@@ -16,16 +16,16 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// Find the Beads workspace so backend selection can follow metadata.json.
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		log.Fatal("No Beads workspace found. Run 'bd init' first.")
+	// Find the Beads database (looks for .beads/*.db in current/parent dirs)
+	dbPath := beads.FindDatabasePath()
+	if dbPath == "" {
+		log.Fatal("No Beads database found. Run 'bd init' first.")
 	}
 
-	fmt.Printf("Using workspace: %s\n\n", beadsDir)
+	fmt.Printf("Using database: %s\n\n", dbPath)
 
-	// Open the configured Dolt implementation (embedded or server mode).
-	store, err := beads.OpenBestAvailable(ctx, beadsDir)
+	// Open the database
+	store, err := beads.Open(ctx, dbPath)
 	if err != nil {
 		log.Fatalf("Failed to open storage: %v", err)
 	}
@@ -113,18 +113,10 @@ func main() {
 		log.Fatalf("Failed to get statistics: %v", err)
 	}
 
-	blockedCount := 0
-	if stats.BlockedIssues != nil {
-		blockedCount = *stats.BlockedIssues
-	}
-	readyCount := 0
-	if stats.ReadyIssues != nil {
-		readyCount = *stats.ReadyIssues
-	}
 	fmt.Printf("Total issues: %d\n", stats.TotalIssues)
 	fmt.Printf("Open: %d | In Progress: %d | Closed: %d | Blocked: %d | Ready: %d\n",
 		stats.OpenIssues, stats.InProgressIssues, stats.ClosedIssues,
-		blockedCount, readyCount)
+		stats.BlockedIssues, stats.ReadyIssues)
 
 	// Example 8: Close the issue
 	fmt.Println("\n=== Closing Issue ===")

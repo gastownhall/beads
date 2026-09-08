@@ -143,7 +143,7 @@ func TestMessagingSuite(t *testing.T) {
 		t.Fatalf("AddDep(duplicates): %v", err)
 	}
 	// Close the duplicate
-	if err := testStore.CloseIssue(ctx, dup.ID, "duplicate", "test", ""); err != nil {
+	if err := testStore.UpdateIssue(ctx, dup.ID, map[string]interface{}{"status": types.StatusClosed}, "test"); err != nil {
 		t.Fatalf("Close dup: %v", err)
 	}
 
@@ -174,8 +174,10 @@ func TestMessagingSuite(t *testing.T) {
 		}
 
 		// Close (ack)
-		if err := testStore.CloseIssue(ctx, lifecycleMsg.ID, "acknowledged", "test", ""); err != nil {
-			t.Fatalf("CloseIssue (ack): %v", err)
+		if err := testStore.UpdateIssue(ctx, lifecycleMsg.ID, map[string]interface{}{
+			"status": types.StatusClosed,
+		}, "test"); err != nil {
+			t.Fatalf("UpdateIssue (close): %v", err)
 		}
 		acked, err := testStore.GetIssue(ctx, lifecycleMsg.ID)
 		if err != nil {
@@ -363,7 +365,7 @@ func TestFindMailDelegate(t *testing.T) {
 	}()
 
 	t.Run("BEADS_MAIL_DELEGATE takes priority", func(t *testing.T) {
-		os.Setenv("BEADS_MAIL_DELEGATE", "gc mail")
+		os.Setenv("BEADS_MAIL_DELEGATE", "gt mail")
 		os.Setenv("BD_MAIL_DELEGATE", "other mail")
 		defer func() {
 			os.Unsetenv("BEADS_MAIL_DELEGATE")
@@ -371,8 +373,8 @@ func TestFindMailDelegate(t *testing.T) {
 		}()
 
 		got := findMailDelegate()
-		if got != "gc mail" {
-			t.Errorf("findMailDelegate() = %q, want \"gc mail\"", got)
+		if got != "gt mail" {
+			t.Errorf("findMailDelegate() = %q, want \"gt mail\"", got)
 		}
 	})
 
@@ -409,7 +411,7 @@ func TestMailDelegateFromConfig(t *testing.T) {
 	testStore := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
 	ctx := context.Background()
 
-	if err := testStore.SetConfig(ctx, "mail.delegate", "gc mail"); err != nil {
+	if err := testStore.SetConfig(ctx, "mail.delegate", "gt mail"); err != nil {
 		t.Fatalf("SetConfig failed: %v", err)
 	}
 
@@ -432,7 +434,7 @@ func TestMailDelegateFromConfig(t *testing.T) {
 	}()
 
 	got := findMailDelegate()
-	if got != "gc mail" {
-		t.Errorf("findMailDelegate() = %q, want \"gc mail\"", got)
+	if got != "gt mail" {
+		t.Errorf("findMailDelegate() = %q, want \"gt mail\"", got)
 	}
 }

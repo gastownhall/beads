@@ -59,10 +59,6 @@ var addTodoCmd = &cobra.Command{
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runTodoAddProxiedServer(cmd, rootCtx, args)
-		}
-
 		title := strings.Join(args, " ")
 
 		priority, _ := cmd.Flags().GetInt("priority")
@@ -135,19 +131,9 @@ func runTodoListCore(cmd *cobra.Command, _ []string) error {
 		filter.Status = &openStatus
 	}
 
-	var issues []*types.Issue
-	if usesProxiedServer() {
-		var err error
-		issues, err = todoListProxied(ctx, filter)
-		if err != nil {
-			return err
-		}
-	} else {
-		var err error
-		issues, err = getStore().SearchIssues(ctx, "", filter)
-		if err != nil {
-			return HandleError("failed to list TODOs: %v", err)
-		}
+	issues, err := getStore().SearchIssues(ctx, "", filter)
+	if err != nil {
+		return HandleError("failed to list TODOs: %v", err)
 	}
 
 	if jsonOutput {
@@ -194,10 +180,6 @@ var doneTodoCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
-
-		if usesProxiedServer() {
-			return runTodoDoneProxiedServer(cmd, rootCtx, args)
-		}
 
 		ctx := rootCtx
 
@@ -267,7 +249,10 @@ func init() {
 
 // todoTruncate truncates a string to the specified length with ellipsis
 func todoTruncate(s string, maxLen int) string {
-	return truncate(s, maxLen)
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // todoSortIssues sorts issues by priority (ascending) then ID

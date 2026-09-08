@@ -29,7 +29,7 @@
 
 # Test specific package
 ./scripts/test.sh ./cmd/bd/...
-./scripts/test.sh ./internal/storage/embeddeddolt/...
+./scripts/test.sh ./internal/storage/sqlite/...
 
 # Test specific feature
 ./scripts/test.sh -run TestCreate ./cmd/bd/...
@@ -99,5 +99,5 @@ TEST_RUN=TestSomething ./scripts/test.sh
 
 - The test script is in `.gitignore` path: `scripts/test.sh`
 - Skip list is in repo root: `.test-skip`
-- Full documentation: `engdocs/TESTING.md`
+- Full documentation: `docs/TESTING.md`
 - Current broken tests: See GH issues #355, #356

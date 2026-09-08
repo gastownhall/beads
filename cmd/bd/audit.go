@@ -29,14 +29,9 @@ var (
 var auditCmd = &cobra.Command{
 	Use:   "audit",
 	Short: "Record and label agent interactions (append-only JSONL)",
-	Long: `Record explicit agent/tool interaction audit entries in .beads/interactions.jsonl.
+	Long: `Audit log entries are appended to .beads/interactions.jsonl.
 
-This optional JSONL sidecar is disabled by default. Enable it with:
-
-  bd config set audit.enabled true
-
-Issue history is always recorded in the database and is visible with
-bd history <id> --events. The JSONL sidecar is for explicit interaction capture:
+Each line is one event. This file is intended to be versioned in git and used for:
 - auditing ("why did the agent do that?")
 - dataset generation (SFT/RL fine-tuning)
 
@@ -100,7 +95,7 @@ var auditRecordCmd = &cobra.Command{
 			}
 		}
 
-		id, err := audit.AppendIfEnabled(&e)
+		id, err := audit.Append(&e)
 		if err != nil {
 			return HandleError("%v", err)
 		}
@@ -143,7 +138,7 @@ var auditLabelCmd = &cobra.Command{
 			Reason:   auditLabelReason,
 		}
 
-		id, err := audit.AppendIfEnabled(&e)
+		id, err := audit.Append(&e)
 		if err != nil {
 			return HandleError("%v", err)
 		}

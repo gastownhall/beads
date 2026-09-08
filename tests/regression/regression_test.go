@@ -43,16 +43,9 @@ var candidateBin string
 var testDoltServerPort int
 
 func TestMain(m *testing.M) {
-	os.Exit(testMainInner(m))
-}
-
-// testMainInner holds TestMain's body so its defer runs before the process
-// exits — os.Exit skips deferred calls, so TestMain itself must never defer
-// anything (be-5kkk6).
-func testMainInner(m *testing.M) int {
 	if runtime.GOOS == "windows" {
 		fmt.Fprintln(os.Stderr, "regression tests not yet supported on Windows (zip extraction needed)")
-		return 0
+		os.Exit(0)
 	}
 
 	// Start an isolated Dolt server so regression tests don't pollute
@@ -60,14 +53,12 @@ func testMainInner(m *testing.M) int {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
 			fmt.Fprintln(os.Stderr, "FAIL: dolt missing under GITHUB_ACTIONS — CI workflow must install dolt")
-			return 1
+			os.Exit(1)
 		}
 		fmt.Fprintln(os.Stderr, "SKIP: dolt not found in PATH; regression tests require dolt")
-		return 0
+		os.Exit(0)
 	}
 	os.Setenv("BEADS_TEST_MODE", "1")
-	// AD-01 (be-c5p): allow regression tests to connect to the test container.
-	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
@@ -79,7 +70,7 @@ func testMainInner(m *testing.M) int {
 	tmpDir, err := os.MkdirTemp("", "bd-regression-bin-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "creating temp dir: %v\n", err)
-		return 1
+		os.Exit(1)
 	}
 
 	// Build candidate from current worktree
@@ -88,7 +79,7 @@ func testMainInner(m *testing.M) int {
 	if err := buildCandidate(candidateBin); err != nil {
 		fmt.Fprintf(os.Stderr, "building candidate: %v\n", err)
 		os.RemoveAll(tmpDir)
-		return 1
+		os.Exit(1)
 	}
 
 	// Get baseline (env override > cache > download)
@@ -97,13 +88,13 @@ func testMainInner(m *testing.M) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "getting baseline: %v\n", err)
 		os.RemoveAll(tmpDir)
-		return 1
+		os.Exit(1)
 	}
 
 	fmt.Fprintf(os.Stderr, "Baseline:  %s\nCandidate: %s\n\n", baselineBin, candidateBin)
 	code := m.Run()
 	os.RemoveAll(tmpDir)
-	return code
+	os.Exit(code)
 }
 
 // ---------------------------------------------------------------------------
@@ -520,11 +511,6 @@ var volatileFields = []string{
 	"last_activity", "closed_by_session",
 	"compaction_level", "original_size",
 	"content_hash",
-	// revision (row_lock) is the guarded-write optimistic-concurrency token that
-	// bd show --json began exposing (bd-bwa7n): a random value the engine
-	// rewrites on every write, and absent from the v0.49.6 baseline's show
-	// output entirely, so it is pure cross-version noise for this oracle.
-	"revision",
 }
 
 // showOnlyFields are present in bd show --json but were not in bd export.

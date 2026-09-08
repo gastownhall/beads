@@ -9,8 +9,8 @@ Thank you for your interest in contributing to bd! This document provides guidel
 - Go (see `go.mod` for the required version; currently 1.26+)
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
-- golangci-lint v2.10.1 for the required local lint gate
-- ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
+- (Optional) golangci-lint for local linting
+- ICU headers are **not required** for building -- see [docs/ICU-POLICY.md](docs/ICU-POLICY.md)
 
 ### Getting Started
 
@@ -44,10 +44,20 @@ beads/
 
 ## Running Tests
 
-Use the canonical [testing guide](engdocs/TESTING.md) to choose focused tests,
-the proportional validation budget, and any applicable CI wrapper. The setup
-and safety notes in this file supplement that guide; they do not define a
-second test policy.
+```bash
+# Run all tests (recommended — uses correct build tags)
+make test
+
+# Run tests with coverage
+go test -tags gms_pure_go -v -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+
+# Run specific package tests
+go test -tags gms_pure_go ./internal/storage/dolt/ -v
+
+# Run tests with race detection
+go test -tags gms_pure_go -race ./...
+```
 
 ## Code Style
 
@@ -61,30 +71,28 @@ We follow standard Go conventions:
 
 ### Linting
 
-Use the same pinned golangci-lint version and repository-owned wrapper as CI:
+We use golangci-lint for code quality checks:
 
 ```bash
-# Install the version pinned by CI
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
+# Install golangci-lint
+brew install golangci-lint  # macOS
+# or
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
-# Run the required formatting and lint contract
-make ci-pr-lint
+# Run linter
+golangci-lint run ./...
 ```
 
-`make ci-pr-lint` must pass with zero issues. It checks formatting, lints the
-repository's normal `gms_pure_go` build, and cross-lints Windows-only non-CGO
-code. Accepted intentional patterns are encoded narrowly in `.golangci.yml`;
-do not ignore a failing baseline. See [engdocs/LINTING.md](engdocs/LINTING.md)
-for the full policy.
+**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [docs/LINTING.md](docs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
 
-CI runs the same required wrapper on all pull requests.
+CI will automatically run linting on all pull requests.
 
 ## Making Changes
 
 ### Project Scope
 
 Before adding new feature surface area, read
-[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). Beads owns issue tracking
+[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md). Beads owns issue tracking
 primitives. It should not encode orchestration-layer policy, become a storage
 engine, or expand the database schema when issue metadata is sufficient.
 
@@ -131,21 +139,131 @@ If you are contributing code that involves AI decision-making or orchestration, 
 
 ## Testing Guidelines
 
-For test commands, test design, and PR-readiness gates, see the canonical
-[engdocs/TESTING.md](engdocs/TESTING.md).
+### Test Strategy
 
-### Before Opening a PR
+We use a two-tier testing approach:
 
-- Follow the proportional validation budget in
-  [engdocs/TESTING.md](engdocs/TESTING.md): docs-only changes use docs checks;
-  Go changes use focused and affected-package tests plus one final `make test`.
-- If you hit a test failure unrelated to your change, don't silently skip
-  it -- check `.test-skip` and file an issue if it's not already tracked
-  (see [engdocs/TESTING.md](engdocs/TESTING.md#failures-skips-and-review)).
-- Run a named CI wrapper only when its risk or surface is affected, or when
-  reproducing that CI check.
-- If your change touches ICU or build tags, see
-  [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md) for the policy and rationale.
+- **Fast tests** (unit tests): Run on every PR via CI with `-short` flag (~2s)
+- **Slow tests** (integration tests): Run nightly with full git operations (~14s)
+
+Slow tests use `testing.Short()` to skip when `-short` flag is present.
+
+### Running Tests
+
+```bash
+# Fast tests (recommended for development - skips slow tests)
+# Use this for rapid iteration during development
+make test
+
+# Full test suite (before committing - includes all tests)
+# Run this before pushing to ensure nothing breaks
+make test
+
+# With race detection and coverage
+CGO_ENABLED=1 go test -tags gms_pure_go -race -coverprofile=coverage.out ./...
+```
+
+**When to use `-short`:**
+- During active development for fast feedback loops
+- When making small changes that don't affect integration points
+- When you want to quickly verify unit tests pass
+
+**When to use full test suite:**
+- Before committing and pushing changes
+- After modifying git operations or multi-clone scenarios
+- When preparing a pull request
+
+### Writing Tests
+
+- Write table-driven tests when testing multiple scenarios
+- Use descriptive test names that explain what is being tested
+- Clean up resources (database files, etc.) in test teardown
+- Use `t.Run()` for subtests to organize related test cases
+- Mark slow tests with `if testing.Short() { t.Skip("slow test") }`
+
+### CGO vs Non-CGO Tests
+
+Tests are split into two categories based on whether they need the embedded Dolt database (which requires CGO):
+
+- **Non-CGO tests** (no build tag): Unit tests for CLI parsing, helpers, and pure logic. These run everywhere.
+- **CGO tests** (`//go:build cgo`): Integration tests that create a real Dolt database. Files often use the `_embedded_test.go` suffix.
+
+```bash
+# Fast non-CGO tests (recommended for development)
+make test                     # or: ./scripts/test.sh
+
+# Opt-in ICU regex path (maintainer-only)
+make test-icu-path            # or: ./scripts/test-icu-path.sh ./...
+
+# Run a specific package or test with shipped config
+CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
+CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestMyFeature$' ./cmd/bd/...
+```
+
+On macOS, use the Make target or script for the opt-in ICU regex path -- they configure the required ICU linker flags automatically.
+
+### ICU and Build Tags
+
+All production builds use `-tags gms_pure_go` to avoid ICU runtime dependencies.
+**Do not add ICU linker flags to the Makefile or `.buildflags`.**
+See [docs/ICU-POLICY.md](docs/ICU-POLICY.md) for the full policy and rationale.
+
+### Test Isolation with `t.TempDir()`
+
+Database tests use `t.TempDir()` for isolation so each test gets a clean environment and nothing touches the production database:
+
+```go
+func TestMyFeature(t *testing.T) {
+    tmpDir := t.TempDir()
+    dbPath := filepath.Join(tmpDir, "test.db")
+    store := newTestStoreWithPrefix(t, dbPath, "bd")
+
+    ctx := context.Background()
+    issue := &types.Issue{
+        ID:     "bd-1",
+        Title:  "Test issue",
+        Status: types.StatusOpen,
+    }
+    if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+        t.Fatalf("CreateIssue failed: %v", err)
+    }
+    // ... assertions ...
+}
+```
+
+Test helpers in `cmd/bd/test_helpers_test.go` provide database setup functions like `newTestStore`, `newTestStoreWithPrefix`, and `newTestStoreSharedBranch` (which uses branch-per-test isolation to avoid expensive CREATE/DROP DATABASE overhead).
+
+### Table-Driven Test Example
+
+```go
+func TestIssueValidation(t *testing.T) {
+    tests := []struct {
+        name    string
+        issue   *types.Issue
+        wantErr bool
+    }{
+        {
+            name:    "valid issue",
+            issue:   &types.Issue{Title: "Test", Status: types.StatusOpen, Priority: 2},
+            wantErr: false,
+        },
+        {
+            name:    "missing title",
+            issue:   &types.Issue{Status: types.StatusOpen, Priority: 2},
+            wantErr: true,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            err := tt.issue.Validate()
+            if (err != nil) != tt.wantErr {
+                t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+            }
+        })
+    }
+}
+```
 
 ## Documentation
 
@@ -153,28 +271,6 @@ For test commands, test design, and PR-readiness gates, see the canonical
 - Update relevant .md files in the project root
 - Add inline code comments for complex logic
 - Include examples in documentation
-
-## Storage filter conventions
-
-### `IssueFilter.MaxRows` opt-out rule (be-x42v)
-
-`types.IssueFilter` carries a defensive row cap (`MaxRows int`,
-`MaxRowsSource string`) that the storage layer enforces via
-`*issueops.ErrTooManyRows`. The cap is wired from `--max-rows` /
-`BEADS_MAX_ROWS` on user-facing commands listed in designer §4 of be-x42v
-(`bd list`, `bd ready`, `bd dep tree`, `bd find-duplicates`, `bd graph`,
-plus env-only on the doctor family).
-
-**Rule for new code that builds an `IssueFilter`:** if your call site is
-NOT on the designer's wired-up list, you **MUST** explicitly initialize
-`filter.MaxRows = 0` and `filter.MaxRowsSource = ""`. This makes the
-opt-out intentional in code review and survives future refactors that
-might otherwise let the env var leak into a sweep path that must not
-abort (export, gc, jira sync, migrate-issues, etc.).
-
-The opt-out test gates (be-x42v.4) enforce this for the
-export / migrate / jira / cleanup / gc paths today. New write-side or
-round-trip paths should pattern-match on those tests.
 
 ## Feature Requests and Bug Reports
 

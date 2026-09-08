@@ -29,7 +29,7 @@
 - Never create test issues in production DB (use temporary DB)
 
 ### Code Style
-- Run `make ci-pr-lint` before committing changes to Go or lint-controlled files
+- Run `golangci-lint run ./...` before committing
 - Follow existing patterns in `cmd/bd/` for new commands
 - Add `--json` flag to all commands for programmatic use
 - Update docs when changing behavior

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -31,12 +30,24 @@ type testEnv struct {
 // sets the issue_prefix config, and returns a testEnv with raw SQL access.
 func newTestEnv(t *testing.T, prefix string) *testEnv {
 	t.Helper()
-	fixture := newPristineEmbeddedDoltFixture(t, prefix)
-	t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	store, err := embeddeddolt.Open(ctx, beadsDir, prefix, "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := store.Commit(ctx, "bd init"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 	return &testEnv{
-		store:    fixture.store,
-		dataDir:  fixture.dataDir,
-		database: fixture.database,
+		store:    store,
+		dataDir:  filepath.Join(beadsDir, "embeddeddolt"),
+		database: prefix,
 	}
 }
 
@@ -982,12 +993,7 @@ func TestCreateIssues(t *testing.T) {
 		te.assertRowNotExists(t, ctx, "wisps", wisp.ID)
 	})
 
-	// A tolerant mixed batch (the importer's shape, SkipDependencyValidationErrors)
-	// keeps its regular->wisp edge: every row of both planes is written on the
-	// one transaction before the dependency pass, so the edge is writable
-	// (wy-a648lq). Nothing is skip-reported, and the edge lands in
-	// dependencies.depends_on_wisp_id — the regular source's own table.
-	t.Run("wires_mixed_batch_dependency_when_validation_errors_are_tolerated", func(t *testing.T) {
+	t.Run("skips_mixed_batch_dependency_when_validation_errors_are_tolerated", func(t *testing.T) {
 		te := newTestEnv(t, "sk")
 		ctx := t.Context()
 
@@ -1013,6 +1019,7 @@ func TestCreateIssues(t *testing.T) {
 		var skipped []string
 
 		err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{regular, wisp}, "tester", storage.BatchCreateOptions{
+			OrphanHandling:                 storage.OrphanAllow,
 			SkipPrefixValidation:           true,
 			SkipDependencyValidationErrors: true,
 			OnSkippedDependency: func(issueID, dependsOnID, reason string) {
@@ -1024,15 +1031,17 @@ func TestCreateIssues(t *testing.T) {
 		}
 		te.assertRowExists(t, ctx, "issues", regular.ID)
 		te.assertRowExists(t, ctx, "wisps", wisp.ID)
-		if len(skipped) != 0 {
-			t.Fatalf("skipped = %#v, want the in-batch cross-plane edge wired, not skip-reported", skipped)
+		if len(skipped) != 1 ||
+			!strings.Contains(skipped[0], "sk-regular-source -> sk-wisp-target") ||
+			!strings.Contains(skipped[0], "cross-bucket dependency") {
+			t.Fatalf("skipped = %#v, want cross-bucket dependency detail", skipped)
 		}
 
 		var regularDeps, wispDeps int
-		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_wisp_id = ? AND depends_on_issue_id IS NULL", []any{regular.ID, wisp.ID}, &regularDeps)
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", []any{regular.ID}, &regularDeps)
 		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", []any{regular.ID}, &wispDeps)
-		if regularDeps != 1 || wispDeps != 0 {
-			t.Fatalf("persisted dependency counts = regular(depends_on_wisp_id):%d wisp:%d, want 1 and 0", regularDeps, wispDeps)
+		if regularDeps != 0 || wispDeps != 0 {
+			t.Fatalf("persisted dependency counts = regular:%d wisp:%d, want none", regularDeps, wispDeps)
 		}
 	})
 
@@ -1256,14 +1265,6 @@ func TestCreateIssues(t *testing.T) {
 }
 
 func TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// The hook runner on Windows executes hook files directly via CreateProcess,
-		// which has no shebang dispatch. The extensionless #!/bin/sh hook written by
-		// newEmbeddedHookStore cannot be executed as a shell script, so no payload is
-		// ever logged and the assertions fail. Same limitation already skipped in
-		// internal/hooks/hooks_test.go. See: https://github.com/gastownhall/beads/issues/3800
-		t.Skip("hook script execution not supported on Windows - see GH#3800")
-	}
 	t.Run("non_transactional", func(t *testing.T) {
 		te := newTestEnv(t, "hk")
 		ctx := t.Context()

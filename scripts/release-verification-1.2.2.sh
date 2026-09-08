@@ -10,7 +10,7 @@
 #       message (not the generic stale-binary advice), non-zero exit
 #   L5  BD_IGNORE_SCHEMA_SKEW=1 stopgap: reads on the v65 DB are byte-identical
 #       to the pre-migration baseline; writes land correctly
-#   L6  cursor rollback per docs/recovery/accidental-1-2-1-release.md: candidate then opens the DB
+#   L6  cursor rollback per docs/RECOVERY-1.2.1.md: candidate then opens the DB
 #       cleanly (no env var, empty stderr) and can write
 #   L7  optional events re-track per the runbook: dolt_ignore row gone, events
 #       table committed again
@@ -98,7 +98,7 @@ else
     E=$(BD_IGNORE_SCHEMA_SKEW=1 "$BD_NEW" create "written under bypass" -p 2 --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
     [ -n "$E" ] && ok "L5b write works under bypass ($E)" || bad "L5b write failed under bypass"
 
-    say "L6: cursor rollback per docs/recovery/accidental-1-2-1-release.md"
+    say "L6: cursor rollback per docs/RECOVERY-1.2.1.md"
     (cd "$DBDIR" \
         && dolt sql -q "DELETE FROM schema_migrations WHERE version > 53; CALL DOLT_ADD('schema_migrations'); CALL DOLT_COMMIT('-m', 'recovery: roll schema cursor back to v53 (accidental v1.2.1)', '--author', 'bd recovery <recovery@beads.invalid>')") >/dev/null 2>&1 \
         && ok "L6a rollback commands from the runbook" || bad "L6a rollback commands failed"

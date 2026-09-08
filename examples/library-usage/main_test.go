@@ -18,27 +18,15 @@ func TestExampleCompiles(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-		t.Fatalf("Failed to create .beads dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
-		t.Fatalf("Failed to create metadata.json: %v", err)
-	}
+	dbPath := filepath.Join(tmpDir, "dolt")
 
 	// Open storage
 	ctx := context.Background()
-	store, err := beads.OpenBestAvailable(ctx, beadsDir)
+	store, err := beads.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open storage: %v", err)
 	}
 	defer store.Close()
-
-	// A fresh workspace needs an issue prefix before issues can be created
-	// (bd init normally seeds this).
-	if err := store.SetConfig(ctx, "issue_prefix", "ex"); err != nil {
-		t.Fatalf("Failed to seed issue prefix: %v", err)
-	}
 
 	// Create an issue (from example code)
 	newIssue := &beads.Issue{

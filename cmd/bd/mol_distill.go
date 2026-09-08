@@ -102,25 +102,6 @@ func parseDistillVar(varFlag, searchableText string) (string, string, error) {
 	}
 }
 
-type molDistillInput struct {
-	epicID         string
-	formulaNameArg string
-	varFlags       []string
-	dryRun         bool
-	outputDir      string
-}
-
-func gatherMolDistillInput(cmd *cobra.Command, args []string) molDistillInput {
-	in := molDistillInput{epicID: args[0]}
-	in.varFlags, _ = cmd.Flags().GetStringArray("var")
-	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
-	in.outputDir, _ = cmd.Flags().GetString("output")
-	if len(args) > 1 {
-		in.formulaNameArg = args[1]
-	}
-	return in
-}
-
 func runMolDistill(cmd *cobra.Command, args []string) error {
 	evt := metrics.NewCommandEvent("mol-distill")
 	defer func() {
@@ -129,21 +110,19 @@ func runMolDistill(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	in := gatherMolDistillInput(cmd, args)
-
-	if usesProxiedServer() {
-		return runMolDistillProxiedServer(rootCtx, in)
-	}
-
 	ctx := rootCtx
 
 	if store == nil {
 		return HandleErrorRespectJSON("no database connection")
 	}
 
-	epicID, err := utils.ResolvePartialID(ctx, store, in.epicID)
+	varFlags, _ := cmd.Flags().GetStringArray("var")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	outputDir, _ := cmd.Flags().GetString("output")
+
+	epicID, err := utils.ResolvePartialID(ctx, store, args[0])
 	if err != nil {
-		return HandleErrorRespectJSON("'%s' not found", in.epicID)
+		return HandleErrorRespectJSON("'%s' not found", args[0])
 	}
 
 	subgraph, err := loadTemplateSubgraph(ctx, store, epicID)
@@ -151,22 +130,17 @@ func runMolDistill(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("loading epic: %v", err)
 	}
 
-	return distillSubgraph(epicID, subgraph, in)
-}
-
-// distillSubgraph converts an already-loaded subgraph into a formula file
-// (dry-run preview or write-to-disk), shared by the embedded and
-// proxied-server dual.
-func distillSubgraph(epicID string, subgraph *TemplateSubgraph, in molDistillInput) error {
-	formulaName := in.formulaNameArg
-	if formulaName == "" {
+	formulaName := ""
+	if len(args) > 1 {
+		formulaName = args[1]
+	} else {
 		formulaName = sanitizeFormulaName(subgraph.Root.Title)
 	}
 
 	replacements := make(map[string]string)
-	if len(in.varFlags) > 0 {
+	if len(varFlags) > 0 {
 		searchableText := collectSubgraphText(subgraph)
-		for _, v := range in.varFlags {
+		for _, v := range varFlags {
 			findText, varName, err := parseDistillVar(v, searchableText)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
@@ -178,8 +152,8 @@ func distillSubgraph(epicID string, subgraph *TemplateSubgraph, in molDistillInp
 	f := subgraphToFormula(subgraph, formulaName, replacements)
 
 	outputPath := ""
-	if in.outputDir != "" {
-		outputPath = filepath.Join(in.outputDir, formulaName+formula.FormulaExt)
+	if outputDir != "" {
+		outputPath = filepath.Join(outputDir, formulaName+formula.FormulaExt)
 	} else {
 		outputPath = findWritableFormulaDir(formulaName)
 		if outputPath == "" {
@@ -191,7 +165,7 @@ func distillSubgraph(epicID string, subgraph *TemplateSubgraph, in molDistillInp
 		}
 	}
 
-	if in.dryRun {
+	if dryRun {
 		fmt.Printf("\nDry run: would distill %d steps from %s into formula\n\n", countSteps(f.Steps), epicID)
 		fmt.Printf("Formula: %s\n", formulaName)
 		fmt.Printf("Output: %s\n", outputPath)

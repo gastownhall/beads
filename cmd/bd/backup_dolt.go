@@ -1,9 +1,7 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -47,9 +46,6 @@ DoltHub (recommended for cloud backup):
 After adding, run 'bd backup sync' to push your data.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("backup init is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("backup-init")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -125,9 +121,6 @@ The backup is atomic — if the sync fails, the previous backup state is preserv
 
 Run 'bd backup init <path>' first to configure a destination.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("backup sync is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("backup-sync")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -355,43 +348,46 @@ func showDoltBackupStatusJSON() map[string]interface{} {
 	return result
 }
 
-// doltBackupSize returns the active database size when the current store
-// instance can measure its storage locally. Unsupported backends preserve the
-// optional status-field contract instead of failing the command.
-func doltBackupSize(ctx context.Context) (int64, bool, error) {
-	if store == nil {
-		return 0, false, fmt.Errorf("no storage backend is open")
+// doltBackupSize returns the approximate size of the Dolt data directory in bytes.
+func doltBackupSize() (int64, error) {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return 0, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
-	return doltBackupSizeForStore(ctx, store)
+	dataDir := doltserver.ResolveDoltDir(beadsDir)
+	return dirSize(dataDir)
 }
 
-func doltBackupSizeForStore(ctx context.Context, candidate storage.DoltStorage) (int64, bool, error) {
-	sizer, ok := storage.UnwrapStore(candidate).(storage.ActiveDatabaseSizer)
-	if !ok {
-		return 0, false, nil
-	}
-	return doltBackupSizeFromSizer(ctx, sizer)
-}
-
-func doltBackupSizeFromSizer(ctx context.Context, sizer storage.ActiveDatabaseSizer) (int64, bool, error) {
-	size, err := sizer.ActiveDatabaseSize(ctx)
-	if err != nil {
-		var unsupported *storage.ErrUnsupported
-		if errors.As(err, &unsupported) {
-			return 0, false, nil
+// dirSize walks a directory tree and sums file sizes.
+func dirSize(path string) (int64, error) {
+	var size int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip errors (permission denied, etc.)
 		}
-		return 0, false, err
-	}
-	return size, true, nil
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
 }
 
 // showDBSize prints the database size as part of status.
-func showDBSize(size int64) {
+func showDBSize() {
+	size, err := doltBackupSize()
+	if err != nil {
+		return
+	}
 	fmt.Printf("  Database size: %s\n", formatBytes(size))
 }
 
 // showDBSizeJSON returns database size for JSON output.
-func showDBSizeJSON(size int64) map[string]interface{} {
+func showDBSizeJSON() map[string]interface{} {
+	size, err := doltBackupSize()
+	if err != nil {
+		return nil
+	}
 	return map[string]interface{}{
 		"bytes": size,
 		"human": formatBytes(size),
@@ -407,9 +403,6 @@ This unregisters the backup remote from Dolt and removes the local
 backup configuration. The backup data at the destination is not deleted.`,
 	Aliases: []string{"rm"},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("backup remove is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("backup-remove")
 		defer func() {
 			if c := metrics.Global(); c != nil {

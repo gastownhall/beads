@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -18,26 +19,22 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 			return err
 		}
 		// Sync normalized tables when config keys change
-		_, err := issueops.SyncConfigTables(ctx, tx, key, value)
-		return err
+		switch key {
+		case "status.custom":
+			if err := issueops.SyncCustomStatusesTable(ctx, tx, value); err != nil {
+				return fmt.Errorf("syncing custom_statuses table: %w", err)
+			}
+		case "types.custom":
+			if err := issueops.SyncCustomTypesTable(ctx, tx, value); err != nil {
+				return fmt.Errorf("syncing custom_types table: %w", err)
+			}
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 
 	// Invalidate caches for keys that affect cached data
-	s.invalidateConfigCaches(key)
-
-	return nil
-}
-
-// invalidateConfigCaches drops the store-level caches derived from a config
-// key. Every path that writes config — store-level SetConfig and
-// doltTransaction.SetConfig alike — must call this, or a long-lived process
-// (server/daemon) keeps serving the pre-write set from GetCustomTypes /
-// GetCustomStatuses / GetInfraTypes until restart. Invalidating for a
-// transaction that later rolls back is harmless: the lazy reload just
-// re-reads the committed state.
-func (s *DoltStore) invalidateConfigCaches(key string) {
 	s.cacheMu.Lock()
 	switch key {
 	case "status.custom":
@@ -52,6 +49,8 @@ func (s *DoltStore) invalidateConfigCaches(key string) {
 		s.infraTypeCache = nil
 	}
 	s.cacheMu.Unlock()
+
+	return nil
 }
 
 // GetConfig retrieves a configuration value

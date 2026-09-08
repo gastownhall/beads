@@ -59,9 +59,6 @@ type ResolveProxiedInitResult struct {
 	IsLocal     bool
 	DBName      string
 	ProjectID   string
-	// DBNameDerived: DBName was guessed (prefix or default) rather than
-	// pinned by the --database flag or an existing metadata.json.
-	DBNameDerived bool
 }
 
 type BeadsDirTemplates struct {
@@ -142,22 +139,22 @@ func (u *beadsDirFSUseCaseImpl) ResolveProxiedInit(ctx context.Context, params R
 		return ResolveProxiedInitResult{}, fmt.Errorf("ResolveProxiedInit: read config: %w", err)
 	}
 
-	result.DBName, result.DBNameDerived = resolveDoltDatabaseName(cfg, params.Prefix, params.DBFlag)
+	result.DBName = resolveDoltDatabaseName(cfg, params.Prefix, params.DBFlag)
 	result.ProjectID = resolveProjectID(cfg)
 	return result, nil
 }
 
-func resolveDoltDatabaseName(cfg *configfile.Config, prefix, dbFlag string) (name string, derived bool) {
+func resolveDoltDatabaseName(cfg *configfile.Config, prefix, dbFlag string) string {
 	if dbFlag != "" {
-		return dbFlag, false
+		return dbFlag
 	}
 	if cfg != nil && cfg.DoltDatabase != "" {
-		return cfg.DoltDatabase, false
+		return cfg.DoltDatabase
 	}
 	if prefix != "" {
-		return strings.ReplaceAll(prefix, "-", "_"), true
+		return strings.ReplaceAll(prefix, "-", "_")
 	}
-	return configfile.DefaultDoltDatabase, true
+	return configfile.DefaultDoltDatabase
 }
 
 func resolveProjectID(cfg *configfile.Config) string {
@@ -188,6 +185,9 @@ func (u *beadsDirFSUseCaseImpl) InitializeBeadsDir(ctx context.Context, params I
 		if err := u.fsRepo.WriteProxiedServerClientInfo(ctx, params.ProxiedServerClientInfo); err != nil {
 			return InitializeBeadsDirResult{}, err
 		}
+	}
+	if err := u.fsRepo.WriteInteractionsLog(ctx); err != nil {
+		return InitializeBeadsDirResult{}, err
 	}
 	if err := u.fsRepo.WriteReadme(ctx); err != nil {
 		return InitializeBeadsDirResult{}, err

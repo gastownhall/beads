@@ -1,138 +1,259 @@
+//go:build cgo
+
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// The assignee fold this command used to own moved to
-// internal/workapi.FoldStatsAssigneeSummary when `bd status` went behind
-// issueops.StatsReporter, and its test moved with it
-// (internal/workapi/stats_test.go). It is the definition of what
-// `bd status --assigned` means and both routes now read it from there, so a
-// copy of the test here would pin a function this package no longer has.
+// Helper function to create a time pointer
+func timePtr(t time.Time) *time.Time {
+	return &t
+}
 
-func TestRenderStatusJSON(t *testing.T) {
-	t.Setenv("BD_JSON_ENVELOPE", "0")
+func TestStatusCommand(t *testing.T) {
+	// Create a temporary directory for the test database
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, ".beads", "test.db")
 
-	count := func(n int) *int { return &n }
-	tests := []struct {
-		name    string
-		stats   *types.Statistics
-		skipped bool
-		blocked *int
-		ready   *int
-	}{
+	// Create .beads directory
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatalf("Failed to create .beads directory: %v", err)
+	}
+
+	// Initialize the database
+	store, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Set issue prefix
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue prefix: %v", err)
+	}
+
+	// Create some test issues with different statuses
+	testIssues := []*types.Issue{
 		{
-			name:    "includes computed counts",
-			stats:   &types.Statistics{TotalIssues: 3, OpenIssues: 1, BlockedIssues: count(1), ReadyIssues: count(1)},
-			blocked: count(1), ready: count(1),
+			Title:     "Open issue 1",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			Assignee:  "alice",
 		},
 		{
-			name:    "preserves skipped counts as null",
-			stats:   &types.Statistics{TotalIssues: 3, OpenIssues: 2, ClosedIssues: 1},
-			skipped: true,
+			Title:     "Open issue 2",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeBug,
+			Assignee:  "bob",
+		},
+		{
+			Title:     "In progress issue",
+			Status:    types.StatusInProgress,
+			Priority:  1,
+			IssueType: types.TypeFeature,
+			Assignee:  "alice",
+		},
+		{
+			Title:     "Blocked issue",
+			Status:    types.StatusBlocked,
+			Priority:  0,
+			IssueType: types.TypeBug,
+			Assignee:  "alice",
+		},
+		{
+			Title:     "Closed issue",
+			Status:    types.StatusClosed,
+			Priority:  3,
+			IssueType: types.TypeTask,
+			Assignee:  "bob",
+			ClosedAt:  timePtr(time.Now()),
 		},
 	}
 
-	oldJSON := jsonOutput
-	jsonOutput = true
-	defer func() { jsonOutput = oldJSON }()
+	for _, issue := range testIssues {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create test issue: %v", err)
+		}
+	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			out := captureStdout(t, func() error { return renderStatus(tt.stats, nil) })
-			var got StatusOutput
-			if err := json.Unmarshal([]byte(out), &got); err != nil {
-				t.Fatalf("unmarshal status JSON: %v\n%s", err, out)
-			}
-			if got.Summary == nil || got.Summary.TotalIssues != tt.stats.TotalIssues {
-				t.Errorf("summary = %+v, want %+v", got.Summary, tt.stats)
-			}
-			if got.BlockedCountSkipped != tt.skipped {
-				t.Errorf("blocked_count_skipped = %t, want %t", got.BlockedCountSkipped, tt.skipped)
-			}
-			if (got.Summary.BlockedIssues == nil) != (tt.blocked == nil) || (got.Summary.BlockedIssues != nil && *got.Summary.BlockedIssues != *tt.blocked) {
-				t.Errorf("blocked_issues = %v, want %v", got.Summary.BlockedIssues, tt.blocked)
-			}
-			if (got.Summary.ReadyIssues == nil) != (tt.ready == nil) || (got.Summary.ReadyIssues != nil && *got.Summary.ReadyIssues != *tt.ready) {
-				t.Errorf("ready_issues = %v, want %v", got.Summary.ReadyIssues, tt.ready)
-			}
-			if got.RecentActivity != nil {
-				t.Errorf("recent activity = %+v, want nil", got.RecentActivity)
-			}
-			if tt.skipped && (!strings.Contains(out, `"blocked_issues": null`) || !strings.Contains(out, `"ready_issues": null`)) {
-				t.Errorf("skipped counts must be encoded as null:\n%s", out)
-			}
-		})
+	// Test GetStatistics
+	stats, err := store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics failed: %v", err)
+	}
+
+	// Verify counts
+	if stats.TotalIssues != 5 {
+		t.Errorf("Expected 5 total issues, got %d", stats.TotalIssues)
+	}
+	if stats.OpenIssues != 2 {
+		t.Errorf("Expected 2 open issues, got %d", stats.OpenIssues)
+	}
+	if stats.InProgressIssues != 1 {
+		t.Errorf("Expected 1 in-progress issue, got %d", stats.InProgressIssues)
+	}
+	if stats.BlockedIssues != 0 {
+		// Note: BlockedIssues counts issues that are blocked by dependencies
+		// Our test issue with status=blocked doesn't have dependencies, so count is 0
+		t.Logf("BlockedIssues: %d (expected 0, status=blocked without deps)", stats.BlockedIssues)
+	}
+	if stats.ClosedIssues != 1 {
+		t.Errorf("Expected 1 closed issue, got %d", stats.ClosedIssues)
+	}
+
+	// Test JSON marshaling with full Statistics
+	output := &StatusOutput{
+		Summary: stats,
+	}
+
+	jsonBytes, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal JSON: %v", err)
+	}
+
+	t.Logf("Status output:\n%s", string(jsonBytes))
+
+	// Verify JSON structure
+	var decoded StatusOutput
+	if err := json.Unmarshal(jsonBytes, &decoded); err != nil {
+		t.Fatalf("Failed to unmarshal JSON: %v", err)
+	}
+
+	if decoded.Summary.TotalIssues != 5 {
+		t.Errorf("Decoded total issues: expected 5, got %d", decoded.Summary.TotalIssues)
 	}
 }
 
-func TestRenderStatusHuman(t *testing.T) {
-	count := func(n int) *int { return &n }
-	tests := []struct {
-		name     string
-		stats    *types.Statistics
-		activity *RecentActivitySummary
-		contains []string
-		absent   []string
-	}{
-		{
-			name:     "normal counts",
-			stats:    &types.Statistics{TotalIssues: 3, OpenIssues: 1, InProgressIssues: 1, ClosedIssues: 1, BlockedIssues: count(1), ReadyIssues: count(2)},
-			contains: []string{"Issue Database Status", "Total Issues:           3", "Blocked:                1", "Ready to Work:          2"},
-			absent:   []string{"(skipped)"},
-		},
-		{
-			name:     "skipped counts",
-			stats:    &types.Statistics{TotalIssues: 1},
-			contains: []string{"Blocked:                (skipped)", "Ready to Work:          (skipped)"},
-		},
-		{
-			name:     "extended statistics",
-			stats:    &types.Statistics{BlockedIssues: count(0), ReadyIssues: count(0), PinnedIssues: 2, EpicsEligibleForClosure: 3, AverageLeadTime: 4.5},
-			contains: []string{"Extended:", "Pinned:                 2", "Epics Ready to Close:   3", "Avg Lead Time:          4.5 hours"},
-		},
-		{
-			name:     "recent activity",
-			stats:    &types.Statistics{BlockedIssues: count(0), ReadyIssues: count(0)},
-			activity: &RecentActivitySummary{HoursTracked: 24, CommitCount: 1, TotalChanges: 2, IssuesCreated: 3, IssuesClosed: 4, IssuesReopened: 5, IssuesUpdated: 6},
-			contains: []string{"Recent Activity (last 24 hours):", "Commits:                1", "Total Changes:          2", "Issues Created:         3", "Issues Closed:          4", "Issues Reopened:        5", "Issues Updated:         6"},
-		},
-	}
+func TestGetGitActivity(t *testing.T) {
+	// Test getGitActivity - it may return nil if not in a git repo
+	// or if there's no recent activity
+	activity := getGitActivity(24)
 
-	oldJSON := jsonOutput
-	jsonOutput = false
-	defer func() { jsonOutput = oldJSON }()
+	// If we're in a git repo with activity, verify the structure
+	if activity != nil {
+		if activity.HoursTracked != 24 {
+			t.Errorf("Expected 24 hours tracked, got %d", activity.HoursTracked)
+		}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			out := captureStdout(t, func() error { return renderStatus(tt.stats, tt.activity) })
-			for _, want := range tt.contains {
-				if !strings.Contains(out, want) {
-					t.Errorf("output does not contain %q:\n%s", want, out)
-				}
-			}
-			for _, unwanted := range tt.absent {
-				if strings.Contains(out, unwanted) {
-					t.Errorf("output unexpectedly contains %q:\n%s", unwanted, out)
-				}
-			}
-		})
+		// Should have non-negative values
+		if activity.CommitCount < 0 {
+			t.Errorf("Negative commit count: %d", activity.CommitCount)
+		}
+		if activity.IssuesCreated < 0 {
+			t.Errorf("Negative issues created: %d", activity.IssuesCreated)
+		}
+		if activity.IssuesClosed < 0 {
+			t.Errorf("Negative issues closed: %d", activity.IssuesClosed)
+		}
+		if activity.IssuesUpdated < 0 {
+			t.Errorf("Negative issues updated: %d", activity.IssuesUpdated)
+		}
+
+		t.Logf("Git activity: commits=%d, created=%d, closed=%d, updated=%d, total=%d",
+			activity.CommitCount, activity.IssuesCreated, activity.IssuesClosed,
+			activity.IssuesUpdated, activity.TotalChanges)
+	} else {
+		t.Log("No git activity found (not in a git repo or no recent commits)")
 	}
 }
 
-func TestGetGitActivityReturnsNil(t *testing.T) {
-	if got := getGitActivity(24); got != nil {
-		t.Errorf("getGitActivity(24) = %+v, want nil", got)
-	}
-}
+func TestGetAssignedStatistics(t *testing.T) {
+	// Create a temporary directory for the test database
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, ".beads", "test.db")
 
-func TestStatusCommandAliases(t *testing.T) {
-	if len(statusCmd.Aliases) != 1 || statusCmd.Aliases[0] != "stats" {
-		t.Errorf("status aliases = %q, want [stats]", statusCmd.Aliases)
+	// Create .beads directory
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatalf("Failed to create .beads directory: %v", err)
+	}
+
+	// Initialize the database
+	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer testStore.Close()
+
+	ctx := context.Background()
+
+	// Set issue prefix
+	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue prefix: %v", err)
+	}
+
+	// Set global store and rootCtx for getAssignedStatistics
+	oldRootCtx := rootCtx
+	rootCtx = ctx
+	defer func() { rootCtx = oldRootCtx }()
+	store = testStore
+
+	// Create test issues with different assignees
+	testIssues := []*types.Issue{
+		{
+			Title:     "Alice's issue 1",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			Assignee:  "alice",
+		},
+		{
+			Title:     "Alice's issue 2",
+			Status:    types.StatusInProgress,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			Assignee:  "alice",
+		},
+		{
+			Title:     "Bob's issue",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			Assignee:  "bob",
+		},
+	}
+
+	for _, issue := range testIssues {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("Failed to create test issue: %v", err)
+		}
+	}
+
+	// Test getAssignedStatistics for Alice
+	stats := getAssignedStatistics("alice")
+	if stats == nil {
+		t.Fatal("getAssignedStatistics returned nil")
+	}
+
+	if stats.TotalIssues != 2 {
+		t.Errorf("Expected 2 issues for alice, got %d", stats.TotalIssues)
+	}
+	if stats.OpenIssues != 1 {
+		t.Errorf("Expected 1 open issue for alice, got %d", stats.OpenIssues)
+	}
+	if stats.InProgressIssues != 1 {
+		t.Errorf("Expected 1 in-progress issue for alice, got %d", stats.InProgressIssues)
+	}
+
+	// Test for Bob
+	bobStats := getAssignedStatistics("bob")
+	if bobStats == nil {
+		t.Fatal("getAssignedStatistics returned nil for bob")
+	}
+
+	if bobStats.TotalIssues != 1 {
+		t.Errorf("Expected 1 issue for bob, got %d", bobStats.TotalIssues)
 	}
 }

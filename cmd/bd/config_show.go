@@ -12,7 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // configEntry represents a single configuration key with its effective value and source.
@@ -95,30 +94,11 @@ func collectConfigEntries() []configEntry {
 	// 4. Git config (beads.role)
 	entries = append(entries, collectGitConfigEntries()...)
 
-	// 5. Standalone env vars not bound to Viper keys
-	entries = append(entries, collectStandaloneEnvEntries()...)
-
 	// Sort by key for stable output
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Key < entries[j].Key
 	})
 
-	return entries
-}
-
-// collectStandaloneEnvEntries returns entries for env vars that bd reads
-// directly (without going through Viper). Keeping these out of Viper avoids
-// polluting the default-value table for opt-in operator knobs.
-func collectStandaloneEnvEntries() []configEntry {
-	var entries []configEntry
-	// BEADS_MAX_ROWS (be-x42v): defensive row cap for SearchIssues.
-	if raw, ok := os.LookupEnv("BEADS_MAX_ROWS"); ok && raw != "" {
-		entries = append(entries, configEntry{
-			Key:    "BEADS_MAX_ROWS",
-			Value:  raw,
-			Source: "env: BEADS_MAX_ROWS",
-		})
-	}
 	return entries
 }
 
@@ -152,20 +132,6 @@ func collectViperEntries() []configEntry {
 		source := config.GetValueSource(key)
 		sourceLabel := viperSourceLabel(key, source)
 
-		// The "actor" key gets the same BEADS_ACTOR > BD_ACTOR precedence as
-		// the runtime path (resolveConfiguredActor in main.go): viper's
-		// AutomaticEnv binds the deprecated BD_ACTOR ahead of any explicit
-		// binding, so config.GetString("actor")/viperSourceLabel alone would
-		// report BD_ACTOR's value and provenance even when BEADS_ACTOR is
-		// also set — contradicting the actor that mutations actually use
-		// (GH#4645). Recompute both here so `config show` matches reality.
-		if key == "actor" {
-			value = formatViperValue(resolveConfiguredActor())
-			if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
-				sourceLabel = "env: BEADS_ACTOR"
-			}
-		}
-
 		// User-global keys (metrics.*) are honored at runtime from the user-global
 		// config.yaml only, never merged project config; report that authoritative
 		// value AND its user-global source so the listing matches what bd actually
@@ -179,7 +145,7 @@ func collectViperEntries() []configEntry {
 			if value == "" {
 				continue // unset in user-global; runtime uses the built-in default
 			}
-			sourceLabel = config.UserConfigYamlDisplayPath()
+			sourceLabel = config.UserConfigYamlPath()
 		}
 
 		// Skip empty defaults — they add noise without information
@@ -295,33 +261,8 @@ func collectDatabaseEntries() []configEntry {
 		return nil
 	}
 
-	return databaseConfigEntries(dbConfig)
-}
-
-// databaseConfigEntries turns the config table into the entries `config show`
-// prints under source=database, MINUS the KV plane.
-//
-// The store's GetAllConfig hands back one table holding two planes, and this
-// command prints values in FULL — it is the operator's provenance view, so
-// redaction would defeat it. Every `bd remember` memory therefore went into
-// every terminal, transcript and pasted bug report that ran `bd config show`,
-// which is the same disclosure the settings enumeration was closed for
-// (issueops/workspaceconfig.go, "KEYS THIS PLANE DOES NOT OWN"). This route
-// reads the store raw rather than through issueops.WorkspaceConfig, so it
-// inherited neither filter and had to be told.
-//
-// The rule is workapi's, not a second `kv.` prefix check: a local one would be
-// the fourth copy of the plane boundary and the first to drift.
-//
-// NOTHING REPLACES THE VIEW. An operator who wants those rows asks the surfaces
-// that own them — `bd kv list`, `bd memories` — which is where they were always
-// meant to be read.
-func databaseConfigEntries(dbConfig map[string]string) []configEntry {
 	var entries []configEntry
 	for key, value := range dbConfig {
-		if workapi.KeyIsOnTheKVPlane(key) {
-			continue
-		}
 		entries = append(entries, configEntry{Key: key, Value: value, Source: "database"})
 	}
 

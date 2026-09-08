@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -60,15 +61,11 @@ func runMolStale(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	ctx := rootCtx
+
 	blockingOnly, _ := cmd.Flags().GetBool("blocking")
 	unassignedOnly, _ := cmd.Flags().GetBool("unassigned")
 	showAll, _ := cmd.Flags().GetBool("all")
-
-	if usesProxiedServer() {
-		return runMolStaleProxiedServer(rootCtx, blockingOnly, unassignedOnly, showAll)
-	}
-
-	ctx := rootCtx
 
 	var result *StaleResult
 	var err error
@@ -85,14 +82,10 @@ func runMolStale(cmd *cobra.Command, args []string) error {
 	if jsonOutput {
 		return outputJSON(result)
 	}
-	renderStaleResult(result, blockingOnly)
-	return nil
-}
 
-func renderStaleResult(result *StaleResult, blockingOnly bool) {
 	if len(result.StaleMolecules) == 0 {
 		fmt.Println("No stale molecules found.")
-		return
+		return nil
 	}
 
 	if blockingOnly {
@@ -126,10 +119,11 @@ func renderStaleResult(result *StaleResult, blockingOnly bool) {
 		fmt.Printf(", %d blocking other work", result.BlockingCount)
 	}
 	fmt.Println()
+	return nil
 }
 
 // findStaleMolecules queries the database for stale molecules
-func findStaleMolecules(ctx context.Context, s molReader, blockingOnly, unassignedOnly, showAll bool) (*StaleResult, error) {
+func findStaleMolecules(ctx context.Context, s storage.DoltStorage, blockingOnly, unassignedOnly, showAll bool) (*StaleResult, error) {
 	// Get all epics eligible for closure (complete but unclosed)
 	epicStatuses, err := s.GetEpicsEligibleForClosure(ctx)
 	if err != nil {

@@ -37,15 +37,20 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
 miss semantically similar issues with very different wording.
 
-The AI approach sends candidate pairs to an Anthropic-compatible model for semantic comparison.
+The AI approach sends candidate pairs to Claude for semantic comparison.
 It first uses mechanical pre-filtering to reduce the number of API calls,
 then asks the LLM to judge whether the remaining pairs are true duplicates.
+
+Orchestrator-managed workflow beads (metadata carrying "gc."-prefixed keys,
+e.g. Gas City spec/logical/control template instances) are skipped: their
+identical template text is owned by the orchestrator lifecycle, not by
+content deduplication. Pass --include-workflow to include them anyway.
 
 Examples:
   bd find-duplicates                       # Mechanical similarity (default)
@@ -54,12 +59,7 @@ Examples:
   bd find-duplicates --status open         # Only check open issues
   bd find-duplicates --limit 20            # Show top 20 pairs
   bd find-duplicates --include-workflow    # Also consider orchestrator-managed beads
-  bd find-duplicates --json                # JSON output
-
-Orchestrator-managed workflow beads (metadata carrying "gc."-prefixed keys,
-e.g. Gas City spec/logical/control template instances) are skipped: their
-identical template text is owned by the orchestrator lifecycle, not by
-content deduplication. Pass --include-workflow to include them anyway.`,
+  bd find-duplicates --json                # JSON output`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runFindDuplicates,
@@ -72,8 +72,6 @@ func init() {
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
 	findDuplicatesCmd.Flags().Bool("include-workflow", false, "Also consider orchestrator-managed workflow beads (metadata with gc.* keys); they are skipped by default")
-	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	addMaxRowsFlag(findDuplicatesCmd)
 	rootCmd.AddCommand(findDuplicatesCmd)
 }
 
@@ -101,75 +99,50 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	model, _ := cmd.Flags().GetString("model")
 	includeWorkflow, _ := cmd.Flags().GetBool("include-workflow")
 	if model == "" {
-		_, keySource := config.ResolveAIAPIKey("")
-		model = config.DefaultAIModelFor(keySource)
+		model = config.DefaultAIModel()
 	}
+
+	ctx := rootCtx
 
 	if method != "mechanical" && method != "ai" {
 		return HandleErrorRespectJSON("invalid method %q (use: mechanical, ai)", method)
 	}
 
 	if method == "ai" {
-		if apiKey, _ := config.ResolveAIAPIKey(""); apiKey == "" {
-			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
+		if os.Getenv("ANTHROPIC_API_KEY") == "" && config.GetString("ai.api_key") == "" {
+			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
 		}
 	}
 
-	// Fetch issues
-	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
-	if err != nil {
-		return err
-	}
-	filter := types.IssueFilter{
-		MaxRows:       maxRows,
-		MaxRowsSource: maxRowsSource,
-	}
+	filter := types.IssueFilter{}
 	if status != "" && status != "all" {
 		s := types.Status(status)
 		filter.Status = &s
 	}
 
-	if usesProxiedServer() {
-		// maxRows was already resolved above (to build filter); reject using
-		// that value directly instead of re-resolving via
-		// rejectMaxRowsUnderProxiedServer, which would call resolveMaxRows a
-		// second time and double any malformed-env warning it emits.
-		if err := rejectResolvedMaxRowsUnderProxiedServer(maxRows); err != nil {
-			return err
-		}
-		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model, includeWorkflow)
-	}
+	var issues []*types.Issue
+	var err error
 
-	issues, err := store.SearchIssues(rootCtx, "", filter)
+	issues, err = store.SearchIssues(ctx, "", filter)
 	if err != nil {
-		if capErr := handleMaxRowsError(err); capErr != nil {
-			return capErr
-		}
 		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
-	issues = filterClosedIfNoStatus(issues, status)
 
-	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model, includeWorkflow)
-}
-
-func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue {
-	if status != "" {
-		return issues
-	}
-	var filtered []*types.Issue
-	for _, issue := range issues {
-		if issue.Status != types.StatusClosed {
-			filtered = append(filtered, issue)
+	if status == "" {
+		var filtered []*types.Issue
+		for _, issue := range issues {
+			if issue.Status != types.StatusClosed {
+				filtered = append(filtered, issue)
+			}
 		}
+		issues = filtered
 	}
-	return filtered
-}
 
-func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string, includeWorkflow bool) error {
 	workflowSkipped := 0
 	if !includeWorkflow {
 		issues, workflowSkipped = partitionWorkflowIssues(issues)
 	}
+
 	if len(issues) < 2 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -179,7 +152,9 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 			})
 		}
 		fmt.Println("Not enough issues to compare (need at least 2)")
-		printWorkflowSkipped(workflowSkipped)
+		if workflowSkipped > 0 {
+			fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
+		}
 		return nil
 	}
 
@@ -237,15 +212,16 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 
 	if len(pairs) == 0 {
 		fmt.Printf("No similar issues found (threshold: %.0f%%)\n", threshold*100)
-		printWorkflowSkipped(workflowSkipped)
+		if workflowSkipped > 0 {
+			fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
+		}
 		return nil
 	}
 
 	fmt.Printf("%s Found %d potential duplicate pair(s) (threshold: %.0f%%):\n\n",
 		ui.RenderWarn("🔍"), len(pairs), threshold*100)
-	printWorkflowSkipped(workflowSkipped)
 	if workflowSkipped > 0 {
-		fmt.Println()
+		fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n\n", ui.RenderAccent("ℹ"), workflowSkipped)
 	}
 
 	for i, p := range pairs {
@@ -416,12 +392,11 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 
 	fmt.Fprintf(os.Stderr, "Analyzing %d candidate pairs with AI...\n", len(candidates))
 
-	apiKey, keySource := config.ResolveAIAPIKey("")
-	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
-	if baseURL := config.DefaultAIBaseURL(keySource); baseURL != "" {
-		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		apiKey = config.GetString("ai.api_key")
 	}
-	client := anthropic.NewClient(clientOptions...)
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	var pairs []duplicatePair
 

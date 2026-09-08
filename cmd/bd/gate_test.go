@@ -3,13 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -152,152 +150,81 @@ func TestShouldCheckGate(t *testing.T) {
 	}
 }
 
-// fakeBeadGateGetter fakes the one lookup checkBeadGate performs.
-type fakeBeadGateGetter struct {
-	issues map[string]*types.Issue
-	err    error
-	gotID  string
-}
-
-func (f *fakeBeadGateGetter) GetIssue(_ context.Context, id string) (*types.Issue, error) {
-	f.gotID = id
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.issues[id], nil
-}
-
-func TestCheckBeadGate_CrossRigUsesBeadIDForRoutedLookup(t *testing.T) {
+func TestCheckBeadGate_InvalidFormat(t *testing.T) {
 	ctx := context.Background()
-	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{
-		"gt-abc": {ID: "gt-abc", Status: types.StatusClosed},
-	}}
 
-	satisfied, reason := checkBeadGate(ctx, st, "gastown:gt-abc")
-	if !satisfied {
-		t.Fatalf("expected closed routed bead to satisfy gate, got reason %q", reason)
-	}
-	if st.gotID != "gt-abc" {
-		t.Fatalf("routed lookup ID = %q, want %q", st.gotID, "gt-abc")
-	}
-}
-
-func TestProxiedFreshReadGetterPreservesLocalNotFoundWhenRoutingUnavailable(t *testing.T) {
-	withStubbedProxiedLookup(t, nil)
-
-	oldDBPath := dbPath
-	dbPath = filepath.Join(t.TempDir(), ".beads", "dolt")
-	t.Cleanup(func() { dbPath = oldDBPath })
-
-	_, err := (proxiedFreshReadGetter{}).GetIssue(context.Background(), "bd-missing")
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("GetIssue error = %v, want original local not-found", err)
-	}
-}
-
-func TestCheckBeadGate_InvalidCrossRigFormat(t *testing.T) {
-	ctx := context.Background()
 	tests := []struct {
 		name    string
 		awaitID string
 	}{
+		{name: "empty", awaitID: ""},
+		{name: "no colon", awaitID: "my-project-mp-abc"},
 		{name: "missing rig", awaitID: ":gt-abc"},
 		{name: "missing bead", awaitID: "my-project:"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			satisfied, reason := checkBeadGate(ctx, nil, tt.awaitID)
+			satisfied, reason := checkBeadGate(ctx, tt.awaitID)
 			if satisfied {
 				t.Errorf("expected not satisfied for %q", tt.awaitID)
 			}
-			if !gateTestContainsIgnoreCase(reason, "expected <rig>:<bead-id>") {
-				t.Errorf("reason %q does not describe the expected format", reason)
+			if reason == "" {
+				t.Error("expected reason to be set")
+			}
+			if !gateTestContainsIgnoreCase(reason, "multi-rig routing removed") {
+				t.Errorf("reason %q does not contain %q", reason, "multi-rig routing removed")
 			}
 		})
 	}
 }
 
-func TestCheckBeadGate_EmptyAwaitID(t *testing.T) {
-	satisfied, reason := checkBeadGate(context.Background(), nil, "")
-	if satisfied {
-		t.Error("expected not satisfied for empty await_id")
-	}
-	if reason == "" {
-		t.Error("expected reason to be set")
-	}
-}
-
-func TestCheckBeadGate_LocalBead(t *testing.T) {
-	// A plain (no-colon) await_id is a bead in this rig's own database
-	// (wy-hgms2): closed resolves the gate, anything else stays pending with
-	// a status-bearing reason.
+func TestCheckBeadGate_RigNotFound(t *testing.T) {
 	ctx := context.Background()
-	st := &fakeBeadGateGetter{
-		issues: map[string]*types.Issue{
-			"bd-closed": {ID: "bd-closed", Status: types.StatusClosed},
-			"bd-open":   {ID: "bd-open", Status: types.StatusOpen},
-		},
-	}
 
-	satisfied, reason := checkBeadGate(ctx, st, "bd-closed")
-	if !satisfied {
-		t.Errorf("expected satisfied for closed local bead, got reason %q", reason)
-	}
-	if !gateTestContainsIgnoreCase(reason, "closed") {
-		t.Errorf("reason %q does not mention closed", reason)
-	}
-
-	satisfied, reason = checkBeadGate(ctx, st, "bd-open")
+	// With multi-rig routing removed, all bead gates return the same message
+	satisfied, reason := checkBeadGate(ctx, "nonexistent:some-id")
 	if satisfied {
-		t.Error("expected not satisfied for open local bead")
-	}
-	if !gateTestContainsIgnoreCase(reason, "open") {
-		t.Errorf("reason %q does not mention the bead status", reason)
-	}
-}
-
-func TestCheckBeadGate_LocalBeadNotFound(t *testing.T) {
-	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{}}
-	satisfied, reason := checkBeadGate(context.Background(), st, "bd-missing")
-	if satisfied {
-		t.Error("expected not satisfied for missing local bead")
-	}
-	if !gateTestContainsIgnoreCase(reason, "not found") {
-		t.Errorf("reason %q does not mention not found", reason)
-	}
-}
-
-func TestCheckBeadGate_LocalBeadLookupError(t *testing.T) {
-	st := &fakeBeadGateGetter{err: errors.New("dolt exploded")}
-	satisfied, reason := checkBeadGate(context.Background(), st, "bd-abc")
-	if satisfied {
-		t.Error("expected not satisfied on lookup error")
-	}
-	if !gateTestContainsIgnoreCase(reason, "dolt exploded") {
-		t.Errorf("reason %q does not carry the lookup error", reason)
-	}
-}
-
-func TestCheckBeadGate_NilStoreStaysPending(t *testing.T) {
-	satisfied, reason := checkBeadGate(context.Background(), nil, "bd-abc")
-	if satisfied {
-		t.Error("expected not satisfied with no store")
+		t.Error("expected not satisfied for non-existent rig")
 	}
 	if reason == "" {
 		t.Error("expected reason to be set")
 	}
+	if !gateTestContainsIgnoreCase(reason, "multi-rig routing removed") {
+		t.Errorf("reason %q does not contain %q", reason, "multi-rig routing removed")
+	}
+}
+
+func TestCheckBeadGate_TargetClosed(t *testing.T) {
+	t.Skip("SQLite-specific: created SQLite DB directly; full integration testing requires routes.jsonl + Dolt rig infrastructure")
 }
 
 func TestCheckGHPRUsesStateWithoutMergedField(t *testing.T) {
-	resolved, escalated, reason, err := checkGHPRWithRunner(&types.Issue{
+	if runtime.GOOS == "windows" {
+		t.Skip("fake gh shell script uses POSIX sh")
+	}
+
+	binDir := t.TempDir()
+	fakeGH := filepath.Join(binDir, "gh")
+	script := `#!/bin/sh
+case "$*" in
+  *merged*)
+    echo "unexpected merged field" >&2
+    exit 9
+    ;;
+esac
+printf '{"state":"MERGED","title":"Fix gate"}'
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	resolved, escalated, reason, err := checkGHPR(&types.Issue{
 		IssueType: "gate",
 		AwaitType: "gh:pr",
 		AwaitID:   "3488",
-	}, fakeGHRunner(t,
-		`{"state":"MERGED","title":"Fix gate"}`,
-		"pr", "view", "3488", "--json", "state,title",
-	))
+	})
 	if err != nil {
 		t.Fatalf("checkGHPR returned error: %v", err)
 	}
@@ -310,225 +237,6 @@ func TestCheckGHPRUsesStateWithoutMergedField(t *testing.T) {
 	if !gateTestContains(reason, "was merged") {
 		t.Fatalf("reason = %q, want merged message", reason)
 	}
-}
-
-func TestCheckGHPRUsesRepositoryFromMetadata(t *testing.T) {
-	resolved, escalated, reason, err := checkGHPRWithRunner(&types.Issue{
-		IssueType: "gate",
-		AwaitType: "gh:pr",
-		AwaitID:   "608",
-		Metadata:  json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
-	}, fakeGHRunner(t,
-		`{"state":"MERGED","title":"Cross-repo gate"}`,
-		"pr", "view", "608", "--json", "state,title", "--repo", "srobroek/agentic-packages",
-	))
-	if err != nil {
-		t.Fatalf("checkGHPR returned error: %v", err)
-	}
-	if !resolved || escalated {
-		t.Fatalf("resolved, escalated = %v, %v; want true, false (%s)", resolved, escalated, reason)
-	}
-}
-
-func TestCheckGHRunUsesRepositoryFromMetadata(t *testing.T) {
-	resolved, escalated, reason, err := checkGHRunWithRunner(&types.Issue{
-		IssueType: "gate",
-		AwaitType: "gh:run",
-		AwaitID:   "12345",
-		Metadata:  json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
-	}, nil,
-		fakeGHRunner(t,
-			`{"status":"completed","conclusion":"success","name":"CI"}`,
-			"run", "view", "12345", "--json", "status,conclusion,name", "--repo", "srobroek/agentic-packages",
-		),
-	)
-	if err != nil {
-		t.Fatalf("checkGHRun returned error: %v", err)
-	}
-	if !resolved || escalated {
-		t.Fatalf("resolved, escalated = %v, %v; want true, false (%s)", resolved, escalated, reason)
-	}
-}
-
-// TestCheckGHRun_CrossRepoDiscoveryUsesInjectedRunner covers the standards
-// note on the SF1 review: discoverRunIDByWorkflowNameInRepo was hard-wired to
-// runGHCommand, so the cross-repo discovery path (a workflow-name hint plus
-// metadata.repo) could not be exercised through the injected ghCommandRunner
-// seam at all. Both the discovery "run list" call and the follow-up "run
-// view" call must go through the same fake runner - if either one reached
-// the real runGHCommand this test would fail (or hang) instead of using the
-// canned response below.
-func TestCheckGHRun_CrossRepoDiscoveryUsesInjectedRunner(t *testing.T) {
-	var calls [][]string
-	fakeRunner := func(args ...string) (stdout, stderr []byte, err error) {
-		calls = append(calls, append([]string(nil), args...))
-		switch args[0] {
-		case "run":
-			if len(args) > 1 && args[1] == "list" {
-				return []byte(`[{"databaseId":999,"name":"release","status":"completed","conclusion":"success","workflowName":"release.yml"}]`), nil, nil
-			}
-			if len(args) > 1 && args[1] == "view" {
-				return []byte(`{"status":"completed","conclusion":"success","name":"CI"}`), nil, nil
-			}
-		}
-		t.Fatalf("unexpected gh invocation: %v", args)
-		return nil, nil, nil
-	}
-
-	resolved, escalated, reason, err := checkGHRunWithRunner(&types.Issue{
-		IssueType: "gate",
-		AwaitType: "gh:run",
-		AwaitID:   "release.yml",
-		Metadata:  json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
-	}, nil, fakeRunner)
-	if err != nil {
-		t.Fatalf("checkGHRun returned error: %v", err)
-	}
-	if !resolved || escalated {
-		t.Fatalf("resolved, escalated = %v, %v; want true, false (%s)", resolved, escalated, reason)
-	}
-
-	wantCalls := [][]string{
-		{"run", "list", "--workflow", "release.yml", "--json", "databaseId,name,status,conclusion,createdAt,workflowName", "--limit", "5", "--repo", "srobroek/agentic-packages"},
-		{"run", "view", "999", "--json", "status,conclusion,name", "--repo", "srobroek/agentic-packages"},
-	}
-	if len(calls) != len(wantCalls) {
-		t.Fatalf("gh invocations = %v, want %v", calls, wantCalls)
-	}
-	for i, want := range wantCalls {
-		if !slices.Equal(calls[i], want) {
-			t.Errorf("gh invocation %d = %v, want %v", i, calls[i], want)
-		}
-	}
-}
-
-func TestQueryGitHubRunsForWorkflowUsesRepository(t *testing.T) {
-	runs, err := queryGitHubRunsForWorkflowInRepoWithRunner(
-		"release.yml",
-		5,
-		"srobroek/agentic-packages",
-		fakeGHRunner(t,
-			`[{"databaseId":12345,"name":"release","status":"completed","conclusion":"success","workflowName":"release.yml"}]`,
-			"run", "list", "--workflow", "release.yml", "--json", "databaseId,name,status,conclusion,createdAt,workflowName", "--limit", "5", "--repo", "srobroek/agentic-packages",
-		),
-	)
-	if err != nil {
-		t.Fatalf("queryGitHubRunsForWorkflowInRepo returned error: %v", err)
-	}
-	if len(runs) != 1 || runs[0].DatabaseID != 12345 {
-		t.Fatalf("runs = %#v, want one run with database ID 12345", runs)
-	}
-}
-
-func TestGitHubRepoFromIssueRejectsInvalidMetadata(t *testing.T) {
-	tests := []struct {
-		name     string
-		metadata json.RawMessage
-	}{
-		{"missing_owner", json.RawMessage(`{"repo":"missing-owner"}`)},
-		{"shell_metacharacter", json.RawMessage(`{"repo":"owner/repo;echo"}`)},
-		{"metadata_not_an_object", json.RawMessage(`"not-an-object"`)},
-		// SF3: an explicit JSON null must be rejected rather than silently
-		// falling back to the current repository - the dangerous direction,
-		// since it could point a cross-repo check at the wrong repo.
-		{"repo_null", json.RawMessage(`{"repo":null}`)},
-		{"repo_number", json.RawMessage(`{"repo":42}`)},
-		{"repo_bool", json.RawMessage(`{"repo":true}`)},
-		{"repo_object", json.RawMessage(`{"repo":{"owner":"a","name":"b"}}`)},
-		{"repo_array", json.RawMessage(`{"repo":["a","b"]}`)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if repo, err := githubRepoFromIssue(&types.Issue{Metadata: tt.metadata}); err == nil {
-				t.Fatalf("githubRepoFromIssue(%s) = %q, nil; want validation error", tt.metadata, repo)
-			}
-		})
-	}
-}
-
-// TestGitHubRepoFromIssueAllowsMissingRepoKey verifies metadata without a
-// "repo" key at all (as opposed to an explicit null) still falls back to the
-// current repository without error - only an explicit malformed value is
-// rejected (SF3).
-func TestGitHubRepoFromIssueAllowsMissingRepoKey(t *testing.T) {
-	tests := []struct {
-		name     string
-		metadata json.RawMessage
-	}{
-		{"nil_metadata", nil},
-		{"null_metadata", json.RawMessage(`null`)},
-		{"empty_object", json.RawMessage(`{}`)},
-		{"unrelated_key", json.RawMessage(`{"priority":"high"}`)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			repo, err := githubRepoFromIssue(&types.Issue{Metadata: tt.metadata})
-			if err != nil {
-				t.Fatalf("githubRepoFromIssue(%s) returned error: %v", tt.metadata, err)
-			}
-			if repo != "" {
-				t.Fatalf("githubRepoFromIssue(%s) = %q, want empty", tt.metadata, repo)
-			}
-		})
-	}
-}
-
-// TestRepoMetadataForGateRestrictsToGitHubTypes covers SF4: repo metadata
-// inheritance/validation must only run for gh:* gate types. A human or timer
-// gate blocking an issue with non-GitHub-shaped "repo" metadata (legal per
-// the metadata contract - "any valid JSON") must not fail gate creation.
-func TestRepoMetadataForGateRestrictsToGitHubTypes(t *testing.T) {
-	badRepoMetadata := json.RawMessage(`{"repo":"not-owner-slash-repo"}`)
-
-	nonGitHubTypes := []string{"human", "timer", "bead"}
-	for _, gateType := range nonGitHubTypes {
-		t.Run("ignores_bad_repo_metadata_for_"+gateType, func(t *testing.T) {
-			metadata, err := repoMetadataForGate(gateType, &types.Issue{Metadata: badRepoMetadata})
-			if err != nil {
-				t.Fatalf("repoMetadataForGate(%q) returned error: %v; non-GitHub gates must tolerate arbitrary repo metadata", gateType, err)
-			}
-			if metadata != nil {
-				t.Fatalf("repoMetadataForGate(%q) = %s, want nil metadata", gateType, metadata)
-			}
-		})
-	}
-
-	githubTypes := []string{"gh:run", "gh:pr"}
-	for _, gateType := range githubTypes {
-		t.Run("rejects_bad_repo_metadata_for_"+gateType, func(t *testing.T) {
-			if _, err := repoMetadataForGate(gateType, &types.Issue{Metadata: badRepoMetadata}); err == nil {
-				t.Fatalf("repoMetadataForGate(%q) = nil error, want validation error", gateType)
-			}
-		})
-
-		t.Run("inherits_valid_repo_for_"+gateType, func(t *testing.T) {
-			metadata, err := repoMetadataForGate(gateType, &types.Issue{
-				Metadata: json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
-			})
-			if err != nil {
-				t.Fatalf("repoMetadataForGate(%q) returned error: %v", gateType, err)
-			}
-			var decoded struct {
-				Repo string `json:"repo"`
-			}
-			if unmarshalErr := json.Unmarshal(metadata, &decoded); unmarshalErr != nil {
-				t.Fatalf("repoMetadataForGate(%q) = %s, not valid JSON: %v", gateType, metadata, unmarshalErr)
-			}
-			if decoded.Repo != "srobroek/agentic-packages" {
-				t.Fatalf("repoMetadataForGate(%q) repo = %q, want srobroek/agentic-packages", gateType, decoded.Repo)
-			}
-		})
-	}
-
-	t.Run("no_metadata_no_repo", func(t *testing.T) {
-		metadata, err := repoMetadataForGate("gh:run", &types.Issue{})
-		if err != nil {
-			t.Fatalf("repoMetadataForGate(gh:run) returned error: %v", err)
-		}
-		if metadata != nil {
-			t.Fatalf("repoMetadataForGate(gh:run) = %s, want nil", metadata)
-		}
-	})
 }
 
 func TestIsNumericID(t *testing.T) {
@@ -656,7 +364,7 @@ func TestCheckGHRun_DryRunDoesNotPersistDiscoveredRunID(t *testing.T) {
 	resolved, escalated, reason, err := checkGHRun(&types.Issue{
 		ID:      "bd-gate",
 		AwaitID: "release.yml",
-	}, nil)
+	}, false)
 	if err != nil {
 		t.Fatalf("checkGHRun returned error: %v", err)
 	}
@@ -711,7 +419,7 @@ func TestCheckGHRun_PersistsDiscoveredRunIDOutsideDryRun(t *testing.T) {
 	resolved, escalated, reason, err := checkGHRun(&types.Issue{
 		ID:      "bd-gate",
 		AwaitID: "release.yml",
-	}, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
+	}, true)
 	if err != nil {
 		t.Fatalf("checkGHRun returned error: %v", err)
 	}
@@ -762,7 +470,7 @@ func TestCheckGHRun_ReturnsErrorWhenPersistingDiscoveredRunIDFails(t *testing.T)
 	resolved, escalated, reason, err := checkGHRun(&types.Issue{
 		ID:      "bd-gate",
 		AwaitID: "release.yml",
-	}, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
+	}, true)
 	if err == nil {
 		t.Fatal("expected checkGHRun to return an error when await_id persistence fails")
 	}
@@ -781,14 +489,9 @@ func TestCheckGHRun_ReturnsErrorWhenPersistingDiscoveredRunIDFails(t *testing.T)
 }
 
 func TestCheckGHRunStatus_Success(t *testing.T) {
-	resolved, escalated, reason, err := checkGHRunStatusInRepoWithRunner(
-		"12345",
-		"",
-		fakeGHRunner(t,
-			`{"status":"completed","conclusion":"success","name":"release"}`,
-			"run", "view", "12345", "--json", "status,conclusion,name",
-		),
-	)
+	installFakeGHScript(t, `{"status":"completed","conclusion":"success","name":"release"}`)
+
+	resolved, escalated, reason, err := checkGHRunStatus("12345")
 	if err != nil {
 		t.Fatalf("checkGHRunStatus returned error: %v", err)
 	}
@@ -988,6 +691,10 @@ func TestWorkflowNameMatches(t *testing.T) {
 }
 
 func TestCheckGHPR_StateHandling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-sh fake binary; skipping on Windows")
+	}
+
 	tests := []struct {
 		name           string
 		ghJSON         string
@@ -1020,11 +727,9 @@ func TestCheckGHPR_StateHandling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			installFakeGHScript(t, tt.ghJSON)
 			gate := &types.Issue{AwaitID: "https://github.com/org/repo/pull/1"}
-			resolved, escalated, reason, err := checkGHPRWithRunner(gate, fakeGHRunner(t,
-				tt.ghJSON,
-				"pr", "view", gate.AwaitID, "--json", "state,title",
-			))
+			resolved, escalated, reason, err := checkGHPR(gate)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1042,11 +747,28 @@ func TestCheckGHPR_StateHandling(t *testing.T) {
 }
 
 func TestCheckGHPR_NoMergedFieldRequested(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-sh fake binary; skipping on Windows")
+	}
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "gh")
+	// Fake gh that fails if "merged" appears anywhere in args
+	script := `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    *merged*) echo "ERROR: 'merged' field must not be requested" >&2; exit 1;;
+  esac
+done
+echo '{"state":"MERGED","title":"Test PR"}'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	gate := &types.Issue{AwaitID: "https://github.com/org/repo/pull/99"}
-	resolved, _, reason, err := checkGHPRWithRunner(gate, fakeGHRunner(t,
-		`{"state":"MERGED","title":"Test PR"}`,
-		"pr", "view", gate.AwaitID, "--json", "state,title",
-	))
+	resolved, _, reason, err := checkGHPR(gate)
 	if err != nil {
 		t.Fatalf("checkGHPR failed (likely requested 'merged' field): %v", err)
 	}
@@ -1058,15 +780,34 @@ func TestCheckGHPR_NoMergedFieldRequested(t *testing.T) {
 	}
 }
 
-func fakeGHRunner(t *testing.T, stdout string, wantArgs ...string) ghCommandRunner {
+func installFakeGHScript(t *testing.T, stdout string) {
 	t.Helper()
-	return func(args ...string) ([]byte, []byte, error) {
-		t.Helper()
-		if !slices.Equal(args, wantArgs) {
-			t.Fatalf("gh arguments = %q, want %q", args, wantArgs)
-		}
-		return []byte(stdout), nil, nil
+
+	dir := t.TempDir()
+
+	var (
+		scriptPath string
+		script     string
+	)
+
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "gh.cmd")
+		script = "@echo off\r\necho " + stdout + "\r\n"
+	} else {
+		scriptPath = filepath.Join(dir, "gh")
+		script = "#!/bin/sh\ncat <<'EOF'\n" + stdout + "\nEOF\n"
 	}
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(scriptPath, 0o755); err != nil {
+			t.Fatalf("chmod fake gh: %v", err)
+		}
+	}
+
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // gateTestContainsIgnoreCase checks if haystack contains needle (case-insensitive)
@@ -1098,62 +839,4 @@ func gateTestFindSubstring(s, substr string) int {
 		}
 	}
 	return -1
-}
-
-// TestFilterIssueGates covers the bead-scoping helper behind `bd gate list <issue-id>`:
-// only gate-type dependencies are returned, --all controls closed visibility, and the
-// limit is honored. Regression guard for the bug where `bd gate list <bead>` silently
-// ignored the argument and returned the DB-wide gate list.
-func TestFilterIssueGates(t *testing.T) {
-	gate := types.IssueType("gate")
-	task := types.IssueType("task")
-	deps := []*types.Issue{
-		{ID: "g-open", IssueType: gate, Status: types.StatusOpen},
-		{ID: "g-closed", IssueType: gate, Status: types.StatusClosed},
-		{ID: "t-blocker", IssueType: task, Status: types.StatusOpen}, // not a gate
-		nil, // defensive: skipped
-		{ID: "g-open2", IssueType: gate, Status: types.StatusOpen},
-	}
-
-	t.Run("open_only_excludes_closed_and_nongates", func(t *testing.T) {
-		got := filterIssueGates(deps, false, 0)
-		ids := gateIDs(got)
-		if len(got) != 2 || ids[0] != "g-open" || ids[1] != "g-open2" {
-			t.Fatalf("expected [g-open g-open2], got %v", ids)
-		}
-	})
-
-	t.Run("all_includes_closed_gates_only", func(t *testing.T) {
-		got := filterIssueGates(deps, true, 0)
-		ids := gateIDs(got)
-		if len(got) != 3 {
-			t.Fatalf("expected 3 gates (incl. closed), got %v", ids)
-		}
-		for _, id := range ids {
-			if id == "t-blocker" {
-				t.Fatalf("non-gate dependency leaked into result: %v", ids)
-			}
-		}
-	})
-
-	t.Run("limit_caps_results", func(t *testing.T) {
-		got := filterIssueGates(deps, true, 1)
-		if len(got) != 1 || got[0].ID != "g-open" {
-			t.Fatalf("expected limit=1 -> [g-open], got %v", gateIDs(got))
-		}
-	})
-
-	t.Run("empty_deps", func(t *testing.T) {
-		if got := filterIssueGates(nil, true, 0); len(got) != 0 {
-			t.Fatalf("expected no gates, got %v", gateIDs(got))
-		}
-	})
-}
-
-func gateIDs(gs []*types.Issue) []string {
-	ids := make([]string, 0, len(gs))
-	for _, g := range gs {
-		ids = append(ids, g.ID)
-	}
-	return ids
 }

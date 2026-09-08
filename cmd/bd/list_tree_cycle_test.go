@@ -145,7 +145,7 @@ func TestDisplayPrettyList_EpicBlockedByChildTerminates(t *testing.T) {
 	finished := make(chan string, 1)
 	go func() {
 		finished <- captureBoundedStdout(t, 1<<20, func() {
-			displayPrettyListWithDeps(issues, false, deps, false, false)
+			displayPrettyListWithDeps(issues, false, deps)
 		})
 	}()
 
@@ -182,7 +182,7 @@ func TestPrintPrettyTree_DiamondStillRendersBothPaths(t *testing.T) {
 	}
 
 	out := captureBoundedStdout(t, 1<<20, func() {
-		printPrettyTree(childrenMap, root.ID, "", nil)
+		printPrettyTree(childrenMap, root.ID, "")
 	})
 
 	if n := strings.Count(out, leaf.ID); n != 2 {
@@ -231,7 +231,7 @@ func TestPrintPrettyTree_TerminatesOnCycle(t *testing.T) {
 	finished := make(chan string, 1)
 	go func() {
 		finished <- captureBoundedStdout(t, limit, func() {
-			printPrettyTree(childrenMap, a.ID, "", nil)
+			printPrettyTree(childrenMap, a.ID, "")
 		})
 	}()
 
@@ -257,7 +257,7 @@ func TestDisplayPrettyList_CycleEndToEnd(t *testing.T) {
 	finished := make(chan string, 1)
 	go func() {
 		finished <- captureBoundedStdout(t, 1<<20, func() {
-			displayPrettyListWithDeps(issues, false, deps, false, false)
+			displayPrettyListWithDeps(issues, false, deps)
 		})
 	}()
 

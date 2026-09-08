@@ -5,6 +5,7 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -18,8 +19,17 @@ func (s *EmbeddedDoltStore) SetConfig(ctx context.Context, key, value string) er
 			return err
 		}
 		// Sync normalized tables when config keys change
-		_, err := issueops.SyncConfigTables(ctx, tx, key, value)
-		return err
+		switch key {
+		case "status.custom":
+			if err := issueops.SyncCustomStatusesTable(ctx, tx, value); err != nil {
+				return fmt.Errorf("syncing custom_statuses table: %w", err)
+			}
+		case "types.custom":
+			if err := issueops.SyncCustomTypesTable(ctx, tx, value); err != nil {
+				return fmt.Errorf("syncing custom_types table: %w", err)
+			}
+		}
+		return nil
 	})
 }
 

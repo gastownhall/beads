@@ -39,52 +39,20 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	if label == "" {
 		return fmt.Errorf("db: LabelSQLRepository.Insert: label must not be empty")
 	}
-	// Reject an over-length label before the INSERT IGNORE, which would otherwise
-	// silently truncate it to the VARCHAR(255) column. This is the proxied-server
-	// (uow) analog of issueops.AddLabelInTx's guard, so both write stacks return a
-	// typed ErrFieldTooLong instead of storing a label the caller never sent.
-	if err := types.CheckFieldLen("label", label); err != nil {
-		return err
-	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
-	result, err := r.runner.ExecContext(ctx,
+	if _, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)", table),
 		issueID, label,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: rows affected: %w", issueID, label, err)
-	}
-	if rows == 0 {
-		issueTable := "issues"
-		if opts.UseWispsTable {
-			issueTable = "wisps"
-		}
-		var count int
-		//nolint:gosec // G201: issueTable is one of two hardcoded constants.
-		if err := r.runner.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", issueTable), issueID).Scan(&count); err != nil {
-			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: verify issue: %w", issueID, label, err)
-		}
-		if count == 0 {
-			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: issue does not exist", issueID, label)
-		}
-		return nil
-	}
-	if err := r.events.Record(ctx, domain.Event{
+	return r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
 		Actor:    actor,
 		NewValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
-		return err
-	}
-	// A label is part of the bead snapshot; the idempotent no-op path above
-	// returns without writing and journals nothing.
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
 }
 
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
@@ -96,29 +64,18 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
-	result, err := r.runner.ExecContext(ctx,
+	if _, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? AND label = ?", table),
 		issueID, label,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: %w", issueID, label, err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: rows affected: %w", issueID, label, err)
-	}
-	if rows == 0 {
-		return nil
-	}
-	if err := r.events.Record(ctx, domain.Event{
+	return r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelRemoved,
 		Actor:    actor,
 		OldValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
-		return err
-	}
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
 }
 
 func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts domain.LabelOpts) ([]string, error) {

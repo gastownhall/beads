@@ -37,10 +37,6 @@ func TestRigIssueIsPersistentButHiddenFromReady(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	if err := store.SetConfig(ctx, "types.custom", "rig"); err != nil {
-		t.Fatalf("SetConfig types.custom: %v", err)
-	}
-
 	rig := &types.Issue{
 		ID:        "rw-rig-durable",
 		Title:     "Rig identity",
@@ -171,68 +167,6 @@ func TestGetReadyWork_StatusFilter(t *testing.T) {
 	}
 	if !foundInProgress {
 		t.Error("in_progress issue should appear when filtering for in_progress")
-	}
-}
-
-// TestGetReadyWork_CustomActiveCategory pins GH#5831: `bd ready` pins
-// StatusOpen, and that pin is the active category — built-in open plus any
-// custom status whose category is active. WIP/done/frozen/unspecified
-// customs stay out; in_progress stays out.
-func TestGetReadyWork_CustomActiveCategory(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	if err := store.SetConfig(ctx, "status.custom", "triaged:active,polishing:wip,shipped:done,parked:frozen,legacy"); err != nil {
-		t.Fatalf("SetConfig status.custom: %v", err)
-	}
-
-	mk := func(id string, status types.Status) {
-		t.Helper()
-		iss := &types.Issue{
-			ID:        id,
-			Title:     id,
-			Status:    types.StatusOpen,
-			Priority:  2,
-			IssueType: types.TypeTask,
-		}
-		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
-			t.Fatalf("CreateIssue %s: %v", id, err)
-		}
-		if status != types.StatusOpen {
-			if err := store.UpdateIssue(ctx, id, map[string]interface{}{"status": string(status)}, "tester"); err != nil {
-				t.Fatalf("UpdateIssue %s -> %s: %v", id, status, err)
-			}
-		}
-	}
-	mk("rw-ca-open", types.StatusOpen)
-	mk("rw-ca-active", types.Status("triaged"))
-	mk("rw-ca-wip", types.Status("polishing"))
-	mk("rw-ca-done", types.Status("shipped"))
-	mk("rw-ca-frozen", types.Status("parked"))
-	mk("rw-ca-legacy", types.Status("legacy"))
-	mk("rw-ca-inprog", types.StatusInProgress)
-
-	work, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
-	if err != nil {
-		t.Fatalf("GetReadyWork: %v", err)
-	}
-	got := map[string]bool{}
-	for _, w := range work {
-		got[w.ID] = true
-	}
-	if !got["rw-ca-open"] {
-		t.Errorf("built-in open missing from ready set: %v", issueIDs(work))
-	}
-	if !got["rw-ca-active"] {
-		t.Errorf("custom active-category status missing from ready set: %v", issueIDs(work))
-	}
-	for _, id := range []string{"rw-ca-wip", "rw-ca-done", "rw-ca-frozen", "rw-ca-legacy", "rw-ca-inprog"} {
-		if got[id] {
-			t.Errorf("%s should not appear in the StatusOpen ready set: %v", id, issueIDs(work))
-		}
 	}
 }
 
@@ -1849,28 +1783,6 @@ func TestSearchIssues_ByExternalRef(t *testing.T) {
 	if len(results) != 0 {
 		t.Fatalf("expected no results for unrelated external ref, got %d", len(results))
 	}
-
-	// ExternalRef exact match should find the issue.
-	results, err = store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &linearURL})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("ExternalRef exact match: expected 1 result, got %d", len(results))
-	}
-	if results[0].ID != issue.ID {
-		t.Errorf("expected %s, got %s", issue.ID, results[0].ID)
-	}
-
-	// ExternalRef exact match with wrong value should return nothing.
-	wrongRef := "jira-WRONG-123"
-	results, err = store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &wrongRef})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(results) != 0 {
-		t.Fatalf("ExternalRef exact match with wrong value: expected 0 results, got %d", len(results))
-	}
 }
 
 func TestSearchIssues_ByID(t *testing.T) {
@@ -2329,12 +2241,8 @@ func TestGetStatistics_EmptyStore(t *testing.T) {
 	if stats.ClosedIssues != 0 {
 		t.Errorf("expected 0 closed issues, got %d", stats.ClosedIssues)
 	}
-	if stats.BlockedIssues == nil || *stats.BlockedIssues != 0 {
-		got := 0
-		if stats.BlockedIssues != nil {
-			got = *stats.BlockedIssues
-		}
-		t.Errorf("expected 0 blocked issues, got %d", got)
+	if stats.BlockedIssues != 0 {
+		t.Errorf("expected 0 blocked issues, got %d", stats.BlockedIssues)
 	}
 }
 
@@ -2426,12 +2334,8 @@ func TestGetStatistics_BlockedCount(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if stats.BlockedIssues == nil || *stats.BlockedIssues != 1 {
-		got := 0
-		if stats.BlockedIssues != nil {
-			got = *stats.BlockedIssues
-		}
-		t.Errorf("expected 1 blocked issue, got %d", got)
+	if stats.BlockedIssues != 1 {
+		t.Errorf("expected 1 blocked issue, got %d", stats.BlockedIssues)
 	}
 }
 
@@ -2542,84 +2446,8 @@ func TestGetStatistics_ReadyIssuesExcludesBlocked(t *testing.T) {
 	}
 
 	// 3 open issues, 1 blocked => ready = 3 - 1 = 2
-	if stats.ReadyIssues == nil || *stats.ReadyIssues != 2 {
-		got := -1
-		if stats.ReadyIssues != nil {
-			got = *stats.ReadyIssues
-		}
-		t.Errorf("expected 2 ready issues (3 open - 1 blocked), got %d", got)
-	}
-}
-
-// TestGetStatisticsNoBlocked_LeavesBlockedAndReadyNil verifies the --no-blocked
-// fast path (GetStatisticsNoBlocked) leaves BlockedIssues and ReadyIssues nil
-// (readiness needs the blocked set), while the full GetStatistics path on the
-// same data populates both. Guards against a *int fake-zero regression: a nil
-// pointer must never silently render/serialize as 0.
-func TestGetStatisticsNoBlocked_LeavesBlockedAndReadyNil(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	blocker := &types.Issue{
-		ID:        "stat-nb-blocker",
-		Title:     "Blocker",
-		Status:    types.StatusOpen,
-		Priority:  1,
-		IssueType: types.TypeTask,
-	}
-	blocked := &types.Issue{
-		ID:        "stat-nb-blocked",
-		Title:     "Blocked",
-		Status:    types.StatusOpen,
-		Priority:  2,
-		IssueType: types.TypeTask,
-	}
-	for _, iss := range []*types.Issue{blocker, blocked} {
-		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
-			t.Fatalf("failed to create issue: %v", err)
-		}
-	}
-	dep := &types.Dependency{
-		IssueID:     blocked.ID,
-		DependsOnID: blocker.ID,
-		Type:        types.DepBlocks,
-	}
-	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
-		t.Fatalf("failed to add dependency: %v", err)
-	}
-
-	noBlocked, err := store.GetStatisticsNoBlocked(ctx)
-	if err != nil {
-		t.Fatalf("GetStatisticsNoBlocked: unexpected error: %v", err)
-	}
-	if noBlocked.TotalIssues != 2 {
-		t.Errorf("GetStatisticsNoBlocked: expected 2 total issues, got %d", noBlocked.TotalIssues)
-	}
-	if noBlocked.BlockedIssues != nil {
-		t.Errorf("GetStatisticsNoBlocked: expected BlockedIssues nil, got %d", *noBlocked.BlockedIssues)
-	}
-	if noBlocked.ReadyIssues != nil {
-		t.Errorf("GetStatisticsNoBlocked: expected ReadyIssues nil, got %d", *noBlocked.ReadyIssues)
-	}
-
-	full, err := store.GetStatistics(ctx)
-	if err != nil {
-		t.Fatalf("GetStatistics: unexpected error: %v", err)
-	}
-	if full.BlockedIssues == nil {
-		t.Fatal("GetStatistics: expected BlockedIssues populated, got nil")
-	}
-	if *full.BlockedIssues != 1 {
-		t.Errorf("GetStatistics: expected 1 blocked issue, got %d", *full.BlockedIssues)
-	}
-	if full.ReadyIssues == nil {
-		t.Fatal("GetStatistics: expected ReadyIssues populated, got nil")
-	}
-	if *full.ReadyIssues != 1 {
-		t.Errorf("GetStatistics: expected 1 ready issue (2 open - 1 blocked), got %d", *full.ReadyIssues)
+	if stats.ReadyIssues != 2 {
+		t.Errorf("expected 2 ready issues (3 open - 1 blocked), got %d", stats.ReadyIssues)
 	}
 }
 

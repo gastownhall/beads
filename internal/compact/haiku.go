@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"os"
 	"sync"
 	"text/template"
 	"time"
@@ -34,8 +35,6 @@ var errAPIKeyRequired = errors.New("API key required")
 type haikuClient struct {
 	client         anthropic.Client
 	model          anthropic.Model
-	apiKeySource   config.AIAPIKeySource
-	baseURL        string
 	tier1Template  *template.Template
 	maxRetries     int
 	initialBackoff time.Duration
@@ -44,20 +43,19 @@ type haikuClient struct {
 }
 
 // newHaikuClient creates a new Haiku API client.
-// API key resolution order: ANTHROPIC_API_KEY env var > MINIMAX_API_KEY env var > ai.api_key config > explicit apiKey parameter.
+// API key resolution order: ANTHROPIC_API_KEY env var > ai.api_key config > explicit apiKey parameter.
 func newHaikuClient(apiKey string) (*haikuClient, error) {
-	apiKey, keySource := config.ResolveAIAPIKey(apiKey)
+	envKey := os.Getenv("ANTHROPIC_API_KEY")
+	if envKey != "" {
+		apiKey = envKey
+	} else if configKey := config.GetString("ai.api_key"); configKey != "" {
+		apiKey = configKey
+	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config", errAPIKeyRequired)
+		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY environment variable or ai.api_key in config", errAPIKeyRequired)
 	}
 
-	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
-	baseURL := config.DefaultAIBaseURL(keySource)
-	if baseURL != "" {
-		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
-	}
-
-	client := anthropic.NewClient(clientOptions...)
+	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	tier1Tmpl, err := template.New("tier1").Parse(tier1PromptTemplate)
 	if err != nil {
@@ -68,9 +66,7 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 
 	return &haikuClient{
 		client:         client,
-		model:          config.DefaultAIModelFor(keySource),
-		apiKeySource:   keySource,
-		baseURL:        baseURL,
+		model:          config.DefaultAIModel(),
 		tier1Template:  tier1Tmpl,
 		maxRetries:     maxRetries,
 		initialBackoff: initialBackoff,

@@ -23,9 +23,8 @@ trusts the flag, so stale values silently hide ready work or surface blocked
 work.
 
 This command runs the full recompute unconditionally and commits the result.
-It is idempotent: on a consistent database it changes nothing. Works in every
-storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
-is server-mode only).
+It is idempotent: on a consistent database it changes nothing. Works in both
+embedded and server mode (unlike 'bd doctor', which is server-mode only).
 
 Examples:
   bd recompute-blocked          # Repair stale is_blocked flags
@@ -44,10 +43,6 @@ Examples:
 
 		ctx := rootCtx
 
-		if usesProxiedServer() {
-			return runRecomputeBlockedProxiedServer(ctx)
-		}
-
 		recomputer, ok := storage.UnwrapStore(store).(storage.BlockedRecomputer)
 		if !ok {
 			return HandleError("storage backend does not support is_blocked recompute")
@@ -56,24 +51,17 @@ Examples:
 		if err != nil {
 			return HandleError("recompute is_blocked: %v", err)
 		}
-		return renderRecomputeBlocked(changed)
-	},
-}
 
-// renderRecomputeBlocked writes the command's whole result, and is shared by
-// every mode so the text and the JSON shape downstream callers read cannot
-// drift between them. wh-bridge-sync only reads the exit code, but a human
-// repairing a stale graph reads these two lines.
-func renderRecomputeBlocked(changed int) error {
-	if jsonOutput {
-		return outputJSON(map[string]interface{}{"rows_corrected": changed})
-	}
-	if changed == 0 {
-		fmt.Println("is_blocked already consistent — nothing to recompute.")
+		if jsonOutput {
+			return outputJSON(map[string]interface{}{"rows_corrected": changed})
+		}
+		if changed == 0 {
+			fmt.Println("is_blocked already consistent — nothing to recompute.")
+			return nil
+		}
+		fmt.Printf("Recomputed is_blocked: %d row(s) corrected.\n", changed)
 		return nil
-	}
-	fmt.Printf("Recomputed is_blocked: %d row(s) corrected.\n", changed)
-	return nil
+	},
 }
 
 func init() {

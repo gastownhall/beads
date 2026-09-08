@@ -45,11 +45,6 @@ Example:
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		includeWorkflow, _ := cmd.Flags().GetBool("include-workflow")
-
-		if usesProxiedServer() {
-			return runDuplicatesProxiedServer(rootCtx, autoMerge, dryRun, includeWorkflow)
-		}
-
 		if autoMerge && !dryRun {
 			CheckReadonly("duplicates --auto-merge")
 		}
@@ -59,168 +54,118 @@ Example:
 		if err != nil {
 			return HandleError("fetching issues: %v", err)
 		}
-		candidates, workflowSkipped := duplicateCandidates(allIssues, includeWorkflow)
-		duplicateGroups := findDuplicateGroups(candidates)
+		openIssues := make([]*types.Issue, 0, len(allIssues))
+		for _, issue := range allIssues {
+			if issue.Status != types.StatusClosed {
+				openIssues = append(openIssues, issue)
+			}
+		}
+		workflowSkipped := 0
+		if !includeWorkflow {
+			openIssues, workflowSkipped = partitionWorkflowIssues(openIssues)
+		}
+		duplicateGroups := findDuplicateGroups(openIssues)
 		if len(duplicateGroups) == 0 {
-			return outputNoDuplicates(workflowSkipped, includeWorkflow)
+			if !jsonOutput {
+				fmt.Println("No duplicates found!")
+				if workflowSkipped > 0 {
+					fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
+				}
+				return nil
+			}
+			return outputJSON(map[string]interface{}{
+				"duplicate_groups": 0,
+				"groups":           []interface{}{},
+				"workflow_skipped": workflowSkipped,
+				"include_workflow": includeWorkflow,
+			})
 		}
 		refCounts := countReferences(allIssues)
-		depCounts, _ := store.GetDependencyCounts(ctx, collectDuplicateGroupIDs(duplicateGroups))
-		structuralScores := buildStructuralScores(duplicateGroups, depCounts)
-
+		structuralScores := countStructuralRelationships(duplicateGroups)
+		var mergeCommands []string
 		var mergeResults []map[string]interface{}
+		for _, group := range duplicateGroups {
+			target := chooseMergeTarget(group, refCounts, structuralScores)
+			sources := make([]string, 0, len(group)-1)
+			for _, issue := range group {
+				if issue.ID != target.ID {
+					sources = append(sources, issue.ID)
+				}
+			}
+			cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: bd close %s && bd dep add %s %s --type related",
+				strings.Join(sources, " "),
+				target.ID,
+				strings.Join(sources, " "),
+				strings.Join(sources, " "),
+				target.ID)
+			mergeCommands = append(mergeCommands, cmd)
+
+			if autoMerge || dryRun {
+				if !dryRun {
+					result := performMerge(target.ID, sources)
+					mergeResults = append(mergeResults, result)
+				}
+			}
+		}
 		if autoMerge && !dryRun {
-			mergeResults = executeDuplicateMerges(duplicateGroups, refCounts, structuralScores)
 			commandDidWrite.Store(true)
 		}
-		return outputDuplicates(duplicateGroups, refCounts, structuralScores, autoMerge, dryRun, mergeResults, workflowSkipped, includeWorkflow)
-	},
-}
-
-// duplicateCandidates narrows all issues to the dedup-eligible set: non-closed
-// issues, minus orchestrator-managed workflow instances unless the operator
-// passed --include-workflow. It is the single choke point shared by the local
-// and proxied-server paths so both behave identically.
-func duplicateCandidates(allIssues []*types.Issue, includeWorkflow bool) ([]*types.Issue, int) {
-	openIssues := openIssuesOf(allIssues)
-	if includeWorkflow {
-		return openIssues, 0
-	}
-	return partitionWorkflowIssues(openIssues)
-}
-
-func openIssuesOf(allIssues []*types.Issue) []*types.Issue {
-	openIssues := make([]*types.Issue, 0, len(allIssues))
-	for _, issue := range allIssues {
-		if issue.Status != types.StatusClosed {
-			openIssues = append(openIssues, issue)
-		}
-	}
-	return openIssues
-}
-
-func collectDuplicateGroupIDs(groups [][]*types.Issue) []string {
-	var ids []string
-	for _, group := range groups {
-		for _, issue := range group {
-			ids = append(ids, issue.ID)
-		}
-	}
-	return ids
-}
-
-func outputNoDuplicates(workflowSkipped int, includeWorkflow bool) error {
-	if !jsonOutput {
-		fmt.Println("No duplicates found!")
-		printWorkflowSkipped(workflowSkipped)
-		return nil
-	}
-	return outputJSON(map[string]interface{}{
-		"duplicate_groups": 0,
-		"groups":           []interface{}{},
-		"workflow_skipped": workflowSkipped,
-		"include_workflow": includeWorkflow,
-	})
-}
-
-// printWorkflowSkipped reports how many orchestrator-managed workflow beads
-// were excluded from consideration unless --include-workflow was passed.
-func printWorkflowSkipped(workflowSkipped int) {
-	if workflowSkipped > 0 {
-		fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
-	}
-}
-
-func executeDuplicateMerges(duplicateGroups [][]*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore) []map[string]interface{} {
-	var mergeResults []map[string]interface{}
-	for _, group := range duplicateGroups {
-		target := chooseMergeTarget(group, refCounts, structuralScores)
-		sources := make([]string, 0, len(group)-1)
-		for _, issue := range group {
-			if issue.ID != target.ID {
-				sources = append(sources, issue.ID)
+		if jsonOutput {
+			output := map[string]interface{}{
+				"duplicate_groups": len(duplicateGroups),
+				"groups":           formatDuplicateGroupsJSON(duplicateGroups, refCounts, structuralScores),
+				"workflow_skipped": workflowSkipped,
+				"include_workflow": includeWorkflow,
 			}
-		}
-		mergeResults = append(mergeResults, performMerge(target.ID, sources))
-	}
-	return mergeResults
-}
-
-func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore, autoMerge, dryRun bool, mergeResults []map[string]interface{}, workflowSkipped int, includeWorkflow bool) error {
-	var mergeCommands []string
-	for _, group := range duplicateGroups {
-		target := chooseMergeTarget(group, refCounts, structuralScores)
-		sources := make([]string, 0, len(group)-1)
-		for _, issue := range group {
-			if issue.ID != target.ID {
-				sources = append(sources, issue.ID)
+			if autoMerge || dryRun {
+				output["merge_commands"] = mergeCommands
+				if autoMerge && !dryRun {
+					output["merge_results"] = mergeResults
+				}
 			}
+			return outputJSON(output)
 		}
-		cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: bd close %s && bd dep add %s %s --type related",
-			strings.Join(sources, " "),
-			target.ID,
-			strings.Join(sources, " "),
-			strings.Join(sources, " "),
-			target.ID)
-		mergeCommands = append(mergeCommands, cmd)
-	}
-
-	if jsonOutput {
-		output := map[string]interface{}{
-			"duplicate_groups": len(duplicateGroups),
-			"groups":           formatDuplicateGroupsJSON(duplicateGroups, refCounts, structuralScores),
-			"workflow_skipped": workflowSkipped,
-			"include_workflow": includeWorkflow,
+		fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
+		if workflowSkipped > 0 {
+			fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n\n", ui.RenderAccent("ℹ"), workflowSkipped)
 		}
-		if autoMerge || dryRun {
-			output["merge_commands"] = mergeCommands
-			if autoMerge && !dryRun {
-				output["merge_results"] = mergeResults
+		for i, group := range duplicateGroups {
+			target := chooseMergeTarget(group, refCounts, structuralScores)
+			fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
+			for _, issue := range group {
+				refs := refCounts[issue.ID]
+				weight := 0
+				if score, ok := structuralScores[issue.ID]; ok {
+					weight = score.dependentCount*3 + score.dependsOnCount
+				}
+				marker := "  "
+				if issue.ID == target.ID {
+					marker = ui.RenderPass("→ ")
+				}
+				fmt.Printf("%s%s (%s, P%d, weight=%d, %d refs)\n",
+					marker, issue.ID, issue.Status, issue.Priority, weight, refs)
 			}
-		}
-		return outputJSON(output)
-	}
-	fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
-	printWorkflowSkipped(workflowSkipped)
-	if workflowSkipped > 0 {
-		fmt.Println()
-	}
-	for i, group := range duplicateGroups {
-		target := chooseMergeTarget(group, refCounts, structuralScores)
-		fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
-		for _, issue := range group {
-			refs := refCounts[issue.ID]
-			weight := 0
-			if score, ok := structuralScores[issue.ID]; ok {
-				weight = score.dependentCount*3 + score.dependsOnCount
+			sources := make([]string, 0, len(group)-1)
+			for _, issue := range group {
+				if issue.ID != target.ID {
+					sources = append(sources, issue.ID)
+				}
 			}
-			marker := "  "
-			if issue.ID == target.ID {
-				marker = ui.RenderPass("→ ")
-			}
-			fmt.Printf("%s%s (%s, P%d, weight=%d, %d refs)\n",
-				marker, issue.ID, issue.Status, issue.Priority, weight, refs)
+			fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), strings.Join(sources, " "), target.ID)
+			fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
+				ui.RenderAccent("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
 		}
-		sources := make([]string, 0, len(group)-1)
-		for _, issue := range group {
-			if issue.ID != target.ID {
-				sources = append(sources, issue.ID)
+		if autoMerge {
+			if dryRun {
+				fmt.Printf("%s Dry run - would execute %d merge(s)\n", ui.RenderWarn("⚠"), len(mergeCommands))
+			} else {
+				fmt.Printf("%s Merged %d group(s)\n", ui.RenderPass("✓"), len(mergeCommands))
 			}
-		}
-		fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), strings.Join(sources, " "), target.ID)
-		fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
-			ui.RenderAccent("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
-	}
-	if autoMerge {
-		if dryRun {
-			fmt.Printf("%s Dry run - would execute %d merge(s)\n", ui.RenderWarn("⚠"), len(mergeCommands))
 		} else {
-			fmt.Printf("%s Merged %d group(s)\n", ui.RenderPass("✓"), len(mergeCommands))
+			fmt.Printf("%s Run with --auto-merge to execute all suggested merges\n", ui.RenderAccent("💡"))
 		}
-	} else {
-		fmt.Printf("%s Run with --auto-merge to execute all suggested merges\n", ui.RenderAccent("💡"))
-	}
-	return nil
+		return nil
+	},
 }
 
 func init() {
@@ -291,17 +236,32 @@ func countReferences(issues []*types.Issue) map[string]int {
 	return counts
 }
 
-func buildStructuralScores(groups [][]*types.Issue, depCounts map[string]*types.DependencyCounts) map[string]*issueScore {
+// countStructuralRelationships counts dependency relationships for issues in duplicate groups.
+// Uses the efficient GetDependencyCounts batch query.
+func countStructuralRelationships(groups [][]*types.Issue) map[string]*issueScore {
 	scores := make(map[string]*issueScore)
+	ctx := rootCtx
+
+	// Collect all issue IDs from all groups
+	var issueIDs []string
 	for _, group := range groups {
 		for _, issue := range group {
+			issueIDs = append(issueIDs, issue.ID)
 			scores[issue.ID] = &issueScore{}
 		}
 	}
 
+	// Batch query for dependency counts
+	depCounts, err := store.GetDependencyCounts(ctx, issueIDs)
+	if err != nil {
+		// On error, return empty scores - fallback to text refs only
+		return scores
+	}
+
+	// Populate scores from dependency counts
 	for id, counts := range depCounts {
 		if score, ok := scores[id]; ok {
-			score.dependentCount = counts.DependentCount
+			score.dependentCount = counts.DependentCount // Issues that depend on this one (children, etc)
 			score.dependsOnCount = counts.DependencyCount
 		}
 	}

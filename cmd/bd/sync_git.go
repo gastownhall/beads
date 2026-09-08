@@ -102,26 +102,15 @@ func gitOriginHasDoltDataRef() bool {
 }
 
 func gitRemoteHasDoltDataRef(remote string) bool {
-	hasData, err := gitRemoteHasDoltDataRefStatus(remote)
-	return err == nil && hasData
-}
-
-// gitOriginHasDoltDataRefStatus is the tri-state form: no data vs. unknown.
-func gitOriginHasDoltDataRefStatus() (bool, error) {
-	return gitRemoteHasDoltDataRefStatus("origin")
-}
-
-// A non-nil error means UNKNOWN, not "no data" — the bool is meaningless.
-func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("probe refs/dolt/data on %s: %w", remote, err)
+		return false
 	}
-	return strings.TrimSpace(string(output)) != "", nil
+	return strings.TrimSpace(string(output)) != ""
 }
 
 func gitRemoteURLForLsRemote(remote string) string {

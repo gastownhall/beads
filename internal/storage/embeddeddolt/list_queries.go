@@ -20,17 +20,6 @@ func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filt
 	return result, err
 }
 
-// SearchIssueIDs is the narrow-projection variant of SearchIssues.
-func (s *EmbeddedDoltStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
-	var result []string
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.SearchIssueIDsInTx(ctx, tx, query, filter)
-		return err
-	})
-	return result, err
-}
-
 func (s *EmbeddedDoltStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	var result []*types.IssueWithCounts
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
@@ -82,34 +71,11 @@ func (s *EmbeddedDoltStore) GetAllDependencyRecords(ctx context.Context) (map[st
 	return result, err
 }
 
-func (s *EmbeddedDoltStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	var result map[string][]*types.Dependency
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetExternalBlockingDependencyRecordsInTx(ctx, tx)
-		return err
-	})
-	return result, err
-}
-
 func (s *EmbeddedDoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
 	var result map[string][]*types.Dependency
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetDependencyRecordsForIssuesInTx(ctx, tx, issueIDs)
-		return err
-	})
-	return result, err
-}
-
-// GetDependentRecordsForIssues returns the raw inbound dependency rows for a SET
-// of target ids in one batched read, keyed by target id. Delegates to
-// issueops.GetDependentRecordsForIssuesInTx for shared query logic.
-func (s *EmbeddedDoltStore) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
-	var result map[string][]*types.Dependency
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetDependentRecordsForIssuesInTx(ctx, tx, targetIDs)
 		return err
 	})
 	return result, err

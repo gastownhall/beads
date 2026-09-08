@@ -24,11 +24,6 @@ import (
 // This function is safe to call concurrently and is rate-limited to avoid
 // unnecessary filesystem walks on hot paths.
 func (s *EmbeddedDoltStore) cleanGitRemoteCacheGarbage() {
-	// Strict read-only opens must not touch the filesystem, even to delete
-	// leaked temp files — observational purity is the contract.
-	if s.readOnly {
-		return
-	}
 	if !cacheCleanupThrottle.shouldRun() {
 		return
 	}

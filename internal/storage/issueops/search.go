@@ -2,206 +2,39 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// SearchIssuesInTx executes a filtered issue search within an existing
-// transaction and returns hydrated issues (labels, and optionally
-// dependencies via filter.IncludeDependencies). Routing, wisp-merge, and
-// overlap detection live in the shared searchInTx wrapper.
+// SearchIssuesInTx executes a filtered issue search within an existing transaction.
+// It queries the issues table, optionally merges wisps, and returns hydrated issues
+// with labels populated.
+//
+// Set filter.SkipWisps=true for callers that never need ephemeral results; this
+// avoids the unconditional full-table wisps scan (Q2 perf opt).
 func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	proj := issueProjection
-	if filter.Lite {
-		proj = issueLiteProjection
-	}
-	return searchInTx(ctx, tx, query, filter, proj)
-}
-
-// SearchIssueIDsInTx is the narrow-projection variant of SearchIssuesInTx:
-// applies the same WHERE clauses (label joins, wisp-merge semantics) but
-// projects only `id` and returns []string. Use when full row hydration is
-// wasted (e.g., partial-ID resolution in internal/utils/id_parser.go).
-func SearchIssueIDsInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]string, error) {
-	return searchInTx(ctx, tx, query, filter, idProjection)
-}
-
-// searchProjection describes how to project, scan, and dedup search results.
-// Adding a narrow-projection variant means adding a new projection literal —
-// not a parallel top-level function or wisp-merge wrapper, which is how the
-// two paths drifted historically.
-type searchProjection[T any] struct {
-	// columns returns the SELECT column expression. Receives FilterTables so
-	// projections can qualify identifiers with tables.Main when needed.
-	columns func(tables FilterTables) string
-	// scan reads one row into T.
-	scan func(*sql.Rows) (T, error)
-	// id returns the issue ID for dedup (within a single table) and wisp-merge
-	// overlap detection (across tables).
-	id func(T) string
-	// hydrate is invoked once per table after rows are scanned and the result
-	// set is closed (so we don't hold multiple active result sets on the same
-	// connection). nil for projections that don't need post-scan loading.
-	hydrate func(ctx context.Context, tx DBTX, tables FilterTables, items []T, filter types.IssueFilter) error
-	// idShrink enables Pattern B (cheap SELECT id scan → batch hydrate) for
-	// limited queries. Worth it only for wide projections; the id projection
-	// already scans id-only with no hydration, so it leaves this false.
-	idShrink bool
-	// joinLeases adds the leases LEFT JOIN to the FROM clause; required by
-	// any projection whose columns include sqlbuild.LeaseSelectColumns.
-	joinLeases bool
-	// less, when non-nil, orders two elements the same way SQL's ORDER BY
-	// ordered each per-table query (sqlbuild.OrderBy), given the same
-	// sortBy/sortDesc values the caller's filter carried. searchInTx's
-	// merge branch (issues+wisps) needs this to re-sort the concatenation
-	// of two independently-ordered legs before trimming to filter.Limit —
-	// without it, the trim keeps whichever leg happens to come first in
-	// the concatenation regardless of sort rank (be-x42v.4 round-5
-	// follow-up). A projection with no sortable payload beyond the id
-	// (idProjection scans bare IDs, no column data) can still order the one
-	// Go-side key — "id" IS its payload — and returns false for every other
-	// key, which leaves sort.SliceStable a no-op (concatenation order, the
-	// pre-existing behavior; still safe because no caller combines Limit>0
-	// with a merged non-SkipWisps ID-only search under a SQL-rendered sort).
-	less func(a, b T, sortBy string, sortDesc bool) bool
-}
-
-var issueProjection = searchProjection[*types.Issue]{
-	columns:    func(_ FilterTables) string { return IssueSelectColumns },
-	scan:       func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueFrom(rows) },
-	id:         func(issue *types.Issue) string { return issue.ID },
-	hydrate:    hydrateIssueLabelsAndDeps,
-	less:       sqlbuild.Less,
-	idShrink:   true,
-	joinLeases: true,
-}
-
-// issueLiteProjection is the opt-in lite variant of issueProjection: it reads
-// IssueSelectColumnsLite instead of IssueSelectColumns and scans with
-// ScanIssueLiteFrom, which leaves the six heavy TEXT columns (description,
-// design, acceptance_criteria, notes, payload, waiters) zero-valued and sets
-// IsLitePartial=true. Selected by SearchIssuesInTx when filter.Lite is set;
-// everything else (label/dep hydration, wisp merge, id-shrink pattern B,
-// lease join) is shared with issueProjection via searchProjection[T]. See
-// engdocs/EXTENDING.md for the caller contract.
-var issueLiteProjection = searchProjection[*types.Issue]{
-	columns:    func(_ FilterTables) string { return IssueSelectColumnsLite },
-	scan:       func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueLiteFrom(rows) },
-	id:         func(issue *types.Issue) string { return issue.ID },
-	hydrate:    hydrateIssueLabelsAndDeps,
-	less:       sqlbuild.Less,
-	idShrink:   true,
-	joinLeases: true,
-}
-
-var idProjection = searchProjection[string]{
-	columns: func(tables FilterTables) string { return tables.Main + ".id" },
-	scan: func(rows *sql.Rows) (string, error) {
-		var id string
-		err := rows.Scan(&id)
-		return id, err
-	},
-	id:      func(id string) string { return id },
-	hydrate: nil,
-	// The id is the whole payload, so the one Go-side sort key is orderable
-	// here; every SQL-rendered key compares false (stable no-op) — see the
-	// less field's doc.
-	less: func(a, b string, sortBy string, sortDesc bool) bool {
-		if !sqlbuild.IsGoSideSort(sortBy) {
-			return false
-		}
-		return sqlbuild.LessID(a, b, sortDesc)
-	},
-}
-
-// hydrateIssueLabelsAndDeps bulk-loads labels (and optionally dependencies)
-// for the given issues. searchTableInTxT runs against exactly one of the
-// issues/wisps tables, so every ID here belongs to tables.Labels — we use
-// GetLabelsForIssuesFromTableInTx and skip the per-batch wisp-partition
-// round-trip the generic GetLabelsForIssuesInTx performs (GH#3414).
-func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables, issues []*types.Issue, filter types.IssueFilter) error {
-	ids := make([]string, len(issues))
-	for i, issue := range issues {
-		ids[i] = issue.ID
-	}
-	if !filter.SkipLabels {
-		labelMap, err := GetLabelsForIssuesFromTableInTx(ctx, tx, tables.Labels, ids)
-		if err != nil {
-			return fmt.Errorf("hydrate labels: %w", err)
-		}
-		for _, issue := range issues {
-			if labels, ok := labelMap[issue.ID]; ok {
-				issue.Labels = labels
-			}
-		}
-	}
-
-	if filter.IncludeDependencies {
-		depMap, err := GetDependencyRecordsForIssuesFromTableInTx(ctx, tx, tables.Dependencies, ids)
-		if err != nil {
-			return fmt.Errorf("hydrate dependencies: %w", err)
-		}
-		for _, issue := range issues {
-			if deps, ok := depMap[issue.ID]; ok {
-				issue.Dependencies = deps
-			}
-		}
-	}
-	return nil
-}
-
-// missingOptionalWispTable reports whether err is the absence of a wisp-plane
-// table a database may legitimately not have. A wisp search touches more than
-// that: its FROM clause carries sqlbuild.LeaseJoin and its hydration reads
-// wisp_labels, so a blanket table-not-exist check reports a broken database as
-// an empty wisp plane and silently drops live rows from the result.
-func missingOptionalWispTable(err error) bool {
-	name, ok := dberrors.MissingTableName(err)
-	return ok && sqlbuild.OptionalWispTable(name)
-}
-
-// searchInTx is the shared wisp-merge wrapper. Ephemeral routing, the
-// empty-wisps probe, the issues+wisps queries, and overlap detection live
-// here once. Both SearchIssuesInTx and SearchIssueIDsInTx use this body —
-// future projections pick up improvements (e.g., the empty-probe) for free.
-func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.IssueFilter, proj searchProjection[T]) ([]T, error) {
 	// Route ephemeral-only queries to wisps table.
 	if filter.Ephemeral != nil && *filter.Ephemeral {
-		results, err := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if err != nil && !missingOptionalWispTable(err) {
+		results, err := searchTableInTx(ctx, tx, query, filter, WispsFilterTables)
+		if err != nil && !isTableNotExistError(err) {
 			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(results) > 0 {
-			results = trimToSearchLimit(results, filter.Limit)
-			if capErr := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); capErr != nil {
-				return nil, capErr
-			}
 			return results, nil
 		}
 		// Fall through: wisps table doesn't exist or returned no results
 	}
 
-	results, err := searchTableInTxT(ctx, tx, query, filter, IssuesFilterTables, proj)
+	results, err := searchTableInTx(ctx, tx, query, filter, IssuesFilterTables)
 	if err != nil {
 		return nil, fmt.Errorf("search issues: %w", err)
 	}
 
 	// Skip wisps merge entirely when caller opts out (Q2: perf escape hatch).
-	// This is also a terminal return of the row set actually handed back to
-	// the caller, so — like the empty-wisps-table early return above — it
-	// must enforce the cap itself; skipping it here would let SkipWisps
-	// callers (e.g. bd list's default filter) silently bypass MaxRows.
 	if filter.SkipWisps {
-		results = trimToSearchLimit(results, filter.Limit)
-		if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
-			return nil, err
-		}
 		return results, nil
 	}
 
@@ -218,136 +51,40 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 			return nil, fmt.Errorf("search wisps (merge): probe: %w", probeErr)
 		}
 		if empty {
-			// No wisps to merge, but the issues-only result set can still
-			// exceed the cap (the merge path below enforces it at line ~74;
-			// this early return must enforce it too, or the cap is silently
-			// skipped whenever the wisps table is empty).
-			results = trimToSearchLimit(results, filter.Limit)
-			if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
-				return nil, err
-			}
 			return results, nil
 		}
-		wispResults, wispErr := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if wispErr != nil && !missingOptionalWispTable(wispErr) {
+		wispResults, wispErr := searchTableInTx(ctx, tx, query, filter, WispsFilterTables)
+		if wispErr != nil && !isTableNotExistError(wispErr) {
 			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
 		}
 		if len(wispResults) > 0 {
 			// Prefer the canonical wisp record when an ID exists in both tables.
 			// Cross-table dups are a transient data-integrity issue (be-iabdi);
 			// hard-erroring breaks every lookup city-wide.
-			wispByID := make(map[string]struct{}, len(wispResults))
+			wispByID := make(map[string]*types.Issue, len(wispResults))
 			for _, w := range wispResults {
-				wispByID[proj.id(w)] = struct{}{}
+				wispByID[w.ID] = w
 			}
-			var filtered []T
+			var filtered []*types.Issue
 			for _, r := range results {
-				if _, dup := wispByID[proj.id(r)]; !dup {
+				if wispByID[r.ID] == nil {
 					filtered = append(filtered, r)
 				}
 			}
 			results = append(filtered, wispResults...)
-			// The concatenation above is two independently ORDER BY'd legs,
-			// not a globally ordered set: re-sort by the same key before
-			// the merge's trimToSearchLimit call below, or trimming just
-			// keeps "however many durable rows fit" and can silently drop
-			// a higher-ranked wisp in favor of a lower-ranked durable row
-			// (be-x42v.4 round-5 follow-up). Mirrors
-			// finishSearchIssuesWithCounts's sortSearchIssuesWithCounts,
-			// which already sorts before its own trim.
-			sortMergedResults(results, proj.less, filter.SortBy, filter.SortDesc)
 		}
-	}
-
-	// Apply the defensive cap on the merged, delivered result set. Each leg
-	// (issues, wisps) is independently bounded by EffectiveSearchLimit, so
-	// the merged pre-trim count can exceed the cap even when filter.Limit
-	// itself does not — e.g. Limit=2, MaxRows=5, 3 rows in each table merges
-	// to 6, which would trip MaxRows even though the page actually handed
-	// back to the caller (trimmed to Limit=2) is well within the cap.
-	// Trimming before the cap check (mirrors GetReadyWorkInTx's
-	// mergeReadyWisps, which trims before its caller's EnforceMaxRowsCap
-	// runs) avoids that false positive; a single-source result never
-	// exceeds Limit when Limit>0 in the first place, so this trim is a
-	// no-op there and a genuine overage still fires (Limit=0, or
-	// Limit>MaxRows overage that survives the trim).
-	results = trimToSearchLimit(results, filter.Limit)
-	if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
-		return nil, err
 	}
 
 	return results, nil
 }
 
-// sortMergedResults re-sorts results in place by the same key SQL's ORDER BY
-// applied to each per-leg query, so a subsequent trimToSearchLimit call on a
-// concatenation of two independently-ordered legs (issues+wisps) keeps the
-// globally correct top-N page rather than an arbitrary prefix of the
-// concatenation. No-ops when less is nil (no sortable payload for this
-// projection — see searchProjection.less's doc comment) or when there's
-// nothing to reorder.
-func sortMergedResults[T any](results []T, less func(a, b T, sortBy string, sortDesc bool) bool, sortBy string, sortDesc bool) {
-	if less == nil || len(results) <= 1 {
-		return
-	}
-	sort.SliceStable(results, func(i, j int) bool {
-		return less(results[i], results[j], sortBy, sortDesc)
-	})
-}
-
-// goSideSortAndTrim establishes a Go-side sort key's order over one leg's
-// complete matching set, then applies the bound the query withheld
-// (EffectiveSearchLimit — the same number the SQL LIMIT would have carried, so
-// cap accounting downstream is unchanged). Ordering the leg BEFORE bounding it
-// is what makes the bound sound: a row in the true top-n is in its leg's
-// top-n. Byte order by id, matching sqlbuild.Less for this key and the
-// domain/db seam's sortGoSide/sortRowsGoSide; the natural-numeric display
-// order is applied later on the delivered page (workapi.CompareIssuesBy) —
-// this decides MEMBERSHIP, that decides DISPLAY. Hydration runs after, so
-// only rows that survive the bound are hydrated.
-func goSideSortAndTrim[T any](results []T, id func(T) string, sortDesc bool, bound int) []T {
-	if len(results) > 1 {
-		sort.SliceStable(results, func(i, j int) bool {
-			return sqlbuild.LessID(id(results[i]), id(results[j]), sortDesc)
-		})
-	}
-	if bound > 0 && len(results) > bound {
-		results = results[:bound]
-	}
-	return results
-}
-
-// trimToSearchLimit truncates results to filter.Limit (when set, Limit>0)
-// before the caller-facing MaxRows cap check runs. Every searchInTx exit
-// path routes results returned to the caller through this before
-// EnforceMaxRowsCap — see the comment above the final merge check for why
-// (be-x42v.4 round-4 follow-up, mirrors finishReadyWorkWithCounts).
-func trimToSearchLimit[T any](results []T, limit int) []T {
-	if limit > 0 && len(results) > limit {
-		return results[:limit]
-	}
-	return results
-}
-
-// searchTableInTxT runs a filtered search against a specific table set
-// (issues or wisps) under the given projection.
+// searchTableInTx runs a filtered search against a specific table set (issues or wisps).
 //
-// When proj.idShrink && filter.Limit > 0 && !filter.NoIDShrink, uses Pattern B
-// (id-shrunk): a cheap SELECT id scan + batch hydration instead of a full
-// wide-projection scan, which is faster on large corpora where most rows are
-// never needed (mirrors GetStaleIssuesInTx).
-func searchTableInTxT[T any](ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables, proj searchProjection[T]) ([]T, error) {
-	// Pattern B: for wide projections with a LIMIT, first run the cheap,
-	// non-hydrating id-only search (the very query SearchIssueIDsInTx issues),
-	// then batch-fetch and hydrate only the rows that survived the LIMIT —
-	// instead of streaming the full projection for rows the LIMIT discards
-	// (mirrors GetStaleIssuesInTx). The id projection itself leaves idShrink
-	// false: it *is* the id-only scan, so it falls straight through to the
-	// direct path below — one query, no second fetch, no hydration.
-	if proj.idShrink && filter.Limit > 0 && !filter.NoIDShrink {
-		return searchTablePatternBT(ctx, tx, query, filter, tables, proj)
-	}
-
+// When filter.Limit > 0 and !filter.NoIDShrink, uses Pattern B (id-shrunk): a cheap
+// SELECT id scan + batch hydration instead of a full 47-column projection scan.
+// Pattern B is equivalent to Pattern A but faster on large corpora where most rows
+// are never needed (mirrors the pattern in scanIssueIDs and GetStaleIssuesInTx).
+func searchTableInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables) ([]*types.Issue, error) {
 	plan := sqlbuild.BuildLabelDrivenSearch(filter, tables)
 	whereClauses, args, err := BuildIssueFilterClauses(query, plan.Filter, tables)
 	if err != nil {
@@ -360,82 +97,88 @@ func searchTableInTxT[T any](ctx context.Context, tx DBTX, query string, filter 
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS
-	// (searchWindowFor's rule, mirrored here for the store-backed seam): a
-	// Go-side sort key renders no ORDER BY, and a LIMIT with no ORDER BY does
-	// not return the first n rows, it returns n rows. So under a Go-side sort
-	// the query scans the complete matching set, and the bound is applied
-	// below — after the order first exists (goSideSortAndTrim).
-	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
-	eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows)
+	// Pattern B: when Limit > 0, use a cheap id scan then hydrate in batch.
+	if filter.Limit > 0 && !filter.NoIDShrink {
+		return searchTablePatternB(ctx, tx, plan.FromSQL, whereSQL, args, filter, tables, plan.Distinct)
+	}
+
+	// Pattern A: full 47-column scan (used for unlimited queries or when NoIDShrink is set).
 	limitSQL := ""
-	if eff > 0 && !goSideSort {
-		limitSQL = fmt.Sprintf(" LIMIT %d", eff)
+	if filter.Limit > 0 {
+		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
-	selectKeyword := "SELECT "
+	selectSQL := "SELECT "
 	if plan.Distinct {
-		selectKeyword = "SELECT DISTINCT "
+		selectSQL = "SELECT DISTINCT "
 	}
-	fromSQL := plan.FromSQL
-	if proj.joinLeases {
-		fromSQL += " " + sqlbuild.LeaseJoin(tables.Main)
-	}
-
 	//nolint:gosec // G201: SQL fragments are built from fixed table/column names and parameterized filters.
 	querySQL := fmt.Sprintf(`%s%s FROM %s %s %s %s`,
-		selectKeyword, proj.columns(tables), fromSQL, whereSQL, sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL)
+		selectSQL, IssueSelectColumns, plan.FromSQL, whereSQL, sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL)
 
 	rows, err := tx.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search %s: %w", tables.Main, err)
 	}
 
-	var results []T
-	seen := make(map[string]struct{})
+	var issues []*types.Issue
+	seen := make(map[string]bool)
 	for rows.Next() {
-		item, scanErr := proj.scan(rows)
+		issue, scanErr := ScanIssueFrom(rows)
 		if scanErr != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("search %s: scan: %w", tables.Main, scanErr)
 		}
-		id := proj.id(item)
-		if _, dup := seen[id]; dup {
+		if seen[issue.ID] {
 			continue // GH#3567: skip duplicate rows from dependency subqueries
 		}
-		seen[id] = struct{}{}
-		results = append(results, item)
+		seen[issue.ID] = true
+		issues = append(issues, issue)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("search %s: rows: %w", tables.Main, err)
 	}
 
-	if goSideSort {
-		results = goSideSortAndTrim(results, proj.id, filter.SortDesc, eff)
+	if err := hydrateIssues(ctx, tx, issues, tables, filter.IncludeDependencies, filter.SkipLabels); err != nil {
+		return nil, fmt.Errorf("search %s: hydrate: %w", tables.Main, err)
 	}
 
-	if proj.hydrate != nil && len(results) > 0 {
-		if err := proj.hydrate(ctx, tx, tables, results, filter); err != nil {
-			return nil, fmt.Errorf("search %s: %w", tables.Main, err)
-		}
-	}
-
-	return results, nil
+	return issues, nil
 }
 
-// searchTablePatternBT runs Pattern B for wide projections. It reuses the
-// id-only search (idProjection) — byte-for-byte the non-hydrating query
-// SearchIssueIDsInTx runs against this table — to get the ordered, LIMIT-bound
-// id list, then batch-fetches the full projection for those ids and hydrates.
-// Keeping the shrink scan in exactly one place (the id projection) is why this
-// no longer hand-rolls its own SELECT id loop. Narrow projections never reach
-// here: they leave idShrink false and are themselves the id scan.
-func searchTablePatternBT[T any](ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables, proj searchProjection[T]) ([]T, error) {
-	ids, err := searchTableInTxT(ctx, tx, query, filter, tables, idProjection)
-	if err != nil {
-		return nil, err
+// searchTablePatternB runs Pattern B: SELECT id LIMIT n → batch hydrate.
+// Equivalent result to Pattern A but avoids streaming all 47 columns for rows
+// that won't survive the LIMIT cut. Mirrors the approach in GetStaleIssuesInTx.
+func searchTablePatternB(ctx context.Context, tx DBTX, fromSQL, whereSQL string, args []interface{}, filter types.IssueFilter, tables FilterTables, labelDriven bool) ([]*types.Issue, error) {
+	idSelect := "SELECT "
+	if labelDriven {
+		idSelect = "SELECT DISTINCT "
 	}
+	//nolint:gosec // G201: SQL fragments from fixed column/table names and parameterized filters.
+	idQuery := fmt.Sprintf(`%s%s.id FROM %s %s %s LIMIT %d`,
+		idSelect, tables.Main, fromSQL, whereSQL,
+		sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, tables.Main), filter.Limit)
+
+	rows, err := tx.QueryContext(ctx, idQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search %s (id scan): %w", tables.Main, err)
+	}
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("search %s (id scan): scan: %w", tables.Main, err)
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("search %s (id scan): rows: %w", tables.Main, err)
+	}
+
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -447,27 +190,23 @@ func searchTablePatternBT[T any](ctx context.Context, tx DBTX, query string, fil
 		placeholders[i] = "?"
 		fetchArgs[i] = id
 	}
-	fetchFrom := tables.Main
-	if proj.joinLeases {
-		fetchFrom += " " + sqlbuild.LeaseJoin(tables.Main)
-	}
-	//nolint:gosec // G201: column expression and table name are fixed; ids are parameterized.
+	//nolint:gosec // G201: table name is a fixed constant from FilterTables.
 	fetchSQL := fmt.Sprintf(`SELECT %s FROM %s WHERE id IN (%s)`,
-		proj.columns(tables), fetchFrom, strings.Join(placeholders, ","))
+		IssueSelectColumns, tables.Main, strings.Join(placeholders, ","))
 
 	fetchRows, err := tx.QueryContext(ctx, fetchSQL, fetchArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("search %s (hydrate): %w", tables.Main, err)
 	}
 
-	itemMap := make(map[string]T, len(ids))
+	issueMap := make(map[string]*types.Issue, len(ids))
 	for fetchRows.Next() {
-		item, scanErr := proj.scan(fetchRows)
+		issue, scanErr := ScanIssueFrom(fetchRows)
 		if scanErr != nil {
 			_ = fetchRows.Close()
 			return nil, fmt.Errorf("search %s (hydrate): scan: %w", tables.Main, scanErr)
 		}
-		itemMap[proj.id(item)] = item
+		issueMap[issue.ID] = issue
 	}
 	_ = fetchRows.Close()
 	if err := fetchRows.Err(); err != nil {
@@ -475,75 +214,58 @@ func searchTablePatternBT[T any](ctx context.Context, tx DBTX, query string, fil
 	}
 
 	// Reorder to preserve the id-scan ORDER BY.
-	results := make([]T, 0, len(ids))
+	issues := make([]*types.Issue, 0, len(ids))
 	for _, id := range ids {
-		if item, ok := itemMap[id]; ok {
-			results = append(results, item)
+		if issue, ok := issueMap[id]; ok {
+			issues = append(issues, issue)
 		}
 	}
 
-	if proj.hydrate != nil && len(results) > 0 {
-		if err := proj.hydrate(ctx, tx, tables, results, filter); err != nil {
-			return nil, fmt.Errorf("search %s (pattern B): %w", tables.Main, err)
+	if err := hydrateIssues(ctx, tx, issues, tables, filter.IncludeDependencies, filter.SkipLabels); err != nil {
+		return nil, fmt.Errorf("search %s (pattern B): hydrate: %w", tables.Main, err)
+	}
+
+	return issues, nil
+}
+
+// hydrateIssues populates labels (and optionally dependencies) on a slice of issues.
+// All issues must belong to tables.Main; labels come from tables.Labels.
+// When skipLabels is true, label hydration is suppressed (Issue.Labels is left nil).
+func hydrateIssues(ctx context.Context, tx DBTX, issues []*types.Issue, tables FilterTables, includeDeps bool, skipLabels bool) error {
+	if len(issues) == 0 {
+		return nil
+	}
+
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+
+	if !skipLabels {
+		// Fast path: every ID in `ids` belongs to tables.Labels.
+		// Skip the per-batch wisp-partition round-trip (GH#3414).
+		labelMap, err := GetLabelsForIssuesFromTableInTx(ctx, tx, tables.Labels, ids)
+		if err != nil {
+			return fmt.Errorf("hydrate labels: %w", err)
+		}
+		for _, issue := range issues {
+			if labels, ok := labelMap[issue.ID]; ok {
+				issue.Labels = labels
+			}
 		}
 	}
 
-	return results, nil
-}
-
-// EffectiveSearchLimit returns the SQL LIMIT to apply given a caller-supplied
-// Limit and a defensive MaxRows cap. Semantics (architecture be-jp5s D1/R-03):
-//
-//   - limit=0, maxRows=0: returns 0 (no LIMIT clause; unlimited)
-//   - limit=N, maxRows=0: returns N (today's --limit behavior)
-//   - limit=0, maxRows=M: returns M+1 (detect overage at cap+1)
-//   - limit=N, maxRows=M: returns N if N<=M, else M+1
-//
-// Callers issue LIMIT cap+1 specifically so that EnforceMaxRowsCap can detect
-// overage by comparing len(scanned rows) to MaxRows. The returned int is the
-// LIMIT value; treat 0 as "do not emit a LIMIT clause".
-func EffectiveSearchLimit(limit, maxRows int) int {
-	if maxRows > 0 {
-		if limit == 0 || limit > maxRows {
-			return maxRows + 1
+	if includeDeps {
+		depMap, err := GetDependencyRecordsForIssuesFromTableInTx(ctx, tx, tables.Dependencies, ids)
+		if err != nil {
+			return fmt.Errorf("hydrate dependencies: %w", err)
+		}
+		for _, issue := range issues {
+			if deps, ok := depMap[issue.ID]; ok {
+				issue.Dependencies = deps
+			}
 		}
 	}
-	return limit
-}
 
-// SearchProbeLimit is the row bound a search runs under when the seam detects
-// truncation with a probe row of its own, together with the cap that bound was
-// sized for. 0 means "do not emit a LIMIT clause".
-//
-// It is the composition this package's callers reach in two steps —
-// workapi.WithFetchOneExtra onto the filter, then EffectiveSearchLimit inside
-// the query builder — written once so a seam that renders its probe row INSIDE
-// the query rather than onto the filter (internal/storage/domain/db) bounds and
-// caps identically. Both implementations of issueops.Reader.List have to agree
-// about when a cap fires, and they only can if they size the same window.
-//
-// THE CAP COMES BACK BECAUSE IT MOVES. At limit == maxRows the probe row would
-// trip a cap the delivered page can never exceed, so it is bumped by one for
-// the length of that one query; see WithFetchOneExtra for the full argument.
-// A caller enforces the cap this returns, not the one it passed in.
-func SearchProbeLimit(limit, maxRows int) (bound, rowCap int) {
-	if maxRows > 0 && limit == maxRows {
-		maxRows++
-	}
-	if limit > 0 {
-		limit++
-	}
-	return EffectiveSearchLimit(limit, maxRows), maxRows
-}
-
-// EnforceMaxRowsCap returns *ErrTooManyRows when found exceeds maxRows.
-// maxRows<=0 disables the cap; the function returns nil. source is the
-// attribution string surfaced in the error message (see ErrTooManyRows).
-// Call this after scanning rows from a query that used EffectiveSearchLimit
-// to size LIMIT.
-func EnforceMaxRowsCap(found, maxRows int, source string) error {
-	if maxRows > 0 && found > maxRows {
-		return &ErrTooManyRows{Found: found, Cap: maxRows, Source: source}
-	}
 	return nil
 }

@@ -42,7 +42,6 @@ func TestBootstrapNoWorkspace(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 	dir := t.TempDir()
-	initGitRepoAt(t, dir)
 
 	t.Run("default_output", func(t *testing.T) {
 		out, err := bdBootstrapAllowError(t, bd, dir)

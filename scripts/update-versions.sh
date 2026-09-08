@@ -20,9 +20,16 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 usage() {
-    echo "Usage: $0 <version>"
+    echo "Usage: $0 <version> [--skip-docs]"
     echo ""
-    echo "Updates version numbers across all components (no git operations)."
+    echo "Updates version numbers across all components (no git operations),"
+    echo "and snapshots the Docusaurus release docs so version.go and the docs"
+    echo "snapshot cannot drift apart for stable releases."
+    echo ""
+    echo "  --skip-docs   Skip the Docusaurus snapshot (e.g. on a host without"
+    echo "                Node.js). You must then run scripts/snapshot-release-docs.sh"
+    echo "                <version> elsewhere before tagging a stable release, or CI"
+    echo "                will fail. Prereleases skip docs snapshots by default."
     echo ""
     echo "Examples:"
     echo "  $0 0.47.1"
@@ -32,8 +39,10 @@ usage() {
 }
 
 NEW_VERSION=""
+SKIP_DOCS=0
 for arg in "$@"; do
     case "$arg" in
+        --skip-docs) SKIP_DOCS=1 ;;
         -h|--help) usage; exit 0 ;;
         -*) echo "Unknown option: $arg" >&2; usage; exit 1 ;;
         *)
@@ -59,6 +68,25 @@ if ! [[ $NEW_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
 fi
 
 BASE_VERSION="${NEW_VERSION%%-*}"
+IS_PRERELEASE=0
+if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
+    IS_PRERELEASE=1
+fi
+
+python_version() {
+    local version=$1
+    # Downstream fork builds (-dcN, -fdN) are not PEP 440 versions: Python
+    # rejects "1.2.2-dc3" / "1.2.2-fd1" outright ("found -fd1, which is not
+    # part of a valid version"). Map them to a dev release with the fork tag
+    # preserved as local metadata, so pyproject/uv.lock stay installable while
+    # the Go side keeps the human-readable tag.
+    if [[ $version =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(dc|fd)([0-9]+)$ ]]; then
+        printf '%s.dev%s+%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" \
+            "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+        return
+    fi
+    printf '%s\n' "${version/-rc./rc}"
+}
 
 # Check we're in repo root
 if [ ! -f "cmd/bd/version.go" ]; then
@@ -68,6 +96,8 @@ fi
 
 # Get current version
 CURRENT_VERSION=$(grep 'Version = ' cmd/bd/version.go | sed 's/.*"\(.*\)".*/\1/')
+CURRENT_PYTHON_VERSION=$(python_version "$CURRENT_VERSION")
+NEW_PYTHON_VERSION=$(python_version "$NEW_VERSION")
 # Base (prerelease-stripped) form of the current version. The Windows PE
 # numeric fields (file_version/product_version, manifest version) only ever
 # hold the base form, so they must be matched on the base, not on the full
@@ -103,8 +133,8 @@ update_file ".claude-plugin/marketplace.json" "\"version\": \"$CURRENT_VERSION\"
 
 # 3. MCP Python package
 echo "  • integrations/beads-mcp/*"
-update_file "integrations/beads-mcp/pyproject.toml" "version = \"$CURRENT_VERSION\"" "version = \"$NEW_VERSION\""
-update_file "integrations/beads-mcp/src/beads_mcp/__init__.py" "__version__ = \"$CURRENT_VERSION\"" "__version__ = \"$NEW_VERSION\""
+update_file "integrations/beads-mcp/pyproject.toml" "version = \"$CURRENT_PYTHON_VERSION\"" "version = \"$NEW_PYTHON_VERSION\""
+update_file "integrations/beads-mcp/src/beads_mcp/__init__.py" "__version__ = \"$CURRENT_PYTHON_VERSION\"" "__version__ = \"$NEW_PYTHON_VERSION\""
 # The release workflow's MCP package gate runs `uv sync --locked`, so a
 # pyproject bump without a lock refresh fails the release only in the
 # tag-triggered run — after the tag exists and can no longer be rewritten.
@@ -137,22 +167,9 @@ update_file "README.md" "Alpha (v$CURRENT_VERSION)" "Alpha (v$NEW_VERSION)"
 echo "  • default.nix"
 update_file "default.nix" "version = \"$CURRENT_VERSION\";" "version = \"$NEW_VERSION\";"
 
-# 7. Tracked managed git-hook sections. The hooks a fresh `bd init` installs
-# are generated dynamically by cmd/bd/hooks.go, but this repo also TRACKS
-# rendered copies in .githooks/, whose BEGIN/END markers embed the binary
-# Version (hookSectionBeginLine), and TestTrackedManagedHookSectionsMatchGenerator
-# holds them byte-equal to the generator's output. Rewrite the marker version
-# wholesale rather than from CURRENT_VERSION — the v1.2.0 bump proved the
-# markers can already be drifted when the bump runs (they still said v1.1.0).
-echo "  • .githooks/* managed section markers"
-for hook in .githooks/*; do
-    [ -f "$hook" ] || continue
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' -E "s#(--- (BEGIN|END) BEADS INTEGRATION) v[^ ]+ ---#\1 v$NEW_VERSION ---#g" "$hook"
-    else
-        sed -i -E "s#(--- (BEGIN|END) BEADS INTEGRATION) v[^ ]+ ---#\1 v$NEW_VERSION ---#g" "$hook"
-    fi
-done
+# 7. Hook templates — now generated dynamically by cmd/bd/hooks.go using the
+# Version constant from version.go. No template files to update.
+# (Previously updated cmd/bd/templates/hooks/* which no longer exist.)
 
 # 8. Windows PE resource metadata
 echo "  • cmd/bd/winres/winres.json"
@@ -165,6 +182,27 @@ update_file "cmd/bd/winres/manifest.xml" "version=\"$CURRENT_BASE.0\"" "version=
 
 echo ""
 echo -e "${GREEN}✓ Version constants updated to $NEW_VERSION${NC}"
+echo ""
+
+# Snapshot the Docusaurus release docs as part of the same bump so version.go
+# and the published docs cannot diverge. This is the failure mode that left
+# main red after the 1.0.5 release (version bumped, docs snapshot missing).
+if [ "$SKIP_DOCS" -eq 1 ]; then
+    echo -e "${YELLOW}Skipping docs snapshot (--skip-docs).${NC}"
+    if [ "$IS_PRERELEASE" -eq 1 ]; then
+        echo "  Prerelease CI does not require a stable docs snapshot for $NEW_VERSION."
+    else
+        echo "  Run scripts/snapshot-release-docs.sh $NEW_VERSION before tagging,"
+        echo "  or CI (check-version-consistency) will fail."
+    fi
+elif [ "$IS_PRERELEASE" -eq 1 ]; then
+    echo -e "${YELLOW}Skipping docs snapshot for prerelease $NEW_VERSION.${NC}"
+    echo "  Stable docs stay on the latest stable release until $BASE_VERSION ships."
+else
+    echo "Snapshotting release docs..."
+    ./scripts/snapshot-release-docs.sh "$NEW_VERSION"
+fi
+
 echo ""
 echo "Changed files:"
 git diff --stat 2>/dev/null || true

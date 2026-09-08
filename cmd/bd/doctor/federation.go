@@ -36,13 +36,8 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 	}
 	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
 		cfg.ServerHost = bcfg.GetDoltServerHost()
-		// Carries PortSource with the port: this cfg reaches applyConfigDefaults,
-		// which reads a sourceless port as caller-explicit (see
-		// dolt.ApplyResolvedServerPort).
-		dolt.ApplyResolvedServerPort(beadsDir, cfg)
+		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 		cfg.ServerUser = bcfg.GetDoltServerUser()
-		cfg.ServerTLS = bcfg.GetDoltServerTLS()
-		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
 	}
 	dolt.ApplyCLIAutoStart(beadsDir, cfg)
 	return cfg
@@ -276,9 +271,6 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	host := "127.0.0.1"
 
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", remotesAPIPort))
-	// Left as a bare dial+close (no doltserver.ProbeSQLServer): remotesapi
-	// speaks gRPC/HTTP, not the MySQL protocol, so there is no handshake
-	// greeting to drain here.
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return DoctorCheck{
@@ -633,7 +625,9 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 		host := cfg.GetDoltServerHost()
 		port := doltserver.DefaultConfig(beadsDir).Port
 		addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-		if _, err := doltserver.ProbeSQLServer("tcp", addr, 2*time.Second); err == nil {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
 			serverReachable = true
 		}
 	}

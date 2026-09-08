@@ -19,7 +19,7 @@ echo "stale repo bd should not run" >&2
 exit 42
 `)
 
-	bin := filepath.Join(repo, "bin")
+	bin := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ exit 99
 func TestReleaseScriptInstalledBDSelectionDoesNotRequireJQ(t *testing.T) {
 	repo := copyReleaseScriptFixture(t)
 
-	bin := filepath.Join(repo, "bin")
+	bin := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ exit 99
 
 func TestReleaseScriptRejectsExplicitBDThatDoesNotResolveRepoFormula(t *testing.T) {
 	repo := copyReleaseScriptFixture(t)
-	bin := filepath.Join(repo, "bin")
+	bin := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -116,60 +116,6 @@ func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testi
 	}
 }
 
-func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.T) {
-	repoRoot := sourceRepoRoot(t)
-	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
-	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
-		t.Fatalf("beads-release formula does not parse: %v", err)
-	}
-
-	homebrewStep := releaseFormulaStep(t, formulaPath, `id = "verify-homebrew-core"`)
-	for _, want := range []string{
-		"brew bump-formula-pr",
-		"--url=\"https://github.com/gastownhall/beads/archive/refs/tags/v{{version}}.tar.gz\"",
-		"Homebrew's current PR template",
-		"Do not remove or hand-edit the bottle block.",
-		"Do not open a duplicate manual PR.",
-		"homepage \"https://github.com/gastownhall/beads\"",
-		"Homebrew/homebrew-core@main",
-	} {
-		if !strings.Contains(homebrewStep, want) {
-			t.Fatalf("verify-homebrew-core step missing %q:\n%s", want, homebrewStep)
-		}
-	}
-
-	localInstallStep := releaseFormulaStep(t, formulaPath, `id = "local-install"`)
-	for _, want := range []string{
-		`needs = ["verify-github", "verify-npm", "verify-pypi", "verify-homebrew-core"]`,
-		"brew upgrade beads",
-	} {
-		if !strings.Contains(localInstallStep, want) {
-			t.Fatalf("local-install step missing %q:\n%s", want, localInstallStep)
-		}
-	}
-	if strings.Contains(localInstallStep, "brew upgrade bd") {
-		t.Fatalf("local-install step still references old Homebrew formula name:\n%s", localInstallStep)
-	}
-}
-
-func releaseFormulaStep(t *testing.T, formulaPath, marker string) string {
-	t.Helper()
-	data, err := os.ReadFile(formulaPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
-	start := strings.Index(text, marker)
-	if start < 0 {
-		t.Fatalf("release formula step marker not found: %s", marker)
-	}
-	step := text[start:]
-	if next := strings.Index(step[len(marker):], "\n[[steps]]"); next >= 0 {
-		step = step[:len(marker)+next]
-	}
-	return step
-}
-
 func copyReleaseScriptFixture(t *testing.T) string {
 	t.Helper()
 
@@ -179,7 +125,7 @@ func copyReleaseScriptFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 
-	repo := releaseTestTempDir(t)
+	repo := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -193,14 +139,6 @@ func copyReleaseScriptFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return repo
-}
-
-func releaseTestTempDir(t *testing.T) string {
-	t.Helper()
-	// Keep fixtures out of the source tree (t.TempDir handles cleanup and
-	// works from read-only checkouts); shellPath converts the resulting
-	// host path for Bash separately at the call sites that need it.
-	return t.TempDir()
 }
 
 func sourceRepoRoot(t *testing.T) string {
@@ -219,170 +157,19 @@ func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {
 
 func runReleaseDryRunWithEnv(t *testing.T, repo, bin string, extraEnv ...string) (string, error) {
 	t.Helper()
-	assignments := []string{
-		// Fake bin first, then the caller's PATH (Nix/Guix coreutils), then a
-		// /usr/bin:/bin baseline: on Windows git-bash the coreutils release.sh
-		// needs live there but are absent from the Go process's PATH.
-		"PATH=" + shSingleQuote(shellPath(t, bin)+":"+bashPathList(t, os.Getenv("PATH"))+":/usr/bin:/bin"),
-		"BD_FAKE_FORMULA_SOURCE=" + shSingleQuote(shellPath(t, filepath.Join(repo, ".beads", "formulas", "beads-release.formula.toml"))),
-	}
-	for _, env := range extraEnv {
-		key, value, ok := strings.Cut(env, "=")
-		if !ok {
-			continue
-		}
-		if key == "BD" && value != "" {
-			value = shellPath(t, value)
-		}
-		assignments = append(assignments, key+"="+shSingleQuote(value))
-	}
-	cmd := exec.Command("bash", "-lc", strings.Join(assignments, " ")+" bash scripts/release.sh 1.2.3 --dry-run")
+	cmd := exec.Command("bash", filepath.Join(repo, "scripts", "release.sh"), "1.2.3", "--dry-run")
 	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
-func msysPath(path string) string {
-	path = filepath.Clean(path)
-	path = filepath.ToSlash(path)
-	if len(path) >= 3 && path[1] == ':' && path[2] == '/' {
-		return "/" + strings.ToLower(path[:1]) + path[2:]
-	}
-	return path
-}
-
-func shellPath(t *testing.T, path string) string {
-	t.Helper()
-	clean := filepath.Clean(path)
-	dir := clean
-	base := ""
-	if info, err := os.Stat(clean); err == nil && !info.IsDir() {
-		dir = filepath.Dir(clean)
-		base = filepath.Base(clean)
-	}
-	cmd := exec.Command("bash", "-lc", "pwd")
-	cmd.Dir = dir
-	if out, err := cmd.Output(); err == nil {
-		converted := strings.TrimSpace(string(out))
-		if converted != "" {
-			if base != "" {
-				return converted + "/" + filepath.ToSlash(base)
-			}
-			return converted
-		}
-	}
-	for _, tool := range []string{"wslpath", "cygpath"} {
-		out, err := exec.Command(tool, "-u", path).Output()
-		if err == nil {
-			converted := strings.TrimSpace(string(out))
-			if converted != "" {
-				return converted
-			}
-		}
-	}
-	return msysPath(path)
-}
-
-func shellPathUnderEnv(t *testing.T, bash, path string, env []string) string {
-	t.Helper()
-	clean := filepath.Clean(path)
-	dir := clean
-	base := ""
-	if info, err := os.Stat(clean); err == nil && !info.IsDir() {
-		dir = filepath.Dir(clean)
-		base = filepath.Base(clean)
-	}
-	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", "pwd")
-	cmd.Dir = dir
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("resolve shell path for %s under script environment: %v\n%s", path, err, out)
-	}
-	converted := strings.TrimSpace(string(out))
-	if converted == "" {
-		t.Fatalf("resolve shell path for %s under script environment: empty output", path)
-	}
-	if base != "" {
-		return converted + "/" + filepath.ToSlash(base)
-	}
-	return converted
-}
-
-// shellPathEnv keeps minimal-environment path conversion independent of
-// inherited temporary-path mounts. Git for Windows can map /tmp differently
-// when TEMP/TMP are omitted, so helpers that replace the child environment
-// must resolve paths under that same authority.
-func shellPathEnv() []string {
-	path := os.Getenv("PATH")
-	if runtime.GOOS == "windows" {
-		path = "/usr/bin:/bin"
-	}
-	return []string{
-		"PATH=" + path,
-		"LC_ALL=C",
-		"LANG=C",
-		"BASH_ENV=",
-		"ENV=",
-	}
-}
-
-func requireShellCommandPath(t *testing.T, bash, dir string, env []string, name, want string) {
-	t.Helper()
-	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", `PATH="$BEADS_TEST_COMMAND_PATH"; export PATH; printf '%s\n' "$PATH"; command -v -- "$1"`, "shim-path-check", name)
-	cmd.Dir = dir
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("resolve injected %s under script environment: %v\n%s", name, err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	got := lines[len(lines)-1]
-	if got != want {
-		t.Fatalf("injected %s resolved to %q, want %q; PATH=%q", name, got, want, lines[0])
-	}
-}
-
-func bashScriptCommand(bash, script string) *exec.Cmd {
-	return exec.Command(bash, "--noprofile", "--norc", "-c", `PATH="$BEADS_TEST_COMMAND_PATH"; export PATH; exec "$BASH" --noprofile --norc "$1"`, "script-test", script)
-}
-
-// bashPathList converts a host-style PATH value (entries separated by
-// os.PathListSeparator) into a Bash-visible, colon-separated PATH so the
-// caller's PATH is preserved (not just /usr/bin:/bin) when it is prepended
-// with the fake bd directory. This matters on systems such as Nix/Guix
-// where bash and core utilities live outside /usr/bin and /bin.
-func bashPathList(t *testing.T, hostPath string) string {
-	t.Helper()
-	entries := filepath.SplitList(hostPath)
-	converted := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry == "" {
-			continue
-		}
-		converted = append(converted, shellPath(t, entry))
-	}
-	return strings.Join(converted, ":")
-}
-
-func shSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
-}
-
 func writeFakeBD(t *testing.T, bin, repo string) {
 	t.Helper()
-	// Let bash itself canonicalize the formula path. release.sh derives
-	// FORMULA_PATH from `pwd`, which on Windows under Git Bash/MSYS produces
-	// mount-aware forms. Keep the fake bd path repo-relative so bash can
-	// `cd` there portably, then let `pwd` resolve it to the exact form that
-	// release.sh will compare against.
-	formulaDir := ".beads/formulas"
+	source := filepath.Join(repo, ".beads", "formulas", "beads-release.formula.toml")
 	body := fmt.Sprintf(`#!/bin/sh
-if [ -n "${BD_FAKE_FORMULA_SOURCE:-}" ]; then
-  SOURCE="$BD_FAKE_FORMULA_SOURCE"
-else
-  SOURCE="$(cd %q && pwd)/beads-release.formula.toml"
-fi
+SOURCE=%q
 if [ "$1 $2 $3 $4" = "formula show beads-release --json" ]; then
   printf '%%s\n' "{\"source\":\"$SOURCE\"}"
   exit 0
@@ -394,7 +181,7 @@ if [ "$1 $2 $3" = "formula show beads-release" ]; then
 fi
 echo "unexpected fake bd invocation: $*" >&2
 exit 64
-`, formulaDir)
+`, source)
 	writeExecutable(t, filepath.Join(bin, "bd"), body)
 }
 
@@ -402,17 +189,5 @@ func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
-	}
-	if runtime.GOOS == "windows" {
-		chmodPath := shellPath(t, path)
-		if wd, err := os.Getwd(); err == nil {
-			if rel, relErr := filepath.Rel(wd, path); relErr == nil {
-				chmodPath = filepath.ToSlash(rel)
-			}
-		}
-		cmd := exec.Command("bash", "-lc", "chmod +x "+shSingleQuote(chmodPath))
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("chmod +x %s failed: %v\n%s", path, err, out)
-		}
 	}
 }

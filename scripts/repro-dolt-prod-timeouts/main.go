@@ -1,7 +1,7 @@
 // repro-dolt-prod-timeouts runs production-shaped bd CLI timeout scenarios.
 //
 // It initializes a real server-mode beads workspace, bulk-loads a graph that
-// mirrors a large production deployment's skew (large mostly-closed issue table, large
+// mirrors maintainer-city's skew (large mostly-closed issue table, large
 // dependency table, small active frontier), then forks actual bd commands.
 //
 // Usage:
@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -266,7 +265,7 @@ func openWorkspace(ctx context.Context, cfg config, dir string) (*workspace, err
 }
 
 func isPortOpen(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second) // #nosec G704 -- loopback probe of a locally started dolt server; not attacker-controlled
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
 	if err != nil {
 		return false
 	}
@@ -288,7 +287,7 @@ func createWorkspace(ctx context.Context, cfg config) (*workspace, error) {
 	defer cancel()
 
 	fmt.Printf("initializing server workspace timeout=%s\n", initTimeout)
-	cmd := exec.CommandContext(initCtx, cfg.BDPath, // #nosec G702 -- fixed subcommand args; cfg.BDPath is an operator-supplied local binary path, not attacker input
+	cmd := exec.CommandContext(initCtx, cfg.BDPath,
 		"init",
 		"--server",
 		"--prefix=perf",
@@ -326,7 +325,7 @@ func startWorkspaceDolt(ctx context.Context, cfg config, dir string) error {
 	startCtx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(startCtx, cfg.BDPath, "dolt", "start") // #nosec G702 -- fixed subcommand args; cfg.BDPath is an operator-supplied local binary path, not attacker input
+	cmd := exec.CommandContext(startCtx, cfg.BDPath, "dolt", "start")
 	cmd.Dir = dir
 	cmd.Env = subprocessEnv("BD_NON_INTERACTIVE=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -449,10 +448,10 @@ func insertIssues(ctx context.Context, db *sql.DB, count, depOps, chainDepth int
 				status = "open"
 			}
 			if i < 40 {
-				assignee = "example-org--control-dispatcher"
+				assignee = "gascity--control-dispatcher"
 			}
 			if i >= 40 && i < 80 {
-				metadata = `{"route.routed_to":"example-org/control-dispatcher"}`
+				metadata = `{"gc.routed_to":"gascity/control-dispatcher"}`
 			}
 			if i >= count {
 				status = "open"
@@ -611,9 +610,9 @@ func runReadyScenario(ctx context.Context, cfg config, ws *workspace) []opResult
 	jobs := make([]job, 0, cfg.Ops)
 	for i := 0; i < cfg.Ops; i++ {
 		if i%2 == 0 {
-			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--assignee=example-org--control-dispatcher", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--assignee=gascity--control-dispatcher", "--json", "--limit=20"}})
 		} else {
-			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--metadata-field", "route.routed_to=example-org/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--metadata-field", "gc.routed_to=gascity/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
 		}
 	}
 	return runJobs(ctx, cfg, ws, jobs)
@@ -876,9 +875,9 @@ func mixedBackgroundJobs(count int) []job {
 		case 0:
 			jobs = append(jobs, job{Kind: "session-ready", Argv: []string{"ready", "--include-ephemeral", "--assignee=" + sessionAssignee(i), "--json", "--limit=1"}})
 		case 1:
-			jobs = append(jobs, job{Kind: "control-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--assignee=example-org--control-dispatcher", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "control-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--assignee=gascity--control-dispatcher", "--json", "--limit=20"}})
 		case 2:
-			jobs = append(jobs, job{Kind: "route-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--metadata-field", "route.routed_to=example-org/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "route-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--metadata-field", "gc.routed_to=gascity/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
 		case 3:
 			jobs = append(jobs, job{Kind: "show", Argv: []string{"show", fmt.Sprintf("perf-%06d", i%350), "--json"}})
 		case 4:
@@ -916,8 +915,8 @@ func controlQueryJobs(count int) []job {
 		legacy  string
 	}{
 		{target: "control-dispatcher", session: "control-dispatcher", legacy: "workflow-control"},
-		{target: "example-org/control-dispatcher", session: "example-org--control-dispatcher", legacy: "example-org/workflow-control"},
-		{target: "example-gui/control-dispatcher", session: "example-gui--control-dispatcher", legacy: "example-gui/workflow-control"},
+		{target: "gascity/control-dispatcher", session: "gascity--control-dispatcher", legacy: "gascity/workflow-control"},
+		{target: "gasworks-gui/control-dispatcher", session: "gasworks-gui--control-dispatcher", legacy: "gasworks-gui/workflow-control"},
 		{target: "gtest-rig/control-dispatcher", session: "gtest-rig--control-dispatcher", legacy: "gtest-rig/workflow-control"},
 	}
 
@@ -966,8 +965,8 @@ for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL
     emit_ready "$BD_BIN" --readonly --sandbox ready --assignee="$cand" --json --limit=20 || exit $?
   done
 done
-emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "route.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=20 || exit $?
-emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "route.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=20 || exit $?
+emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=20 || exit $?
+emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=20 || exit $?
 [ -s "$tmp" ] && jq -s 'reduce add[] as $item ([]; if any(.[]; .id == $item.id) then . else . + [$item] end)' "$tmp" || printf "[]"
 `
 }
@@ -1015,7 +1014,9 @@ func runJob(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 func runBD(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 	opCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	cmd := newBDCommand(opCtx, cfg, ws, j)
+	cmd := exec.CommandContext(opCtx, cfg.BDPath, j.Argv...)
+	cmd.Dir = ws.Dir
+	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1"}, j.Env...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	start := time.Now()
@@ -1038,7 +1039,9 @@ func runBD(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 func runShell(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 	opCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	cmd := newShellCommand(opCtx, cfg, ws, j)
+	cmd := exec.CommandContext(opCtx, "sh", "-c", j.Sh)
+	cmd.Dir = ws.Dir
+	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1", "BD_BIN=" + cfg.BDPath}, j.Env...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	start := time.Now()
@@ -1053,20 +1056,6 @@ func runShell(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 	}
 	res.StderrTail = tail(stderr.String(), 300)
 	return res
-}
-
-func newBDCommand(ctx context.Context, cfg config, ws *workspace, j job) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, cfg.BDPath, j.Argv...)
-	cmd.Dir = ws.Dir
-	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1"}, j.Env...)...)
-	return cmd
-}
-
-func newShellCommand(ctx context.Context, cfg config, ws *workspace, j job) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "sh", "-c", j.Sh)
-	cmd.Dir = ws.Dir
-	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1", "BD_BIN=" + cfg.BDPath}, j.Env...)...)
-	return cmd
 }
 
 func compactShell(s string) string {
@@ -1137,29 +1126,19 @@ func subprocessEnv(extra ...string) []string {
 func cleanEnv(env []string, keys ...string) []string {
 	drop := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
-		drop[environmentKeyIdentity(key)] = struct{}{}
+		drop[key] = struct{}{}
 	}
 	out := env[:0]
 	for _, e := range env {
 		key, _, ok := strings.Cut(e, "=")
 		if ok {
-			if _, skip := drop[environmentKeyIdentity(key)]; skip {
+			if _, skip := drop[key]; skip {
 				continue
 			}
 		}
 		out = append(out, e)
 	}
 	return out
-}
-
-// environmentKeyIdentity mirrors the key comparison used by os/exec when it
-// prepares a child environment. strings.ToLower is intentional: EqualFold
-// would collapse Unicode near-collisions that os/exec keeps distinct.
-func environmentKeyIdentity(key string) string {
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(key)
-	}
-	return key
 }
 
 func tail(s string, max int) string {

@@ -544,11 +544,10 @@ func TestGetClaudePluginVersion(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Temporarily override the home directory. GetClaudePluginVersion resolves it
-			// with os.UserHomeDir(), which reads USERPROFILE on Windows and HOME elsewhere,
-			// so both must be set for this to be portable (t.Setenv also restores them).
-			t.Setenv("HOME", tmpHome)
-			t.Setenv("USERPROFILE", tmpHome)
+			// Temporarily override home directory
+			origHome := os.Getenv("HOME")
+			os.Setenv("HOME", tmpHome)
+			defer os.Setenv("HOME", origHome)
 
 			version, installed, err := doctor.GetClaudePluginVersion()
 

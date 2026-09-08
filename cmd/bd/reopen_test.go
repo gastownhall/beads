@@ -38,9 +38,10 @@ func (h *reopenTestHelper) closeIssue(issueID, reason string) {
 }
 
 func (h *reopenTestHelper) reopenIssue(issueID string) {
-	// Reopen through the lifecycle operation so the fixture carries the full
-	// closure teardown, mirroring closeIssue above.
-	if err := h.s.ReopenIssue(h.ctx, issueID, "", "test-user"); err != nil {
+	updates := map[string]interface{}{
+		"status": string(types.StatusOpen),
+	}
+	if err := h.s.UpdateIssue(h.ctx, issueID, updates, "test-user"); err != nil {
 		h.t.Fatalf("Failed to reopen issue: %v", err)
 	}
 }

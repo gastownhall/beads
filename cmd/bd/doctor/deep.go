@@ -43,8 +43,9 @@ func RunDeepValidation(path string) DeepValidationResult {
 		check := DoctorCheck{
 			Name:     "Deep Validation",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("N/A (deep validation requires Dolt; configured backend is %q)", backend),
+			Message:  "SQLite backend detected",
 			Category: CategoryMaintenance,
+			Fix:      "Run 'bd init' to set up Dolt backend",
 		}
 		result.AllChecks = append(result.AllChecks, check)
 		return result

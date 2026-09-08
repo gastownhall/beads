@@ -14,7 +14,7 @@ expected and should not be flagged.
 
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
-- **Project Scope** - Read [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md) before adding new feature surface area
+- **Project Scope** - Read [docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md) before adding new feature surface area
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
 - **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
 - **Maintainer PR Guidelines** - Read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md) before triaging, landing, or closing PRs
@@ -22,7 +22,7 @@ expected and should not be flagged.
 ## Project Scope
 
 Before adding new feature surface area, read
-[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). Beads owns issue tracking
+[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md). Beads owns issue tracking
 primitives and should not encode orchestration-layer policy, become a storage
 engine, or casually expand the database schema when metadata would work.
 
@@ -50,26 +50,21 @@ and credit their design/tests.
 
 **NEVER use emoji-style icons** (🔴🟠🟡🔵⚪) in CLI output. They cause cognitive overload.
 
-**ALWAYS use small Unicode symbols** with semantic colors (status uses symbols; priority uses labels):
+**ALWAYS use small Unicode symbols** with semantic colors:
 - Status: `○ ◐ ● ✓ ❄`
-- Priority: `P0`–`P4` label with color (no status glyph)
+- Priority: `● P0` (filled circle with color)
 
 See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelines.
 
 ## Storage Boundary
 
 The canonical storage boundary is in
-[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md#storage-boundary). In short:
+[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md#storage-boundary). In short:
 Beads talks to storage through a driver interface (`dolthub/driver` for Dolt).
 Do not add beads-side flocks, engine introspection, storage-specific retry or
 crash-recovery logic, or public SDK return types that leak driver internals.
 If the boundary is too narrow, widen the interface or route the issue to the
 driver instead of patching around it in beads.
-
-A live application of this rule: `bd doctor` support for embedded mode is
-enabled one subcommand at a time, each human-vetted (GH#3794). Do not lift the
-embedded-mode gate in `cmd/bd/doctor.go` wholesale, and keep database-layer
-checks and fixes server-gated until the driver interface covers them.
 
 ## Agent Warning: Interactive Commands
 
@@ -88,10 +83,16 @@ echo 'Description with `backticks` and "quotes"' | bd create "Title" --descripti
 echo 'Updated text' | bd update <id> --description=-
 ```
 
-## Testing
+## Testing Commands (No Ambiguity)
 
-Use [engdocs/TESTING.md](engdocs/TESTING.md) for the canonical commands,
-test-design guidance, and PR-readiness gates.
+- Default local test command: `make test` (or `./scripts/test.sh`).
+- Opt-in ICU regex path: `make test-icu-path` (or `./scripts/test-icu-path.sh ./...`).
+- This ICU path is maintainer-only and not part of normal validation; `make test-full-cgo` and `./scripts/test-cgo.sh` are deprecated aliases.
+- For package- or test-scoped shipped-config CGO runs, prefer:
+```bash
+CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
+CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestName$' ./cmd/bd/...
+```
 
 ## Non-Interactive Shell Commands
 
@@ -119,17 +120,12 @@ cp -rf source dest          # NOT: cp -r source dest
 
 ## Landing the Plane (Session Completion)
 
-**When ending a work session** (or when the user says "let's land the
-plane"), you MUST complete ALL steps below. Work is NOT complete until
-`git push` succeeds.
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed):
-   - `make ci-pr-lint` (required zero-finding formatting and lint wrapper)
-   - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
-   - File a P0 issue if quality gates are broken
+2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
@@ -137,15 +133,9 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. **Clean up**:
-   ```bash
-   git stash clear                    # Remove old stashes
-   git remote prune origin            # Clean up deleted remote branches
-   ```
-6. **Verify** - All changes committed AND pushed, no untracked files remain
-7. **Hand off** - Choose a follow-up issue and give the user a prompt for
-   the next session, e.g. "Continue work on bd-X: [issue title]. [Brief
-   context about what's been done and what's next]"
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds
@@ -153,11 +143,7 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 
-Close with a summary for the user: what was completed this session, issues
-filed for follow-up, quality-gate status, confirmation everything is pushed,
-and the recommended prompt for the next session.
-
-<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:bacef91e -->
+<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
@@ -240,7 +226,7 @@ bd stores issue history in Dolt:
 - Use `bd dolt push`/`bd dolt pull` for remote sync
 - Do not treat `.beads/issues.jsonl` as the sync protocol
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 
 ### Important Rules
 
@@ -252,7 +238,7 @@ bd stores issue history in Dolt:
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 
-For more details, see README.md and https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md.
+For more details, see README.md and docs/QUICKSTART.md.
 
 ## Agent Context Profiles
 

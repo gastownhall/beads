@@ -24,13 +24,6 @@ func expectRemoteAndBranch(mock sqlmock.Sqlmock, branch string) {
 		WillReturnRows(sqlmock.NewRows([]string{"b"}).AddRow(branch))
 }
 
-func expectRemoteMigrationShape(mock sqlmock.Sqlmock, ref string) {
-	mock.ExpectQuery(`SHOW TABLES AS OF '` + ref + `' LIKE 'schema_migrations'`).
-		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("schema_migrations"))
-	mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations AS OF '` + ref + `' LIKE 'content_hash'`).
-		WillReturnRows(sqlmock.NewRows([]string{"Field"}).AddRow("content_hash"))
-}
-
 func TestCheckMigrationContentSkew_NoRemote(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -66,7 +59,6 @@ func TestCheckMigrationContentSkew_UsesConfiguredRemote(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"b"}).AddRow("main"))
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a"))
-	expectRemoteMigrationShape(mock, "remotes/upstream/main")
 	mock.ExpectQuery(`AS OF 'remotes/upstream/main'`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a"))
 
@@ -89,38 +81,12 @@ func TestCheckMigrationContentSkew_NoCachedRemoteRef(t *testing.T) {
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a"))
 	// Real Dolt phrasing for an AS OF ref that is not cached locally.
-	mock.ExpectQuery(`SHOW TABLES AS OF 'remotes/origin/main'`).
+	mock.ExpectQuery(`AS OF 'remotes/origin/main'`).
 		WillReturnError(errors.New("branch not found: remotes/origin/main"))
 
 	got := checkMigrationContentSkew(context.Background(), db, "origin")
 	if got.Status != StatusOK {
 		t.Errorf("status = %q, want %q (%s)", got.Status, StatusOK, got.Message)
-	}
-}
-
-func TestCheckMigrationContentSkew_CachedRemotePredatesContentHashes(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	expectRemoteAndBranch(mock, "main")
-	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
-		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a"))
-	mock.ExpectQuery(`SHOW TABLES AS OF 'remotes/origin/main' LIKE 'schema_migrations'`).
-		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("schema_migrations"))
-	mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations AS OF 'remotes/origin/main' LIKE 'content_hash'`).
-		WillReturnRows(sqlmock.NewRows([]string{"Field"}))
-
-	got := checkMigrationContentSkew(context.Background(), db, "origin")
-	if got.Status != StatusOK {
-		t.Errorf("status = %q, want %q (%s)", got.Status, StatusOK, got.Message)
-	}
-	if !strings.Contains(got.Message, "predates migration content hashes") {
-		t.Errorf("message = %q, want an old-cached-ref skip", got.Message)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("unmet expectations: %v", err)
 	}
 }
 
@@ -136,7 +102,6 @@ func TestCheckMigrationContentSkew_UnexpectedErrorWarns(t *testing.T) {
 	expectRemoteAndBranch(mock, "main")
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a"))
-	expectRemoteMigrationShape(mock, "remotes/origin/main")
 	mock.ExpectQuery(`AS OF 'remotes/origin/main'`).
 		WillReturnError(errors.New(`unbound variable "v1" in query`))
 
@@ -178,7 +143,6 @@ func TestCheckMigrationContentSkew_Matches(t *testing.T) {
 	expectRemoteAndBranch(mock, "main")
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a").AddRow(2, "b"))
-	expectRemoteMigrationShape(mock, "remotes/origin/main")
 	mock.ExpectQuery(`AS OF 'remotes/origin/main'`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a").AddRow(2, "b"))
 
@@ -197,7 +161,6 @@ func TestCheckMigrationContentSkew_Diverges(t *testing.T) {
 	expectRemoteAndBranch(mock, "main")
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a").AddRow(2, "b"))
-	expectRemoteMigrationShape(mock, "remotes/origin/main")
 	mock.ExpectQuery(`AS OF 'remotes/origin/main'`).
 		WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}).AddRow(1, "a").AddRow(2, "DIFFERENT"))
 

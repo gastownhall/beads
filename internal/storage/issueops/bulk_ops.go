@@ -197,19 +197,6 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, fmt.Errorf("affected by source-repo delete: %w", aerr)
 	}
 
-	// Deleted issues hold no leases: clear them while the id set is still
-	// joinable (before the issues rows go away).
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM leases WHERE issue_id IN (SELECT id FROM issues WHERE source_repo = ?)`, sourceRepo); err != nil {
-		return 0, fmt.Errorf("delete leases: %w", err)
-	}
-
-	// Edges are journaled before the rows go, while their source snapshots can
-	// still be read.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, issueIDs); err != nil {
-		return 0, fmt.Errorf("journal dependency removals for source-repo delete: %w", err)
-	}
-
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
 	if err != nil {
 		return 0, fmt.Errorf("delete issues: %w", err)
@@ -218,16 +205,6 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("rows affected: %w", err)
-	}
-
-	// Journal each deleted issue in the same transaction. issueIDs is the exact
-	// set removed by the DELETE above (both were scoped to source_repo), so
-	// there are no phantom records here. The source-repo bulk delete plumbing
-	// carries no actor, so the rows record none.
-	for _, id := range issueIDs {
-		if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
-			return int(rowsAffected), err
-		}
 	}
 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
@@ -239,55 +216,10 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 
 //nolint:gosec // G201: table names are hardcoded
 func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
-	// Capture the edges under the OLD id before the rename rewrites them; they
-	// are what the journal replays as a remove/re-add pair around the identity
-	// change.
-	var renameEdges []journalDependencyEdge
-	if journalEnabled(ctx, tx) {
-		var err error
-		renameEdges, err = dependencyEdgesForIssueIDsInTx(ctx, tx, []string{oldID})
-		if err != nil {
-			return fmt.Errorf("capture dependency edges for rename %s -> %s: %w", oldID, newID, err)
-		}
-	}
 	if IsActiveWispInTx(ctx, tx, oldID) {
-		if err := updateWispIDInTx(ctx, tx, oldID, newID, issue, actor); err != nil {
-			return err
-		}
-	} else if err := updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor); err != nil {
-		return err
+		return updateWispIDInTx(ctx, tx, oldID, newID, issue, actor)
 	}
-	return recordRenameInJournal(ctx, tx, oldID, newID, actor, renameEdges)
-}
-
-// recordRenameInJournal replays a rename as the operations a consumer can apply
-// without understanding identity changes: drop the old edges, delete the old
-// bead, create the new one, re-add the edges under the new id.
-func recordRenameInJournal(ctx context.Context, tx DBTX, oldID, newID, actor string, edges []journalDependencyEdge) error {
-	for _, edge := range edges {
-		if err := RecordDepEventInTx(ctx, tx, EventDepRemove, edge.source, edge.kind, edge.target, edge.metadata, actor); err != nil {
-			return err
-		}
-	}
-	if err := RecordDeleteInTx(ctx, tx, oldID, actor); err != nil {
-		return err
-	}
-	if err := RecordEventInTx(ctx, tx, EventCreate, newID, actor); err != nil {
-		return err
-	}
-	for _, edge := range edges {
-		source, target := edge.source, edge.target
-		if source == oldID {
-			source = newID
-		}
-		if target == oldID {
-			target = newID
-		}
-		if err := RecordDepEventInTx(ctx, tx, EventDepAdd, source, edge.kind, target, edge.metadata, actor); err != nil {
-			return err
-		}
-	}
-	return nil
+	return updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor)
 }
 
 func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
@@ -308,19 +240,11 @@ func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		return err
 	}
 
-	// A live lease follows its issue across the rename.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE leases SET issue_id = ? WHERE issue_id = ?`, newID, oldID); err != nil {
-		return fmt.Errorf("rename lease row: %w", err)
-	}
-
-	return InsertDerivedEvent(ctx, tx, "events", AuxEvent{
-		IssueID:   newID,
-		EventType: "renamed",
-		Actor:     actor,
-		OldValue:  str(oldID),
-		NewValue:  str(newID),
-	})
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID)
+	return err
 }
 
 func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
@@ -337,13 +261,10 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 		return fmt.Errorf("wisp not found: %s", oldID)
 	}
 
-	if err = InsertDerivedEvent(ctx, tx, "wisp_events", AuxEvent{
-		IssueID:   newID,
-		EventType: "renamed",
-		Actor:     actor,
-		OldValue:  str(oldID),
-		NewValue:  str(newID),
-	}); err != nil {
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID); err != nil {
 		return err
 	}
 
@@ -352,7 +273,7 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 
 // FindWispDependentsRecursiveInTx walks wisp_dependencies to find all transitive
 // dependents of the given IDs.
-func FindWispDependentsRecursiveInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+func FindWispDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}

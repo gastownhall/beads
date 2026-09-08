@@ -12,8 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // multiRepoYAMLConfig represents the types section of config.yaml for YAML unmarshaling.
@@ -131,8 +129,20 @@ func readTypesFromDB(beadsDir string) ([]string, error) {
 		return nil, err
 	}
 
-	// ParseTypesConfigValue returns nil for an empty or whitespace-only value.
-	return issueops.ParseTypesConfigValue(typesStr), nil
+	if typesStr == "" {
+		return nil, nil
+	}
+
+	// Parse comma-separated list
+	var types []string
+	for _, t := range strings.Split(typesStr, ",") {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			types = append(types, t)
+		}
+	}
+
+	return types, nil
 }
 
 // readTypesFromYAML reads types.custom from config.yaml
@@ -179,17 +189,20 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	}
 	defer func() { _ = store.Close() }()
 
-	// Collect known custom types (parent custom + all child custom).
-	// Built-in types — including orchestrator types like gate, molecule,
-	// spike, story, and milestone — are recognized via IsBuiltIn below, so
-	// this map only needs the configured custom types.
-	knownTypes := make(map[string]bool)
+	// Collect all known types (core work types + parent custom + all child custom)
+	// Only core work types are built-in; orchestrator types require types.custom config.
+	knownTypes := map[string]bool{
+		"bug": true, "feature": true, "task": true, "epic": true, "chore": true, "decision": true,
+	}
 
 	// Add parent's custom types
 	parentTypes, err := store.GetConfig(ctx, "types.custom")
 	if err == nil && parentTypes != "" {
-		for _, t := range issueops.ParseTypesConfigValue(parentTypes) {
-			knownTypes[t] = true
+		for _, t := range strings.Split(parentTypes, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				knownTypes[t] = true
+			}
 		}
 	}
 
@@ -219,7 +232,7 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 		if err := rows.Scan(&issueType); err != nil {
 			continue
 		}
-		if !types.IssueType(issueType).IsBuiltIn() && !knownTypes[issueType] && !seen[issueType] {
+		if !knownTypes[issueType] && !seen[issueType] {
 			unknownTypes = append(unknownTypes, issueType)
 			seen[issueType] = true
 		}

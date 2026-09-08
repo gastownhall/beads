@@ -117,10 +117,6 @@ type Formula struct {
 
 	// Source tracks where this formula was loaded from (set by parser).
 	Source string `json:"source,omitempty"`
-
-	// Intent is an optional caller-defined hint about the formula's runtime
-	// intent (e.g. "mail_only"). Opaque to bd; consumed by downstream tools.
-	Intent string `json:"intent,omitempty" toml:"intent,omitempty"`
 }
 
 // VarDef defines a template variable with optional validation.
@@ -206,11 +202,7 @@ type Step struct {
 	// Notes are additional notes for the issue (supports substitution).
 	Notes string `json:"notes,omitempty"`
 
-	// Type is the issue type: any built-in type (task by default; bug,
-	// feature, epic, chore, decision, spike, story, milestone, ...) or a
-	// custom type already registered in types.custom. Unregistered types
-	// are flattened to task, with a warning, when the formula is cooked
-	// or poured.
+	// Type is the issue type: task, bug, feature, epic, chore.
 	Type string `json:"type,omitempty"`
 
 	// Priority is the issue priority (0-4).
@@ -297,13 +289,6 @@ type Gate struct {
 
 	// Timeout is how long to wait before escalation (e.g., "1h", "24h").
 	Timeout string `json:"timeout,omitempty"`
-
-	// Repo optionally selects the GitHub repository (OWNER/REPO or
-	// HOST/OWNER/REPO) a gh:run or gh:pr gate's condition is checked
-	// against. Empty means the current Git repository - the same default
-	// as an ad-hoc `bd gate create` gate. Ignored for non-GitHub gate
-	// types (human, timer, bead).
-	Repo string `json:"repo,omitempty" toml:"repo,omitempty"`
 }
 
 // LoopSpec defines iteration over a body of steps.

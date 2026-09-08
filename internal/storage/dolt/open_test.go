@@ -2,13 +2,11 @@ package dolt
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -163,50 +161,6 @@ func TestApplyCLIAutoStart_DisableAutoStartWins(t *testing.T) {
 	}
 }
 
-func TestConfigConstructorsRejectNonDoltBackends(t *testing.T) {
-	for _, backend := range []string{
-		configfile.BackendSQLite,
-		configfile.BackendPostgres,
-		configfile.BackendMySQL,
-		"mystery",
-	} {
-		t.Run(backend, func(t *testing.T) {
-			beadsDir := t.TempDir()
-			if err := (&configfile.Config{Backend: backend}).Save(beadsDir); err != nil {
-				t.Fatalf("save metadata: %v", err)
-			}
-
-			constructors := map[string]func() (*DoltStore, error){
-				"standard": func() (*DoltStore, error) {
-					return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true})
-				},
-				"cli": func() (*DoltStore, error) {
-					return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true})
-				},
-			}
-			for name, construct := range constructors {
-				t.Run(name, func(t *testing.T) {
-					store, err := construct()
-					if store != nil {
-						_ = store.Close()
-						t.Fatalf("non-Dolt backend %q unexpectedly opened as Dolt", backend)
-					}
-					if err == nil || !strings.Contains(err.Error(), "cannot be opened as Dolt") {
-						t.Fatalf("constructor error = %v, want backend mismatch", err)
-					}
-					if backend == configfile.BackendPostgres || backend == configfile.BackendMySQL {
-						for _, want := range []string{"no longer supported", "was not opened or modified", "bd help init-safety"} {
-							if !strings.Contains(err.Error(), want) {
-								t.Errorf("removed-backend constructor error missing %q: %v", want, err)
-							}
-						}
-					}
-				})
-			}
-		})
-	}
-}
-
 func TestCLIDirUsesSharedDoltRootInSharedServerMode(t *testing.T) {
 	sharedRoot := t.TempDir()
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
@@ -252,9 +206,7 @@ func TestApplyResolvedConfig(t *testing.T) {
 		}
 		cfg := &Config{}
 
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
+		applyResolvedConfig(beadsDir, fileCfg, cfg)
 
 		if cfg.BeadsDir != beadsDir {
 			t.Fatalf("BeadsDir = %q, want %q", cfg.BeadsDir, beadsDir)
@@ -292,9 +244,7 @@ func TestApplyResolvedConfig(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
+		applyResolvedConfig(beadsDir, fileCfg, cfg)
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -323,9 +273,7 @@ func TestApplyResolvedConfig(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
+		applyResolvedConfig(beadsDir, fileCfg, cfg)
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -351,9 +299,7 @@ func TestApplyResolvedConfig(t *testing.T) {
 			ServerUser: "custom",
 		}
 
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
+		applyResolvedConfig(beadsDir, fileCfg, cfg)
 
 		if cfg.BeadsDir != "/override/.beads" {
 			t.Fatalf("BeadsDir override lost: %q", cfg.BeadsDir)
@@ -369,135 +315,6 @@ func TestApplyResolvedConfig(t *testing.T) {
 		}
 		if cfg.ServerUser != "custom" {
 			t.Fatalf("ServerUser override lost: %q", cfg.ServerUser)
-		}
-	})
-
-	t.Run("pool timeouts populate from env vars (bd-vz0y9)", func(t *testing.T) {
-		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
-		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "45")
-		cfg := &Config{}
-
-		if err := applyResolvedConfig(context.Background(), t.TempDir(), &configfile.Config{Backend: configfile.BackendDolt}, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
-
-		if cfg.PoolReadTimeout != 90*time.Second {
-			t.Fatalf("PoolReadTimeout = %v, want 90s", cfg.PoolReadTimeout)
-		}
-		if cfg.PoolWriteTimeout != 45*time.Second {
-			t.Fatalf("PoolWriteTimeout = %v, want 45s (bare number = seconds)", cfg.PoolWriteTimeout)
-		}
-	})
-
-	t.Run("caller-set pool timeouts win over env vars", func(t *testing.T) {
-		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
-		cfg := &Config{PoolReadTimeout: 2 * time.Minute}
-
-		if err := applyResolvedConfig(context.Background(), t.TempDir(), &configfile.Config{Backend: configfile.BackendDolt}, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
-
-		if cfg.PoolReadTimeout != 2*time.Minute {
-			t.Fatalf("PoolReadTimeout = %v, want caller's 2m", cfg.PoolReadTimeout)
-		}
-	})
-
-	t.Run("propagates ServerPortSource and ServerPortSharedServer alongside ServerPort (be-9tju)", func(t *testing.T) {
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-		t.Setenv("BEADS_DOLT_PORT", "")
-		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
-		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
-		beadsDir := t.TempDir()
-		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
-			t.Fatalf("EnsurePortFile: %v", err)
-		}
-		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
-		cfg := &Config{}
-
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
-
-		if cfg.ServerPort != 14567 {
-			t.Fatalf("ServerPort = %d, want 14567", cfg.ServerPort)
-		}
-		if cfg.ServerPortSource != doltserver.PortSourcePortFile {
-			t.Fatalf("ServerPortSource = %q, want %q (applyResolvedConfig must propagate doltserver.DefaultConfig's PortSource, not just Port)", cfg.ServerPortSource, doltserver.PortSourcePortFile)
-		}
-		if cfg.ServerPortSharedServer != false {
-			t.Fatalf("ServerPortSharedServer = %v, want false", cfg.ServerPortSharedServer)
-		}
-	})
-
-	t.Run("chained through applyConfigDefaults: port-file resolution is never mislabeled caller-explicit (be-9tju)", func(t *testing.T) {
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-		t.Setenv("BEADS_DOLT_PORT", "")
-		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
-		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
-		beadsDir := t.TempDir()
-		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
-			t.Fatalf("EnsurePortFile: %v", err)
-		}
-		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
-		cfg := &Config{}
-
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
-		applyConfigDefaults(cfg)
-
-		if cfg.ServerPortSource != doltserver.PortSourcePortFile {
-			t.Fatalf("ServerPortSource = %q, want %q (a port-file-resolved port must not be mislabeled caller_explicit — GH#4052 auto-start fail-closed logic depends on this)", cfg.ServerPortSource, doltserver.PortSourcePortFile)
-		}
-		if cfg.ServerPort != 14567 {
-			t.Fatalf("ServerPort = %d, want 14567 (unchanged)", cfg.ServerPort)
-		}
-	})
-
-	t.Run("legacy BEADS_DOLT_PORT redirects away from a non-authoritative port-file port (be-9tju)", func(t *testing.T) {
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-		t.Setenv("BEADS_DOLT_PORT", "43211")
-		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
-		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
-		beadsDir := t.TempDir()
-		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
-			t.Fatalf("EnsurePortFile: %v", err)
-		}
-		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
-		cfg := &Config{}
-
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
-		applyConfigDefaults(cfg)
-
-		if cfg.ServerPort != 43211 {
-			t.Fatalf("ServerPort = %d, want 43211 (legacy BEADS_DOLT_PORT must override a non-authoritative port-file-resolved port — regression of hq-27t bug class)", cfg.ServerPort)
-		}
-		if cfg.ServerPortSource != doltserver.PortSourceEnv {
-			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceEnv)
-		}
-	})
-
-	t.Run("genuinely caller-explicit ServerPort still outranks ambient BEADS_DOLT_SERVER_PORT env (be-wf9a.1 regression safety)", func(t *testing.T) {
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "43211")
-		t.Setenv("BEADS_DOLT_PORT", "")
-		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
-		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
-		beadsDir := t.TempDir()
-		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
-		cfg := &Config{ServerPort: 15000}
-
-		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
-			t.Fatalf("applyResolvedConfig: %v", err)
-		}
-		applyConfigDefaults(cfg)
-
-		if cfg.ServerPort != 15000 {
-			t.Fatalf("ServerPort = %d, want 15000 (caller-explicit preset must outrank ambient env)", cfg.ServerPort)
-		}
-		if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
-			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceCallerExplicit)
 		}
 	})
 }

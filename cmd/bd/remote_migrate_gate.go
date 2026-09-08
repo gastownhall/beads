@@ -39,7 +39,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			"observed":                fmt.Sprintf("%d pending schema migration(s) and a configured remote", e.Pending),
 			"expected":                "exactly one designated clone migrates and publishes; every other clone adopts the result",
 			"options":                 opts,
-			"docs":                    "https://github.com/gastownhall/beads/blob/main/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones",
+			"docs":                    "https://github.com/gastownhall/beads/blob/main/website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones",
 		}
 		// Smart gate (#4516): when a state-aware decision narrowed the stop,
 		// tell the agent which case it is and (for a fork) which versions skewed.
@@ -53,14 +53,6 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			gate["observed"] = fmt.Sprintf("this clone and the remote applied different content for migration(s) %s — already forked", schema.FormatMigrationVersions(e.SkewVersions))
 			gate["expected"] = "pick one canonical clone and re-bootstrap the others (data-loss decision)"
 			gate["skew_versions"] = e.SkewVersions
-		default:
-			// Blunt #4515 stop — name WHY the smart gate (#4516) could not do
-			// better (gastownhall/beads#4551 follow-up), so an agent/operator can
-			// tell "unreadable remote state" apart from "below the convergence
-			// floor" apart from "opted out" apart from "unparseable BD_SMART_GATE".
-			if e.FallbackReason != "" {
-				gate["fallback_reason"] = e.FallbackReason
-			}
 		}
 		m["remote_migrate_gate"] = gate
 	}

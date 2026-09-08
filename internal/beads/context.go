@@ -15,7 +15,7 @@
 //	}
 //	cmd := rc.GitCmd(ctx, "status")  // Runs in beads repo, not CWD
 //
-// See engdocs/REPO_CONTEXT.md for detailed documentation.
+// See docs/REPO_CONTEXT.md for detailed documentation.
 package beads
 
 import (
@@ -274,15 +274,11 @@ func (rc *RepoContext) RelPath(absPath string) (string, error) {
 	return filepath.Rel(rc.RepoRoot, absPath)
 }
 
-// ResetCaches clears every cached workspace-resolution input: the RepoContext
-// here and the git context in internal/git, forcing re-resolution on next call.
+// ResetCaches clears the cached RepoContext, forcing re-resolution on next call.
 //
 // This is intended for tests that need to change directory or BEADS_DIR
 // between test cases. In production, the cache is safe because these
-// values don't change during command execution. Workspace resolution reads
-// the git context (worktree detection, repo root), so resetting only one of
-// the two caches leaves resolution pinned to the pre-chdir state — the
-// composition here is what makes this a single complete reset verb.
+// values don't change during command execution.
 //
 // WARNING: Not thread-safe. Only call from single-threaded test contexts.
 //
@@ -290,9 +286,9 @@ func (rc *RepoContext) RelPath(absPath string) (string, error) {
 //
 //	t.Cleanup(func() {
 //	    beads.ResetCaches()
+//	    git.ResetCaches()
 //	})
 func ResetCaches() {
-	git.ResetCaches()
 	repoCtxOnce = sync.Once{}
 	repoCtx = nil
 	repoCtxErr = nil
@@ -313,40 +309,22 @@ func isPathInSafeBoundary(path string) bool {
 		return false
 	}
 
-	// Allow OS-designated temp directories (e.g., /var/folders on macOS, which
-	// symlinks to /private/var/folders). World-writable, so resolve symlinks
-	// before admitting: a symlink planted under the temp dir whose target
-	// escapes the boundary must be rejected, not followed into a system
-	// directory — same treatment as the /Users/Shared carve-out below
-	// (be-kghzr SEC-003 hardening).
-	// The carve-out must admit both spellings of the temp root: os.TempDir()
-	// itself (on macOS the symlinked /var/folders/... form) and its physical
-	// resolution (/private/var/folders/...). A caller-supplied path that has
-	// already been symlink-resolved arrives in the physical form and would
-	// otherwise skip this branch and be rejected by the /private deny prefix
-	// below.
-	tempDir := strings.TrimSuffix(os.TempDir(), "/")
-	physTempDir := strings.TrimSuffix(resolveLongestExistingAncestor(tempDir), "/")
-	if absPath == tempDir || strings.HasPrefix(absPath, tempDir+"/") ||
-		absPath == physTempDir || strings.HasPrefix(absPath, physTempDir+"/") {
-		return resolvedPathWithinRoot(absPath, tempDir)
+	// Allow OS-designated temp directories (e.g., /var/folders on macOS)
+	// On macOS, TempDir() returns paths under /var/folders which symlinks to /private/var/folders
+	tempDir := os.TempDir()
+	resolvedTemp, _ := filepath.EvalSymlinks(tempDir)
+	resolvedPath, _ := filepath.EvalSymlinks(absPath)
+	if resolvedTemp != "" && strings.HasPrefix(resolvedPath, resolvedTemp) {
+		return true
+	}
+	// Also check unresolved paths (in case symlink resolution fails)
+	if strings.HasPrefix(absPath, tempDir) {
+		return true
 	}
 
 	// Allow /var/home as a valid user home directory (Fedora Silverblue, Bluefin, etc.)
 	if strings.HasPrefix(absPath, "/var/home/") {
 		return true
-	}
-
-	// Allow /var/tmp as the FHS-standard secondary temp directory (persists across
-	// reboots, unlike /tmp). This is distinct from the os.TempDir() carve-out
-	// above: a machine's build tooling can set GOTMPDIR to redirect Go's own
-	// test/compile temp dirs under /var/tmp even while os.TempDir() itself still
-	// reports /tmp, so t.TempDir() in a test binary can land here without the
-	// os.TempDir() check ever seeing it (be-odye4). Like /Users/Shared, /var/tmp is
-	// world-writable (drwxrwxrwt), so resolve symlinks before admitting (SEC-003):
-	// a symlink planted under it must not be followed into a rejected directory.
-	if absPath == "/var/tmp" || strings.HasPrefix(absPath, "/var/tmp/") {
-		return resolvedPathWithinRoot(absPath, "/var/tmp")
 	}
 
 	for _, prefix := range unsafePrefixes {

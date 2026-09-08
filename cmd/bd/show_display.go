@@ -124,18 +124,88 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 	// Dependencies (what this issue depends on)
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 	depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
-		printDepSection(sec)
+
+	if len(depsWithMeta) > 0 {
+		var blocks, parent, discovered []*types.IssueWithDependencyMetadata
+		for _, dep := range depsWithMeta {
+			switch dep.DependencyType {
+			case types.DepBlocks:
+				blocks = append(blocks, dep)
+			case types.DepParentChild:
+				parent = append(parent, dep)
+			case types.DepRelated, types.DepRelatesTo:
+				relatedSeen[dep.ID] = dep
+			case types.DepDiscoveredFrom:
+				discovered = append(discovered, dep)
+			default:
+				blocks = append(blocks, dep)
+			}
+		}
+		if len(parent) > 0 {
+			fmt.Printf("\n%s\n", ui.RenderBold("PARENT"))
+			for _, dep := range parent {
+				fmt.Println(formatDependencyLine("↑", dep))
+			}
+		}
+		if len(blocks) > 0 {
+			fmt.Printf("\n%s\n", ui.RenderBold("DEPENDS ON"))
+			for _, dep := range blocks {
+				fmt.Println(formatDependencyLine("→", dep))
+			}
+		}
+		if len(discovered) > 0 {
+			fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
+			for _, dep := range discovered {
+				fmt.Println(formatDependencyLine("◊", dep))
+			}
+		}
 	}
 
 	// Dependents (what depends on this issue)
 	dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID)
-	for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
-		printDepSection(sec)
+	if len(dependentsWithMeta) > 0 {
+		var blocks, children, discovered []*types.IssueWithDependencyMetadata
+		for _, dep := range dependentsWithMeta {
+			switch dep.DependencyType {
+			case types.DepBlocks:
+				blocks = append(blocks, dep)
+			case types.DepParentChild:
+				children = append(children, dep)
+			case types.DepRelated, types.DepRelatesTo:
+				relatedSeen[dep.ID] = dep
+			case types.DepDiscoveredFrom:
+				discovered = append(discovered, dep)
+			default:
+				blocks = append(blocks, dep)
+			}
+		}
+		if len(children) > 0 {
+			fmt.Printf("\n%s\n", ui.RenderBold("CHILDREN"))
+			for _, dep := range children {
+				fmt.Println(formatDependencyLine("↳", dep))
+			}
+		}
+		if len(blocks) > 0 {
+			fmt.Printf("\n%s\n", ui.RenderBold("BLOCKS"))
+			for _, dep := range blocks {
+				fmt.Println(formatDependencyLine("←", dep))
+			}
+		}
+		if len(discovered) > 0 {
+			fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
+			for _, dep := range discovered {
+				fmt.Println(formatDependencyLine("◊", dep))
+			}
+		}
 	}
 
 	// Related (bidirectional, deduplicated)
-	printRelatedSection(relatedSeen)
+	if len(relatedSeen) > 0 {
+		fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
+		for _, dep := range relatedSeen {
+			fmt.Println(formatDependencyLine("↔", dep))
+		}
+	}
 
 	// Comments
 	comments, _ := issueStore.GetIssueComments(ctx, issue.ID)

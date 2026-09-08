@@ -2,11 +2,10 @@ package issueops
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -15,13 +14,8 @@ import (
 // filter.Status is empty, open and in_progress issues are returned.
 // Results are ordered by updated_at ascending (stalest first).
 //
-// Label predicates are applied in SQL rather than to the hydrated results
-// because filter.Limit is a LIMIT on this query: post-filtering would return
-// fewer than the requested number of stale issues whenever the cut-off page
-// contained a non-matching row.
-//
-// nolint:gosec // G201: statusClause and labelClause contain only literal SQL or ? placeholders
-func GetStaleIssuesInTx(ctx context.Context, tx DBTX, filter types.StaleFilter) ([]*types.Issue, error) {
+// nolint:gosec // G201: statusClause contains only literal SQL or a single ? placeholder
+func GetStaleIssuesInTx(ctx context.Context, tx *sql.Tx, filter types.StaleFilter) ([]*types.Issue, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -filter.Days)
 
 	statusClause := "status IN ('open', 'in_progress')"
@@ -29,33 +23,17 @@ func GetStaleIssuesInTx(ctx context.Context, tx DBTX, filter types.StaleFilter) 
 		statusClause = "status = ?"
 	}
 
-	labelWhere, labelArgs := sqlbuild.LabelSetClauses("id", IssuesFilterTables, filter.Labels, filter.LabelsAny, filter.ExcludeLabels)
-	labelClause := ""
-	if len(labelWhere) > 0 {
-		labelClause = "\n\t\t  AND " + strings.Join(labelWhere, "\n\t\t  AND ")
-	}
-
-	// Heartbeats live in the ephemeral leases table and no longer stamp
-	// issues.updated_at (bd-lrgn1), so an actively-worked claim can carry an
-	// old updated_at: an issue with a heartbeat since the cutoff is not stale.
 	query := fmt.Sprintf(`
 		SELECT id FROM issues
 		WHERE updated_at < ?
 		  AND %s
 		  AND (ephemeral = 0 OR ephemeral IS NULL)
-		  AND NOT EXISTS (
-			SELECT 1 FROM leases WHERE leases.issue_id = issues.id AND leases.heartbeat_at >= ?
-		  )%s
 		ORDER BY updated_at ASC
-	`, statusClause, labelClause)
+	`, statusClause)
 	args := []interface{}{cutoff}
 	if filter.Status != "" {
 		args = append(args, filter.Status)
 	}
-	args = append(args, cutoff) // NOT EXISTS heartbeat cutoff, after any status arg
-	// Label placeholders sit after the NOT EXISTS in the query text, so their
-	// args go last.
-	args = append(args, labelArgs...)
 
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)

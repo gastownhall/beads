@@ -264,7 +264,6 @@ func TestCompactTier1_UpdateError(t *testing.T) {
 
 func TestNew_NilConfig(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("MINIMAX_API_KEY", "")
 	store := &stubStore{}
 	c, err := New(store, "", nil)
 	if err != nil {
@@ -294,7 +293,6 @@ func TestNew_DryRunExplicit(t *testing.T) {
 
 func TestNew_NoAPIKeyFallsToDryRun(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("MINIMAX_API_KEY", "")
 	store := &stubStore{}
 	c, err := New(store, "", &Config{})
 	if err != nil {
@@ -307,7 +305,6 @@ func TestNew_NoAPIKeyFallsToDryRun(t *testing.T) {
 
 func TestNew_WithAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("MINIMAX_API_KEY", "")
 	store := &stubStore{}
 	c, err := New(store, "test-key-123", &Config{Concurrency: 2, AuditEnabled: true, Actor: "testbot"})
 	if err != nil {

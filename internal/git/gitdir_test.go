@@ -41,8 +41,8 @@ func setupTestRepo(t *testing.T) (repoPath string, cleanup func()) {
 }
 
 func TestGetGitHooksDirTildeExpansion(t *testing.T) {
-	// Use an explicit temporary home so tilde expansion is deterministic
-	// regardless of the environment (CI, containers, overridden homes, etc.).
+	// Use an explicit temporary HOME so tilde expansion is deterministic
+	// regardless of the environment (CI, containers, overridden HOME, etc.).
 	fakeHome := t.TempDir()
 
 	tests := []struct {
@@ -88,10 +88,17 @@ func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 			subRepoPath, subCleanup := setupTestRepo(t)
 			defer subCleanup()
 
-			// Override both home variables after repo setup so Git and
-			// os.UserHomeDir resolve to fakeHome on every platform.
-			t.Setenv("HOME", fakeHome)
-			t.Setenv("USERPROFILE", fakeHome)
+			// Override HOME after repo setup so tilde expansion resolves
+			// to fakeHome deterministically for the code under test.
+			origHome := os.Getenv("HOME")
+			os.Setenv("HOME", fakeHome)
+			t.Cleanup(func() {
+				if origHome != "" {
+					os.Setenv("HOME", origHome)
+				} else {
+					os.Unsetenv("HOME")
+				}
+			})
 
 			ResetCaches()
 

@@ -2,69 +2,12 @@ package domain
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
 )
-
-// The dependency-edge refusals are declared and documented by the public
-// contract package, github.com/steveyegge/beads/issueops. These are the same
-// values, so every domain.ErrX reference and every errors.Is site keeps
-// matching the identical error.
-var (
-	ErrSelfDependency           = issueops.ErrSelfDependency
-	ErrDependencyCycle          = issueops.ErrDependencyCycle
-	ErrDependencySourceNotFound = issueops.ErrDependencySourceNotFound
-	ErrDependencyTargetNotFound = issueops.ErrDependencyTargetNotFound
-)
-
-// cycleError carries a fully-formatted cycle-rejection message while unwrapping
-// to ErrDependencyCycle. The bulk dependency-add path surfaces this text
-// verbatim through the proxied CLI (HandleErrorRespectJSON("%v", err)), so a
-// plain fmt.Errorf("...: %w", ErrDependencyCycle) — which appends the sentinel's
-// own "adding dependency would create a cycle" text to an already-complete
-// message — would change the user-facing string. This keeps the message
-// byte-for-byte and adds only errors.Is matchability.
-type cycleError struct {
-	msg string
-}
-
-func (e *cycleError) Error() string { return e.msg }
-func (e *cycleError) Unwrap() error { return ErrDependencyCycle }
-
-// cycleErrorf formats a cycle-rejection message that errors.Is-matches
-// ErrDependencyCycle without altering the rendered text.
-func cycleErrorf(format string, args ...any) error {
-	return &cycleError{msg: fmt.Sprintf(format, args...)}
-}
-
-// NewCycleError is the exported entry point for cycleErrorf. The embedded bulk
-// CLI final gate (cmd/bd/dep.go addBulkDependenciesInTx) lives in a different
-// package but must type its cycle rejection identically to this bulk path, so it
-// builds the same errors.Is-matchable-but-text-preserving error through here
-// rather than duplicating the cycleError wrapper.
-func NewCycleError(format string, args ...any) error {
-	return cycleErrorf(format, args...)
-}
-
-// DependencyTypeConflictError reports a duplicate dependency pair with a
-// conflicting requested type. See issueops.DependencyTypeConflictError.
-type DependencyTypeConflictError = issueops.DependencyTypeConflictError
-
-// DependencyHierarchyConflictError reports a dependency that would make a
-// blocking hierarchy impossible to complete. See
-// issueops.DependencyHierarchyConflictError.
-type DependencyHierarchyConflictError = issueops.DependencyHierarchyConflictError
-
-// DependencyEndpointNotFoundError reports which endpoint of a refused edge this
-// database could see the absence of. See
-// issueops.DependencyEndpointNotFoundError.
-type DependencyEndpointNotFoundError = issueops.DependencyEndpointNotFoundError
 
 type DepDirection int
 
@@ -75,20 +18,7 @@ const (
 )
 
 type DepInsertOpts struct {
-	UseWispsTable      bool
-	HierarchyValidated bool // Set only after ValidateBlockingHierarchy on the same repository/UOW.
-	CycleValidated     bool // Set only after HasCycle or a whole-graph check on the same repository/UOW.
-	// EmitEvent records a dependency_added / dependency_removed event on the
-	// source's event table for a genuine edge add/remove. Only the explicit dep
-	// verbs (AddDependency/RemoveDependency plus their wisp twins, and the bulk
-	// AddDependencies) set it; create-with-deps and reparent call Insert/Delete
-	// directly with it unset, so an implicit parent-child / --deps / waits-for
-	// edge produces no event.
-	// The embedded plumbing matches edge-for-edge: its structural paths
-	// wire edges through the plain AddDependency/tx.AddDependency, whose
-	// issueops.AddDependencyInTx EmitEvent gate is unset, while only the explicit
-	// bd dep add / bd link / bd dep remove verbs pass EmitEvent.
-	EmitEvent bool
+	UseWispsTable bool
 }
 
 type DepListOpts struct {
@@ -138,7 +68,6 @@ type BulkAddDepsResult struct {
 }
 
 type DependencySQLRepository interface {
-	ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
 	Insert(ctx context.Context, dep *types.Dependency, actor string, opts DepInsertOpts) error
 	Delete(ctx context.Context, issueID, dependsOnID, actor string, opts DepInsertOpts) (DepDeleteResult, error)
 	HasCycle(ctx context.Context, issueID, dependsOnID string) (bool, error)
@@ -155,42 +84,16 @@ type DependencySQLRepository interface {
 	DeleteAllForIDs(ctx context.Context, ids []string, opts DepInsertOpts) (int, error)
 	CountAllForIDs(ctx context.Context, ids []string, opts DepCountsOpts) (int, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
-	// DetectCycleReport answers the same walk in the shape issueops.CycleDetector
-	// publishes: canonically ordered, and carrying every member of a cycle
-	// whether or not this database can describe it. DetectCycles above is the
-	// lossy legacy shape.
-	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
 
 	GetTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
-	// WalkDependencyTree answers the tree walk in the shape issueops.TreeWalker
-	// publishes: validated, rooted, pruned by status and capped, with both
-	// directions of a `both` request inside ONE transaction. GetTree above is the
-	// unvalidated shape.
-	WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error)
-	// CountEdges answers the batched edge count in the shape
-	// issueops.GraphCounter publishes: validated, per-anchor, spanning both
-	// dependency planes, with the existence probe and the tally in ONE
-	// transaction. CountByIssueID above is the single-anchor, unprobed shape.
-	CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error)
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
-	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 	GetWispDependencyRecordsForIDs(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
-
-	// WispSourceIDs returns the subset of ids that are currently wisps, in one
-	// scoped query rather than a probe per id.
-	WispSourceIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 }
 
 type DependencyUseCase interface {
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
 	RemoveDependency(ctx context.Context, issueID, dependsOnID, actor string) error
-	// RemoveDependencyBySource removes one edge from the plane its SOURCE
-	// lives in, the way AddDependencies writes one. There is deliberately no
-	// plane flag: `bd dep remove` names an id, not a table, and a removal
-	// cannot put an edge anywhere, so reading the plane is always safer than
-	// pinning it.
-	RemoveDependencyBySource(ctx context.Context, sourceID, dependsOnID, actor string) (bool, error)
 	Reparent(ctx context.Context, childID, newParentID, actor string) error
 	ListByIssueIDs(ctx context.Context, issueIDs []string, filter DepListFilter) (DepBulkResult, error)
 	ListWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
@@ -201,44 +104,12 @@ type DependencyUseCase interface {
 	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
 	GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
-	// DetectCycleReport is the shape issueops.CycleDetector publishes; see the
-	// repository method of the same name.
-	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
 
 	GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
-	// WalkDependencyTree is the shape issueops.TreeWalker publishes; see the
-	// repository method of the same name.
-	WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error)
-	// CountEdges is the shape issueops.GraphCounter publishes; see the
-	// repository method of the same name.
-	CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error)
-	// AddDependencies asserts a batch of edges, each landing in the plane its
-	// own SOURCE lives in. There is deliberately no plane-pinned variant:
-	// `bd dep add` takes whatever ids the caller names and one request may
-	// legitimately mix them, so routing the whole batch by a flag would put an
-	// edge on a row the target table does not have. It is ONE pass, not one
-	// pass per plane: the parent-child-first ordering and the whole-graph
-	// cycle gate both have to see the request as a single graph.
 	AddDependencies(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts) (BulkAddDepsResult, error)
-	// ValidateBlockingHierarchy and CycleThroughEdges are the two halves of the
-	// whole-graph gate AddDependencies runs at the end of its own batch,
-	// published so a caller that writes edges INTERLEAVED with other mutations
-	// can run the same gate over the graph its whole request produced.
-	//
-	// issueops.BatchApplier is that caller and the reason these are here: it
-	// applies items in the caller's declaration order and never reorders, so a
-	// blocking edge can be written before the parent-child edge that makes it a
-	// conflict, and the per-edge probe that ran at the time saw a hierarchy
-	// that had not been built yet. Both must be re-run at the end, against the
-	// same repository methods the per-edge path uses, or the two backends
-	// answer different refusals to the same request.
-	ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
-	// CycleThroughEdges reports the path of a scheduling cycle any of edges
-	// closes, or "" when none does. Each pair is (source, target).
-	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
-	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 
+	AddWispDependencies(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts) (BulkAddDepsResult, error)
 	GetWispDependencyRecords(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
 
 	AddWispDependency(ctx context.Context, dep *types.Dependency, actor string) error
@@ -278,51 +149,17 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 		return fmt.Errorf("add dep: IssueID and DependsOnID must be non-empty")
 	}
 
-	// Self-dependency guard mirrors issueops.CheckDependencyCycleInTx: it is
-	// checked BEFORE the cycle probe and for ALL dep types, and emits the
-	// dedicated self-dep message. A blocking self-edge otherwise trips HasCycle
-	// and would report the wrong (cycle) error (#4547 F-1).
-	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("%w: %s cannot depend on itself", ErrSelfDependency, dep.IssueID)
-	}
-	if err := u.depRepo.ValidateBlockingHierarchy(ctx, dep); err != nil {
-		var hierarchyConflict *DependencyHierarchyConflictError
-		if errors.As(err, &hierarchyConflict) {
-			return err
-		}
-		return fmt.Errorf("add dep: hierarchy check: %w", err)
-	}
-
-	if types.IsSchedulingEdge(dep.Type) {
+	if isBlockingDep(dep.Type) {
 		cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
 		if err != nil {
 			return fmt.Errorf("add dep: cycle check: %w", err)
 		}
 		if cycle {
-			// Match the embedded store's user-facing wording verbatim (no ids
-			// prefix) so gc code that string-matches this error behaves the same
-			// on both plumbings (#4547 F-1).
-			return ErrDependencyCycle
+			return fmt.Errorf("add dep: adding %s -> %s would create a cycle", dep.IssueID, dep.DependsOnID)
 		}
 	}
 
-	if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp, HierarchyValidated: true, CycleValidated: true, EmitEvent: true}); err != nil {
-		// The retype conflict is a user-facing error whose message already
-		// matches embedded verbatim; pass it through unwrapped so the CLI does
-		// not prepend "add dep: insert:" (#4547 F-1). The endpoint-existence
-		// refusals are here for the same reason.
-		var conflict *DependencyTypeConflictError
-		if errors.As(err, &conflict) {
-			return err
-		}
-		var hierarchyConflict *DependencyHierarchyConflictError
-		if errors.As(err, &hierarchyConflict) {
-			return err
-		}
-		var missingEndpoint *DependencyEndpointNotFoundError
-		if errors.As(err, &missingEndpoint) {
-			return err
-		}
+	if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 		return fmt.Errorf("add dep: insert: %w", err)
 	}
 	return nil
@@ -336,36 +173,11 @@ func (u *dependencyUseCaseImpl) RemoveWispDependency(ctx context.Context, wispID
 	return u.removeDep(ctx, wispID, dependsOnID, actor, true)
 }
 
-// RemoveDependencyBySource removes one edge from the plane its SOURCE lives in
-// and reports whether there was an edge to remove.
-//
-// It is the source-routed twin of AddDependencies, and exists for the same
-// reason: `bd dep remove` takes whatever id the caller names, and pinning the
-// removal to the durable table means failing to remove an edge whose source is
-// a wisp while reporting that it was never there (bd-yby99.17). The delete IS
-// the verdict, the way the store-backed body reads it off RemoveDependencyInTx
-// rather than from a separate lookup.
-func (u *dependencyUseCaseImpl) RemoveDependencyBySource(ctx context.Context, sourceID, dependsOnID, actor string) (bool, error) {
-	if sourceID == "" || dependsOnID == "" {
-		return false, fmt.Errorf("remove dep: sourceID and dependsOnID must not be empty")
-	}
-	wispSources, err := u.depRepo.WispSourceIDs(ctx, []string{sourceID})
-	if err != nil {
-		return false, fmt.Errorf("remove dep: classify source: %w", err)
-	}
-	_, sourceIsWisp := wispSources[sourceID]
-	res, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: sourceIsWisp, EmitEvent: true})
-	if err != nil {
-		return false, fmt.Errorf("remove dep %s -> %s: %w", sourceID, dependsOnID, err)
-	}
-	return res.Found, nil
-}
-
 func (u *dependencyUseCaseImpl) removeDep(ctx context.Context, sourceID, dependsOnID, actor string, useWisp bool) error {
 	if sourceID == "" || dependsOnID == "" {
 		return fmt.Errorf("remove dep: sourceID and dependsOnID must not be empty")
 	}
-	if _, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: useWisp, EmitEvent: true}); err != nil {
+	if _, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 		return fmt.Errorf("remove dep %s -> %s: %w", sourceID, dependsOnID, err)
 	}
 	return nil
@@ -397,69 +209,35 @@ func (u *dependencyUseCaseImpl) reparent(ctx context.Context, childID, newParent
 		return fmt.Errorf("reparent: list current parent: %w", err)
 	}
 
-	// A child can carry MORE THAN ONE parent-child edge — Create accepts
-	// CreateRequest.ParentID and an explicit parent-child entry in
-	// Dependencies in the same request — so this is a set replacement, not a
-	// swap of one edge. Diffing the whole existing set against the target set
-	// is the same rule the store-backed backends apply in
-	// issueops.ApplyParentPatch; that body cannot be called from here because
-	// internal/storage/issueops imports this package (bd-yby99.26).
-	existing := map[string]struct{}{}
+	var oldParentID string
 	for _, dep := range res.Outgoing[childID] {
 		if dep.Type == types.DepParentChild {
-			existing[dep.DependsOnID] = struct{}{}
+			oldParentID = dep.DependsOnID
+			break
 		}
 	}
-	target := map[string]struct{}{}
-	if newParentID != "" {
-		target[newParentID] = struct{}{}
-	}
-	if sameStringSet(existing, target) {
+
+	if oldParentID == newParentID {
 		return nil
 	}
 
-	for _, oldParentID := range sortedSetDifference(existing, target) {
+	if oldParentID != "" {
 		if _, err := u.depRepo.Delete(ctx, childID, oldParentID, actor, opts); err != nil {
 			return fmt.Errorf("reparent: remove old parent %s: %w", oldParentID, err)
 		}
 	}
 
-	for _, addParentID := range sortedSetDifference(target, existing) {
+	if newParentID != "" {
 		dep := &types.Dependency{
 			IssueID:     childID,
-			DependsOnID: addParentID,
+			DependsOnID: newParentID,
 			Type:        types.DepParentChild,
 		}
 		if err := u.depRepo.Insert(ctx, dep, actor, opts); err != nil {
-			return fmt.Errorf("reparent: add new parent %s: %w", addParentID, err)
+			return fmt.Errorf("reparent: add new parent %s: %w", newParentID, err)
 		}
 	}
 	return nil
-}
-
-func sameStringSet(left, right map[string]struct{}) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for value := range left {
-		if _, ok := right[value]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-// sortedSetDifference returns the members of left absent from right, sorted so
-// the writes it drives land in a deterministic order.
-func sortedSetDifference(left, right map[string]struct{}) []string {
-	values := make([]string, 0, len(left))
-	for value := range left {
-		if _, ok := right[value]; !ok {
-			values = append(values, value)
-		}
-	}
-	sort.Strings(values)
-	return values
 }
 
 func (u *dependencyUseCaseImpl) ListByIssueIDs(ctx context.Context, issueIDs []string, filter DepListFilter) (DepBulkResult, error) {
@@ -613,6 +391,10 @@ func (u *dependencyUseCaseImpl) GetBlockingInfo(ctx context.Context, issueIDs []
 	return out, nil
 }
 
+func isBlockingDep(t types.DependencyType) bool {
+	return t == types.DepBlocks || t == types.DepConditionalBlocks
+}
+
 func (u *dependencyUseCaseImpl) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	return u.isBlocked(ctx, issueID, false)
 }
@@ -640,30 +422,6 @@ func (u *dependencyUseCaseImpl) DetectCycles(ctx context.Context) ([][]*types.Is
 	return out, nil
 }
 
-func (u *dependencyUseCaseImpl) DetectCycleReport(ctx context.Context) (issueops.CycleReport, error) {
-	out, err := u.depRepo.DetectCycleReport(ctx)
-	if err != nil {
-		return issueops.CycleReport{}, fmt.Errorf("DetectCycleReport: %w", err)
-	}
-	return out, nil
-}
-
-// WalkDependencyTree passes the request straight through.
-//
-// No pre-check and no error wrapping, unlike GetDependencyTree below: the
-// request's whole vocabulary is validated inside the shared body, and its
-// refusals are typed sentinels both front doors classify.
-func (u *dependencyUseCaseImpl) WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
-	return u.depRepo.WalkDependencyTree(ctx, req)
-}
-
-// CountEdges passes the request straight through, for WalkDependencyTree's
-// reason: the request's whole vocabulary is validated inside the shared body,
-// and its refusals are typed sentinels both front doors classify.
-func (u *dependencyUseCaseImpl) CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
-	return u.depRepo.CountEdges(ctx, req)
-}
-
 func (u *dependencyUseCaseImpl) GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error) {
 	if rootID == "" {
 		return nil, fmt.Errorf("GetDependencyTree: rootID must not be empty")
@@ -675,17 +433,19 @@ func (u *dependencyUseCaseImpl) GetDependencyTree(ctx context.Context, rootID st
 	return out, nil
 }
 
-// AddDependencies asserts every edge in one pass, writing each to the plane its
-// own source lives in. The ordering and the final cycle gate deliberately do
-// not partition by plane, because the hierarchy a blocking edge is checked
-// against and the graph the gate walks both span the two tables.
 func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts) (BulkAddDepsResult, error) {
+	return u.addBulk(ctx, deps, actor, opts, false)
+}
+
+func (u *dependencyUseCaseImpl) AddWispDependencies(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts) (BulkAddDepsResult, error) {
+	return u.addBulk(ctx, deps, actor, opts, true)
+}
+
+func (u *dependencyUseCaseImpl) addBulk(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts, useWisp bool) (BulkAddDepsResult, error) {
 	if len(deps) == 0 {
 		return BulkAddDepsResult{Added: []*types.Dependency{}}, nil
 	}
-	// Validate the entire input shape before the first write. Multi-edge callers
-	// run in a UOW, but this also avoids an avoidable partial prefix for direct
-	// use-case consumers.
+	insertOpts := DepInsertOpts{UseWispsTable: useWisp}
 	for i, dep := range deps {
 		if dep == nil {
 			return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: dep must not be nil", i)
@@ -693,114 +453,38 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 		if dep.IssueID == "" || dep.DependsOnID == "" {
 			return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: IssueID and DependsOnID must be non-empty", i)
 		}
-		// Self-dependency guard mirrors the single-edge add() path and
-		// issueops.CheckDependencyCycleInTx: reject a self-edge for ALL dep
-		// types before the hierarchy/cycle probe, so a scheduling self-edge is
-		// typed as ErrSelfDependency instead of tripping HasCycle (or the final
-		// CycleThroughEdges gate) and surfacing as a cycle. The message is
-		// byte-identical to every other self-dep site so the proxied bulk CLI
-		// (bd dep add / bd link) shows one consistent self-dependency error.
-		if dep.IssueID == dep.DependsOnID {
-			return BulkAddDepsResult{}, fmt.Errorf("%w: %s cannot depend on itself", ErrSelfDependency, dep.IssueID)
+		if !opts.SkipPerEdgeCycleCheck && isBlockingDep(dep.Type) {
+			cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
+			if err != nil {
+				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: cycle check: %w", i, err)
+			}
+			if cycle {
+				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: adding %s -> %s would create a cycle", i, dep.IssueID, dep.DependsOnID)
+			}
+		}
+		if err := u.depRepo.Insert(ctx, dep, actor, insertOpts); err != nil {
+			return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: insert: %w", i, err)
 		}
 	}
-	sources := make([]string, 0, len(deps))
-	for _, dep := range deps {
-		sources = append(sources, dep.IssueID)
-	}
-	// One query for the batch, read before the first write. Nothing an edge
-	// write does moves a source between planes, so the answer stays true for
-	// the rest of the unit of work.
-	wispSources, err := u.depRepo.WispSourceIDs(ctx, sources)
-	if err != nil {
-		return BulkAddDepsResult{}, fmt.Errorf("add deps: classify sources: %w", err)
-	}
-	// Parent-child edges must be visible before blocking edges in the same
-	// request. The shared repository guard can then evaluate existing + planned
-	// ancestry without widening #4034 into #4035's combined-graph cycle check.
-	for phase := 0; phase < 2; phase++ {
-		parentPhase := phase == 0
-		for i, dep := range deps {
-			if (dep.Type == types.DepParentChild) != parentPhase {
+	if opts.SkipPerEdgeCycleCheck {
+		var pairs [][2]string
+		for _, dep := range deps {
+			if !isBlockingDep(dep.Type) {
 				continue
 			}
-			if err := u.depRepo.ValidateBlockingHierarchy(ctx, dep); err != nil {
-				var hierarchyConflict *DependencyHierarchyConflictError
-				if errors.As(err, &hierarchyConflict) {
-					return BulkAddDepsResult{}, err
-				}
-				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: hierarchy check: %w", i, err)
-			}
-			if !opts.SkipPerEdgeCycleCheck && types.IsSchedulingEdge(dep.Type) {
-				cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
-				if err != nil {
-					return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: cycle check: %w", i, err)
-				}
-				if cycle {
-					return BulkAddDepsResult{}, cycleErrorf("add deps[%d]: adding %s -> %s would create a cycle", i, dep.IssueID, dep.DependsOnID)
-				}
-			}
-			// The explicit `bd dep add` / `bd link` verb on the proxied server
-			// (cmd/bd/dep_proxied_server.go, link_proxied_server.go) records a
-			// dependency_added event for each genuine new edge — unlike
-			// create-with-deps, which calls depRepo.Insert directly without
-			// EmitEvent. UseWispsTable routes both the edge and that event to
-			// the source's own pair of tables.
-			_, sourceIsWisp := wispSources[dep.IssueID]
-			if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{
-				UseWispsTable:      sourceIsWisp,
-				HierarchyValidated: true,
-				CycleValidated:     true,
-				EmitEvent:          true,
-			}); err != nil {
-				var hierarchyConflict *DependencyHierarchyConflictError
-				if errors.As(err, &hierarchyConflict) {
-					return BulkAddDepsResult{}, err
-				}
-				var missingEndpoint *DependencyEndpointNotFoundError
-				if errors.As(err, &missingEndpoint) {
-					return BulkAddDepsResult{}, err
-				}
-				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: insert: %w", i, err)
-			}
+			pairs = append(pairs, [2]string{dep.IssueID, dep.DependsOnID})
 		}
-	}
-	var pairs [][2]string
-	for _, dep := range deps {
-		if !types.IsSchedulingEdge(dep.Type) {
-			continue
-		}
-		pairs = append(pairs, [2]string{dep.IssueID, dep.DependsOnID})
-	}
-	if len(pairs) > 0 {
-		cyclePath, err := u.depRepo.CycleThroughEdges(ctx, pairs)
-		if err != nil {
-			return BulkAddDepsResult{}, fmt.Errorf("add deps: final cycle check: %w", err)
-		}
-		if cyclePath != "" {
-			return BulkAddDepsResult{}, cycleErrorf("add deps: dependency cycle would be created: %s", cyclePath)
+		if len(pairs) > 0 {
+			cyclePath, err := u.depRepo.CycleThroughEdges(ctx, pairs)
+			if err != nil {
+				return BulkAddDepsResult{}, fmt.Errorf("add deps: final cycle check: %w", err)
+			}
+			if cyclePath != "" {
+				return BulkAddDepsResult{}, fmt.Errorf("add deps: dependency cycle would be created: %s", cyclePath)
+			}
 		}
 	}
 	return BulkAddDepsResult{Added: deps}, nil
-}
-
-// ValidateBlockingHierarchy passes the edge straight to the repository check
-// AddDependencies runs per edge, so a caller re-running the gate at the end of
-// a mixed request raises the identical *DependencyHierarchyConflictError rather
-// than a second opinion about the same graph.
-func (u *dependencyUseCaseImpl) ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
-	return u.depRepo.ValidateBlockingHierarchy(ctx, dep)
-}
-
-// CycleThroughEdges passes the pairs straight to the repository walk
-// AddDependencies runs as its own final gate. The caller composes the refusal,
-// because the two callers word it differently and both spellings are already
-// pinned.
-func (u *dependencyUseCaseImpl) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
-	if len(edges) == 0 {
-		return "", nil
-	}
-	return u.depRepo.CycleThroughEdges(ctx, edges)
 }
 
 func (u *dependencyUseCaseImpl) GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
@@ -810,14 +494,6 @@ func (u *dependencyUseCaseImpl) GetIssueDependencyRecords(ctx context.Context, i
 	out, err := u.depRepo.GetDependencyRecordsForIssues(ctx, issueIDs)
 	if err != nil {
 		return nil, fmt.Errorf("GetIssueDependencyRecords: %w", err)
-	}
-	return out, nil
-}
-
-func (u *dependencyUseCaseImpl) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	out, err := u.depRepo.GetExternalBlockingDependencyRecords(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("GetExternalBlockingDependencyRecords: %w", err)
 	}
 	return out, nil
 }

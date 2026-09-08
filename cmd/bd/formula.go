@@ -32,16 +32,8 @@ Search paths (in order):
   4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Commands:
-  list    List available formulas from all search paths
-  show    Show formula details, steps, and composition rules
-  schema  Show the formula schema index (alias: primitives)
-
-Discovering primitives:
-  bd formula schema                 # list every declared formula struct
-  bd formula schema loop            # show LoopSpec fields, types, and tags
-  bd formula primitives gate        # alias; same handler as 'schema'
-  examples/formulas/primitives/     # curated, smoke-tested wired fixtures
-  docs/workflows/formulas.md          # narrative reference`,
+  list   List available formulas from all search paths
+  show   Show formula details, steps, and composition rules`,
 }
 
 // formulaListCmd lists all available formulas.
@@ -57,9 +49,6 @@ Search paths (in order of priority):
   4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Formulas in earlier paths shadow those with the same name in later paths.
-
-To list the declared formula schema structs an agent can write inside a .formula.toml,
-use 'bd formula schema' (alias: 'bd formula primitives').
 
 Examples:
   bd formula list
@@ -83,9 +72,6 @@ Displays:
   - Steps with dependencies
   - Composition rules (extends, aspects, expansions)
   - Bond points for external composition
-
-To inspect the structure of an individual primitive (e.g. LoopSpec, Gate)
-rather than a user-authored formula, use 'bd formula schema <primitive>'.
 
 Examples:
   bd formula show shiny
@@ -418,7 +404,10 @@ func truncateDescription(desc string, maxLen int) string {
 	if idx := strings.Index(desc, "\n"); idx >= 0 {
 		desc = desc[:idx]
 	}
-	return truncate(desc, maxLen)
+	if len(desc) > maxLen {
+		return desc[:maxLen-3] + "..."
+	}
+	return desc
 }
 
 // getTypeIcon returns an icon for the formula type.

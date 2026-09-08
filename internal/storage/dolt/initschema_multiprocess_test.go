@@ -55,10 +55,7 @@ func TestHelperSchemaInit(t *testing.T) {
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
 
-	// Must leave room for the retry wrapper's full serverRetryMaxElapsed (30s)
-	// budget on top of connect time, or the context cuts the retry short and
-	// re-creates the failure it exists to absorb.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
@@ -66,18 +63,9 @@ func TestHelperSchemaInit(t *testing.T) {
 		os.Exit(1)
 	}
 
-	// initSchemaOnDBWithRetry, not the raw initSchemaOnDB: every production
-	// caller (DoltStore.initSchema, DoltStore.ApplySchemaMigrations) goes
-	// through this wrapper, and the 5s GET_LOCK wait in
-	// schema.MigrateUpWithLock is deliberately sized to fit inside its retry
-	// budget — see migrationLockAcquireTimeoutSeconds. Racing the raw call and
-	// demanding a first-try win asserts on a path no bd process ever takes:
-	// with N processes on one fresh database, N-1 of them are supposed to lose
-	// the lock and come back. #5880 made the same change in this file's
-	// TestMultiProcessSchemaInit_DoltVerify and missed this subprocess helper.
-	_, err = initSchemaOnDBWithRetry(ctx, db)
+	_, err = initSchemaOnDB(ctx, db)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: initSchemaOnDBWithRetry: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ERROR: initSchemaOnDB: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -136,10 +124,7 @@ func TestMultiProcessSchemaInit(t *testing.T) {
 	for i := 0; i < numProcs; i++ {
 		procID := strconv.Itoa(i)
 		eg.Go(func() error {
-			// Same reasoning as the subprocess's own context: this bound has to
-			// cover process start, connect, and the retry wrapper's whole 30s
-			// budget, so it cannot itself be 30s.
-			subCtx, subCancel := context.WithTimeout(egCtx, 2*time.Minute)
+			subCtx, subCancel := context.WithTimeout(egCtx, 30*time.Second)
 			defer subCancel()
 
 			cmd := exec.CommandContext(subCtx, testBin,
@@ -230,7 +215,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 		t.Fatalf("mkdir dolt: %v", err)
 	}
 
-	initCmd := exec.Command(doltPath, "init", "--name", "test", "--email", "test@example.com")
+	initCmd := exec.Command(doltPath, "init")
 	initCmd.Dir = doltDir
 	initCmd.Env = append(os.Environ(), "HOME="+tmpDir, "DOLT_ROOT_PATH="+tmpDir)
 	if out, err := initCmd.CombinedOutput(); err != nil {
@@ -240,17 +225,6 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 	// Start a local server.
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
 	t.Setenv("BEADS_DOLT_AUTO_START", "1")
-
-	// Regression coverage for a round-1 review finding: BEADS_DOLT_SERVER_PORT
-	// is the top-priority, authoritative port source (see portSources in
-	// internal/doltserver/doltserver.go) — an ambient value left by an
-	// unrelated process on a shared host pointed doltserver.Start at that
-	// process's port, and Start correctly refused to steal it, failing this
-	// test for a reason unrelated to schema init. This test manages its own
-	// throwaway server, so it isolates itself from ambient port config the
-	// same way it already isolates BEADS_DOLT_SHARED_SERVER/
-	// BEADS_DOLT_AUTO_START above.
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 
 	state, err := doltserver.Start(beadsDir)
 	if err != nil {
@@ -296,12 +270,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 			defer db.Close()
 			db.SetMaxOpenConns(2)
 			<-ready
-			// initSchemaOnDBWithRetry, not the raw initSchemaOnDB: real bd
-			// processes racing for the migration lock go through this same
-			// retry wrapper (store.go's initSchema), which exists precisely so
-			// contended GET_LOCK attempts converge instead of one unlucky
-			// waiter failing outright.
-			_, err = initSchemaOnDBWithRetry(egCtx, db)
+			_, err = initSchemaOnDB(egCtx, db)
 			return err
 		})
 	}
@@ -324,7 +293,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 		dbDir = doltDir
 	}
 
-	verifyCmd := exec.Command(doltPath, "fsck")
+	verifyCmd := exec.Command(doltPath, "verify")
 	verifyCmd.Dir = dbDir
 	verifyCmd.Env = append(os.Environ(), "HOME="+tmpDir, "DOLT_ROOT_PATH="+tmpDir)
 	verifyOut, verifyErr := verifyCmd.CombinedOutput()

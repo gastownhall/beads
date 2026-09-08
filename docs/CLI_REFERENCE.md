@@ -5967,7 +5967,7 @@ Configuration (checked in order):
 
 Examples:
   # Configure delegation (one-time setup)
-  `export BEADS_MAIL_DELEGATE="gt mail"`
+  export BEADS_MAIL_DELEGATE="gt mail"
   # or
   bd config set mail.delegate "gt mail"
 

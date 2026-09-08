@@ -2,13 +2,10 @@
 package utils
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 )
 
 // ResolveForWrite returns the path to write to, resolving symlinks.
@@ -94,9 +91,8 @@ func TestDiscoveryCeiling(start string) string {
 }
 
 // resolveCanonicalCase resolves a path to its true filesystem case.
-// On macOS, prefers a single kernel query (F_GETPATH) and falls back to
-// walking each path component and matching against actual directory entries
-// to recover the correct case (HFS+/APFS are case-insensitive).
+// On macOS, walks each path component and matches against actual directory
+// entries to recover the correct case (HFS+/APFS are case-insensitive).
 // Returns empty string if resolution fails.
 func resolveCanonicalCase(path string) string {
 	if runtime.GOOS != "darwin" {
@@ -104,30 +100,8 @@ func resolveCanonicalCase(path string) string {
 		return ""
 	}
 
-	// Fast path: ask the kernel for the vnode's true path. This is O(1) in the
-	// size of the ancestor directories; the component walk below is O(entries)
-	// in EVERY ancestor, which collapses on a machine whose $TMPDIR holds tens
-	// of thousands of leftover test directories — CanonicalizePath is called
-	// once per FindBeadsDir, i.e. on the hot path of every audit Append and
-	// every store open, so the walk turned whole test packages into apparent
-	// hangs (wy-9ai3u: 640ms/call at 97k $TMPDIR entries, 8000 calls).
-	switch resolved, err := canonicalCaseFast(path); {
-	case err == nil:
-		return resolved
-	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
-		// A component does not exist: the walk below would reach the same
-		// "not found" verdict, so skip it and let the caller fall back.
-		return ""
-	}
-
-	return resolveCanonicalCaseWalk(path)
-}
-
-// resolveCanonicalCaseWalk is the portable fallback for resolveCanonicalCase:
-// it walks the path component-by-component, listing each parent directory and
-// matching case-insensitively. Correct everywhere, but O(entries) per ancestor
-// directory — see the fast path above for why that matters.
-func resolveCanonicalCaseWalk(path string) string {
+	// Walk the path component-by-component, resolving each to its true case
+	// by listing the parent directory and matching case-insensitively.
 	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
 	if len(parts) == 0 {
 		return ""

@@ -18,16 +18,7 @@ import (
 var testServerPort int
 
 func TestMain(m *testing.M) {
-	os.Exit(testMainInner(m))
-}
-
-// testMainInner holds TestMain's body so its defers run before the process
-// exits — os.Exit skips deferred calls, so TestMain itself must never defer
-// anything (be-5kkk6).
-func testMainInner(m *testing.M) int {
 	os.Setenv("BEADS_TEST_MODE", "1")
-	// AD-01 (be-c5p): allow root tests to connect to the test container.
-	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
@@ -39,7 +30,7 @@ func testMainInner(m *testing.M) int {
 
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
-	return code
+	os.Exit(code)
 }
 
 func skipIfNoDolt(t *testing.T) {
@@ -152,13 +143,16 @@ func TestOpenFromConfig_DefaultsToEmbedded(t *testing.T) {
 
 func TestOpenFromConfig_ServerModeFailsWithoutServer(t *testing.T) {
 	// Server mode should fail-fast when no server is listening.
-	// Clear port env vars so the config port from metadata.json is used —
-	// BEADS_DOLT_SERVER_PORT takes priority over BEADS_DOLT_PORT in
-	// GetDoltServerPort, so both must be cleared. Keep BEADS_TEST_MODE=1
-	// so auto-start is suppressed and the connection uses the free port
-	// from metadata.json (which has nothing listening).
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-	t.Setenv("BEADS_DOLT_PORT", "")
+	// Temporarily unset BEADS_DOLT_PORT/BEADS_TEST_MODE so the config port
+	// isn't overridden by applyConfigDefaults to the test server.
+	if prev := os.Getenv("BEADS_DOLT_PORT"); prev != "" {
+		os.Unsetenv("BEADS_DOLT_PORT")
+		t.Cleanup(func() { os.Setenv("BEADS_DOLT_PORT", prev) })
+	}
+	if prev := os.Getenv("BEADS_TEST_MODE"); prev != "" {
+		os.Unsetenv("BEADS_TEST_MODE")
+		t.Cleanup(func() { os.Setenv("BEADS_TEST_MODE", prev) })
+	}
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -239,11 +233,14 @@ func TestOpenBestAvailable_ServerMode(t *testing.T) {
 
 func TestOpenBestAvailable_ServerMode_FailsWithoutServer(t *testing.T) {
 	// OpenBestAvailable in server mode should propagate the fail-fast error.
-	// Clear port env vars (both BEADS_DOLT_SERVER_PORT and BEADS_DOLT_PORT)
-	// so the config port from metadata.json is used. Keep BEADS_TEST_MODE=1
-	// so auto-start is suppressed.
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-	t.Setenv("BEADS_DOLT_PORT", "")
+	if prev := os.Getenv("BEADS_DOLT_PORT"); prev != "" {
+		os.Unsetenv("BEADS_DOLT_PORT")
+		t.Cleanup(func() { os.Setenv("BEADS_DOLT_PORT", prev) })
+	}
+	if prev := os.Getenv("BEADS_TEST_MODE"); prev != "" {
+		os.Unsetenv("BEADS_TEST_MODE")
+		t.Cleanup(func() { os.Setenv("BEADS_TEST_MODE", prev) })
+	}
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

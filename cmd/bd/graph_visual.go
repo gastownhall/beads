@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -21,28 +19,14 @@ type dagEdgeInfo struct {
 // Each layer is a vertical column of node boxes, with edges drawn in
 // gutter areas between columns.
 func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
-	renderGraphVisualTo(os.Stdout, layout, subgraph)
-}
-
-// renderGraphVisualTo is the writer-aware test seam for the terminal visual
-// renderer. The production wrapper intentionally retains its existing stdout
-// destination and ignored write-error behavior.
-func renderGraphVisualTo(out io.Writer, layout *GraphLayout, subgraph *TemplateSubgraph) {
-	printf := func(format string, args ...interface{}) {
-		_, _ = fmt.Fprintf(out, format, args...)
-	}
-	println := func(args ...interface{}) {
-		_, _ = fmt.Fprintln(out, args...)
-	}
-
 	if len(layout.Nodes) == 0 {
-		println("Empty graph")
+		fmt.Println("Empty graph")
 		return
 	}
 
-	printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
-	println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
-	println()
+	fmt.Printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
+	fmt.Println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println()
 
 	numLayers := len(layout.Layers)
 	if numLayers == 0 {
@@ -91,8 +75,8 @@ func renderGraphVisualTo(out io.Writer, layout *GraphLayout, subgraph *TemplateS
 			headerLine.WriteString(strings.Repeat(" ", gutterW))
 		}
 	}
-	println(headerLine.String())
-	println()
+	fmt.Println(headerLine.String())
+	fmt.Println()
 
 	// Render each output line
 	for y := 0; y < totalLines; y++ {
@@ -124,10 +108,10 @@ func renderGraphVisualTo(out io.Writer, layout *GraphLayout, subgraph *TemplateS
 			}
 		}
 
-		println(strings.TrimRight(line.String(), " "))
+		fmt.Println(strings.TrimRight(line.String(), " "))
 	}
 
-	println()
+	fmt.Println()
 
 	// Summary
 	blocksDeps := 0
@@ -137,9 +121,9 @@ func renderGraphVisualTo(out io.Writer, layout *GraphLayout, subgraph *TemplateS
 		}
 	}
 	if blocksDeps > 0 {
-		printf("  Dependencies: %d blocking relationships\n", blocksDeps)
+		fmt.Printf("  Dependencies: %d blocking relationships\n", blocksDeps)
 	}
-	printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
+	fmt.Printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
 }
 
 // computeDAGNodeWidth calculates a consistent width for all DAG node boxes

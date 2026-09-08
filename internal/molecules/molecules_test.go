@@ -163,7 +163,7 @@ func TestLoader_SkipExistingMolecules(t *testing.T) {
 		Status:     types.StatusOpen,
 		IsTemplate: true,
 	}
-	opts := storage.BatchCreateOptions{SkipPrefixValidation: true}
+	opts := storage.BatchCreateOptions{SkipPrefixValidation: true, OrphanHandling: storage.OrphanAllow}
 	if err := store.CreateIssuesWithFullOptions(ctx, []*types.Issue{existingMol}, "test", opts); err != nil {
 		t.Fatalf("Failed to create existing molecule: %v", err)
 	}

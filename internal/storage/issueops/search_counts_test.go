@@ -104,10 +104,7 @@ func TestFinishSearchIssuesWithCountsTruncatesByRequestedSort(t *testing.T) {
 		iwc("bd-newest-p4", 4, at(10)),
 	}
 
-	got, err := finishSearchIssuesWithCounts(items, types.IssueFilter{SortBy: "created", Limit: 2})
-	if err != nil {
-		t.Fatalf("sort=created limit=2: unexpected error: %v", err)
-	}
+	got := finishSearchIssuesWithCounts(items, types.IssueFilter{SortBy: "created", Limit: 2})
 	if len(got) != 2 || got[0].Issue.ID != "bd-newest-p4" || got[1].Issue.ID != "bd-new-p3" {
 		ids := make([]string, len(got))
 		for i, g := range got {
@@ -117,10 +114,7 @@ func TestFinishSearchIssuesWithCountsTruncatesByRequestedSort(t *testing.T) {
 	}
 
 	// SortDesc flips the per-key default direction: created becomes ASC.
-	got, err = finishSearchIssuesWithCounts(items, types.IssueFilter{SortBy: "created", SortDesc: true, Limit: 2})
-	if err != nil {
-		t.Fatalf("sort=created desc limit=2: unexpected error: %v", err)
-	}
+	got = finishSearchIssuesWithCounts(items, types.IssueFilter{SortBy: "created", SortDesc: true, Limit: 2})
 	if len(got) != 2 || got[0].Issue.ID != "bd-old-p0" || got[1].Issue.ID != "bd-mid-p2" {
 		ids := make([]string, len(got))
 		for i, g := range got {
@@ -130,10 +124,7 @@ func TestFinishSearchIssuesWithCountsTruncatesByRequestedSort(t *testing.T) {
 	}
 
 	// Default (no SortBy) keeps the historical priority/created/id order.
-	got, err = finishSearchIssuesWithCounts(items, types.IssueFilter{Limit: 2})
-	if err != nil {
-		t.Fatalf("default sort limit=2: unexpected error: %v", err)
-	}
+	got = finishSearchIssuesWithCounts(items, types.IssueFilter{Limit: 2})
 	if len(got) != 2 || got[0].Issue.ID != "bd-old-p0" || got[1].Issue.ID != "bd-mid-p2" {
 		ids := make([]string, len(got))
 		for i, g := range got {

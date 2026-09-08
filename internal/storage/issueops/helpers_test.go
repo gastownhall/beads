@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -221,43 +220,6 @@ func TestFormatJSONStringArray(t *testing.T) {
 	}
 }
 
-func TestGetCustomStatusesTxParsesTypedConfigNames(t *testing.T) {
-	t.Parallel()
-
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT name, category FROM custom_statuses ORDER BY name").
-		WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
-	mock.ExpectQuery("SELECT value FROM config WHERE `key` = \\?").
-		WithArgs("status.custom").
-		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("review:wip,on_hold:frozen"))
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("db.Begin: %v", err)
-	}
-	mock.ExpectRollback()
-
-	got, err := GetCustomStatusesTx(context.Background(), tx)
-	if err != nil {
-		t.Fatalf("GetCustomStatusesTx returned error: %v", err)
-	}
-	want := []string{"review", "on_hold"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("GetCustomStatusesTx() = %#v, want %#v", got, want)
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("tx.Rollback: %v", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
-	}
-}
-
 func TestReadConfigPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -290,7 +252,7 @@ func TestReadConfigPrefix(t *testing.T) {
 		}
 	})
 
-	t.Run("missing config row names the commands that initialize the prefix", func(t *testing.T) {
+	t.Run("missing config row has actionable key naming hint", func(t *testing.T) {
 		t.Parallel()
 
 		db, mock, err := sqlmock.New()
@@ -320,56 +282,12 @@ func TestReadConfigPrefix(t *testing.T) {
 		msg := err.Error()
 		if !containsAll(msg,
 			"issue_prefix config is missing",
-			"bd init --prefix",
-			"bd bootstrap",
+			"issue-prefix",
+			"not 'issue_prefix'",
 		) {
-			t.Fatalf("ReadConfigPrefix error missing actionable recovery commands: %s", msg)
+			t.Fatalf("ReadConfigPrefix error missing key naming guidance: %s", msg)
 		}
 	})
-}
-
-// TestReadConfigPrefixDoesNotRecommendInertYAMLKey pins GH#5916: the message
-// used to tell an operator to "use key 'issue-prefix', not 'issue_prefix'" in
-// config.yaml, but this gate only ever reads the database's config table. The
-// YAML key is SET here and the gate still fails, so the recommendation sent
-// operators to commit a tracked field that changes nothing and misleads the
-// next reader.
-//
-// Not parallel: it initializes and mutates the process-global viper config.
-// BEADS_TEST_IGNORE_REPO_CONFIG keeps the checkout's own tracked config.yaml
-// out of the picture, so only the value injected below is in effect.
-func TestReadConfigPrefixDoesNotRecommendInertYAMLKey(t *testing.T) {
-	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
-	defer config.ResetForTesting()
-	config.Set("issue-prefix", "skills")
-
-	if got := config.GetString("issue-prefix"); got != "skills" {
-		t.Fatalf("precondition: config.GetString(issue-prefix) = %q, want %q — the assertions below would be vacuous", got, "skills")
-	}
-
-	_, mock, tx := beginMockTx(t)
-	mock.ExpectQuery("SELECT value FROM config WHERE `key` = \\?").
-		WithArgs("issue_prefix").
-		WillReturnRows(sqlmock.NewRows([]string{"value"}))
-
-	_, err := ReadConfigPrefix(context.Background(), tx)
-	if err == nil {
-		t.Fatal("ReadConfigPrefix() returned nil error, want error: the YAML key must not satisfy this gate")
-	}
-	if !errors.Is(err, storage.ErrNotInitialized) {
-		t.Fatalf("ReadConfigPrefix error = %v, want ErrNotInitialized", err)
-	}
-
-	msg := err.Error()
-	if strings.Contains(msg, "use key 'issue-prefix'") {
-		t.Fatalf("ReadConfigPrefix recommends a config.yaml key that does not satisfy it: %s", msg)
-	}
-	if !containsAll(msg, "bd init --prefix", "bd bootstrap") {
-		t.Fatalf("ReadConfigPrefix error missing actionable recovery commands: %s", msg)
-	}
 }
 
 func containsAll(s string, parts ...string) bool {

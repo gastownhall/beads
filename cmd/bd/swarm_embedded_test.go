@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -71,37 +70,16 @@ func bdSwarmJSON(t *testing.T, bd, dir string, args ...string) map[string]interf
 // createSwarmableEpic creates an epic with 3 children forming a DAG suitable for swarming.
 func createSwarmableEpic(t *testing.T, bd, dir, prefix string) (epicID string, childIDs []string) {
 	t.Helper()
-	plan := fmt.Sprintf(`{
-		"nodes": [
-			{"key": "epic", "title": %q, "type": "epic"},
-			{"key": "child1", "title": %q, "type": "task", "parent_key": "epic"},
-			{"key": "child2", "title": %q, "type": "task", "parent_key": "epic"},
-			{"key": "child3", "title": %q, "type": "task", "parent_key": "epic"}
-		],
-		"edges": [
-			{"from_key": "child3", "to_key": "child1", "type": "blocks"}
-		]
-	}`, prefix+" epic", prefix+" child 1", prefix+" child 2", prefix+" child 3")
-	planFile := filepath.Join(dir, "swarm-graph-plan.json")
-	if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
-		t.Fatalf("write swarm graph plan: %v", err)
-	}
-
-	result := bdCreateGraph(t, bd, dir, planFile)
-	epicID = result.IDs["epic"]
-	childIDs = []string{result.IDs["child1"], result.IDs["child2"], result.IDs["child3"]}
-	allIDs := append([]string{epicID}, childIDs...)
-	for i, id := range allIDs {
-		if id == "" {
-			t.Fatalf("graph create returned an empty ID at index %d: %#v", i, result.IDs)
-		}
-		for j := 0; j < i; j++ {
-			if id == allIDs[j] {
-				t.Fatalf("graph create returned duplicate IDs at indexes %d and %d: %#v", j, i, result.IDs)
-			}
-		}
-	}
-	return epicID, childIDs
+	epic := bdCreate(t, bd, dir, prefix+" epic", "--type", "epic")
+	c1 := bdCreate(t, bd, dir, prefix+" child 1", "--type", "task")
+	c2 := bdCreate(t, bd, dir, prefix+" child 2", "--type", "task")
+	c3 := bdCreate(t, bd, dir, prefix+" child 3", "--type", "task")
+	bdDep(t, bd, dir, "add", c1.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", c2.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", c3.ID, epic.ID, "--type", "parent-child")
+	// c3 depends on c1 (serial constraint)
+	bdDep(t, bd, dir, "add", c3.ID, c1.ID)
+	return epic.ID, []string{c1.ID, c2.ID, c3.ID}
 }
 
 func TestEmbeddedSwarm(t *testing.T) {

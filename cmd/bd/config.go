@@ -15,9 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
-	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
 )
 
 var configCmd = &cobra.Command{
@@ -34,14 +32,9 @@ Common namespaces:
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
-  - gitlab.*          GitLab integration settings
-  - ado.*             Azure DevOps integration settings
-  - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
-  - claim.*           Claim arbitration settings (pool-aware claiming)
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
-  - lint.*            Additional per-type lint sections (stored in config.yaml)
 
 Auto-Export (config.yaml):
   Optional JSONL export to .beads/issues.jsonl after write commands (throttled).
@@ -74,18 +67,6 @@ Custom Status States:
   This enables issues to use statuses like 'awaiting_review' in addition to
   the built-in statuses (open, in_progress, blocked, deferred, closed).
 
-Claim Pools:
-  A dispatcher can pre-assign issues to a pool pseudo-assignee (e.g.
-  "fable-crew") and let any actor take them with --claim. List the pool
-  aliases in the claim.pools config key, comma-separated:
-
-    bd config set claim.pools "fable-crew,night-crew"
-
-  Issues assigned to a real actor (or to an alias not in the list) keep
-  their anti-steal protection. Pool takes carry the normal lease; note
-  that if a taker's lease expires, bd reclaim returns the issue to the
-  unassigned pool, not to the pool alias it was dispatched to.
-
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true
@@ -102,11 +83,9 @@ Examples:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
-  bd config set claim.pools "fable-crew,night-crew"    # Pool aliases claimable by any actor
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
-  bd config set lint.sections.epic "Standards scorecard, Cost"   # Extra sections bd lint requires for epics
   bd config get export.auto
   bd config list
   bd config unset jira.url`,
@@ -142,12 +121,6 @@ var configSetCmd = &cobra.Command{
 			return SilentExit()
 		}
 
-		if strings.HasPrefix(key, "storage-class.") {
-			if err := validateStorageClassConfig(key, value); err != nil {
-				return HandleError("%v", err)
-			}
-		}
-
 		if !isRecognizedConfigKey(key) {
 			suggestion := suggestConfigKey(key)
 			if suggestion != "" {
@@ -169,7 +142,7 @@ var configSetCmd = &cobra.Command{
 			location := "config.yaml"
 			if config.IsUserGlobalKey(key) {
 				setErr = config.SetUserYamlConfig(key, value)
-				location = config.UserConfigYamlDisplayPath()
+				location = config.UserConfigYamlPath()
 			} else {
 				setErr = config.SetYamlConfig(key, value)
 			}
@@ -215,62 +188,42 @@ var configSetCmd = &cobra.Command{
 			return nil
 		}
 
-		// Everything above this line is FRONT-DOOR routing: which source owns
-		// the key, and whether writing it to a file on this machine would leak
-		// a secret into git. From here the key is known to belong to the
-		// workspace database, and the write is the role's.
-		settings, err := openWorkspaceConfig("config set requires direct database access")
-		if err != nil {
+		if usesProxiedServer() {
+			runConfigSetProxiedServer(rootCtx, key, value)
+			return nil
+		}
+
+		// Database-stored config requires direct mode
+		if err := ensureDirectMode("config set requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
-		result, err := settings.SetSetting(rootCtx, issueops.SetSettingRequest{Key: key, Value: value})
-		if err != nil {
+
+		ctx := rootCtx
+
+		if key == "status.custom" && value != "" {
+			if _, err := types.ParseCustomStatusConfig(value); err != nil {
+				return HandleError("invalid status.custom value: %v", err)
+			}
+		}
+
+		if err := store.SetConfig(ctx, key, value); err != nil {
 			return HandleError("setting config: %v", err)
 		}
-		noteDirectConfigWrite()
+		commandDidWrite.Store(true)
 
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
-				"key":   result.Key,
-				"value": result.Value,
+				"key":   key,
+				"value": value,
 			}); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("Set %s = %s\n", result.Key, result.Value)
+			fmt.Printf("Set %s = %s\n", key, value)
 		}
-		printConfigSideEffects(checkConfigSetSideEffects(result.Key, result.Value))
+		printConfigSideEffects(checkConfigSetSideEffects(key, value))
 		return nil
 	},
-}
-
-// openWorkspaceConfig hands back the workspace-settings role for whichever
-// route this invocation is on, each through its OWN capability accessor — the
-// store's for the direct route and the provider's for the proxied one.
-//
-// directRequirement is the message `ensureDirectMode` reports when a workspace
-// is reachable by neither route. It is per-verb because the shipped text names
-// the verb.
-func openWorkspaceConfig(directRequirement string) (issueops.WorkspaceConfig, error) {
-	if usesProxiedServer() {
-		return proxiedWorkspaceConfig()
-	}
-	if err := ensureDirectMode(directRequirement); err != nil {
-		return nil, err
-	}
-	return store.WorkspaceConfig()
-}
-
-// noteDirectConfigWrite marks the invocation as having written, which is what
-// the auto-commit epilogue in main.go keys on.
-//
-// It is DIRECT-ROUTE ONLY: a proxied write already committed inside the role's
-// own unit of work, so flagging it here would ask the epilogue to commit a
-// second time on a route that has nothing outstanding.
-func noteDirectConfigWrite() {
-	if !usesProxiedServer() {
-		commandDidWrite.Store(true)
-	}
 }
 
 var configGetCmd = &cobra.Command{
@@ -289,17 +242,6 @@ var configGetCmd = &cobra.Command{
 
 		key := args[0]
 
-		if key == "backup.enabled" {
-			// backup.enabled has an auto-detected effective value that
-			// differs from the stored value: when unset it auto-enables
-			// in embedded mode with a git remote, and is forced OFF in
-			// sql-server mode (see isBackupAutoEnabled). Reporting the raw
-			// stored "false"/"not set" here misled operators during the
-			// 2026-07 shared-dolt incident, so show the EFFECTIVE value
-			// and its source.
-			return runConfigGetBackupEnabled()
-		}
-
 		if config.IsYamlOnlyKey(key) {
 			// User-global keys (e.g. metrics.*) must be read from the user-global
 			// config.yaml only — the same source the runtime uses for metrics
@@ -308,7 +250,7 @@ var configGetCmd = &cobra.Command{
 			// opposite of what `bd metrics` actually honors.
 			if config.IsUserGlobalKey(key) {
 				value := config.GetUserYamlConfig(key)
-				location := config.UserConfigYamlDisplayPath()
+				location := config.UserConfigYamlPath()
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{
 						"key":      key,
@@ -363,69 +305,39 @@ var configGetCmd = &cobra.Command{
 			return nil
 		}
 
-		settings, err := openWorkspaceConfig("config get requires direct database access")
-		if err != nil {
+		if usesProxiedServer() {
+			runConfigGetProxiedServer(rootCtx, key)
+			return nil
+		}
+
+		// Database-stored config requires direct mode
+		if err := ensureDirectMode("config get requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
-		result, err := settings.GetSetting(rootCtx, issueops.GetSettingRequest{Key: key})
+
+		ctx := rootCtx
+		var value string
+		var err error
+
+		value, err = store.GetConfig(ctx, key)
+
 		if err != nil {
 			return HandleError("getting config: %v", err)
 		}
 
 		if jsonOutput {
 			return outputJSON(map[string]string{
-				"key":   result.Key,
-				"value": result.Value,
+				"key":   key,
+				"value": value,
 			})
 		}
-		// "(not set)" also prints for a key stored as the empty string: the
-		// role answers "" for both, and issueops.SettingResult.Value says why.
-		if result.Value == "" {
-			fmt.Printf("%s (not set)\n", result.Key)
+		if value == "" {
+			fmt.Printf("%s (not set)\n", key)
 		} else {
-			fmt.Printf("%s\n", result.Value)
+			fmt.Printf("%s\n", value)
 		}
 		return nil
 	},
-}
-
-// runConfigGetBackupEnabled reports the EFFECTIVE value of
-// backup.enabled together with its source, rather than the raw stored
-// value. The stored value is misleading because isBackupAutoEnabled()
-// derives the runtime value: unset → auto-enabled in embedded mode
-// when a git remote exists, and forced OFF in sql-server mode.
-func runConfigGetBackupEnabled() error {
-	const key = "backup.enabled"
-	source := config.GetValueSource(key)
-	effective := isBackupAutoEnabled()
-
-	var sourceDesc string
-	switch source {
-	case config.SourceEnvVar:
-		sourceDesc = "env var"
-	case config.SourceConfigFile:
-		sourceDesc = "config.yaml"
-	default: // SourceDefault — value came from auto-detection
-		switch {
-		case usesSQLServer():
-			sourceDesc = "default (auto: off in sql-server mode)"
-		case effective:
-			sourceDesc = "default (auto: on — git remote detected)"
-		default:
-			sourceDesc = "default (auto: off — no git remote)"
-		}
-	}
-
-	if jsonOutput {
-		return outputJSON(map[string]interface{}{
-			"key":       key,
-			"value":     effective,
-			"effective": effective,
-			"source":    string(source),
-		})
-	}
-	fmt.Printf("%t (%s)\n", effective, sourceDesc)
-	return nil
 }
 
 var configListCmd = &cobra.Command{
@@ -441,40 +353,43 @@ var configListCmd = &cobra.Command{
 			}
 		}()
 
-		settings, err := openWorkspaceConfig("config list requires direct database access")
-		if err != nil {
+		if usesProxiedServer() {
+			runConfigListProxiedServer(rootCtx)
+			return nil
+		}
+
+		// Config operations work in direct mode only
+		if err := ensureDirectMode("config list requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
-		result, err := settings.ListSettings(rootCtx, issueops.ListSettingsRequest{})
+
+		ctx := rootCtx
+		config, err := store.GetAllConfig(ctx)
 		if err != nil {
 			return HandleError("listing config: %v", err)
 		}
-		stored := result.Settings
 
 		if jsonOutput {
-			return outputJSON(stored)
+			return outputJSON(config)
 		}
 
-		if len(stored) == 0 {
+		if len(config) == 0 {
 			fmt.Println("No configuration set")
 			return nil
 		}
 
-		keys := make([]string, 0, len(stored))
-		for k := range stored {
+		keys := make([]string, 0, len(config))
+		for k := range config {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 
 		fmt.Println("\nConfiguration:")
 		for _, k := range keys {
-			fmt.Printf("  %s = %s\n", k, stored[k])
+			fmt.Printf("  %s = %s\n", k, config[k])
 		}
 
-		// The OTHER sources, reported beside the stored ones rather than merged
-		// into them: the role answers for the database, and config.yaml and the
-		// environment are files and variables of THIS process.
-		showConfigYAMLOverrides(stored)
+		showConfigYAMLOverrides(config)
 		return nil
 	},
 }
@@ -572,7 +487,7 @@ var configUnsetCmd = &cobra.Command{
 			var unsetErr error
 			if config.IsUserGlobalKey(key) {
 				unsetErr = config.UnsetUserYamlConfig(key)
-				location = config.UserConfigYamlDisplayPath()
+				location = config.UserConfigYamlPath()
 			} else {
 				unsetErr = config.UnsetYamlConfig(key)
 			}
@@ -612,26 +527,32 @@ var configUnsetCmd = &cobra.Command{
 			return nil
 		}
 
-		settings, err := openWorkspaceConfig("config unset requires direct database access")
-		if err != nil {
+		if usesProxiedServer() {
+			runConfigUnsetProxiedServer(rootCtx, key)
+			return nil
+		}
+
+		// Database-stored config requires direct mode
+		if err := ensureDirectMode("config unset requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
-		result, err := settings.UnsetSetting(rootCtx, issueops.UnsetSettingRequest{Key: key})
-		if err != nil {
+
+		ctx := rootCtx
+		if err := store.DeleteConfig(ctx, key); err != nil {
 			return HandleError("deleting config: %v", err)
 		}
-		noteDirectConfigWrite()
+		commandDidWrite.Store(true)
 
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
-				"key": result.Key,
+				"key": key,
 			}); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("Unset %s\n", result.Key)
+			fmt.Printf("Unset %s\n", key)
 		}
-		printConfigSideEffects(checkConfigUnsetSideEffects(result.Key))
+		printConfigSideEffects(checkConfigUnsetSideEffects(key))
 		return nil
 	},
 }
@@ -804,15 +725,6 @@ Examples:
 		}
 
 		for _, p := range pairs {
-			// The same refusal `bd config set` makes, and it was MISSING here:
-			// `bd config set-many issue_prefix=x` re-prefixed the workspace
-			// behind the guard the single-key verb enforces. This verb does not
-			// go through issueops.WorkspaceConfig (see the write below), so it
-			// makes the refusal itself, before any pair is written.
-			if msg, rejected := rejectProtectedConfigKey(p.key); rejected {
-				fmt.Fprintln(os.Stderr, msg)
-				return SilentExit()
-			}
 			if p.key == "beads.role" {
 				validRoles := map[string]bool{"maintainer": true, "contributor": true}
 				if !validRoles[p.value] {
@@ -822,11 +734,6 @@ Examples:
 			if p.key == "status.custom" && p.value != "" {
 				if _, err := types.ParseCustomStatusConfig(p.value); err != nil {
 					return HandleError("invalid status.custom value: %v", err)
-				}
-			}
-			if strings.HasPrefix(p.key, "storage-class.") {
-				if err := validateStorageClassConfig(p.key, p.value); err != nil {
-					return HandleError("%v", err)
 				}
 			}
 		}
@@ -869,12 +776,6 @@ Examples:
 			}
 		}
 
-		// SET-MANY IS NOT ON issueops.WorkspaceConfig, and the reason is the
-		// property TestProxiedServerConfigSetMany pins: the whole batch is ONE
-		// Dolt commit, which is the entire point of the verb ("faster and less
-		// noisy than separate calls, especially in CI"). The role writes one
-		// setting per call and commits each, so routing this through it would
-		// turn a three-key batch into three commits.
 		if len(dbPairs) > 0 {
 			if usesProxiedServer() {
 				keys := make([]string, len(dbPairs))
@@ -883,15 +784,15 @@ Examples:
 					keys[i] = p.key
 					values[i] = p.value
 				}
-				if err := runConfigSetManyProxiedServer(rootCtx, keys, values); err != nil {
-					return err
-				}
+				runConfigSetManyProxiedServer(rootCtx, keys, values)
 			} else {
 				if err := ensureDirectMode("config set-many requires direct database access"); err != nil {
 					return HandleError("%v", err)
 				}
+
+				ctx := rootCtx
 				for _, p := range dbPairs {
-					if err := store.SetConfig(rootCtx, p.key, p.value); err != nil {
+					if err := store.SetConfig(ctx, p.key, p.value); err != nil {
 						return HandleError("setting config %s: %v", p.key, err)
 					}
 				}
@@ -904,7 +805,7 @@ Examples:
 			for _, p := range pairs {
 				location := "database"
 				if config.IsUserGlobalKey(p.key) {
-					location = config.UserConfigYamlDisplayPath()
+					location = config.UserConfigYamlPath()
 				} else if config.IsYamlOnlyKey(p.key) {
 					location = "config.yaml"
 				} else if p.key == "beads.role" {
@@ -923,7 +824,7 @@ Examples:
 			for _, p := range pairs {
 				location := ""
 				if config.IsUserGlobalKey(p.key) {
-					location = fmt.Sprintf(" (in %s)", config.UserConfigYamlDisplayPath())
+					location = fmt.Sprintf(" (in %s)", config.UserConfigYamlPath())
 				} else if config.IsYamlOnlyKey(p.key) {
 					location = " (in config.yaml)"
 				} else if p.key == "beads.role" {
@@ -938,84 +839,27 @@ Examples:
 
 // recognizedConfigPrefixes lists valid top-level config namespaces.
 // Keys under custom.* are always accepted (user-extensible).
-//
-// Tracker namespaces (jira., linear., github., ado., ...) are NOT listed here:
-// they are derived from the tracker registry at runtime via
-// allRecognizedConfigPrefixes, so the recognizer cannot drift out of sync when
-// a new tracker is added (GH#4427).
 var recognizedConfigPrefixes = []string{
-	"export.", "import.", "dolt.", "custom.",
-	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
+	"export.", "import.", "dolt.", "jira.", "linear.", "github.", "custom.",
+	"status.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
-	"lint.", "hierarchy.", "ai.", "backup.", "federation.", "metrics.",
-	"agent.", "claim.", "storage-class.",
-}
-
-// validateStorageClassConfig validates a storage-class.<type> per-type
-// default at config-set time (Protocol v0.1 C-OQ1: values are validated when
-// set, not discovered broken at create time). The key suffix must name an
-// issue type and the value must be a storage class.
-func validateStorageClassConfig(key, value string) error {
-	suffix := strings.TrimPrefix(key, "storage-class.")
-	if suffix == "" || strings.Contains(suffix, ".") {
-		return fmt.Errorf("invalid key %q: expected storage-class.<issue-type> (e.g. storage-class.event)", key)
-	}
-	// The key suffix must be a canonical, known issue type: create-time lookup
-	// keys on the Normalize()d type (resolveStorageClass), so an alias like
-	// storage-class.feat or a typo like storage-class.taks would pass set-time
-	// validation and then silently never match — the C-OQ1 failure mode this
-	// validator exists to prevent.
-	issueType := types.IssueType(suffix)
-	if canonical := issueType.Normalize(); canonical != issueType {
-		return fmt.Errorf("invalid key %q: %q is an alias of %q, and create-time lookup uses the canonical type; set storage-class.%s instead", key, suffix, canonical, canonical)
-	}
-	if !issueType.IsValidWithCustom(loadEmbeddedCustomTypes()) {
-		return fmt.Errorf("invalid key %q: unknown issue type %q (use a built-in type, or add it to types.custom first)", key, suffix)
-	}
-	if _, err := types.ParseStorageClass(value); err != nil {
-		return err
-	}
-	return nil
-}
-
-// allRecognizedConfigPrefixes returns the static namespaces plus the prefix of
-// every registered tracker ("ado.", "jira.", ...). Deriving tracker prefixes
-// from the registry keeps config-key recognition in sync with the set of
-// trackers compiled into bd instead of a hand-maintained allowlist (GH#4427).
-func allRecognizedConfigPrefixes() []string {
-	names := tracker.List()
-	prefixes := make([]string, 0, len(recognizedConfigPrefixes)+len(names))
-	prefixes = append(prefixes, recognizedConfigPrefixes...)
-	for _, name := range names {
-		prefixes = append(prefixes, name+".")
-	}
-	return prefixes
+	"hierarchy.", "ai.", "backup.", "federation.", "metrics.",
 }
 
 // recognizedConfigKeys lists valid non-namespaced config keys.
 var recognizedConfigKeys = map[string]bool{
 	"no-db": true, "json": true, "db": true, "actor": true,
 	"identity": true, "no-push": true, "no-git-ops": true,
-	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
-	"prime.max-memories":  true, "prime.max-memory-chars": true,
-	// The events-journal family. All four are startup settings that land in
-	// config.yaml (config.YamlOnlyKeys), and every one of them is documented as
-	// a `bd config set` invocation — including the auto-prune opt-out, where an
-	// unrecognized-key warning next to a command that DID take effect reads as
-	// "that did not work" on the one setting whose whole purpose is to stop bd
-	// deleting records.
-	"events-journal": true, "events-journal-auto-prune": true,
-	"events-journal-retain-days": true, "events-journal-retain-rows": true,
 }
 
 func isRecognizedConfigKey(key string) bool {
 	if recognizedConfigKeys[key] {
 		return true
 	}
-	for _, prefix := range allRecognizedConfigPrefixes() {
+	for _, prefix := range recognizedConfigPrefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
 		}
@@ -1054,7 +898,7 @@ func suggestConfigKey(key string) string {
 
 	bestMatch := ""
 	bestDist := 3 // max edit distance to suggest
-	for _, known := range allRecognizedConfigPrefixes() {
+	for _, known := range recognizedConfigPrefixes {
 		knownPrefix := strings.TrimSuffix(known, ".")
 		d := levenshteinDistance(parts[0], knownPrefix)
 		if d > 0 && d < bestDist {

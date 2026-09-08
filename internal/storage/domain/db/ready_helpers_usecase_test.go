@@ -190,10 +190,8 @@ func (s *testSuite) ucStatsEmpty() {
 	stats, err := uc.GetStatistics(s.Ctx())
 	s.Require().NoError(err)
 	s.Equal(0, stats.TotalIssues)
-	s.Require().NotNil(stats.ReadyIssues)
-	s.Equal(0, *stats.ReadyIssues)
-	s.Require().NotNil(stats.BlockedIssues)
-	s.Equal(0, *stats.BlockedIssues)
+	s.Equal(0, stats.ReadyIssues)
+	s.Equal(0, stats.BlockedIssues)
 }
 
 func (s *testSuite) ucStatsAggregates() {
@@ -232,10 +230,8 @@ func (s *testSuite) ucStatsReadyDerived() {
 	stats, err := uc.GetStatistics(s.Ctx())
 	s.Require().NoError(err)
 	s.Equal(2, stats.OpenIssues)
-	s.Require().NotNil(stats.BlockedIssues)
-	s.Equal(1, *stats.BlockedIssues)
-	s.Require().NotNil(stats.ReadyIssues)
-	s.Equal(1, *stats.ReadyIssues, "UC must surface ready = open - blocked")
+	s.Equal(1, stats.BlockedIssues)
+	s.Equal(1, stats.ReadyIssues, "UC must surface ready = open - blocked")
 }
 
 // ---------- DetectCycles UC ----------
@@ -257,7 +253,7 @@ func (s *testSuite) ucCyclesDetected() {
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-uccy-a", "bd-uccy-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(dr.Insert(s.Ctx(),
-		newDep("bd-uccy-b", "bd-uccy-a", types.DepBlocks), "tester", domain.DepInsertOpts{CycleValidated: true}))
+		newDep("bd-uccy-b", "bd-uccy-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 
 	out, err := s.depUseCase().DetectCycles(s.Ctx())
 	s.Require().NoError(err)

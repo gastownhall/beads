@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -36,10 +35,6 @@ Examples:
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runLinkProxiedServer(cmd, rootCtx, args)
-		}
-
 		id1 := args[0]
 		id2 := args[1]
 		depType, _ := cmd.Flags().GetString("type")
@@ -62,13 +57,13 @@ Examples:
 		}
 		defer toCleanup()
 
-		dt := types.DependencyType(depType)
-		if isDisallowedHierarchicalDependency(fromID, toID, dt) {
+		if isChildOf(fromID, toID) {
 			return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 		}
 
+		dt := types.DependencyType(depType)
 		if !dt.IsValid() {
-			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
+			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 		}
 
 		dep := &types.Dependency{
@@ -77,7 +72,7 @@ Examples:
 			Type:        dt,
 		}
 
-		if err := fromStore.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+		if err := fromStore.AddDependency(ctx, dep, actor); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 

@@ -2,7 +2,7 @@ package doltutil
 
 import (
 	"errors"
-	"sync/atomic"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,38 +27,18 @@ func TestCloseWithTimeout_Error(t *testing.T) {
 }
 
 func TestCloseWithTimeout_Timeout(t *testing.T) {
-	deadline := make(chan time.Time)
-	releaseClose := make(chan struct{})
-	closeExited := make(chan struct{})
-	closeStarted := make(chan struct{})
-	var closeCalls atomic.Int32
-
-	result := make(chan error, 1)
-	go func() {
-		result <- closeWithDeadline("slow-db", func() error {
-			closeCalls.Add(1)
-			close(closeStarted)
-			<-releaseClose
-			close(closeExited)
-			return nil
-		}, deadline)
-	}()
-
-	<-closeStarted
-	t.Cleanup(func() {
-		close(releaseClose)
-		<-closeExited
+	err := CloseWithTimeout("slow-db", func() error {
+		time.Sleep(CloseTimeout + time.Second)
+		return nil
 	})
-	deadline <- time.Now()
-	err := <-result
 	if err == nil {
 		t.Fatal("CloseWithTimeout() should return error on timeout")
 	}
-	if got, want := err.Error(), "slow-db close timed out after 5s"; got != want {
-		t.Errorf("CloseWithTimeout() error = %q, want %q", got, want)
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error should mention timeout, got: %v", err)
 	}
-	if got, want := closeCalls.Load(), int32(1); got != want {
-		t.Errorf("close function calls = %d, want %d", got, want)
+	if !strings.Contains(err.Error(), "slow-db") {
+		t.Errorf("error should mention resource name, got: %v", err)
 	}
 }
 

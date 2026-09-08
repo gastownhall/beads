@@ -50,14 +50,11 @@ func TestProtocol_CommentsPreservedAcrossUpdate(t *testing.T) {
 	// Update an unrelated field
 	w.run("update", id, "--title", "Commented issue (renamed)")
 
-	issue := w.showJSONFull(id)
+	issue := w.showJSON(id)
 
 	requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
 		[]string{"Important design note", "Follow-up from review"},
 		"comments after title update")
-
-	// The count-only default payload must agree with the streamed bodies.
-	assertFieldFloat(t, w.showJSON(id), "comment_count", 2)
 }
 
 // TestProtocol_ScalarUpdatePreservesRelationalData asserts that updating
@@ -90,9 +87,8 @@ func TestProtocol_ScalarUpdatePreservesRelationalData(t *testing.T) {
 	w.run("update", id1, "--assignee", "alice")
 	w.run("update", id1, "--notes", "Updated notes")
 
-	// Verify via show --json. Comment bodies are opt-in (--include-comments),
-	// so ask for the full payload; labels and deps are inline either way.
-	issue := w.showJSONFull(id1)
+	// Verify via show --json
+	issue := w.showJSON(id1)
 
 	t.Run("labels_preserved", func(t *testing.T) {
 		requireStringSetEqual(t, getStringSlice(issue, "labels"),
@@ -110,7 +106,6 @@ func TestProtocol_ScalarUpdatePreservesRelationalData(t *testing.T) {
 		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
 			[]string{"Design review notes", "Implementation started"},
 			"comments after 5 scalar updates")
-		assertFieldFloat(t, w.showJSON(id1), "comment_count", 2)
 	})
 }
 
@@ -131,7 +126,7 @@ func TestProtocol_StatusTransitionsPreserveLabels(t *testing.T) {
 	w.run("close", a)
 	w.run("reopen", a)
 
-	shown := w.showJSONFull(a)
+	shown := w.showJSON(a)
 
 	// Labels preserved
 	labels := getStringSlice(shown, "labels")

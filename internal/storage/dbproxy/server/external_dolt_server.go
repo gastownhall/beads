@@ -20,6 +20,9 @@ type ExternalDoltServer struct {
 	host            string
 	port            int
 	socket          string
+	tlsRequired     bool
+	tlsCert         string
+	tlsKey          string
 	keepAlivePeriod time.Duration
 
 	started atomic.Bool
@@ -40,6 +43,9 @@ func NewExternalDoltServer(cfg configfile.ExternalDoltConfig) (*ExternalDoltServ
 		host:            cfg.Host,
 		port:            cfg.Port,
 		socket:          cfg.Socket,
+		tlsRequired:     cfg.TLSRequired,
+		tlsCert:         cfg.TLSCert,
+		tlsKey:          cfg.TLSKey,
 		keepAlivePeriod: keepAlive,
 	}, nil
 }
@@ -62,9 +68,12 @@ func (s *ExternalDoltServer) ID(_ context.Context) string {
 
 func (s *ExternalDoltServer) DSN(_ context.Context, database, user, password string) string {
 	dsn := util.DoltServerDSN{
-		User:     user,
-		Password: password,
-		Database: database,
+		User:        user,
+		Password:    password,
+		Database:    database,
+		TLSRequired: s.tlsRequired,
+		TLSCert:     s.tlsCert,
+		TLSKey:      s.tlsKey,
 	}
 	if s.socket != "" {
 		dsn.Socket = s.socket

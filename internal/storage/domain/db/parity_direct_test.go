@@ -78,8 +78,7 @@ func (s *testSuite) classicReady(filter types.WorkFilter) []*types.Issue {
 func (s *testSuite) classicAddDep(issueID, dependsOn string, depType types.DependencyType) {
 	tx := s.beginClassicTx()
 	dep := &types.Dependency{IssueID: issueID, DependsOnID: dependsOn, Type: depType}
-	_, err := issueops.AddDependencyInTx(s.Ctx(), tx, dep, "tester", issueops.AddDependencyOpts{})
-	s.Require().NoError(err)
+	s.Require().NoError(issueops.AddDependencyInTx(s.Ctx(), tx, dep, "tester", issueops.AddDependencyOpts{}))
 	s.Require().NoError(tx.Commit())
 }
 
