@@ -109,15 +109,20 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 	}
 	table := pickDepTable(opts.UseWispsTable)
 
-	var existingType string
+	var existingType, existingMetadata string
 	err := r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-		fmt.Sprintf("SELECT type FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+		fmt.Sprintf("SELECT type, metadata FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
 		dep.IssueID, dep.DependsOnID,
-	).Scan(&existingType)
+	).Scan(&existingType, &existingMetadata)
 	switch {
 	case err == nil:
 		if existingType == string(dep.Type) {
+			if existingMetadata == metadata {
+				// Same type, same metadata: a change-free write. Nothing is
+				// written and nothing is journaled (#5898 R3).
+				return nil
+			}
 			//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
 			if _, err := r.runner.ExecContext(ctx,
 				fmt.Sprintf("UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
