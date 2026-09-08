@@ -1,6 +1,14 @@
 package issueops
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/journalscan"
@@ -239,9 +247,16 @@ var versionNeverMints = map[string]string{
 
 func versionMints(t *testing.T) (map[string]*journalscan.FuncInfo, map[string]bool) {
 	t.Helper()
-	fns, err := journalscan.ParsePackage(".")
+	return versionMintsIn(t, ".")
+}
+
+// versionMintsIn is versionMints over the package at dir, so the guard's own
+// machinery can be proven against a synthetic package.
+func versionMintsIn(t *testing.T, dir string) (map[string]*journalscan.FuncInfo, map[string]bool) {
+	t.Helper()
+	fns, err := journalscan.ParsePackage(dir)
 	if err != nil {
-		t.Fatalf("parse issueops package: %v", err)
+		t.Fatalf("parse package %s: %v", dir, err)
 	}
 	mints := journalscan.Fixpoint(fns,
 		func(f *journalscan.FuncInfo) bool { return f.CallsAnyOf(versionMintHelpers) },
@@ -249,10 +264,34 @@ func versionMints(t *testing.T) (map[string]*journalscan.FuncInfo, map[string]bo
 	return fns, mints
 }
 
+// compositeMintLeaks returns, for a composite mutation f, every function key
+// that one of its live edges — the calls left after the literal-false
+// constituents are dropped — resolves to and that reaches the seam: each is a
+// mint f would perform besides its own. The called bare name is resolved to
+// every key it can denote, the free function and every method of that name,
+// exactly as the fixpoint resolves it. mints is keyed "Recv.Name" for a
+// method, so a bare-name lookup would quietly stop seeing a constituent the
+// moment it became one (TestCompositeCheckSeesMethodConstituents).
+func compositeMintLeaks(fns map[string]*journalscan.FuncInfo, mints map[string]bool, f *journalscan.FuncInfo) []string {
+	seen := map[string]bool{}
+	var leaks []string
+	for _, callee := range versionMintEdges(fns)(f) {
+		for _, key := range journalscan.Resolve(fns, callee) {
+			if mints[key] && !seen[key] {
+				seen[key] = true
+				leaks = append(leaks, key)
+			}
+		}
+	}
+	sort.Strings(leaks)
+	return leaks
+}
+
 // TestCompositeMutationsCarryTheirOwnMint pins that each composite mutation
 // calls RecordVersionInTx itself AND that none of the edges it leaves live
-// (after the literal-false constituents are dropped) reaches the seam — so the
-// composite's own call is load-bearing, and deleting it fails
+// (after the literal-false constituents are dropped) reaches the seam, each
+// called name resolved to every function it can denote (compositeMintLeaks)
+// — so the composite's own call is load-bearing, and deleting it fails
 // TestEveryVersionedEntryPointMints rather than being papered over by a
 // constituent it explicitly told not to mint.
 func TestCompositeMutationsCarryTheirOwnMint(t *testing.T) {
@@ -266,11 +305,189 @@ func TestCompositeMutationsCarryTheirOwnMint(t *testing.T) {
 		if !f.CallsAnyOf(versionMintHelpers) {
 			t.Errorf("composite mutation %q does not call RecordVersionInTx itself; it runs its constituents with %s=false, so nothing else mints for it", name, versionMintGate)
 		}
-		for _, callee := range versionMintEdges(fns)(f) {
-			if mints[callee] {
-				t.Errorf("composite mutation %q would also mint through %q, so its own RecordVersionInTx is no longer the one mint the write-path doc promises — either that constituent is called with %s left on, or it mints unconditionally", name, callee, versionMintGate)
+		for _, key := range compositeMintLeaks(fns, mints, f) {
+			t.Errorf("composite mutation %q would also mint through %q, so its own RecordVersionInTx is no longer the one mint the write-path doc promises — either that constituent is called with %s left on, or it mints unconditionally", name, key, versionMintGate)
+		}
+	}
+}
+
+// TestCompositeCheckSeesMethodConstituents proves the composite check against
+// a synthetic package whose constituent is a METHOD: the mints fixpoint keys
+// it "svc.constituent", the composite calls it by the bare name, and the
+// check must still see the mint a call with the gate left on lets through.
+// This is what keeps TestCompositeMutationsCarryTheirOwnMint from quietly
+// ceasing to bite should a constituent in issueops become a method.
+func TestCompositeCheckSeesMethodConstituents(t *testing.T) {
+	dir := t.TempDir()
+	src := `package probe
+
+func RecordVersionInTx() {}
+
+type svc struct{}
+
+func (s *svc) constituent(mintVersion bool) {
+	if mintVersion {
+		RecordVersionInTx()
+	}
+}
+
+// Composite runs its constituent with the gate off and mints once itself.
+func Composite(s *svc) { s.constituent(false); RecordVersionInTx() }
+
+// Leaky leaves the gate on, so its constituent mints as well as it does.
+func Leaky(s *svc) { s.constituent(true); RecordVersionInTx() }
+`
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fns, mints := versionMintsIn(t, dir)
+	if !mints["svc.constituent"] {
+		t.Fatal("svc.constituent does not mint; the synthetic package no longer exercises a method constituent")
+	}
+	if mints["constituent"] {
+		t.Fatal("mints is keyed by the bare name of a method; the check must resolve to the receiver-qualified key, and this probe no longer shows that it has to")
+	}
+	if got := compositeMintLeaks(fns, mints, fns["Composite"]); len(got) != 0 {
+		t.Errorf("Composite leaks through %q, want nothing: its constituent is switched off", got)
+	}
+	if got := compositeMintLeaks(fns, mints, fns["Leaky"]); !reflect.DeepEqual(got, []string{"svc.constituent"}) {
+		t.Errorf("Leaky leaks through %q, want [svc.constituent]: a method constituent left with the gate on must be seen through its receiver-qualified key", got)
+	}
+}
+
+// TestFalseIsNotShadowedInIssueops pins the reading CallsOnlyWithLiteralFalse
+// rests on as EXACT for this package rather than merely conservative. The
+// scanner counts a false argument as the predeclared identifier only when
+// nothing it can see declares that name; this walk proves nothing in the
+// package does, in any declaration position — so every mintVersion=false in
+// issueops is the switch-off the guard takes it for, and no true is a false
+// in disguise. Test files are walked too: a package-level shadow in one would
+// change what every false in the package means under test.
+func TestFalseIsNotShadowedInIssueops(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse issueops package: %v", err)
+	}
+	var positions int
+	var shadows []string
+	declared := func(what string, ident *ast.Ident) {
+		if ident == nil {
+			return
+		}
+		positions++
+		if ident.Name == "false" || ident.Name == "true" {
+			shadows = append(shadows, fmt.Sprintf("%s: %s named %s", fset.Position(ident.Pos()), what, ident.Name))
+		}
+	}
+	declaredFields := func(what string, list *ast.FieldList) {
+		if list == nil {
+			return
+		}
+		for _, field := range list.List {
+			for _, name := range field.Names {
+				declared(what, name)
 			}
 		}
+	}
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				switch node := n.(type) {
+				case *ast.ImportSpec:
+					declared("import name", node.Name)
+				case *ast.ValueSpec:
+					for _, name := range node.Names {
+						declared("var/const", name)
+					}
+				case *ast.TypeSpec:
+					declared("type", node.Name)
+				case *ast.FuncDecl:
+					declared("function", node.Name)
+					declaredFields("receiver", node.Recv)
+				case *ast.FuncType: // the signature of a FuncDecl or a FuncLit
+					declaredFields("parameter", node.Params)
+					declaredFields("result", node.Results)
+				case *ast.AssignStmt:
+					if node.Tok == token.DEFINE {
+						for _, lhs := range node.Lhs {
+							if ident, ok := lhs.(*ast.Ident); ok {
+								declared("short variable declaration", ident)
+							}
+						}
+					}
+				case *ast.RangeStmt:
+					if node.Tok == token.DEFINE {
+						for _, expr := range []ast.Expr{node.Key, node.Value} {
+							if ident, ok := expr.(*ast.Ident); ok {
+								declared("range variable", ident)
+							}
+						}
+					}
+				case *ast.LabeledStmt:
+					declared("label", node.Label)
+				}
+				return true
+			})
+		}
+	}
+	if positions == 0 {
+		t.Fatal("the walk visited no declaration position in issueops — parsing changed; the guard is not actually running")
+	}
+	sort.Strings(shadows)
+	for _, shadow := range shadows {
+		t.Errorf("%s shadows a predeclared identifier, so a %s=false in this package may not be the switch-off the guard reads it as — rename it", shadow, versionMintGate)
+	}
+}
+
+// TestLiteralFalseCalleesResolveUnambiguously pins the other half of the
+// switch-off's exactness. Resolution is name-based: a called bare name
+// denotes the free function of that name AND every method of that name, and
+// when a caller switches the name off with mintVersion=false the fixpoint
+// drops its edge to all of them — including a same-named function that
+// declares no mintVersion and mints unconditionally, whose mint the switch-off
+// cannot have switched off. So every callee reached by a literal-false
+// mintVersion call must resolve to exactly one function, or every function it
+// resolves to must declare the gate; otherwise the name is ambiguous and one
+// of them must be renamed. (Resolve's semantics are deliberately left alone:
+// name-based resolution is what keeps the guard free of type information.)
+func TestLiteralFalseCalleesResolveUnambiguously(t *testing.T) {
+	fns, _ := versionMints(t)
+	callers := make([]string, 0, len(fns))
+	for key := range fns {
+		callers = append(callers, key)
+	}
+	sort.Strings(callers)
+	var switchedOff int
+	checked := map[string]bool{}
+	for _, caller := range callers {
+		f := fns[caller]
+		for _, callee := range f.AllCallNames() {
+			if !journalscan.CallsOnlyWithLiteralFalse(fns, f, callee, versionMintGate) {
+				continue
+			}
+			switchedOff++
+			if checked[callee] {
+				continue
+			}
+			checked[callee] = true
+			keys := journalscan.Resolve(fns, callee)
+			if len(keys) == 1 {
+				continue
+			}
+			var ungated []string
+			for _, key := range keys {
+				if fns[key].ParamIndex(versionMintGate) < 0 {
+					ungated = append(ungated, key)
+				}
+			}
+			if len(ungated) > 0 {
+				t.Errorf("%q is called with %s=false (by %s) and resolves to %q, of which %q declare no %s: the switch-off would drop the fixpoint's edge to a function it cannot have switched off — rename one of them, or give it a %s parameter", callee, versionMintGate, caller, keys, ungated, versionMintGate, versionMintGate)
+			}
+		}
+	}
+	if switchedOff == 0 {
+		t.Fatalf("no %s=false call found in issueops — the composite mutations no longer switch their constituents off, or the predicate stopped seeing the literal; the guard is not exercising the switch-off at all", versionMintGate)
 	}
 }
 
