@@ -2,7 +2,9 @@ package issueops
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -53,6 +55,14 @@ import (
 // safe only with a SINGLE writer per store until migration 0068 steps 1-3
 // (UUID version_id primary key, ordinal demoted to an index) land; those
 // steps follow as their own PR.
+//
+// "Single writer" means one writer AT A TIME per store, not merely one
+// clone. SELECT COALESCE(MAX(revision), 0) + 1 against PRIMARY KEY
+// (issue_id, revision) is not a safe allocator for two concurrent
+// transactions in one store either, and the label and dependency paths are
+// not serialized on the issue row the way the claim/close CAS is; the
+// RunDualWrite* contract cases exclude concurrent writers, so no test
+// speaks to it. Tracked as gastownhall/beads#6379 (item 4).
 
 var versionedHistoryTransactions sync.Map // map[DBTX]bool; entries live for one transaction
 
@@ -119,6 +129,20 @@ func attributionStatusForActor(actor string) string {
 // bytes are the same bytes. types.Issue carries no such magnitudes (its
 // integers are ordinals and priorities), but the rule is stated so nobody
 // expects int64 fidelity from the token.
+//
+// Two properties worth stating because a hand-rolled canonicalizer would get
+// them wrong. First, jcs.Transform normalizes away encoding/json's HTML
+// escaping of <, > and &, so the token is a function of content, not of
+// Go's escaping policy. Second, a snapshot that cannot be canonicalized
+// deliberately FAILS the mutation: types.Issue.Metadata is a json.RawMessage
+// passed through verbatim, RFC 8785 rejects duplicate keys, and this seam
+// returns the error to its caller, which aborts the transaction. An issue
+// whose metadata column already holds duplicate keys (reachable through bd
+// sql or a hand-written JSONL import) therefore mutates fine with the flag
+// off and becomes unmutatable with it on. Fail-closed is the policy for now
+// -- bytes that could canonicalize two ways would not be a content token --
+// and whether to normalize such metadata first, or to find such rows with
+// bd doctor, is gastownhall/beads#6379 (item 3).
 func canonicalDurableState(issue any) ([]byte, error) {
 	marshaled, err := json.Marshal(issue)
 	if err != nil {
@@ -135,7 +159,11 @@ func canonicalDurableState(issue any) ([]byte, error) {
 // issues.current_revision to match, as of tx (read-your-writes within the
 // same transaction). A no-op when versioned history is disabled for tx, or
 // when issueID resolves to a wisp: wisps carry current_revision for shape
-// parity only and are never versioned this phase (design FR-8).
+// parity only and are never versioned this phase (design FR-8). IsWisp is
+// Ephemeral || NoHistory, so a promoted no-history bead -- a durable
+// issues-plane row with NoHistory=true -- is also never versioned; that is
+// what no-history means, not an FR-8 wisp rule, and the write-path doc's
+// row 13 says so.
 //
 // The revision it mints is a local ordinal, not an address — see the
 // package comment above on ordinals versus version_id, and on the
@@ -183,11 +211,20 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 	}
 	issue.Dependencies = deps[issueID]
 
-	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO store_epoch (id, epoch) VALUES (1, 1)"); err != nil {
-		return fmt.Errorf("versioned history: seed store epoch: %w", err)
-	}
+	// store_epoch is one shared row (id = 1) that every minting transaction
+	// reads. Read first and seed only when the row is absent, so the seed
+	// INSERT happens once per store rather than once per mint: an INSERT IGNORE
+	// on every mint put that shared row into every write transaction's
+	// footprint for nothing.
 	var epoch int
-	if err := tx.QueryRowContext(ctx, "SELECT epoch FROM store_epoch WHERE id = 1").Scan(&epoch); err != nil {
+	err = tx.QueryRowContext(ctx, "SELECT epoch FROM store_epoch WHERE id = 1").Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, seedErr := tx.ExecContext(ctx, "INSERT IGNORE INTO store_epoch (id, epoch) VALUES (1, 1)"); seedErr != nil {
+			return fmt.Errorf("versioned history: seed store epoch: %w", seedErr)
+		}
+		err = tx.QueryRowContext(ctx, "SELECT epoch FROM store_epoch WHERE id = 1").Scan(&epoch)
+	}
+	if err != nil {
 		return fmt.Errorf("versioned history: read store epoch: %w", err)
 	}
 
