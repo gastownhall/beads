@@ -43,6 +43,18 @@ func (s *EmbeddedDoltStore) GetAllConfig(ctx context.Context) (map[string]string
 	return result, err
 }
 
+// GetConfigByPrefix retrieves the configuration values whose key starts with
+// prefix, filtered in SQL (the domain.ConfigPrefixReader optional fast path).
+func (s *EmbeddedDoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetConfigByPrefixInTx(ctx, tx, prefix)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
