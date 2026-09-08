@@ -108,8 +108,9 @@ func TestSweepDefaultsTheOptionalMembers(t *testing.T) {
 	}
 	// protect_referenced ABSENT means TRUE on this surface, which is the one
 	// default here that deliberately differs from the role's zero value. The
-	// endpoint is unauthenticated and destructive, so an omitted member must
-	// not buy weaker protection than `bd prune` gives by default.
+	// endpoint is destructive and its optional bearer is shared and
+	// surface-wide, so an omitted member must not buy weaker protection than
+	// `bd prune` gives by default.
 	want := issueops.SweepRequest{Tier: issueops.SweepEphemeral, ProtectReferenced: true}
 	if reqs[0] != want {
 		t.Errorf("request = %+v, want %+v", reqs[0], want)

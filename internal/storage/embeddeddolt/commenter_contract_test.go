@@ -3,7 +3,9 @@
 package embeddeddolt_test
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/backend/conformance"
 )
@@ -28,6 +30,12 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("ResultMirrorsTheStoredRow", func(t *testing.T) {
 		conformance.RunCommenterResultMirrorsTheStoredRow(t, ctx, fixture)
 	})
+	t.Run("AdvancesALiveStampPastTheThreadsNewestComment", func(t *testing.T) {
+		conformance.RunCommenterAdvancesALiveStampPastTheThreadsNewestComment(t, ctx, fixture)
+	})
+	t.Run("TakesTheClockWhenTheThreadIsBehindIt", func(t *testing.T) {
+		conformance.RunCommenterTakesTheClockWhenTheThreadIsBehindIt(t, ctx, fixture)
+	})
 	t.Run("CommentOnAWispLandsOnTheWispThread", func(t *testing.T) {
 		conformance.RunCommenterCommentOnAWispLandsOnTheWispThread(t, ctx, fixture)
 	})
@@ -40,8 +48,8 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("DoesNotResolvePrefixes", func(t *testing.T) {
 		conformance.RunCommenterDoesNotResolvePrefixes(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunCommenterRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunCommenterRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("LeavesTheAnchorIssueUntouched", func(t *testing.T) {
 		conformance.RunCommenterLeavesTheAnchorIssueUntouched(t, ctx, fixture)
@@ -71,5 +79,10 @@ func newEmbeddedCommenterFixture(t *testing.T, te *testEnv, prefix string) confo
 		CreateWisp:   kit.CreateWisp,
 		QueryScalar:  kit.QueryScalar,
 		CountHistory: kit.CountHistory,
+		// Not on the kit; see the same note in the server-backed wiring.
+		SeedCommentAt: func(ctx context.Context, issueID, author, text string, at time.Time) error {
+			_, err := te.store.ImportIssueComment(ctx, issueID, author, text, at)
+			return err
+		},
 	}
 }

@@ -101,8 +101,10 @@ func (s *Server) addDependenciesRequest(w http.ResponseWriter, r *http.Request) 
 		return issueops.AddDependenciesRequest{}, false
 	}
 	// SkipPerEdgeCycleCheck stays UNPUBLISHED and therefore false: it trades
-	// validation for speed on a trusted bulk path, and an unauthenticated HTTP
-	// surface is where a default must be the guarded one.
+	// validation for speed on a trusted bulk path, and this surface has no way
+	// to tell a trusted caller from any other — a configured bearer is shared
+	// and admits a client to the whole surface — so the default must be the
+	// guarded one.
 	return issueops.AddDependenciesRequest{Actor: actor, Edges: edges}, true
 }
 

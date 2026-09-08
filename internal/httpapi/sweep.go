@@ -116,12 +116,14 @@ func (s *Server) sweepRequest(w http.ResponseWriter, r *http.Request) (issueops.
 	// protect_referenced DEFAULTS ON over HTTP, and the default is set here
 	// rather than left to the zero value on purpose.
 	//
-	// This surface has no authentication, and this is the only destructive
-	// operation on it. A remote caller that omits the member must not get
-	// weaker protection than the operator typing `bd prune`, which protects
-	// unless --ignore-references is passed. Leaving the zero value would have
-	// inverted exactly that: locally you opt OUT of protection, remotely you
-	// had to opt IN.
+	// This is the only destructive operation on the surface, and a configured
+	// bearer is not a per-caller right: one shared token admits a client to
+	// everything published here, so being authenticated says nothing about
+	// whether this particular deletion was meant. A remote caller that omits
+	// the member must not get weaker protection than the operator typing `bd
+	// prune`, which protects unless --ignore-references is passed. Leaving the
+	// zero value would have inverted exactly that: locally you opt OUT of
+	// protection, remotely you had to opt IN.
 	//
 	// The cost is a full scan of the not-done set and its comments. A caller
 	// that wants the cheaper sweep asks for it by sending

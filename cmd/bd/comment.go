@@ -2,9 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -80,41 +77,22 @@ To list comments on an issue, use the plural form: bd comments <id>`,
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runCommentProxiedServer(cmd, rootCtx, args)
-		}
-
 		id := args[0]
 		textArgs := args[1:]
 
-		stdinFlag, _ := cmd.Flags().GetBool("stdin")
-		fileFlag, _ := cmd.Flags().GetString("file")
-
-		var commentText string
-		switch {
-		case stdinFlag:
-			content, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				return HandleErrorRespectJSON("reading from stdin: %v", err)
-			}
-			commentText = strings.TrimRight(string(content), "\n")
-		case fileFlag != "":
-			content, err := readBodyFile(fileFlag)
-			if err != nil {
-				return HandleErrorRespectJSON("reading file: %v", err)
-			}
-			commentText = content
-		case len(textArgs) > 0:
-			commentText = strings.Join(textArgs, " ")
-		default:
-			return HandleErrorRespectJSON("no comment text provided (use positional args, --stdin, or --file)")
-		}
-
-		if strings.TrimSpace(commentText) == "" {
-			return HandleErrorRespectJSON("comment text cannot be empty")
+		commentText, err := requireTextFromSources("comment text", "use positional args, --stdin, or --file",
+			cmdTextSources(cmd, textArgs))
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		author := getActorWithGit()
+
+		// Dispatched after the text is resolved so both backends read the
+		// same sources and report the same conflicts.
+		if usesProxiedServer() {
+			return runCommentProxiedServer(rootCtx, id, author, commentText)
+		}
 
 		ctx := rootCtx
 
@@ -161,9 +139,7 @@ To list comments on an issue, use the plural form: bd comments <id>`,
 }
 
 func init() {
-	commentCmd.Flags().Bool("stdin", false, "Read comment text from stdin")
-	commentCmd.Flags().String("file", "", "Read comment text from file")
-	commentCmd.MarkFlagsMutuallyExclusive("stdin", "file")
+	registerTextSourceFlags(commentCmd, "comment text")
 	commentCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(commentCmd)
 }

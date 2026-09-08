@@ -2,8 +2,40 @@ package githooksenv
 
 import (
 	"os"
+	"slices"
 	"testing"
 )
+
+func TestDisabledEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "adds override when absent",
+			in:   []string{"PATH=/usr/bin"},
+			want: []string{"PATH=/usr/bin", ParametersEnv + "=" + NoHooksParam},
+		},
+		{
+			name: "replaces existing entry, preserving its parameters",
+			in:   []string{"PATH=/usr/bin", ParametersEnv + "='user.email=a@b'"},
+			want: []string{"PATH=/usr/bin", ParametersEnv + "='user.email=a@b' " + NoHooksParam},
+		},
+		{
+			name: "collapses duplicates with last-wins",
+			in:   []string{ParametersEnv + "='x=1'", ParametersEnv + "='y=2'"},
+			want: []string{ParametersEnv + "='y=2' " + NoHooksParam},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DisabledEnv(slices.Clone(tt.in)); !slices.Equal(got, tt.want) {
+				t.Errorf("DisabledEnv(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestAppendParameter(t *testing.T) {
 	tests := []struct {

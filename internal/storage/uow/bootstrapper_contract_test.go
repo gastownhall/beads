@@ -48,8 +48,14 @@ func TestBootstrapperContract(t *testing.T) {
 	t.Run("LeavesTheSubstrateUntouchedWhenItCannotComplete", func(t *testing.T) {
 		conformance.RunBootstrapperLeavesTheSubstrateUntouchedWhenItCannotComplete(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunBootstrapperRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	// ONE, not zero, and not a range. The proxied init route
+	// (cmd/bd/init_proxied_server.go) calls this role and stops, so the entry
+	// this body labels is the only thing that versions the identity there; both
+	// store wirings pin ZERO because `bd init` commits for them. The two are a
+	// ratified split, so do not "fix" either by matching it to the other — read
+	// RunBootstrapperRecordsNoHistoryEntryOfItsOwn first.
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunBootstrapperRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("VerifierAnswersEmptyForAnUnidentifiedSubstrate", func(t *testing.T) {
 		conformance.RunInitVerifierAnswersEmptyForAnUnidentifiedSubstrate(t, ctx, fixture)

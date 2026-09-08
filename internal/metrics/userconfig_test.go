@@ -13,6 +13,8 @@ func setupUserConfigHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	return home
 }
@@ -195,5 +197,31 @@ func TestEnsureUserConfigDefaults_ConfigDirIsFile_FailsLoudly(t *testing.T) {
 	err := EnsureUserConfigDefaults()
 	if err == nil {
 		t.Fatal("expected an error when ~/.config is a file, got nil")
+	}
+}
+
+func TestEnsureUserConfigDefaults_UnsafeRootsFailBeforeMutation(t *testing.T) {
+	sentinel := t.TempDir()
+	t.Chdir(sentinel)
+	t.Setenv("HOME", "~")
+	t.Setenv("USERPROFILE", "~")
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	t.Setenv("XDG_CONFIG_HOME", "relative-xdg")
+	t.Setenv("APPDATA", "relative-appdata")
+
+	err := EnsureUserConfigDefaults()
+	if err == nil {
+		t.Fatal("EnsureUserConfigDefaults returned nil error for unsafe user roots")
+	}
+	if !strings.Contains(err.Error(), "resolve user config.yaml") ||
+		!strings.Contains(err.Error(), "not an absolute native path") {
+		t.Fatalf("EnsureUserConfigDefaults error = %v, want native path resolution context", err)
+	}
+
+	for _, relativeRoot := range []string{"~", "relative-xdg", "relative-appdata"} {
+		if _, statErr := os.Stat(filepath.Join(sentinel, relativeRoot)); !os.IsNotExist(statErr) {
+			t.Errorf("unsafe relative root %q was materialized: %v", relativeRoot, statErr)
+		}
 	}
 }

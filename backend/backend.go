@@ -124,7 +124,6 @@ type (
 	HistoryEntry            = storage.HistoryEntry
 	MergeSlotResult         = storage.MergeSlotResult
 	MergeSlotStatus         = storage.MergeSlotStatus
-	OrphanHandling          = storage.OrphanHandling
 	RemoteInfo              = storage.RemoteInfo
 	StatusEntry             = storage.StatusEntry
 	SyncResult              = storage.SyncResult
@@ -136,14 +135,6 @@ type (
 // VCStatus here — matching the root beads package — because Status is the
 // issue-status enum from the domain types.
 type VCStatus = storage.Status
-
-// OrphanHandling values for BatchCreateOptions.
-const (
-	OrphanAllow     = storage.OrphanAllow
-	OrphanResurrect = storage.OrphanResurrect
-	OrphanSkip      = storage.OrphanSkip
-	OrphanStrict    = storage.OrphanStrict
-)
 
 // Backend describes a registered storage backend: how to open its workspace
 // store. See the field docs on the aliased struct.

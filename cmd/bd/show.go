@@ -14,6 +14,18 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+// showNotFoundHint explains that an unresolved issue ID is not proof the ID
+// never existed: bd delete and wisp purge both remove a row (and its
+// events) from the live tables with no trace left behind, so a deleted or
+// purged ID looks identical to one that was never created. bd history can
+// sometimes tell the two apart via Dolt's commit history, but that scan is
+// real, sometimes-slow work (and wisps are never committed to history at
+// all), so it's offered as a pointer rather than run automatically here
+// (ga-m6inyb).
+func showNotFoundHint(id string) string {
+	return fmt.Sprintf("this ID may have never existed, or may reference a deleted/purged record with no trace left in the live database — try 'bd history %s'", id)
+}
+
 var showCmd = &cobra.Command{
 	Use:           "show [id...] [--id=<id>...] [--current]",
 	Aliases:       []string{"view"},
@@ -46,6 +58,7 @@ var showCmd = &cobra.Command{
 		currentMode, _ := cmd.Flags().GetBool("current")
 		includeDepends, _ := cmd.Flags().GetBool("include-dependents")
 		includeComments, _ := cmd.Flags().GetBool("include-comments")
+		briefDeps, _ := cmd.Flags().GetBool("brief-deps")
 		ctx := rootCtx
 
 		// Helper to format timestamp based on --local-time flag
@@ -120,7 +133,12 @@ var showCmd = &cobra.Command{
 				if result != nil {
 					result.Close()
 				}
-				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				if isNotFoundErr(err) {
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
+				} else {
+					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				}
 				continue
 			}
 			if result == nil || result.Issue == nil {
@@ -128,6 +146,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 				continue
 			}
 			issue := result.Issue
@@ -160,16 +179,12 @@ var showCmd = &cobra.Command{
 					result.Close()
 					return HandleErrorRespectJSON("%v", rerr)
 				}
-				details, derr := rd.Get(ctx, issueops.GetRequest{
-					ID:                issue.ID,
-					IncludeDependents: includeDepends,
-					IncludeComments:   includeComments,
-				})
+				details, derr := rd.Get(ctx, showGetRequest(issue.ID, includeDepends, includeComments, briefDeps))
 				if derr != nil {
 					result.Close()
 					return HandleErrorRespectJSON("%v", derr)
 				}
-				allDetails = append(allDetails, projectShowJSONDetails(details))
+				allDetails = append(allDetails, details)
 				result.Close()
 				continue
 			}
@@ -182,20 +197,6 @@ var showCmd = &cobra.Command{
 
 			// Metadata: Owner · Type | Created · Updated
 			fmt.Println(formatIssueMetadata(issue))
-
-			// Compaction info (if applicable)
-			if issue.CompactionLevel > 0 {
-				fmt.Println()
-				if issue.OriginalSize > 0 {
-					currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-					saved := issue.OriginalSize - currentSize
-					if saved > 0 {
-						reduction := float64(saved) / float64(issue.OriginalSize) * 100
-						fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n",
-							issue.OriginalSize, currentSize, reduction)
-					}
-				}
-			}
 
 			// Content sections — always show DESCRIPTION header so the user
 			// can distinguish "empty" from "hidden" (GH#3336).
@@ -231,110 +232,20 @@ var showCmd = &cobra.Command{
 
 			// Show dependencies - grouped by dependency type for clarity
 			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
-
-			if len(depsWithMeta) > 0 {
-				// Group by dependency type
-				var blocks, parent, discovered []*types.IssueWithDependencyMetadata
-				for _, dep := range depsWithMeta {
-					switch dep.DependencyType {
-					case types.DepBlocks:
-						blocks = append(blocks, dep)
-					case types.DepParentChild:
-						parent = append(parent, dep)
-					case types.DepRelated, types.DepRelatesTo:
-						relatedSeen[dep.ID] = dep
-					case types.DepDiscoveredFrom:
-						discovered = append(discovered, dep)
-					default:
-						blocks = append(blocks, dep) // Default to blocks
-					}
-				}
-
-				if len(parent) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("PARENT"))
-					for _, dep := range parent {
-						fmt.Println(formatDependencyLine("↑", dep))
-					}
-				}
-				if len(blocks) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DEPENDS ON"))
-					for _, dep := range blocks {
-						fmt.Println(formatDependencyLine("→", dep))
-					}
-				}
-				if len(discovered) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
-					for _, dep := range discovered {
-						fmt.Println(formatDependencyLine("◊", dep))
-					}
-				}
+			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+				printDepSection(sec)
 			}
 
 			// Show dependents - grouped by dependency type for clarity
 			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
-			if len(dependentsWithMeta) > 0 {
-				// Group by dependency type
-				var blocks, children, discovered []*types.IssueWithDependencyMetadata
-				for _, dep := range dependentsWithMeta {
-					switch dep.DependencyType {
-					case types.DepBlocks:
-						blocks = append(blocks, dep)
-					case types.DepParentChild:
-						children = append(children, dep)
-					case types.DepRelated, types.DepRelatesTo:
-						relatedSeen[dep.ID] = dep
-					case types.DepDiscoveredFrom:
-						discovered = append(discovered, dep)
-					default:
-						blocks = append(blocks, dep) // Default to blocks
-					}
-				}
-
-				if len(children) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("CHILDREN"))
-					for _, dep := range children {
-						fmt.Println(formatDependencyLine("↳", dep))
-					}
-					// Epic progress summary
-					if issue.IssueType == types.TypeEpic {
-						closedCount := 0
-						for _, dep := range children {
-							if dep.Issue.Status == types.StatusClosed {
-								closedCount++
-							}
-						}
-						pct := 0
-						if len(children) > 0 {
-							pct = (closedCount * 100) / len(children)
-						}
-						if closedCount == len(children) {
-							fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closedCount, len(children), pct)
-						} else {
-							fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closedCount, len(children), pct)
-						}
-					}
-				}
-				if len(blocks) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("BLOCKS"))
-					for _, dep := range blocks {
-						fmt.Println(formatDependencyLine("←", dep))
-					}
-				}
-				if len(discovered) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
-					for _, dep := range discovered {
-						fmt.Println(formatDependencyLine("◊", dep))
-					}
+			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
+				printDepSection(sec)
+				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
+					printEpicChildProgress(sec.Deps)
 				}
 			}
 
-			// Print deduplicated RELATED section (bidirectional links shown once)
-			if len(relatedSeen) > 0 {
-				fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-				for _, dep := range relatedSeen {
-					fmt.Println(formatDependencyLine("↔", dep))
-				}
-			}
+			printRelatedSection(relatedSeen)
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
@@ -365,7 +276,8 @@ var showCmd = &cobra.Command{
 					return jerr
 				}
 			} else {
-				return HandleErrorRespectJSON("no issues found matching the provided IDs")
+				return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+					"some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check")
 			}
 		} else if foundCount > 0 {
 			maybeShowTip(store)
@@ -396,6 +308,19 @@ func init() {
 	showCmd.Flags().Bool("current", false, "Show the currently active issue (in-progress, hooked, or last touched)")
 	showCmd.Flags().Bool("include-dependents", false, "Stream full dependent issues in JSON output (--json only; may be slow on hub beads)")
 	showCmd.Flags().Bool("include-comments", false, "Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)")
+	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
+}
+
+// showGetRequest carries the show flags onto the read contract. Extracted so
+// the hop is reachable from a test: both show routes build this request
+// independently, and a dropped field here is invisible to every other test.
+func showGetRequest(id string, includeDependents, includeComments, briefDeps bool) issueops.GetRequest {
+	return issueops.GetRequest{
+		ID:                id,
+		IncludeDependents: includeDependents,
+		IncludeComments:   includeComments,
+		BriefDeps:         briefDeps,
+	}
 }

@@ -237,7 +237,13 @@ func (s *uowExportSource) LoadExportRelations(ctx context.Context, issues []*typ
 		return rel, nil
 	}
 
-	labels, err := s.uw.LabelUseCase().GetLabelsForIssues(ctx, allIDs)
+	// BATCH READS, and the batch is what keeps them here. Export hydrates every
+	// relation of N issues at once — labels, comments, dependencies, counts,
+	// both planes — and no role answers "the labels of these N ids": Reader.Get
+	// is one detail view per call, so a role-routed export would be N round
+	// trips over a whole workspace. A bulk relation reader is the follow-up
+	// (ga-2ltro.12). Every LabelUseCase call in this file is one of these.
+	labels, err := s.uw.LabelUseCase().GetLabelsForIssues(ctx, allIDs) //nolint:forbidigo // bulk relation load; no role answers labels-for-N-ids
 	if err != nil {
 		return exportRelations{}, fmt.Errorf("load labels: %w", err)
 	}
@@ -253,7 +259,7 @@ func (s *uowExportSource) LoadExportRelations(ctx context.Context, issues []*typ
 	}
 	mergeExportMap(rel.commentCounts, counts)
 
-	wispLabels, err := s.uw.LabelUseCase().GetLabelsForWisps(ctx, allIDs)
+	wispLabels, err := s.uw.LabelUseCase().GetLabelsForWisps(ctx, allIDs) //nolint:forbidigo // bulk relation load; see GetLabelsForIssues above
 	if err != nil {
 		if !dberrors.IsTableNotExist(err) {
 			return exportRelations{}, fmt.Errorf("load wisp labels: %w", err)

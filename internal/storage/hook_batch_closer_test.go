@@ -68,31 +68,75 @@ func TestHookFiringStoreBatchCloserPropagatesInnerError(t *testing.T) {
 
 // TestHookBatchCloserFiresOncePerLandedItem pins the rule that makes a batch
 // close indistinguishable from N single closes as far as a hook script can
-// tell: one firing per item that landed, in request order, and none for an
-// item that refused. Collapsing the batch into one firing would silently stop
-// reporting every close but one.
+// tell: one firing per item that LANDED, in request order, and none for an
+// item that refused or changed nothing. Collapsing the batch into one firing
+// would silently stop reporting every close but one.
+//
+// It records the ID each hook was fired for, using the sibling applier's
+// recorder, because half these rows are about WHICH item fires: a recorder
+// that only counted firings would pass a wrapper that announced the re-close
+// and dropped the real one.
 func TestHookBatchCloserFiresOncePerLandedItem(t *testing.T) {
 	issue := func(id string) *types.Issue { return &types.Issue{ID: id} }
-	inner := &fakeBatchCloser{result: issueops.CloseBatchResult{
-		Outcomes: []issueops.CloseOutcome{
-			{IssueID: "bd-1", Issue: issue("bd-1")},
-			{IssueID: "bd-2", Err: errors.New("refused")},
-			{IssueID: "bd-3", Issue: issue("bd-3")},
+	for _, test := range []struct {
+		name  string
+		inner *fakeBatchCloser
+		want  []string
+	}{
+		{
+			// The claim's update fires last, matching the order the
+			// transaction applied them in: the closes, then the claim.
+			name: "each landed item fires its own hook, in request order, and the claim's update fires last",
+			inner: &fakeBatchCloser{result: issueops.CloseBatchResult{
+				Outcomes: []issueops.CloseOutcome{
+					{IssueID: "bd-1", Issue: issue("bd-1"), Changed: true},
+					{IssueID: "bd-2", Err: errors.New("refused")},
+					{IssueID: "bd-3", Issue: issue("bd-3"), Changed: true},
+				},
+				ClaimedNext: &types.IssueWithCounts{Issue: issue("bd-4")},
+			}},
+			want: []string{"close:bd-1", "close:bd-3", "update:bd-4"},
 		},
-		ClaimedNext: &types.IssueWithCounts{Issue: issue("bd-4")},
-	}}
-	recorder := &recordingIssueOperationHooks{}
-	closer := &hookBatchCloser{inner: inner, hooks: recorder}
+		{
+			// CHANGED IS THE TEST, not a nil per-item Err: an idempotent
+			// re-close is a per-item SUCCESS that wrote nothing
+			// (issueops.CloseOutcome.Changed), so a teardown replayed against
+			// an already-closed convoy would otherwise run the workspace's
+			// on_close script on every pass. The batch also earns no claim,
+			// for the reason issueops.CloseBatchRequest.ClaimNext gives.
+			name: "an idempotent re-close fires nothing",
+			inner: &fakeBatchCloser{result: issueops.CloseBatchResult{
+				Outcomes: []issueops.CloseOutcome{
+					{IssueID: "bd-1", Issue: issue("bd-1")},
+					{IssueID: "bd-2", Issue: issue("bd-2")},
+				},
+			}},
+			want: nil,
+		},
+		{
+			// The discriminating row: a replay where one item was still open.
+			// Only that item is a script's business.
+			name: "a re-close beside a real close announces only the close that landed",
+			inner: &fakeBatchCloser{result: issueops.CloseBatchResult{
+				Outcomes: []issueops.CloseOutcome{
+					{IssueID: "bd-1", Issue: issue("bd-1")},
+					{IssueID: "bd-2", Issue: issue("bd-2"), Changed: true},
+				},
+			}},
+			want: []string{"close:bd-2"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := &recordingBatchApplyHooks{}
+			closer := &hookBatchCloser{inner: test.inner, hooks: recorder}
 
-	if _, err := closer.CloseBatch(context.Background(), issueops.CloseBatchRequest{Actor: "worker"}); err != nil {
-		t.Fatalf("CloseBatch() error = %v", err)
-	}
-
-	// The claim's update fires last, matching the order the transaction
-	// applied them in: the closes, then the claim.
-	want := []string{"close", "close", "update"}
-	if !reflect.DeepEqual(recorder.completions, want) {
-		t.Fatalf("hooks fired = %v, want %v", recorder.completions, want)
+			if _, err := closer.CloseBatch(context.Background(), issueops.CloseBatchRequest{Actor: "worker"}); err != nil {
+				t.Fatalf("CloseBatch() error = %v", err)
+			}
+			if !reflect.DeepEqual(recorder.completions, test.want) {
+				t.Fatalf("hooks fired = %v, want %v", recorder.completions, test.want)
+			}
+		})
 	}
 }
 

@@ -30,7 +30,7 @@ func TestReadyClaimerContract(t *testing.T) {
 		name string
 		run  func(*testing.T, context.Context, conformance.ReadyClaimerFixture)
 	}{
-		{name: "RejectsLimitOffsetAndEmptyActor", run: conformance.RunReadyClaimerRejectsLimitOffsetAndEmptyActor},
+		{name: "RejectsLimitOffsetBriefAndEmptyActor", run: conformance.RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor},
 		{name: "EmptyFrontIsNormal", run: conformance.RunReadyClaimerEmptyFrontIsNormal},
 		{name: "ClaimsTheFrontRowAndReturnsThePostClaimState", run: conformance.RunReadyClaimerClaimsTheFrontRowAndReturnsThePostClaimState},
 		{name: "ClaimsAnEphemeralRowTheFilterAdmits", run: conformance.RunReadyClaimerClaimsAnEphemeralRowTheFilterAdmits},

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -528,5 +529,225 @@ func TestCloseResolvesAcrossBothPlanes(t *testing.T) {
 	}
 	if got := lifecycle.closeRequests(); len(got) != 1 || got[0].IssueID != "bd-w1" {
 		t.Fatalf("the role received %+v, want the wisp id unchanged", got)
+	}
+}
+
+// guardToken is the fixture row version every guarded case in this package
+// uses, and its SIZE is the point: it is past 2^53, where an IEEE-754 double's
+// ulp is already 2, so a response member read through `map[string]any` comes
+// back as a value NEAR the token and is not it.
+//
+// Live row_lock tokens run in this range, which is how the update slice's first
+// integration case failed — the guard it composed from a float64-decoded
+// revision was refused against a row nothing else had touched. Pinning it here
+// means a member decoded the wrong way fails in milliseconds instead of against
+// real Dolt.
+const guardToken int64 = 9007199254740993
+
+// guard spells a row-version expectation the way a request carries one: through
+// a pointer, so that nil ("do not check") stays distinct from a guard on the
+// never-written version 0.
+func guard(v int64) *int64 { return &v }
+
+// revisionOf reads `revision` as the 64-BIT INTEGER the document declares,
+// which is the whole reason it exists beside decodeBody: that helper decodes
+// into `any`, and `any` is a float64.
+//
+// NEVER ORDER IT AND NEVER COMPUTE ONE. The token is opaque and compared for
+// equality alone, so "the previous revision" is not `revision - 1`; it is the
+// value an earlier write answered with.
+func revisionOf(t *testing.T, resp *http.Response) int64 {
+	t.Helper()
+	raw := readAll(t, resp)
+	var body struct {
+		Revision *int64 `json:"revision"`
+	}
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("decode revision from %q: %v", raw, err)
+	}
+	if body.Revision == nil {
+		t.Fatalf("the response carries no `revision`: %s", raw)
+	}
+	return *body.Revision
+}
+
+// TestCloseForwardsTheVersionGuard: the member reaches the role as the POINTER
+// it models, and an absent member stays nil.
+//
+// The nil half is not decoration. issueops.CloseRequest.ExpectedVersion is a
+// pointer precisely so that "do not check" is distinguishable from a caller
+// guarding on the never-written version 0, so a handler that collapsed absence
+// into &0 would refuse every close of a row that has ever been written.
+func TestCloseForwardsTheVersionGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want *int64
+	}{
+		{"a guard is forwarded", `{"actor":"alice","expected_version":9007199254740993}`, guard(guardToken)},
+		{"the never-written version is a real guard", `{"actor":"alice","expected_version":0}`, guard(0)},
+		{"an absent guard stays nil", `{"actor":"alice"}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{closeResult: issueops.CloseResult{Issue: closedIssue("bd-1"), Changed: true}}
+			ts := newCloseServer(t, lifecycle)
+
+			resp := ts.closeIssue(t, closePath, tc.body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			got := lifecycle.closeRequests()
+			if len(got) != 1 {
+				t.Fatalf("%d closes, want 1", len(got))
+			}
+			switch {
+			case tc.want == nil && got[0].ExpectedVersion != nil:
+				t.Errorf("ExpectedVersion = %d, want nil: an absent member must not become a guard", *got[0].ExpectedVersion)
+			case tc.want != nil && got[0].ExpectedVersion == nil:
+				t.Errorf("ExpectedVersion = nil, want %d", *tc.want)
+			case tc.want != nil && *got[0].ExpectedVersion != *tc.want:
+				t.Errorf("ExpectedVersion = %d, want %d", *got[0].ExpectedVersion, *tc.want)
+			}
+		})
+	}
+}
+
+// TestCloseAnswersWithTheRowsRevision is the other half of the guard: the token
+// a caller's NEXT request needs comes back on this one.
+//
+// It asserts the value against the row the ROLE answered with rather than
+// against whatever the handler put there, which is the difference between this
+// case and one that cannot fail. The update slice measured that exactly: its
+// first version echoed the handler's own number and stayed green against a
+// `revision: 0`.
+//
+// The idempotent re-close carries one too. A caller that guarded a replay needs
+// the token whether or not the replay wrote, and `already_closed: true` with no
+// revision beside it would leave a chain unable to continue.
+func TestCloseAnswersWithTheRowsRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		changed bool
+	}{
+		{"a close that wrote", true},
+		{"an idempotent re-close", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := closedIssue("bd-1")
+			issue.RowVersion = guardToken
+			lifecycle := &roleLifecycle{closeResult: issueops.CloseResult{Issue: issue, Changed: tc.changed}}
+			ts := newCloseServer(t, lifecycle)
+
+			resp := ts.closeIssue(t, closePath, `{"actor":"alice"}`)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			if got := revisionOf(t, resp); got != guardToken {
+				t.Errorf("revision = %d, want the row's %d", got, guardToken)
+			}
+		})
+	}
+}
+
+// TestCloseRefusesAStaleGuard is the 409, and it is the case whose GREEN is
+// bought by the arm's placement in failClose.
+//
+// ClassifyError has no row for ErrVersionMismatch and neither leg wraps it, so
+// the arm's absence is not a worse status — it is a 500 for a refusal this
+// document names by code. Mutation-checked: deleting the arm makes this case
+// fail with 500.
+//
+// `actual_version` stays ABSENT. The refusal rolled its transaction back, so a
+// read afterwards would describe a row it never saw; PreconditionFailed says so
+// and this pins it.
+func TestCloseRefusesAStaleGuard(t *testing.T) {
+	lifecycle := &roleLifecycle{closeErr: fmt.Errorf("close bd-1: %w", issueops.ErrVersionMismatch)}
+	ts := newCloseServer(t, lifecycle)
+
+	resp := ts.closeIssue(t, closePath, `{"actor":"alice","expected_version":9007199254740993}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodePreconditionFailed) {
+		t.Errorf("code = %v, want %s", body["code"], CodePreconditionFailed)
+	}
+	if body["param"] != expectedVersionMember {
+		t.Errorf("param = %v, want %s", body["param"], expectedVersionMember)
+	}
+	if _, present := body["expected_version"]; !present {
+		t.Errorf("the refusal does not echo the guard the request sent: %v", body)
+	}
+	if _, present := body["actual_version"]; present {
+		t.Errorf("actual_version = %v; the refusing transaction rolled back, so there is no observed value to report",
+			body["actual_version"])
+	}
+	// It is not the close-policy refusal wearing a different code.
+	if _, present := body["open_children"]; present {
+		t.Errorf("open_children = %v on a precondition refusal; that member is not_closable's discriminator", body["open_children"])
+	}
+}
+
+// TestCloseGuardOutranksClosePolicy pins the ORDER the role documents, over the
+// wire: ExpectedVersion is checked first, so a request that is both stale and
+// policy-refused reports the stale guard.
+//
+// A caller told "close the children first" when its whole view of the row has
+// moved would be acting on information that has already changed.
+func TestCloseGuardOutranksClosePolicy(t *testing.T) {
+	lifecycle := &roleLifecycle{closeErr: fmt.Errorf("close bd-1: %w", issueops.ErrVersionMismatch)}
+	ts := newCloseServer(t, lifecycle)
+
+	resp := ts.closeIssue(t, closePath, `{"actor":"alice","expected_version":41,"force":false}`)
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodePreconditionFailed) {
+		t.Errorf("code = %v, want %s: the role checks the version before policy and the wire must not reorder it",
+			body["code"], CodePreconditionFailed)
+	}
+}
+
+// TestCloseForceDoesNotBypassTheGuard pins the two members as INDEPENDENT.
+// `force` says "close it even though the graph objects"; the guard says "only
+// if this is still the row I read". A handler that dropped the guard when force
+// arrived would let the one member that cannot be undone travel unchecked.
+func TestCloseForceDoesNotBypassTheGuard(t *testing.T) {
+	lifecycle := &roleLifecycle{closeResult: issueops.CloseResult{Issue: closedIssue("bd-1"), Changed: true}}
+	ts := newCloseServer(t, lifecycle)
+
+	if resp := ts.closeIssue(t, closePath, `{"actor":"alice","force":true,"expected_version":41}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	got := lifecycle.closeRequests()
+	if len(got) != 1 {
+		t.Fatalf("%d closes, want 1", len(got))
+	}
+	if !got[0].Force || got[0].ExpectedVersion == nil || *got[0].ExpectedVersion != 41 {
+		t.Errorf("request = %+v, want both Force and the guard forwarded", got[0])
+	}
+}
+
+// TestCloseRefusesAMalformedGuard: the token is an integer and nothing else,
+// refused at the edge before any database work.
+func TestCloseRefusesAMalformedGuard(t *testing.T) {
+	for _, body := range []string{
+		`{"actor":"alice","expected_version":"41"}`,
+		`{"actor":"alice","expected_version":1.5}`,
+		`{"actor":"alice","expected_version":null}`,
+		`{"actor":"alice","expected_version":true}`,
+	} {
+		lifecycle := &roleLifecycle{closeResult: issueops.CloseResult{Issue: closedIssue("bd-1")}}
+		ts := newCloseServer(t, lifecycle)
+
+		resp := ts.closeIssue(t, closePath, body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400: %s", body, resp.StatusCode, readAll(t, resp))
+			continue
+		}
+		if problem := decodeBody(t, resp); problem["param"] != expectedVersionMember {
+			t.Errorf("body %s: param = %v, want %s", body, problem["param"], expectedVersionMember)
+		}
+		if calls := lifecycle.closeRequests(); len(calls) != 0 {
+			t.Errorf("body %s: %d closes reached the role; a malformed guard is refused before any database work", body, len(calls))
+		}
 	}
 }

@@ -25,6 +25,9 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("PersistsThePatchAndHydratesTheResult", func(t *testing.T) {
 		conformance.RunLifecycleUpdatePersistsThePatchAndHydratesTheResult(t, ctx, fixture)
 	})
+	t.Run("PreservesTheCreationStamp", func(t *testing.T) {
+		conformance.RunLifecycleUpdatePreservesTheCreationStamp(t, ctx, fixture)
+	})
 	t.Run("ReportsNoChangeForASameValuePatch", func(t *testing.T) {
 		conformance.RunLifecycleUpdateReportsNoChangeForASameValuePatch(t, ctx, fixture)
 	})
@@ -46,6 +49,36 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("RefusalWritesNoMemberOfThePatch", func(t *testing.T) {
 		conformance.RunLifecycleUpdateRefusalWritesNoMemberOfThePatch(t, ctx, fixture)
 	})
+	t.Run("ConditionalGuardsGateOrdinaryEdits", func(t *testing.T) {
+		conformance.RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits(t, ctx, fixture)
+	})
+	t.Run("ConditionalGuardAcceptsRespelledAssignee", func(t *testing.T) {
+		conformance.RunLifecycleUpdateConditionalGuardAcceptsRespelledAssignee(t, ctx, fixture)
+	})
+	t.Run("MetadataPatchOrdersMergeSetUnset", func(t *testing.T) {
+		conformance.RunLifecycleUpdateMetadataPatchOrdersMergeSetUnset(t, ctx, fixture)
+	})
+	t.Run("ClosePolicy", func(t *testing.T) {
+		conformance.RunLifecycleUpdateClosePolicy(t, ctx, fixture)
+	})
+	t.Run("AssigneeTransferFence", func(t *testing.T) {
+		conformance.RunLifecycleUpdateAssigneeTransferFence(t, ctx, fixture)
+	})
+	t.Run("ClaimIsAMutationWhenThePatchRestoresTheRow", func(t *testing.T) {
+		conformance.RunLifecycleUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t, ctx, fixture)
+	})
+	t.Run("ParentIDReplacesTheParentEdge", func(t *testing.T) {
+		conformance.RunLifecycleUpdateParentIDReplacesTheParentEdge(t, ctx, fixture)
+	})
+	t.Run("ParentIDReplacesEveryParent", func(t *testing.T) {
+		conformance.RunLifecycleUpdateParentIDReplacesEveryParent(t, ctx, fixture)
+	})
+	t.Run("PersistentPreservesUnversionedClass", func(t *testing.T) {
+		conformance.RunLifecycleUpdatePersistentPreservesUnversionedClass(t, ctx, fixture)
+	})
+	t.Run("ProvenanceLabelsHistory", func(t *testing.T) {
+		conformance.RunLifecycleUpdateProvenanceLabelsHistory(t, ctx, fixture)
+	})
 }
 
 func newEmbeddedLifecycleUpdateFixture(t *testing.T, te *testEnv, prefix string) conformance.LifecycleUpdateFixture {
@@ -59,14 +92,19 @@ func newEmbeddedLifecycleUpdateFixture(t *testing.T, te *testEnv, prefix string)
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.LifecycleUpdateFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Lifecycle:     lifecycle,
-		CreateIssue:   kit.CreateIssue,
-		CreateWisp:    kit.CreateWisp,
-		AddDependency: kit.AddDependency,
+		IssuePrefix:          kit.IssuePrefix,
+		Lifecycle:            lifecycle,
+		CreateIssue:          kit.CreateIssue,
+		CreateWisp:           kit.CreateWisp,
+		AddDependency:        kit.AddDependency,
+		SetConfig:            kit.SetConfig,
+		CountHistoryMatching: kit.CountHistoryMatching,
 		// The frozen kit reads through QueryScalar. This block reads its
-		// post-state through the store's own issue read instead, so no case in
-		// it depends on raw SQL.
-		GetIssue: te.store.GetIssue,
+		// post-state through the store's own reads instead, so no case in it
+		// depends on raw SQL.
+		GetIssue:         te.store.GetIssue,
+		ListEvents:       newEmbeddedContractEventLister(te.store),
+		ListDependencies: newEmbeddedContractDependencyLister(te.store),
+		WispExists:       newEmbeddedContractWispProbe(te),
 	}
 }

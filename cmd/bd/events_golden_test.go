@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/eventsjournal"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -19,7 +21,8 @@ const goldenPath = "testdata/events_journal_records.jsonl"
 
 // TestEventsJournalGolden pins the external record contract for the durable
 // events journal. It marshals REAL beads types.Issue, EventDep and EventComment
-// values through the same buildRecord path `bd events tail` uses, so the golden
+// values through the same eventsjournal.NewRecord projection `bd events tail`
+// and GET /v0/beads/events both serve from, so the golden
 // captures bd's actual field marshaling — issue_type, omitempty elision, the
 // top-level dep edge (kind/target/metadata), and the replayable comment payload
 // — that external consumers parse. A change to the wire shape (a renamed/added/
@@ -75,7 +78,7 @@ func TestEventsJournalGoldenIsDeterministic(t *testing.T) {
 }
 
 // renderGoldenLines builds the fixture records and returns them as JSONL exactly
-// as buildRecord + the tail encoder would emit them.
+// as eventsjournal.NewRecord + the tail encoder would emit them.
 func renderGoldenLines(t *testing.T) []byte {
 	t.Helper()
 	ts := "2026-01-02T03:04:05Z" // normalized UTC insert time, as the read seam yields
@@ -148,20 +151,25 @@ func renderGoldenLines(t *testing.T) []byte {
 		CreatedAt: updated, Source: issueops.CommentSourceAudit,
 	}
 
-	records := []eventRecord{
-		buildRecord(1, ts, string(issueops.EventCreate), minimal.ID, mustJSON(t, minimal), "", ""),
-		buildRecord(2, ts, string(issueops.EventCreate), full.ID, mustJSON(t, full), "", ""),
-		buildRecord(3, ts, string(issueops.EventDepAdd), "bd-101", mustJSON(t, full),
+	// actor pins both halves of the attribution contract: an attributed row
+	// emits the acting identity (the same one the audit-events table resolves),
+	// and an actorless row — derived maintenance, actorless delete plumbing,
+	// records from before the column existed — omits the member entirely.
+	records := []eventsjournal.Record{
+		goldenRecord(1, ts, string(issueops.EventCreate), minimal.ID, "author", mustJSON(t, minimal), "", ""),
+		goldenRecord(2, ts, string(issueops.EventCreate), full.ID, "author", mustJSON(t, full), "", ""),
+		goldenRecord(3, ts, string(issueops.EventDepAdd), "bd-101", "author", mustJSON(t, full),
 			mustJSON(t, &issueops.EventDep{Kind: string(types.DepBlocks), Target: "bd-100"}), ""),
-		buildRecord(4, ts, string(issueops.EventUpdate), blocked.ID, mustJSON(t, blocked), "", ""),
-		buildRecord(5, ts, string(issueops.EventDepRemove), "bd-101", mustJSON(t, full),
+		// A derived-maintenance update (is_blocked recompute) carries no actor.
+		goldenRecord(4, ts, string(issueops.EventUpdate), blocked.ID, "", mustJSON(t, blocked), "", ""),
+		goldenRecord(5, ts, string(issueops.EventDepRemove), "bd-101", "author", mustJSON(t, full),
 			mustJSON(t, &issueops.EventDep{Kind: string(types.DepBlocks), Target: "bd-100", Metadata: `{"note":"unblocked"}`}), ""),
-		buildRecord(6, ts, string(issueops.EventUpdate), claimed.ID, mustJSON(t, claimed), "", ""),
-		buildRecord(7, ts, string(issueops.EventCommentWrite), claimed.ID, mustJSON(t, claimed), "", mustJSON(t, structuredComment)),
-		buildRecord(8, ts, string(issueops.EventCommentWrite), claimed.ID, mustJSON(t, claimed), "", mustJSON(t, auditComment)),
-		buildRecord(9, ts, string(issueops.EventClose), closedIssue.ID, mustJSON(t, closedIssue), "", ""),
-		buildRecord(10, ts, string(issueops.EventCreate), wisp.ID, mustJSON(t, wisp), "", ""),
-		buildRecord(11, ts, string(issueops.EventDelete), "bd-100", "", "", ""), // null issue on delete
+		goldenRecord(6, ts, string(issueops.EventUpdate), claimed.ID, "worker-1", mustJSON(t, claimed), "", ""),
+		goldenRecord(7, ts, string(issueops.EventCommentWrite), claimed.ID, "worker-1", mustJSON(t, claimed), "", mustJSON(t, structuredComment)),
+		goldenRecord(8, ts, string(issueops.EventCommentWrite), claimed.ID, "worker-1", mustJSON(t, claimed), "", mustJSON(t, auditComment)),
+		goldenRecord(9, ts, string(issueops.EventClose), closedIssue.ID, "worker-1", mustJSON(t, closedIssue), "", ""),
+		goldenRecord(10, ts, string(issueops.EventCreate), wisp.ID, "author", mustJSON(t, wisp), "", ""),
+		goldenRecord(11, ts, string(issueops.EventDelete), "bd-100", "", "", "", ""), // null issue on delete; actorless delete plumbing
 	}
 
 	var buf bytes.Buffer
@@ -172,6 +180,22 @@ func renderGoldenLines(t *testing.T) []byte {
 		}
 	}
 	return buf.Bytes()
+}
+
+// goldenRecord spells one stored row positionally, so the fixture below reads
+// as a table. The projection it runs through is the shipped one — the fixture
+// must not be able to construct a record shape no reader can produce.
+func goldenRecord(seq int64, ts, op, issueID, actor, issueJS, depJS, commentJS string) eventsjournal.Record {
+	return eventsjournal.NewRecord(storage.EventsJournalRow{
+		Seq:         seq,
+		TS:          ts,
+		Op:          op,
+		IssueID:     issueID,
+		Actor:       actor,
+		IssueJSON:   issueJS,
+		DepJSON:     depJS,
+		CommentJSON: commentJS,
+	})
 }
 
 // assertNoInlineDependencies fails if any record's issue snapshot carries a

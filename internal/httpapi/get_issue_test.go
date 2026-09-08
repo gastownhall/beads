@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -398,5 +401,138 @@ func TestGetIssueAnswersAQueryRefusalBeforeTheIDBound(t *testing.T) {
 	}
 	if n := len(rd.getRequests()); n != 0 {
 		t.Errorf("%d detail reads ran for a refused request", n)
+	}
+}
+
+// revisionReader answers a detail view built the way the seam builds one — the
+// token PROJECTED off the row — so the handler is exercised against the shape
+// production hands it rather than against a literal that sets the member by
+// hand.
+type revisionReader struct {
+	roleReader
+	token int64
+}
+
+func (r *revisionReader) Get(ctx context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
+	if _, err := r.roleReader.Get(ctx, req); err != nil {
+		return nil, err
+	}
+	issue := seededIssue(req.ID, "", types.StatusOpen)
+	issue.RowVersion = r.token
+	return types.NewIssueDetails(*issue), nil
+}
+
+// TestGetIssuePublishesTheRevisionToken is the wire half of the read-side
+// token: the value the role's row carries arrives on the response under
+// `revision`, and it arrives for a legacy-zero row too.
+//
+// The token is decoded as a 64-BIT INTEGER rather than through `any`, and the
+// large case is chosen past 2^53 on purpose. A live row_lock runs there, where
+// a float64's ulp is already 64, so a body read through the default JSON
+// decoding yields a number NEAR the token and not the token — and every guard
+// composed from it is refused against a row nothing else touched. A test that
+// compared float64s would pass on a server that had silently narrowed the
+// member to a double.
+func TestGetIssuePublishesTheRevisionToken(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token int64
+	}{
+		{"a live token past 2^53", 9007199254740993},
+		// 0 is the migration-0054 backfill value: a real, comparable token a
+		// guarded client must be able to read and send back. It is emitted
+		// rather than omitted, or an absent member would be ambiguous between
+		// a legacy row and a server with no token to give.
+		{"a legacy un-mutated row", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rd := &revisionReader{token: tc.token}
+			ts := newTestServer(t, rolesConfig(Config{Reader: rd}))
+
+			resp := ts.get(t, "/v0/beads/issues/bd-1")
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			var body struct {
+				Revision *int64 `json:"revision"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("decode %q: %v", raw, err)
+			}
+			if body.Revision == nil {
+				t.Fatalf("the detail response carries no `revision`: %s", raw)
+			}
+			if *body.Revision != tc.token {
+				t.Errorf("revision = %d, want the row's token %d", *body.Revision, tc.token)
+			}
+			// The storage spelling never rides along: row_lock is json:"-" on
+			// the issue for a reason that still holds, and `revision` is the
+			// one name this token has on the wire.
+			for _, forbidden := range []string{"row_lock", "row_version", "RowVersion"} {
+				if strings.Contains(string(raw), forbidden) {
+					t.Errorf("the detail response leaked the storage spelling %q: %s", forbidden, raw)
+				}
+			}
+		})
+	}
+}
+
+// TestListIssuesRowsCarryNoRevision is the negative space beside the member
+// above, and it is a real assertion rather than a restatement of the schema.
+//
+// types.IssueWithCounts is also the record `bd export` writes to JSONL, so a
+// token on that element would put a per-write-random value into a git-tracked
+// file — the loss types.Issue.RowVersion's json:"-" exists to prevent.
+//
+// Neither existing gate covers it, and both were measured against the
+// mutation: adding `Revision int64 json:"revision"` to types.IssueWithCounts
+// leaves types.TestRowVersionNeverSerialized GREEN, because the new field is a
+// SEPARATE one that nothing populates and its zero carries none of the
+// forbidden spellings. TestWireTagBijection goes red only while the document
+// has not caught up — a slice that adds the field AND the schema property has
+// both surfaces agreeing on the wrong answer. This case is what stays red.
+func TestListIssuesRowsCarryNoRevision(t *testing.T) {
+	issue := seededIssue("bd-1", "", types.StatusOpen)
+	issue.RowVersion = 9007199254740993
+	rd := &roleReader{page: issueops.IssuePage{
+		Items: []*types.IssueWithCounts{{Issue: issue}},
+	}}
+	ts := newTestServer(t, rolesConfig(Config{Reader: rd}))
+
+	resp := ts.get(t, "/v0/beads/issues?limit=10")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	for _, forbidden := range []string{"revision", "row_lock", "9007199254740993"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("a list row carries %q; the token stops at the detail read, "+
+				"because this element is also the JSONL interchange record: %s", forbidden, raw)
+		}
+	}
+}
+
+// TestGetIssueBriefDepsReachesTheRequest is the HTTP half of #5546. The CLI and
+// this handler build GetRequest separately, so wiring one leaves the field
+// unreachable from the other.
+func TestGetIssueBriefDepsReachesTheRequest(t *testing.T) {
+	ts, rd := newGetIssueServer(t)
+
+	if resp := ts.get(t, "/v0/beads/issues/bd-1?brief_deps=true"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	reqs := rd.getRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d detail reads, want 1", len(reqs))
+	}
+	if want := (issueops.GetRequest{ID: "bd-1", BriefDeps: true}); reqs[0] != want {
+		t.Errorf("GetRequest = %+v, want %+v", reqs[0], want)
 	}
 }

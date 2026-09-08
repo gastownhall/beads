@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -35,6 +34,7 @@ type showProxiedInput struct {
 	watchMode       bool
 	currentMode     bool
 	includeDepends  bool
+	briefDeps       bool
 	includeComments bool
 }
 
@@ -50,6 +50,7 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	in.currentMode, _ = cmd.Flags().GetBool("current")
 	in.includeDepends, _ = cmd.Flags().GetBool("include-dependents")
+	in.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
 	in.includeComments, _ = cmd.Flags().GetBool("include-comments")
 
 	idFlags, _ := cmd.Flags().GetStringArray("id")
@@ -158,6 +159,7 @@ func proxiedGetComments(ctx context.Context, uw uow.UnitOfWork, id string, isWis
 func reportIssueLookupFailure(verb, id string, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Error %s %s: %v\n", verb, id, err)
@@ -227,28 +229,8 @@ func runShowProxiedRefs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedI
 			continue
 		}
 		fmt.Printf("\n%s References to %s:\n", ui.RenderAccent("📎"), id)
-		refsByType := make(map[types.DependencyType][]*types.IssueWithDependencyMetadata)
-		for _, ref := range refs {
-			refsByType[ref.DependencyType] = append(refsByType[ref.DependencyType], ref)
-		}
-		typeOrder := []types.DependencyType{
-			types.DepUntil, types.DepCausedBy, types.DepValidates,
-			types.DepBlocks, types.DepParentChild, types.DepRelatesTo,
-			types.DepTracks, types.DepDiscoveredFrom, types.DepRelated,
-			types.DepSupersedes, types.DepDuplicates, types.DepRepliesTo,
-			types.DepApprovedBy, types.DepAuthoredBy, types.DepAssignedTo,
-		}
-		shown := make(map[types.DependencyType]bool)
-		for _, depType := range typeOrder {
-			if grp, ok := refsByType[depType]; ok {
-				displayRefGroup(depType, grp)
-				shown[depType] = true
-			}
-		}
-		for depType, grp := range refsByType {
-			if !shown[depType] {
-				displayRefGroup(depType, grp)
-			}
+		for _, sec := range groupDepSections(refs, false, nil) {
+			displayRefGroup(sec)
 		}
 		fmt.Println()
 	}
@@ -446,11 +428,7 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 	foundCount := 0
 	for idx, id := range in.ids {
 		if rd != nil {
-			details, derr := rd.Get(ctx, issueops.GetRequest{
-				ID:                id,
-				IncludeDependents: in.includeDepends,
-				IncludeComments:   in.includeComments,
-			})
+			details, derr := rd.Get(ctx, in.getRequest(id))
 			if derr != nil {
 				if errors.Is(derr, storage.ErrNotFound) {
 					// The corpus pins this pair for a missing id: the human
@@ -468,7 +446,7 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 				return HandleErrorRespectJSON("%v", derr)
 			}
 			foundCount++
-			allDetails = append(allDetails, projectShowJSONDetails(details))
+			allDetails = append(allDetails, details)
 			continue
 		}
 
@@ -491,7 +469,8 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 		if len(allDetails) > 0 {
 			_ = outputJSON(allDetails)
 		} else {
-			return HandleErrorRespectJSON("no issues found matching the provided IDs")
+			return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+				"some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check")
 		}
 	} else if foundCount == 0 {
 		return SilentExit()
@@ -508,16 +487,6 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	}
 	fmt.Println(formatIssueMetadata(issue))
 
-	if issue.CompactionLevel > 0 && issue.OriginalSize > 0 {
-		currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-		saved := issue.OriginalSize - currentSize
-		if saved > 0 {
-			reduction := float64(saved) / float64(issue.OriginalSize) * 100
-			fmt.Println()
-			fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n", issue.OriginalSize, currentSize, reduction)
-		}
-	}
-
 	if issue.Description != "" {
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
 	} else {
@@ -533,11 +502,19 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
 	}
 
+	// A READ on an ALTERNATE view. `bd show`'s detail view is on
+	// issueops.Reader on both routes and gets its labels hydrated there; this
+	// renderer serves --refs, --children, --thread and --as-of, which answer
+	// with shapes the Reader contract does not describe, from a unit of work
+	// the caller already holds and has already read the issue from. Asking the
+	// role here would open a second transaction to re-fetch a row this function
+	// was handed. Alternate views reaching roles of their own is the follow-up
+	// (ga-2ltro.12).
 	var labels []string
 	if isWisp {
-		labels, _ = uw.LabelUseCase().GetWispLabels(ctx, issue.ID)
+		labels, _ = uw.LabelUseCase().GetWispLabels(ctx, issue.ID) //nolint:forbidigo // alternate view, caller-owned UOW; the detail view is on the role
 	} else {
-		labels, _ = uw.LabelUseCase().GetLabels(ctx, issue.ID)
+		labels, _ = uw.LabelUseCase().GetLabels(ctx, issue.ID) //nolint:forbidigo // alternate view, caller-owned UOW; the detail view is on the role
 	}
 	if len(labels) > 0 {
 		fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))
@@ -550,107 +527,19 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 	depsWithMeta, _ := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
-	if len(depsWithMeta) > 0 {
-		var blocks, parent, discovered []*types.IssueWithDependencyMetadata
-		for _, dep := range depsWithMeta {
-			switch dep.DependencyType {
-			case types.DepBlocks:
-				blocks = append(blocks, dep)
-			case types.DepParentChild:
-				parent = append(parent, dep)
-			case types.DepRelated, types.DepRelatesTo:
-				relatedSeen[dep.ID] = dep
-			case types.DepDiscoveredFrom:
-				discovered = append(discovered, dep)
-			default:
-				blocks = append(blocks, dep)
-			}
-		}
-		if len(parent) > 0 {
-			fmt.Printf("\n%s\n", ui.RenderBold("PARENT"))
-			for _, dep := range parent {
-				fmt.Println(formatDependencyLine("↑", dep))
-			}
-		}
-		if len(blocks) > 0 {
-			fmt.Printf("\n%s\n", ui.RenderBold("DEPENDS ON"))
-			for _, dep := range blocks {
-				fmt.Println(formatDependencyLine("→", dep))
-			}
-		}
-		if len(discovered) > 0 {
-			fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
-			for _, dep := range discovered {
-				fmt.Println(formatDependencyLine("◊", dep))
-			}
-		}
+	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+		printDepSection(sec)
 	}
 
 	dependentsWithMeta, _ := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionIn})
-	if len(dependentsWithMeta) > 0 {
-		var blocks, children, discovered []*types.IssueWithDependencyMetadata
-		for _, dep := range dependentsWithMeta {
-			switch dep.DependencyType {
-			case types.DepBlocks:
-				blocks = append(blocks, dep)
-			case types.DepParentChild:
-				children = append(children, dep)
-			case types.DepRelated, types.DepRelatesTo:
-				relatedSeen[dep.ID] = dep
-			case types.DepDiscoveredFrom:
-				discovered = append(discovered, dep)
-			default:
-				blocks = append(blocks, dep)
-			}
-		}
-		if len(children) > 0 {
-			fmt.Printf("\n%s\n", ui.RenderBold("CHILDREN"))
-			for _, dep := range children {
-				fmt.Println(formatDependencyLine("↳", dep))
-			}
-			if issue.IssueType == types.TypeEpic {
-				closedCount := 0
-				for _, dep := range children {
-					if dep.Status == types.StatusClosed {
-						closedCount++
-					}
-				}
-				pct := 0
-				if len(children) > 0 {
-					pct = (closedCount * 100) / len(children)
-				}
-				if closedCount == len(children) {
-					fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closedCount, len(children), pct)
-				} else {
-					fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closedCount, len(children), pct)
-				}
-			}
-		}
-		if len(blocks) > 0 {
-			fmt.Printf("\n%s\n", ui.RenderBold("BLOCKS"))
-			for _, dep := range blocks {
-				fmt.Println(formatDependencyLine("←", dep))
-			}
-		}
-		if len(discovered) > 0 {
-			fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
-			for _, dep := range discovered {
-				fmt.Println(formatDependencyLine("◊", dep))
-			}
+	for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
+		printDepSection(sec)
+		if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
+			printEpicChildProgress(sec.Deps)
 		}
 	}
 
-	if len(relatedSeen) > 0 {
-		fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-		ids := make([]string, 0, len(relatedSeen))
-		for k := range relatedSeen {
-			ids = append(ids, k)
-		}
-		sort.Strings(ids)
-		for _, k := range ids {
-			fmt.Println(formatDependencyLine("↔", relatedSeen[k]))
-		}
-	}
+	printRelatedSection(relatedSeen)
 
 	comments, _ := proxiedGetComments(ctx, uw, issue.ID, isWisp)
 	if len(comments) > 0 {
@@ -669,4 +558,10 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	}
 
 	fmt.Println()
+}
+
+// getRequest carries the proxied show flags onto the read contract. See
+// showGetRequest: the two routes build this independently.
+func (in *showProxiedInput) getRequest(id string) issueops.GetRequest {
+	return showGetRequest(id, in.includeDepends, in.includeComments, in.briefDeps)
 }

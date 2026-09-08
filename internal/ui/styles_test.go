@@ -60,17 +60,17 @@ func TestRenderStatusAndPriority(t *testing.T) {
 		}
 	}
 
-	// RenderPriority now includes the priority icon (●)
+	// RenderPriority is P-label only (no ● — that glyph is status blocked; GH#4996)
 	priorityCases := []struct {
 		priority int
 		want     string
 	}{
-		{0, PriorityP0Style.Render(PriorityIcon + " P0")},
-		{1, PriorityP1Style.Render(PriorityIcon + " P1")},
-		{2, PriorityP2Style.Render(PriorityIcon + " P2")},
-		{3, PriorityP3Style.Render(PriorityIcon + " P3")},
-		{4, PriorityP4Style.Render(PriorityIcon + " P4")},
-		{5, PriorityIcon + " P5"},
+		{0, PriorityP0Style.Render("P0")},
+		{1, PriorityP1Style.Render("P1")},
+		{2, PriorityP2Style.Render("P2")},
+		{3, PriorityP3Style.Render("P3")},
+		{4, PriorityP4Style.Render("P4")},
+		{5, "P5"},
 	}
 	for _, tc := range priorityCases {
 		if got := RenderPriority(tc.priority); got != tc.want {
@@ -78,7 +78,7 @@ func TestRenderStatusAndPriority(t *testing.T) {
 		}
 	}
 
-	// RenderPriorityCompact returns just "P0" without icon
+	// RenderPriorityCompact returns just "P0"
 	if got := RenderPriorityCompact(0); !strings.Contains(got, "P0") {
 		t.Fatalf("compact priority should contain P0, got %q", got)
 	}

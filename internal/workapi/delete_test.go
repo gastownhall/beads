@@ -26,6 +26,18 @@ func TestValidateDeleteRequest(t *testing.T) {
 		{"blank id", issueops.DeleteRequest{IDs: []string{""}}, true},
 		{"whitespace id", issueops.DeleteRequest{IDs: []string{"\t "}}, true},
 		{"blank beside a real one", issueops.DeleteRequest{IDs: []string{"bd-1", "  "}}, true},
+		{"expected version on one id", issueops.DeleteRequest{IDs: []string{"bd-1"}, ExpectedVersion: deleteVersion(7)}, false},
+		// DeleteRequest.ExpectedVersion counts DISTINCT ids, so the two rows
+		// below are the whole rule: a repeated mention still names one row.
+		{"expected version on a repeated id", issueops.DeleteRequest{IDs: []string{"bd-1", " bd-1 "}, ExpectedVersion: deleteVersion(7)}, false},
+		{"expected version on several ids", issueops.DeleteRequest{IDs: []string{"bd-1", "bd-2"}, ExpectedVersion: deleteVersion(7)}, true},
+		// Version 0 is a real expectation — a row nothing has written yet — so
+		// the pointer and not the value is what disables the check.
+		{"expected version zero on one id", issueops.DeleteRequest{IDs: []string{"bd-1"}, ExpectedVersion: deleteVersion(0)}, false},
+		{"expected version zero on several ids", issueops.DeleteRequest{IDs: []string{"bd-1", "bd-2"}, ExpectedVersion: deleteVersion(0)}, true},
+		// Without a version the multi-id request is the ordinary one, which is
+		// what keeps the new rule from reading as a general arity limit.
+		{"several ids without a version", issueops.DeleteRequest{IDs: []string{"bd-1", "bd-2"}}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := ValidateDeleteRequest(test.request)
@@ -96,3 +108,6 @@ func TestSortedDeleteIDs(t *testing.T) {
 		t.Errorf("SortedDeleteIDs() = %v, want %v", got, want)
 	}
 }
+
+// deleteVersion is the one-line address-of a table row cannot spell inline.
+func deleteVersion(v int64) *int64 { return &v }

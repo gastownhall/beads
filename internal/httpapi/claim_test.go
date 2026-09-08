@@ -650,7 +650,14 @@ func TestCustomMethodsNarrowThePOSTSurface(t *testing.T) {
 		"/v0/beads/issues/bd-1:Close",     // nor is this one
 		"/v0/beads/issues/bd-1:claim-not", // a suffix that merely starts the same
 		"/v0/beads/issues/bd-1:close-not",
+		// `unclaim` is the CLI's spelling of the release and is deliberately not
+		// a second name for it here: one verb per operation, and a client that
+		// guessed from the command name gets the same 404 any other unrouted
+		// suffix gets.
 		"/v0/beads/issues/bd-1:unclaim",
+		"/v0/beads/issues/:release",
+		"/v0/beads/issues/bd-1:Release",
+		"/v0/beads/issues/bd-1:released",
 		"/v0/beads/issues/:reopen",
 		"/v0/beads/issues/bd-1:Reopen",
 		"/v0/beads/issues/bd-1:reopened",

@@ -36,6 +36,9 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ListExcludesTheKVPlane", func(t *testing.T) {
 		conformance.RunWorkspaceConfigListExcludesTheKVPlane(t, ctx, fixture)
 	})
+	t.Run("PointReadRefusesTheKVPlane", func(t *testing.T) {
+		conformance.RunWorkspaceConfigPointReadRefusesTheKVPlane(t, ctx, fixture)
+	})
 	t.Run("UnsetRemovesTheSetting", func(t *testing.T) {
 		conformance.RunWorkspaceConfigUnsetRemovesTheSetting(t, ctx, fixture)
 	})
@@ -66,6 +69,21 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ARefusedWriteRecordsNoHistory", func(t *testing.T) {
 		conformance.RunWorkspaceConfigARefusedWriteRecordsNoHistory(t, ctx, fixture)
 	})
+	t.Run("KeysAreCaseSensitive", func(t *testing.T) {
+		conformance.RunWorkspaceConfigKeysAreCaseSensitive(t, ctx, fixture)
+	})
+	t.Run("CustomStatusReadsAreOrderedByName", func(t *testing.T) {
+		conformance.RunWorkspaceConfigCustomStatusReadsAreOrderedByName(t, ctx, fixture)
+	})
+	t.Run("CustomTypeReadsAreOrderedByName", func(t *testing.T) {
+		conformance.RunWorkspaceConfigCustomTypeReadsAreOrderedByName(t, ctx, fixture)
+	})
+	t.Run("ConfiguredInfraTypesReplaceTheDefaultSet", func(t *testing.T) {
+		conformance.RunWorkspaceConfigConfiguredInfraTypesReplaceTheDefaultSet(t, ctx, fixture)
+	})
+	t.Run("UnconfiguredVocabularyReadsAreEmptyNotErrors", func(t *testing.T) {
+		conformance.RunWorkspaceConfigUnconfiguredVocabularyReadsAreEmptyNotErrors(t, ctx, fixture)
+	})
 }
 
 func newDoltWorkspaceConfigFixture(t *testing.T, prefix string) (conformance.WorkspaceConfigFixture, context.Context, func()) {
@@ -92,9 +110,26 @@ func newDoltWorkspaceConfigFixture(t *testing.T, prefix string) (conformance.Wor
 		SetConfig:       kit.SetConfig,
 		QueryScalar:     kit.QueryScalar,
 		CountHistory:    kit.CountHistory,
+		Vocabulary:      doltWorkspaceVocabularyReader(store),
 	}
 	return fixture, ctx, func() {
 		cancel()
 		storeCleanup()
+	}
+}
+
+// doltWorkspaceVocabularyReader is this backend's half of the vocabulary the
+// role writes and gives no verb to read. It reaches the store's own methods,
+// which is what the front doors reach through workapi.NewStoreConfigSource —
+// including GetInfraTypes, whose signature carries NO error, so on this leg the
+// list-shaped commands cannot be bricked by that read failing. The unit-of-work
+// leg's can.
+func doltWorkspaceVocabularyReader(store *DoltStore) *conformance.WorkspaceVocabularyReader {
+	return &conformance.WorkspaceVocabularyReader{
+		CustomStatuses: store.GetCustomStatusesDetailed,
+		CustomTypes:    store.GetCustomTypes,
+		InfraTypes: func(ctx context.Context) (map[string]bool, error) {
+			return store.GetInfraTypes(ctx), nil
+		},
 	}
 }

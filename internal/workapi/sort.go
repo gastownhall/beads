@@ -48,7 +48,6 @@ func CompareIssuesBy(a, b *types.Issue, sortBy string) int {
 // filter on.
 func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 	wf := types.WorkFilter{
-		Status:         types.StatusOpen,
 		Limit:          filter.Limit,
 		Offset:         filter.Offset,
 		Labels:         filter.Labels,
@@ -64,6 +63,23 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		HasMetadataKey: filter.HasMetadataKey,
 		MaxRows:        filter.MaxRows,
 		MaxRowsSource:  filter.MaxRowsSource,
+		// Carried, where SkipLabels and SkipCounts are dropped: those two hide
+		// a number the ready renderings print, and this bounds a body no
+		// listing prints. Dropping it here would answer `bd list --ready
+		// --brief` with full rows and nothing to say why.
+		Lite: filter.Lite,
+	}
+	// Status is copied the same way as assignee/priority/labels: an explicit
+	// selector on the list filter is the ready-work selector too. The open
+	// default is only the fallback when BuildListFilter did not write one
+	// (plain `--ready`, or `--ready --status all`). Hard-coding StatusOpen
+	// here used to drop `--status` even after the builder honored it (GH#5832).
+	if filter.Status != nil {
+		wf.Status = *filter.Status
+	} else if len(filter.Statuses) > 0 {
+		wf.Statuses = append([]types.Status(nil), filter.Statuses...)
+	} else {
+		wf.Status = types.StatusOpen
 	}
 	if filter.IssueType != nil {
 		wf.Type = string(*filter.IssueType)
@@ -77,7 +93,22 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 	if filter.NoAssignee {
 		wf.Unassigned = true
 	}
-	if filter.Ephemeral != nil && *filter.Ephemeral {
+	// The ephemeral PLANE, which the two filters spell differently: a list
+	// filter admits it by leaving SkipWisps off (or, for an infra type, by
+	// routing to it outright), and a work filter by setting IncludeEphemeral.
+	// Reading both spellings is what carries ListRequest.IncludeEphemeral —
+	// and IncludeInfra's plane half with it — onto the --ready arm instead of
+	// dropping it there, which would answer a request that named the plane
+	// with the durable set and no error.
+	//
+	// THE PREDICATE IS NEGATIVE, on a field whose ZERO VALUE means admit. That
+	// is deliberate but it is a footgun worth naming: this fires for any filter
+	// that merely never set SkipWisps, not only for one that asked. Every
+	// caller today is handed a filter built by BuildListFilter, which decides
+	// that field for every request, so "unset" is not reachable here — a
+	// hand-built types.IssueFilter{} passed in from somewhere new would get the
+	// wisp plane it never asked for. Keep the construction on the builder.
+	if (filter.Ephemeral != nil && *filter.Ephemeral) || !filter.SkipWisps {
 		wf.IncludeEphemeral = true
 	}
 	return wf

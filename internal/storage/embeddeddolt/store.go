@@ -767,7 +767,6 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 
 		// Create all issues in the same transaction
 		if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
 			SkipPrefixValidation: true,
 			// Defense-in-depth (GH#3955): the embedded fast-path is the primary
 			// auto-import route for 1.0+ users and is gated by the in-transaction

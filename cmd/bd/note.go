@@ -2,9 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -131,31 +128,10 @@ To read notes on an issue, use: bd show <id>`,
 		id := args[0]
 		textArgs := args[1:]
 
-		stdinFlag, _ := cmd.Flags().GetBool("stdin")
-		fileFlag, _ := cmd.Flags().GetString("file")
-
-		var noteText string
-		switch {
-		case stdinFlag:
-			content, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				return HandleErrorRespectJSON("reading from stdin: %v", err)
-			}
-			noteText = strings.TrimRight(string(content), "\n")
-		case fileFlag != "":
-			content, err := readBodyFile(fileFlag)
-			if err != nil {
-				return HandleErrorRespectJSON("reading file: %v", err)
-			}
-			noteText = content
-		case len(textArgs) > 0:
-			noteText = strings.Join(textArgs, " ")
-		default:
-			return HandleErrorRespectJSON("no note text provided (use positional args, --stdin, or --file)")
-		}
-
-		if noteText == "" {
-			return HandleErrorRespectJSON("note text is empty")
+		noteText, err := requireTextFromSources("note text", "use positional args, --stdin, or --file",
+			cmdTextSources(cmd, textArgs))
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		if usesProxiedServer() {
@@ -223,9 +199,7 @@ To read notes on an issue, use: bd show <id>`,
 }
 
 func init() {
-	noteCmd.Flags().Bool("stdin", false, "Read note text from stdin")
-	noteCmd.Flags().String("file", "", "Read note text from file")
-	noteCmd.MarkFlagsMutuallyExclusive("stdin", "file")
+	registerTextSourceFlags(noteCmd, "note text")
 	noteCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(noteCmd)
 }

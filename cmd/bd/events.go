@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
@@ -92,7 +93,7 @@ var eventsTailCmd = &cobra.Command{
 
 Each line is a JSON record:
   {"seq":N,"ts":"...","op":"create|update|close|delete|dep_add|dep_remove|comment",
-   "issue_id":"...","issue":{...|null},"dep":{"kind":..,"target":..,"metadata":..},"comment":{...}}
+   "issue_id":"...","actor":"...","issue":{...|null},"dep":{"kind":..,"target":..,"metadata":..},"comment":{...}}
 
 Record contract (stable for external consumers):
   seq       int64   counter-assigned inside the mutation's transaction; gapless,
@@ -100,6 +101,12 @@ Record contract (stable for external consumers):
   ts        string  UTC insert time, stamped inside the committing transaction
   op        string  one of the seven ops above
   issue_id  string  the mutated issue's id
+  actor     string  the acting identity that performed the mutation, as resolved
+                    for the audit-events table (on a comment row: the comment's
+                    author); empty (omitted) when the mutation path has no
+                    actor — derived maintenance, deletes (other than a rename's
+                    synthetic delete), and rows older than the column. Never
+                    user attribution when empty.
   issue     object  full issue state AFTER the mutation; null on delete
   dep       object  {"kind","target","metadata"} for dep_add / dep_remove; omitted otherwise
   comment   object  {"id","author","text","created_at","source"} for comment; omitted otherwise
@@ -197,18 +204,6 @@ func init() {
 	eventsCmd.AddCommand(eventsExportCmd)
 	eventsCmd.AddCommand(eventsPruneCmd)
 	rootCmd.AddCommand(eventsCmd)
-}
-
-// eventRecord is one journal line rendered to callers. Issue, Dep and Comment
-// are raw JSON so the stored payloads are not re-encoded.
-type eventRecord struct {
-	Seq     int64           `json:"seq"`
-	TS      string          `json:"ts"`
-	Op      string          `json:"op"`
-	IssueID string          `json:"issue_id"`
-	Issue   json.RawMessage `json:"issue"`
-	Dep     json.RawMessage `json:"dep,omitempty"`
-	Comment json.RawMessage `json:"comment,omitempty"`
 }
 
 // reportEventsTruncated renders a pruned-past checkpoint as a machine-readable
@@ -328,7 +323,11 @@ func journalAccessor() (storage.EventsJournalAccessor, error) {
 // readJournal reads records with seq greater than since from the active
 // storage seam. Proxied-server mode uses its transaction-bound UOW journal
 // capability; direct stores use EventsJournalAccessor.
-func readJournal(ctx context.Context, since int64, limit int) ([]eventRecord, error) {
+//
+// The projection onto the published envelope is eventsjournal.Records, the same
+// one GET /v0/beads/events serves from — see the note on eventsjournal.Record
+// for why there is exactly one.
+func readJournal(ctx context.Context, since int64, limit int) ([]eventsjournal.Record, error) {
 	var rows []storage.EventsJournalRow
 	if usesProxiedServer() {
 		if uowProvider == nil {
@@ -353,11 +352,7 @@ func readJournal(ctx context.Context, since int64, limit int) ([]eventRecord, er
 			return nil, err
 		}
 	}
-	out := make([]eventRecord, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, buildRecord(r.Seq, r.TS, r.Op, r.IssueID, r.IssueJSON, r.DepJSON, r.CommentJSON))
-	}
-	return out, nil
+	return eventsjournal.Records(rows), nil
 }
 
 // pruneJournal deletes records below before honoring the retain floors.
@@ -378,18 +373,4 @@ func pruneJournal(ctx context.Context, before int64, retainDays, retainRows int)
 		return 0, err
 	}
 	return acc.PruneEventsJournal(ctx, before, retainDays, retainRows)
-}
-
-func buildRecord(seq int64, ts, op, issueID, issueJS, depJS, commentJS string) eventRecord {
-	rec := eventRecord{Seq: seq, TS: ts, Op: op, IssueID: issueID, Issue: json.RawMessage("null")}
-	if issueJS != "" {
-		rec.Issue = json.RawMessage(issueJS)
-	}
-	if depJS != "" {
-		rec.Dep = json.RawMessage(depJS)
-	}
-	if commentJS != "" {
-		rec.Comment = json.RawMessage(commentJS)
-	}
-	return rec
 }

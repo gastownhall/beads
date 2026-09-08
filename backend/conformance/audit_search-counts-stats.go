@@ -160,7 +160,7 @@ func testAuditReadyWorkDepCreatedAtParity(t *testing.T, f Factory) {
 				{IssueID: "dca-s", DependsOnID: "dca-t", Type: types.DepBlocks, CreatedAt: depCreatedAt},
 			},
 		}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 
 	// Rendered path: SearchIssuesWithCounts (bd list --with-counts) and
 	// GetReadyWorkWithCounts (bd ready) share ScanReadyWorkRowWithCounts, which parses

@@ -32,6 +32,12 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("ClearsOneTierAndLeavesTheOther", func(t *testing.T) {
 		conformance.RunSweeperClearsOneTierAndLeavesTheOther(t, ctx, fixture)
 	})
+	t.Run("TreatsALegacyTypedWispAsEphemeralTier", func(t *testing.T) {
+		conformance.RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t, ctx, fixture)
+	})
+	t.Run("LeavesNoHistoryBeadsToTheDurableTier", func(t *testing.T) {
+		conformance.RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t, ctx, fixture)
+	})
 	t.Run("ProtectsPinnedRows", func(t *testing.T) {
 		conformance.RunSweeperProtectsPinnedRows(t, ctx, fixture)
 	})
@@ -50,8 +56,8 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("EmptyMatchIsZeroAndNil", func(t *testing.T) {
 		conformance.RunSweeperEmptyMatchIsZeroAndNil(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunSweeperRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunSweeperRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunSweeperDoesNotMutateTheCallerRequest(t, ctx, fixture)
@@ -73,12 +79,25 @@ func newUOWSweeperFixture(t *testing.T, ctx context.Context, prefix string) conf
 	}
 	kit := newUOWRoleFixtureKit(provider, prefix)
 	return conformance.SweeperFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Sweeper:      sweeper,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Sweeper:       sweeper,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
+		CommitPending: uowCommitPending(provider),
+		// The write half of the same raw-SQL pass-through the cycle-detector
+		// wiring uses, inside ONE committing unit of work.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				for _, stmt := range statements {
+					if _, err := uw.RawSQLUseCase().Exec(ctx, stmt.Query, stmt.Args...); err != nil {
+						return "", fmt.Errorf("%s: %w", stmt.Query, err)
+					}
+				}
+				return "seed legacy sweep rows", nil
+			})
+		},
 		AddComment: func(ctx context.Context, issueID, author, text string) error {
 			// Through the Commenter ROLE, which resolves the plane itself, so
 			// the case can cite from a wisp's comment without knowing how this

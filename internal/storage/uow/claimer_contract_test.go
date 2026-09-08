@@ -40,6 +40,7 @@ func TestClaimerContract(t *testing.T) {
 		{name: "ClaimsAnUnassignedOpenIssueAndAnswersTheBareRow", run: conformance.RunClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow},
 		{name: "TakesAnOpenIssueTheActorAlreadyHolds", run: conformance.RunClaimerTakesAnOpenIssueTheActorAlreadyHolds},
 		{name: "ReclaimsItsOwnInProgressIssueWithoutWriting", run: conformance.RunClaimerReclaimsItsOwnInProgressIssueWithoutWriting},
+		{name: "ReclaimsAcrossSpellingWithoutWriting", run: conformance.RunClaimerReclaimsAcrossSpellingWithoutWriting},
 		{name: "AcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne", run: conformance.RunClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne},
 		{name: "TakesAPoolAssignedIssueButRefusesAForeignHolder", run: conformance.RunClaimerTakesAPoolAssignedIssueButRefusesAForeignHolder},
 		{name: "RefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt", run: conformance.RunClaimerRefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt},

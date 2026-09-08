@@ -71,7 +71,7 @@ func NotPinned(force bool) IssueValidator {
 	}
 }
 
-// canonicalActor normalizes an identity string so two spellings of the same
+// CanonicalActor normalizes an identity string so two spellings of the same
 // Gas Town identity compare equal. The same identity arrives at bd in more
 // than one spelling depending on which layer produced the string it was
 // handed: a dotted alias like "gastown.mayor" gets its dot replaced wherever
@@ -80,44 +80,71 @@ func NotPinned(force bool) IssueValidator {
 // string, never the substitution itself (ga-wzl83). None of ".", "_", "-"
 // carries meaning in an identity string: each is always a positional
 // separator between a rig and a role/agent name, never part of either name.
-// Collapsing any run of them to one canonical separator lets two spellings
-// of the same identity compare equal without weakening comparisons between
+// Collapsing a run of them to one canonical separator lets two spellings of
+// the same identity compare equal without weakening comparisons between
 // genuinely different identities, whose non-separator characters still
 // differ (e.g. "gastown.mayor" vs "gastown.dog-3" stay distinct).
+//
+// A run that is the exact two-byte sequence "--" is a second, distinct axis:
+// gascity's session-name encoding (session_name.go) substitutes "--" for a
+// rig-qualified agent's "/" — a DIFFERENT identity from one substituting "_"
+// or "__" for a dotted alias's "." — so it decodes to a literal "/" instead
+// of collapsing into the generic "_" separator (ga-2vy9p2). Any other run,
+// including "__" and longer or mixed runs, still collapses to "_": those
+// keep meaning nothing but "here was some separator". A raw "/" already
+// passes through unchanged (it hits the default case below), which is what
+// makes the "--" decode land on the same canonical form: "gastown/mayor" and
+// "gastown--mayor" both canonicalize to "gastown/mayor", while
+// "gastown--mayor" and "gastown__mayor" no longer collapse to the same
+// value — collapsing them was a real widening: "gastown--mayor" is a
+// rig-qualified agent named "mayor", "gastown__mayor" is a dotted alias
+// "gastown.mayor"; treating them as the same actor was wrong regardless of
+// whether either happens to be held by the same principal today.
+//
+// Byte-scanned rather than rune-scanned so a 2-byte lookahead can detect an
+// exact "--" run: safe because '.', '_', '-' are single-byte ASCII that never
+// appear as a continuation byte of a multi-byte UTF-8 rune, so slicing on
+// them cannot split one.
 //
 // Empty stays empty: an actual absence of an actor must never canonicalize
 // to the same value as a non-empty one, or AssigneeMatches would start
 // accepting an empty actor against an assigned issue.
-func canonicalActor(s string) string {
+func CanonicalActor(s string) string {
 	if s == "" {
 		return ""
 	}
 	var b strings.Builder
 	b.Grow(len(s))
-	inSeparator := false
-	for _, r := range s {
-		switch r {
-		case '.', '_', '-':
-			if !inSeparator {
-				b.WriteByte('_')
-				inSeparator = true
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '.' || c == '_' || c == '-' {
+			j := i
+			for j < len(s) && (s[j] == '.' || s[j] == '_' || s[j] == '-') {
+				j++
 			}
-		default:
-			b.WriteRune(r)
-			inSeparator = false
+			if s[i:j] == "--" {
+				b.WriteByte('/')
+			} else {
+				b.WriteByte('_')
+			}
+			i = j
+			continue
 		}
+		b.WriteByte(c)
+		i++
 	}
 	return b.String()
 }
 
-// actorMatches reports whether actor has the same authority as assignee:
+// ActorMatches reports whether actor has the same authority as assignee:
 // either they're byte-identical, or they canonicalize to the same identity
-// (see canonicalActor). The byte-identical check is not redundant — it is
-// what keeps two DIFFERENT identities that happen to canonicalize the same
-// way from ever being needed for this to matter in practice, and it avoids
-// paying canonicalization on the overwhelmingly common exact-match path.
-func actorMatches(assignee, actor string) bool {
-	return assignee == actor || canonicalActor(assignee) == canonicalActor(actor)
+// (see CanonicalActor). The byte-identical check is not redundant — it
+// avoids paying canonicalization on the overwhelmingly common exact-match
+// path (ga-5ksp5 gate review, #5438: fixes a garbled doc comment, no
+// behavior change).
+func ActorMatches(assignee, actor string) bool {
+	return assignee == actor || CanonicalActor(assignee) == CanonicalActor(actor)
 }
 
 // AssigneeMatches validates that the actor has authority to close the issue.
@@ -125,7 +152,7 @@ func actorMatches(assignee, actor string) bool {
 // assignee. Returns an error on mismatch unless force is true.
 //
 // Authority is identity-by-string: actor is compared to assignee under
-// canonicalActor, so two principals sharing one canonical actor name both
+// CanonicalActor, so two principals sharing one canonical actor name both
 // pass — including the same principal spelled two different ways by two
 // different layers of Gas Town (ga-wzl83). bd has no identity layer, so this
 // matches the existing semantics of the actor field — the guard removes
@@ -140,7 +167,7 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 		if issue == nil || force {
 			return nil
 		}
-		if issue.Assignee == "" || actorMatches(issue.Assignee, actor) {
+		if issue.Assignee == "" || ActorMatches(issue.Assignee, actor) {
 			return nil
 		}
 		return fmt.Errorf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override", id, issue.Assignee, actor)
@@ -171,7 +198,7 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 //     the overwhelmingly common non-conflicting paths.
 //
 // Like AssigneeMatches, authority is identity-by-string — compared under
-// canonicalActor rather than verbatim (ga-wzl83), so this removes silent
+// CanonicalActor rather than verbatim (ga-wzl83), so this removes silent
 // cross-actor takeovers without adding new identity guarantees, and without
 // falsely treating the current holder as a stranger when actor or
 // newAssignee names it under a different layer's spelling of the same
@@ -181,7 +208,7 @@ func AssigneeNotStolen(actor, newAssignee string, poolAliases func() []string, f
 		if issue == nil || force {
 			return nil
 		}
-		if issue.Assignee == "" || actorMatches(issue.Assignee, actor) || actorMatches(issue.Assignee, newAssignee) {
+		if issue.Assignee == "" || ActorMatches(issue.Assignee, actor) || ActorMatches(issue.Assignee, newAssignee) {
 			return nil
 		}
 		if issue.Status != types.StatusInProgress {

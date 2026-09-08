@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
@@ -9,7 +10,7 @@ import (
 
 // reopenRequestMembers is the document's member list for ReopenIssueRequest,
 // read as raw members for the reason closeRequestMembers is.
-var reopenRequestMembers = []string{"actor", "reason"}
+var reopenRequestMembers = []string{"actor", "reason", expectedVersionMember}
 
 // reopenProvenance labels the version-control history entry a reopen records,
 // naming the surface it came from.
@@ -58,25 +59,45 @@ func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
 
 	lifecycle, err := s.lifecycle(r)
 	if err != nil {
-		s.failErr(w, r, err)
+		s.failReopen(w, r, request, err)
 		return
 	}
 	result, err := lifecycle.Reopen(r.Context(), request)
 	if err != nil {
-		// No failReopen sibling, deliberately: this operation has no conflict
-		// code and therefore no typed refusal to read extension members out of.
-		// The shared mapping is the whole of its error vocabulary, and adding a
-		// pass-through wrapper would suggest otherwise.
-		s.failErr(w, r, err)
+		s.failReopen(w, r, request, err)
 		return
 	}
 	// `already_open` is the wire's name for the role's unchanged result: a
 	// reopen of an issue that was never done. Idempotent, like the re-claim and
 	// the re-close, and for the same reason.
+	//
+	// `revision` is the row's post-reopen concurrency token, on the wire for the
+	// close's reason: `expected_version` is a guard a caller cannot fill without
+	// it, and a reopen-then-re-close recovery composes its next expectation from
+	// this value.
 	writeJSON(w, apigen.ReopenIssueResponse{
 		Issue:       *result.Issue,
 		AlreadyOpen: !result.Changed,
+		Revision:    result.Issue.RowVersion,
 	})
+}
+
+// failReopen answers a failed reopen.
+//
+// It exists now, where a pass-through wrapper would once have been a lie about
+// the vocabulary: this operation has exactly one typed refusal to read an
+// extension member out of, and it is the row-version guard rather than a
+// policy. Everything else is still the shared mapping.
+//
+// THE ARM IS FIRST, under the rule ClassifyError states, and the cost of
+// forgetting it is a generic 500 for every guard miss here rather than a worse
+// 4xx — failClose's finding, on the mirror operation.
+func (s *Server) failReopen(w http.ResponseWriter, r *http.Request, request issueops.ReopenRequest, err error) {
+	if errors.Is(err, issueops.ErrVersionMismatch) {
+		s.fail(w, r, versionPreconditionResult(request.ExpectedVersion))
+		return
+	}
+	s.failErr(w, r, err)
 }
 
 // reopenRequest decodes and validates the body, and reports whether the request
@@ -103,12 +124,18 @@ func (s *Server) reopenRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.ReopenRequest{}, false
 	}
+	// The close's guard, read the same way: one decoder, one refusal sentence.
+	expectedVersion, res := applyVersionGuardMember(members, "")
+	if res != nil {
+		s.fail(w, r, *res)
+		return issueops.ReopenRequest{}, false
+	}
 
-	// ExpectedVersion stays unpublished on this surface, as for the close.
 	return issueops.ReopenRequest{
-		Actor:      actor,
-		IssueID:    id,
-		Reason:     reason,
-		Provenance: reopenProvenance,
+		Actor:           actor,
+		IssueID:         id,
+		Reason:          reason,
+		ExpectedVersion: expectedVersion,
+		Provenance:      reopenProvenance,
 	}, true
 }

@@ -44,7 +44,9 @@ func TestServeAnswersFromTheStoreTheRootCommandOpened(t *testing.T) {
 
 	var opens atomic.Int64
 	open := func(context.Context, string) (storage.DoltStorage, error) {
-		return &serveIdentityStore{id: fmt.Sprintf("store-%d", opens.Add(1))}, nil
+		return &serveIdentityDoltStore{
+			serveIdentityStore: &serveIdentityStore{id: fmt.Sprintf("store-%d", opens.Add(1))},
+		}, nil
 	}
 	backends.Register(name, backends.Backend{
 		Open:                open,
@@ -115,7 +117,7 @@ func TestServeAnswersFromTheStoreTheRootCommandOpened(t *testing.T) {
 
 // openRegisteredStoreForTest opens the workspace the way PersistentPreRunE
 // does: through the registry, by name, with no knowledge of what is behind it.
-func openRegisteredStoreForTest(t *testing.T, name, beadsDir string) (*serveIdentityStore, error) {
+func openRegisteredStoreForTest(t *testing.T, name, beadsDir string) (*serveIdentityDoltStore, error) {
 	t.Helper()
 	backend, ok := backends.Lookup(name)
 	if !ok {
@@ -125,7 +127,7 @@ func openRegisteredStoreForTest(t *testing.T, name, beadsDir string) (*serveIden
 	if err != nil {
 		return nil, err
 	}
-	identified, ok := opened.(*serveIdentityStore)
+	identified, ok := opened.(*serveIdentityDoltStore)
 	if !ok {
 		t.Fatalf("the registry returned %T, not the identified store this test reads by name", opened)
 	}
@@ -155,12 +157,26 @@ func getBody(t *testing.T, url string) string {
 // identity of the value the server was wired to is a substring of the response
 // rather than something a test has to reach inside the server to inspect.
 //
-// The embedded DoltStorage is nil: nothing on this path calls anything else, and
-// a nil-panic naming the method would be a truer failure than a stub that
-// answered.
+// IT EMBEDS NOTHING, and the assertion below is why. This stub used to embed a
+// nil storage.DoltStorage, so a role it had not declared arrived as a promoted
+// method on a nil interface — GraphCounter did, and it surfaced as a segfault on
+// a full-package CI shard rather than as a compile error, because no -run
+// pattern anyone reached for names this test. Declaring the whole of
+// serveRoleSource makes the next role a build failure here.
 type serveIdentityStore struct {
-	storage.DoltStorage
 	id string
+}
+
+var _ serveRoleSource = (*serveIdentityStore)(nil)
+
+// serveIdentityDoltStore is what the registry hands back, because
+// backends.Backend.Open returns a whole storage.DoltStorage. The roles above sit
+// one embed shallower than the nil store in serveStubRest and so shadow it:
+// nothing on this path calls anything else, and a nil panic naming the method
+// would be a truer failure than a stub that answered.
+type serveIdentityDoltStore struct {
+	*serveIdentityStore
+	serveStubRest
 }
 
 func (s *serveIdentityStore) IssueReader() (issueops.Reader, error) {
@@ -182,6 +198,13 @@ func (s *serveIdentityStore) Close() error { return nil }
 // They hand back serveIdentityRole, which satisfies each interface by
 // EMBEDDING it rather than implementing it: non-nil, so the set is complete,
 // while an actual call panics naming the method it reached.
+func (*serveIdentityStore) BatchCloser() (issueops.BatchCloser, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) ReadyClaimer() (issueops.ReadyClaimer, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) Releaser() (issueops.Releaser, error) { return serveIdentityRole{}, nil }
 func (*serveIdentityStore) IssueLifecycle() (issueops.Lifecycle, error) {
 	return serveIdentityRole{}, nil
 }
@@ -195,6 +218,38 @@ func (*serveIdentityStore) CycleDetector() (issueops.CycleDetector, error) {
 	return serveIdentityRole{}, nil
 }
 func (*serveIdentityStore) EdgeReader() (issueops.EdgeReader, error) { return serveIdentityRole{}, nil }
+
+// GraphCounter is declared for the reason every accessor here is, and it is the
+// one this stub was CAUGHT missing rather than written with: the edge-count
+// role is a read, so its hook decorator recurses, and the recursion lands on a
+// type whose embedded storage.DoltStorage is nil. That is a promoted method on
+// a nil interface — a segfault inside `bd serve`'s role extraction, not a
+// compile error — and it surfaced only on the full-suite macOS shard, because
+// no test name here matches the ones a role slice thinks to run.
+func (*serveIdentityStore) GraphCounter() (issueops.GraphCounter, error) {
+	return serveIdentityRole{}, nil
+}
+
+// IssueRelations is the first role added to serveIssueRoles since this stub
+// stopped embedding a nil store, so the comment above it is now a record of the
+// old regime rather than a warning about this one: GraphCounter had to be found
+// by a CI shard, and this had to be declared before the package would build,
+// with `missing method IssueRelations` naming it.
+//
+// It is declared HERE, at depth 1, and that placement is the load-bearing half.
+// serveIdentityDoltStore embeds this type shallower than serveStubRest's nil
+// store, so a role declared here shadows the promotion; one declared on the
+// wrapper instead would satisfy the compiler and leave the assertion below
+// unable to see it.
+func (*serveIdentityStore) IssueRelations() (issueops.Relations, error) {
+	return serveIdentityRole{}, nil
+}
+
+// Commenter is declared at depth 1 for IssueRelations' reason, and it is the
+// second role to arrive as a build error here rather than as a runtime one.
+func (*serveIdentityStore) Commenter() (issueops.Commenter, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 	return serveIdentityRole{}, nil
 }
@@ -202,6 +257,7 @@ func (*serveIdentityStore) TreeWalker() (issueops.TreeWalker, error) { return se
 func (*serveIdentityStore) ReadyCounter() (issueops.ReadyCounter, error) {
 	return serveIdentityRole{}, nil
 }
+func (*serveIdentityStore) Counter() (issueops.Counter, error) { return serveIdentityRole{}, nil }
 func (*serveIdentityStore) Querier() (issueops.Querier, error) { return serveIdentityRole{}, nil }
 func (*serveIdentityStore) Sweeper() (issueops.Sweeper, error) { return serveIdentityRole{}, nil }
 func (*serveIdentityStore) Deleter() (issueops.Deleter, error) { return serveIdentityRole{}, nil }
@@ -211,7 +267,13 @@ func (*serveIdentityStore) BatchCreator() (issueops.BatchCreator, error) {
 func (*serveIdentityStore) DependencyEditor() (issueops.DependencyEditor, error) {
 	return serveIdentityRole{}, nil
 }
+func (*serveIdentityStore) BatchApplier() (issueops.BatchApplier, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) Memories() (memoryops.Memories, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) MetadataCAS() (issueops.MetadataCAS, error) {
 	return serveIdentityRole{}, nil
 }
 
@@ -221,18 +283,27 @@ func (*serveIdentityStore) Memories() (memoryops.Memories, error) {
 // being promoted and the build would say so.
 type serveIdentityRole struct {
 	issueops.Lifecycle
+	issueops.Releaser
+	issueops.ReadyClaimer
+	issueops.BatchCloser
+	issueops.MetadataCAS
 	issueops.WorkspaceConfig
 	issueops.StatsReporter
 	issueops.CycleDetector
 	issueops.EdgeReader
+	issueops.GraphCounter
+	issueops.Relations
+	issueops.Commenter
 	issueops.BlockingAnnotator
 	issueops.TreeWalker
 	issueops.ReadyCounter
+	issueops.Counter
 	issueops.Querier
 	issueops.Sweeper
 	issueops.Deleter
 	issueops.BatchCreator
 	issueops.DependencyEditor
+	issueops.BatchApplier
 	memoryops.Memories
 }
 

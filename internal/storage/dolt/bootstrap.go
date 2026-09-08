@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/remotecache"
 )
@@ -76,7 +78,7 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 	// from an earlier bootstrap that a stale/empty doltExists() check
 	// missed) that we must not delete.
 	targetPreExisted := pathExists(cloneTarget)
-	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget)...)
+	cmd := bootstrapCloneCmd(ctx, remoteURL, cloneTarget)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		if targetPreExisted {
 			return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s\nClone target %q already existed before this attempt; left untouched to avoid deleting a pre-existing Dolt repo", err, output, cloneTarget)
@@ -87,6 +89,15 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 
 	fmt.Fprintf(os.Stderr, "Bootstrapped from remote: %s\n", remoteURL)
 	return true, nil
+}
+
+// bootstrapCloneCmd builds the `dolt clone` for remote bootstrap. It does not
+// route through prepareDoltCLITransferCommand, so it applies the remote env
+// guards itself (see internal/gittraceenv and internal/githooksenv).
+func bootstrapCloneCmd(ctx context.Context, remoteURL, cloneTarget string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget)...)
+	cmd.Env = githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
+	return cmd
 }
 
 var failedCloneCleanupRetryDelays = []time.Duration{

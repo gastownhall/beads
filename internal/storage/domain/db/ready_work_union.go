@@ -7,7 +7,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -70,7 +69,7 @@ func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter 
 	if err != nil {
 		return idSrcPage{}, false, fmt.Errorf("ready work union: query: %w", err)
 	}
-	page, err := scanIDSrcPage(rows, true)
+	page, err := scanIDSrcPage(rows)
 	if err != nil {
 		return idSrcPage{}, false, fmt.Errorf("ready work union: %w", err)
 	}
@@ -119,13 +118,13 @@ func (r *issueSQLRepositoryImpl) getReadyWorkWithCountsUnion(ctx context.Context
 		return domain.SearchCountsPage{Items: nil, HasMore: hasMore}, nil
 	}
 
-	issuesByID, err := r.fetchCountsByIDs(ctx, page.issueIDs, issuesFilterTables, wispDepsExist, sqlbuild.CountsHydration{})
+	issuesByID, err := r.fetchCountsByIDs(ctx, page.issueIDs, issuesFilterTables, wispDepsExist, readyHydrationFor(filter))
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("ready work union with counts: hydrate issues: %w", err)
 	}
 	var wispsByID map[string]*types.IssueWithCounts
 	if len(page.wispIDs) > 0 {
-		wispsByID, err = r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, sqlbuild.CountsHydration{})
+		wispsByID, err = r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, readyHydrationFor(filter))
 		if err != nil && !dberrors.IsTableNotExist(err) {
 			return domain.SearchCountsPage{}, fmt.Errorf("ready work union with counts: hydrate wisps: %w", err)
 		}

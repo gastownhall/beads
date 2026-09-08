@@ -10,6 +10,7 @@ import (
 // reading and pruning the durable mutation journal.
 type EventsJournalSQLRepository interface {
 	Read(ctx context.Context, since int64, limit int) ([]storage.EventsJournalRow, error)
+	ReadPage(ctx context.Context, since int64, limit int) (storage.EventsJournalPage, error)
 	Prune(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
 }
 
@@ -17,6 +18,10 @@ type EventsJournalSQLRepository interface {
 // proxied-server callers without leaking a raw SQL connection.
 type EventsJournalUseCase interface {
 	Read(ctx context.Context, since int64, limit int) ([]storage.EventsJournalRow, error)
+	// ReadPage is Read plus the journal head, for a consumer that must pace
+	// itself rather than merely take what came next. See
+	// issueops.ReadEventsPageInTx for why the head is not folded into Read.
+	ReadPage(ctx context.Context, since int64, limit int) (storage.EventsJournalPage, error)
 	Prune(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
 }
 
@@ -32,6 +37,10 @@ var _ EventsJournalUseCase = (*eventsJournalUseCase)(nil)
 
 func (u *eventsJournalUseCase) Read(ctx context.Context, since int64, limit int) ([]storage.EventsJournalRow, error) {
 	return u.repo.Read(ctx, since, limit)
+}
+
+func (u *eventsJournalUseCase) ReadPage(ctx context.Context, since int64, limit int) (storage.EventsJournalPage, error) {
+	return u.repo.ReadPage(ctx, since, limit)
 }
 
 func (u *eventsJournalUseCase) Prune(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {

@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-MAX_AGE_DAYS="${DOC_FRESHNESS_MAX_AGE_DAYS:-90}"
+MAX_AGE_DAYS_INPUT="${DOC_FRESHNESS_MAX_AGE_DAYS:-90}"
 TODAY="${DOC_FRESHNESS_TODAY:-}"
 TODAY_SOURCE="override"
 TODAY_DAY=""
@@ -25,6 +25,7 @@ DOCS=(
     "docs/reference/json-schema.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
     "docs/recovery/init-safety.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
     "engdocs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
+    "engdocs/SERVE_RUNBOOK.md|internal/httpapi/server.go;internal/httpapi/events_watch.go;cmd/bd/serve.go;internal/httpapi/auth.go"
     "engdocs/LINTING.md|.golangci.yml;scripts/ci/pr-lint.sh;Makefile;.github/workflows/pr.yml;.github/workflows/main.yml"
     "engdocs/CI_CLEANUP_PLAN.md|engdocs/CI_TEST_SURFACE_AUDIT.md;.github/workflows/*.yml;.buildflags;.golangci.yml;scripts/ci/pr-lint.sh;Makefile"
     "engdocs/design/otel/otel-data-model.md|internal/telemetry/;internal/storage/dolt/store.go;internal/compact/haiku.go;cmd/bd/find_duplicates.go;internal/hooks/"
@@ -111,6 +112,38 @@ path_exists_or_glob_matches() {
     fi
 }
 
+normalize_max_age_days() {
+    local value="$1"
+    local normalized
+
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+
+    # Keep the policy value as decimal text. It must never become a Bash
+    # arithmetic expression, and it may be larger than Bash's integer range.
+    normalized="${value#"${value%%[!0]*}"}"
+    [[ -n "$normalized" ]] || normalized=0
+    printf '%s\n' "$normalized"
+}
+
+decimal_greater_than() {
+    local left="$1"
+    local right="$2"
+    local LC_ALL=C
+
+    if ((${#left} > ${#right})); then
+        return 0
+    fi
+    if ((${#left} < ${#right})); then
+        return 1
+    fi
+    [[ "$left" > "$right" ]]
+}
+
+if ! MAX_AGE_DAYS="$(normalize_max_age_days "$MAX_AGE_DAYS_INPUT")"; then
+    echo "ERROR: DOC_FRESHNESS_MAX_AGE_DAYS must be a nonnegative decimal integer" >&2
+    exit 2
+fi
+
 if [[ -z "$TODAY" ]]; then
     TODAY_SOURCE="provider"
     if ! TODAY="$(date '+%Y-%m-%d' 2>/dev/null)"; then
@@ -165,7 +198,7 @@ for entry in "${DOCS[@]}"; do
         elif (( age_days < 0 )); then
             echo "FAIL: Last reviewed date is in the future: $reviewed"
             ERRORS=$((ERRORS + 1))
-        elif (( age_days > MAX_AGE_DAYS )); then
+        elif decimal_greater_than "$age_days" "$MAX_AGE_DAYS"; then
             echo "FAIL: Last reviewed date is stale: $reviewed (${age_days} days old)"
             ERRORS=$((ERRORS + 1))
         else

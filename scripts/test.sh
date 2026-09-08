@@ -108,8 +108,9 @@ if [[ -z "${BEADS_TEST_BD_BINARY:-}" ]]; then
             fi
             mkdir -p "$PREBUILT_BD_DIR"
             echo "Prebuilding bd for subprocess tests..." >&2
-            if go build -o "$PREBUILT_BD_DIR/bd" "$REPO_ROOT/cmd/bd"; then
-                export BEADS_TEST_BD_BINARY="$PREBUILT_BD_DIR/bd"
+            PREBUILT_BD_BIN="$PREBUILT_BD_DIR/bd$(go env GOEXE)"
+            if go build -o "$PREBUILT_BD_BIN" "$REPO_ROOT/cmd/bd"; then
+                export BEADS_TEST_BD_BINARY="$PREBUILT_BD_BIN"
                 echo "Prebuilt bd: $BEADS_TEST_BD_BINARY" >&2
             else
                 echo "WARN: bd prebuild failed; tests will build their own binaries" >&2

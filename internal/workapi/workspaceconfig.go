@@ -10,8 +10,8 @@ import (
 )
 
 // The single definition of what a write to the workspace's durable settings
-// plane is allowed to be and of what an enumeration of it may carry, beside
-// BuildListFilter and BuildCountFilter.
+// plane is allowed to be and of what a READ of it may carry — either by
+// enumeration or by name — beside BuildListFilter and BuildCountFilter.
 //
 // It lives here for the reason those do: three implementations of
 // issueops.WorkspaceConfig have to agree about it, and it is checkable without
@@ -72,8 +72,9 @@ func ValidateSettingWrite(key, value string) (string, error) {
 // keys and the `bd remember` memories nested under them are USER DATA stored as
 // config rows beneath kvkeys.Prefix, and an enumeration that returned them
 // published that data on `bd config list` and on GET /v0/beads/config alike —
-// the latter unauthenticated, and redacting on the KEY NAME while a memory's
-// content is in the VALUE. `bd config list` carrying kv rows was never a
+// the latter reachable by anything a shared bearer admits, if one is
+// configured at all, and redacting on the KEY NAME while a memory's content is
+// in the VALUE. `bd config list` carrying kv rows was never a
 // design; it fell out of one storage table holding two planes.
 //
 // THE WHOLE PREFIX GOES, not just kv.memory.: "settings minus one user-data
@@ -88,12 +89,12 @@ func ValidateSettingWrite(key, value string) (string, error) {
 // into every terminal and transcript while the HTTP door claimed they were not
 // settings.
 //
-// AND IT IS AN ENUMERATION EXCLUSION, NOT A FIREWALL. GetSetting still answers
-// a verbatim kv.* key and SetSetting/UnsetSetting still write one; see
-// issueops/workspaceconfig.go for why that asymmetry is deliberate. A caller
-// who already knows the exact key is in a different class from one who
-// discovers it by listing. Making it a wall is one more refusal in this
-// function and nothing else changes.
+// IT IS ONE HALF OF THE READ FIREWALL. The other half is
+// FilterSettingsPointRead, which answers the caller who names an exact key, and
+// both decide with KeyIsOnTheKVPlane so the boundary is stated once. An
+// exclusion that stopped at the enumeration left the disclosure standing for
+// anyone who could guess a key — and the guess is cheap, since `bd memories`
+// derives its keys from the content it stores.
 //
 // The result is always a fresh map, empty rather than nil, because
 // ListSettingsResult.Settings promises a caller can range over the answer
@@ -102,10 +103,54 @@ func ValidateSettingWrite(key, value string) (string, error) {
 func FilterSettingsEnumeration(stored map[string]string) map[string]string {
 	settings := make(map[string]string, len(stored))
 	for key, value := range stored {
-		if strings.HasPrefix(key, kvkeys.Prefix) {
+		if KeyIsOnTheKVPlane(key) {
 			continue
 		}
 		settings[key] = value
 	}
 	return settings
+}
+
+// FilterSettingsPointRead answers a GetSetting that names a key on the KV
+// plane, and reports whether it answered. A caller gets (result, false) for
+// every key the settings role owns, and reads on.
+//
+// THE ANSWER IS THE ABSENT-KEY ANSWER, EXACTLY: the echoed key, an empty value
+// and a nil error, which is what SettingResult.Value documents for a key
+// nothing ever stored. Returning it rather than an error is what makes the
+// refusal indistinguishable from absence — there is no ErrNotFound on this role
+// to reach for, and a bespoke error would tell the caller that the key it
+// guessed exists, which is most of what it wanted to know.
+//
+// IT IS DECIDED BEFORE THE STORE IS ASKED. Both bodies call it between the key
+// validator and their read, so a refused key costs no query and, on the
+// unit-of-work leg, opens no transaction.
+//
+// THE ANSWER IS THE ROLE'S, NOT THE PLANE'S. `bd kv get`, `bd remember` and
+// `bd memories` read those rows through their own front doors, which do not
+// come through here, so nothing a user stored becomes unreachable — it stops
+// being reachable through the door marked "settings". The WRITES are untouched:
+// SetSetting and UnsetSetting still take a verbatim `kv.` key, which is the
+// escape hatch for a wedged memory.
+func FilterSettingsPointRead(key string) (issueops.SettingResult, bool) {
+	if !KeyIsOnTheKVPlane(key) {
+		return issueops.SettingResult{}, false
+	}
+	return issueops.SettingResult{Key: key}, true
+}
+
+// KeyIsOnTheKVPlane reports whether a config-table key names user data rather
+// than a setting.
+//
+// It is the single statement of where the plane boundary runs. Both filters
+// above decide with it, and so does `bd config show`, whose database section
+// reads the table raw and would otherwise print the plane back into every
+// terminal the two filters were added to keep it out of.
+//
+// THE WHOLE PREFIX, ANCHORED. Not kvkeys.MemoryConfigKeyPrefix, which is the
+// narrower constant and the tempting one; not an unanchored match, which would
+// take `custom.mentions.kv.somewhere` with it; and "kv." carries the dot, so
+// `kvetch` is a setting.
+func KeyIsOnTheKVPlane(key string) bool {
+	return strings.HasPrefix(key, kvkeys.Prefix)
 }

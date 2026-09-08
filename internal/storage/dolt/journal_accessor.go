@@ -14,6 +14,7 @@ import (
 // store the same way it does against the embedded store.
 var (
 	_ storage.EventsJournalAccessor    = (*DoltStore)(nil)
+	_ storage.EventsJournalCursor      = (*DoltStore)(nil)
 	_ issueops.EventsMaintenanceRunner = (*DoltStore)(nil)
 )
 
@@ -26,6 +27,18 @@ func (s *DoltStore) ReadEventsJournal(ctx context.Context, since int64, limit in
 		return readErr
 	})
 	return out, err
+}
+
+// ReadEventsJournalPage returns the same rows plus the journal head, in ONE
+// transaction so the pair cannot straddle a commit.
+func (s *DoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (storage.EventsJournalPage, error) {
+	var page storage.EventsJournalPage
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var readErr error
+		page, readErr = issueops.ReadEventsPageInTx(ctx, tx, since, limit)
+		return readErr
+	})
+	return page, err
 }
 
 // PruneEventsJournal deletes journal rows below before, honoring the retain

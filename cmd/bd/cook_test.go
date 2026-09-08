@@ -974,3 +974,66 @@ func TestCookFormulaToSubgraph_StepMetadata(t *testing.T) {
 		t.Errorf("Metadata[origin] = %v, want \"repro\"", got)
 	}
 }
+
+// TestProcessStepToIssueParentType verifies that a parent step's declared
+// type is honored; only a step with children and no declared type defaults
+// to epic (GH#5443).
+func TestProcessStepToIssueParentType(t *testing.T) {
+	tests := []struct {
+		name     string
+		stepType string
+		want     types.IssueType
+	}{
+		{"undeclared parent defaults to epic", "", types.TypeEpic},
+		{"declared built-in type kept on parent", "decision", types.TypeDecision},
+		{"declared custom type kept on parent", "duty", types.IssueType("duty")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := &formula.Step{
+				ID:       "parent",
+				Title:    "parent step",
+				Type:     tt.stepType,
+				Children: []*formula.Step{{ID: "c", Title: "child step"}},
+			}
+			issue := processStepToIssue(step, "f")
+			if issue.IssueType != tt.want {
+				t.Errorf("IssueType = %q, want %q", issue.IssueType, tt.want)
+			}
+		})
+	}
+}
+
+func TestStepTypeToIssueType(t *testing.T) {
+	tests := []struct {
+		stepType string
+		want     types.IssueType
+	}{
+		// Core work types pass through.
+		{"task", types.TypeTask},
+		{"bug", types.TypeBug},
+		{"feature", types.TypeFeature},
+		{"epic", types.TypeEpic},
+		{"chore", types.TypeChore},
+		// Empty (or whitespace-only) defaults to task; surrounding
+		// whitespace is trimmed rather than becoming part of the type.
+		{"", types.TypeTask},
+		{"   ", types.TypeTask},
+		{" bug ", types.TypeBug},
+		// Other built-in types pass through instead of collapsing to task.
+		{"decision", types.TypeDecision},
+		{"spike", types.TypeSpike},
+		{"story", types.TypeStory},
+		// Aliases normalize to their canonical form.
+		{"enhancement", types.TypeFeature},
+		// Non-built-in types pass through; at pour/cook time,
+		// flattenUnregisteredIssueTypes degrades them to task unless they
+		// are already registered in types.custom.
+		{"duty", types.IssueType("duty")},
+	}
+	for _, tt := range tests {
+		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
+			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
+		}
+	}
+}

@@ -58,6 +58,10 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "RemoveUnmarksItsSourceAndDescendants", run: conformance.RunDependencyEditorRemoveUnmarksItsSourceAndDescendants},
 		{name: "MaintainsBlockedStateAcrossPlanes", run: conformance.RunDependencyEditorMaintainsBlockedStateAcrossPlanes},
 		{name: "ClosedChildAddSatisfiesAnAnyChildrenGate", run: conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate},
+		{name: "RelatesToAddLeavesItsSourceUnblocked", run: conformance.RunDependencyEditorRelatesToAddLeavesItsSourceUnblocked},
+		{name: "AcceptsADiamond", run: conformance.RunDependencyEditorAcceptsADiamond},
+		{name: "GateScopeFollowsTheEdgeType", run: conformance.RunDependencyEditorGateScopeFollowsTheEdgeType},
+		{name: "AcceptsBlockingAcrossIssueTypes", run: conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)

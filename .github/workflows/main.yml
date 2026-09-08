@@ -401,7 +401,7 @@ jobs:
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -444,15 +444,33 @@ jobs:
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
+      # No BD_LINT_NEW_FROM_MERGE_BASE here: the push lane sweeps the whole
+      # tree, including the GOOS=windows cross-lint. pr.yml scopes the same
+      # wrapper to the PR's own diff.
       - name: Run PR lint wrapper
         run: make ci-pr-lint
 
   # Cross-platform test matrix (Linux/macOS only - Windows uses smoke tests)
+  #
+  # Both legs run every package in one `./...` invocation, so go test's DEFAULT
+  # 10m per-package deadline applied — and cmd/bd outgrew it. scripts/test.sh
+  # already documents the floor for local runs: cmd/bd is the slowest package at
+  # ~18min wall, which is why TEST_TIMEOUT defaults to 25m there. CI was still on
+  # the 10m default and rode the edge: on 2026-09-01 main run 33497003321 failed
+  # twice with `panic: test timed out after 10m0s` in cmd/bd AND, in the same
+  # coverage pass, internal/storage/uow — different tests only 1-12s in flight
+  # each attempt (a package-wide crawl on the 2-core coverage-instrumented
+  # runner, not a hang), while a rerun of the identical tree passed. Match
+  # scripts/test.sh's 25m per-package deadline and keep it inside one finite job
+  # budget, the same shape the storage/uow and conformance jobs below use: the go
+  # deadline fires first and prints goroutine stacks, so a REAL hang is still
+  # diagnosable rather than being cut off by a bare job kill.
   test:
     name: Test (${{ matrix.os }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     needs: build-artifacts
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -465,7 +483,7 @@ jobs:
           # macOS: full test suite, no coverage (faster)
           - os: macos-latest
             coverage: false
-            test-flags: '-v -race -short'
+            test-flags: '-v -race -short -timeout=25m'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -502,7 +520,7 @@ jobs:
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt (Linux/macOS)
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
@@ -548,7 +566,7 @@ jobs:
           gotestsum \
             --junitfile junit.xml \
             --format testdox \
-            -- -tags gms_pure_go -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
+            -- -tags gms_pure_go -race -short -timeout=25m -coverprofile=coverage.out -skip '^TestEmbedded' ./...
 
       - name: Test
         if: ${{ !matrix.coverage }}
@@ -609,6 +627,9 @@ jobs:
     name: Test (storage domain + uow)
     runs-on: ubuntu-latest
     needs: build-artifacts
+    # The race-enabled storage package has outgrown Go's implicit 10-minute
+    # timeout. Keep both per-package deadlines inside one finite job budget.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -619,7 +640,7 @@ jobs:
           cache: false
 
       - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
@@ -652,7 +673,7 @@ jobs:
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
+        run: go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
       # The doctor/fix DB-backed suite spins its own Dolt container in
       # TestMain. BEADS_FIX_REQUIRE_DOLT=1 turns a missing container into a
@@ -662,7 +683,7 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           BEADS_FIX_REQUIRE_DOLT: "1"
-        run: go test -tags gms_pure_go -race -count=1 -v ./cmd/bd/doctor/fix/
+        run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
 
   main-linux-integration-packages:
     name: Main Linux integration packages (${{ matrix.shard }}/6)
@@ -697,7 +718,7 @@ jobs:
           chmod +x bd-linux-gms-pure
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -781,7 +802,7 @@ jobs:
           chmod +x bd-linux-gms-pure
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -872,7 +893,7 @@ jobs:
       - name: Install Dolt CLI
         # TestProxiedServerExternalCreate needs the dolt binary on PATH; the
         # shared harness itself uses the dolt sql-server container image.
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -1157,6 +1178,9 @@ jobs:
       - name: Check gofmt
         run: make fmt-check
 
+  # The whole-tree lint sweep. pr.yml's job of the same name reports only what
+  # a PR introduces, so this push lane is where a pre-existing or newly landed
+  # issue anywhere in the tree surfaces.
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -1183,7 +1207,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3
+      - uses: DeterminateSystems/determinate-nix-action@527f17dd63d2d60d3e5552934bc84b9a33a14d11 # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |

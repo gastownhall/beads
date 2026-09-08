@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/eventsjournal"
 )
 
 // The two plumbings the root pre-run never reached. Both are end-to-end on
@@ -45,6 +47,13 @@ func TestServeActivatesTheEventsJournal(t *testing.T) {
 	}
 	if !hasEventOp(records, "create") {
 		t.Errorf("journal has no create record for the served mutation: %+v", records)
+	}
+	// The exported record attributes the mutation to the acting identity the
+	// request resolved — the same actor the audit-events table records.
+	for _, rec := range records {
+		if rec.Op == "create" && rec.Actor != "tester" {
+			t.Errorf("create record actor = %q, want %q", rec.Actor, "tester")
+		}
 	}
 }
 
@@ -149,7 +158,7 @@ func TestRoutedCreateHonorsTheEnvOverrideOverTheTargetsConfig(t *testing.T) {
 	}
 }
 
-func hasEventOp(records []eventRecord, op string) bool {
+func hasEventOp(records []eventsjournal.Record, op string) bool {
 	for _, r := range records {
 		if r.Op == op {
 			return true

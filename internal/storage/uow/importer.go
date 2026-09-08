@@ -61,7 +61,6 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 			staleRejected := make(map[string]struct{})
 			skippedSeen := make(map[string]struct{})
 			opts := storage.BatchCreateOptions{
-				OrphanHandling:                 storage.OrphanAllow,
 				SkipPrefixValidation:           request.SkipPrefixValidation,
 				RejectStaleUpserts:             !request.AllowStale,
 				SkipDependencyValidationErrors: true,

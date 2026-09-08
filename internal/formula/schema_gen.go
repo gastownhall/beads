@@ -660,7 +660,11 @@ Used for dependency references and bond points.`,
 				Name:     "Type",
 				Type:     "string",
 				JSONName: "type",
-				Doc:      `Type is the issue type: task, bug, feature, epic, chore.`,
+				Doc: `Type is the issue type: any built-in type (task by default; bug,
+feature, epic, chore, decision, spike, story, milestone, ...) or a
+custom type already registered in types.custom. Unregistered types
+are flattened to task, with a warning, when the formula is cooked
+or poured.`,
 			},
 			{
 				Name:     "Priority",

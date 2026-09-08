@@ -75,7 +75,14 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 				return HandleError("parent issue %s not found: %v", in.parentID, err)
 			}
 			if !in.noInheritLabels {
-				inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID)
+				// A READ inside the DRY-RUN unit of work, which is opened only to
+				// be discarded: this previews what --parent would inherit without
+				// creating anything. The role that answers it for real is
+				// CreateRequest.InheritLabelsFromParent, which resolves the parent's
+				// labels inside the create it is part of — and a preview has no
+				// create to be part of. A dry-run mode on the create role is the
+				// follow-up (ga-2ltro.12).
+				inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID) //nolint:forbidigo // dry-run preview; the role resolves this only inside a real create
 				if lerr != nil {
 					dryUW.Close(ctx)
 					return HandleError("dry-run inherit labels: %v", lerr)

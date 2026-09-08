@@ -36,6 +36,13 @@ func (c *storeWorkspaceConfig) GetSetting(ctx context.Context, req issueops.GetS
 	if err != nil {
 		return issueops.SettingResult{}, err
 	}
+	// The KV plane rides in the same table and is not settings. Both the
+	// refusal and the answer it gives are workapi's, shared with the
+	// unit-of-work body and with the enumeration filter, so where the plane
+	// boundary runs is one decision rather than one per door.
+	if refused, ok := workapi.FilterSettingsPointRead(key); ok {
+		return refused, nil
+	}
 	value, err := c.store.GetConfig(ctx, key)
 	if err != nil {
 		return issueops.SettingResult{}, err

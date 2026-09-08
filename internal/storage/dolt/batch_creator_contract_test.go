@@ -36,6 +36,12 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("LinksAnEarlierItemOfTheSameBatch", func(t *testing.T) {
 		conformance.RunBatchCreatorLinksAnEarlierItemOfTheSameBatch(t, ctx, fixture)
 	})
+	t.Run("LinksAnEarlierItemOnTheEphemeralPlane", func(t *testing.T) {
+		conformance.RunBatchCreatorLinksAnEarlierItemOnTheEphemeralPlane(t, ctx, fixture)
+	})
+	t.Run("KeepsAnEphemeralItemsLabelsOffTheDurablePlane", func(t *testing.T) {
+		conformance.RunBatchCreatorKeepsAnEphemeralItemsLabelsOffTheDurablePlane(t, ctx, fixture)
+	})
 	t.Run("RefusesAnAbsentEdgeTarget", func(t *testing.T) {
 		conformance.RunBatchCreatorRefusesAnAbsentEdgeTarget(t, ctx, fixture)
 	})

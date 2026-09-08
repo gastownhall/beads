@@ -10,12 +10,14 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
-	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/httpapi"
 )
 
 // End-to-end lifecycle for `bd serve`, driven as a subprocess exactly as an
@@ -125,45 +127,56 @@ func (sp *serveProcess) wait() error {
 
 func (sp *serveProcess) url(path string) string { return "http://" + sp.addr + path }
 
-// servedCapabilities is what GET /v0/beads/context must advertise, spelled out
-// ONCE for every topology that checks it.
+// assertServedCapabilities checks a decoded context body against the capability
+// set this build's route table implies. Every topology asserts the same thing,
+// because a mode changes where the data lives and never what the handshake
+// advertises.
 //
-// It is deliberately a literal rather than httpapi.Capabilities(): comparing the
-// server against its own derivation would pass for any surface at all, and the
-// point of this list is that adding an operation costs a line here. The
-// assertion is on the whole list rather than a count, so an operation that
-// arrives stubbed still fails — which is what it did when the facade programme
-// took this from four operations to sixteen. Update it deliberately when you
-// add one.
+// THE EXPECTATION IS DERIVED, and it used to be a literal spelled out here for
+// a reason that did not survive contact with the third operation to be added.
+// That reason was: "comparing the server against its own derivation would pass
+// for any surface at all, and the point of this list is that adding an
+// operation costs a line here."
 //
-// ONE COPY, and that is the fix this list arrived with. It used to be written
-// out separately in each topology's test, on the theory that the two must agree
-// — and they silently stopped agreeing: the server-mode copy sat at four
-// entries through every expansion since, asserting a surface that had not
-// existed for a long time. Two literals that MUST match are one literal; a
-// package's own gates cannot catch an expectation stored as data outside it.
-var servedCapabilities = []any{
-	"config.get", "config.list",
-	"dependencies.add", "dependencies.blocking", "dependencies.cycles",
-	"dependencies.list", "dependencies.remove", "dependencies.tree",
-	"issues.batchCreate", "issues.claim", "issues.close", "issues.delete",
-	"issues.get", "issues.list", "issues.query", "issues.reopen", "issues.sweep",
-	"issues.update",
-	"memories.forget", "memories.get", "memories.list", "memories.remember",
-	"ready.count", "ready.list", "stats.get",
-}
-
-// assertServedCapabilities checks a decoded context body against
-// servedCapabilities. Every topology asserts the same thing, because a mode
-// changes where the data lives and never what the handshake advertises.
+// The first half is true and is answered elsewhere. The capability CONTENT is
+// pinned by TestSpecCapabilityVocabularyMatchesTheRouteTable, which compares
+// the derived set against the `capabilities` prose in openapi.v0.yaml in both
+// directions — a paragraph a human writes for the operation being added, which
+// is an independent source in a way a second test literal never was.
+//
+// The second half is the part that inverted. The line this list cost was paid
+// in the WRONG package: an operation is added in internal/httpapi, its own
+// gates go green, and the copy that fails is out here in a proxied shard the
+// author's pre-merge checks do not run. That is precisely what happened to the
+// slice that added `issues.count` — this file went red on a list nothing about
+// counting had changed. And the failure mode the old comment itself describes,
+// a copy silently stuck at four entries while the surface grew, is not a bug
+// derivation makes harder to catch: it is a bug derivation makes impossible to
+// write.
+//
+// What the assertion still buys, and what no in-package test can see: each
+// TOPOLOGY's subprocess really binds, really answers /v0/beads/context, and
+// really publishes the whole set rather than a truncated one.
 func assertServedCapabilities(t *testing.T, body map[string]any) {
 	t.Helper()
 	caps, ok := body["capabilities"].([]any)
 	if !ok {
 		t.Fatalf("capabilities = %#v, want an array", body["capabilities"])
 	}
-	if !reflect.DeepEqual(caps, servedCapabilities) {
-		t.Errorf("capabilities = %v, want %v", caps, servedCapabilities)
+	got := make([]string, 0, len(caps))
+	for i, c := range caps {
+		token, ok := c.(string)
+		if !ok {
+			t.Fatalf("capabilities[%d] = %#v, want a string", i, c)
+		}
+		got = append(got, token)
+	}
+	want := httpapi.Capabilities()
+	if len(want) == 0 {
+		t.Fatal("this build derives no capabilities; the assertion below would pass against a server that advertises nothing")
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("capabilities = %v, want %v", got, want)
 	}
 }
 

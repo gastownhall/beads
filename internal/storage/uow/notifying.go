@@ -234,6 +234,10 @@ func (p *notifyingProvider) BlockingAnnotator() (publicops.BlockingAnnotator, er
 
 func (p *notifyingProvider) TreeWalker() (publicops.TreeWalker, error) { return NewTreeWalker(p) }
 
+func (p *notifyingProvider) GraphCounter() (publicops.GraphCounter, error) {
+	return NewGraphCounter(p)
+}
+
 func (p *notifyingProvider) Counter() (publicops.Counter, error) { return NewCounter(p) }
 
 func (p *notifyingProvider) ReadyCounter() (publicops.ReadyCounter, error) {
@@ -266,6 +270,15 @@ func (p *notifyingProvider) DependencyEditor() (publicops.DependencyEditor, erro
 	return NewDependencyEditor(p)
 }
 
+// BatchApplier builds on THIS provider, like every role above it, so the
+// notifications its items produce are the ones the recording use cases already
+// emit for a create, an update, a close and an edge. It needs no recorder of
+// its own for that reason: the role composes those use cases rather than
+// reaching past them.
+func (p *notifyingProvider) BatchApplier() (publicops.BatchApplier, error) {
+	return NewBatchApplier(p)
+}
+
 func (p *notifyingProvider) Deleter() (publicops.Deleter, error) { return NewDeleter(p) }
 
 func (p *notifyingProvider) Sweeper() (publicops.Sweeper, error) { return NewSweeper(p) }
@@ -288,7 +301,20 @@ func (p *notifyingProvider) VersionReconciler() (publicops.VersionReconciler, er
 	return NewVersionReconciler(p)
 }
 
+func (p *notifyingProvider) MetadataCAS() (publicops.MetadataCAS, error) { return NewMetadataCAS(p) }
+
+func (p *notifyingProvider) Releaser() (publicops.Releaser, error) { return NewReleaser(p) }
+
 func (p *notifyingProvider) Memories() (memoryops.Memories, error) { return NewMemories(p) }
+
+// EventsJournalCursor builds on THIS provider, like every role above it, so a
+// journal read taken through a notifying provider still runs in a unit of work
+// this layer opened. Nothing here records, and nothing needs to: this accessor
+// reaches only the READ half of EventsJournalUseCase, which the parity guard
+// exempts for reading state and changing none.
+func (p *notifyingProvider) EventsJournalCursor() (storage.EventsJournalCursor, error) {
+	return NewEventsJournalCursor(p)
+}
 
 // ── Provider capabilities that are not roles ────────────────────────
 
@@ -353,34 +379,36 @@ func (p *notifyingProvider) RunEventsMaintenanceTx(ctx context.Context, fn func(
 }
 
 var (
-	_ UnitOfWorkProvider      = (*notifyingProvider)(nil)
-	_ MaintenanceProvider     = (*notifyingProvider)(nil)
-	_ PoolTuner               = (*notifyingProvider)(nil)
-	_ IssueLifecycleSource    = (*notifyingProvider)(nil)
-	_ IssueReaderSource       = (*notifyingProvider)(nil)
-	_ IssueClaimerSource      = (*notifyingProvider)(nil)
-	_ RelationsSource         = (*notifyingProvider)(nil)
-	_ EdgeReaderSource        = (*notifyingProvider)(nil)
-	_ BlockingAnnotatorSource = (*notifyingProvider)(nil)
-	_ TreeWalkerSource        = (*notifyingProvider)(nil)
-	_ CounterSource           = (*notifyingProvider)(nil)
-	_ ReadyCounterSource      = (*notifyingProvider)(nil)
-	_ ReadyClaimerSource      = (*notifyingProvider)(nil)
-	_ QuerierSource           = (*notifyingProvider)(nil)
-	_ StatsReporterSource     = (*notifyingProvider)(nil)
-	_ CycleDetectorSource     = (*notifyingProvider)(nil)
-	_ CommenterSource         = (*notifyingProvider)(nil)
-	_ BatchCloserSource       = (*notifyingProvider)(nil)
-	_ BatchCreatorSource      = (*notifyingProvider)(nil)
-	_ DependencyEditorSource  = (*notifyingProvider)(nil)
-	_ DeleterSource           = (*notifyingProvider)(nil)
-	_ SweeperSource           = (*notifyingProvider)(nil)
-	_ ImporterSource          = (*notifyingProvider)(nil)
-	_ BootstrapperSource      = (*notifyingProvider)(nil)
-	_ InitVerifierSource      = (*notifyingProvider)(nil)
-	_ WorkspaceConfigSource   = (*notifyingProvider)(nil)
-	_ VersionReconcilerSource = (*notifyingProvider)(nil)
-	_ MemoriesSource          = (*notifyingProvider)(nil)
+	_ UnitOfWorkProvider        = (*notifyingProvider)(nil)
+	_ MaintenanceProvider       = (*notifyingProvider)(nil)
+	_ PoolTuner                 = (*notifyingProvider)(nil)
+	_ IssueLifecycleSource      = (*notifyingProvider)(nil)
+	_ IssueReaderSource         = (*notifyingProvider)(nil)
+	_ IssueClaimerSource        = (*notifyingProvider)(nil)
+	_ RelationsSource           = (*notifyingProvider)(nil)
+	_ EdgeReaderSource          = (*notifyingProvider)(nil)
+	_ BlockingAnnotatorSource   = (*notifyingProvider)(nil)
+	_ TreeWalkerSource          = (*notifyingProvider)(nil)
+	_ GraphCounterSource        = (*notifyingProvider)(nil)
+	_ CounterSource             = (*notifyingProvider)(nil)
+	_ ReadyCounterSource        = (*notifyingProvider)(nil)
+	_ ReadyClaimerSource        = (*notifyingProvider)(nil)
+	_ QuerierSource             = (*notifyingProvider)(nil)
+	_ StatsReporterSource       = (*notifyingProvider)(nil)
+	_ CycleDetectorSource       = (*notifyingProvider)(nil)
+	_ CommenterSource           = (*notifyingProvider)(nil)
+	_ BatchCloserSource         = (*notifyingProvider)(nil)
+	_ BatchCreatorSource        = (*notifyingProvider)(nil)
+	_ DependencyEditorSource    = (*notifyingProvider)(nil)
+	_ DeleterSource             = (*notifyingProvider)(nil)
+	_ SweeperSource             = (*notifyingProvider)(nil)
+	_ ImporterSource            = (*notifyingProvider)(nil)
+	_ BootstrapperSource        = (*notifyingProvider)(nil)
+	_ InitVerifierSource        = (*notifyingProvider)(nil)
+	_ WorkspaceConfigSource     = (*notifyingProvider)(nil)
+	_ VersionReconcilerSource   = (*notifyingProvider)(nil)
+	_ MemoriesSource            = (*notifyingProvider)(nil)
+	_ EventsJournalCursorSource = (*notifyingProvider)(nil)
 )
 
 // ── The unit of work ────────────────────────────────────────────────
@@ -489,6 +517,56 @@ func (r *recorder) record(op string, issue *types.Issue) {
 }
 
 func (r *recorder) drain() []mutationEntry { e := r.entries; r.entries = nil; return e }
+
+// batchNotificationBuffer is this decorator seen from the BATCH COMPOSITIONS in
+// this package. They need it because the close verbs are shared: a single close
+// and a batch item reach the same recordingIssueUC method, and the two have
+// different firing rules — the single close announces an idempotent re-close,
+// the batch verbs do not (ga-2yaqp.1). Gating inside the verb would change both.
+//
+// So the composition marks the buffer before the item's close and rewinds to
+// that mark when the close turned out to have persisted nothing. Rewinding
+// rather than not-recording is what keeps the rule where it belongs: the verb
+// stays honest about what it did, and the composition decides what is worth
+// telling a script about.
+//
+// It is an interface rather than a concrete field because a UnitOfWork is only
+// sometimes this decorator — with hooks disabled NewNotifyingProvider hands back
+// the inner provider unwrapped, and then there is no buffer and nothing to do.
+type batchNotificationBuffer interface {
+	markNotifications() int
+	rewindNotifications(mark int)
+}
+
+func (u *notifyingUOW) markNotifications() int { return len(u.rec.entries) }
+
+func (u *notifyingUOW) rewindNotifications(mark int) {
+	if mark >= 0 && mark <= len(u.rec.entries) {
+		u.rec.entries = u.rec.entries[:mark]
+	}
+}
+
+// markBatchNotifications returns a rewind token for a batch item's close, or -1
+// when this unit of work buffers nothing.
+func markBatchNotifications(uw UnitOfWork) int {
+	if buf, ok := uw.(batchNotificationBuffer); ok {
+		return buf.markNotifications()
+	}
+	return -1
+}
+
+// rewindBatchNotifications drops whatever a batch item's close buffered. The
+// caller has established the item changed nothing, which is the only thing that
+// makes discarding a recorded mutation safe: nothing observes the buffer before
+// Commit drains it.
+func rewindBatchNotifications(uw UnitOfWork, mark int) {
+	if mark < 0 {
+		return
+	}
+	if buf, ok := uw.(batchNotificationBuffer); ok {
+		buf.rewindNotifications(mark)
+	}
+}
 
 // The recorder's op vocabulary. These name what happened; hookEventForOp maps
 // them to the three events internal/hooks publishes.
@@ -871,6 +949,50 @@ func (u *recordingIssueUC) UpdateIssue(ctx context.Context, id string, updates m
 	return nil
 }
 
+// CompareAndSetMetadataKey records an update for a swap that MOVED the value,
+// and nothing for one that did not — the same line hookMetadataCAS draws on the
+// DoltStorage chain, which fires on_update only when the row changed.
+//
+// It reads the fact rather than inferring it. The use case reports whether a
+// row write landed, which is strictly better than the decorator's comparison of
+// the request's two ends, and it is the only caller of this method that has it.
+//
+// THE SNAPSHOT IS anyPlane, because this role resolves the id across both
+// planes itself: a swap on a wisp is an update to a wisp, and reading only the
+// issues table would record a nil for it.
+func (u *recordingIssueUC) CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error) {
+	result, wrote, err := u.IssueUseCase.CompareAndSetMetadataKey(ctx, plan)
+	if err != nil || !wrote {
+		return result, wrote, err
+	}
+	u.rec.record(opUpdate, u.snap.anyPlane(ctx, plan.IssueID))
+	return result, wrote, nil
+}
+
+// ReleaseIssue records an update for a release that landed.
+//
+// It is DECLARED rather than inherited, which is the whole reason this method
+// exists: an accessor promoted onto an embedder compiles perfectly and records
+// nothing, so a release through a notifying unit of work would silently lose
+// the hook the DoltStorage chain fires for the same write.
+//
+// It reads the ROLE'S OWN verdict — ReleaseResult.Changed — which is the same
+// fact the bool beside it carries and the one a notification is about. An
+// ephemeral release changes a wisp and versions nothing, and it is still an
+// update somebody asked to be notified about.
+//
+// THE SNAPSHOT IS anyPlane, because this role resolves the id across both
+// planes itself: releasing a wisp is an update to a wisp, and reading only the
+// issues table would record a nil for it.
+func (u *recordingIssueUC) ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error) {
+	result, wrote, err := u.IssueUseCase.ReleaseIssue(ctx, req)
+	if err != nil || !result.Changed {
+		return result, wrote, err
+	}
+	u.rec.record(opUpdate, u.snap.anyPlane(ctx, req.IssueID))
+	return result, wrote, nil
+}
+
 func (u *recordingIssueUC) UpdateWisp(ctx context.Context, id string, updates map[string]any, actor string) error {
 	if err := u.IssueUseCase.UpdateWisp(ctx, id, updates, actor); err != nil {
 		return err
@@ -966,10 +1088,17 @@ func (u *recordingIssueUC) ClaimReadyWisp(ctx context.Context, filter types.Work
 
 // CloseIssue and its three siblings record on SUCCESS, not on "something
 // changed": the DoltStorage plumbing fires on_close for an idempotent re-close
-// too — HookFiringStore.CloseIssueChecked says so in as many words, and
-// hookBatchCloser fires for every outcome that did not refuse. A close that
-// found the issue already closed still answers "it is closed", and a script
-// that reconciles on that answer must not be told only sometimes.
+// too — HookFiringStore.CloseIssueChecked says so in as many words. A close
+// that found the issue already closed still answers "it is closed", and a
+// script that reconciles on that answer must not be told only sometimes.
+//
+// THE BATCH COMPOSITIONS OVERRIDE THAT, and they do it above these verbs rather
+// than inside them, because these are the SAME methods a single close reaches.
+// closeBatchItem and uowApplyRun.applyClose rewind the recorded notification
+// when the item persisted nothing, matching hookBatchCloser and hookBatchApplier
+// on the other plumbing (ga-2yaqp.1) — otherwise a teardown replayed against an
+// already-closed convoy runs on_close once per item on every pass. Gate here
+// and the single close would lose its re-close firing with it.
 //
 // The snapshot read is PLANE-PINNED to the verb that was called, while the verb
 // itself tolerates an id from either plane. That gap is unreachable as shipped:

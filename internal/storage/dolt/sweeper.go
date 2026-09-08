@@ -42,9 +42,12 @@ var _ issueops.Sweeper = (*sweeper)(nil)
 // look like a mutation to everything watching the store.
 //
 // THE VERSION-CONTROL ENTRY IS ONE PER SWEEP, recorded here rather than in the
-// shared body because only this backend records one at all. An ephemeral sweep
-// touches only the wisp tables, which this plane ignores, so DOLT_COMMIT finds
-// nothing to commit — the "at most one" the role promises, not "exactly one".
+// shared body because the two backends mint it differently: this one INSIDE
+// the write transaction, where the embedded store can only publish after its
+// SQL commit, on a second connection. That is why the role promises exactly
+// one entry in the STEADY STATE and only this leg makes it atomic with the
+// sweep. An ephemeral sweep touches only the wisp tables, which this plane
+// ignores, so DOLT_COMMIT finds nothing to commit and records none.
 func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueops.SweepResult, error) {
 	if err := workapi.ValidateSweepRequest(req); err != nil {
 		return issueops.SweepResult{}, err

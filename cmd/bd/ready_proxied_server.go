@@ -79,10 +79,7 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	}
 	defer uw.Close(ctx)
 
-	var filter types.WorkFilter
-	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
-		filter.ParentID = &parentID
-	}
+	filter := blockedFilterFromFlags(cmd)
 
 	blocked, err := uw.IssueUseCase().GetBlockedIssues(ctx, filter)
 	if err != nil {

@@ -166,18 +166,24 @@ type UnsetSettingResult struct {
 // their own merge semantics (a config conflict auto-resolves --theirs only when
 // every conflicted key is a memory) and their own front doors. They are stored
 // as config rows because there is one table, not because they are settings.
-// `bd kv` and the memory surface are their views; this role is not. So
-// ListSettings OMITS them — see its own doc — while GetSetting, SetSetting and
-// UnsetSetting still answer and write a verbatim `kv.` key.
+// `bd kv` and the memory surface are their views; this role is not. So NEITHER
+// READ ANSWERS THEM: ListSettings omits them and GetSetting answers a `kv.` key
+// exactly as it answers a key nothing ever stored — see each one's own doc.
 //
-// THAT ASYMMETRY IS DELIBERATE. It is the same shape as the protected key's
-// (Set refuses issue_prefix, Unset does not): an exclusion from the ENUMERATION,
-// not a firewall. The enumeration was the disclosure — it handed every stored
-// memory, key and value, to `bd config list` and to an unauthenticated
-// GET /v0/beads/config, whose redaction decides on the key name while a
-// memory's content is in the value. A caller naming one exact key is a
-// different question, and refusing it would break `bd config get kv.foo` and
-// the escape hatch of deleting a wedged memory with `bd config unset`.
+// THE READS ARE A FIREWALL; THE WRITES ARE NOT. SetSetting and UnsetSetting
+// still take a verbatim `kv.` key, which is the escape hatch for deleting a
+// wedged memory, and a write discloses nothing.
+//
+// THE READ HALF USED TO STOP AT THE ENUMERATION, and stopping there was the
+// bug. The disclosure is a stored memory's CONTENT — `bd config list` and an
+// unauthenticated GET /v0/beads/config both handed it over, and the latter's
+// redaction decides on the key NAME while a memory's secret is in the value.
+// The exclusion was argued as "a caller naming one exact key is a different
+// question", which holds only while the key is hard to name: `bd remember`
+// derives its key from the content it stores, so the names are guessable and a
+// point read walked around the wall. What a caller loses is `bd config get
+// kv.foo`, which was never the door for those rows — `bd kv get` and
+// `bd recall` are, and they read the store directly.
 //
 // Deterministic request-validation failures match ErrValidation; result values
 // are unspecified when error is non-nil. Implementations never mutate
@@ -193,15 +199,22 @@ type WorkspaceConfig interface {
 	// An empty Key is ErrValidation. There is no row a caller could mean by
 	// it, so answering "" would report "not set" for a question that was never
 	// asked.
+	//
+	// A KEY UNDER `kv.` IS ANSWERED AS IF IT WERE ABSENT: the echoed key, ""
+	// and a nil error, whether or not a row is there. It is deliberately
+	// indistinguishable from the unset answer — an error, of any kind, would
+	// confirm the key to the caller who guessed it, and this role has no
+	// ErrNotFound to give. The row is NOT touched; see "KEYS THIS PLANE DOES
+	// NOT OWN" above for what that plane is and which doors do read it.
 	GetSetting(ctx context.Context, req GetSettingRequest) (SettingResult, error)
 
 	// ListSettings returns every stored setting.
 	//
 	// EXCEPT THE KV PLANE. No key under `kv.` appears here — not the generic
-	// `bd kv` keys and not the `bd remember` memories nested under them — even
-	// though those rows live in the same table and GetSetting still answers
-	// each one by name. See "KEYS THIS PLANE DOES NOT OWN" above for what that
-	// plane is and why the exclusion stops at the enumeration.
+	// `bd kv` keys and not the `bd remember` memories nested under them —
+	// though those rows live in the same table. Naming one exactly does not get
+	// it either: GetSetting answers a `kv.` key as absent. See "KEYS THIS PLANE
+	// DOES NOT OWN" above for what that plane is and which doors do read it.
 	//
 	// A read, on the same terms as GetSetting, and one whose answer is a MAP rather
 	// than a page: settings are a keyed namespace a workspace holds tens of,

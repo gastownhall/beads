@@ -15,7 +15,7 @@ import (
 // caller's force was lost silently.
 //
 // The table is kept WHOLE although two of its three rows are now also held by
-// RunIssueOperationsUpdateClosePolicy at this backend: deleting the override
+// RunLifecycleUpdateClosePolicy at this backend: deleting the override
 // fails both suites, and always spelling it would let the contract's unforced
 // crossing succeed where it must refuse. The third row is the one the contract
 // cannot see — spelling the override WITHOUT a status change has no

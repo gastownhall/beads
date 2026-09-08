@@ -38,6 +38,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -648,6 +649,22 @@ const (
 	// resolved (GH#3545): the user asserted a remote host, so bd fills in
 	// the default port rather than dialing :0 or allocating locally.
 	PortSourceExternalHostDefault PortSource = "external_host_default"
+	// PortSourceCallerExplicit is an already-nonzero Config.ServerPort set by
+	// the caller before applyConfigDefaults runs (e.g. `bd init
+	// --server-port`, or initGlobalDatabaseConfig's copy-forward of it) —
+	// a direct user/tooling assertion, outranking the
+	// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT env vars (be-wf9a.1).
+	PortSourceCallerExplicit PortSource = "caller_explicit"
+	// PortSourceSharedServerDefault is DefaultSharedServerPort (3308), filled
+	// in when shared-server mode is on and no other source resolved a port.
+	// NOT authoritative: bd picked it on the user's behalf, exactly like the
+	// port file. It exists so DefaultConfig never returns a nonzero Port with
+	// PortSourceUnset — without it, a bd-chosen shared default is
+	// indistinguishable from a caller assertion and applyConfigDefaults
+	// stamps it PortSourceCallerExplicit, which silently disables the
+	// BEADS_DOLT_SERVER_PORT override and turns a benign auto-start port
+	// change into a hard failure (GH#4052, be-9tju).
+	PortSourceSharedServerDefault PortSource = "shared_server_default"
 )
 
 // IsAuthoritative reports whether this source represents a user (or
@@ -657,7 +674,7 @@ const (
 // authoritative one (GH#4052).
 func (s PortSource) IsAuthoritative() bool {
 	switch s {
-	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON:
+	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON, PortSourceCallerExplicit:
 		return true
 	default:
 		return false
@@ -788,6 +805,7 @@ func DefaultConfig(beadsDir string) *Config {
 	// ephemeral port from the OS (GH#2098, GH#2372).
 	if cfg.Port == 0 && IsSharedServerMode() {
 		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
+		cfg.PortSource = PortSourceSharedServerDefault
 		cfg.PortSharedServer = true
 	}
 
@@ -1008,6 +1026,16 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 // warnings, errors, and fatal messages. Valid dolt levels are:
 // trace, debug, info, warning, error, fatal.
 const doltServerLogLevel = "warning"
+
+// ServerSpawnEnv returns the environment for a spawned dolt sql-server (the
+// directly-managed spawn here and the proxied one in dbproxy/server). The
+// server runs CALL DOLT_PUSH/FETCH itself, so the guards must be in the
+// child's environment: templated git hooks disabled (GH#4272; approach from
+// PR #4281 by pmgledhill102) and stderr-directed git tracing scrubbed (see
+// internal/gittraceenv).
+func ServerSpawnEnv() []string {
+	return githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
+}
 
 // buildDoltServerArgs returns the argv passed to `dolt` (excluding argv[0]/
 // the binary itself). It is factored out of Start so it can be asserted on
@@ -1398,13 +1426,7 @@ func Start(beadsDir string) (*State, error) {
 			cmd.Stderr = logFile
 			cmd.Stdin = nil
 			cmd.SysProcAttr = procAttrDetached()
-			// In server mode the CALL DOLT_PUSH runs inside THIS child, not in
-			// bd, so the hooks override has to be in the child's environment —
-			// setting it on bd's own process (what the embedded path does)
-			// would be invisible here. GH#4272; approach from PR #4281 by
-			// pmgledhill102.
-			cmd.Env = append(os.Environ(), githooksenv.ParametersEnv+"="+
-				githooksenv.AppendParameter(os.Getenv(githooksenv.ParametersEnv), githooksenv.NoHooksParam))
+			cmd.Env = ServerSpawnEnv()
 
 			// GH#4634: the server outlives the caller, so any descriptor the
 			// caller left non-CLOEXEC (a shell `exec 9>lock`, a CI harness, an
@@ -1810,15 +1832,22 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	)
 }
 
-// waitForReady polls TCP until the server accepts connections.
+// waitForReady polls until the server accepts TCP connections AND greets
+// with a MySQL handshake. Draining the handshake before closing the probe
+// connection makes Close() send TCP FIN instead of RST, which prevents the
+// dolt sql-server process from interpreting probe closes as aborted MySQL
+// handshakes and crashing (see gastownhall/beads#4132, #4133).
+//
+// A dial that succeeds but never greets (TCP listener accepting, MySQL
+// engine not yet writing) is not treated as ready: this function keeps
+// polling until either a greeting arrives or the deadline is reached.
 func waitForReady(host string, port int, timeout time.Duration) error {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond) //nolint:gosec // G704: addr is built from internal host+port, not user input
-		if err == nil {
-			_ = conn.Close()
+		greeted, err := ProbeSQLServer("tcp", addr, 500*time.Millisecond) //nolint:gosec // G704: addr is built from internal host+port, not user input
+		if err == nil && greeted {
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)

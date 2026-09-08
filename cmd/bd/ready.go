@@ -49,6 +49,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		claimReady, _ := cmd.Flags().GetBool("claim")
 
+		// ABOVE THE MODE DISPATCH, and above the proxied branch, so it is the
+		// one place a --brief conflict is decided for this command on either
+		// route. The branches below return before gatherReadyInput runs, so a
+		// check written into each of them would be three untested copies; this
+		// is one call into the body the gatherer also uses.
+		if err := briefModeConflictFromFlags(cmd); err != nil {
+			return err
+		}
+
 		if usesProxiedServer() {
 			// --claim consumes exactly one row, same reasoning as the
 			// direct-path fix in issueops/claim.go: a rig-wide cap sized
@@ -273,6 +282,32 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		return nil
 	},
 }
+
+// blockedFilterFromFlags builds the blocked-issue filter from blockedCmd's
+// flags. Both the direct and the proxied-server path call it, so the two
+// cannot drift as filtering flags are added.
+func blockedFilterFromFlags(cmd *cobra.Command) types.WorkFilter {
+	var filter types.WorkFilter
+	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
+		filter.ParentID = &parentID
+	}
+	// Normalize as every other label filter does (list_input.go:293-295,
+	// search.go:106, orphans.go:56, workapi/ready.go:56-58). These clauses
+	// match a label EXACTLY, so an untrimmed value silently under-reports:
+	// pflag's CSV split leaves the leading space in the everyday
+	// `--label 'a, b'` form, and `--label 'a,,b'` would AND in a `label = ''`
+	// clause that matches nothing at all. Without this, `--label` would not
+	// mean the same thing here as on the commands next to it -- which is the
+	// promise LabelSetClauses is documented to keep.
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	filter.Labels = utils.NormalizeLabels(labels)
+	filter.LabelsAny = utils.NormalizeLabels(labelsAny)
+	filter.ExcludeLabels = utils.NormalizeLabels(excludeLabels)
+	return filter
+}
+
 var blockedCmd = &cobra.Command{
 	Use:           "blocked",
 	Short:         "Show blocked issues",
@@ -292,11 +327,7 @@ var blockedCmd = &cobra.Command{
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 		ctx := rootCtx
-		parentID, _ := cmd.Flags().GetString("parent")
-		var blockedFilter types.WorkFilter
-		if parentID != "" {
-			blockedFilter.ParentID = &parentID
-		}
+		blockedFilter := blockedFilterFromFlags(cmd)
 		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -419,6 +450,7 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 	fmt.Printf("Ready: %d issues with no active blockers\n", len(issues))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
 }
 
 // readyExplainFilter is the filter both --explain routes run, derived from the
@@ -700,12 +732,21 @@ func init() {
 	readyCmd.Flags().String("mol-type", "", "Filter by molecule type: swarm, patrol, or work")
 	readyCmd.Flags().Bool("pretty", true, "Display issues in a tree format with status/priority symbols")
 	readyCmd.Flags().Bool("plain", false, "Display issues as a plain numbered list")
+	readyCmd.Flags().Bool("flat", false, "Alias for --plain, spelled the way bd list spells it")
 	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	readyCmd.Flags().Bool("claim", false, "Atomically claim the first ready issue matching the filters")
+	// Projection toggle, the same one `bd list --brief` sets. Refused with
+	// --claim, which returns one whole row by contract; see gatherReadyInput.
+	readyCmd.Flags().Bool("brief", false,
+		"Omit the free-form text (description, design, acceptance criteria, notes, "+
+			"payload, waiters) from each row. Filters that read those fields still "+
+			"select on them. An omitted field is indistinguishable from an empty "+
+			"one; fetch a whole issue with bd show. Requires --json, and cannot be "+
+			"combined with --claim, --gated, --mol or --explain.")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
@@ -713,5 +754,8 @@ func init() {
 	addMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
+	blockedCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	blockedCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	blockedCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
 	rootCmd.AddCommand(blockedCmd)
 }

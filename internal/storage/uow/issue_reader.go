@@ -145,6 +145,7 @@ func (r *issueReader) Get(ctx context.Context, req publicops.GetRequest) (*publi
 		return workapi.BuildIssueDetails(ctx, src, issue, isWisp, workapi.DetailOptions{
 			IncludeDependents: req.IncludeDependents,
 			IncludeComments:   req.IncludeComments,
+			BriefDeps:         req.BriefDeps,
 		})
 	})
 }

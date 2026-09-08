@@ -41,6 +41,13 @@ import (
 //
 // issueops.EdgeReader has no wrapper here for the same reason: it answers with
 // a value, and wireEdges drops a nil edge.
+//
+// issueops.Relations has none either, and it is the case worth stating because
+// it is the first role that answers with a SLICE OF POINTERS and still needs no
+// wrapper. What decides it is not the pointer, it is whether a handler
+// dereferences one it was handed: wireRelated skips a nil element exactly as
+// wireEdges and wireItems do, so the only thing a wrapper could add is the
+// appearance of a guarantee.
 type checkedReader struct{ inner issueops.Reader }
 
 // Ready passes the request through unchanged.
@@ -91,18 +98,86 @@ func (c checkedBatchCreator) CreateBatch(ctx context.Context, req issueops.Creat
 	return result, nil
 }
 
+// checkedBatchCloser is the closer the batch-close handler is handed.
+//
+// It is the one role here whose result is POSITIONAL: the document promises one
+// outcome per requested item in request order, and a client walks the array
+// against its own argument list rather than matching ids back up. So the two
+// broken shapes it folds are at different scopes, and the scope is the whole
+// reasoning.
+//
+//   - AN OUTCOME COUNT THAT DOES NOT MATCH THE REQUEST is the whole batch's
+//     fault: it cannot be walked against the caller's items at all, and
+//     projecting it anyway would report one item's answer under another item's
+//     id for the rest of the array — silently, inside a 200. It is
+//     checkedBatchCreator's whole-batch refusal exactly, and it is the generic
+//     500 with the fault in the log, never a partial projection.
+//
+//   - AN OUTCOME CARRYING NEITHER A ROW NOR A REFUSAL has no honest wire shape:
+//     `code`'s absence promises `issue`, so projected as it stands it is a
+//     success with no row — the shape closeOutcome's `default` branch already
+//     refuses to produce. It is folded into THAT ITEM's Err instead, because
+//     this batch is not all-or-nothing: its survivors have already committed,
+//     and a whole-batch 500 would hide durable closes from a caller with no way
+//     to re-read them. The handler maps it through the branch it wrote for
+//     exactly this, and the rest of the outcomes are untouched.
+//
+// batchCloser() used to hand this role out unwrapped on the reasoning that
+// CloseBatchResult is a value and its issue pointer is forwarded rather than
+// dereferenced. That is true, and it is why there is no panic here to prevent —
+// but it left the two shapes above reaching a client as answers rather than as
+// faults.
+type checkedBatchCloser struct{ inner issueops.BatchCloser }
+
+// CloseBatch refuses a miscounted result and folds a neither-row-nor-refusal
+// outcome into its own item.
+func (c checkedBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	result, err := c.inner.CloseBatch(ctx, req)
+	if err != nil {
+		return result, err
+	}
+	if len(result.Outcomes) != len(req.Items) {
+		return issueops.CloseBatchResult{}, fmt.Errorf(
+			"close batch: the closer reported %d outcomes for %d items", len(result.Outcomes), len(req.Items))
+	}
+	corrected := false
+	for i := range result.Outcomes {
+		if result.Outcomes[i].Err != nil || result.Outcomes[i].Issue != nil {
+			continue
+		}
+		if !corrected {
+			// Correct a COPY. The slice is the role's own, and a role that
+			// answers from one prepared result would carry this server's
+			// correction into everything it hands back afterwards.
+			result.Outcomes = append([]issueops.CloseOutcome(nil), result.Outcomes...)
+			corrected = true
+		}
+		result.Outcomes[i].Err = fmt.Errorf(
+			"close batch: the closer reported outcome %d (%q) with neither an issue nor a refusal",
+			i, result.Outcomes[i].IssueID)
+	}
+	return result, nil
+}
+
 // checkedLifecycle is the lifecycle role every mutation handler is handed.
 //
-// Update, Close and Reopen are why it exists: all three handlers write
-// *result.Issue, which is checkedClaimer's hazard exactly. Create passes
-// through because no handler on this surface reaches it — a single create is
-// unpublished here, and batchCreateIssues goes to issueops.BatchCreator.
+// All four methods are why it exists: every handler over this role writes
+// *result.Issue, which is checkedClaimer's hazard exactly.
 type checkedLifecycle struct{ inner issueops.Lifecycle }
 
-// Create passes the request through unchanged: this surface publishes no
-// create-one operation (batchCreateIssues reaches issueops.BatchCreator).
+// Create refuses a result that reports success without the row the response
+// body is built from, for Close's reason.
+//
+// It USED to pass through, because no handler on this surface reached it. The
+// single create publishes one, and handleCreateIssue writes *result.Issue
+// straight onto the wire, so the same nil-with-nil-error a provider-supplied
+// role can return is a panic on a live server without this.
 func (c checkedLifecycle) Create(ctx context.Context, req issueops.CreateRequest) (issueops.CreateResult, error) {
-	return c.inner.Create(ctx, req)
+	result, err := c.inner.Create(ctx, req)
+	if err == nil && result.Issue == nil {
+		return issueops.CreateResult{}, fmt.Errorf("create: the lifecycle reported success without an issue")
+	}
+	return result, err
 }
 
 // Update refuses a result that reports success without the row the response
@@ -160,6 +235,50 @@ func (c checkedClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (i
 	result, err := c.inner.Claim(ctx, req)
 	if err == nil && result.Issue == nil {
 		return issueops.ClaimResult{}, fmt.Errorf("claim %q: the claimer reported success without an issue", req.IssueID)
+	}
+	return result, err
+}
+
+// checkedCommenter is the commenter the add-comment handler is handed.
+//
+// It exists for checkedClaimer's reason exactly: handleAddComment writes
+// *result.Comment onto the wire, so a role that reported success without the row
+// would panic on a live server.
+type checkedCommenter struct{ inner issueops.Commenter }
+
+// AddComment refuses a result that reports success without the row the response
+// body is built from.
+//
+// The generic 500, for checkedClaimer's reason. There is no wire code that fits
+// and there must not be: a 404 would say the issue does not exist when the role
+// just said it appended a comment to it, and this operation has no conflict code
+// at all. It is a broken implementation.
+func (c checkedCommenter) AddComment(ctx context.Context, req issueops.AddCommentRequest) (issueops.AddCommentResult, error) {
+	result, err := c.inner.AddComment(ctx, req)
+	if err == nil && result.Comment == nil {
+		return issueops.AddCommentResult{}, fmt.Errorf("add comment %q: the commenter reported success without a comment", req.IssueID)
+	}
+	return result, err
+}
+
+// checkedReleaser is the releaser the release handler is handed.
+//
+// It exists for checkedClaimer's reason exactly: handleRelease writes
+// *result.Issue and reads its RowVersion, so a role that reported success
+// without the row would panic on a live server.
+type checkedReleaser struct{ inner issueops.Releaser }
+
+// Release refuses a result that reports success without the row the response
+// body is built from.
+//
+// The generic 500, for checkedClaimer's reason and one of its own: there is no
+// wire code that fits and there must not be. A 409 would say the row refused
+// the release when the role said it did not, and a 404 would say the issue does
+// not exist when nothing here knows that. It is a broken implementation.
+func (c checkedReleaser) Release(ctx context.Context, req issueops.ReleaseRequest) (issueops.ReleaseResult, error) {
+	result, err := c.inner.Release(ctx, req)
+	if err == nil && result.Issue == nil {
+		return issueops.ReleaseResult{}, fmt.Errorf("release %q: the releaser reported success without an issue", req.IssueID)
 	}
 	return result, err
 }

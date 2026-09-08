@@ -1728,10 +1728,333 @@ func RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *testing.T, c
 	}
 }
 
+// RunDependencyEditorRelatesToAddLeavesItsSourceUnblocked pins the term of
+// issueops.BlockedStateInvariant's first clause that names the EDGE TYPE: a row
+// is blocked when it has a blocks or conditional-blocks edge onto a live
+// target, so an edge of any other type onto the same live target leaves the
+// stored flag exactly where it was.
+//
+// IT IS THE TWIN RunDependencyEditorAddMarksItsSourceInTheSameVerb DOES NOT
+// HAVE. That case varies the TARGET'S STATUS and holds the type fixed, so
+// every zero it observes is attributable to a closed target; nothing in this
+// package has ever observed a zero attributable to the type. The add path is
+// where the type decides — issueops/dependencies.go reaches
+// markDirectBlockingDependencySourceInTx only for the two blocking types, and
+// internal/storage/domain/db/dependency.go's Insert carries a hand-mirrored
+// copy of that decision — so this is a genuine second vote, on the body whose
+// mirror already dropped one clause once (bd-6dnrw.44 item 3).
+//
+// THE READ IS RAW. The audit-tier ancestor of this case asked GetReadyWork and
+// IsBlocked whether the source was blocked; both compute the answer from the
+// live edge set, so they answer correctly against a backend that never writes
+// the column at all — and is_blocked is derived AND PERSISTED, read straight
+// off the row by every ready query. A role answer is not a substitute for the
+// column here.
+//
+// WHAT THE FIXTURE MAKES OBSERVABLE. The non-scheduling sources carry that edge
+// AND NOTHING ELSE, asserted by counting their blocks/conditional-blocks edges
+// at zero: a source that also had a blocking edge would read 1 for a reason
+// this case is not about, and the term it is named for would be invisible —
+// the same shape the conditional-blocks case in issue_operations_contract.go
+// guards against from the other side. Their target is asserted OPEN, so the
+// zero is not the closed-target answer wearing this case's name. And the
+// blocking edge in the SAME request is the must-flip term: it proves the
+// marking machinery ran in this very transaction, so a zero beside it is a
+// decision rather than a body that marked nothing.
+//
+// Both non-scheduling spellings ride in, because the type lists in the mark
+// templates are enumerations of what DOES block and a body that had heard of
+// one and not the other is exactly the drift a single-type case misses.
+func RunDependencyEditorRelatesToAddLeavesItsSourceUnblocked(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	target := fixture.IssuePrefix + "-bsrel-target"
+	relatesTo := fixture.IssuePrefix + "-bsrel-relatesto"
+	related := fixture.IssuePrefix + "-bsrel-related"
+	mustFlip := fixture.IssuePrefix + "-bsrel-blocks"
+	control := fixture.IssuePrefix + "-bsrel-control"
+	for _, id := range []string{target, relatesTo, related, mustFlip, control} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(mustFlip)},
+		[]blockedStateRow{blockedIssue(relatesTo), blockedIssue(related), blockedIssue(control)})
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: relatesTo, DependsOnID: target, Type: types.DepRelatesTo},
+			{IssueID: related, DependsOnID: target, Type: publicops.DepRelated},
+			{IssueID: mustFlip, DependsOnID: target, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("AddDependencies for the non-scheduling add case: %v", err)
+	}
+
+	flip.requireFlippedTo(t, 1,
+		"the blocking edge in the same request is the must-flip term: without it a zero on the others could be a body that marks nothing")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(mustFlip), blockedIssue(target),
+		"the postcondition is the flag AND the live blocker behind it")
+
+	// The zeros are only worth anything if the edges landed, the sources carry
+	// no blocking edge of their own, and the shared target is live.
+	for _, edge := range []struct {
+		source  string
+		depType publicops.DependencyType
+	}{
+		{relatesTo, types.DepRelatesTo},
+		{related, publicops.DepRelated},
+	} {
+		assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", edge.source, target, string(edge.depType), 1)
+		if got := probe.directBlockerEdges(t, blockedIssue(edge.source)); got != 0 {
+			t.Fatalf("%s carries %d blocking edges of its own, want 0: a %s source that is also blocked cannot show that %s does not block",
+				edge.source, got, edge.depType, edge.depType)
+		}
+	}
+	if status := probe.rawStatus(t, blockedIssue(target)); status != string(types.StatusOpen) {
+		t.Fatalf("the shared target %s has status %q, want %q: onto a closed target every type answers zero and this case would mean nothing",
+			target, status, types.StatusOpen)
+	}
+}
+
+// RunDependencyEditorAcceptsADiamond pins the half of the add-time cycle gate
+// that says YES. Every other cycle case in this file asserts a refusal, so a
+// gate that refused any target it could reach by more than one path — the
+// difference between a reachability test and a visited-node count — passes all
+// of them, and the shape it would refuse is the ordinary one: two pieces of
+// work that both have to land before a third can start.
+//
+// THE TWO CONVERGING EDGES LAND IN ONE REQUEST, which is the arm that matters:
+// the gate checks each edge against the graph INCLUDING the edges the same
+// request has already applied, so the second edge is probed against a graph
+// that already reaches the same node by another route. Adding them one at a
+// time — what the audit-tier ancestor of this case did — never puts a second
+// path in front of the probe at all.
+//
+// THE REFUSAL IS ON THE SAME GRAPH. A body that answered "no cycle" to
+// everything would pass the acceptance half alone, so the case closes the
+// diamond back onto its own root and requires ErrDependencyCycle with nothing
+// written. Acceptance and refusal over one fixture is what makes either one
+// mean anything.
+//
+// THE LAST ARM IS THE ONE THAT WALKS THE CONVERGENCE. Both gates search FROM
+// the new edge's target, so while the target is the diamond's foot the walk
+// finds a sink and never meets a node twice — the acceptance above would
+// survive a gate that mistook a second visit for a loop. An edge pointing INTO
+// the diamond's head makes the search start at the root and reach the foot down
+// both shoulders, so the second visit happens on a graph with no cycle in it,
+// and the gate's visited-set (issueops.CycleThroughEdgesInGraph's BFS) is what
+// has to tell those apart.
+func RunDependencyEditorAcceptsADiamond(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	root := fixture.IssuePrefix + "-diamond-root"
+	left := fixture.IssuePrefix + "-diamond-left"
+	right := fixture.IssuePrefix + "-diamond-right"
+	foot := fixture.IssuePrefix + "-diamond-foot"
+	for _, id := range []string{root, left, right, foot} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: root, DependsOnID: left, Type: publicops.DepBlocks},
+			{IssueID: root, DependsOnID: right, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("seed the two shoulders of the diamond: %v", err)
+	}
+
+	// Both feet in ONE request: the second is probed against a graph in which
+	// the request itself has already made foot reachable from root.
+	result, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: left, DependsOnID: foot, Type: publicops.DepBlocks},
+			{IssueID: right, DependsOnID: foot, Type: publicops.DepBlocks},
+		},
+	})
+	if err != nil {
+		t.Fatalf("closing a diamond is not a cycle: AddDependencies = %v, want both edges accepted", err)
+	}
+	if len(result.Added) != 2 {
+		t.Fatalf("Added = %#v, want both converging edges", result.Added)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", left, foot, string(publicops.DepBlocks), 1)
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", right, foot, string(publicops.DepBlocks), 1)
+	assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", root, 2)
+
+	// The same graph, closed: foot reaches root through either shoulder.
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: foot, DependsOnID: root, Type: publicops.DepBlocks}},
+	}); !errors.Is(err, publicops.ErrDependencyCycle) {
+		t.Fatalf("closing the diamond back onto its root: error = %v, want ErrDependencyCycle — the accepting half above is only meaningful beside a gate that still fires", err)
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, foot)
+
+	// An edge into the HEAD of the diamond, from an issue the diamond cannot
+	// reach. The gate searches from the target, so this is the arm whose search
+	// runs down both shoulders and arrives at the foot twice.
+	outsider := fixture.IssuePrefix + "-diamond-outsider"
+	seedDependencyEditorIssue(t, ctx, fixture, outsider)
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: outsider, DependsOnID: root, Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("gating an outside issue on the head of a diamond: %v — reaching one node by two paths is convergence, not a loop", err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", outsider, root, string(publicops.DepBlocks), 1)
+}
+
+// RunDependencyEditorGateScopeFollowsTheEdgeType pins which edges the ADD-TIME
+// gate walks, from the side that accepts.
+//
+// cycle_detector_contract.go pins edge-type scope for the REPORT, over a
+// raw-seeded graph, and RunDependencyEditorRefusesACycleThroughAParentChildHop
+// pins that the gate walks one type the report does not. Neither shows the
+// gate DECLINING to walk a type: a mutual pair of non-scheduling edges is not a
+// scheduling cycle and has to be accepted, because that is what `bd dep add
+// --type relates-to` writes in both directions between two issues that
+// reference each other.
+//
+// The parent-child arm is the same fixture from the other side. A pure
+// parent-child two-cycle — an issue that is its own parent's parent — is a
+// scheduling cycle with no blocking edge anywhere in it, and is refused. Two
+// arms over one shape is what separates "walks the scheduling types" from
+// "walks everything" and from "walks blocks only": the first arm fails the
+// former, the second fails the latter.
+func RunDependencyEditorGateScopeFollowsTheEdgeType(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	relatedA := fixture.IssuePrefix + "-gscope-rel-a"
+	relatedB := fixture.IssuePrefix + "-gscope-rel-b"
+	parent := fixture.IssuePrefix + "-gscope-pc-parent"
+	child := fixture.IssuePrefix + "-gscope-pc-child"
+	for _, id := range []string{relatedA, relatedB, parent, child} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+
+	// Two requests, not one: a mutual pair written in a single request could be
+	// collapsed or reordered, and the claim is about the SECOND edge meeting a
+	// stored first one.
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: relatedA, DependsOnID: relatedB, Type: types.DepRelatesTo}},
+	}); err != nil {
+		t.Fatalf("seed the first half of the mutual non-scheduling pair: %v", err)
+	}
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: relatedB, DependsOnID: relatedA, Type: types.DepRelatesTo}},
+	}); err != nil {
+		t.Fatalf("closing a mutual %s pair is not a scheduling cycle: AddDependencies = %v, want it accepted", types.DepRelatesTo, err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", relatedA, relatedB, string(types.DepRelatesTo), 1)
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", relatedB, relatedA, string(types.DepRelatesTo), 1)
+
+	// The other side of the same shape: parent-child IS in the walk, so its own
+	// two-cycle is refused even with no blocking edge anywhere in the graph.
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: child, DependsOnID: parent, Type: publicops.DepParentChild}},
+	}); err != nil {
+		t.Fatalf("seed the hierarchy edge: %v", err)
+	}
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: parent, DependsOnID: child, Type: publicops.DepParentChild}},
+	}); !errors.Is(err, publicops.ErrDependencyCycle) {
+		t.Fatalf("reversing a parent-child edge: error = %v, want ErrDependencyCycle — parent-child is inside the gate's walk", err)
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, parent)
+}
+
+// RunDependencyEditorAcceptsBlockingAcrossIssueTypes pins bd-wg7ve: the
+// blocking-hierarchy guard is about an issue's HIERARCHY LINE, never about its
+// issue TYPE. An epic may be gated on a task it does not contain, and a task on
+// an epic it does not belong to.
+//
+// EVERY OTHER SEED IN THIS FILE IS A TASK. That is what makes the rule
+// unobservable here today: a guard rewritten to refuse "a blocking edge between
+// an epic and a task" — the plausible misreading of the ancestor/descendant
+// refusal, and one a reviewer would wave through — passes the whole contract,
+// because no two seeds anywhere in it have different types.
+//
+// THE REFUSAL ARM USES THE SAME TWO TYPES. Its epic and task are a real parent
+// and child, so the pair differs from the accepting arm in the hierarchy
+// relationship and in nothing else, and the two together say the guard reads
+// the edge and not the row: a body that refused on type fails the acceptance, a
+// body that dropped the ancestry walk fails the refusal, and neither can be
+// made to pass by weakening the other.
+func RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	epic := fixture.IssuePrefix + "-xtype-epic"
+	task := fixture.IssuePrefix + "-xtype-task"
+	other := fixture.IssuePrefix + "-xtype-othertask"
+	seedDependencyEditorIssueOfType(t, ctx, fixture, epic, types.TypeEpic)
+	seedDependencyEditorIssueOfType(t, ctx, fixture, task, types.TypeTask)
+	seedDependencyEditorIssueOfType(t, ctx, fixture, other, types.TypeTask)
+
+	// Both directions across the type boundary, between issues with no
+	// hierarchy relationship at all.
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: epic, DependsOnID: task, Type: publicops.DepBlocks},
+			{IssueID: other, DependsOnID: epic, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("gating an epic on an unrelated task and a task on an unrelated epic: %v — the guard is about the hierarchy line, not the type", err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", epic, task, string(publicops.DepBlocks), 1)
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", other, epic, string(publicops.DepBlocks), 1)
+	assertDependencyEditorIssueType(t, ctx, fixture, epic, types.TypeEpic)
+	assertDependencyEditorIssueType(t, ctx, fixture, task, types.TypeTask)
+
+	// The same two types, now a real parent and child: refused.
+	hierEpic := fixture.IssuePrefix + "-xtype-hier-epic"
+	hierTask := fixture.IssuePrefix + "-xtype-hier-task"
+	seedDependencyEditorIssueOfType(t, ctx, fixture, hierEpic, types.TypeEpic)
+	seedDependencyEditorIssueOfType(t, ctx, fixture, hierTask, types.TypeTask)
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: hierTask, DependsOnID: hierEpic, Type: publicops.DepParentChild}},
+	}); err != nil {
+		t.Fatalf("seed the epic/task hierarchy: %v", err)
+	}
+	_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: hierTask, DependsOnID: hierEpic, Type: publicops.DepBlocks}},
+	})
+	var conflict *publicops.DependencyHierarchyConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("gating a task on the epic it belongs to: error = %v, want *DependencyHierarchyConflictError", err)
+	}
+	if !conflict.BlockerIsAncestor {
+		t.Errorf("conflict = %#v, want BlockerIsAncestor true", conflict)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", hierTask, hierEpic, string(publicops.DepBlocks), 0)
+}
+
 func seedDependencyEditorIssue(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, id string) {
 	t.Helper()
 	if err := fixture.CreateIssue(ctx, dependencyEditorSeed(id, false), "seed"); err != nil {
 		t.Fatalf("seed issue %s: %v", id, err)
+	}
+}
+
+// seedDependencyEditorIssueOfType seeds a durable issue carrying an ISSUE TYPE
+// other than the file's default task. Only the cross-type case needs one, and
+// it asserts the type landed rather than trusting the seed: a create that
+// normalized the type away would leave that case comparing two tasks and
+// quietly testing nothing.
+func seedDependencyEditorIssueOfType(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, id string, issueType types.IssueType) {
+	t.Helper()
+	seed := dependencyEditorSeed(id, false)
+	seed.IssueType = issueType
+	if err := fixture.CreateIssue(ctx, seed, "seed"); err != nil {
+		t.Fatalf("seed issue %s of type %q: %v", id, issueType, err)
 	}
 }
 
@@ -1820,6 +2143,21 @@ func assertDependencyEditorTargetColumn(t *testing.T, ctx context.Context, fixtu
 			t.Errorf("%s.%s rows %s -> %s = %d, want %d: the target belongs in %s — %s",
 				table, column, source, target, got, want, wantColumn, why)
 		}
+	}
+}
+
+// assertDependencyEditorIssueType reads the stored issue_type of a durable row.
+// The cross-type case is the only caller: its whole claim is that two rows have
+// DIFFERENT types, and a seed whose type never landed would leave it comparing
+// two of the file's default tasks and asserting nothing.
+func assertDependencyEditorIssueType(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, id string, want types.IssueType) {
+	t.Helper()
+	var got string
+	if err := fixture.QueryScalar(ctx, "SELECT issue_type FROM issues WHERE id = ?", []any{id}, &got); err != nil {
+		t.Fatalf("read the issue_type of %s: %v", id, err)
+	}
+	if got != string(want) {
+		t.Fatalf("%s has issue_type %q, want %q: this case is about two rows of different types and the seed did not produce them", id, got, want)
 	}
 }
 

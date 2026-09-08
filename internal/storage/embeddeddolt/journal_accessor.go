@@ -16,6 +16,7 @@ import (
 // embedded mode — where there is no stable *sql.DB to reach via RawDBAccessor.
 var (
 	_ storage.EventsJournalAccessor    = (*EmbeddedDoltStore)(nil)
+	_ storage.EventsJournalCursor      = (*EmbeddedDoltStore)(nil)
 	_ issueops.EventsMaintenanceRunner = (*EmbeddedDoltStore)(nil)
 )
 
@@ -30,6 +31,18 @@ func (s *EmbeddedDoltStore) ReadEventsJournal(ctx context.Context, since int64, 
 		return readErr
 	})
 	return out, err
+}
+
+// ReadEventsJournalPage returns the same rows plus the journal head, on one
+// connection so the pair cannot straddle a commit.
+func (s *EmbeddedDoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (storage.EventsJournalPage, error) {
+	var page storage.EventsJournalPage
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var readErr error
+		page, readErr = issueops.ReadEventsPageInTx(ctx, tx, since, limit)
+		return readErr
+	})
+	return page, err
 }
 
 // PruneEventsJournal deletes journal rows below before, honoring the retain

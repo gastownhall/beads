@@ -219,6 +219,30 @@ func TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *tes
 	conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsgate"))
 }
 
+func TestEmbeddedDependencyEditorRelatesToAddLeavesItsSourceUnblocked(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRelatesToAddLeavesItsSourceUnblocked(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsrel"))
+}
+
+func TestEmbeddedDependencyEditorAcceptsADiamond(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorAcceptsADiamond(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "diamond"))
+}
+
+func TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorGateScopeFollowsTheEdgeType(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "gscope"))
+}
+
+func TestEmbeddedDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "xtype"))
+}
+
 // newEmbeddedDependencyEditorFixture composes the backend's role fixture kit
 // with the accessor under test. Every hook but the accessor comes from the kit,
 // so the seeding and scalar-query plumbing stays identical to the other roles'.

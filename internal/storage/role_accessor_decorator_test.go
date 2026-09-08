@@ -5,6 +5,8 @@ import (
 	"errors"
 	"reflect"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -12,35 +14,102 @@ import (
 	"github.com/steveyegge/beads/memoryops"
 )
 
-// roleAccessorNames is the twenty-four-strong capability surface every storage
-// decorator has to answer for. It is written out rather than derived so that
-// adding a twenty-fifth role to DoltStorage without deciding what each decorator
-// does with it is a compile-or-test failure somewhere, not silence.
-var roleAccessorNames = []string{
-	"IssueLifecycle",
-	"IssueReader",
-	"IssueClaimer",
-	"IssueRelations",
-	"EdgeReader",
-	"BlockingAnnotator",
-	"TreeWalker",
-	"Counter",
-	"WorkspaceConfig",
-	"Memories",
-	"VersionReconciler",
-	"StatsReporter",
-	"CycleDetector",
-	"ReadyCounter",
-	"Querier",
-	"Sweeper",
-	"Deleter",
-	"Bootstrapper",
-	"InitVerifier",
-	"Commenter",
-	"ReadyClaimer",
-	"BatchCloser",
-	"BatchCreator",
-	"DependencyEditor",
+// roleAccessorNames is the capability surface every storage decorator has to
+// answer for: every DoltStorage method that hands out a role interface from the
+// public facade.
+//
+// It is DERIVED because a written-out list is the same silence this test
+// exists to break. A hand-kept list of twenty-four names promised that adding a
+// twenty-fifth role would fail somewhere, and it could not deliver: the
+// decorators embed DoltStorage, so the new accessor is promoted rather than
+// declared, everything still compiles, and the census simply never hears about
+// it. Reflection puts the new role in the census the moment it joins the
+// interface, which is the only version of that promise that holds.
+var roleAccessorNames = deriveRoleAccessorNames()
+
+// deriveRoleAccessorNames censuses the role accessors DoltStorage declares.
+func deriveRoleAccessorNames() []string {
+	names, _ := roleAccessorNamesOf(reflect.TypeOf((*DoltStorage)(nil)).Elem())
+	return names
+}
+
+// roleAccessorNamesOf reports every method of surface that takes nothing and
+// returns (role interface, error), where the role belongs to the public facade.
+// It also reports the accessor-shaped methods whose interface belongs to no
+// facade package, because that is how a census shrinks in silence: a third
+// facade package would arrive in exactly that shape and every role in it would
+// simply stop being asked about.
+func roleAccessorNamesOf(surface reflect.Type) (names, unclassified []string) {
+	facade := map[string]bool{
+		reflect.TypeOf((*issueops.Reader)(nil)).Elem().PkgPath():    true,
+		reflect.TypeOf((*memoryops.Memories)(nil)).Elem().PkgPath(): true,
+	}
+	errorType := reflect.TypeOf((*error)(nil)).Elem()
+
+	for i := range surface.NumMethod() {
+		accessor := surface.Method(i)
+		signature := accessor.Type
+		if signature.NumIn() != 0 || signature.NumOut() != 2 || signature.Out(1) != errorType {
+			continue
+		}
+		role := signature.Out(0)
+		if role.Kind() != reflect.Interface {
+			continue
+		}
+		if !facade[role.PkgPath()] {
+			unclassified = append(unclassified, accessor.Name+" -> "+role.PkgPath()+"."+role.Name())
+			continue
+		}
+		names = append(names, accessor.Name)
+	}
+	sort.Strings(names)
+	sort.Strings(unclassified)
+	return names, unclassified
+}
+
+// TestEveryStoreRoleAccessorIsClassified fails when DoltStorage hands out an
+// interface the census cannot place. Every one of the twenty-eight today is a
+// facade role, so this costs nothing and closes the path where a role surface
+// grows a package and the census quietly stops covering it. (roleAccessorNames
+// is derived, so the count is prose and only this sentence goes stale — but it
+// does go stale, and the last three sweeps found it saying twenty-seven.)
+func TestEveryStoreRoleAccessorIsClassified(t *testing.T) {
+	_, unclassified := roleAccessorNamesOf(reflect.TypeOf((*DoltStorage)(nil)).Elem())
+	for _, accessor := range unclassified {
+		t.Errorf("accessor %s belongs to no known facade package: teach the census that package, "+
+			"or every role in it goes uncensused", accessor)
+	}
+}
+
+// rehearsalSurface is a fabricated store surface: DoltStorage plus one more
+// role accessor and two methods that are not accessors at all.
+type rehearsalSurface interface {
+	DoltStorage
+	// Rehearser is the one more accessor the census must find on its own.
+	Rehearser() (issueops.Reader, error)
+	// Rehearse returns no role, and RehearsalName returns no error: neither is
+	// an accessor, and neither may reach the census.
+	Rehearse() error
+	RehearsalName() (string, error)
+}
+
+// TestRoleAccessorCensusGrowsWithTheStoreSurface is the test the old
+// hand-written list could not have passed. It fabricates one more role
+// accessor and asserts the census finds it without being told, which is the
+// whole reason the list is derived: a new accessor is promoted onto every
+// decorator by the embedded interface, so nothing else in the build says a
+// word about it.
+func TestRoleAccessorCensusGrowsWithTheStoreSurface(t *testing.T) {
+	rehearsal, unclassified := roleAccessorNamesOf(reflect.TypeOf((*rehearsalSurface)(nil)).Elem())
+
+	want := append(slices.Clone(roleAccessorNames), "Rehearser")
+	slices.Sort(want)
+	if !slices.Equal(rehearsal, want) {
+		t.Errorf("census of the rehearsal surface = %v, want the real accessors plus Rehearser (%v)", rehearsal, want)
+	}
+	if len(unclassified) != 0 {
+		t.Errorf("rehearsal surface reported %v as unclassified; every added method returns a facade role or no role at all", unclassified)
+	}
 }
 
 // TestHookFiringStoreDeclaresEveryRoleAccessor is the structural half of the
@@ -64,6 +133,9 @@ func TestHookFiringStoreDeclaresEveryRoleAccessor(t *testing.T) {
 // see internal/telemetry/role_accessor_decorator_test.go.
 func assertRoleAccessorsAreDeclared(t *testing.T, decorator reflect.Type) {
 	t.Helper()
+	if len(roleAccessorNames) == 0 {
+		t.Fatal("no DoltStorage method hands out a facade role; the census is empty and this test would pass vacuously")
+	}
 	for _, name := range roleAccessorNames {
 		method, ok := decorator.MethodByName(name)
 		if !ok {
@@ -78,9 +150,9 @@ func assertRoleAccessorsAreDeclared(t *testing.T, decorator reflect.Type) {
 	}
 }
 
-// roleAccessorStore is a DoltStorage whose only real methods are the twenty-four
-// role accessors, each answering with a distinguishable sentinel so a test can
-// tell a decorated surface from a passed-through one.
+// roleAccessorStore is a DoltStorage whose only real methods are the
+// twenty-eight role accessors, each answering with a distinguishable sentinel
+// so a test can tell a decorated surface from a passed-through one.
 type roleAccessorStore struct {
 	DoltStorage
 	lifecycle    issueops.Lifecycle
@@ -89,6 +161,7 @@ type roleAccessorStore struct {
 	edges        issueops.EdgeReader
 	blocking     issueops.BlockingAnnotator
 	tree         issueops.TreeWalker
+	graphCounter issueops.GraphCounter
 	counter      issueops.Counter
 	settings     issueops.WorkspaceConfig
 	memories     memoryops.Memories
@@ -100,12 +173,15 @@ type roleAccessorStore struct {
 	closer       issueops.BatchCloser
 	creator      issueops.BatchCreator
 	editor       issueops.DependencyEditor
+	applier      issueops.BatchApplier
 	readyCounter issueops.ReadyCounter
 	querier      issueops.Querier
 	sweeper      issueops.Sweeper
 	deleter      issueops.Deleter
 	bootstrapper issueops.Bootstrapper
 	verifier     issueops.InitVerifier
+	metadataCAS  issueops.MetadataCAS
+	releaser     issueops.Releaser
 	err          error
 }
 
@@ -118,6 +194,7 @@ func newRoleAccessorStore() *roleAccessorStore {
 		relations:    sentinel,
 		edges:        sentinel,
 		blocking:     sentinel,
+		graphCounter: sentinel,
 		counter:      sentinel,
 		settings:     sentinel,
 		versions:     sentinel,
@@ -128,12 +205,15 @@ func newRoleAccessorStore() *roleAccessorStore {
 		closer:       sentinel,
 		creator:      sentinel,
 		editor:       sentinel,
+		applier:      sentinel,
 		readyCounter: sentinel,
 		querier:      sentinel,
 		sweeper:      sentinel,
 		deleter:      sentinel,
 		bootstrapper: sentinel,
 		verifier:     sentinel,
+		metadataCAS:  sentinel,
+		releaser:     sentinel,
 	}
 }
 
@@ -189,8 +269,22 @@ func (s *roleAccessorStore) BatchCreator() (issueops.BatchCreator, error) {
 func (s *roleAccessorStore) DependencyEditor() (issueops.DependencyEditor, error) {
 	return s.editor, s.err
 }
+func (s *roleAccessorStore) GraphCounter() (issueops.GraphCounter, error) {
+	return s.graphCounter, s.err
+}
+func (s *roleAccessorStore) MetadataCAS() (issueops.MetadataCAS, error) {
+	return s.metadataCAS, s.err
+}
+func (s *roleAccessorStore) BatchApplier() (issueops.BatchApplier, error) {
+	return s.applier, s.err
+}
+func (s *roleAccessorStore) Releaser() (issueops.Releaser, error) {
+	return s.releaser, s.err
+}
 
-// roleAccessorSentinel implements twenty-three of the twenty-four roles at once.
+// roleAccessorSentinel implements twenty-seven of the twenty-eight roles at
+// once — every one but memoryops.Memories, whose List collides with
+// issueops.Reader.List and needs the second sentinel below.
 // Nothing calls its methods; identity is the whole point.
 type roleAccessorSentinel struct{}
 
@@ -230,6 +324,9 @@ func (*roleAccessorSentinel) Count(context.Context, issueops.CountRequest) (issu
 func (*roleAccessorSentinel) CountByGroup(context.Context, issueops.CountByGroupRequest) (issueops.CountByGroupResult, error) {
 	return issueops.CountByGroupResult{}, nil
 }
+func (*roleAccessorSentinel) CountEdges(context.Context, issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
+	return issueops.EdgeCountResult{}, nil
+}
 func (*roleAccessorSentinel) GetSetting(context.Context, issueops.GetSettingRequest) (issueops.SettingResult, error) {
 	return issueops.SettingResult{}, nil
 }
@@ -257,6 +354,9 @@ func (*roleAccessorSentinel) AssigneeStats(context.Context, issueops.AssigneeSta
 
 func (*roleAccessorSentinel) DetectCycles(context.Context, issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
 	return issueops.CycleReport{}, nil
+}
+func (*roleAccessorSentinel) ApplyBatch(context.Context, issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+	return issueops.ApplyBatchResult{}, nil
 }
 
 func (*roleAccessorSentinel) CountReady(context.Context, issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
@@ -298,8 +398,15 @@ func (*roleAccessorSentinel) AddDependencies(context.Context, issueops.AddDepend
 func (*roleAccessorSentinel) RemoveDependency(context.Context, issueops.RemoveDependencyRequest) (issueops.RemoveDependencyResult, error) {
 	return issueops.RemoveDependencyResult{}, nil
 }
+func (*roleAccessorSentinel) CompareAndSetKey(context.Context, issueops.CompareAndSetKeyRequest) (issueops.CompareAndSetKeyResult, error) {
+	return issueops.CompareAndSetKeyResult{}, nil
+}
+func (*roleAccessorSentinel) Release(context.Context, issueops.ReleaseRequest) (issueops.ReleaseResult, error) {
+	return issueops.ReleaseResult{}, nil
+}
 
-// memoryRoleSentinel is the twenty-fourth role's sentinel, and the one role
+// memoryRoleSentinel is the memory role's sentinel, and the one role
+// memoryRoleSentinel is the remaining role's sentinel, and the one role
 // that cannot share the struct above: memoryops.Memories.List and
 // issueops.Reader.List are the same method name with different signatures, so
 // no single Go type can satisfy both. A second sentinel value is all the split
@@ -328,8 +435,9 @@ func (*memoryRoleSentinel) List(context.Context, memoryops.ListRequest) (memoryo
 // THE PASS-THROUGH ROLES are asserted the other way round on purpose, in one
 // paragraph rather than four near-identical ones (bd-8ri3m). Reads fire no
 // completion hooks, so IssueReader, IssueRelations, Counter, StatsReporter,
-// CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter,
-// Querier and InitVerifier deliberately return the inner surface unwrapped,
+// CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, GraphCounter,
+// ReadyCounter, Querier and InitVerifier deliberately return the inner surface
+// unwrapped,
 // each in its own hook_*.go. The ones in that column that are NOT reads are
 // WorkspaceConfig, Memories, VersionReconciler, Bootstrapper, Sweeper and
 // Deleter: a settings write changes the workspace rather than a bead, a
@@ -355,11 +463,15 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"BatchCloser", func() (any, error) { return store.BatchCloser() }, inner.closer, true},
 		{"BatchCreator", func() (any, error) { return store.BatchCreator() }, inner.creator, true},
 		{"DependencyEditor", func() (any, error) { return store.DependencyEditor() }, inner.editor, true},
+		{"MetadataCAS", func() (any, error) { return store.MetadataCAS() }, inner.metadataCAS, true},
+		{"BatchApplier", func() (any, error) { return store.BatchApplier() }, inner.applier, true},
+		{"Releaser", func() (any, error) { return store.Releaser() }, inner.releaser, true},
 		{"IssueReader", func() (any, error) { return store.IssueReader() }, inner.reader, false},
 		{"IssueRelations", func() (any, error) { return store.IssueRelations() }, inner.relations, false},
 		{"EdgeReader", func() (any, error) { return store.EdgeReader() }, inner.edges, false},
 		{"BlockingAnnotator", func() (any, error) { return store.BlockingAnnotator() }, inner.blocking, false},
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }, inner.tree, false},
+		{"GraphCounter", func() (any, error) { return store.GraphCounter() }, inner.graphCounter, false},
 		{"Counter", func() (any, error) { return store.Counter() }, inner.counter, false},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }, inner.settings, false},
 		{"Memories", func() (any, error) { return store.Memories() }, inner.memories, false},
@@ -408,11 +520,15 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"BatchCloser", func() (any, error) { return store.BatchCloser() }},
 		{"BatchCreator", func() (any, error) { return store.BatchCreator() }},
 		{"DependencyEditor", func() (any, error) { return store.DependencyEditor() }},
+		{"MetadataCAS", func() (any, error) { return store.MetadataCAS() }},
+		{"BatchApplier", func() (any, error) { return store.BatchApplier() }},
+		{"Releaser", func() (any, error) { return store.Releaser() }},
 		{"IssueReader", func() (any, error) { return store.IssueReader() }},
 		{"IssueRelations", func() (any, error) { return store.IssueRelations() }},
 		{"EdgeReader", func() (any, error) { return store.EdgeReader() }},
 		{"BlockingAnnotator", func() (any, error) { return store.BlockingAnnotator() }},
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }},
+		{"GraphCounter", func() (any, error) { return store.GraphCounter() }},
 		{"Counter", func() (any, error) { return store.Counter() }},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }},
 		{"Memories", func() (any, error) { return store.Memories() }},

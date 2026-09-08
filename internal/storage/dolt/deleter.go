@@ -44,10 +44,12 @@ var _ issueops.Deleter = (*deleter)(nil)
 // like a mutation to everything watching the store.
 //
 // THE VERSION-CONTROL ENTRY IS ONE PER DELETION, recorded here rather than in
-// the shared body because only this backend records one at all. A deletion
-// confined to the wisp tables touches only tables this plane ignores, so
-// DOLT_COMMIT finds nothing to commit and records no entry — the "at most one"
-// the role promises, not "exactly one".
+// the shared body because the two backends mint it differently: this one
+// INSIDE the write transaction, where the embedded store can only publish
+// after its SQL commit, on a second connection. That is why the role promises
+// exactly one entry in the STEADY STATE and only this leg makes it atomic with
+// the deletion. A deletion confined to the wisp tables touches only tables
+// this plane ignores, so DOLT_COMMIT finds nothing to commit and records none.
 func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issueops.DeleteResult, error) {
 	if err := workapi.ValidateDeleteRequest(req); err != nil {
 		return issueops.DeleteResult{}, err

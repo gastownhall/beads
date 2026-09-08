@@ -160,42 +160,97 @@ which is legible enough that someone will read it — so the contract is enforce
 by the version prefix rather than by obscurity. A client that mints its own
 token gets `invalid_cursor` the moment the encoding moves.
 
-**No lifetime.** The token carries a position and a private encoding version,
-and nothing else. The server keeps no state for it, so it does not expire, does
-not become invalid across a restart, and is not tied to the connection that
-issued it. The only thing that invalidates one is an encoding change.
+**No lifetime.** The token carries a position, the ORDER that position is in,
+and a private encoding version — and nothing else. The server keeps no state
+for it, so it does not expire, does not become invalid across a restart, and is
+not tied to the connection that issued it. The only thing that invalidates one
+is an encoding change, and the one encoding change made so far (`v1` → `v2`,
+adding the order tag) kept every outstanding `v1` token readable as the
+`created`-order position it is, so no traversal in flight had to restart.
 
 **One recovery.** Every failure mode — wrong version, undecodable base64,
-malformed JSON, an empty position — is the same answer, because it is the same
-client situation: restart paging with no `cursor`. Re-sending the value cannot
-succeed.
+malformed JSON, an empty position, a position in another order — is the same
+answer, because it is the same client situation: restart paging with no
+`cursor`. Re-sending the value cannot succeed.
 
-**Misuse is not detectable.** Because the token carries no filters, a page
-fetched with a cursor minted under different filters is *not* refused. The
-server applies the current request's filters from the old request's position,
-silently skipping every row the new filter set would have placed before it.
-Repeat every filter verbatim for the whole traversal, and start a new traversal
-when they change.
+**Filter misuse is not detectable; ORDER misuse is.** Those are two different
+properties and the difference is the whole of the design here.
 
-That last property is a deliberate trade. Embedding the filters would make the
-token a second, opaque copy of the request that can disagree with the request
-itself; keeping it a bare position makes the failure mode a documented client
-obligation instead of a hidden server-side reconciliation.
+Because the token carries no filters, a page fetched with a cursor minted under
+different filters is *not* refused. The server applies the current request's
+filters from the old request's position, silently skipping every row the new
+filter set would have placed before it. Repeat every filter verbatim for the
+whole traversal, and start a new traversal when they change. That is a
+deliberate trade: embedding the filters would make the token a second, opaque
+copy of the request that can disagree with the request itself, and keeping it a
+bare position makes the failure mode a documented client obligation instead of
+a hidden server-side reconciliation.
+
+The ORDER is not a filter, and it does not get the same treatment. A filter
+selects the SET; the order decides what the position MEANS. The same instant
+and id name one row's place under `sort=created` and a different row's place
+under `sort=priority`, and there is nothing in the bytes to say which was
+intended — so a token replayed under a different `sort` is refused with
+`invalid_cursor` rather than reinterpreted. This is not a second copy of the
+request; it is the position's own type tag, and without it adding `sort` at all
+would mean serving skipped-and-duplicated pages with a 200 and no way for a
+client to notice.
+
+**Only orders with a proven total key are served.** `sort` takes `created` and
+`priority` and nothing else, because each value is a keyset contract — a
+position shape, a strictly-after predicate, an index — rather than a display
+preference. Both of these keys are total (`priority` and `created_at` are
+non-null, `id` is unique), so a page boundary inside a run of equal keys
+resolves on `id` with no dropped and no repeated row. The seven other orders
+`bd list --sort` accepts have no such key: `id` is a natural-numeric order no
+database expresses, `updated` moves on every write, `closed` is nullable, and
+`status`/`title`/`type`/`assignee` are mutable and unindexed. A client that
+wants one of those still pages in `created` order and sorts what it received.
+
+`priority` is itself mutable, which `created_at` is not, and the consequence is
+stated rather than hidden: under `created` only new rows move relative to a
+walk, while under `priority` a priority update moves an existing row too, so it
+can be seen twice or missed. That is the same "a cursor pins a position, not a
+snapshot" caveat reached by a second route, not a new class of error —
+unchanged data never skips or repeats under either order.
+
+`GET /v0/beads/ready` still publishes a `sort` with a wider vocabulary and no
+cursor at all, which is consistent rather than contradictory: without a cursor
+an order is only a display decision, and nothing has to be able to resume into
+the middle of it.
 
 ## The loopback posture
 
-v0 has no authentication and no TLS. The trust model is the loopback boundary
-— the same boundary the database behind it already relies on.
+v0 has **optional** bearer authentication and no TLS. On loopback the trust
+model is the loopback boundary — the same boundary the database behind it
+already relies on — and a `bd serve` with no auth flags is byte for byte the
+server it has always been.
+
+`--auth-token-file` turns authentication on: every operation except
+`GET /healthz` then requires `Authorization: Bearer <token>`, including
+`GET /v0/beads/context`, which reports the repo root, beads directory and
+database name. The file holds one token per line and every line is accepted;
+it is re-read while the server runs, so rotation and revocation both take
+effect within about a second and neither needs a restart. There is
+deliberately no `--auth-token` flag: an argument is readable out of the process
+listing by every local user.
+
+The token is a shared secret that grants the WHOLE surface. It is not an
+identity, it carries no scopes, and it therefore never makes `actor` an
+authenticated principal — see below.
 
 `--addr` defaults to `127.0.0.1:0`. The host must be a numeric IP literal.
 `--allow-non-loopback` is the operator decision to bind beyond loopback; it is
-never taken by default, it prints a warning naming what it exposes, and nothing
-else about the server changes. Every peer that can reach the address gets full
-read and claim access.
+never taken by default, and it now **requires `--auth-token-file`**, because
+otherwise reaching the address would be the whole authorization: every peer
+that can reach it would get full read and claim access.
+`--insecure-no-auth` is the explicit, auditable way to say you meant that
+anyway — it applies only beside `--allow-non-loopback`, contradicts a token
+file, and logs a warning naming what it exposes.
 
 Three things bound the posture regardless of bind mode:
 
-**The Host allowlist**, which has no off switch. An unauthenticated service on
+**The Host allowlist**, which has no off switch. A service on
 loopback is reachable from any browser on the host, and a page that re-resolves
 its own name to `127.0.0.1` issues requests the browser treats as same-origin,
 so no CORS rule stops them. What the browser does preserve is the attacker's
@@ -225,8 +280,10 @@ one and, on that 400, re-issues with an explicit limit and pages with `cursor`.
 It is a client-side fix, never a retry.
 
 An `actor` on an HTTP request is caller-asserted provenance for the audit
-trail, not authenticated identity — the same thing it has always been on the
-CLI, where any local process can pass any `--actor`. The claim's
+trail and is not the authenticated principal, even where a bearer is required:
+one shared token admits a client to everything, so it can neither confirm nor
+contradict the name a request sends. That is the same thing `actor` has always
+been on the CLI, where any local process can pass any `--actor`. The claim's
 compare-and-set is therefore a correctness fence against *concurrent* claims,
 not an authorization boundary: it guarantees that two racing claimants cannot
 both win, and guarantees nothing about who either of them really is.

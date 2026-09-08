@@ -45,6 +45,56 @@ type DeleteRequest struct {
 	// resolving an ambiguous prefix to a row and then deleting it is the one
 	// place a convenience is not one.
 	IDs []string
+	// ExpectedVersion is an optimistic-concurrency precondition on the row this
+	// request NAMES: the deletion proceeds only if that row's current
+	// RowVersion — the opaque server-minted row_lock token carried on
+	// types.Issue.RowVersion — still equals *ExpectedVersion, and otherwise the
+	// request is refused with ErrVersionMismatch and NOTHING IS DELETED.
+	//
+	// THE TOKEN IS OPAQUE AND COMPARED FOR EQUALITY ONLY. It is minted afresh
+	// on every lifecycle write rather than incremented, so it does not order:
+	// "newer" and "older" are not questions this precondition can answer. The
+	// only question it answers is whether the row is still the one the caller
+	// looked at, which is the only question a caller about to erase something
+	// irreversibly needs answered.
+	//
+	// nil DISABLES THE CHECK. It is a pointer for the reason
+	// UpdateRequest.ExpectedVersion is one: nil, meaning "do not check", has to
+	// be distinct from a caller that requires the never-written version 0.
+	//
+	// IT REQUIRES A SINGLE-ID REQUEST. A non-nil ExpectedVersion beside more
+	// than one DISTINCT id is ErrValidation, refused before anything is read.
+	// One token cannot describe two rows: the version space is per-row and not
+	// shared, so checking one number against a batch would pass a whole list of
+	// never-written rows by coincidence — every one of them holds 0 — and fail
+	// forever for any list whose rows have since diverged. A guard that passes
+	// by coincidence and a guard a caller can never satisfy are the same defect
+	// seen from two sides. The per-id shape a batch would actually need is a
+	// token PER id, which is a list of ITEMS rather than a list of ids, and
+	// this role is not born with one; BatchCloser.Items is where that shape
+	// lives, and BatchCloseItem deliberately carries no version for the same
+	// reason its own doc gives.
+	//
+	// DUPLICATES COLLAPSE FIRST, so `bd delete a a` with a token names one row
+	// and is legal. The refusal counts DISTINCT ids, not mentions.
+	//
+	// NEITHER Cascade NOR Force BYPASSES IT. Force bypasses POLICY — the
+	// dependents guard — and never a precondition, exactly as
+	// CloseRequest.Force bypasses close policy and never the version it is
+	// paired with. A caller that could orphan its way past a stale token would
+	// be doing the irreversible half of the operation on a row it no longer
+	// recognizes.
+	//
+	// IT GUARDS THE NAMED ROW'S LIFECYCLE STATE, NOT ITS GRAPH AND NOT ITS
+	// CLOSURE. RowVersion is reminted by status, assignee and started_at
+	// writes and deliberately not by label, dependency, rename or is_blocked
+	// writes, so a matching token does NOT promise that the row's edges are the
+	// ones the caller saw. Under Cascade that has a consequence worth saying
+	// out loud: the closure is resolved inside the deleting transaction, so a
+	// caller whose named row is unchanged deletes the closure the graph has
+	// NOW, which an edge added since its read may have grown. A caller that
+	// needs the closure itself pinned wants DryRun's preview and not this.
+	ExpectedVersion *int64
 	// Cascade also deletes the TRANSITIVE CLOSURE of everything that depends
 	// on the named rows, in both planes. It is what `bd delete --cascade`
 	// asks for.
@@ -82,6 +132,11 @@ type DeleteRequest struct {
 	// batch that names both ends of an edge is deleting the edge too, and
 	// refusing it would make `bd delete a b` fail on exactly the pair a caller
 	// took care to list together.
+	//
+	// IT BYPASSES POLICY, NEVER A PRECONDITION. It does not bypass
+	// ExpectedVersion and it does not bypass the existence probe: the guard it
+	// answers is the one about OTHER rows, and a caller saying "orphan them" has
+	// said nothing about whether the row it named is still the row it read.
 	Force bool
 	// DryRun reports what the deletion WOULD do and changes nothing, including
 	// history.
@@ -259,26 +314,56 @@ type Deleter interface {
 	// scan on every delete is a cost this operation does not take.
 	//
 	// THE ORDER THE REFUSALS HAPPEN IN IS PART OF THE ANSWER, because a
-	// request can fail two ways at once: request validation, then the
-	// existence probe, then the dependents guard. `bd delete typo real-with-
-	// dependents` reports the TYPO, which is the one the caller can fix
-	// without deciding anything.
+	// request can fail several ways at once: request validation, then the
+	// existence probe, then the version precondition, then the dependents
+	// guard. `bd delete typo real-with-dependents` reports the TYPO, which is
+	// the one the caller can fix without deciding anything.
+	//
+	// THE VERSION PRECONDITION OUTRANKS THE DEPENDENTS GUARD, and that
+	// placement is the answer to "which refusal helps the caller more". A
+	// mismatch says the row has changed since the caller read it, so the whole
+	// plan — including whether to delete at all — is built on a stale view;
+	// reporting the dependents refusal first would be asking a caller to choose
+	// --cascade or --force over information that has already moved. It ranks
+	// BELOW the existence probe for the opposite reason: a version is a fact
+	// about a row, and a request that named no row has nothing to be stale
+	// about.
 	//
 	// REFUSALS:
 	//
 	//   - an empty or all-blank IDs, and an IDs containing a blank entry:
 	//     ErrValidation, before anything is read;
+	//   - a non-nil ExpectedVersion beside more than one distinct id:
+	//     ErrValidation, also before anything is read;
 	//   - an id naming no row in either plane: *NotFoundError, matching
 	//     ErrNotFound;
+	//   - an ExpectedVersion that no longer matches the named row's current
+	//     RowVersion: ErrVersionMismatch, which neither Force nor Cascade
+	//     bypasses;
 	//   - without Cascade and without Force, a named row with a dependent the
 	//     request did not name: *DependentsOutsideRequestError, matching
 	//     ErrDependentsOutsideRequest.
 	//
 	// EVERY ONE OF THEM DELETES NOTHING, under DryRun and otherwise.
 	//
+	// THE VERSION READ SHARES THE DELETING TRANSACTION, so the pair is a true
+	// compare-and-delete rather than a read followed by a hopeful write: a
+	// writer that committed before the transaction opened is caught by the read
+	// itself, and one that commits during it collides on the same row_lock cell
+	// and is replayed against the new value. That is the same two-limbed
+	// invariant Lifecycle's ExpectedVersion has, over the same token.
+	//
 	// A DRY RUN CHANGES NOTHING, including history: an implementation that
 	// records a version-control entry for a deletion records none for a dry
-	// run. Where an implementation versions at all, one call records AT MOST
-	// ONE entry — a deletion is one act, not one per row.
+	// run. Where an implementation versions at all, a call that deleted
+	// durable rows records EXACTLY ONE entry — a deletion is one act, not one
+	// per row, and not none. A deletion confined to tables the version-control
+	// plane ignores records none, because there is nothing to version.
+	//
+	// EXACTLY ONE IS A STEADY-STATE PROMISE, NOT A CRASH-ATOMIC ONE. An
+	// implementation may write the entry after the transaction that deleted
+	// the rows — the embedded store has no way to mint one inside its own —
+	// so a crash between the two leaves the rows gone and the entry unwritten
+	// until the next flush.
 	Delete(ctx context.Context, req DeleteRequest) (DeleteResult, error)
 }

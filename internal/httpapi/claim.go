@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -45,13 +46,17 @@ const (
 // caller-named actor, and the write whose posture every later one adopted.
 //
 // ACTOR SEMANTICS, stated because adopting this endpoint depends on them. The
-// actor is caller-ASSERTED provenance for the audit trail, not authenticated
-// identity: this API has no authentication, so any client can claim as any
-// name, exactly as any local process can pass any --actor to the CLI. The CAS
-// is therefore a correctness fence against CONCURRENT claims, not an
-// authorization boundary — it guarantees that two racing claimants cannot both
-// win, and guarantees nothing about who either of them really is. The
-// loopback-only bind is what bounds the blast radius of that posture.
+// actor is caller-ASSERTED provenance for the audit trail and is NOT the
+// authenticated principal, even where a bearer is required: the token a
+// deployment configures is shared and surface-wide, so it names nobody and
+// cannot confirm or contradict the actor a request sends. Any client that
+// reaches this endpoint can claim as any name, exactly as any local process
+// can pass any --actor to the CLI. The CAS is therefore a correctness fence
+// against CONCURRENT claims, not an authorization boundary — it guarantees
+// that two racing claimants cannot both win, and guarantees nothing about who
+// either of them really is. What bounds the blast radius of that posture is
+// the bind: loopback by default, and beyond loopback only with a token file
+// (or the explicit --insecure-no-auth).
 //
 // Two things a CLI claim does that this deliberately does not: hooks do not
 // fire (a user-controlled subprocess per mutation is an unbounded latency
@@ -218,32 +223,46 @@ func decodeJSONObjectBody(w http.ResponseWriter, r *http.Request) (map[string]js
 // trim, then refuse an empty result, an over-long value, and any control
 // character.
 func validateActor(actor string) (string, *Result) {
+	return validateNameMember(claimActorMember, actor)
+}
+
+// validateNameMember applies the actor rules to any member that NAMES SOMEONE
+// and lands in a 255-character column: `actor` on the mutations, `author` on a
+// comment. The rules are one statement parameterized by the member's spelling,
+// rather than one statement per member — two copies would be two chances for a
+// bound to drift, and the difference between them is a name.
+//
+// It reports the TRIMMED value, which is what reaches the role.
+func validateNameMember(member, value string) (string, *Result) {
 	refuse := func(detail string) *Result {
-		res := InvalidArgument(claimActorMember, ReasonInvalidValue, detail)
+		res := InvalidArgument(member, ReasonInvalidValue, detail)
 		return &res
 	}
-	trimmed := strings.TrimSpace(actor)
+	trimmed := strings.TrimSpace(value)
 	switch {
 	case trimmed == "":
-		return "", refuse("`" + claimActorMember + "` is empty after trimming")
+		return "", refuse("`" + member + "` is empty after trimming")
 
 	case len(trimmed) > maxActorBytes:
 		return "", refuse(fmt.Sprintf("`%s` is %d bytes; the limit is %d",
-			claimActorMember, len(trimmed), maxActorBytes))
+			member, len(trimmed), maxActorBytes))
 
 	// The storage column holds types.MaxFieldLen (255) CHARACTERS, one fewer
 	// than the document's 256-byte cap allows. Refusing that one-character
 	// window here rather than letting it through keeps a documented-looking
 	// value from becoming a 500 from the assignee column, and keeps the check
 	// keyed on storage's own constant instead of a second copy of the number.
-	case types.CheckFieldLen(claimActorMember, trimmed) != nil:
+	case types.CheckFieldLen(member, trimmed) != nil:
 		return "", refuse(fmt.Sprintf("`%s` is %d characters; storage holds at most %d",
-			claimActorMember, utf8.RuneCountInString(trimmed), types.MaxFieldLen))
+			member, utf8.RuneCountInString(trimmed), types.MaxFieldLen))
 
 	// Newline above all: the actor is interpolated into the storage commit
-	// message, so a multiline value would forge audit-trail lines.
+	// message, so a multiline value would forge audit-trail lines. A comment's
+	// author is not, and is refused anyway — it lands in a column every renderer
+	// of the thread prints, where an unfiltered C1 introducer is an
+	// escape-sequence payload.
 	case strings.ContainsFunc(trimmed, isControlChar):
-		return "", refuse("`" + claimActorMember + "` must not contain control characters")
+		return "", refuse("`" + member + "` must not contain control characters")
 	}
 	return trimmed, nil
 }
@@ -308,22 +327,32 @@ type timedProvider struct {
 // provider it holds for the role — the same two-step a CLI command performs on
 // a store — instead of reaching past it to a constructor.
 var (
-	_ uow.IssueReaderSource       = timedProvider{}
-	_ uow.IssueClaimerSource      = timedProvider{}
-	_ uow.IssueLifecycleSource    = timedProvider{}
-	_ uow.WorkspaceConfigSource   = timedProvider{}
-	_ uow.StatsReporterSource     = timedProvider{}
-	_ uow.CycleDetectorSource     = timedProvider{}
-	_ uow.EdgeReaderSource        = timedProvider{}
-	_ uow.BlockingAnnotatorSource = timedProvider{}
-	_ uow.TreeWalkerSource        = timedProvider{}
-	_ uow.ReadyCounterSource      = timedProvider{}
-	_ uow.QuerierSource           = timedProvider{}
-	_ uow.SweeperSource           = timedProvider{}
-	_ uow.DeleterSource           = timedProvider{}
-	_ uow.BatchCreatorSource      = timedProvider{}
-	_ uow.DependencyEditorSource  = timedProvider{}
-	_ uow.MemoriesSource          = timedProvider{}
+	_ uow.IssueReaderSource         = timedProvider{}
+	_ uow.IssueClaimerSource        = timedProvider{}
+	_ uow.BatchCloserSource         = timedProvider{}
+	_ uow.ReadyClaimerSource        = timedProvider{}
+	_ uow.ReleaserSource            = timedProvider{}
+	_ uow.IssueLifecycleSource      = timedProvider{}
+	_ uow.WorkspaceConfigSource     = timedProvider{}
+	_ uow.StatsReporterSource       = timedProvider{}
+	_ uow.CycleDetectorSource       = timedProvider{}
+	_ uow.EdgeReaderSource          = timedProvider{}
+	_ uow.GraphCounterSource        = timedProvider{}
+	_ uow.RelationsSource           = timedProvider{}
+	_ uow.CommenterSource           = timedProvider{}
+	_ uow.BlockingAnnotatorSource   = timedProvider{}
+	_ uow.TreeWalkerSource          = timedProvider{}
+	_ uow.ReadyCounterSource        = timedProvider{}
+	_ uow.CounterSource             = timedProvider{}
+	_ uow.QuerierSource             = timedProvider{}
+	_ uow.SweeperSource             = timedProvider{}
+	_ uow.DeleterSource             = timedProvider{}
+	_ uow.BatchCreatorSource        = timedProvider{}
+	_ uow.DependencyEditorSource    = timedProvider{}
+	_ uow.MetadataCASSource         = timedProvider{}
+	_ uow.BatchApplierSource        = timedProvider{}
+	_ uow.MemoriesSource            = timedProvider{}
+	_ uow.EventsJournalCursorSource = timedProvider{}
 )
 
 // IssueReader builds the reader OVER THIS WRAPPER rather than delegating to the
@@ -363,6 +392,32 @@ func (p timedProvider) IssueClaimer() (issueops.Claimer, error) {
 	return uow.NewIssueClaimer(p)
 }
 
+// BatchCloser builds the many-issue close role OVER THIS WRAPPER, for the same
+// reason as the roles above. Like BatchApplier it opens one of the longest
+// write units of work on this surface — up to a hundred closes plus their
+// blocked-state maintenance in one transaction — so a recursion here would
+// report uow_ms=0.000 for exactly the requests whose timing matters most.
+func (p timedProvider) BatchCloser() (issueops.BatchCloser, error) {
+	return uow.NewBatchCloser(p)
+}
+
+// ReadyClaimer builds the take-ready-work role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueClaimer: it opens a write unit of
+// work per call, and its scan is the longest read on this surface — it walks
+// the whole ready order past rows other agents took — so a recursion here would
+// report uow_ms=0.000 for exactly the requests whose timing matters most.
+func (p timedProvider) ReadyClaimer() (issueops.ReadyClaimer, error) {
+	return uow.NewReadyClaimer(p)
+}
+
+// Releaser builds the claim-release role OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueClaimer: a release opens a write transaction
+// per call, so a recursion here would report uow_ms=0.000 for every one of
+// them.
+func (p timedProvider) Releaser() (issueops.Releaser, error) {
+	return uow.NewReleaser(p)
+}
+
 // IssueLifecycle builds the guarded-mutation role OVER THIS WRAPPER, for the
 // same reason and with the same hazard as IssueClaimer: this role opens the
 // longest write transactions on the surface, so a claimer-style recursion here
@@ -395,6 +450,26 @@ func (p timedProvider) EdgeReader() (issueops.EdgeReader, error) {
 	return uow.NewEdgeReader(p)
 }
 
+// GraphCounter builds the edge-count role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader.
+func (p timedProvider) GraphCounter() (issueops.GraphCounter, error) {
+	return uow.NewGraphCounter(p)
+}
+
+// IssueRelations builds the single-anchor neighbor role OVER THIS WRAPPER, for
+// the same reason and with the same hazard as IssueReader. It is the one
+// accessor here whose name is not the role's: the seam spells it IssueRelations
+// on both the store and the provider, and this type implements the seam.
+func (p timedProvider) IssueRelations() (issueops.Relations, error) {
+	return uow.NewIssueRelations(p)
+}
+
+// Commenter builds the add-comment role OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueReader.
+func (p timedProvider) Commenter() (issueops.Commenter, error) {
+	return uow.NewCommenter(p)
+}
+
 // BlockingAnnotator builds the blocking-decoration role OVER THIS WRAPPER, for
 // the same reason and with the same hazard as IssueReader.
 func (p timedProvider) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
@@ -411,6 +486,11 @@ func (p timedProvider) TreeWalker() (issueops.TreeWalker, error) {
 // and with the same hazard as IssueReader.
 func (p timedProvider) ReadyCounter() (issueops.ReadyCounter, error) {
 	return uow.NewReadyCounter(p)
+}
+
+// Counter builds the issue counter OVER THIS WRAPPER, for ReadyCounter's reason.
+func (p timedProvider) Counter() (issueops.Counter, error) {
+	return uow.NewCounter(p)
 }
 
 // Querier builds the boolean-query role OVER THIS WRAPPER, for the same reason
@@ -445,11 +525,29 @@ func (p timedProvider) DependencyEditor() (issueops.DependencyEditor, error) {
 	return uow.NewDependencyEditor(p)
 }
 
+// MetadataCAS builds the conditional metadata write OVER THIS WRAPPER, for the
+// same reason and with the same hazard as IssueReader.
+func (p timedProvider) MetadataCAS() (issueops.MetadataCAS, error) {
+	return uow.NewMetadataCAS(p)
+}
+
+// BatchApplier builds the ordered-plan write role OVER THIS WRAPPER, for the
+// same reason as the roles above. It opens the LONGEST write unit of work on
+// this surface — up to a hundred items in one transaction — so a recursion here
+// would report uow_ms=0.000 for exactly the requests whose timing matters most.
+func (p timedProvider) BatchApplier() (issueops.BatchApplier, error) {
+	return uow.NewBatchApplier(p)
+}
+
 // Memories builds the persistent-memory role OVER THIS WRAPPER, for the same
 // reason and with the same hazard as IssueReader. It is the one accessor here
 // whose role is not an issueops role; the binding rule is the same.
 func (p timedProvider) Memories() (memoryops.Memories, error) {
 	return uow.NewMemories(p)
+}
+
+func (p timedProvider) EventsJournalCursor() (storage.EventsJournalCursor, error) {
+	return uow.NewEventsJournalCursor(p)
 }
 
 func (p timedProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {

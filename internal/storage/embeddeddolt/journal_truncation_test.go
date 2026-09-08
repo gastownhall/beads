@@ -19,6 +19,18 @@ import (
 // It runs against the real embedded store — the same read path `bd events
 // tail --since` takes — so the counter self-heal, the prune floors, and the
 // truncation check are all exercised together rather than mocked.
+//
+// IT SURVIVED THE JOURNAL CONTRACT, and which half survived is the point.
+// backend/conformance/journal_contract.go now pins the same restart, retention
+// and truncation promises on all three legs — but it pins them on
+// journalops.Journal, whose body is issueops.ReadEventsPageInTx. Every read
+// below is ReadEventsJournal, which is storage.EventsJournalAccessor's
+// list-only read and a SECOND composition of the same parts: it pays for the
+// head only where the verdict is ambiguous, because `bd events tail --follow`
+// runs it every second. A mutation of one is invisible to the other, so the
+// role contract cannot stand in for this file. Its page-path twin,
+// TestEventsJournalPageReportsTheHead, could and was deleted with the contract
+// that replaced it.
 func TestEventsJournalRestartAndRetentionBoundary(t *testing.T) {
 	env := newTestEnv(t, "trn")
 	ctx := context.Background()
@@ -128,6 +140,15 @@ func TestEventsJournalRestartAndRetentionBoundary(t *testing.T) {
 		t.Fatalf("post-prune create = %+v, want a single row at seq %d", next, head+1)
 	}
 }
+
+// TestEventsJournalPageReportsTheHead was here, and the Journal contract
+// replaced it: RunJournalLimitCapsRowsNotHead pins that a bounded page reports
+// the JOURNAL's head, RunJournalHeadArrivesWithItsRowsAndDetectsCaughtUp pins
+// the caught-up answer, RunJournalHeadSurvivesAFullPrune pins the head standing
+// over an emptied table, and RunJournalTruncationIsTypedAndNamesTheWindow pins
+// the typed failure on the same read. Every one of them now runs on three legs
+// where this ran on one, against the same body
+// (issueops.ReadEventsPageInTx). See journal_contract_test.go.
 
 func requireTruncated(t *testing.T, err error) *storage.EventsJournalTruncatedError {
 	t.Helper()

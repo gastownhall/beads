@@ -175,6 +175,10 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 }
 
 func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
+		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
+	}
+
 	// Auto-detect source routing if not provided.
 	sourceTable := opts.SourceTable
 	writeTable := opts.WriteTable
@@ -274,7 +278,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay even
 			// though no audit event is written.
-			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 		}
 		return false, &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -347,7 +351,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
@@ -355,7 +359,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
 	// as real to a replaying consumer as one added by an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -442,7 +446,7 @@ func CheckDependencyCycleInTx(ctx context.Context, tx DBTX, dep *types.Dependenc
 	if dep.IssueID == dep.DependsOnID {
 		return fmt.Errorf("%w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
-	if !isSchedulingEdge(dep.Type) {
+	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
 	wouldCycle, err := WouldCreateSchedulingCycleInTx(ctx, tx, dep.IssueID, dep.DependsOnID, depTables)
@@ -512,18 +516,6 @@ func cycleReachabilityQuery(depTables []string) string {
 
 func cycleDetectionTables() []string {
 	return []string{"dependencies", "wisp_dependencies"}
-}
-
-// isSchedulingEdge reports whether a dependency type belongs to the static
-// combined-cycle set: blocks, conditional-blocks, and parent-child. Waits-for
-// also affects readiness but is intentionally outside this validation rule.
-func isSchedulingEdge(t types.DependencyType) bool {
-	switch t {
-	case types.DepBlocks, types.DepConditionalBlocks, types.DepParentChild:
-		return true
-	default:
-		return false
-	}
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue
@@ -988,7 +980,7 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
 	// consumer as one from an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata)
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor)
 }
 
 func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {

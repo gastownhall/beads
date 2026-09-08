@@ -123,6 +123,38 @@ func TestDependencyEditorLayersHooksOutsideTelemetry(t *testing.T) {
 	}
 }
 
+// TestBatchApplierLayersHooksOutsideTelemetry is the same pin for the
+// apply-many role, and it has more to lose than its siblings: this decorator is
+// the one place four hook vocabularies fire from one call, so an accessor that
+// stopped wrapping would silently drop on_create, on_update AND on_close for
+// every plan a caller applies.
+func TestBatchApplierLayersHooksOutsideTelemetry(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	applier, err := storage.NewHookFiringStore(instrumented, nil).BatchApplier()
+	if err != nil {
+		t.Fatalf("BatchApplier() error = %v", err)
+	}
+	if got := reflect.TypeOf(applier).String(); got != "*storage.hookBatchApplier" {
+		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+func TestBatchApplierExposesTypedUnsupportedError(t *testing.T) {
+	applier, err := (*dolt.DoltStore)(nil).BatchApplier()
+	if applier != nil {
+		t.Fatalf("BatchApplier() applier = %T, want nil", applier)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("BatchApplier() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 // TestCommenterLayersHooksOutsideTelemetry is the same pin for the comment
 // role.
 func TestCommenterLayersHooksOutsideTelemetry(t *testing.T) {
@@ -138,6 +170,71 @@ func TestCommenterLayersHooksOutsideTelemetry(t *testing.T) {
 	}
 	if got := reflect.TypeOf(commenter).String(); got != "*storage.hookCommenter" {
 		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+// TestMetadataCASLayersHooksOutsideTelemetry is the same pin for the
+// conditional metadata write, and it is the answer the OTHER destructive-ish
+// write roles do not give: a swap that lands names a bead and moves a column,
+// which is on_update — a hook the vocabulary publishes and a row a script can
+// still read back — so this decorator wraps rather than recursing the way
+// Sweeper and Deleter do.
+func TestMetadataCASLayersHooksOutsideTelemetry(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	cas, err := storage.NewHookFiringStore(instrumented, nil).MetadataCAS()
+	if err != nil {
+		t.Fatalf("MetadataCAS() error = %v", err)
+	}
+	if got := reflect.TypeOf(cas).String(); got != "*storage.hookMetadataCAS" {
+		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+func TestMetadataCASExposesTypedUnsupportedError(t *testing.T) {
+	cas, err := (*dolt.DoltStore)(nil).MetadataCAS()
+	if cas != nil {
+		t.Fatalf("MetadataCAS() surface = %T, want nil", cas)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("MetadataCAS() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
+// TestReleaserLayersHooksOutsideTelemetry is the same pin for the claim
+// release. It gives the same answer the metadata swap does and for the same
+// reason: a release moves assignee and status, which is on_update — a hook the
+// vocabulary publishes and a row a script can still read back — so this
+// decorator wraps rather than recursing the way Sweeper and Deleter do.
+func TestReleaserLayersHooksOutsideTelemetry(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	releaser, err := storage.NewHookFiringStore(instrumented, nil).Releaser()
+	if err != nil {
+		t.Fatalf("Releaser() error = %v", err)
+	}
+	if got := reflect.TypeOf(releaser).String(); got != "*storage.hookReleaser" {
+		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+func TestReleaserExposesTypedUnsupportedError(t *testing.T) {
+	releaser, err := (*dolt.DoltStore)(nil).Releaser()
+	if releaser != nil {
+		t.Fatalf("Releaser() surface = %T, want nil", releaser)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("Releaser() error = %v, want *beads.ErrUnsupported", err)
 	}
 }
 
@@ -525,6 +622,35 @@ func TestTreeWalkerExposesTypedUnsupportedError(t *testing.T) {
 	var unsupported *beads.ErrUnsupported
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("TreeWalker() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
+// TestGraphCounterKeepsTelemetryOutermost is the READ answer again: counting
+// edges fires no completion hooks, so the hook decorator adds no layer.
+func TestGraphCounterKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	counter, err := storage.NewHookFiringStore(instrumented, nil).GraphCounter()
+	if err != nil {
+		t.Fatalf("GraphCounter() error = %v", err)
+	}
+	if got := reflect.TypeOf(counter).String(); got != "*telemetry.instrumentedGraphCounter" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+func TestGraphCounterExposesTypedUnsupportedError(t *testing.T) {
+	counter, err := (*dolt.DoltStore)(nil).GraphCounter()
+	if counter != nil {
+		t.Fatalf("GraphCounter() counter = %T, want nil", counter)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("GraphCounter() error = %v, want *beads.ErrUnsupported", err)
 	}
 }
 

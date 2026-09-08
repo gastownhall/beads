@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -26,9 +27,10 @@ import (
 // structs do not all live in one package: nine are internal/types, and the
 // three that are not — the cycle pair and IssueBlocking — live in the role
 // package issueops, where the results of issueops.CycleDetector and
-// issueops.BlockingAnnotator are declared. Asserting the declared path per
-// schema keeps the pin's TARGET checked, which is what a bare x-go-type name
-// would not do.
+// issueops.BlockingAnnotator are declared, and EventRecord lives in
+// internal/eventsjournal, which owns the journal's published envelope for both
+// front doors. Asserting the declared path per schema keeps the pin's TARGET
+// checked, which is what a bare x-go-type name would not do.
 var pinnedSchemas = []struct {
 	name       string
 	goType     string
@@ -47,11 +49,16 @@ var pinnedSchemas = []struct {
 	{"Cycle", "issueops.Cycle", canonicalRolesImport, issueops.Cycle{}},
 	{"CycleMember", "issueops.CycleMember", canonicalRolesImport, issueops.CycleMember{}},
 	{"IssueBlocking", "issueops.IssueBlocking", canonicalRolesImport, issueops.IssueBlocking{}},
+	{"EventRecord", "eventsjournal.Record", canonicalJournalImport, eventsjournal.Record{}},
 }
 
 const (
 	canonicalTypesImport = "github.com/steveyegge/beads/internal/types"
 	canonicalRolesImport = "github.com/steveyegge/beads/issueops"
+	// The journal record lives in neither: it is the leaf package that owns the
+	// journal's cross-binary concerns, and its Record is what `bd events tail`
+	// marshals.
+	canonicalJournalImport = "github.com/steveyegge/beads/internal/eventsjournal"
 )
 
 // omittedProperties lists JSON field names a pinned schema deliberately does

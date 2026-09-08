@@ -66,8 +66,8 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("DryRunChangesNothing", func(t *testing.T) {
 		conformance.RunDeleterDryRunChangesNothing(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunDeleterRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunDeleterRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunDeleterDoesNotMutateTheCallerRequest(t, ctx, fixture)
@@ -80,6 +80,18 @@ func TestDeleterContract(t *testing.T) {
 	})
 	t.Run("SettlesTheChildrenOfADeletedParent", func(t *testing.T) {
 		conformance.RunDeleterSettlesTheChildrenOfADeletedParent(t, ctx, fixture)
+	})
+	t.Run("DeletesOnAMatchingExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterDeletesOnAMatchingExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("RefusesAStaleExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterRefusesAStaleExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("VersionOutranksForceAndCascade", func(t *testing.T) {
+		conformance.RunDeleterVersionOutranksForceAndCascade(t, ctx, fixture)
+	})
+	t.Run("RefusesAnExpectedVersionAcrossSeveralIDs", func(t *testing.T) {
+		conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, ctx, fixture)
 	})
 }
 
@@ -105,5 +117,20 @@ func newUOWDeleterFixture(t *testing.T, ctx context.Context, prefix string) conf
 		AddDependency: kit.AddDependency,
 		QueryScalar:   kit.QueryScalar,
 		CountHistory:  kit.CountHistory,
+		CommitPending: uowCommitPending(provider),
+	}
+}
+
+// uowCommitPending settles the working set into the version history. Every seed
+// on this backend is its own unit of work and versions itself on the way in, so
+// an empty unit of work here has nothing left to publish — doltServerTx.Commit
+// demotes a commit with no pending changes to a plain SQL COMMIT. The history
+// case still asks for it, because settling is a stated precondition rather than
+// a side effect the case is entitled to assume.
+func uowCommitPending(provider UnitOfWorkProvider) func(context.Context) error {
+	return func(ctx context.Context) error {
+		return RunTx(ctx, provider, func(context.Context, UnitOfWork) (string, error) {
+			return "conformance: settle seeds before a history delta", nil
+		})
 	}
 }

@@ -26,6 +26,12 @@ func TestEmbeddedClaimerReclaimsItsOwnInProgressIssueWithoutWriting(t *testing.T
 	conformance.RunClaimerReclaimsItsOwnInProgressIssueWithoutWriting(t, ctx, newEmbeddedClaimerFixture(t, "clidem"))
 }
 
+func TestEmbeddedClaimerReclaimsAcrossSpellingWithoutWriting(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunClaimerReclaimsAcrossSpellingWithoutWriting(t, ctx, newEmbeddedClaimerFixture(t, "clspell"))
+}
+
 func TestEmbeddedClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

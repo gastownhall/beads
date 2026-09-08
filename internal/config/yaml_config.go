@@ -115,7 +115,7 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	// Check prefix matches for nested keys
-	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list.", "audit.", "storage-class."}
+	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "lint.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list.", "audit.", "storage-class."}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -153,8 +153,10 @@ var secretKeySegments = map[string]bool{
 // `bd config set` guard that refuses to write a credential into a git-tracked
 // file, and — since the settings surface went on the wire — the redaction in
 // internal/httpapi that decides whether GET /v0/beads/config publishes a
-// value. `bd serve` has no authentication, so a spelling missing from this
-// predicate is a credential served in cleartext.
+// value. Redaction is the whole control there: a `bd serve` bearer is optional
+// and, where configured, shared and surface-wide, so it cannot withhold one
+// value from one caller — and there is no TLS either. A spelling missing from
+// this predicate is a credential served in cleartext.
 //
 // It errs toward over-redacting for that reason: a key wrongly withheld is an
 // operator asking why, and a key wrongly published cannot be recalled. The
@@ -339,7 +341,11 @@ func IsUserGlobalKey(key string) bool {
 // never re-enable metrics for a user who opted out, nor redirect where metrics
 // are sent. See MetricsDisabledByUserConfig / UserMetricsEndpoint.
 func readUserGlobalYamlValue(key string) (string, bool) {
-	return readYamlValueAtPath(UserConfigYamlPath(), key)
+	configPath, err := UserConfigYamlPath()
+	if err != nil {
+		return "", false
+	}
+	return readYamlValueAtPath(configPath, key)
 }
 
 // WorkspaceYamlValue reads a single dotted key out of ONE workspace's
@@ -451,10 +457,13 @@ func MetricsNoticeShownByUserConfig() bool {
 }
 
 func UnsetUserYamlConfig(key string) error {
-	configPath := UserConfigYamlPath()
+	configPath, err := UserConfigYamlPath()
+	if err != nil {
+		return err
+	}
 	normalizedKey := normalizeYamlKey(key)
 
-	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from UserConfigYamlPath
+	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is a validated absolute user config path
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -478,7 +487,10 @@ func SetUserYamlConfig(key, value string) error {
 	if err := validateYamlConfigValue(key, value); err != nil {
 		return err
 	}
-	configPath := UserConfigYamlPath()
+	configPath, err := UserConfigYamlPath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create user config directory: %w", err)
 	}
@@ -605,32 +617,6 @@ func projectConfigPathFromLoadedState() string {
 		return ""
 	}
 	return configPath
-}
-
-// UserConfigYamlPath returns the platform-appropriate path for the
-// user-level config.yaml file. On Linux this is typically
-// ~/.config/bd/config.yaml; on macOS it checks ~/.config/bd/ first
-// (the documented cross-platform path) and falls back to
-// ~/Library/Application Support/bd/.
-func UserConfigYamlPath() string {
-	// Prefer ~/.config/bd/config.yaml — it's the documented path and
-	// works on all platforms after GH#3532.
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
-		if _, err := os.Stat(xdgPath); err == nil {
-			return xdgPath
-		}
-		// If it doesn't exist yet, still prefer it as the recommendation
-		// unless the os.UserConfigDir() path already has a file.
-		if configDir, err := os.UserConfigDir(); err == nil {
-			osPath := filepath.Join(configDir, "bd", "config.yaml")
-			if _, err := os.Stat(osPath); err == nil {
-				return osPath
-			}
-		}
-		return xdgPath // recommend the cross-platform path
-	}
-	return "~/.config/bd/config.yaml" // fallback display string
 }
 
 func findProjectBeadsDir() string {

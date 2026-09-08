@@ -31,6 +31,37 @@ question (`Count` and `CountByGroup` share a predicate and differ only in
 whether the answer is a number or a number per bucket). The rule forbids
 APPENDING later, not being born whole.
 
+**And a third question, which the first two do not ask: does a SIBLING already
+answer this, and do both survive the answer?** "Different question" is only
+half a test, because two roles can each be a different question and still be
+one capability split in two — and the split is only worth it if each half is
+reachable, contract-pinned and named on its own terms afterwards.
+
+`issueops.BatchCreator` and `issueops.BatchApplier` are the worked example.
+Both write many beads in one transaction, and the tempting reading is that the
+second subsumes the first: an apply plan of N create items is a batch create.
+It is not, and the reason is what to copy:
+
+- **The QUESTIONS differ in what the caller is allowed to say.** `batchCreate`
+  takes a homogeneous list of creates and answers with the created rows in
+  request order; `batchApply` takes a heterogeneous plan of creates, updates
+  and closes over rows that may not exist yet, with intra-plan references and a
+  per-item guard vocabulary. Folding the first into the second would make every
+  caller of "create these ten beads" compose a plan.
+- **The REFUSALS differ, and a caller dispatches on them.** `batchApply`'s 409
+  vocabulary carries `item_index`, `item_kind`, `item_key` and
+  `item_issue_id`, because an item is the unit that failed. `batchCreate` has
+  no items to name, and inheriting a refusal shape it can never fill would put
+  four always-absent members on its wire.
+- **BOTH SURVIVE, and that is the part to check.** Each has its own contract,
+  its own capability token, its own operation, and a front door that reaches
+  it. Neither is a thin wrapper the next reader will ask about.
+
+If a sibling would be left as a shim over the new role — same refusals, same
+answer shape, one call through — the honest outcome is one role, not two. Ask
+it before writing the leaf, because the answer decides whether you are writing
+one contract file or two.
+
 **And one command may be born with TWO roles.** `bd init` is the case:
 `Bootstrapper` writes the workspace identity and `InitVerifier` reads it, and
 they are separate even though `VersionReconciler` — whose read and write are
@@ -111,6 +142,38 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
    — the shared function takes a transaction, so no front door can call it at
    all.
 
+   **CHECK WHETHER THE UNIT OF WORK CAN REACH THE BODY BEFORE PROMISING THAT IT
+   WILL.** `MetadataCAS` and `TreeWalker` collapse all three legs onto one
+   `…InTx` function, and it is tempting to read that as the rule for tx-level
+   bodies. It is not. Those two take a `DBTX`, which is exactly the method set
+   `domain/db.Runner` publishes, so the unit-of-work leg reaches them through
+   the domain repository. `issueops.BatchApplier` cannot: its body COMPOSES
+   `ExecuteCreate`, `ExecuteUpdate` and `ExecuteClose`, every one of which takes
+   a `*sql.Tx`, and a unit of work's runner is a `*sql.Conn` with a transaction
+   open on it. No interface between the two publishes the other, and widening
+   three of the oldest write paths in the tree to take an interface is not a
+   role slice's change.
+
+   So that role has TWO bodies, and its contract says so at the top rather than
+   claiming three legs and one reading. **The test is mechanical: does every
+   function your body calls take an interface `Runner` satisfies?** Ask it
+   before you write the contract header, because the header's vote count is
+   what tells the next reader how much a three-leg run is worth.
+
+   **THEN SHARE EVERYTHING THE FORK DOES NOT FORCE YOU TO DUPLICATE, and be
+   precise about which half that is.** `BatchApplier`'s two bodies share their
+   request VALIDATION and their commit-message rule outright — one function
+   each, called from both. Its end gate is the interesting case, because it is
+   shared at the LEAF and forked at the ORCHESTRATION: both legs reach the same
+   `issueops.CheckBlockingHierarchyInTx` and the same
+   `AppendSchedulingGraphInTx`/`CycleThroughEdgesInGraph` walk (the unit-of-work
+   leg through two repository methods that delegate to them), so the two cannot
+   disagree about what a conflict or a cycle IS — but which edges get collected,
+   in what order, and how the refusal is wrapped are written twice. That is the
+   shape to aim for and the shape to describe honestly: "the legs share their
+   end gate" would be a claim the code does not support, and the next reader
+   would trust it.
+
 4. **The unit-of-work body and its source interface.**
    `internal/storage/uow/<role>.go`, declaring `type <Role>Source interface {
    <Role>() (publicops.<Role>, error) }` and implementing the accessor on
@@ -151,12 +214,32 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
    today that is the `configStore` stub in `internal/jira/tracker_test.go`.
 
 10. **The decorator enumerations.** Both `role_accessor_decorator_test.go`
-    files (`internal/storage`, `internal/telemetry`) list the roles by name in
-    `roleAccessorNames`, declare them on a fake store, implement them on a
-    shared sentinel, and drive them in two tables each. All five places, in
-    both files. Add the layering pin in `issue_roles_external_test.go` too:
-    a write role expects the hook wrapper outermost, a read role expects the
-    telemetry wrapper.
+    files (`internal/storage`, `internal/telemetry`) declare the role on a fake
+    store, implement its methods on a shared sentinel, and drive it in two
+    tables each — the wrapped/unwrapped table and the error-propagation table.
+    In the storage file the fake store also needs its field and that field's
+    line in `newRoleAccessorStore`; in the telemetry file the accessor returns
+    the single shared surface, so there is no field. Measured against
+    `issueops.GraphCounter`'s commit: six edits in the storage file, four in
+    the telemetry one.
+
+    **There is NO name list to add to, and there has not been since #5460.**
+    `roleAccessorNames` is DERIVED by reflection over `DoltStorage`; the
+    telemetry file duplicates the derivation and runs its own declaration
+    check, because the storage file's is unexported and in a test package it
+    cannot import. That is the whole point of the
+    derivation: the decorators embed `DoltStorage`, so a new accessor is
+    PROMOTED onto every one of them and everything still compiles, and a
+    hand-kept list would simply never hear about it. What still costs you an
+    edit is a fake store and a sentinel, because those are types the compiler
+    has to see satisfy the interface.
+
+    Add the layering pin in `issue_roles_external_test.go` too: a write role
+    expects the hook wrapper outermost, a read role expects the telemetry
+    wrapper. And when you touch the storage file's pass-through paragraph — the
+    one naming which roles return the inner surface unwrapped — add the role
+    there rather than beside it; the paragraph exists so "recurses" reads as a
+    decision instead of an omission.
 
 11. **The conformance contract and its three wirings.**
     `backend/conformance/<role>_contract.go` holds the cases and the
@@ -194,18 +277,46 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
     provider can never be, so a case placed there silently never runs on the
     backend most likely to diverge.
 
+    **TWO GATES NOW FAIL THE BUILD IF YOU SKIP THIS STEP, and both take a
+    reasoned waiver rather than silence.** They exist because coverage used to
+    be aspirational: `issueops.Importer.ImportBatch` had no contract case from
+    the day it was written and nothing noticed.
+
+    - **`TestEveryRoleMethodHasAContractCase`**
+      (`backend/conformance/role_coverage_gate_test.go`). Every method of every
+      interface the public facade declares must be CALLED by a contract case in
+      that package. Both halves of the comparison are derived — the facade
+      census from source, the call sites by scanning the package — so a new
+      role method reaches this gate on its own. To waive, add an entry to
+      `uncoveredRoleMethods` keyed `"<Role>.<Method>"` with a sentence saying
+      why the contract tier cannot reach it. The gate is shrink-only in the
+      way that matters: it fails on an entry naming no real method AND on an
+      entry the package has since covered, so the change that writes the first
+      case deletes the waiver in the same diff.
+    - **`unwiredContractEntrypoints`**
+      (`internal/storage/contract_leg_registry_test.go`). The mirror question,
+      per LEG: a registered leg is held to every entrypoint the conformance
+      package exports. To waive, call `registerContractLegWaivers("<leg>",
+      map[string]string{"<Entrypoint>": "why"})` from an `init()`. Same rules —
+      a real leg, a real entrypoint, a reason, and removal the moment it is
+      wired — and a second registration of one entrypoint is REFUSED rather
+      than merged, so a waiver cannot outlive the reason that justified it.
+      A leg part-way through adopting the tier uses `adoptionCeiling` instead
+      of hundreds of identical reasons; it is asserted EXACTLY, so it is a
+      ratchet and not a budget.
+
+    Legs register from an `init()`, never by editing a literal. That is what
+    lets a distribution built on this repository bring its own leg and its own
+    waivers in its own file and merge without conflict (#5499).
+
 12. **Both front doors, and the lint that keeps them there.** The CLI handler
     and any HTTP handler call the role and nothing else — no filter, no config
     load, no unit of work opened by hand. Since the owner's 2026-08-05 scope
     decision the HTTP half lands WITH the command: the operation is written into
     `internal/httpapi/spec/openapi.v0.yaml` FIRST and the types generated from
-    it (`make api-gen`), never the other way round. That costs four more edits
-    the spec tests will name if you miss one — a row in `routeTable`, an
-    `Op<Name>` constant and an `operationCodes` row in `problem.go`, and the
-    capability token in `ContextResponse.capabilities`'s prose. A role served
-    from the store-shaped `Config` source also becomes a required field there,
-    because `checkDatabaseSource` refuses a half-set source rather than letting
-    a handler dereference nil on a live server.
+    it (`make api-gen`), never the other way round. Step 13 has the measured
+    file list for that half; it is not repeated here, because two copies of one
+    count is how the last one went stale.
     Then close the holes behind them in
     `.golangci.yml`: add the step-3 package to the `cmd-bd-role-constructors`
     depguard deny list, and if the command no longer names `types.IssueFilter`,
@@ -217,10 +328,34 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
 13. **The HTTP half, when the role has one.** The spec is written FIRST —
     `internal/httpapi/spec/openapi.v0.yaml`, then `make api-gen` — and the
     handler is written against the generated types, never the other way round.
-    An operation costs four more edits beside the handler: the `Op*` id and the
-    `operationCodes` row in `problem.go`, the `routeTable` row and its
-    `capability` token in `routes.go`, and that token in the document's
-    `capabilities` vocabulary. `make api-check` is the gate.
+    `make api-check` is the gate: it regenerates and fails if regeneration
+    changed anything, then runs the spec tests.
+
+    **What an operation costs beside the handler, measured against the two
+    freshest wire slices** — `issueops.GraphCounter`'s (#5536) and
+    `issueops.Relations`' (#5540), whose full file sets differ (each has its own
+    handler, its own handler test and its own proxied integration test) around
+    an identical nine-file core:
+
+    | File | Edit |
+    |---|---|
+    | `spec/openapi.v0.yaml` | The operation, its schemas, and the capability token in `ContextResponse.capabilities`'s prose — that token is hand-edited; `Capabilities()` itself is derived from the route table |
+    | `problem.go` | The `Op<Name>` constant and its `operationCodes` row |
+    | `routes.go` | The `routeTable` row, carrying the `capability` token |
+    | `server.go` | A required `Config` field, its entry in `sourceRoles`, its name in `roleSourceNames`, the `Server` field, the `Listen` assignment, and the per-request accessor |
+    | `claim.go` | The `timedProvider` accessor, plus the `uow.<Role>Source` compile-time assertion beside its siblings |
+    | `cmd/bd/serve.go` | The `serveRoleSource` method, the `serveIssueRoles` row, the `serveRoles` field, and the `httpapi.Config` literal |
+    | `cmd/bd/serve_source_test.go`, `cmd/bd/serve_store_identity_test.go` | The two serve stubs — a COMPILE ERROR since #5539 if you forget, see "the step with no number" |
+
+    Nine files, and the spec tests name most of them if you miss one. Budget
+    `server.go` in particular: six lines in one file, and the `Config` field is
+    REQUIRED, so every caller and test that built a Config grows a line too.
+
+    **And a tenth both slices paid, which is not in the core because it is a
+    test:** `internal/httpapi/roles_test.go` needs the role's fake and its entry
+    in `rolesConfig` — about thirty lines each time, and the compiler does not
+    ask for them, so it is the one on this list you can finish the operation
+    without noticing.
 
     **A role may honestly have none, and `issueops.VersionReconciler` is the
     one that does.** It answers a startup hook rather than a command: its two
@@ -345,6 +480,13 @@ address is what decides the entry, so a namespace of tx-level bodies has no
 entries at all, and the absence has to be readable as a decision rather than as
 a step someone skipped.
 
+`issueops.BatchApplier` is the second role with no entry, for the same reason
+and one more: its step-3 body is an `…InTx` function AND it has no `cmd/bd`
+front door at all in the slice that introduced it — it landed with the HTTP
+half only. An absent CLI is a decision too, and the place to write it down is
+the leaf doc beside the promises, exactly as `VersionReconciler` writes down
+its absent HTTP half.
+
 The test: **does step 3 have an exported constructor returning the role
 interface, in a package a `cmd/bd` file can import?**
 `internal/workapi/store<role>` does, so it gets an entry. A `…InTx` function
@@ -417,6 +559,251 @@ now carry a per-row `inner` comparand naming the surface each one must not be
 (`internal/telemetry/role_accessor_decorator_test.go:279-282`). **A shared test
 fixture a new namespace cannot satisfy is a signal: the row you add beside it
 may be a row that cannot fail.**
+
+## The third namespace
+
+`journalops.Journal` is the durable mutation journal's read side: the
+seq-ordered replay feed behind `bd events tail`, `bd events export` and
+`GET /v0/beads/events`. It is a third leaf rather than a role in either
+existing one because its rows are neither beads nor settings — they are
+clone-local engine state on a `dolt_ignore`d table, written in the same
+transaction as the mutation they describe, versioned by nothing and replicated
+nowhere. A plane whose rows deliberately survive no merge has nothing in common
+with the plane that holds the merged data, however similar an id column makes
+them look.
+
+Most of what the second namespace decided transferred without argument. Four
+things did not, and the first two are the ones a fourth namespace inherits.
+
+**A role can have NO ACCESSOR AT ALL, and that is what makes the census a
+source parse rather than a convenience.** Every other role in this tree is
+handed out by a method on a store or a provider; this one is reached by TYPE
+ASSERTION, because the journal is not on `storage.DoltStorage`'s published
+surface and a backend is free not to implement it (`cmd/bd/serve.go`,
+`serveJournalCursor`). `issueops.Importer` is the precedent and the warning: it
+had no contract case from the day it was written and nothing noticed, precisely
+because a reflection-only census can only ask about types something already
+names. So the demand side is where an accessorless role is added —
+`facadePackages` in `backend/conformance/role_coverage_scan_test.go`, one line
+— and from there `TestEveryRoleMethodHasAContractCase` treats it exactly like a
+role with three accessors. The supply side needs nothing: `#5499`'s per-leg
+lock is ENTRYPOINT-scoped, so the six new `Run…` functions were demanded of all
+three legs the moment the contract file existed. Check which of the two gates
+your role is invisible to before assuming both.
+
+Nothing else in the accessor apparatus applies, and the absences should read as
+decisions: no row in either `role_accessor_decorator_test.go`, because there is
+no accessor to decorate; no `RoleFiresHooks` entry, because a read fires none;
+no `.golangci.yml` deny entry, for `memoryops`' reason — the body is an `…InTx`
+function (`issueops.ReadEventsPageInTx`) that no front door can hold, so there
+is no constructor to deny.
+
+**Conditional requiredness is a RESOLVED BOOLEAN the caller hands in, never
+something the server works out.** `httpapi.Config.EventsJournal` is the one
+role field required conditionally — on `Config.EventsJournalEnabled` — and the
+flag is separate from the role because it CANNOT BE INFERRED FROM THE DATA: a
+disabled journal presents as zero rows and a head of zero, byte-identical to an
+enabled journal nothing has written to yet, so a server without the flag would
+answer "you are caught up" to a consumer polling a workspace that will never
+emit a record. Activation lives in the target workspace's own config and
+environment, which `internal/httpapi` resolves none of. If your role is
+optional, ask what tells the difference between "off" and "empty"; if the
+answer is nothing, the flag is a field and not an inference.
+
+**Alias FORWARD from the old home when a role is carved out of shipped code.**
+The second namespace's section above argued that moving a vocabulary later
+costs nothing because a Go alias preserves identity in both directions, and
+called the opposite claim a false dichotomy. This is that claim measured. Four
+names and a constant moved from `internal/storage` into the leaf and the old
+spellings became aliases —
+`type EventsJournalCursor = journalops.Journal` and its three siblings — and
+the whole tree compiled with **no non-test change anywhere else**: not in
+`internal/httpapi`, not in `cmd/bd`, not in any of the four implementations,
+not in the enterprise sync. `errors.As` against `*journalops.TruncatedError`
+matches an error every leg constructs as `*storage.EventsJournalTruncatedError`,
+because they are one type. The direction is what has to be right — the leaf
+imports `context` and `fmt` and cannot name `internal/storage`, so the canon
+goes down and the alias goes up — and the contract asserts the identity at
+runtime on three legs rather than leaving it to be argued from the spec.
+
+**A role may arrive AFTER its front doors, and the leaf is where that gets
+written down.** The checklist's usual worry is a role whose command or
+operation lands later (`GraphCounter`, `BatchApplier`, `VersionReconciler`).
+This is the inverse: the CLI, the HTTP operation and four implementations all
+shipped first, against a seam in `internal/storage`, and the role was carved
+out of them afterwards. What that buys is exactly what a facade-only slice
+buys, one step later: ONE place where the promises are stated and three legs
+held to them. What it costs is that the promises have to be reconstructed from
+working code rather than written before it — so read the bodies for what they
+actually do at every boundary (a checkpoint at or above the head; a limit of 0;
+a head after a full prune) and put each answer in the leaf doc, because those
+are the cases the shipped tests were least likely to have covered.
+
+**And keep the operator's half OFF the role, deliberately and in writing.**
+`storage.EventsJournalAccessor` (read plus prune) and
+`storage.EventsJournalConfigurer` (per-instance activation) stayed in
+`internal/storage` when the read moved out. The entitlement test from `bd init`
+applies and comes back loudly yes: `bd serve` documents itself as publishing
+the journal and never retaining it, so handing it a delete would make that
+documentation the only thing between a consumer's checkpoint and a prune. The
+conformance fixture still needs both — the cases have to create records and
+manufacture a truncation — so they arrive as fixture hooks with a comment
+saying they are the operator surface being borrowed, not part of what is under
+test (`backend/conformance/journal_contract.go`, `JournalFixture.Prune`).
+
+## When all three legs share one body
+
+`issueops.TreeWalker` was the first, and `issueops.MetadataCAS` is the second:
+the two stores wrap the `…InTx` function and the unit of work reaches the SAME
+function through the domain repository. Two things about that arrangement are
+not obvious the first time, and both cost a debugging session here.
+
+**The domain seam pulls the meaning layer DOWN, past step 2's address.** The
+unit-of-work leg reaches the body through `internal/storage/domain`, so
+`domain` has to name whatever request type the body takes — and `internal/workapi`
+already imports `domain`. So step 2's package cannot be workapi for this shape:
+the plan type and the equality rule live in `internal/storage` instead
+(`metadata_cas.go`, beside `ValidateMetadataKey`). Check the direction before
+picking step 2's address; the compiler tells you late and the fix is a move.
+
+**"Nothing to VERSION" and "nothing was WRITTEN" are different facts, and the
+unit-of-work leg is where conflating them bites.** A tx body naturally returns
+the durable tables it changed, for the store legs to stage. An EPHEMERAL write
+changes none of them — `ChangedTables.Add` drops the wisp tables on purpose —
+so an empty set arrives for a swap that really did write a row. The store legs
+survive that: their SQL transaction commits either way and only the Dolt commit
+is skipped. The unit of work does not, because its COMMIT MESSAGE is what
+commits the SQL transaction as well as what versions it, so an empty message
+rolls the write back. Here the wisp case went green on both stores and red on
+the unit of work with the row simply absent. Return the two facts separately
+(`issueops.MetadataCASWrite`), and make sure a wisp case exists on all three
+legs — it is the only case that can tell them apart.
+
+**And one measurement worth copying rather than the conclusion.** Two of this
+role's promises turned out to be held one layer down rather than by the code
+that reads as if it holds them: the metadata column is a Dolt JSON column that
+normalizes on write, so canonicalizing the STORED side is unfalsifiable on every
+in-tree backend, and `DiscardNoopIssueUpdates` already suppresses a metadata
+write that matches the row, so the body's own no-op short-circuit is
+unfalsifiable too. Neither was guessed — each was mutated and watched to stay
+green. One of them cost a case that had already been written, wired into three
+legs and the bundle, and then deleted, because a green case named for a promise
+is worse than no case. Say which mechanism actually holds a promise in the
+contract's coverage paragraph, and name the substrate that would make it
+observable.
+
+**And validation moves WITH the body when there is only one.** `ExecuteEdgeRead`
+leaves `ValidateEdgeReadRequest` to each accessor, because that role has two
+bodies and the check belongs to each of them. `issueops.GraphCounter` has one
+body on all three legs, so its validation runs INSIDE `ExecuteEdgeCount`: there
+is no second implementation for a per-leg check to belong to, and a leg that
+forgot to call the validator would be a leg answering a different contract with
+nothing to notice it. Ask which shape you have before copying the accessor's
+first three lines from a sibling.
+
+**A role whose front doors land later still lands whole, and says so.** The
+checklist's steps 1-11 are the role; steps 12 and 13 are the front doors.
+`issueops.GraphCounter` shipped with NEITHER — no `bd` command and no HTTP
+operation — because the numbers it answers are already printed through
+`internal/workapi`'s detail seam, which is shared with an HTTP handler and
+therefore moves in a change with its own parity argument, and because the wire
+operation was separately gated. That is `BatchApplier`'s absent CLI and
+`VersionReconciler`'s absent HTTP at the same time, and it is only legible as a
+decision if the leaf doc says it: what a facade-only slice buys is ONE place
+where the role's rules are stated and held to on three legs, before either
+surface has to agree with the other.
+
+**Then go back and update the leaf when a front door lands**, because the same
+sentence that made the absence legible makes it a lie the moment it stops being
+true. `GET /v0/beads/dependencies:count` landed in #5536 and
+`GET /v0/beads/issues/{id}/related` in #5540; the first left `graphcounter.go`
+saying it had "no HTTP operation either" and promising a bound "the graph-counts
+wire slice sets" in the future tense, over a slice that had already set it. A
+facade-only leaf carries a claim with an expiry date on it. The wire slice owns
+the expiry.
+
+## When the role's answer carries a JSON value
+
+Two traps, both found in review of `issueops.MetadataCAS` and both invisible to
+every test that asserts on wire BYTES.
+
+**A `*json.RawMessage` wire member cannot READ a present `null`.** `encoding/json`
+answers a JSON null against a pointer by setting the pointer to nil, before any
+`UnmarshalJSON` runs — so a generated client decoding `{"current":null}` gets
+exactly what it gets for a response with no `current` member at all. If those
+two mean different things on your operation, the generated client cannot tell
+them apart and no round-trip test on the server notices, because the server's
+own handler reads raw members. The fix is
+`x-go-type-skip-optional-pointer: true` beside the `x-go-type`, which makes the
+member a bare `json.RawMessage` — an `Unmarshaler` in its own right, so it
+receives the literal, while an omitted member still leaves it nil and
+`omitempty` still omits it on the way out. **The wire does not change in either
+direction**, which is why nothing else catches the regression: add a test that
+decodes a present null INTO the generated struct, or the next `make api-gen`
+takes the fix away. Add `nullable: true` too — the document is OpenAPI 3.0.3 and
+a validating gateway is entitled to reject a legitimate null without it.
+
+**Do not justify a rule with a precision the SUBSTRATE does not keep.** This
+role shipped with a comparison rule defended, in three places, as protecting
+int64s past 2^53 from a float64 round-trip. The metadata column is a
+go-mysql-server JSON column that decodes numbers through float64 itself:
+measured, `9007199254740993` stores as `...992`, `1.0` as `1`, `-0.0` as `0`,
+and `1e300` as three hundred and one digits. The defense was against a loss that
+had already happened one layer down. Two consequences worth generalizing:
+
+- **Measure the column before writing the promise.** One throwaway probe that
+  seeds a row and reads the raw bytes back settles it in a minute, and the same
+  probe is what tells you whether a canonicalization is observable at all.
+- **A result value the caller feeds back must be READ, not echoed.** Answering
+  with the request's own bytes made the "what you get is what a later read sees"
+  promise false and left the documented retry loop unable to converge on any
+  value the store renormalizes. Re-read it inside the deciding transaction — one
+  extra SELECT — and say in the leaf that the caller composes its next
+  expectation from that value and not from its own spelling.
+
+**And the step with no number: every surface that EMBEDS the store or a use
+case.** A new accessor arrives on each of them PROMOTED rather than declared, so
+the build stays green and the first symptom is a nil dereference in somebody
+else's stub. `issueops.MetadataCAS` was caught by CI in four such places after
+passing every package test its own slice ran: `storage.RoleFiresHooks` (a role
+whose hook decorator WRAPS must gain a case, or `checkDatabaseSource` cannot
+refuse a hook-firing one — missing it is a `bd serve` that runs a user
+subprocess per call); `uow`'s notifying wrapper, in BOTH halves — the recording
+use case, which silently records nothing for an inherited method, and the
+notifying provider, whose missing accessor makes a caller's type assertion stop
+matching; and two `cmd/bd` stub stores that embedded `storage.DoltStorage`. Grep
+for the embed, not for the interface.
+
+**A READ ROLE IS THE ONE THAT BITES, and the reason is the decorator, not the
+role.** A role whose hook decorator WRAPS produces a surface the caller holds
+instead of the stub's, so a missing stub accessor is only reached to build the
+wrapper. A read role's decorator RECURSES — `hook_counter.go` and
+`hook_graph_counter.go` are three lines each, because nothing completed and
+there is no hook to fire — so the call lands on the STUB itself, and a stub
+that promoted the accessor off a nil embed dereferences nil right there. Both
+roles this actually happened to, `issueops.Counter` and
+`issueops.GraphCounter`, are reads.
+
+Neither was found by reasoning about it. `Counter` surfaced only once `bd serve`
+began binding the role, and `GraphCounter` (#5508) surfaced as a panic in
+`TestServeIssueRolesComeFromBeneathTheHookDecorator` on a full-package CI
+shard — a test about hook peeling, which no `-run` pattern anyone reaches for
+names, so local runs never touched it. **The sharpened rule: a role bound in
+`serveIssueRoles` must be DECLARED on the serve stub store in the same commit.**
+
+Those two `cmd/bd` stubs are the one place this step is now taken FOR you.
+`serveIssueRoles` asks for `serveRoleSource` — the accessor subset it actually
+reaches — and both stubs declare that subset, assert it with
+`var _ serveRoleSource = (*serveRolesStore)(nil)`, and embed NOTHING, so there
+is no promotion to hide behind. A role added to the loop is a compile error
+naming the missing method instead of a segfault inside role extraction.
+`issueops.Relations` (#5540) is the first role added since, and it measured the
+return: `*serveRolesStore does not implement serveRoleSource (missing method
+IssueRelations)`, at build time, in the file that has to change. Every other
+surface above is still yours to grep for.
+And note that `internal/storage/uow`'s own
+package run is nine minutes — the parity guards live there, so a role slice that
+runs only its contract on the three legs has not run them.
 
 ## Retiring a test against a contract
 

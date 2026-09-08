@@ -233,7 +233,6 @@ func importJSONLIntoStore(ctx context.Context, store storage.DoltStorage, jsonlP
 	actor := detectActor()
 
 	err = store.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
-		OrphanHandling:       storage.OrphanAllow,
 		SkipPrefixValidation: true,
 	})
 	if err != nil {

@@ -20,6 +20,12 @@ type ClaimNextRequest struct {
 	// be unclaimable while plenty of other ready work remained. Rejecting the
 	// two fields says that out loud rather than accepting them and quietly
 	// dropping them.
+	//
+	// Brief must be unset too, and for the same reason stated once more
+	// because this one costs a write: the claim refetches its winning row
+	// whole rather than reading it through the page's query, so the projection
+	// cannot be applied here, and accepting it would return an unprojected row
+	// from a request that has already mutated state.
 	Filter ReadyRequest
 }
 

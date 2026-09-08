@@ -12,7 +12,7 @@ import (
 )
 
 // What this file still holds, after the metadata PATCH SEMANTICS moved to the
-// contract: the refusals. RunIssueOperationsUpdateMetadataPatchOrdersMergeSet-
+// contract: the refusals. RunLifecycleUpdateMetadataPatchOrdersMergeSet-
 // Unset now pins Merge before Set before Unset at all three backends, against
 // the stored document as well as the returned one, and with a key that SURVIVES
 // the patch so the Merge-before-Set half is falsifiable — which the case that

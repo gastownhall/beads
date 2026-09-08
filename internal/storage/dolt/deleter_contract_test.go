@@ -9,14 +9,14 @@ import (
 
 // TestDeleterContract runs the Deleter contract against the server-backed
 // store, which reaches internal/storage/issueops.DeleteInTx through its own
-// write transaction and is the ONE wiring that records a version-control entry
-// for a deletion.
+// write transaction and is the one wiring whose version-control entry is
+// recorded INSIDE that transaction; the other two publish theirs after it.
 //
 // The cases are subtests of one parent so the whole role suite shares one store
 // and one copy-on-write branch, which is why every case namespaces its seeds
 // under fixture.IssuePrefix plus its own tag. setupTestStore already marks the
 // PARENT parallel; no subtest here calls t.Parallel, because
-// RecordsAtMostOneHistoryEntry takes a before/after delta.
+// RecordsExactlyOneHistoryEntry takes a before/after delta.
 func TestDeleterContract(t *testing.T) {
 	fixture, ctx, cleanup := newDoltDeleterFixture(t, "del")
 	defer cleanup()
@@ -63,8 +63,8 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("DryRunChangesNothing", func(t *testing.T) {
 		conformance.RunDeleterDryRunChangesNothing(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunDeleterRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunDeleterRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunDeleterDoesNotMutateTheCallerRequest(t, ctx, fixture)
@@ -77,6 +77,18 @@ func TestDeleterContract(t *testing.T) {
 	})
 	t.Run("SettlesTheChildrenOfADeletedParent", func(t *testing.T) {
 		conformance.RunDeleterSettlesTheChildrenOfADeletedParent(t, ctx, fixture)
+	})
+	t.Run("DeletesOnAMatchingExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterDeletesOnAMatchingExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("RefusesAStaleExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterRefusesAStaleExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("VersionOutranksForceAndCascade", func(t *testing.T) {
+		conformance.RunDeleterVersionOutranksForceAndCascade(t, ctx, fixture)
+	})
+	t.Run("RefusesAnExpectedVersionAcrossSeveralIDs", func(t *testing.T) {
+		conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, ctx, fixture)
 	})
 }
 
@@ -104,5 +116,17 @@ func newDoltDeleterFixture(t *testing.T, prefix string) (conformance.DeleterFixt
 		AddDependency: kit.AddDependency,
 		QueryScalar:   kit.QueryScalar,
 		CountHistory:  kit.CountHistory,
+		CommitPending: doltCommitPending(store),
 	}, ctx, stop
+}
+
+// doltCommitPending settles the working set into the version history. On this
+// backend the seed verbs already version each row on the way in, so it is
+// normally a no-op — Commit tolerates an empty working set — but the history
+// case states settling as a precondition rather than relying on a per-backend
+// side effect.
+func doltCommitPending(store *DoltStore) func(context.Context) error {
+	return func(ctx context.Context) error {
+		return store.Commit(ctx, "conformance: settle seeds before a history delta")
+	}
 }

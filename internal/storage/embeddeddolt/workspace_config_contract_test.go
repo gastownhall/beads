@@ -3,6 +3,7 @@
 package embeddeddolt_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -38,6 +39,9 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ListExcludesTheKVPlane", func(t *testing.T) {
 		conformance.RunWorkspaceConfigListExcludesTheKVPlane(t, ctx, fixture)
 	})
+	t.Run("PointReadRefusesTheKVPlane", func(t *testing.T) {
+		conformance.RunWorkspaceConfigPointReadRefusesTheKVPlane(t, ctx, fixture)
+	})
 	t.Run("UnsetRemovesTheSetting", func(t *testing.T) {
 		conformance.RunWorkspaceConfigUnsetRemovesTheSetting(t, ctx, fixture)
 	})
@@ -68,6 +72,21 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ARefusedWriteRecordsNoHistory", func(t *testing.T) {
 		conformance.RunWorkspaceConfigARefusedWriteRecordsNoHistory(t, ctx, fixture)
 	})
+	t.Run("KeysAreCaseSensitive", func(t *testing.T) {
+		conformance.RunWorkspaceConfigKeysAreCaseSensitive(t, ctx, fixture)
+	})
+	t.Run("CustomStatusReadsAreOrderedByName", func(t *testing.T) {
+		conformance.RunWorkspaceConfigCustomStatusReadsAreOrderedByName(t, ctx, fixture)
+	})
+	t.Run("CustomTypeReadsAreOrderedByName", func(t *testing.T) {
+		conformance.RunWorkspaceConfigCustomTypeReadsAreOrderedByName(t, ctx, fixture)
+	})
+	t.Run("ConfiguredInfraTypesReplaceTheDefaultSet", func(t *testing.T) {
+		conformance.RunWorkspaceConfigConfiguredInfraTypesReplaceTheDefaultSet(t, ctx, fixture)
+	})
+	t.Run("UnconfiguredVocabularyReadsAreEmptyNotErrors", func(t *testing.T) {
+		conformance.RunWorkspaceConfigUnconfiguredVocabularyReadsAreEmptyNotErrors(t, ctx, fixture)
+	})
 }
 
 func newEmbeddedWorkspaceConfigFixture(t *testing.T, te *testEnv, prefix string) conformance.WorkspaceConfigFixture {
@@ -88,5 +107,15 @@ func newEmbeddedWorkspaceConfigFixture(t *testing.T, te *testEnv, prefix string)
 		SetConfig:       kit.SetConfig,
 		QueryScalar:     kit.QueryScalar,
 		CountHistory:    kit.CountHistory,
+		Vocabulary: &conformance.WorkspaceVocabularyReader{
+			// The same three reads the server-backed store answers, and the
+			// same body behind them: the difference between the two stores is
+			// below storage.DoltStorage, not above it.
+			CustomStatuses: te.store.GetCustomStatusesDetailed,
+			CustomTypes:    te.store.GetCustomTypes,
+			InfraTypes: func(ctx context.Context) (map[string]bool, error) {
+				return te.store.GetInfraTypes(ctx), nil
+			},
+		},
 	}
 }

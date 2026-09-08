@@ -292,8 +292,8 @@ func TestAddDependenciesForwardsEveryEdgeInRequestOrder(t *testing.T) {
 	if !reflect.DeepEqual(calls[0], want) {
 		t.Errorf("request = %+v, want %+v", calls[0], want)
 	}
-	// SkipPerEdgeCycleCheck is not published, and an unauthenticated surface is
-	// where a default must be the guarded one.
+	// SkipPerEdgeCycleCheck is not published, and a surface that cannot tell a
+	// trusted caller from any other is where a default must be the guarded one.
 	if calls[0].SkipPerEdgeCycleCheck {
 		t.Error("the handler skipped the per-edge cycle check; that flag is unpublished on this surface")
 	}

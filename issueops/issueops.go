@@ -255,6 +255,29 @@ type UpdateRequest struct {
 	// It is the update-side spelling of CloseRequest.Force; a command adapter
 	// that maps one flag to both spells both.
 	ForceClosePolicy bool
+	// The three Expected* guards below are this package's FOUNDING spelling of
+	// the compare-and-set family, and the family's rules are stated once, at
+	// length, on DeleteRequest.ExpectedVersion (deleter.go) and
+	// ApplyUpdateItem's guards (batchapplier.go). They hold here unchanged and
+	// are not restated:
+	//
+	//   - THE TOKEN IS OPAQUE AND COMPARED FOR EQUALITY ONLY. RowVersion is
+	//     minted afresh on every lifecycle write rather than incremented, so
+	//     "newer" and "older" are not questions a version guard can answer.
+	//   - IT GUARDS THE ROW'S LIFECYCLE STATE, NOT ITS GRAPH. RowVersion is
+	//     reminted by status, assignee and started_at writes and deliberately
+	//     not by label, dependency, rename or is_blocked writes, so a matching
+	//     token does not promise the row's edges are the ones the caller saw.
+	//   - nil DISABLES THE CHECK. Each is a pointer so that "do not check" is
+	//     distinct from a caller requiring the never-written version 0, or the
+	//     empty assignee, which is a real guard meaning "expected unassigned".
+	//   - GUARDS PRESENT TOGETHER MUST ALL HOLD, and each is read inside the
+	//     writing transaction, so there is no internal TOCTOU.
+	//   - A MISS REFUSES AND WRITES NOTHING, with the typed sentinel for the
+	//     guard that missed: ErrVersionMismatch, ErrStatusMismatch,
+	//     ErrAssigneeMismatch. That is the opposite of MetadataCAS, whose miss
+	//     is a result rather than an error; metadatacas.go states why.
+	//
 	// ExpectedVersion requires the current row version to match before the claim
 	// and patch. It is an independent precondition and may be combined with Claim.
 	ExpectedVersion *int64
@@ -262,6 +285,12 @@ type UpdateRequest struct {
 	// the requested Patch.Assignee transfer: this compare-and-set replaces the
 	// ordinary anti-steal fence. It must be nil with Claim, and
 	// ForceAssigneeTransfer must be false when it is non-nil.
+	//
+	// THE COMPARISON IS SEPARATOR-INSENSITIVE, exactly as
+	// ReleaseRequest.ExpectedAssignee documents: a run of ".", "_" or "-"
+	// matches any other such run — except an exact "--" run, which decodes to
+	// "/" as gascity's rig-qualified agent encoding, so "a--b" matches "a/b"
+	// rather than "a__b" — and nothing else is forgiven.
 	ExpectedAssignee *string
 	// ExpectedStatus requires the current status to match. It must be nil when
 	// Claim is true.
@@ -310,8 +339,17 @@ type CloseRequest struct {
 	// Force bypasses only blocker and open-child close policy. It never bypasses
 	// validation, ExpectedVersion, or lifecycle rules.
 	Force bool
-	// ExpectedVersion requires the current row version to match and is checked
-	// before an idempotent close.
+	// ExpectedVersion requires the current row version to match, and is checked
+	// BEFORE the idempotent close — so a re-close of an already-closed issue
+	// still refuses on a stale token rather than reporting the no-op it would
+	// otherwise be. That ordering is the whole difference from composing a read
+	// with a close, and a conformance case pins it.
+	//
+	// The rest of the family's rules are UpdateRequest.ExpectedVersion's,
+	// unchanged: the token is opaque and compared for equality only, it guards
+	// the row's lifecycle state and not its graph, nil disables the check, and
+	// a miss refuses with ErrVersionMismatch having written nothing. Force
+	// bypasses close policy and never this guard.
 	ExpectedVersion *int64
 }
 

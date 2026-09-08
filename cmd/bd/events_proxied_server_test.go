@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -144,15 +145,15 @@ func TestEventsJournalProxiedServerOffByDefault(t *testing.T) {
 	}
 }
 
-func decodeEventRecords(t *testing.T, out string) []eventRecord {
+func decodeEventRecords(t *testing.T, out string) []eventsjournal.Record {
 	t.Helper()
-	var records []eventRecord
+	var records []eventsjournal.Record
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "{") {
 			continue
 		}
-		var rec eventRecord
+		var rec eventsjournal.Record
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("decode journal record %q: %v", line, err)
 		}

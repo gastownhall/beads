@@ -16,22 +16,18 @@ import (
 )
 
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
-// Returns types.TypeTask for empty or unrecognized types.
+// Returns types.TypeTask for empty types. Non-empty types pass through
+// (trimmed and normalized) rather than being validated here: at pour and
+// cook --persist time, flattenUnregisteredIssueTypes degrades types that
+// are neither built-in nor registered in types.custom to task (with a
+// warning), and the storage layer validates what remains — the same
+// division of labor as bd create --type.
 func stepTypeToIssueType(stepType string) types.IssueType {
-	switch stepType {
-	case "task":
-		return types.TypeTask
-	case "bug":
-		return types.TypeBug
-	case "feature":
-		return types.TypeFeature
-	case "epic":
-		return types.TypeEpic
-	case "chore":
-		return types.TypeChore
-	default:
+	stepType = strings.TrimSpace(stepType)
+	if stepType == "" {
 		return types.TypeTask
 	}
+	return types.IssueType(stepType).Normalize()
 }
 
 // cookCmd compiles a formula JSON into a proto bead.
@@ -561,9 +557,12 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 	// Generate issue ID (formula-name.step-id)
 	issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
 
-	// Determine issue type (children override to epic)
-	issueType := stepTypeToIssueType(step.Type)
-	if len(step.Children) > 0 {
+	// Determine issue type. A parent step with no declared type defaults to
+	// epic; a declared type is honored even when the step has children
+	// (GH#5443).
+	declaredType := strings.TrimSpace(step.Type)
+	issueType := stepTypeToIssueType(declaredType)
+	if len(step.Children) > 0 && declaredType == "" {
 		issueType = types.TypeEpic
 	}
 
@@ -901,6 +900,14 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 	// Create issues, labels, and dependencies in a single atomic transaction.
 	// This prevents orphaned issues if label/dependency creation fails.
 	err := transact(ctx, s, fmt.Sprintf("bd: cook formula %s", protoID), func(tx storage.Transaction) error {
+		// Flatten unregistered step types to task (with a warning) before
+		// inserting, mirroring cloneSubgraphInto (pour). Without this,
+		// PrepareIssueForInsert rejects them with "invalid issue type" and
+		// the whole cook --persist transaction rolls back.
+		if err := flattenUnregisteredIssueTypes(ctx, storeMolWriter{DoltStorage: s, tx: tx}, issues, deps); err != nil {
+			return fmt.Errorf("checking custom types: %w", err)
+		}
+
 		// Create all issues
 		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
 			return fmt.Errorf("failed to create issues: %w", err)

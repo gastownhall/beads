@@ -22,6 +22,7 @@ var freshnessDocuments = []struct {
 	{"docs/reference/json-schema.md", []string{"cmd/bd/output.go", "cmd/bd/errors.go", "cmd/bd/protocol/json_contract_test.go"}},
 	{"docs/recovery/init-safety.md", []string{"cmd/bd/init.go", "cmd/bd/init_safety.go", "cmd/bd/init_safety_test.go"}},
 	{"engdocs/ERROR_HANDLING.md", []string{"cmd/bd/*.go", "cmd/bd/errors.go"}},
+	{"engdocs/SERVE_RUNBOOK.md", []string{"internal/httpapi/server.go", "internal/httpapi/events_watch.go", "cmd/bd/serve.go", "internal/httpapi/auth.go"}},
 	{"engdocs/LINTING.md", []string{".golangci.yml", "scripts/ci/pr-lint.sh", "Makefile", ".github/workflows/pr.yml", ".github/workflows/main.yml"}},
 	{"engdocs/CI_CLEANUP_PLAN.md", []string{"engdocs/CI_TEST_SURFACE_AUDIT.md", ".github/workflows/*.yml", ".buildflags", ".golangci.yml", "scripts/ci/pr-lint.sh", "Makefile"}},
 	{"engdocs/design/otel/otel-data-model.md", []string{"internal/telemetry/", "internal/storage/dolt/store.go", "internal/compact/haiku.go", "cmd/bd/find_duplicates.go", "internal/hooks/"}},
@@ -77,6 +78,79 @@ func TestDocFreshnessDoesNotRequirePython(t *testing.T) {
 			t.Fatalf("missing %q:\n%s", want, run.output)
 		}
 	}
+}
+
+func TestDocFreshnessValidatesMaxAge(t *testing.T) {
+	t.Run("unset uses default", func(t *testing.T) {
+		run := runDocFreshnessWithoutMaxAge(t, "2026-01-15", "2026-04-15")
+		if run.err != nil {
+			t.Fatalf("check-doc-freshness rejected the default max age: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "Max age: 90 days") {
+			t.Fatalf("missing default max-age result:\n%s", run.output)
+		}
+	})
+
+	valid := []struct {
+		name     string
+		reviewed string
+		today    string
+		maxAge   string
+		want     string
+	}{
+		{name: "empty uses default", reviewed: "2026-01-15", today: "2026-01-31", maxAge: "", want: "Max age: 90 days"},
+		{name: "zero", reviewed: "2026-01-15", today: "2026-01-15", maxAge: "0", want: "Max age: 0 days"},
+		{name: "leading zeroes", reviewed: "2026-01-15", today: "2026-01-31", maxAge: "000000090", want: "Max age: 90 days"},
+		{name: "full calendar span", reviewed: "0001-01-01", today: "9999-12-31", maxAge: "3652058", want: "PASS: Last reviewed marker is current: 0001-01-01 (3652058 days old)"},
+		{name: "larger than Bash integer range", reviewed: "2026-01-15", today: "2026-01-31", maxAge: strings.Repeat("9", 100), want: "PASS: Last reviewed marker is current: 2026-01-15 (16 days old)"},
+	}
+	for _, test := range valid {
+		t.Run(test.name, func(t *testing.T) {
+			run := runDocFreshness(t, test.reviewed, test.today, test.maxAge)
+			if run.err != nil {
+				t.Fatalf("check-doc-freshness rejected max age %q: %v\n%s", test.maxAge, run.err, run.output)
+			}
+			if !strings.Contains(run.output, test.want) {
+				t.Fatalf("missing %q:\n%s", test.want, run.output)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name   string
+		maxAge string
+	}{
+		{name: "negative", maxAge: "-1"},
+		{name: "signed", maxAge: "+90"},
+		{name: "expression", maxAge: "1+2"},
+		{name: "variable reference", maxAge: "TODAY_DAY"},
+		{name: "whitespace", maxAge: " 90"},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			run := runDocFreshness(t, "2026-01-15", "2026-01-31", test.maxAge)
+			if exitCode(run.err) != 2 {
+				t.Fatalf("exit = %d, want 2; error=%v\n%s", exitCode(run.err), run.err, run.output)
+			}
+			if !strings.Contains(run.output, "ERROR: DOC_FRESHNESS_MAX_AGE_DAYS must be a nonnegative decimal integer") {
+				t.Fatalf("missing max-age diagnostic:\n%s", run.output)
+			}
+			if strings.Contains(run.output, "Checking reference doc freshness markers") {
+				t.Fatalf("invalid max age reached document checks:\n%s", run.output)
+			}
+		})
+	}
+
+	t.Run("long leading-zero value keeps decimal semantics", func(t *testing.T) {
+		run := runDocFreshness(t, "2026-01-15", "2026-01-31", strings.Repeat("0", 100)+"15")
+		if exitCode(run.err) != 1 {
+			t.Fatalf("exit = %d, want 1; error=%v\n%s", exitCode(run.err), run.err, run.output)
+		}
+		if !strings.Contains(run.output, "Max age: 15 days") ||
+			!strings.Contains(run.output, "FAIL: Last reviewed date is stale: 2026-01-15 (16 days old)") {
+			t.Fatalf("long leading-zero threshold did not compare as decimal 15:\n%s", run.output)
+		}
+	})
 }
 
 func TestDocFreshnessBashProbeIgnoresStartupEnvironment(t *testing.T) {
@@ -288,20 +362,25 @@ func TestDocFreshnessReportsInvalidTodayOverride(t *testing.T) {
 
 func runDocFreshness(t *testing.T, reviewed, today, maxAge string) freshnessRun {
 	t.Helper()
-	return runDocFreshnessWithDateFunction(t, reviewed, today, maxAge, "")
+	return runDocFreshnessWithDateFunction(t, reviewed, today, &maxAge, "")
 }
 
-func runDocFreshnessWithDateFunction(t *testing.T, reviewed, today, maxAge, dateFunction string) freshnessRun {
+func runDocFreshnessWithoutMaxAge(t *testing.T, reviewed, today string) freshnessRun {
+	t.Helper()
+	return runDocFreshnessWithDateFunction(t, reviewed, today, nil, "")
+}
+
+func runDocFreshnessWithDateFunction(t *testing.T, reviewed, today string, maxAge *string, dateFunction string) freshnessRun {
 	t.Helper()
 	return runDocFreshnessProcess(t, reviewed, &today, maxAge, dateFunction)
 }
 
 func runDocFreshnessWithDefaultToday(t *testing.T, reviewed, maxAge, dateFunction string) freshnessRun {
 	t.Helper()
-	return runDocFreshnessProcess(t, reviewed, nil, maxAge, dateFunction)
+	return runDocFreshnessProcess(t, reviewed, nil, &maxAge, dateFunction)
 }
 
-func runDocFreshnessProcess(t *testing.T, reviewed string, today *string, maxAge, dateFunction string) freshnessRun {
+func runDocFreshnessProcess(t *testing.T, reviewed string, today, maxAge *string, dateFunction string) freshnessRun {
 	t.Helper()
 	bash := docFreshnessBash(t)
 
@@ -329,8 +408,10 @@ func runDocFreshnessProcess(t *testing.T, reviewed string, today *string, maxAge
 		"BASH_ENV=" + msysPath(bashEnvironment),
 		"ENV=",
 		"DATE_BACKEND_MARKER=" + msysPath(dateMarker),
-		"DOC_FRESHNESS_MAX_AGE_DAYS=" + maxAge,
 		"PYTHON_POISON_MARKER=" + msysPath(pythonMarker),
+	}
+	if maxAge != nil {
+		cmd.Env = append(cmd.Env, "DOC_FRESHNESS_MAX_AGE_DAYS="+*maxAge)
 	}
 	if today != nil {
 		cmd.Env = append(cmd.Env, "DOC_FRESHNESS_TODAY="+*today)

@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -35,7 +36,6 @@ type doltTransaction struct {
 	// role: it deliberately drops wisp_* tables because they are dolt-ignored.
 	wroteRegularDep bool
 	wroteWispDep    bool
-	lifecycle       bool
 	// journalPinned records that ignoredTx IS regularTx because the events
 	// journal collapsed the two planes into one transaction, so the finish path
 	// must not commit or roll it back a second time.
@@ -124,7 +124,7 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 		var callbackErr error
 		err := run(ctx, func(sqlTx *sql.Tx) error {
 			invoked = true
-			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s, lifecycle: true}
+			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s}
 			if callbackErr = fn(tx); callbackErr != nil {
 				return callbackErr
 			}
@@ -428,19 +428,22 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("issue must not be nil")
 	}
 
-	if issueops.IsWisp(issue) {
-		bc, err := issueops.NewBatchContext(ctx, t.ignoredTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
-		if err != nil {
-			return err
-		}
-		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
-		return err
-	}
-
+	// Build the validation context on regularTx for both tiers: wisp rows
+	// live on the ignored session, but the validation context (config,
+	// custom_types) lives in regular dolt-tracked tables — reading it
+	// through regularTx keeps types registered earlier in this transaction
+	// (tx.SetConfig("types.custom", ...)) visible. Both sessions are
+	// pinned to the same branch (GH#5443).
 	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err != nil {
 		return err
 	}
+
+	if issueops.IsWisp(issue) {
+		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
+		return err
+	}
+
 	result, err := issueops.CreateIssueInTxWithResult(ctx, t.regularTx, bc, issue, actor)
 	if err != nil {
 		return err
@@ -473,11 +476,18 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 		}
 	}
 
+	// See CreateIssue: one validation context on regularTx serves both
+	// tiers, so in-transaction custom-type registration is visible to the
+	// wisp tier too (GH#5443).
+	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+	})
+	if err != nil {
+		return err
+	}
+
 	if len(regularIssues) > 0 {
-		result, err := issueops.CreateIssuesInTxWithResult(ctx, t.regularTx, regularIssues, actor, storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
-			SkipPrefixValidation: true,
-		})
+		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.regularTx, bc, regularIssues, actor)
 		if err != nil {
 			return err
 		}
@@ -487,10 +497,7 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 	}
 
 	if len(wispIssues) > 0 {
-		if _, err := issueops.CreateIssuesInTxWithResult(ctx, t.ignoredTx, wispIssues, actor, storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
-			SkipPrefixValidation: true,
-		}); err != nil {
+		if _, err := issueops.CreateIssuesInTxWithContext(ctx, t.ignoredTx, bc, wispIssues, actor); err != nil {
 			return err
 		}
 	}
@@ -513,6 +520,14 @@ func (t *doltTransaction) GetIssue(ctx context.Context, id string) (*types.Issue
 // regularTx/ignoredTx (see txFor). Not worth re-implementing: partial-ID
 // resolution calls the (fast) store path, never a transaction, so this is cold.
 func (t *doltTransaction) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	// The caller wants ids only, so opt out of the bulk label read SearchIssues
+	// would otherwise run and then project away. filter is a value copy, so this
+	// does not touch the caller's filter. SkipLabels gates only hydration: the
+	// label-driven WHERE predicates (LabelPattern, ExcludeLabels, LabelRegex,
+	// Labels/LabelsAny) are built from their own filter fields in
+	// BuildIssueFilterClauses and still select the same rows. Dependency
+	// hydration is already gated on IncludeDependencies, so it costs nothing here.
+	filter.SkipLabels = true
 	issues, err := t.SearchIssues(ctx, query, filter)
 	if err != nil {
 		return nil, err
@@ -525,328 +540,95 @@ func (t *doltTransaction) SearchIssueIDs(ctx context.Context, query string, filt
 }
 
 // SearchIssues searches for issues within the transaction.
-// Supports the same filter fields as DoltStore.SearchIssues (bd-v6v8).
+//
+// The WHERE clause, the ORDER BY, the row bound and the label/dependency
+// hydration all come from the SHARED implementation the store-level searches
+// use (sqlbuild.BuildIssueFilterClauses, sqlbuild.OrderBy,
+// issueops.EffectiveSearchLimit/EnforceMaxRowsCap,
+// issueops.GetLabelsForIssuesFromTableInTx). This used to be a second,
+// hand-rolled filter builder, and that was the whole defect: a field the second
+// builder did not implement was not refused, it was IGNORED, and the caller got
+// plausible wrong rows with no error (ga-v1nuj — Statuses, ExcludeLabels,
+// LabelPattern, LabelRegex, IsBlocked, StartedAfter/StartedBefore,
+// SortBy/SortDesc, MaxRows and the AfterID/AfterCreatedAt keyset cursor were all
+// accepted and dropped; labels were never hydrated at all). A new filter field
+// now reaches this path for free, which is the point of not having a second
+// builder.
+//
+// What still differs from the store-level search, deliberately and visibly:
+//
+//   - NO WISP MERGE. This runs ONE table — issues, or wisps when the filter
+//     routes there — because doltTransaction splits the two tiers across
+//     regularTx/ignoredTx (see txFor) and the shared searchInTx merges them over
+//     a single *sql.Tx. So a default (SkipWisps=false) search here answers what
+//     a SkipWisps=true search answers at the store level. That is a structural
+//     difference in the transaction, not a dropped filter field, and merging the
+//     tiers is its own change with its own blast radius.
+//   - filter.Lite and filter.NoIDShrink are not read. Both describe HOW to
+//     fetch, not WHICH rows: ignoring Lite returns fully populated rows with
+//     IsLitePartial left false, which is exactly what that flag promises a
+//     caller may receive, and this path is always id-shrunk anyway. Neither can
+//     produce a wrong answer, so neither is worth a refusal.
+//   - filter.Offset is not read — nor is it read by issueops, so the store-level
+//     search ignores it too. Refusing it HERE would invent a divergence rather
+//     than remove one.
 func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	table := "issues"
+	tables := issueops.IssuesFilterTables
 	if filter.Ephemeral != nil && *filter.Ephemeral {
-		table = "wisps"
+		tables = issueops.WispsFilterTables
 	}
 	// If searching by IDs that are all ephemeral, use wisps table (bd-w2w)
 	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) {
-		table = "wisps"
+		tables = issueops.WispsFilterTables
 	}
 
-	// Derive related table names from the main table
-	depTable := "dependencies"
-	labelTable := "labels"
-	if table == "wisps" {
-		depTable = "wisp_dependencies"
-		labelTable = "wisp_labels"
+	whereClauses, args, err := issueops.BuildIssueFilterClauses(query, filter, tables)
+	if err != nil {
+		return nil, err
 	}
-
-	whereClauses := []string{}
-	args := []interface{}{}
-
-	// Text search — optimized to avoid full-table scans (hq-319).
-	if query != "" {
-		lowerQuery := strings.ToLower(query)
-		if looksLikeIssueID(query) {
-			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ?)")
-			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%")
-		} else {
-			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
-			pattern := "%" + lowerQuery + "%"
-			args = append(args, pattern, pattern)
-		}
-	}
-
-	if filter.TitleSearch != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleSearch)+"%")
-	}
-	if filter.TitleContains != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleContains)+"%")
-	}
-	if filter.DescriptionContains != "" {
-		whereClauses = append(whereClauses, "LOWER(description) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.DescriptionContains)+"%")
-	}
-	if filter.NotesContains != "" {
-		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.NotesContains)+"%")
-	}
-	if filter.ExternalRefContains != "" {
-		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
-	}
-	if filter.ExternalRef != nil {
-		whereClauses = append(whereClauses, "external_ref = ?")
-		args = append(args, *filter.ExternalRef)
-	}
-
-	// Status
-	if filter.Status != nil {
-		whereClauses = append(whereClauses, "status = ?")
-		args = append(args, *filter.Status)
-	}
-	if len(filter.ExcludeStatus) > 0 {
-		placeholders := make([]string, len(filter.ExcludeStatus))
-		for i, s := range filter.ExcludeStatus {
-			placeholders[i] = "?"
-			args = append(args, string(s))
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("status NOT IN (%s)", strings.Join(placeholders, ",")))
-	}
-
-	if len(filter.ExcludeTypes) > 0 {
-		placeholders := make([]string, len(filter.ExcludeTypes))
-		for i, tp := range filter.ExcludeTypes {
-			placeholders[i] = "?"
-			args = append(args, string(tp))
-		}
-		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type NOT IN (%s))", table, strings.Join(placeholders, ",")))
-	}
-
-	// Priority
-	if filter.Priority != nil {
-		whereClauses = append(whereClauses, "priority = ?")
-		args = append(args, *filter.Priority)
-	}
-	if filter.PriorityMin != nil {
-		whereClauses = append(whereClauses, "priority >= ?")
-		args = append(args, *filter.PriorityMin)
-	}
-	if filter.PriorityMax != nil {
-		whereClauses = append(whereClauses, "priority <= ?")
-		args = append(args, *filter.PriorityMax)
-	}
-
-	if filter.IssueType != nil {
-		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type = ?)", table))
-		args = append(args, *filter.IssueType)
-	}
-
-	// Assignee
-	if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
-	}
-
-	// Date ranges
-	if filter.CreatedAfter != nil {
-		whereClauses = append(whereClauses, "created_at > ?")
-		args = append(args, filter.CreatedAfter.Format(time.RFC3339))
-	}
-	if filter.CreatedBefore != nil {
-		whereClauses = append(whereClauses, "created_at < ?")
-		args = append(args, filter.CreatedBefore.Format(time.RFC3339))
-	}
-	if filter.UpdatedAfter != nil {
-		whereClauses = append(whereClauses, "updated_at > ?")
-		args = append(args, filter.UpdatedAfter.Format(time.RFC3339))
-	}
-	if filter.UpdatedBefore != nil {
-		whereClauses = append(whereClauses, "updated_at < ?")
-		args = append(args, filter.UpdatedBefore.Format(time.RFC3339))
-	}
-	if filter.ClosedAfter != nil {
-		whereClauses = append(whereClauses, "closed_at > ?")
-		args = append(args, filter.ClosedAfter.Format(time.RFC3339))
-	}
-	if filter.ClosedBefore != nil {
-		whereClauses = append(whereClauses, "closed_at < ?")
-		args = append(args, filter.ClosedBefore.Format(time.RFC3339))
-	}
-	if filter.DeferAfter != nil {
-		whereClauses = append(whereClauses, "defer_until > ?")
-		args = append(args, filter.DeferAfter.Format(time.RFC3339))
-	}
-	if filter.DeferBefore != nil {
-		whereClauses = append(whereClauses, "defer_until < ?")
-		args = append(args, filter.DeferBefore.Format(time.RFC3339))
-	}
-	if filter.DueAfter != nil {
-		whereClauses = append(whereClauses, "due_at > ?")
-		args = append(args, filter.DueAfter.Format(time.RFC3339))
-	}
-	if filter.DueBefore != nil {
-		whereClauses = append(whereClauses, "due_at < ?")
-		args = append(args, filter.DueBefore.Format(time.RFC3339))
-	}
-
-	// Empty/null checks
-	if filter.EmptyDescription {
-		whereClauses = append(whereClauses, "(description IS NULL OR description = '')")
-	}
-	if filter.NoAssignee {
-		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
-	}
-	if filter.NoLabels {
-		//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT DISTINCT issue_id FROM %s)", labelTable))
-	}
-
-	// Label filtering (AND)
-	if len(filter.Labels) > 0 {
-		for _, label := range filter.Labels {
-			//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
-			whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", labelTable))
-			args = append(args, label)
-		}
-	}
-
-	// Label filtering (OR)
-	if len(filter.LabelsAny) > 0 {
-		placeholders := make([]string, len(filter.LabelsAny))
-		for i, label := range filter.LabelsAny {
-			placeholders[i] = "?"
-			args = append(args, label)
-		}
-		//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", labelTable, strings.Join(placeholders, ", ")))
-	}
-
-	// ID filtering
-	if len(filter.IDs) > 0 {
-		placeholders := make([]string, len(filter.IDs))
-		for i, id := range filter.IDs {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
-	}
-
-	if filter.IDPrefix != "" {
-		whereClauses = append(whereClauses, "id LIKE ?")
-		args = append(args, filter.IDPrefix+"%")
-	}
-	if filter.SpecIDPrefix != "" {
-		whereClauses = append(whereClauses, "spec_id LIKE ?")
-		args = append(args, filter.SpecIDPrefix+"%")
-	}
-
-	// Source repo
-	if filter.SourceRepo != nil {
-		whereClauses = append(whereClauses, "source_repo = ?")
-		args = append(args, *filter.SourceRepo)
-	}
-
-	// Ephemeral filtering (when querying issues table with explicit ephemeral filter)
-	if filter.Ephemeral != nil {
-		if *filter.Ephemeral {
-			whereClauses = append(whereClauses, "ephemeral = 1")
-		} else {
-			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-		}
-	}
-
-	// Pinned filtering
-	if filter.Pinned != nil {
-		if *filter.Pinned {
-			whereClauses = append(whereClauses, "pinned = 1")
-		} else {
-			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
-		}
-	}
-
-	// Template filtering
-	if filter.IsTemplate != nil {
-		if *filter.IsTemplate {
-			whereClauses = append(whereClauses, "is_template = 1")
-		} else {
-			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
-		}
-	}
-
-	// Parent filtering
-	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND %s = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')))", depTable, issueops.DepTargetExpr, depTable))
-		args = append(args, parentID, parentID)
-	}
-
-	// No-parent filtering
-	if filter.NoParent {
-		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')", depTable))
-	}
-
-	// Molecule type filtering
-	if filter.MolType != nil {
-		whereClauses = append(whereClauses, "mol_type = ?")
-		args = append(args, string(*filter.MolType))
-	}
-
-	// Wisp type filtering
-	if filter.WispType != nil {
-		whereClauses = append(whereClauses, "wisp_type = ?")
-		args = append(args, string(*filter.WispType))
-	}
-
-	// Time-based scheduling filters
-	if filter.Deferred {
-		whereClauses = append(whereClauses, "(defer_until IS NOT NULL OR status = ?)")
-		args = append(args, types.StatusDeferred)
-	}
-	if filter.Overdue {
-		whereClauses = append(whereClauses, "due_at IS NOT NULL AND due_at < ? AND status != ?")
-		args = append(args, time.Now().UTC().Format(time.RFC3339), types.StatusClosed)
-	}
-
-	// Metadata existence check
-	if filter.HasMetadataKey != "" {
-		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
-			return nil, err
-		}
-		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
-	}
-
-	// Metadata field equality filters
-	if len(filter.MetadataFields) > 0 {
-		metaKeys := make([]string, 0, len(filter.MetadataFields))
-		for k := range filter.MetadataFields {
-			metaKeys = append(metaKeys, k)
-		}
-		sort.Strings(metaKeys)
-		for _, k := range metaKeys {
-			if err := storage.ValidateMetadataKey(k); err != nil {
-				return nil, err
-			}
-			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
-		}
-	}
-
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
+	// A page bound is only pushed under an order the query can express (the rule
+	// issueops.searchTableInTxT states): a Go-side sort key renders no ORDER BY,
+	// and a LIMIT with no ORDER BY does not return the first n rows, it returns n
+	// rows. Under such a key the query scans the whole matching set and the bound
+	// is applied below, after the order exists.
+	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
+	eff := issueops.EffectiveSearchLimit(filter.Limit, filter.MaxRows)
 	limitSQL := ""
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
+	if eff > 0 && !goSideSort {
+		limitSQL = fmt.Sprintf(" LIMIT %d", eff)
 	}
 
-	//nolint:gosec // G201: table is hardcoded, whereSQL is parameterized
-	rows, err := t.txFor(table).QueryContext(ctx, fmt.Sprintf(`
-		SELECT id FROM %s %s ORDER BY priority ASC, created_at DESC %s
-	`, table, whereSQL, limitSQL), args...)
+	//nolint:gosec // G201: table name is a fixed constant, whereSQL is parameterized
+	rows, err := t.txFor(tables.Main).QueryContext(ctx, fmt.Sprintf(
+		`SELECT id FROM %s %s %s %s`,
+		tables.Main, whereSQL, sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL), args...)
 	if err != nil {
 		return nil, wrapQueryError("search issues in tx", err)
 	}
 
 	var ids []string
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
 			return nil, wrapScanError("search issues in tx", err)
 		}
+		// Structural parity with issueops.searchTableInTxT, which dedups because
+		// it can drive from a joined label table where a row repeats (GH#3567).
+		// This tx query is JOIN-free — only id IN (<correlated subquery>)
+		// predicates from sqlbuild.BuildIssueFilterClauses — so a row cannot
+		// actually repeat on this path; the dedup mirrors the reference rather
+		// than guarding a live duplicate source here.
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
@@ -854,6 +636,13 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		return nil, wrapQueryError("search issues in tx: rows iteration", err)
 	}
 	_ = rows.Close()
+
+	if goSideSort {
+		sort.SliceStable(ids, func(i, j int) bool { return sqlbuild.LessID(ids[i], ids[j], filter.SortDesc) })
+		if eff > 0 && len(ids) > eff {
+			ids = ids[:eff]
+		}
+	}
 
 	var issues []*types.Issue
 	for _, id := range ids {
@@ -863,9 +652,82 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		}
 		issues = append(issues, issue)
 	}
+	if err := t.hydrateSearchLabels(ctx, tables, filter, issues); err != nil {
+		return nil, err
+	}
+	if err := t.hydrateSearchDependencies(ctx, tables.Dependencies, filter, issues); err != nil {
+		return nil, err
+	}
+
+	// Trim to the caller's page before the cap check, exactly as
+	// issueops.searchInTx does: the cap is a statement about the rows actually
+	// handed back, and eff can exceed filter.Limit when MaxRows sized the bound.
+	if filter.Limit > 0 && len(issues) > filter.Limit {
+		issues = issues[:filter.Limit]
+	}
+	if err := issueops.EnforceMaxRowsCap(len(issues), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
 	return issues, nil
 }
 
+// hydrateSearchLabels populates Issue.Labels from the tier the search ran
+// against, using the same bulk read issueops.searchInTx uses. SkipLabels is the
+// caller's opt-out; without this the transaction answered every search with
+// unlabeled issues while the store-level search labeled them (ga-v1nuj).
+func (t *doltTransaction) hydrateSearchLabels(ctx context.Context, tables issueops.FilterTables, filter types.IssueFilter, issues []*types.Issue) error {
+	if filter.SkipLabels || len(issues) == 0 {
+		return nil
+	}
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	labelsByID, err := issueops.GetLabelsForIssuesFromTableInTx(ctx, t.txFor(tables.Labels), tables.Labels, ids)
+	if err != nil {
+		return fmt.Errorf("search issues in tx: hydrate labels: %w", err)
+	}
+	for _, issue := range issues {
+		if labels, ok := labelsByID[issue.ID]; ok {
+			issue.Labels = labels
+		}
+	}
+	return nil
+}
+
+// hydrateSearchDependencies populates Issue.Dependencies when the filter asked
+// for it, using the same bulk read issueops.SearchIssuesInTx uses so the two
+// backends answer IncludeDependencies from one implementation. Issues with no
+// edges keep a nil slice; the map simply has no entry for them.
+func (t *doltTransaction) hydrateSearchDependencies(ctx context.Context, depTable string, filter types.IssueFilter, issues []*types.Issue) error {
+	if !filter.IncludeDependencies || len(issues) == 0 {
+		return nil
+	}
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	depsByID, err := issueops.GetDependencyRecordsForIssuesFromTableInTx(ctx, t.txFor(depTable), depTable, ids)
+	if err != nil {
+		return fmt.Errorf("search issues in tx: hydrate dependencies: %w", err)
+	}
+	for _, issue := range issues {
+		if deps, ok := depsByID[issue.ID]; ok {
+			issue.Dependencies = deps
+		}
+	}
+	return nil
+}
+
+// UpdateIssue applies field updates and records the "updated" history event,
+// which is what the store-level DoltStore.UpdateIssue records for the same
+// change and what embeddedTransaction.UpdateIssue records here. Wrapping an
+// update in a transaction must not change its audit trail: a consumer cannot
+// see which backend or which call shape it got, so a transaction-only silence
+// shows up as a user's own edits missing from the history of their own issue.
+// The eventless variant exists for demotion (ephemeral_routing.go), which
+// copies the historical event stream and appends one demotion event of its
+// own; a generic update is not that case.
 func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	table := "issues"
 	if t.isActiveWisp(ctx, id) {
@@ -882,11 +744,7 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 		}
 	}
 
-	update := issueops.UpdateIssueWithoutEventInTx
-	if t.lifecycle {
-		update = issueops.UpdateIssueInTx
-	}
-	result, err := update(ctx, t.txFor(table), id, updates, actor)
+	result, err := issueops.UpdateIssueInTx(ctx, t.txFor(table), id, updates, actor)
 	if err != nil {
 		return wrapExecError("update issue in tx", err)
 	}
@@ -894,10 +752,8 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 		return nil
 	}
 	t.dirty.MarkDirty(table)
-	if t.lifecycle {
-		_, _, eventTable, _ := issueops.WispTableRouting(table == "wisps")
-		t.dirty.MarkDirty(eventTable)
-	}
+	_, _, eventTable, _ := issueops.WispTableRouting(table == "wisps")
+	t.dirty.MarkDirty(eventTable)
 	return nil
 }
 
@@ -1116,16 +972,17 @@ func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, sourceID
 	return &p, nil
 }
 
-// checkCrossTierSchedulingCycle rejects a scheduling edge (blocks,
-// conditional-blocks, parent-child — the same set issueops.CheckDependencyCycleInTx
-// gates) that would close a cycle, using the merged view of both sessions'
-// dependency tables. The in-tx cycle check scans both tables on the write tx
-// and so misses edges added on the other session earlier in this logical
-// transaction.
+// checkCrossTierSchedulingCycle rejects a scheduling edge that would close a
+// cycle, using the merged view of both sessions' dependency tables. The in-tx
+// cycle check scans both tables on the write tx and so misses edges added on
+// the other session earlier in this logical transaction.
+//
+// The set is types.IsSchedulingEdge's, by call and not by restatement: an
+// inline copy that missed a fifth scheduling type would fall through to
+// "not a scheduling edge" and skip this gate entirely, which is silence rather
+// than a failure — the whole reason that predicate was consolidated (ga-2ltro.10).
 func (t *doltTransaction) checkCrossTierSchedulingCycle(ctx context.Context, dep *types.Dependency) error {
-	switch dep.Type {
-	case types.DepBlocks, types.DepConditionalBlocks, types.DepParentChild:
-	default:
+	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
 	cycle, err := t.CycleThroughEdges(ctx, [][2]string{{dep.IssueID, dep.DependsOnID}})
@@ -1279,10 +1136,28 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
-	if err == nil {
-		t.dirty.MarkDirty("config")
+	if err != nil {
+		return wrapExecError("set config in tx", err)
 	}
-	return wrapExecError("set config in tx", err)
+	t.dirty.MarkDirty("config")
+
+	// ResolveCustomTypesInTx reads the normalized tables first, so without
+	// this sync a type registered in-transaction stays invisible to
+	// validation whenever the table already has rows.
+	table, err := issueops.SyncConfigTables(ctx, t.regularTx, key, value)
+	if err != nil {
+		return err
+	}
+	if table != "" {
+		t.dirty.MarkDirty(table)
+	}
+
+	// Keep store-level caches (GetCustomTypes and friends) coherent with
+	// in-transaction config writes; see invalidateConfigCaches.
+	if t.store != nil {
+		t.store.invalidateConfigCaches(key)
+	}
+	return nil
 }
 
 // GetConfig gets a config value within the transaction

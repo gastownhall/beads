@@ -93,13 +93,13 @@ func TestDepEdgeDisplay(t *testing.T) {
 	}{
 		{"parent-child", types.DepParentChild, "", false, false},
 		{"blocks", types.DepBlocks, "depends-on", true, true},
-		{"conditional-blocks", types.DepConditionalBlocks, "conditional-blocks", true, true},
+		{"conditional-blocks", types.DepConditionalBlocks, "conditionally-depends-on", true, true},
 		{"waits-for", types.DepWaitsFor, "waits-for", true, true},
 		{"related", types.DepRelated, "related", false, true},
 		{"relates-to", types.DepRelatesTo, "related", false, true},
 		{"discovered-from", types.DepDiscoveredFrom, "discovered-from", false, true},
 		{"duplicates", types.DepDuplicates, "duplicates", false, true},
-		{"supersedes", types.DepSupersedes, "supersedes", false, true},
+		{"supersedes", types.DepSupersedes, "superseded-by", false, true},
 		{"replies-to", types.DepRepliesTo, "replies-to", false, true},
 		{"custom-type", types.DependencyType("some-custom-type"), "some-custom-type", false, true},
 	}

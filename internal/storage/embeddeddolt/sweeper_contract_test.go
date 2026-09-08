@@ -4,17 +4,20 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/issueops"
 )
 
 // TestSweeperContract runs the Sweeper contract against the embedded store,
 // which hands back the SAME body the server-backed store does
 // (internal/storage/issueops.SweepInTx) and differs only in how it reaches a
-// transaction and in that its commit runs outside one. That is what this
-// wiring catches; it is not an independent vote on the body.
+// transaction and in that its version commit is published after that
+// transaction rather than inside it. That is what this wiring catches; it is
+// not an independent vote on the body.
 //
 // One environment for the whole suite: booting an embedded engine per case
 // would dominate the runtime, every case scopes itself to prefix-namespaced
@@ -34,6 +37,12 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("ClearsOneTierAndLeavesTheOther", func(t *testing.T) {
 		conformance.RunSweeperClearsOneTierAndLeavesTheOther(t, ctx, fixture)
 	})
+	t.Run("TreatsALegacyTypedWispAsEphemeralTier", func(t *testing.T) {
+		conformance.RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t, ctx, fixture)
+	})
+	t.Run("LeavesNoHistoryBeadsToTheDurableTier", func(t *testing.T) {
+		conformance.RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t, ctx, fixture)
+	})
 	t.Run("ProtectsPinnedRows", func(t *testing.T) {
 		conformance.RunSweeperProtectsPinnedRows(t, ctx, fixture)
 	})
@@ -52,8 +61,8 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("EmptyMatchIsZeroAndNil", func(t *testing.T) {
 		conformance.RunSweeperEmptyMatchIsZeroAndNil(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunSweeperRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunSweeperRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunSweeperDoesNotMutateTheCallerRequest(t, ctx, fixture)
@@ -68,12 +77,28 @@ func newEmbeddedSweeperFixture(t *testing.T, te *testEnv, prefix string) conform
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.SweeperFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Sweeper:      sweeper,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Sweeper:       sweeper,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
+		CommitPending: embeddedCommitPending(te),
+		// The write half of the same short-lived raw connection the kit's
+		// QueryScalar opens, mirroring the cycle-detector wiring.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+			if err != nil {
+				return err
+			}
+			defer func() { _ = cleanup() }()
+			for _, stmt := range statements {
+				if _, err := db.ExecContext(ctx, stmt.Query, stmt.Args...); err != nil {
+					return fmt.Errorf("%s: %w", stmt.Query, err)
+				}
+			}
+			return nil
+		},
 		AddComment: func(ctx context.Context, issueID, author, text string) error {
 			// Through the Commenter ROLE, which resolves the plane itself, so
 			// the case can cite from a wisp's comment without knowing how this

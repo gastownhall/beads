@@ -3,6 +3,7 @@
 package embeddeddolt_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -11,8 +12,9 @@ import (
 // TestDeleterContract runs the Deleter contract against the embedded store,
 // which hands back the SAME body the server-backed store does
 // (internal/storage/issueops.DeleteInTx) and differs only in how it reaches a
-// transaction and in that its commit runs outside one. That is what this wiring
-// catches; it is not an independent vote on the body.
+// transaction and in that its version commit is published after that
+// transaction rather than inside it. That is what this wiring catches; it is
+// not an independent vote on the body.
 //
 // One environment for the whole suite: booting an embedded engine per case
 // would dominate the runtime, every case namespaces its seeds, and the history
@@ -65,8 +67,8 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("DryRunChangesNothing", func(t *testing.T) {
 		conformance.RunDeleterDryRunChangesNothing(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunDeleterRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunDeleterRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunDeleterDoesNotMutateTheCallerRequest(t, ctx, fixture)
@@ -79,6 +81,18 @@ func TestDeleterContract(t *testing.T) {
 	})
 	t.Run("SettlesTheChildrenOfADeletedParent", func(t *testing.T) {
 		conformance.RunDeleterSettlesTheChildrenOfADeletedParent(t, ctx, fixture)
+	})
+	t.Run("DeletesOnAMatchingExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterDeletesOnAMatchingExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("RefusesAStaleExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterRefusesAStaleExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("VersionOutranksForceAndCascade", func(t *testing.T) {
+		conformance.RunDeleterVersionOutranksForceAndCascade(t, ctx, fixture)
+	})
+	t.Run("RefusesAnExpectedVersionAcrossSeveralIDs", func(t *testing.T) {
+		conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, ctx, fixture)
 	})
 }
 
@@ -97,5 +111,21 @@ func newEmbeddedDeleterFixture(t *testing.T, te *testEnv, prefix string) conform
 		AddDependency: kit.AddDependency,
 		QueryScalar:   kit.QueryScalar,
 		CountHistory:  kit.CountHistory,
+		CommitPending: embeddedCommitPending(te),
+	}
+}
+
+// embeddedCommitPending settles the working set into the version history. It is
+// the hook the history case needs and the frozen role kit does not carry: this
+// backend's seed verbs write rows WITHOUT minting a Dolt commit, where the
+// other two backends' version each seed on the way in, so a delete or a sweep
+// of nothing but seeds would find the working set already equal to HEAD and
+// have nothing to record.
+//
+// Commit is the store's own working-set flush and tolerates an empty one, so
+// calling it when there is nothing pending is a no-op rather than an error.
+func embeddedCommitPending(te *testEnv) func(context.Context) error {
+	return func(ctx context.Context) error {
+		return te.store.Commit(ctx, "conformance: settle seeds before a history delta")
 	}
 }

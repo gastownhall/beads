@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestWorkspaceConfigContract runs the WorkspaceConfig contract against the
@@ -39,6 +40,9 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ListExcludesTheKVPlane", func(t *testing.T) {
 		conformance.RunWorkspaceConfigListExcludesTheKVPlane(t, ctx, fixture)
 	})
+	t.Run("PointReadRefusesTheKVPlane", func(t *testing.T) {
+		conformance.RunWorkspaceConfigPointReadRefusesTheKVPlane(t, ctx, fixture)
+	})
 	t.Run("UnsetRemovesTheSetting", func(t *testing.T) {
 		conformance.RunWorkspaceConfigUnsetRemovesTheSetting(t, ctx, fixture)
 	})
@@ -69,6 +73,21 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ARefusedWriteRecordsNoHistory", func(t *testing.T) {
 		conformance.RunWorkspaceConfigARefusedWriteRecordsNoHistory(t, ctx, fixture)
 	})
+	t.Run("KeysAreCaseSensitive", func(t *testing.T) {
+		conformance.RunWorkspaceConfigKeysAreCaseSensitive(t, ctx, fixture)
+	})
+	t.Run("CustomStatusReadsAreOrderedByName", func(t *testing.T) {
+		conformance.RunWorkspaceConfigCustomStatusReadsAreOrderedByName(t, ctx, fixture)
+	})
+	t.Run("CustomTypeReadsAreOrderedByName", func(t *testing.T) {
+		conformance.RunWorkspaceConfigCustomTypeReadsAreOrderedByName(t, ctx, fixture)
+	})
+	t.Run("ConfiguredInfraTypesReplaceTheDefaultSet", func(t *testing.T) {
+		conformance.RunWorkspaceConfigConfiguredInfraTypesReplaceTheDefaultSet(t, ctx, fixture)
+	})
+	t.Run("UnconfiguredVocabularyReadsAreEmptyNotErrors", func(t *testing.T) {
+		conformance.RunWorkspaceConfigUnconfiguredVocabularyReadsAreEmptyNotErrors(t, ctx, fixture)
+	})
 }
 
 func newUOWWorkspaceConfigFixture(t *testing.T, ctx context.Context, prefix string) conformance.WorkspaceConfigFixture {
@@ -93,5 +112,38 @@ func newUOWWorkspaceConfigFixture(t *testing.T, ctx context.Context, prefix stri
 		SetConfig:       kit.SetConfig,
 		QueryScalar:     kit.QueryScalar,
 		CountHistory:    kit.CountHistory,
+		Vocabulary:      newUOWWorkspaceVocabularyReader(provider),
+	}
+}
+
+// newUOWWorkspaceVocabularyReader is this backend's half of the vocabulary the
+// role writes and gives no verb to read. It goes through ConfigUseCase, which
+// is what workapi.NewUOWConfigSource goes through, and which is a genuinely
+// different body from the stores': no per-handle cache, a YAML union on the
+// custom types, and the infra DEFAULT resolved in
+// internal/storage/domain/config.go rather than in
+// issueops.ResolveInfraTypesInTx.
+//
+// It is also the leg on which the bricking edge is REACHABLE: here the infra
+// read returns an error, where the store method's signature has none, so this
+// is the wiring that can carry a failed vocabulary read up into
+// workapi.LoadListConfig the way production would.
+func newUOWWorkspaceVocabularyReader(provider UnitOfWorkProvider) *conformance.WorkspaceVocabularyReader {
+	return &conformance.WorkspaceVocabularyReader{
+		CustomStatuses: func(ctx context.Context) ([]types.CustomStatus, error) {
+			return RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) ([]types.CustomStatus, error) {
+				return uw.ConfigUseCase().GetCustomStatuses(ctx)
+			})
+		},
+		CustomTypes: func(ctx context.Context) ([]string, error) {
+			return RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) ([]string, error) {
+				return uw.ConfigUseCase().GetCustomTypes(ctx)
+			})
+		},
+		InfraTypes: func(ctx context.Context) (map[string]bool, error) {
+			return RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (map[string]bool, error) {
+				return uw.ConfigUseCase().GetInfraTypes(ctx)
+			})
+		},
 	}
 }

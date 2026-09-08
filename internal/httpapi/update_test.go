@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -281,10 +282,14 @@ func TestUpdateNamesItsHistoryEntry(t *testing.T) {
 	}
 }
 
-// TestUpdateRejectsTheShapesTheDocumentRefuses is the body vocabulary. The
-// EXCLUDED members are the important half: status, assignee and metadata are
-// refused by NAME, so a client that tries to smuggle lifecycle through a patch
-// is told what happened rather than having it ignored.
+// TestUpdateRejectsTheShapesTheDocumentRefuses is the body vocabulary.
+//
+// The four cases that used to live here — status, assignee, metadata and
+// parent_id refused BY NAME — are gone, because those members are published
+// now. What replaces them is the refusal each one BROUGHT: a self-parent, and
+// the two combinations of the assignee guards that contradict each other. An
+// unknown member is still refused by name at both levels, which is what a
+// client dispatches on to tell version skew from a bad value.
 func TestUpdateRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -300,11 +305,24 @@ func TestUpdateRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 		{"patch is not an object", `{"actor":"alice","patch":["title"]}`, "patch"},
 		{"empty patch", `{"actor":"alice","patch":{}}`, "patch"},
 		{"unknown request member", `{"actor":"alice","patch":{"title":"t"},"force":true}`, "force"},
-		// The three the spec argues out of the vocabulary, refused by name.
-		{"status is not a patch member", `{"actor":"alice","patch":{"status":"closed"}}`, "patch.status"},
-		{"assignee is not a patch member", `{"actor":"alice","patch":{"assignee":"bob"}}`, "patch.assignee"},
-		{"metadata is not a patch member", `{"actor":"alice","patch":{"metadata":{}}}`, "patch.metadata"},
-		{"parent_id is not a patch member", `{"actor":"alice","patch":{"parent_id":"bd-2"}}`, "patch.parent_id"},
+		{"unknown patch member", `{"actor":"alice","patch":{"title":"t","persistence":"ephemeral"}}`, "patch.persistence"},
+		// The refusals the three policy members brought with them, all decided
+		// at the edge because none of them needs to read a row.
+		{"self parent", `{"actor":"alice","patch":{"parent_id":"bd-1"}}`, "patch.parent_id"},
+		{"oversize parent_id", `{"actor":"alice","patch":{"parent_id":"` + strings.Repeat("x", 300) + `"}}`, "patch.parent_id"},
+		{"oversize status", `{"actor":"alice","patch":{"status":"` + strings.Repeat("x", 300) + `"}}`, "patch.status"},
+		{"oversize assignee", `{"actor":"alice","patch":{"assignee":"` + strings.Repeat("x", 300) + `"}}`, "patch.assignee"},
+		{"metadata replace beside merge", `{"actor":"alice","patch":{"metadata":{"replace":{},"merge":{"a":1}}}}`, "patch.metadata.replace"},
+		// A wrong JSON TYPE on a nested member is reported against the whole
+		// patch, the way `labels` already is: the typed decode fails as one
+		// unit and this surface does not quote its error string.
+		{"metadata is not an object", `{"actor":"alice","patch":{"metadata":["a"]}}`, "patch"},
+		{"unknown metadata member", `{"actor":"alice","patch":{"metadata":{"clear":true}}}`, "patch.metadata.clear"},
+		{"force_assignee_transfer without an assignee edit", `{"actor":"alice","patch":{"title":"t"},"force_assignee_transfer":true}`, "force_assignee_transfer"},
+		{"force_assignee_transfer beside expected_assignee", `{"actor":"alice","patch":{"assignee":"bob"},"force_assignee_transfer":true,"expected_assignee":"carol"}`, "force_assignee_transfer"},
+		{"expected_version is not a number", `{"actor":"alice","patch":{"title":"t"},"expected_version":"3"}`, "expected_version"},
+		{"null expected_status", `{"actor":"alice","patch":{"title":"t"},"expected_status":null}`, "expected_status"},
+		{"null force_close_policy", `{"actor":"alice","patch":{"title":"t"},"force_close_policy":null}`, "force_close_policy"},
 		{"blank title", `{"actor":"alice","patch":{"title":"   "}}`, "patch.title"},
 		{"oversize title", `{"actor":"alice","patch":{"title":"` + strings.Repeat("x", 300) + `"}}`, "patch.title"},
 		{"title is not a string", `{"actor":"alice","patch":{"title":7}}`, "patch"},
@@ -563,5 +581,588 @@ func TestUpdateResolvesAcrossBothPlanes(t *testing.T) {
 	}
 	if got := lifecycle.updateRequests(); len(got) != 1 || got[0].IssuePlaneOnly {
 		t.Fatalf("the role received %+v, want a both-plane resolve", got)
+	}
+}
+
+// The pins for the members this operation grew: the three that carry POLICY —
+// `status`, `assignee`, `parent_id` — the `metadata` algebra, and the guard and
+// force flags beside `patch`. What is asserted is the WIRE EDGE: that each
+// reaches the role's own field, and that each refusal the role can now raise
+// arrives as the documented code naming the member that earned it.
+
+// revisionedIssue is the row a guarded case reads its token off. The revision
+// is the only thing that distinguishes it from updatedIssue, and it is what a
+// case must never invent for itself.
+func revisionedIssue(id string, revision int64) *types.Issue {
+	issue := updatedIssue(id)
+	issue.RowVersion = revision
+	return issue
+}
+
+// TestUpdateForwardsTheGuardedMembers walks the members added beside the
+// original patch vocabulary in one request and asserts the projection onto the
+// role's UpdateRequest field by field. It is TestUpdateForwardsEveryDocumented
+// Member's sibling for the half that carries policy.
+func TestUpdateForwardsTheGuardedMembers(t *testing.T) {
+	lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: revisionedIssue("bd-1", 42), Changed: true}}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath, `{
+		"actor":"alice",
+		"expected_version": 41,
+		"expected_status": "open",
+		"force_close_policy": true,
+		"patch": {
+			"status": "closed",
+			"assignee": "bob",
+			"parent_id": "bd-parent",
+			"metadata": {"merge":{"a":1},"set":{"b":null},"unset":["c"]}
+		}
+	}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+
+	got := lifecycle.updateRequests()
+	if len(got) != 1 {
+		t.Fatalf("the role was called %d times, want 1", len(got))
+	}
+	req := got[0]
+	if req.ExpectedVersion == nil || *req.ExpectedVersion != 41 {
+		t.Errorf("expected_version = %v, want 41", req.ExpectedVersion)
+	}
+	if req.ExpectedStatus == nil || *req.ExpectedStatus != issueops.Status("open") {
+		t.Errorf("expected_status = %v, want open", req.ExpectedStatus)
+	}
+	if req.ExpectedAssignee != nil {
+		t.Errorf("expected_assignee = %v, want nil for an absent guard", *req.ExpectedAssignee)
+	}
+	if !req.ForceClosePolicy || req.ForceAssigneeTransfer {
+		t.Errorf("force flags = %v/%v, want close-policy only", req.ForceClosePolicy, req.ForceAssigneeTransfer)
+	}
+	// Claim stays zero: acquiring work is `{id}:claim`, which has its own
+	// eligibility rules and its own conflict vocabulary.
+	if req.Claim {
+		t.Error("the update claimed the issue; that operation is `{id}:claim`")
+	}
+	if req.IssuePlaneOnly {
+		t.Error("the update narrowed itself to the issue plane; this operation resolves across both")
+	}
+
+	p := req.Patch
+	if !p.Status.Set || p.Status.Value != issueops.Status("closed") {
+		t.Errorf("status = %+v, want a set closed", p.Status)
+	}
+	if !p.Assignee.Set || p.Assignee.Value != "bob" {
+		t.Errorf("assignee = %+v, want a set bob", p.Assignee)
+	}
+	if !p.ParentID.Set || p.ParentID.Value != "bd-parent" {
+		t.Errorf("parent_id = %+v, want a set bd-parent", p.ParentID)
+	}
+	m := p.Metadata
+	if m.Replace.Set {
+		t.Errorf("metadata.replace is set though the request sent none: %+v", m.Replace)
+	}
+	if !m.Merge.Set || strings.ReplaceAll(string(m.Merge.Value), " ", "") != `{"a":1}` {
+		t.Errorf("metadata.merge = %+v, want the caller's own bytes", m.Merge)
+	}
+	if len(m.Set) != 1 || string(m.Set["b"]) != "null" {
+		t.Errorf("metadata.set = %v; a key written to JSON null must survive as the literal", m.Set)
+	}
+	if len(m.Unset) != 1 || m.Unset[0] != "c" {
+		t.Errorf("metadata.unset = %v, want [c]", m.Unset)
+	}
+}
+
+// TestUpdateDistinguishesTheThreeMetadataStates is the F12 pin, and it is the
+// case the generated type cannot express: on the metadata plane an absent
+// member, a member holding JSON null and a member holding the empty string are
+// three different requests, and only the raw bytes carry the difference.
+func TestUpdateDistinguishesTheThreeMetadataStates(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  string
+		want string
+	}{
+		{"a key written to null", `{"set":{"k":null}}`, "null"},
+		{"a key written to the empty string", `{"set":{"k":""}}`, `""`},
+		{"a key written to an empty object", `{"set":{"k":{}}}`, "{}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":{"metadata":`+test.set+`}}`)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			got := lifecycle.updateRequests()
+			if len(got) != 1 {
+				t.Fatalf("the role was called %d times, want 1", len(got))
+			}
+			if value := string(got[0].Patch.Metadata.Set["k"]); value != test.want {
+				t.Errorf("metadata.set[k] = %q, want %q", value, test.want)
+			}
+		})
+	}
+
+	t.Run("an absent key is not written at all", func(t *testing.T) {
+		lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+		ts := newUpdateServer(t, lifecycle)
+
+		resp := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":{"metadata":{"unset":["k"]}}}`)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+		}
+		got := lifecycle.updateRequests()
+		if len(got) != 1 {
+			t.Fatalf("the role was called %d times, want 1", len(got))
+		}
+		if _, present := got[0].Patch.Metadata.Set["k"]; present {
+			t.Error("an unset key arrived as a set one; removing a key is `unset`, never a null in `set`")
+		}
+	})
+
+	// `metadata` itself is NOT nullable: a null on it would be a clear the
+	// document never promised, and the algebra spells one as `replace`.
+	t.Run("metadata itself refuses an explicit null", func(t *testing.T) {
+		lifecycle := &roleLifecycle{}
+		ts := newUpdateServer(t, lifecycle)
+
+		resp := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":{"metadata":null}}`)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+		}
+		if body := decodeBody(t, resp); body["param"] != "patch.metadata" {
+			t.Errorf("param = %v, want patch.metadata", body["param"])
+		}
+		if len(lifecycle.updateRequests()) != 0 {
+			t.Error("a null reached the role")
+		}
+	})
+}
+
+// TestUpdateGuardsComposeFromTheRevisionTheWriteAnswered is the precondition's
+// happy path, and it is written as a LOOP rather than with a literal token on
+// purpose: `expected_version` guards an opaque value the store mints, so a case
+// that invented one would pass against a server that answered a different
+// number than it stores. The second request's guard comes from the first
+// response's `revision` and from nowhere else.
+func TestUpdateGuardsComposeFromTheRevisionTheWriteAnswered(t *testing.T) {
+	const stored int64 = 7
+	lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: revisionedIssue("bd-1", stored), Changed: true}}
+	ts := newUpdateServer(t, lifecycle)
+
+	first := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":{"title":"first"}}`)
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", first.StatusCode, readAll(t, first))
+	}
+	revision, ok := decodeBody(t, first)["revision"].(float64)
+	if !ok {
+		t.Fatalf("the response carries no `revision`; a guard whose token no response carries cannot be filled")
+	}
+	// The token must be the ROW's, read off the snapshot the role answered
+	// with. Without this the loop below round-trips whatever the handler put
+	// there — including a constant zero — and could not fail against a
+	// `revision` that describes no row.
+	if int64(revision) != stored {
+		t.Fatalf("revision = %d, want the %d the role's row carries", int64(revision), stored)
+	}
+
+	second := ts.updateIssue(t, updatePath,
+		fmt.Sprintf(`{"actor":"alice","expected_version":%d,"patch":{"title":"second"}}`, int64(revision)))
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("guarded status = %d, want 200: %s", second.StatusCode, readAll(t, second))
+	}
+	got := lifecycle.updateRequests()
+	if len(got) != 2 {
+		t.Fatalf("the role was called %d times, want 2", len(got))
+	}
+	if got[1].ExpectedVersion == nil || *got[1].ExpectedVersion != int64(revision) {
+		t.Errorf("expected_version = %v, want the %d the write answered with", got[1].ExpectedVersion, int64(revision))
+	}
+}
+
+// TestUpdateRefusesAStaleGuard pins the 409 for each member of the trio: the
+// code, the member `param` names, and the expectation echoed back. The observed
+// value is deliberately absent — the refusal rolled its transaction back, so a
+// read afterwards would describe a row the refusal never saw.
+func TestUpdateRefusesAStaleGuard(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		body      string
+		err       error
+		wantParam string
+		wantEcho  string
+		wantValue any
+	}{
+		{
+			name:      "version",
+			body:      `{"actor":"alice","expected_version":7,"patch":{"title":"t"}}`,
+			err:       fmt.Errorf("update bd-1: %w", issueops.ErrVersionMismatch),
+			wantParam: "expected_version",
+			wantEcho:  "expected_version",
+			wantValue: float64(7),
+		},
+		{
+			name:      "status",
+			body:      `{"actor":"alice","expected_status":"open","patch":{"title":"t"}}`,
+			err:       fmt.Errorf("update bd-1: %w", issueops.ErrStatusMismatch),
+			wantParam: "expected_status",
+			wantEcho:  "expected_status",
+			wantValue: "open",
+		},
+		{
+			name:      "assignee",
+			body:      `{"actor":"alice","expected_assignee":"bob","patch":{"assignee":"carol"}}`,
+			err:       fmt.Errorf("update bd-1: %w", issueops.ErrAssigneeMismatch),
+			wantParam: "expected_assignee",
+			wantEcho:  "expected_assignee",
+			wantValue: "bob",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateErr: test.err}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, test.body)
+			if resp.StatusCode != http.StatusConflict {
+				t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(CodePreconditionFailed) {
+				t.Errorf("code = %v, want %s", body["code"], CodePreconditionFailed)
+			}
+			if body["param"] != test.wantParam {
+				t.Errorf("param = %v, want %q", body["param"], test.wantParam)
+			}
+			if body[test.wantEcho] != test.wantValue {
+				t.Errorf("%s = %v, want %v echoed from the request", test.wantEcho, body[test.wantEcho], test.wantValue)
+			}
+			for _, absent := range []string{"actual_version", "actual_status", "actual_assignee"} {
+				if _, present := body[absent]; present {
+					t.Errorf("%s is present; this role reports no observed value and inventing one from a later read would be worse than omitting it", absent)
+				}
+			}
+		})
+	}
+}
+
+// TestUpdateAnswersThePolicyRefusalsItsMembersEarned walks every 409 the three
+// policy members brought, and the extension members that discriminate within a
+// shared code.
+func TestUpdateAnswersThePolicyRefusalsItsMembersEarned(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		body       string
+		err        error
+		wantStatus int
+		wantCode   Code
+		wantParam  string
+		check      func(*testing.T, map[string]any)
+	}{
+		{
+			name:       "status crossing with open children",
+			body:       `{"actor":"alice","patch":{"status":"closed"}}`,
+			err:        fmt.Errorf("close: %w", &issueops.CloseOpenChildrenError{OpenChildren: 3}),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeNotClosable,
+			wantParam:  "patch.status",
+			check: func(t *testing.T, body map[string]any) {
+				if body["open_children"] != float64(3) {
+					t.Errorf("open_children = %v, want 3 read from the refusing transaction", body["open_children"])
+				}
+			},
+		},
+		{
+			name:       "status crossing with a live blocker",
+			body:       `{"actor":"alice","patch":{"status":"closed"}}`,
+			err:        fmt.Errorf("close: %w", issueops.ErrCloseBlocked),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeNotClosable,
+			wantParam:  "patch.status",
+			check: func(t *testing.T, body map[string]any) {
+				if _, present := body["open_children"]; present {
+					t.Error("open_children is present on the blocker refusal; its ABSENCE is what tells the two apart")
+				}
+			},
+		},
+		{
+			name:       "assignee transfer off a live owner",
+			body:       `{"actor":"alice","patch":{"assignee":"carol"}}`,
+			err:        fmt.Errorf("update: %w: issue bd-1 is assigned to %q", storage.ErrAlreadyClaimed, "bob"),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeAlreadyClaimed,
+			wantParam:  "patch.assignee",
+			check: func(t *testing.T, body map[string]any) {
+				// The fence refuses without a typed holder, so the member is
+				// absent — and it must NOT be parsed out of the message text,
+				// which is exactly what a client adopting this endpoint deletes.
+				if got, present := body["assignee"]; present {
+					t.Errorf("assignee = %v; the fence reports no typed holder, so this must not be scraped from the message", got)
+				}
+			},
+		},
+		{
+			// THE DEFENSIVE ARM, driven directly because no reparent can reach
+			// it: CheckBlockingHierarchyInTx probes `blocks` and
+			// `conditional-blocks` only, and patch.parent_id writes
+			// `parent-child`. It is NOT a promise this operation makes — the
+			// document tells clients the hierarchy members never arrive here —
+			// and this case pins only that IF the refusal ever reaches this
+			// handler it keeps its members instead of collapsing into the plain
+			// cycle below, which is the one shape a client cannot tell apart.
+			name:       "the defensive hierarchy arm keeps its members",
+			body:       `{"actor":"alice","patch":{"parent_id":"bd-child"}}`,
+			err:        fmt.Errorf("reparent: %w", &issueops.DependencyHierarchyConflictError{IssueID: "bd-1", BlockerID: "bd-child", BlockerIsAncestor: false}),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeDependencyCycle,
+			wantParam:  "patch.parent_id",
+			check: func(t *testing.T, body map[string]any) {
+				if body["issue_id"] != "bd-1" || body["blocker_id"] != "bd-child" {
+					t.Errorf("hierarchy members = %v/%v, want the refused pair", body["issue_id"], body["blocker_id"])
+				}
+				if body["blocker_is_ancestor"] != false {
+					t.Errorf("blocker_is_ancestor = %v; it travels in BOTH polarities", body["blocker_is_ancestor"])
+				}
+			},
+		},
+		{
+			// THE ARM EVERY REAL REPARENT CYCLE TAKES, and the one the proxied
+			// integration case drives end to end. Its lack of hierarchy members
+			// is what this operation documents.
+			name:       "reparent that closes a cycle",
+			body:       `{"actor":"alice","patch":{"parent_id":"bd-2"}}`,
+			err:        fmt.Errorf("reparent: %w", issueops.ErrDependencyCycle),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeDependencyCycle,
+			wantParam:  "patch.parent_id",
+			check: func(t *testing.T, body map[string]any) {
+				for _, member := range []string{"issue_id", "blocker_id", "blocker_is_ancestor"} {
+					if _, present := body[member]; present {
+						t.Errorf("%s is present; this operation's cycle never carries the hierarchy members", member)
+					}
+				}
+			},
+		},
+		{
+			name:       "reparent onto a pair that already carries another edge",
+			body:       `{"actor":"alice","patch":{"parent_id":"bd-2"}}`,
+			err:        fmt.Errorf("reparent: %w", &issueops.DependencyTypeConflictError{IssueID: "bd-1", DependsOnID: "bd-2", ExistingType: "blocks", RequestedType: "parent-child"}),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeDependencyExists,
+			wantParam:  "patch.parent_id",
+			check: func(t *testing.T, body map[string]any) {
+				if body["existing_type"] != "blocks" || body["requested_type"] != "parent-child" {
+					t.Errorf("types = %v/%v, want both read from the typed error", body["existing_type"], body["requested_type"])
+				}
+			},
+		},
+		{
+			// An edge ENDPOINT, not the resource this request addresses. A 404
+			// here would send a client looking for the wrong missing row.
+			name:       "reparent onto a parent that names nothing",
+			body:       `{"actor":"alice","patch":{"parent_id":"bd-gone"}}`,
+			err:        fmt.Errorf("reparent: %w", &issueops.DependencyEndpointNotFoundError{IssueID: "bd-1", DependsOnID: "bd-gone", MissingID: "bd-gone", Err: issueops.ErrDependencyTargetNotFound}),
+			wantStatus: http.StatusBadRequest,
+			wantCode:   CodeInvalidArgument,
+			wantParam:  "patch.parent_id",
+			check:      func(*testing.T, map[string]any) {},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateErr: test.err}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, test.body)
+			if resp.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", resp.StatusCode, test.wantStatus, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(test.wantCode) {
+				t.Errorf("code = %v, want %s", body["code"], test.wantCode)
+			}
+			if body["param"] != test.wantParam {
+				t.Errorf("param = %v, want %q", body["param"], test.wantParam)
+			}
+			if detail, _ := body["detail"].(string); strings.Contains(detail, "reparent:") || strings.Contains(detail, "is assigned to") {
+				t.Errorf("detail quotes the role's own message: %q", detail)
+			}
+			test.check(t, body)
+		})
+	}
+}
+
+// TestUpdateStillAnswers404ForThePathID keeps the one miss this operation does
+// own. Publishing `parent_id` added a second not-found shape to the same
+// handler, so the two have to stay distinguishable: the path id is a 404 and an
+// edge endpoint is a 400.
+func TestUpdateStillAnswers404ForThePathID(t *testing.T) {
+	lifecycle := &roleLifecycle{updateErr: fmt.Errorf("update bd-1: %w", storage.ErrNotFound)}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":{"parent_id":"bd-2"}}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if body := decodeBody(t, resp); body["code"] != string(CodeNotFound) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotFound)
+	}
+}
+
+// TestUpdateEmptiesTheParentSetOnAnEmptyString pins the one value of
+// `parent_id` whose meaning is not "this is the new parent": the role reads a
+// set empty value as "remove every parent-child edge", so it must reach the
+// role SET rather than being dropped as an absent member.
+func TestUpdateEmptiesTheParentSetOnAnEmptyString(t *testing.T) {
+	lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":{"parent_id":""}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	got := lifecycle.updateRequests()
+	if len(got) != 1 {
+		t.Fatalf("the role was called %d times, want 1", len(got))
+	}
+	if !got[0].Patch.ParentID.Set || got[0].Patch.ParentID.Value != "" {
+		t.Errorf("parent_id = %+v, want a SET empty value — the spelling that unparents", got[0].Patch.ParentID)
+	}
+}
+
+// TestUpdateGuardsDistinguishAbsentFromEmpty pins the pointer the role models
+// the two string guards as. A guard on the EMPTY assignee is how a caller says
+// "only if nobody holds it", so an absent member and one holding "" must not
+// collapse into each other.
+func TestUpdateGuardsDistinguishAbsentFromEmpty(t *testing.T) {
+	lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+	ts := newUpdateServer(t, lifecycle)
+
+	if resp := ts.updateIssue(t, updatePath, `{"actor":"alice","expected_assignee":"","expected_status":"","patch":{"assignee":"bob"}}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	got := lifecycle.updateRequests()
+	if len(got) != 1 {
+		t.Fatalf("the role was called %d times, want 1", len(got))
+	}
+	if got[0].ExpectedAssignee == nil || *got[0].ExpectedAssignee != "" {
+		t.Errorf("expected_assignee = %v, want a pointer to the empty string", got[0].ExpectedAssignee)
+	}
+	if got[0].ExpectedStatus == nil || *got[0].ExpectedStatus != "" {
+		t.Errorf("expected_status = %v, want a pointer to the empty status", got[0].ExpectedStatus)
+	}
+}
+
+// TestUpdateAssemblesTheThreeLabelMembersAsOnePatch is the whole of the
+// incremental-label slice, and the assertion is that they are ONE edit rather
+// than three members racing to write the same field.
+//
+// The role applies Replace, then Add, then Remove, so removal wins. A handler
+// that built a LabelPatch per member would have the last one decoded overwrite
+// the others in silence, which is the failure this shape exists to prevent —
+// and the reason the three are assembled in one loop rather than three `if`s.
+func TestUpdateAssemblesTheThreeLabelMembersAsOnePatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		patch   string
+		replace *[]string
+		add     []string
+		remove  []string
+	}{
+		{
+			name:    "replacement alone still sets Replace",
+			patch:   `{"labels":["a","b"]}`,
+			replace: &[]string{"a", "b"},
+		},
+		{
+			// The case the pair exists for: an addition that does NOT have to
+			// name the labels already on the row, so a concurrent writer's
+			// label is not silently dropped.
+			name:  "an addition alone leaves Replace unset",
+			patch: `{"add_labels":["c"]}`,
+			add:   []string{"c"},
+		},
+		{
+			name:   "a removal alone leaves Replace unset",
+			patch:  `{"remove_labels":["c"]}`,
+			remove: []string{"c"},
+		},
+		{
+			// NOT mutually exclusive, unlike `notes`/`append_notes`: the role
+			// defines an order over all three, so this request has a defined
+			// result and must reach the role whole.
+			name:    "all three together reach the role together",
+			patch:   `{"labels":["a"],"add_labels":["b"],"remove_labels":["a"]}`,
+			replace: &[]string{"a"},
+			add:     []string{"b"},
+			remove:  []string{"a"},
+		},
+		{
+			name:    "an empty replacement clears, and is not read as absent",
+			patch:   `{"labels":[]}`,
+			replace: &[]string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":`+tc.patch+`}`)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			got := lifecycle.updateRequests()
+			if len(got) != 1 {
+				t.Fatalf("the role received %+v, want exactly one request", got)
+			}
+			labels := got[0].Patch.Labels
+			if (tc.replace != nil) != labels.Replace.Set {
+				t.Fatalf("Replace.Set = %v, want %v: presence of `labels` is what selects a replacement",
+					labels.Replace.Set, tc.replace != nil)
+			}
+			if tc.replace != nil && !slices.Equal(labels.Replace.Value, *tc.replace) {
+				t.Errorf("Replace.Value = %v, want %v", labels.Replace.Value, *tc.replace)
+			}
+			if !slices.Equal(labels.Add, tc.add) {
+				t.Errorf("Add = %v, want %v", labels.Add, tc.add)
+			}
+			if !slices.Equal(labels.Remove, tc.remove) {
+				t.Errorf("Remove = %v, want %v", labels.Remove, tc.remove)
+			}
+		})
+	}
+}
+
+// TestUpdateBoundsEveryLabelMember: the length rule is about what a label may
+// BE, so it holds on all three members — including `remove_labels`, where a
+// value the column could not hold could never have been stored. The role
+// refuses it there too and writes nothing, so the edge refuses it where the
+// 400 can name the member and the index.
+func TestUpdateBoundsEveryLabelMember(t *testing.T) {
+	long := strings.Repeat("x", types.MaxFieldLen+1)
+	for _, member := range []string{"labels", "add_labels", "remove_labels"} {
+		t.Run(member, func(t *testing.T) {
+			lifecycle := &roleLifecycle{}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath,
+				fmt.Sprintf(`{"actor":"alice","patch":{%q:["ok",%q]}}`, member, long))
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["param"] != patchParam(member) {
+				t.Errorf("param = %v, want %q", body["param"], patchParam(member))
+			}
+			// The index is in the detail, so a caller fixing a long list knows
+			// which entry to fix without a binary search.
+			if detail, _ := body["detail"].(string); !strings.Contains(detail, member+"[1]") {
+				t.Errorf("detail does not name the offending entry: %q", detail)
+			}
+			if got := lifecycle.updateRequests(); len(got) != 0 {
+				t.Errorf("a refused label reached the role: %+v", got)
+			}
+		})
 	}
 }

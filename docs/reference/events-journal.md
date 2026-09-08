@@ -69,13 +69,162 @@ bd events export                        # the whole journal from seq 1 — same 
 Output is JSON Lines, one record per line, in sequence order:
 
 ```json
-{"seq":1,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
+{"seq":1,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","actor":"worker-1","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
 {"seq":4,"ts":"2026-01-02T03:04:05Z","op":"update","issue_id":"bd-100","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","is_blocked":true,"created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
 {"seq":11,"ts":"2026-01-02T03:04:05Z","op":"delete","issue_id":"bd-100","issue":null}
 ```
 
 A consumer advances its checkpoint to the highest `seq` it has durably
 processed, and passes that as the next `--since`.
+
+### Over HTTP
+
+A consumer that already talks to a workspace over `bd serve` reads the same
+journal at `GET /v0/beads/events` instead of shelling out:
+
+```bash
+curl 'http://127.0.0.1:8080/v0/beads/events?since=4211&limit=500'
+```
+
+```json
+{
+  "records": [
+    {"seq":4212,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","actor":"worker-1","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
+  ],
+  "head": 4980
+}
+```
+
+The `records` are the records above — the same fields, the same encoding, the
+same [record contract](#the-record-contract) — so an HTTP mirror and a
+`bd events export` on the same workspace can be reconciled directly.
+
+- `since` is **required**, and it is the same checkpoint `--since` takes. A
+  missing or negative value is a `400`, never a read from the beginning.
+- `limit` runs from 1 to 10000 and defaults to 1000. There is no unlimited
+  read here: `limit=0` is refused rather than meaning "everything" as it does
+  on `GET /v0/beads/issues`.
+- `head` is the highest sequence number ever assigned, so a consumer knows
+  whether to keep reading or back off. When the last record's `seq` equals
+  `head` you are caught up — a full page proves nothing on its own.
+- The journal is read-only over HTTP. Pruning stays a workspace decision made
+  with `bd events prune` and the retention floors.
+
+<Warning>
+Publishing the journal publishes the workspace's **history**, not its current
+state: every retained record carries the full issue snapshot as it was at that
+mutation, including titles and descriptions since edited and issues since
+deleted. Pruning and the retention floors are the only thing that removes a
+record — editing or deleting a bead does not redact it from the journal. And
+because this is an HTTP read, any process that can reach the address gets that
+history without the filesystem permissions on `.beads/` that `bd events tail`
+requires. Weigh both before binding a journal-enabled workspace with
+`--allow-non-loopback` — which requires `--auth-token-file` (or the explicit
+`--insecure-no-auth`), and that token is shared and surface-wide: every client
+holding it reads the whole journal.
+</Warning>
+
+Two refusals are worth wiring into a consumer before it ships. A checkpoint
+below the retained window is a `410 Gone` carrying the same
+`events_journal_truncated` code and the same `since` / `floor` / `head` window
+[the CLI reports](#resuming-and-the-truncation-error) — with the same ways
+forward. And a workspace whose journal is **off** answers `409` with
+`events_journal_disabled` rather than an empty page, because a disabled journal
+and an empty one look identical in the data and a consumer given the empty page
+would poll a workspace that will never produce a record. That 409 is workspace
+state, not a missing feature: `events.list` appears in `/v0/beads/context`'s
+capabilities on every build, so treat the capability as "this server speaks it"
+and the 409 as "not on this workspace". (A workspace that has enabled the
+journal on a storage backend with no journal support never gets this far —
+`bd serve` refuses to start, the same refusal opening that workspace already
+gives.)
+
+The journal is per replica, which matters more over HTTP than on the command
+line: a checkpoint is meaningful only against the server URL that issued it.
+Track one per server, and re-baseline rather than carry one across.
+
+### Streaming instead of polling
+
+`GET /v0/beads/events:watch` is the same journal, pushed. It answers
+`text/event-stream` and holds the connection open, emitting each mutation as it
+commits — the HTTP form of `bd events tail --follow`:
+
+```bash
+curl -N 'http://127.0.0.1:8080/v0/beads/events:watch?since=4211'
+```
+
+```
+retry: 3000
+
+id: 4212
+data: {"seq":4212,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","actor":"worker-1","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
+
+: heartbeat
+```
+
+Each event's `data` is one line carrying exactly the record the paged read
+returns, and `id` is that record's `seq` — the same number `since` takes. The
+comment lines are heartbeats, sent every 20 seconds of silence so idle
+connections survive intermediaries that drop them; clients ignore comments
+automatically.
+
+**Watch or poll?** Poll unless the delay is the point. A poller holds nothing
+between requests and can never be refused for capacity; a stream costs a
+connection for as long as it is open, and this server holds at most **48** of
+them before answering `503` with `events_watch_saturated` and pointing you back
+at `GET /v0/beads/events`. That cap sits deliberately below the server's
+64-connection limit, so a workspace saturated with streams still has room to
+answer polls, mutations and health checks — and room to deliver the `503`
+itself. Stream when something is waiting on the mutation — a live mirror, an
+agent watching a gate — and poll for anything that can afford an interval.
+Neither is faster at draining a backlog.
+
+**Delivery is at-least-once against your own checkpoint.** Within a single
+stream each record is sent once, in `seq` order, with no gaps. Duplicates are
+possible only across a reconnect — if you resume from an id whose records you
+had already applied — so make your consumer idempotent on `seq` and advance
+your checkpoint only after your own write lands, exactly as when polling.
+
+**Reconnecting is the normal case, and it is free.** When a stream drops,
+reconnect with the standard `Last-Event-ID` header carrying the last `seq` you
+processed; it **overrides** `since`. That is what makes a browser's
+`EventSource` correct with no extra code — it re-sends the original URL, whose
+`since` is as old as your process:
+
+```js
+const es = new EventSource('/v0/beads/events:watch?since=0');
+es.onmessage = (e) => apply(JSON.parse(e.data));   // e.lastEventId is the seq
+es.addEventListener('truncated', (e) => { es.close(); rebaseline(JSON.parse(e.data)); });
+```
+
+`since` is still required on every connect — the header is absent on the first
+one — and a `Last-Event-ID` that is not a sequence number is a `400` rather than
+a silent fall back to `since`, which would start the stream somewhere you did
+not ask for.
+
+**Every refusal happens before the stream opens.** The `409` and the `410` above
+are the same responses on this route as on the paged read, decided before the
+first byte, so a client that got its `200` knows its checkpoint was servable.
+
+<Warning>
+There is exactly one failure that can arrive *after* that: a **`truncated`
+event**, sent when a prune removes the records the open stream was about to
+send. Its `data` is the same `410` body — `events_journal_truncated` with
+`since` / `floor` / `head` — and the stream closes immediately after it.
+
+**Treat it as stop-and-re-baseline**, with [the same ways
+forward](#resuming-and-the-truncation-error) as the `410`. A consumer that
+ignores it does not lose records silently, but it does stall loudly: a bare
+`EventSource` will reconnect with the same dead id and earn a connect-time
+`410` on every attempt from then on. The stream raises the reconnection delay to
+60 seconds first so that loop is slow rather than hot.
+</Warning>
+
+The exposure warning above applies identically — a stream is the same history
+over the same address and under the same shared credential, held open — and so
+does the capability
+rule: `events.watch` appears in `/v0/beads/context`'s capabilities on every
+build, and says nothing about whether this workspace has a journal.
 
 ## The record contract
 
@@ -85,6 +234,7 @@ processed, and passes that as the next `--since`.
 | `ts` | string | UTC insert time, stamped inside the committing transaction. |
 | `op` | string | One of the seven operations below. |
 | `issue_id` | string | The mutated issue. |
+| `actor` | string | The acting identity that performed the mutation, as resolved for the audit-events table; on a `comment` row, the comment's author. Absent when the path has no actor — derived maintenance (`is_blocked` recomputes), deletes (other than a rename's synthetic `delete` row), and rows written before the journal recorded actors. An absent `actor` is never user attribution: read it as "system/unknown", not as a conflicting writer. |
 | `issue` | object or null | The issue's full state *after* the mutation; `null` on a delete. |
 | `dep` | object | `{"kind","target","metadata"}` on `dep_add` and `dep_remove`; absent otherwise. |
 | `comment` | object | `{"id","author","text","created_at","source"}` on `comment`; absent otherwise. |
@@ -199,6 +349,21 @@ A hole in the *middle* of the retained window refuses the same way, with
 from your checkpoint. Nothing bd does produces such a hole — pruning only ever
 removes a prefix — but a restored, hand-edited, or half-copied journal table
 can, and a consumer must never be handed one silently.
+
+That case has a **third way forward**, and it is worth taking before the other
+two: everything between your checkpoint and the reported `since` is intact and
+servable, and the refusal did not hand it over. Drain it explicitly by asking
+for exactly that span — the same `--since` you already passed, with `--limit`
+set to `response.since - your since` — which stops the batch at the hole and
+succeeds:
+
+```bash
+# refused with since 40 (your checkpoint was 12), floor 61
+bd events tail --since 12 --limit 28   # records 13..40, the intact stretch
+bd events tail --since 60              # then take the gap, or re-baseline
+```
+
+Skipping straight to `floor - 1` loses records you could have had.
 
 ## Retention and pruning
 

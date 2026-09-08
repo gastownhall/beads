@@ -111,11 +111,12 @@ func TestNotifyingUOWWrapsEveryMutatingUseCase(t *testing.T) {
 			"DoltRemoteUseCase": "Dolt remotes are repository plumbing; no bead changes and no event to name",
 			"RawSQLUseCase": "the raw escape hatch executes statements this layer cannot read, so it " +
 				"cannot say which bead changed; the DoltStorage chain fires nothing for raw access either",
-			"EventsJournalUseCase": "read-only cursor surface; fires no hooks. Its two operations are a " +
-				"read of bd_events_journal and a prefix delete of records already committed — the " +
-				"delete changes no bead, and the journal itself is written at the issueops seam " +
-				"inside the mutation's own transaction, so everything it records is already covered " +
-				"by the use case that made the change",
+			"EventsJournalUseCase": "read-only cursor surface; fires no hooks. Two of its three " +
+				"operations read bd_events_journal (Read, and ReadPage which adds the counter head " +
+				"GET /v0/beads/events pages with) and the third is a prefix delete of records " +
+				"already committed — the delete changes no bead, and the journal itself is written " +
+				"at the issueops seam inside the mutation's own transaction, so everything it " +
+				"records is already covered by the use case that made the change",
 		})
 }
 
@@ -178,26 +179,35 @@ func TestRecordingDependencyUseCaseCoversItsSurface(t *testing.T) {
 	reads := "reads the graph, changes none"
 	assertPartition(t, "DependencyUseCase", interfaceMethods(reflect.TypeOf((*domain.DependencyUseCase)(nil)).Elem()),
 		reflect.TypeOf((*recordingDepUC)(nil)), map[string]string{
-			"CountByIssueID":            reads,
-			"CountByWispID":             reads,
-			"CountsByIssueIDs":          reads,
-			"CountsByWispIDs":           reads,
-			"DetectCycleReport":         reads,
-			"DetectCycles":              reads,
-			"GetBlockingInfo":           reads,
-			"GetDependencyTree":         reads,
-			"GetForIssueIDs":            reads,
-			"GetIssueDependencyRecords": reads,
-			"GetWispDependencyRecords":  reads,
-			"IsBlocked":                 reads,
-			"IsWispBlocked":             reads,
-			"IterWispWithIssueMetadata": reads,
-			"IterWithIssueMetadata":     reads,
-			"ListByIssueIDs":            reads,
-			"ListByWispIDs":             reads,
-			"ListWispWithIssueMetadata": reads,
-			"ListWithIssueMetadata":     reads,
-			"WalkDependencyTree":        reads,
+			"CountByIssueID":   reads,
+			"CountEdges":       reads,
+			"CountByWispID":    reads,
+			"CountsByIssueIDs": reads,
+			"CountsByWispIDs":  reads,
+			// The two halves of the whole-graph gate issueops.BatchApplier
+			// re-runs at the end of a mixed request. Both are repository PROBES
+			// — an ancestry walk and a reachability walk — so there is nothing
+			// for the recorder to notify about; the writes those gates guard are
+			// recorded by AddDependencies, which is declared below.
+			"ValidateBlockingHierarchy":            reads,
+			"CycleThroughEdges":                    reads,
+			"DetectCycleReport":                    reads,
+			"DetectCycles":                         reads,
+			"GetBlockingInfo":                      reads,
+			"GetDependencyTree":                    reads,
+			"GetExternalBlockingDependencyRecords": reads,
+			"GetForIssueIDs":                       reads,
+			"GetIssueDependencyRecords":            reads,
+			"GetWispDependencyRecords":             reads,
+			"IsBlocked":                            reads,
+			"IsWispBlocked":                        reads,
+			"IterWispWithIssueMetadata":            reads,
+			"IterWithIssueMetadata":                reads,
+			"ListByIssueIDs":                       reads,
+			"ListByWispIDs":                        reads,
+			"ListWispWithIssueMetadata":            reads,
+			"ListWithIssueMetadata":                reads,
+			"WalkDependencyTree":                   reads,
 		})
 }
 
@@ -246,11 +256,22 @@ func TestNotifyingProviderAnswersTheWholeProviderSurface(t *testing.T) {
 	if len(surface) < 25 {
 		t.Fatalf("parsed only %d methods off doltSQLProvider — the scan is broken, not the provider", len(surface))
 	}
+	// initSchemaAttempt is the single-attempt body initSchema's backoff loop
+	// calls, and verifyTeamServerSchema and attachPreviewDatabase are the two open
+	// paths it fans out to (dolt_sql_provider.go). Like initSchema above them, each
+	// is an unexported startup helper reached only as p.<method> on the concrete
+	// provider — never through a UnitOfWorkProvider type assertion — so the wrapper
+	// has no capability to answer and no bead write to fire a hook for.
+	initBranch := "an unexported branch of initSchema's startup path, reached only on the concrete " +
+		"provider, not a capability any caller can reach through the wrapper"
 	assertPartition(t, "UnitOfWorkProvider", surface, reflect.TypeOf((*notifyingProvider)(nil)), map[string]string{
 		"BeginTx": "TxProvider hands out a bare transaction with no unit of work around it, so " +
 			"there is nothing to buffer and nothing to drain: the wrapper deliberately does not " +
 			"offer it, and only this package's own NewUOW asks a provider for one",
-		"initSchema": "unexported provider setup, not a capability any caller can reach",
+		"initSchema":             "unexported provider setup, not a capability any caller can reach",
+		"initSchemaAttempt":      initBranch,
+		"verifyTeamServerSchema": initBranch,
+		"attachPreviewDatabase":  initBranch,
 	})
 }
 

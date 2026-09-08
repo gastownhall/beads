@@ -206,7 +206,11 @@ type Step struct {
 	// Notes are additional notes for the issue (supports substitution).
 	Notes string `json:"notes,omitempty"`
 
-	// Type is the issue type: task, bug, feature, epic, chore.
+	// Type is the issue type: any built-in type (task by default; bug,
+	// feature, epic, chore, decision, spike, story, milestone, ...) or a
+	// custom type already registered in types.custom. Unregistered types
+	// are flattened to task, with a warning, when the formula is cooked
+	// or poured.
 	Type string `json:"type,omitempty"`
 
 	// Priority is the issue priority (0-4).

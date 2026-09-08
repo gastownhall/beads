@@ -403,28 +403,6 @@ func GetCustomStatusesTx(ctx context.Context, tx DBTX) ([]string, error) {
 	return types.CustomStatusNames(detailed), nil
 }
 
-// GetCustomTypesTx reads custom types from config within a transaction.
-func GetCustomTypesTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	var raw string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "types.custom").Scan(&raw)
-	if err == sql.ErrNoRows || raw == "" {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to read custom_types config: %w", err)
-	}
-	var customTypes []string
-	if err := json.Unmarshal([]byte(raw), &customTypes); err != nil {
-		for _, s := range strings.Split(raw, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				customTypes = append(customTypes, s)
-			}
-		}
-	}
-	return customTypes, nil
-}
-
 // ValidateMetadataIfConfigured checks metadata against the schema from config.
 func ValidateMetadataIfConfigured(metadata json.RawMessage) error {
 	mode := config.MetadataValidationMode()
@@ -546,7 +524,7 @@ func ReadConfigPrefix(ctx context.Context, tx DBTX) (string, error) {
 		underscoreYamlPrefix := strings.TrimSpace(config.GetString("issue_prefix"))
 		debug.Logf("Debug: missing config.issue_prefix in database (err=%v, db value=%q, yaml issue-prefix=%q, yaml issue_prefix=%q)\n",
 			err, configPrefix, yamlPrefix, underscoreYamlPrefix)
-		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote; if using config.yaml, use key 'issue-prefix', not 'issue_prefix')", storage.ErrNotInitialized)
+		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote; this check reads the database's config table, so adding 'issue-prefix' to config.yaml does not satisfy it)", storage.ErrNotInitialized)
 	} else if err != nil {
 		return "", fmt.Errorf("failed to get config: %w", err)
 	}
