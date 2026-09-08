@@ -2,11 +2,15 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
 // stopSharedServerCleanup is the cleanup every fixture in this package that
@@ -35,6 +39,18 @@ func stopSharedServerCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve shared server dir: %v", err)
 	}
+	stopDoltServerCleanup(t, sharedDir)
+}
+
+// stopDoltServerCleanup is the same cleanup for a server whose pid file lives
+// under an explicit beads directory: a per-project server under
+// <repo>/.beads, or a shared server under a HOME the fixture hands ONLY to
+// the subprocess (`cmd.Env = ...HOME=<tmp>...`), where this process's own
+// SharedServerPath would resolve the wrong tree. Register it BEFORE the first
+// subprocess `bd` runs; the directory need not exist yet.
+func stopDoltServerCleanup(t *testing.T, beadsDir string) {
+	t.Helper()
+	sharedDir := beadsDir
 	t.Cleanup(func() {
 		// Read the record BEFORE stopping: a clean Stop removes the pid
 		// file, so afterwards there is nothing left to verify against.
@@ -62,6 +78,32 @@ func stopSharedServerCleanup(t *testing.T) {
 			return
 		}
 		requireSharedServerExited(t, pid, token)
+	})
+}
+
+// stopProxiedServerCleanup is the same duty for a subprocess `bd init
+// --proxied-server`: that init leaves a proxy (proxy.pid) and its backend
+// dolt sql-server (proxy-child.pid) running under <beadsDir>/dolt, with no
+// dolt-server.pid for stopDoltServerCleanup to find — the post-run sweep
+// named the metrics fixture's repo by exactly that cwd. proxy.Shutdown is
+// the verified stop `bd dolt stop` performs and covers both records. A root
+// that never started (the embedded and per-project cases of the same table)
+// has neither record and is not an error.
+func stopProxiedServerCleanup(t *testing.T, proxyRoot string) {
+	t.Helper()
+	t.Cleanup(func() {
+		recorded := false
+		for _, name := range []string{proxy.PIDFileName, server.PIDFileName} {
+			if _, err := os.Stat(filepath.Join(proxyRoot, name)); err == nil {
+				recorded = true
+			}
+		}
+		if !recorded {
+			return
+		}
+		if err := proxy.Shutdown(proxyRoot); err != nil {
+			t.Errorf("proxy.Shutdown(%s): %v", proxyRoot, err)
+		}
 	})
 }
 
