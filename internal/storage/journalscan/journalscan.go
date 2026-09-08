@@ -22,9 +22,22 @@ type FuncInfo struct {
 	Recv       string   // receiver type name ("" for free functions)
 	Name       string   // bare method/function name
 	Exported   bool     // the bare name is exported
+	Params     []string // declared parameter names, in order ("" for an unnamed one)
 	IdentCalls []string // intra-package bare-identifier calls (free functions)
 	SelCalls   []string // selector calls, by selector name (x.Foo -> "Foo")
+	Calls      []Call   // every call, bare or selector, with its arguments
 	OwnBeadDML bool     // body issues INSERT/UPDATE/DELETE against a bead table
+}
+
+// Call is one call expression in a function body: the called name (a bare
+// identifier, or the selector name of x.Foo) and its arguments, each reduced
+// to the bare identifier or literal it passes — "" for any other expression.
+// The predeclared false and true therefore read as "false" and "true", and a
+// caller forwarding its own parameter reads as that parameter's name, which
+// is what lets a guard tell "switched off here" from "left to the caller".
+type Call struct {
+	Name string
+	Args []string
 }
 
 // AllCallNames returns every called name, both bare-identifier and selector.
@@ -40,6 +53,17 @@ func (f *FuncInfo) CallsAnyOf(set map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// ParamIndex returns the position of f's parameter named name, or -1 when f
+// declares none by that name.
+func (f *FuncInfo) ParamIndex(name string) int {
+	for i, p := range f.Params {
+		if p == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // ReceiverTypeName returns the bare type name of a method receiver
@@ -72,7 +96,7 @@ func ParsePackage(dir string) (map[string]*FuncInfo, error) {
 				if !ok {
 					continue
 				}
-				f := &FuncInfo{Name: fn.Name.Name, Exported: fn.Name.IsExported()}
+				f := &FuncInfo{Name: fn.Name.Name, Exported: fn.Name.IsExported(), Params: paramNames(fn.Type)}
 				if fn.Recv != nil && len(fn.Recv.List) > 0 {
 					f.Recv = ReceiverTypeName(fn.Recv.List[0].Type)
 				}
@@ -82,8 +106,10 @@ func ParsePackage(dir string) (map[string]*FuncInfo, error) {
 						switch fun := node.Fun.(type) {
 						case *ast.Ident:
 							f.IdentCalls = append(f.IdentCalls, fun.Name)
+							f.Calls = append(f.Calls, Call{Name: fun.Name, Args: argNames(node.Args)})
 						case *ast.SelectorExpr:
 							f.SelCalls = append(f.SelCalls, fun.Sel.Name)
+							f.Calls = append(f.Calls, Call{Name: fun.Sel.Name, Args: argNames(node.Args)})
 						}
 					case *ast.BasicLit:
 						if node.Kind == token.STRING && SQLWritesBeadTable(node.Value) {
@@ -103,23 +129,102 @@ func ParsePackage(dir string) (map[string]*FuncInfo, error) {
 	return out, nil
 }
 
+// paramNames flattens a signature's parameter list into one entry per
+// parameter, so a position in it lines up with a position in a call's
+// argument list: "a, b int" is two entries, and an unnamed parameter is "".
+func paramNames(sig *ast.FuncType) []string {
+	if sig == nil || sig.Params == nil {
+		return nil
+	}
+	var names []string
+	for _, field := range sig.Params.List {
+		if len(field.Names) == 0 {
+			names = append(names, "")
+			continue
+		}
+		for _, name := range field.Names {
+			names = append(names, name.Name)
+		}
+	}
+	return names
+}
+
+// argNames reduces call arguments to the bare identifier or literal each one
+// passes; anything else (a call, a selector, a composite literal) is "".
+func argNames(args []ast.Expr) []string {
+	names := make([]string, len(args))
+	for i, arg := range args {
+		switch a := arg.(type) {
+		case *ast.Ident:
+			names[i] = a.Name
+		case *ast.BasicLit:
+			names[i] = a.Value
+		}
+	}
+	return names
+}
+
+// resolve maps a called name to the function keys it can denote: the free
+// function of that name, if any, and every method of that name (name-based
+// resolution, sufficient for a guard).
+func resolve(fns map[string]*FuncInfo, name string) []string {
+	var keys []string
+	if _, ok := fns[name]; ok {
+		keys = append(keys, name)
+	}
+	for key, f := range fns {
+		if f.Recv != "" && f.Name == name {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// CallsOnlyWithLiteralFalse reports whether f calls callee, and every one of
+// those calls passes the predeclared false for callee's boolean parameter
+// named gate — the argument callee's own body reads as "skip the gated
+// write". A guard that follows call edges to find who reaches a seam uses it
+// to drop the edges a caller has explicitly switched off, so a composite
+// mutation that runs its constituents with the gate off and performs the
+// gated write once itself is not credited with the one it told them to skip.
+//
+// The edge stays live (false is returned) whenever the switch-off is not
+// certain: callee is unknown or declares no parameter named gate, f never
+// calls it, at least one of f's calls passes anything but the literal (true,
+// a variable, f's own parameter of that name, an expression), or a call is
+// too short to line up with the signature. callee resolves the way Fixpoint
+// resolves edges — the free function of that name and every method of that
+// name — and every resolution that declares the gate must see false.
+func CallsOnlyWithLiteralFalse(fns map[string]*FuncInfo, f *FuncInfo, callee, gate string) bool {
+	var gateAt []int
+	for _, key := range resolve(fns, callee) {
+		if i := fns[key].ParamIndex(gate); i >= 0 {
+			gateAt = append(gateAt, i)
+		}
+	}
+	if len(gateAt) == 0 {
+		return false
+	}
+	called := false
+	for _, call := range f.Calls {
+		if call.Name != callee {
+			continue
+		}
+		called = true
+		for _, i := range gateAt {
+			if i >= len(call.Args) || call.Args[i] != "false" {
+				return false
+			}
+		}
+	}
+	return called
+}
+
 // Fixpoint returns the set of function keys for which seed is true or which
 // (transitively) call a name for which it becomes true, following edges. A
 // called bare name resolves to a free function of that name and to any method
 // with that name (name-based resolution, sufficient for a guard).
 func Fixpoint(fns map[string]*FuncInfo, seed func(*FuncInfo) bool, edges func(*FuncInfo) []string) map[string]bool {
-	resolve := func(name string) []string {
-		var keys []string
-		if _, ok := fns[name]; ok {
-			keys = append(keys, name)
-		}
-		for key, f := range fns {
-			if f.Recv != "" && f.Name == name {
-				keys = append(keys, key)
-			}
-		}
-		return keys
-	}
 	got := map[string]bool{}
 	for key, f := range fns {
 		if seed(f) {
@@ -133,7 +238,7 @@ func Fixpoint(fns map[string]*FuncInfo, seed func(*FuncInfo) bool, edges func(*F
 				continue
 			}
 			for _, callee := range edges(f) {
-				for _, ck := range resolve(callee) {
+				for _, ck := range resolve(fns, callee) {
 					if got[ck] {
 						got[key] = true
 						changed = true
