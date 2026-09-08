@@ -74,10 +74,10 @@ Example:
 				return nil
 			}
 			return outputJSON(map[string]interface{}{
-				"duplicate_groups":  0,
-				"groups":            []interface{}{},
-				"workflow_skipped":  workflowSkipped,
-				"include_workflow":  includeWorkflow,
+				"duplicate_groups": 0,
+				"groups":           []interface{}{},
+				"workflow_skipped": workflowSkipped,
+				"include_workflow": includeWorkflow,
 			})
 		}
 		refCounts := countReferences(allIssues)
