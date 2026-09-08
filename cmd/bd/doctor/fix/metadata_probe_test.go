@@ -10,12 +10,13 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
-// newRecordingMock wraps sqlmock with a matcher that records every query the
-// code actually issues, so assertions run against the full executed set —
-// including queries whose (escaped) text is hostile-looking. sqlmock's default
-// expectation failure path cannot pin this property on its own: an unexpected
-// query surfaces as an error the probe is allowed to swallow, and
-// ExpectationsWereMet only sees the queries that were expected.
+// newRecordingMock wraps sqlmock with a matcher that appends each actual query
+// to a recorded list before delegating to the default regexp matcher. The
+// recorded list pins the ordered set of queries that reached expectation
+// matching; it does not capture queries sqlmock rejects before matching (an
+// unexpected query surfaces as an error the probe's `err == nil` path
+// swallows), so the assertions pair DeepEqual on the recording with
+// ExpectationsWereMet rather than claiming either alone sees everything.
 func newRecordingMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *[]string) {
 	t.Helper()
 	var recorded []string
@@ -76,14 +77,30 @@ func TestProbeForCorrectDoltDatabaseEscapesHostileNames(t *testing.T) {
 }
 
 func TestProbeForCorrectDoltDatabasePrefersFirstProbeableCandidate(t *testing.T) {
-	db, mock, _ := newRecordingMock(t)
+	db, mock, recorded := newRecordingMock(t)
 
-	databases := sqlmock.NewRows([]string{"Database"}).AddRow("beads")
+	databases := sqlmock.NewRows([]string{"Database"}).AddRow("stale-db").AddRow("beads")
 	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(databases)
+	// The first candidate's probe fails (no issues table): it is probed, not
+	// skipped, and the scan continues to the second candidate.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `stale-db`.issues LIMIT 1")).
+		WillReturnError(errors.New("table not found"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `beads`.issues LIMIT 1")).
 		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(1))
 
 	if got := probeForCorrectDoltDatabase(db, ""); got != "beads" {
 		t.Fatalf("probeForCorrectDoltDatabase = %q, want %q", got, "beads")
+	}
+
+	want := []string{
+		"SHOW DATABASES",
+		"SELECT COUNT(*) FROM `stale-db`.issues LIMIT 1",
+		"SELECT COUNT(*) FROM `beads`.issues LIMIT 1",
+	}
+	if !reflect.DeepEqual(*recorded, want) {
+		t.Fatalf("executed queries = %q, want %q", *recorded, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unexpected queries: %v", err)
 	}
 }
