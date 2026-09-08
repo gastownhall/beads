@@ -46,7 +46,8 @@ func (d DoltServerDSN) String() string {
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 		ClientFoundRows:      d.ClientFoundRows,
-		InterpolateParams:    true,
+		// Same setting, same reasons as doltutil.ServerDSN; see the comment there.
+		InterpolateParams: true,
 	}
 	switch {
 	case d.TLSConfigName != "":
