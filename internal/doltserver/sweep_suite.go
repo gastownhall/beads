@@ -19,11 +19,23 @@ import (
 // left its dolt sql-server behind (wy-j2zc8q).
 const SuiteOwnerMarkerName = "testmain.pid"
 
-// FailOnLeakEnv turns a post-run sweep that actually reaped something from a
-// warning into a suite failure. It is opt-in on purpose: a single leaky test
-// would otherwise redden a whole package for everyone, so the default is a
-// loud line on stderr and the code the tests themselves produced.
-const FailOnLeakEnv = "BEADS_TEST_FAIL_ON_LEAK"
+// AllowLeakEnv downgrades a post-run sweep that actually reaped something
+// from a suite failure to a warning. Setting it to "1" is the ONLY way a
+// leaked `dolt sql-server` leaves a green run.
+//
+// The default is the failure, not the warning. This leak has now been
+// diagnosed and closed three times (wy-9byjk, wy-5ce39p, wy-j2zc8q) and every
+// one of those fixes was landed alongside machinery that reported the leak on
+// stderr and exited 0 — so each regression rode a green suite for weeks, and
+// the leak was rediscovered from a dev box's process table rather than from
+// CI. A reaped server means a test finished with a detached daemon still
+// serving a directory the suite is about to delete; that is a defect in the
+// suite, and the run should say so in the only channel anybody reads.
+//
+// The escape hatch exists for the bisect/triage case — someone who needs the
+// tests' own exit code out of a package with a known leak — not as a lane
+// default.
+const AllowLeakEnv = "BEADS_TEST_ALLOW_LEAK"
 
 // WriteSuiteOwnerMarker records this process as the owner of root by writing
 // SuiteOwnerMarkerName inside it. Call it from TestMain immediately after
@@ -203,26 +215,27 @@ func sweepDeadSuiteRoots(
 // call into the suite's exit code. suite names the package for the log line.
 //
 // A non-empty sweep means the suite leaked a dolt sql-server: the tests
-// finished, but a server survived every t.Cleanup and TestMain defer. That is
-// always reported loudly on stderr; it only fails the run when
-// FailOnLeakEnv is set to "1", so one flaky test cannot redden a package for
-// everyone who did not opt in. A code the tests already failed with is
-// preserved, never downgraded.
+// finished, but a server survived every t.Cleanup and TestMain defer. That
+// fails the run, so the regression is caught by the suite that caused it
+// instead of by someone reading `ps` days later — unless AllowLeakEnv is set
+// to "1", which downgrades it to the loud stderr line it used to be. A code
+// the tests already failed with is preserved, never overwritten.
 func ApplyLeakPolicy(suite string, code int, swept []int) int {
 	if len(swept) == 0 {
 		return code
 	}
-	if os.Getenv(FailOnLeakEnv) == "1" {
+	if os.Getenv(AllowLeakEnv) == "1" {
 		fmt.Fprintf(os.Stderr,
-			"FAIL: %s leaked %d dolt sql-server process(es) %v; swept them, and %s=1 makes that a failure\n",
-			suite, len(swept), swept, FailOnLeakEnv)
-		if code == 0 {
-			return 1
-		}
+			"Warning: %d leaked dolt sql-server(s) swept after %s: %v (%s=1 is downgrading this from a failure)\n",
+			len(swept), suite, swept, AllowLeakEnv)
 		return code
 	}
 	fmt.Fprintf(os.Stderr,
-		"Warning: %d leaked dolt sql-server(s) swept after %s: %v (set %s=1 to fail the run on this)\n",
-		len(swept), suite, swept, FailOnLeakEnv)
+		"FAIL: %s leaked %d dolt sql-server process(es) %v; swept them. A test finished with a detached server still\n"+
+			"      serving a temp dir this suite deletes. Fix the fixture's cleanup, or set %s=1 to downgrade this.\n",
+		suite, len(swept), swept, AllowLeakEnv)
+	if code == 0 {
+		return 1
+	}
 	return code
 }

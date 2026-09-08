@@ -273,7 +273,7 @@ func TestSweepDeadSuiteRootsSkipsSelf(t *testing.T) {
 }
 
 // TestApplyLeakPolicyForSuite covers the exit-code arithmetic of the
-// env-gated leak-as-failure rule.
+// leak-as-failure rule and its env-gated downgrade.
 func TestApplyLeakPolicyForSuite(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -284,17 +284,18 @@ func TestApplyLeakPolicyForSuite(t *testing.T) {
 	}{
 		{name: "no leak, passing suite", code: 0, swept: nil, want: 0},
 		{name: "no leak, failing suite", code: 2, swept: nil, want: 2},
-		{name: "leak warns but does not fail by default", code: 0, swept: []int{101}, want: 0},
-		{name: "leak fails a passing suite when opted in", env: "1", code: 0, swept: []int{101}, want: 1},
-		{name: "leak never downgrades an existing failure", env: "1", code: 2, swept: []int{101}, want: 2},
-		{name: "any value other than 1 stays advisory", env: "true", code: 0, swept: []int{101}, want: 0},
+		{name: "leak fails a passing suite by default", code: 0, swept: []int{101}, want: 1},
+		{name: "leak never overwrites an existing failure", code: 2, swept: []int{101}, want: 2},
+		{name: "leak warns instead when opted out", env: "1", code: 0, swept: []int{101}, want: 0},
+		{name: "opt-out never revives a failing suite", env: "1", code: 2, swept: []int{101}, want: 2},
+		{name: "any value other than 1 still fails", env: "true", code: 0, swept: []int{101}, want: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(FailOnLeakEnv, tc.env)
+			t.Setenv(AllowLeakEnv, tc.env)
 			if got := ApplyLeakPolicy("internal/doltserver", tc.code, tc.swept); got != tc.want {
 				t.Errorf("ApplyLeakPolicy(%d, %v) with %s=%q = %d, want %d",
-					tc.code, tc.swept, FailOnLeakEnv, tc.env, got, tc.want)
+					tc.code, tc.swept, AllowLeakEnv, tc.env, got, tc.want)
 			}
 		})
 	}
