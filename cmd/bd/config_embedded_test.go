@@ -190,6 +190,77 @@ func TestEmbeddedConfig(t *testing.T) {
 		}
 	})
 
+	// The location bd reports must be a record of the writes it made, not a
+	// guess made before them. GetYamlConfig reads viper's MERGED value -
+	// SetDefault values and AutomaticEnv included - so a database-backed key
+	// with a non-empty default looked present in config.yaml even in a
+	// workspace whose config.yaml never mentioned it, and bd claimed to have
+	// cleared a file it did not touch.
+	t.Run("config_unset_does_not_claim_a_yaml_write_it_did_not_make", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		before, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		// no-hooks is not a yaml-only key and carries the default "false", so
+		// GetYamlConfig("no-hooks") is non-empty with or without a
+		// config.yaml entry. It is absent from this workspace's config.yaml.
+		if strings.Contains(string(before), "no-hooks") {
+			t.Skipf("this workspace's config.yaml already carries no-hooks; the probe needs a key it does not")
+		}
+
+		bdConfig(t, bd, dir, "set", "no-hooks", "true")
+		out := bdConfig(t, bd, dir, "unset", "no-hooks")
+
+		if strings.Contains(out, "config.yaml") {
+			t.Errorf("unset named config.yaml as a cleared location, but the key was never written there: %s", out)
+		}
+		if !strings.Contains(out, "in database") {
+			t.Errorf("unset should report the database as the cleared location: %s", out)
+		}
+
+		after, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml after unset: %v", err)
+		}
+		if string(after) != string(before) {
+			t.Errorf("config.yaml was rewritten by an unset that had nothing to clear:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+
+	// With no project config.yaml at all, a database-backed unset of a
+	// defaulted key used to delete the row and then fail on "no
+	// .beads/config.yaml found" - a non-zero exit over a half-applied unset,
+	// where before this PR bd printed "Unset <key>" and exited 0. "Not in
+	// config.yaml" is an answer, not a failure. The key has to be one with a
+	// non-empty default (no-hooks), since that is what made the old
+	// GetYamlConfig pre-check believe there was a config.yaml layer to clear.
+	t.Run("config_unset_succeeds_with_no_project_config_yaml", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		original, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.WriteFile(configPath, original, 0600); err != nil {
+				t.Fatalf("restore config.yaml: %v", err)
+			}
+		})
+
+		bdConfig(t, bd, dir, "set", "no-hooks", "true")
+		if err := os.Remove(configPath); err != nil {
+			t.Fatalf("remove config.yaml: %v", err)
+		}
+
+		out := bdConfig(t, bd, dir, "unset", "no-hooks")
+		if strings.Contains(out, "config.yaml") {
+			t.Errorf("unset named config.yaml with no config.yaml present: %s", out)
+		}
+		if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+			t.Errorf("unset recreated config.yaml: %v", err)
+		}
+	})
+
 	// ===== Validate =====
 	// Note: config validate checks dolt server connectivity which doesn't
 	// apply to embedded mode, so we skip it here.

@@ -456,31 +456,38 @@ func MetricsNoticeShownByUserConfig() bool {
 	return shown
 }
 
-func UnsetUserYamlConfig(key string) error {
+// UnsetUserYamlConfig comments out key in the user-global config.yaml. The bool
+// reports whether the file was actually changed, on the same terms as
+// UnsetYamlConfig: an absent file or an absent key is (false, nil), not an
+// error.
+func UnsetUserYamlConfig(key string) (bool, error) {
 	configPath, err := UserConfigYamlPath()
 	if err != nil {
-		return err
+		return false, err
 	}
 	normalizedKey := normalizeYamlKey(key)
 
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is a validated absolute user config path
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("failed to read user config.yaml: %w", err)
+		return false, fmt.Errorf("failed to read user config.yaml: %w", err)
 	}
 
-	newContent := commentOutYamlKey(string(content), normalizedKey)
+	newContent, changed := commentOutYamlKey(string(content), normalizedKey)
+	if !changed {
+		return false, nil
+	}
 
 	// Preserve the owner-private 0600 posture every other user-global writer
 	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
 	// rewriting at 0644 would relax this shared user config to world-readable.
 	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
-		return fmt.Errorf("failed to write user config.yaml: %w", err)
+		return false, fmt.Errorf("failed to write user config.yaml: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func SetUserYamlConfig(key, value string) error {
@@ -540,28 +547,44 @@ func GetYamlConfig(key string) string {
 	return v.GetString(normalizedKey)
 }
 
-// UnsetYamlConfig removes a configuration value from the project's config.yaml file.
-// The key line is commented out (prefixed with "# ") to preserve it as documentation.
-func UnsetYamlConfig(key string) error {
+// UnsetYamlConfig removes a configuration value from the project's config.yaml
+// file. The key line is commented out (prefixed with "# ") to preserve it as
+// documentation.
+//
+// The bool reports whether the file was actually changed, so a caller can name
+// where the unset landed rather than asserting a write it did not make. It is
+// false, with a nil error, when the workspace has no project config.yaml at all
+// (an external BEADS_DIR or a database-only workspace) and when the key is not
+// present in a form commentOutYamlKey can safely comment. Neither is a failure:
+// "the key is not in config.yaml" is the correct answer to give, and erroring
+// on it left a database-backed unset half-applied - the row deleted, the
+// command exiting non-zero.
+func UnsetYamlConfig(key string) (bool, error) {
 	configPath, err := findProjectConfigYaml()
 	if err != nil {
-		return err
+		return false, nil
 	}
 
 	normalizedKey := normalizeYamlKey(key)
 
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml
 	if err != nil {
-		return fmt.Errorf("failed to read config.yaml: %w", err)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
-	newContent := commentOutYamlKey(string(content), normalizedKey)
+	newContent, changed := commentOutYamlKey(string(content), normalizedKey)
+	if !changed {
+		return false, nil
+	}
 
 	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
-		return fmt.Errorf("failed to write config.yaml: %w", err)
+		return false, fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // findProjectConfigYaml finds the active config.yaml path for YAML-only config writes.
@@ -798,24 +821,30 @@ func scalarStyleFor(value string) yaml.Style {
 	return 0
 }
 
-func commentOutYamlKey(content, key string) string {
+// commentOutYamlKey comments out key's line in content and reports whether it
+// actually did so. A false return means the key was not present in a form this
+// can safely comment - an absent key, a key whose value is the block beneath
+// it, or a leaf that does not own its own line - and the content comes back
+// unchanged. Callers use that boolean to report where the unset landed instead
+// of asserting a write they did not make.
+func commentOutYamlKey(content, key string) (string, bool) {
 	if updated, ok := commentOutFlatYamlKey(content, key); ok {
-		return updated
+		return updated, true
 	}
 	if updated, ok := commentOutNestedYamlKey(content, key); ok {
-		return updated
+		return updated, true
 	}
-	return content
+	return content, false
 }
 
 func commentOutFlatYamlKey(content, key string) (string, bool) {
 	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:(.*)$`)
 
-	var lines []string
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
+	// Split rather than scan so the file's trailing newline survives: a
+	// scanner drops it, and "a: 1\n" would come back as "# a: 1" while the
+	// nested and no-match paths preserved theirs. Which path fires must not
+	// decide whether the file keeps its final newline.
+	lines := strings.Split(content, "\n")
 
 	found := false
 	for i, line := range lines {
@@ -882,6 +911,14 @@ func commentOutNestedYamlKey(content, key string) (string, bool) {
 		return content, false
 	}
 	trimmed := strings.TrimLeft(lines[idx], " \t")
+	// The leaf must own the line it sits on. In flow style the leaf's line is
+	// also its parent's - `dolt: {mode: server}` puts `mode` at column 8 while
+	// the line begins at column 1 - so commenting the whole line would delete
+	// the entire `dolt` mapping to unset `dolt.mode`. Requiring the key node to
+	// start at the line's first non-space column refuses that instead.
+	if keyNode.Column != len(lines[idx])-len(trimmed)+1 {
+		return content, false
+	}
 	lines[idx] = lines[idx][:len(lines[idx])-len(trimmed)] + "# " + trimmed
 
 	return strings.Join(lines, "\n"), true
