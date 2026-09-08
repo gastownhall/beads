@@ -627,14 +627,28 @@ func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars ma
 		return nil, "", fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}
 
-	// A dry-run must fail the same way the real bond would: an enum/pattern/
-	// provided-empty violation in --var values fails resolveOrCookToSubgraph,
-	// so reporting "will be cooked" here would be a false preview.
-	if err := formula.ValidateProvidedVars(f, vars); err != nil {
-		return nil, "", err
+	// A dry-run must fail the same way the real bond would, and the real bond
+	// (resolveAndCookFormulaWithVars) resolves inheritance BEFORE it validates
+	// anything. parser.Resolve is what calls Formula.Validate - LoadByName ->
+	// loadFormula -> ParseFile never does - so skipping it here previewed a
+	// successful bond for a formula the real bond rejects, including the
+	// unspawnable waits_for gate this PR adds. Resolving first also means the
+	// --var check runs against the merged formula rather than the unmerged
+	// one, so a var declared only in a parent is checked too.
+	resolved, err := parser.Resolve(f)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolving formula %q: %w", operand, err)
 	}
 
-	return nil, f.Formula, nil
+	// An enum/pattern/provided-empty violation in --var values fails
+	// resolveOrCookToSubgraph, so reporting "will be cooked" here would be a
+	// false preview. Wrapped the same way the real path wraps it, so the two
+	// produce the same message rather than merely the same exit code.
+	if err := formula.ValidateProvidedVars(resolved, vars); err != nil {
+		return nil, "", fmt.Errorf("formula %q: %w", operand, err)
+	}
+
+	return nil, resolved.Formula, nil
 }
 
 // resolveOrCookToSubgraph tries to resolve an operand as an issue ID or formula.
