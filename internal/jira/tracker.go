@@ -207,7 +207,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	// Incremental sync
 	if opts.Since != nil {
-		jql += fmt.Sprintf(" AND updated >= %q", opts.Since.Format("2006-01-02 15:04"))
+		jql += fmt.Sprintf(` AND updated >= "%s"`, opts.Since.UTC().Format("2006-01-02 15:04 UTC"))
 	}
 
 	jql += " ORDER BY updated DESC"
@@ -242,6 +242,18 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 
 	// Set project to primary (first) project key.
 	fields["project"] = map[string]string{"key": t.PrimaryProjectKey()}
+
+	// Epic-link: when configured, nest every created issue under the project
+	// epic so the Jira mirror groups fleet work under one parent. Without
+	// this, created issues land outside the epic and the ledger cannot see
+	// them (external_ref is still written back by the sync engine).
+	epicKey, err := t.getConfig(ctx, "jira.epic_key", "JIRA_EPIC_KEY")
+	if err != nil {
+		return nil, err
+	}
+	if epicKey != "" {
+		fields["parent"] = map[string]string{"key": epicKey}
+	}
 
 	created, err := t.client.CreateIssue(ctx, fields)
 	if err != nil {
