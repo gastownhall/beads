@@ -1,5 +1,9 @@
 # Versioned Beads: issue-plane write paths and their Phase 2 disposition
 
+This document has two parts. **Dispositions at this head** is the current inventory: every row whose disposition changed after the completeness fix a14f48b17 (merged as 5098ec85f), the seam's call sites at this head, and notes that are true now. **As found at 321a79278** is the review artifact this PR started from — the table donnabox's item 5 on #6358 asked for, derived before the completeness fix — kept verbatim under a dated heading because it is the record of what the review found. Wherever the two parts differ, the current part wins; a reader citing a row number should cite it from the current part.
+
+## Dispositions at this head (67428a55a)
+
 Status after a14f48b17 (merged as 5098ec85f on `deploy/be-764ey-gate`): the table below was derived from the tree at 321a79278, before the completeness fix, and is kept as the record of what the review found. Since that commit the following rows changed disposition:
 
 - Rows 17-23, 25 and 27 (close, reopen, claim, unclaim/release, lease reclaim, defer wake, label add/remove, promote, persistence move) are now **VERSIONED**: each mints once, after its row write and event, gated on a row actually changing.
@@ -7,9 +11,92 @@ Status after a14f48b17 (merged as 5098ec85f on `deploy/be-764ey-gate`): the tabl
 - Ordering: `ExecuteUpdate` mints once, after field, label, parent and persistence patches; batch create mints per issue after its creation-time edges are persisted, so the first version carries the outgoing edge set.
 - `version_completeness_test.go` (46 must-mint entry points, exemption table with reasons, never-mints inverse guard) and `embeddeddolt/version_completeness_behaviour_test.go` pin the set at runtime.
 
-Still true and deliberately out of contract or deferred: an unchanged re-import of an existing row mints a version (create has no field-level no-op gate — and the journal seam sits in the same position: `RecordEventInTx(EventCreate)` at create.go:207 runs on every accepted upsert, only the events-table write behind the `isNew` gate at create.go:171 is skipped, so a no-op gate belongs in front of both seams, not the version seam alone); the uow leg mints per repository write, so a domain create with N labels and M edges yields 1+N+M versions where the direct legs yield one (each a distinct accepted state; follow-up); demote-to-wisp and delete/rename strand version rows because `issue_versions` has no FK to `issues` (Phase 3's deleted-Versioned-Bead guarantee); compaction bookkeeping, restore, migrations, merge-settle, doctor fixes and `bd sql` remain out of contract by design.
-
 The seam is `issueops.RecordVersionInTx` (internal/storage/issueops/version_history.go:87 at 321a79278; :148 after a14f48b17), which sits beside the events-journal seam `issueops.RecordEventInTx` (journal.go:309). At 321a79278 it was reached from exactly six call sites: create.go:196, update.go:547, dependency_editor.go:181 and :272, and domain/db/issue.go:87/:102 (`Insert`) and :339 (`Update`); after a14f48b17 it is reached from 27 (18 in issueops, 9 in domain/db), listed in the section "Seam call sites after the completeness fix" below. Dispositions: **VERSIONED** = reaches `RecordVersionInTx` and mints an `issue_versions` row plus the `current_revision` bump; **NO-OP** = discarded before the seam (`DiscardNoopIssueUpdates`, the dependency editor's `eventWritten` gate, create's early returns, or the wisp exclusion); **OUT OF CONTRACT** = mutates an issue-plane row (issues, wisps, dependencies, labels, comments and wisp_* twins) without ever calling the seam. Paths are under `internal/storage/` unless they start with `cmd/`, `internal/compact/` or `backend/`. Checkout: /var/tmp/mayor-beads-phase2 @ deploy/be-764ey-gate; all line numbers are against commit 321a79278, the HEAD when this inventory was read (see the last note on drift).
+
+### Rows whose disposition changed after a14f48b17
+
+Row numbers are the historical table's. Line numbers in this table are against the Go tree at this head (unchanged since 5098ec85f).
+
+| # | Path | Version seam at this head | Disposition | Mechanism |
+|---|---|---|---|---|
+| 13 | any of rows 1-8 whose target row is a wisp **or a promoted no-history bead** | no | NO-OP | `RecordVersionInTx` returns on `IsWisp`, which is `Ephemeral \|\| NoHistory` (helpers.go:36-41): wisps per FR-8, and a promoted no-history bead — a durable issues-plane row with `NoHistory=true` — because no-history means no history. Wording only; the code did not change. |
+| 14 | dependencies.go:`addDependencyInTx` via `AddDependencyInTx` from the store verbs, `ApplyParentPatch`, `applyBatchRun.applyDepAdd` | yes | VERSIONED | mint moved into `addDependencyInTx` (`mintDependencyVersion`, dependencies.go:393), gated on the row insert rather than on `eventWritten`; the publicops editor's own mint call was removed so no leg double-mints |
+| 15 | domain/db/dependency.go:`dependencySQLRepositoryImpl.Insert` (uow `AddDependencies`, create-time edges) | yes | VERSIONED | seam at dependency.go:228 and :240 after the insert |
+| 16 | dependencies.go:`removeDependencyInTx` via `RemoveDependencyInTx` and domain/db/dependency.go:`Delete` | yes | VERSIONED | gated on the row delete; dependency.go:409 on the uow leg |
+| 17 | close.go:`closeIssueInTx` (all close variants; `ExecuteCloseBatch` loops it; domain/db `Close`/`CloseChecked`) | yes | VERSIONED | close.go:394, after the row write and event, gated on the row changing |
+| 18 | reopen.go:`reopenIssueInTx` | yes | VERSIONED | reopen.go:126 |
+| 19 | claim.go:`claimIssueInTx` and domain/db/issue.go:`Claim` | yes | VERSIONED | claim.go:239 and issue.go:551; `ExecuteUpdate`'s Claim flag passes `mintVersion=false` and mints once at its own end |
+| 20 | unclaim.go:`finishUnclaimInTx` (unclaim, release) | yes | VERSIONED | unclaim.go:137 |
+| 21 | lease.go:`ReclaimExpiredLeasesInTx` | yes | VERSIONED | lease.go:786 |
+| 22 | wake_defers.go:`wakeExpiredDefersInTable` | yes | VERSIONED | wake_defers.go:143 |
+| 23 | labels.go:`addLabelInTx` / `removeLabelInTx` and domain/db/label.go:`Insert` / `Delete` | yes | VERSIONED | labels.go:190 and :239 gated on `RowsAffected() > 0`; label.go:91 and :130; `applyLabelPatch` (aggregate.go:360) mints only when called outside `ExecuteUpdate` |
+| 25 | promote.go:`PromoteFromEphemeralInTx` | yes | VERSIONED | promote.go:141, after the label, dependency and comment copies |
+| 27 | persistence.go:`moveIssuePersistenceInTx` | yes | VERSIONED | persistence.go:76 and :153; `ExecuteUpdate` passes `mintVersion=false` and mints once at its own end |
+| 34 | batch_apply.go:`applyBatchRun` | yes, per item | VERSIONED | its create/update/close items reach rows 1/2, 5/6 and 17; its dep-add items reach `addDependencyInTx`, which now mints (row 14) |
+
+Rows not listed keep the disposition shown in the historical table: rows 1-8 VERSIONED; rows 9-12 NO-OP gates inside them; rows 24, 26, 28-33 and 35-39 OUT OF CONTRACT; row 40 writes no issue-plane row; row 41 is Phase 3.
+
+### Counts at this head
+
+Of the 34 live issue-plane write paths (rows 1-8 and 14-39), **21 are VERSIONED** (rows 1-8, 14-23, 25, 27, 34) and **13 are OUT OF CONTRACT** (rows 24, 26, 28-33, 35-39); rows 9-13 are the no-op gates inside the versioned ones. The out-of-contract set is what the design puts out of contract: comments (not part of the snapshot), is_blocked flips, delete, rename and demote (Phase 3's deleted-Versioned-Bead guarantee), compaction bookkeeping and restore, migrations, merge-settle, doctor fixes and raw SQL.
+
+### Still deferred
+
+Still true and deliberately out of contract or deferred: an unchanged re-import of an existing row mints a version (create has no field-level no-op gate — and the journal seam sits in the same position: `RecordEventInTx(EventCreate)` at create.go:207 runs on every accepted upsert, only the events-table write behind the `isNew` gate at create.go:171 is skipped, so a no-op gate belongs in front of both seams, not the version seam alone); the uow leg mints per repository write, so a domain create with N labels and M edges yields 1+N+M versions where the direct legs yield one (each a distinct accepted state; follow-up); demote-to-wisp and delete/rename strand version rows because `issue_versions` has no FK to `issues` (Phase 3's deleted-Versioned-Bead guarantee); compaction bookkeeping, restore, migrations, merge-settle, doctor fixes and `bd sql` remain out of contract by design. The flag-off contract is behaviourally a no-op at the seam (`RecordVersionInTx` returns before any query) but not literally zero added work: labels.go's `RowsAffected` gate and the per-transaction `sync.Map` entry run with the flag off; the differential harness that would prove the stronger claim is not in this PR. The items that become live the first time the flag is on — the uow leg's 1+N+M, the re-import no-op gate on both seams, duplicate-key metadata, the single-writer allocator, and the `attribution_status` vocabulary being enforced only in Go — are tracked together in gastownhall/beads#6379.
+
+### Seam call sites at this head
+
+Verified with `grep -rn 'RecordVersionInTx(' internal/ --include='*.go'` over non-test files at d484b809d (the Go tree is unchanged between the merge of a14f48b17 as 5098ec85f and this note): **27 call sites** reach the seam, 18 on the direct legs in `issueops/` and 9 on the uow leg in `domain/db/`. The figure of 29 quoted in the PR thread was an over-count; this table is the correction. Line numbers are against that tree. The 46 "must-mint entry points" pinned by `version_completeness_test.go` are a different count by design: they are the public entry functions whose call graph must reach the seam, not the seam's own call sites.
+
+Direct legs, `internal/storage/issueops/` (18):
+
+| File:line | Function | Mutation |
+|---|---|---|
+| aggregate.go:360 | `applyLabelPatch` | label patch (mints only when used outside `ExecuteUpdate`, which passes `mintVersion=false`) |
+| aggregate.go:423 | `applyParentPatch` | parent patch (same rule) |
+| claim.go:239 | `claimIssueInTx` | claim |
+| close.go:394 | `closeIssueInTx` | close, all variants; `ExecuteCloseBatch` loops it |
+| create.go:216 | `CreateIssueInTxWithResult` | singular create and import upsert |
+| create.go:384 | `CreateIssuesInTxWithContext` | batch create, per issue, after its creation-time edges (`DeferVersionMint`) |
+| dependencies.go:393 | `mintDependencyVersion` | from `addDependencyInTx` / `removeDependencyInTx`: legacy verbs, the publicops editor, batch-apply |
+| execution.go:269 | `ExecuteUpdate` | once, after field, label, parent and persistence patches |
+| labels.go:190 | `addLabelInTx` | label add |
+| labels.go:239 | `removeLabelInTx` | label remove |
+| lease.go:786 | `ReclaimExpiredLeasesInTx` | lease reclaim |
+| persistence.go:76, :153 | `moveIssuePersistenceInTx` | persistence move (two sites in the one function) |
+| promote.go:141 | `PromoteFromEphemeralInTx` | promote from ephemeral |
+| reopen.go:126 | `reopenIssueInTx` | reopen |
+| unclaim.go:137 | `finishUnclaimInTx` | unclaim / release |
+| update.go:555 | `updateIssueInTx` | update |
+| wake_defers.go:143 | `wakeExpiredDefersInTable` | defer wake |
+
+uow leg, `internal/storage/domain/db/` (9):
+
+| File:line | Method | Mutation |
+|---|---|---|
+| issue.go:87, :102 | issue repository `Insert` | create (two sites in the one method) |
+| issue.go:339 | issue repository `Update` | update |
+| issue.go:551 | issue repository `Claim` | claim |
+| label.go:91 | label repository `Insert` | label add |
+| label.go:130 | label repository `Delete` | label remove |
+| dependency.go:228, :240 | dependency repository `Insert` | edge add (two sites in the one method) |
+| dependency.go:409 | dependency repository `Delete` | edge remove |
+
+### Notes at this head
+
+- **What actually versions:** every accepted issue-plane mutation on every leg — create (singular, batch, import), update (and everything that reaches `updateIssueInTx`: metadata merge/delete/CAS, deleted-reference rewrite, compaction's content rewrite), dependency add and remove (editor, legacy verbs, uow repository, batch-apply), close, reopen, claim, unclaim/release, lease reclaim, defer wake, label add and remove, promote, persistence move. `version_completeness_test.go` pins 46 must-mint entry points with an exemption table (a reason per row) and an inverse never-mints guard; `embeddeddolt/version_completeness_behaviour_test.go` pins the runtime deltas.
+- **Cross-leg symmetry on dependencies:** resolved. The dolt and embeddeddolt editors, the legacy store verbs and the uow repository all reach the seam through `addDependencyInTx` / `removeDependencyInTx`, gated on the row insert or delete.
+- **Ordering inside a versioned call:** the mint is the last durable-state write. `ExecuteUpdate` mints once after its field, label, parent and persistence patches; batch create mints per issue after `PersistDependenciesWithOptionsResult`, so the first version carries the creation-time edge set.
+- **Count vs design:** 21 VERSIONED, 13 OUT OF CONTRACT, 5 no-op gates (see Counts at this head). The design's "eighteen" is still not reconcilable item by item from this checkout.
+- **Import upsert:** an unchanged re-import of an existing row still mints, and it also journals — `RecordEventInTx(EventCreate)` at create.go:207 runs on every accepted upsert — so the no-op gate belongs in front of both seams (gastownhall/beads#6379, item 2).
+- **No FK from issue_versions to issues** (0067), so delete, rename and demote strand version rows under ids that no longer exist in `issues` — Phase 3 (gastownhall/beads#6379, item 6).
+- **Non-canonicalizable snapshots fail the mutation** by policy: duplicate keys in an issue's `metadata` (a `json.RawMessage`) make `canonicalDurableState` return an error and abort the transaction with the flag on (gastownhall/beads#6379, item 3).
+- **Single writer means one writer at a time per store,** not merely one clone: `MAX(revision)+1` is not a safe allocator for two concurrent transactions in one store either, and no contract case runs concurrent writers (gastownhall/beads#6379, item 4).
+- **Exemption tables that name the seam:** journal_completeness_test.go `beadDMLExemptions` and row_lock_guard_test.go `funcNameExemptions` both list `RecordVersionInTx` as bookkeeping for an already-journaled mutation; unchanged.
+
+## As found at 321a79278 (historical; superseded above wherever the two parts differ)
+
+The table and notes below are the inventory as derived from the tree at 321a79278, the HEAD when it was read, and all line numbers in this part are against that commit. It is kept verbatim as the record of what the review found. Rows 13-23, 25, 27 and 34 are superseded by the current table above; the notes below that contradict the notes above are superseded too.
 
 | # | Path (file:function) | Writes | Events seam | Version seam | Disposition | Why |
 |---|---|---|---|---|---|---|
@@ -55,45 +142,7 @@ The seam is `issueops.RecordVersionInTx` (internal/storage/issueops/version_hist
 | 40 | issueops/bootstrap.go:`BootstrapInTx` (uow/bootstrapper.go, hook_bootstrapper.go) | config + metadata tables only (`SetConfigInTx`, `SetMetadataInTx`) | no | no | OUT OF CONTRACT (n/a) | writes no issue-plane row at all |
 | 41 | PLANNED 18th: `fk_dep_issue_target` ON DELETE CASCADE (schema/cli_migrations.go:284,311; migrations 0041/0043) | DB-level cascade deleting dependencies rows when their target issues row is deleted; no Go call site | no | no | Phase 3 (planned) | PR #6358 body: "Phase 3 items by design: the `fk_dep_issue_target` cascade (the 18th path)"; today it fires silently underneath rows 28-29 |
 
-## Seam call sites after the completeness fix
-
-Verified with `grep -rn 'RecordVersionInTx(' internal/ --include='*.go'` over non-test files at d484b809d (the Go tree is unchanged between the merge of a14f48b17 as 5098ec85f and this note): **27 call sites** reach the seam, 18 on the direct legs in `issueops/` and 9 on the uow leg in `domain/db/`. The figure of 29 quoted in the PR thread was an over-count; this table is the correction. Line numbers are against that tree. The 46 "must-mint entry points" pinned by `version_completeness_test.go` are a different count by design: they are the public entry functions whose call graph must reach the seam, not the seam's own call sites.
-
-Direct legs, `internal/storage/issueops/` (18):
-
-| File:line | Function | Mutation |
-|---|---|---|
-| aggregate.go:360 | `applyLabelPatch` | label patch (mints only when used outside `ExecuteUpdate`, which passes `mintVersion=false`) |
-| aggregate.go:423 | `applyParentPatch` | parent patch (same rule) |
-| claim.go:239 | `claimIssueInTx` | claim |
-| close.go:394 | `closeIssueInTx` | close, all variants; `ExecuteCloseBatch` loops it |
-| create.go:216 | `CreateIssueInTxWithResult` | singular create and import upsert |
-| create.go:384 | `CreateIssuesInTxWithContext` | batch create, per issue, after its creation-time edges (`DeferVersionMint`) |
-| dependencies.go:393 | `mintDependencyVersion` | from `addDependencyInTx` / `removeDependencyInTx`: legacy verbs, the publicops editor, batch-apply |
-| execution.go:269 | `ExecuteUpdate` | once, after field, label, parent and persistence patches |
-| labels.go:190 | `addLabelInTx` | label add |
-| labels.go:239 | `removeLabelInTx` | label remove |
-| lease.go:786 | `ReclaimExpiredLeasesInTx` | lease reclaim |
-| persistence.go:76, :153 | `moveIssuePersistenceInTx` | persistence move (two sites in the one function) |
-| promote.go:141 | `PromoteFromEphemeralInTx` | promote from ephemeral |
-| reopen.go:126 | `reopenIssueInTx` | reopen |
-| unclaim.go:137 | `finishUnclaimInTx` | unclaim / release |
-| update.go:555 | `updateIssueInTx` | update |
-| wake_defers.go:143 | `wakeExpiredDefersInTable` | defer wake |
-
-uow leg, `internal/storage/domain/db/` (9):
-
-| File:line | Method | Mutation |
-|---|---|---|
-| issue.go:87, :102 | issue repository `Insert` | create (two sites in the one method) |
-| issue.go:339 | issue repository `Update` | update |
-| issue.go:551 | issue repository `Claim` | claim |
-| label.go:91 | label repository `Insert` | label add |
-| label.go:130 | label repository `Delete` | label remove |
-| dependency.go:228, :240 | dependency repository `Insert` | edge add (two sites in the one method) |
-| dependency.go:409 | dependency repository `Delete` | edge remove |
-
-## Notes
+### Notes as found at 321a79278
 
 - **Count vs design.** Grouping by leaf mutation function, the code has **34 live issue-plane write paths** (rows 1-8 and 14-39; row 40 excluded because it writes no issue row; rows 9-13 are gates inside rows 1-8) plus the planned FK cascade — not eighteen. Of the 34, **8 are VERSIONED, 26 OUT OF CONTRACT**, and 5 NO-OP gates sit inside the versioned ones. The design's own list (be-hs42e.3) is not resolvable from this checkout or `bd show`; only PR #6358's "the 18th path" line was found, so the eighteen could not be reconciled item by item.
 - **What actually versions:** create, update (and their uow twins in domain/db/issue.go) and the publicops dependency editor. Every other journaled mutation — close, reopen, claim, unclaim/release, lease reclaim, defer wake, labels, comments, promote, persistence move, delete, rename — reaches `RecordEventInTx` but never `RecordVersionInTx`, even though version_history.go:20-27 describes the seam as living "inside the same already-short-circuited functions that call RecordEventInTx". journal_completeness_test.go pins 57 `mutationEntryPoints` for the journal; the version seam is wired into 3 of them, and no equivalent completeness test exists for it.
