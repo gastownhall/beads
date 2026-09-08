@@ -15,6 +15,15 @@ func varSubgraph(text string, varDefs map[string]formula.VarDef) *TemplateSubgra
 	}
 }
 
+// conditionVarSubgraph is varSubgraph plus the names a formula's step
+// conditions referenced. cook records these before FilterStepsByCondition
+// runs, since the step it drops takes its condition with it.
+func conditionVarSubgraph(text string, varDefs map[string]formula.VarDef, conditionVars ...string) *TemplateSubgraph {
+	sg := varSubgraph(text, varDefs)
+	sg.ConditionVars = conditionVars
+	return sg
+}
+
 func TestCheckPourVarsRejectsUnknownVars(t *testing.T) {
 	defaulted := map[string]formula.VarDef{"component": {Default: strPtr("core")}}
 
@@ -62,6 +71,24 @@ func TestCheckPourVarsRejectsUnknownVars(t *testing.T) {
 			vars:        map[string]string{"zeta": "1", "alpha": "2"},
 			wantErr:     true,
 			wantInError: []string{"alpha, zeta"},
+		},
+		{
+			// A var used only in a step condition appears in no issue field
+			// and need not be declared in [vars], but it decides which steps
+			// get poured at all - so it is consumable, and rejecting it would
+			// fail a pour the var demonstrably changes.
+			name:     "var referenced only by a step condition is accepted",
+			subgraph: conditionVarSubgraph("build {{component}}", defaulted, "has_spike"),
+			vars:     map[string]string{"component": "rule", "has_spike": "true"},
+		},
+		{
+			// The condition var widens the known set; it does not disable the
+			// check. A typo in it is still unusable.
+			name:        "typo in a condition var is still rejected",
+			subgraph:    conditionVarSubgraph("build {{component}}", defaulted, "has_spike"),
+			vars:        map[string]string{"has_spke": "true"},
+			wantErr:     true,
+			wantInError: []string{"has_spke", "has_spike"},
 		},
 	}
 

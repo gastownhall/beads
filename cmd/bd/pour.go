@@ -310,6 +310,14 @@ func knownVarsAcross(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubg
 		for _, name := range extractAllVariables(sg) {
 			known[name] = true
 		}
+		// A var referenced only by a step condition is consumable even though
+		// it appears in no issue field and need not be declared in [vars]:
+		// FilterStepsByCondition uses it to decide which steps get poured at
+		// all. Rejecting it would fail a pour that the var demonstrably
+		// changes.
+		for _, name := range sg.ConditionVars {
+			known[name] = true
+		}
 	}
 
 	add(subgraph)
@@ -373,7 +381,7 @@ func renderPourResult(result *InstantiateResult, totalAttached, attachCount int)
 
 func init() {
 	// Pour command flags
-	pourCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	pourCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	pourCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	pourCmd.Flags().String("assignee", "", "Assign the root issue to this agent/user")
 	pourCmd.Flags().StringSlice("attach", []string{}, "Proto to attach after spawning (repeatable)")
