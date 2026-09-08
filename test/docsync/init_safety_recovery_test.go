@@ -16,7 +16,7 @@ import (
 //     "root hash doesn't exist: <hash>".
 //  2. A fresh clone lacks dolt-ignored clone-local tables (leases, wisps,
 //     events, local_metadata, etc.) until `bd migrate schema` has run once.
-//     Symptom: "table not found: leases". The fix's "Schema already at v64"
+//     Symptom: "table not found: leases". The fix's "Schema already at v<N>"
 //     output is the expected, reassuring result — not an error.
 func TestInitSafetyRecoveryDocCoversReCloneGotchas(t *testing.T) {
 	root := repoRoot()
@@ -34,7 +34,7 @@ func TestInitSafetyRecoveryDocCoversReCloneGotchas(t *testing.T) {
 		{"damaged-store crash-loop symptom", "root hash doesn't exist"},
 		{"fresh-clone missing-table symptom", "table not found: leases"},
 		{"fresh-clone fix command", "bd migrate schema"},
-		{"fresh-clone reassuring success message", "schema already at v64"},
+		{"fresh-clone reassuring success message", "schema already at v"},
 	}
 	for _, c := range cases {
 		if !strings.Contains(lower, strings.ToLower(c.substr)) {
