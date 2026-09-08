@@ -124,22 +124,41 @@ func openStatsReporter() (issueops.StatsReporter, error) {
 // suppressedTypeSummary describes the counted rows that a default bd list will
 // not show, so the totals above can be reconciled against a listing instead of
 // looking like a phantom.
+//
+// It names two of the three type-based suppressions a default listing applies.
+// The third - the infra types, which applyTypeSuppressions
+// (internal/workapi/list.go) adds to ExcludeTypes independently of the wisp
+// plane bit - is NOT here, and not because a durable infra row is unreachable.
+// It is reachable: the plane routing and the listing's exclusions both read the
+// WORKSPACE-CONFIGURED types.infra set, and changing that set only invalidates
+// a cache (internal/storage/dolt/config.go) - it never moves rows already
+// written. So durable rows created while a type was not infra stay in the
+// issues plane once it becomes one, and a type evicted from the set creates
+// durable rows outright (pinned by the create contract in
+// backend/conformance/issue_operations_contract.go). Counting them therefore
+// needs that configured set, which ScanIssueCountsInTx - pure portable SQL with
+// no config seam - cannot reach. Tracked separately rather than guessed at
+// here with the built-in names, which would be wrong in exactly the workspaces
+// where it matters.
 func suppressedTypeSummary(stats *types.Statistics) string {
 	var parts []string
 	if stats.GateIssues > 0 {
-		parts = append(parts, fmt.Sprintf("%s (--include-gates)", pluralCount(stats.GateIssues, "gate")))
+		parts = append(parts, fmt.Sprintf("%s (--include-gates)", pluralCount(stats.GateIssues, "gate", "gates")))
 	}
 	if stats.TemplateIssues > 0 {
-		parts = append(parts, fmt.Sprintf("%s (--include-templates)", pluralCount(stats.TemplateIssues, "template")))
+		parts = append(parts, fmt.Sprintf("%s (--include-templates)", pluralCount(stats.TemplateIssues, "template", "templates")))
 	}
 	return strings.Join(parts, ", ")
 }
 
-func pluralCount(n int, noun string) string {
+// pluralCount renders a count with the right one of two spellings. Both forms
+// are passed in rather than derived by appending "s", so a caller with an
+// irregular plural is not silently mis-served.
+func pluralCount(n int, singular, plural string) string {
 	if n == 1 {
-		return fmt.Sprintf("%d %s", n, noun)
+		return fmt.Sprintf("%d %s", n, singular)
 	}
-	return fmt.Sprintf("%d %ss", n, noun)
+	return fmt.Sprintf("%d %s", n, plural)
 }
 
 func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary) error {
