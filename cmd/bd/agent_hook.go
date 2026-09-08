@@ -50,9 +50,10 @@ func runBdPrime(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("bd prime: resolve executable: %w", err)
 	}
 	cmdArgs := append([]string{"prime"}, args...)
-	// #nosec G702 - exe is os.Executable() (this bd binary re-invoking itself);
-	// cmdArgs is the fixed "prime" subcommand plus allowlisted internal flags,
-	// never attacker-controlled input.
+	// #nosec G702 - exe comes from primeExecutable (os.Executable in
+	// production: this bd binary re-invoking itself); cmdArgs is the fixed
+	// "prime" subcommand plus allowlisted internal flags, never
+	// attacker-controlled input.
 	cmd := exec.CommandContext(ctx, exe, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
