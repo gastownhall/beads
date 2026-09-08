@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -517,6 +518,18 @@ func TestSandboxHomeUnderPerUserTempRoot(t *testing.T) {
 		for _, tc := range cases {
 			if got := isUnderFixedTempRoots(tc.path, tc.goos); got != tc.want {
 				t.Errorf("isUnderFixedTempRoots(%q, %q) = %v, want %v", tc.path, tc.goos, got, tc.want)
+			}
+		}
+
+		// The rows above are only host-independent because the darwin table
+		// spells the symlink-resolved forms out. canonicalRoots would add
+		// them via EvalSymlinks on a Mac and NOT on Linux, so without the
+		// literals the /private/… rows pass here and fail on Linux CI — the
+		// exact split this assertion closes (wy-j2zc8q).
+		darwinRoots := fixedTempRoots("darwin")
+		for _, want := range []string{"/tmp", "/private/tmp", "/var/folders", "/private/var/folders"} {
+			if !slices.Contains(darwinRoots, want) {
+				t.Errorf("fixedTempRoots(%q) = %v, missing the literal %q", "darwin", darwinRoots, want)
 			}
 		}
 	})

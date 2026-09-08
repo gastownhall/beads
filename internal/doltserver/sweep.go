@@ -190,10 +190,21 @@ func isUnderFixedTempRoots(path, goos string) bool {
 // puts HOME under /var/folders/xx/yy/T — which without this entry disqualified
 // os.TempDir() itself and left the deleted-cwd arm inert on every Mac
 // (wy-j2zc8q).
+//
+// The darwin row spells out the symlink-RESOLVED forms ("/private/tmp",
+// "/private/var/folders") literally instead of leaving them to canonicalRoots.
+// canonicalRoots resolves with filepath.EvalSymlinks, which reads the HOST's
+// filesystem: on a Mac it turns /tmp and /var/folders into their /private/…
+// targets, and on a Linux runner it adds nothing at all. But this table is a
+// claim ABOUT darwin that any platform may be asked to judge — the platform
+// row is pinned from Linux CI by TestSandboxHomeUnderPerUserTempRoot, and a
+// Mac's lsof reports cwds in the /private/… form — so the answer must not
+// depend on where the judging happens. canonicalRoots dedups, so on a real
+// Mac these literals cost nothing: they are exactly what it would have added.
 func fixedTempRoots(goos string) []string {
 	roots := []string{"/tmp"}
 	if goos == "darwin" {
-		roots = append(roots, "/var/folders")
+		roots = append(roots, "/private/tmp", "/var/folders", "/private/var/folders")
 	}
 	return roots
 }
