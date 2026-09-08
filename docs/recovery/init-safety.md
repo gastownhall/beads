@@ -308,9 +308,9 @@ skipping straight to `bd list`) can hit either of two live gotchas — see
 
 ## re-clone-gotchas
 
-Two gotchas hit during a live manual re-clone recovery (issue
-[ga-vrq5pu](https://github.com/gastownhall/beads/issues/ga-vrq5pu)), each of
-which cost real time because the symptom looks nothing like the cause. Both
+Two gotchas hit during a live manual re-clone recovery (issue ga-vrq5pu),
+each of which cost real time because the symptom looks nothing like the
+cause. Both
 apply any time you set aside or replace a Dolt database directory by hand —
 during the [pk-fork-refused](#pk-fork-refused) playbook above, the
 [init-force-refused](#init-force-refused) `bd bootstrap` path, or any other
@@ -345,12 +345,12 @@ When you set a database directory aside by hand, move it *outside*
 `data_dir` — e.g. up to `/tmp/` or a sibling of `.beads/`, never to a
 sibling path still under `.beads/dolt/`. This is exactly what the automated
 recovery path already does: `bd doctor --fix`'s corrupt-manifest repair
-renames a damaged database directory to a timestamped backup nested one
-level *inside* that database's own directory (`X/.dolt` →
-`X/.dolt.<ts>.corrupt.backup`), which is safe because it is not a new
-top-level subdirectory of `data_dir`. Doing the equivalent by hand at the
-top level of `data_dir` is what triggers this gotcha; see `bd doctor --fix`
-for the automated, gotcha-free version of this move.
+renames the *whole* `data_dir` directory itself to a timestamped
+`.<ts>.corrupt.backup` sibling (`data_dir` → `data_dir.<ts>.corrupt.backup`),
+landing next to `data_dir`, not inside it. Doing the equivalent by hand but
+leaving the renamed copy nested under the original `data_dir` is what
+triggers this gotcha; see `bd doctor --fix` for the automated, gotcha-free
+version of this move.
 
 ### Gotcha 2 — a fresh clone needs `bd migrate schema`
 
@@ -383,7 +383,7 @@ bd migrate schema
 No `--force` needed. This replays the clone-local tables and prints:
 
 ```
-✓ Schema already at v64
+✓ Schema already at v<N>
 ```
 
 **That output is expected and reassuring, not an error** — it means the

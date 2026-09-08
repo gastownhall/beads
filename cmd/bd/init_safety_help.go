@@ -98,7 +98,7 @@ RE-CLONE GOTCHAS
 
   Missing tables: a fresh clone lacks clone-local tables (leases, wisps,
   events, ...) until you run "bd migrate schema" (no --force). You'll see
-  "table not found: leases" until then; "Schema already at v64" after
+  "table not found: leases" until then; "Schema already at v<N>" after
   running it is expected, not an error.
 
   See docs/recovery/init-safety.md#re-clone-gotchas for full detail.
