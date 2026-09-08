@@ -22,16 +22,56 @@ import (
 
 // versionMintHelpers are the helpers whose call mints a version row. There is
 // exactly one seam; a function mints if it calls it directly or through a
-// named helper (mintDependencyVersion, addLabelInTx, updateIssueInTx, ...).
+// named helper (mintDependencyVersion, addLabelInTx, updateIssueInTx, ...)
+// whose mint it did not switch off — see versionMintGate.
 var versionMintHelpers = map[string]bool{
 	"RecordVersionInTx": true,
 }
 
-// versionMintEdges follows the same call-graph discipline as journalEmitEdges:
-// nothing in the derived-readiness family mints, and a mutator must not be
-// able to inherit a mint through a recompute either.
-func versionMintEdges(f *journalscan.FuncInfo) []string {
-	return journalEmitEdges(f)
+// versionMintGate names the boolean parameter the constituent helpers
+// (claimIssueInTx, updateIssueInTx, applyLabelPatch, applyParentPatch,
+// moveIssuePersistenceInTx, addLabelInTx, removeLabelInTx, addDependencyInTx,
+// removeDependencyInTx) mint under. mintDependencyVersion spells its own
+// "mint", but it is only ever handed a caller's mintVersion, never a literal,
+// so the one name covers every switch-off in the package.
+const versionMintGate = "mintVersion"
+
+// versionMintEdges follows the same call-graph discipline as journalEmitEdges
+// — nothing in the derived-readiness family mints, and a mutator must not be
+// able to inherit a mint through a recompute — with one refinement the journal
+// guard has no need for: a helper that takes a mintVersion bool mints only
+// when asked to, so a call passing the literal false for it is NOT a minting
+// edge. That is how a composite mutation runs its constituents without minting
+// and mints once itself at the end (ExecuteUpdate's claim, row write, label
+// and parent patches and persistence move). Without the refinement the
+// fixpoint credited the composite with the mint it told its constituents to
+// skip, and deleting its own final RecordVersionInTx stayed green (reviewer
+// Probe 2 on gastownhall/beads#6358). A call passing true, a variable, or the
+// caller's own mintVersion parameter is still a minting edge, so the leaf
+// wrappers (ClaimIssueInTx, ApplyLabelPatch, ...) and the forwarding helpers
+// keep theirs.
+func versionMintEdges(fns map[string]*journalscan.FuncInfo) func(*journalscan.FuncInfo) []string {
+	return func(f *journalscan.FuncInfo) []string {
+		var live []string
+		for _, callee := range journalEmitEdges(f) {
+			if journalscan.CallsOnlyWithLiteralFalse(fns, f, callee, versionMintGate) {
+				continue
+			}
+			live = append(live, callee)
+		}
+		return live
+	}
+}
+
+// versionCompositeMutations are the functions that run constituents with
+// versionMintGate switched off and mint once themselves, so each must carry
+// its own RecordVersionInTx: nothing it calls with the gate off can carry it
+// on its behalf. TestCompositeMutationsCarryTheirOwnMint is what turns
+// reviewer Probe 2 (delete ExecuteUpdate's final mint block) into a failure.
+var versionCompositeMutations = []string{
+	"ExecuteUpdate",
+	"applyLabelPatch",
+	"applyParentPatch",
 }
 
 // versionedEntryPoints are the issueops functions that mutate an issue's
@@ -205,8 +245,33 @@ func versionMints(t *testing.T) (map[string]*journalscan.FuncInfo, map[string]bo
 	}
 	mints := journalscan.Fixpoint(fns,
 		func(f *journalscan.FuncInfo) bool { return f.CallsAnyOf(versionMintHelpers) },
-		versionMintEdges)
+		versionMintEdges(fns))
 	return fns, mints
+}
+
+// TestCompositeMutationsCarryTheirOwnMint pins that each composite mutation
+// calls RecordVersionInTx itself AND that none of the edges it leaves live
+// (after the literal-false constituents are dropped) reaches the seam — so the
+// composite's own call is load-bearing, and deleting it fails
+// TestEveryVersionedEntryPointMints rather than being papered over by a
+// constituent it explicitly told not to mint.
+func TestCompositeMutationsCarryTheirOwnMint(t *testing.T) {
+	fns, mints := versionMints(t)
+	for _, name := range versionCompositeMutations {
+		f, defined := fns[name]
+		if !defined {
+			t.Errorf("composite mutation %q not found in issueops — was it renamed? update versionCompositeMutations", name)
+			continue
+		}
+		if !f.CallsAnyOf(versionMintHelpers) {
+			t.Errorf("composite mutation %q does not call RecordVersionInTx itself; it runs its constituents with %s=false, so nothing else mints for it", name, versionMintGate)
+		}
+		for _, callee := range versionMintEdges(fns)(f) {
+			if mints[callee] {
+				t.Errorf("composite mutation %q would also mint through %q, so its own RecordVersionInTx is no longer the one mint the write-path doc promises — either that constituent is called with %s left on, or it mints unconditionally", name, callee, versionMintGate)
+			}
+		}
+	}
 }
 
 // TestEveryVersionedEntryPointMints parses this package's source, builds the
