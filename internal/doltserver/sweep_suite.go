@@ -157,7 +157,7 @@ func removeSuiteRoot(root string) error {
 func sweepDeadSuiteRoots(
 	parentDir, prefix string,
 	alive func(int) bool,
-	sweepServers func(...string) []int,
+	sweepServers func(...string) []SweptServer,
 	removeAll func(string) error,
 ) []string {
 	if parentDir == "" || prefix == "" {
@@ -220,7 +220,12 @@ func sweepDeadSuiteRoots(
 // instead of by someone reading `ps` days later — unless AllowLeakEnv is set
 // to "1", which downgrades it to the loud stderr line it used to be. A code
 // the tests already failed with is preserved, never overwritten.
-func ApplyLeakPolicy(suite string, code int, swept []int) int {
+//
+// Both lines print each leak as "<pid> cwd=<dir>" (SweptServer.String): the
+// PID is dead by the time anyone reads the log, but the directory names the
+// test whose fixture leaked, which is the only part of the report a reader
+// can act on (wy-j2zc8q).
+func ApplyLeakPolicy(suite string, code int, swept []SweptServer) int {
 	if len(swept) == 0 {
 		return code
 	}

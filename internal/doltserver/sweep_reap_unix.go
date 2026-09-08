@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// reapServerPIDs SIGTERMs each selected PID, then SIGKILLs whatever is still
+// reapServers SIGTERMs each selected server, then SIGKILLs whatever is still
 // alive a moment later. isServer re-reads the process's identity and reports
 // whether it still looks like a dolt sql-server; it is consulted immediately
 // before EVERY signal, because the kernel could have recycled the PID onto an
@@ -19,21 +19,27 @@ import (
 //
 // This lives in a darwin||linux file rather than the portable sweep.go
 // because the signaling itself is POSIX; the selection logic that decides
-// WHICH pids get here is in sweep.go and is platform-independent.
+// WHICH servers get here is in sweep.go and is platform-independent.
 //
-// Returns the PIDs it sent a kill signal to.
-func reapServerPIDs(pids []int, isServer func(int) bool) []int {
+// The Info line prints each entry as "<pid> cwd=<dir>" (SweptServer.String).
+// The directory, not the PID, is what a reader can act on: it is the temp
+// tree the leaked server was serving, which Go names after the test that
+// created it, so the report identifies the leaking fixture instead of a
+// number that no longer refers to anything (wy-j2zc8q).
+//
+// Returns the servers it sent a kill signal to.
+func reapServers(servers []SweptServer, isServer func(int) bool) []SweptServer {
 	self := os.Getpid()
-	var killed []int
-	for _, pid := range pids {
-		if pid == self {
+	var killed []SweptServer
+	for _, server := range servers {
+		if server.PID == self {
 			continue
 		}
-		if !isServer(pid) {
+		if !isServer(server.PID) {
 			continue
 		}
-		if err := syscall.Kill(pid, syscall.SIGTERM); err == nil {
-			killed = append(killed, pid)
+		if err := syscall.Kill(server.PID, syscall.SIGTERM); err == nil {
+			killed = append(killed, server)
 		}
 	}
 
@@ -46,11 +52,11 @@ func reapServerPIDs(pids []int, isServer func(int) bool) []int {
 	// Give SIGTERM a moment, then force anything still alive. This runs at a
 	// suite boundary, so a short bounded wait here is acceptable.
 	time.Sleep(300 * time.Millisecond)
-	for _, pid := range killed {
-		if !isServer(pid) {
+	for _, server := range killed {
+		if !isServer(server.PID) {
 			continue
 		}
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_ = syscall.Kill(server.PID, syscall.SIGKILL)
 	}
 
 	return killed

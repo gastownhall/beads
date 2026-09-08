@@ -37,17 +37,17 @@ import (
 //
 // Safety is the whole point: this must never touch a developer's real
 // shared server. It only reads /proc (no killing) to build the candidate
-// list, and selectOrphanTestServerPIDs only matches processes whose data
+// list, and selectOrphanTestServers only matches processes whose data
 // directory is gone or explicitly caller-scoped — a production server's
 // data directory is neither. Errors reading /proc for any single PID just
 // drop that PID from consideration; this function is best-effort and never
 // returns an error itself.
 //
-// Returns the PIDs it sent a kill signal to.
-func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
+// Returns the servers (pid + cwd) it sent a kill signal to.
+func SweepOrphanedTestServers(suiteTempRoots ...string) []SweptServer {
 	candidates := gatherDoltServerCandidates()
-	pids := selectOrphanTestServerPIDs(candidates, canonicalRoots(suiteTempRoots), tempDirRoots())
-	return reapServerPIDs(pids, isDoltServerProcess)
+	selected := selectOrphanTestServers(candidates, canonicalRoots(suiteTempRoots), tempDirRoots())
+	return reapServers(selected, isDoltServerProcess)
 }
 
 // sweepServersUnderRoots reaps only the dolt sql-servers whose working
@@ -55,11 +55,11 @@ func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
 // without the deleted-cwd arm, for callers that must not reach outside the
 // trees they name — see selectServersUnderRoots.
 //
-// Returns the PIDs it sent a kill signal to.
-func sweepServersUnderRoots(suiteTempRoots ...string) []int {
+// Returns the servers (pid + cwd) it sent a kill signal to.
+func sweepServersUnderRoots(suiteTempRoots ...string) []SweptServer {
 	candidates := gatherDoltServerCandidates()
-	pids := selectServersUnderRoots(candidates, canonicalRoots(suiteTempRoots))
-	return reapServerPIDs(pids, isDoltServerProcess)
+	selected := selectServersUnderRoots(candidates, canonicalRoots(suiteTempRoots))
+	return reapServers(selected, isDoltServerProcess)
 }
 
 // isDoltServerProcess re-reads /proc/<pid>/cmdline and reports whether pid

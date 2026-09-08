@@ -18,11 +18,11 @@ import (
 // a shared/global temp directory. This is best-effort: process-listing errors
 // and candidates whose cwd cannot be resolved are ignored.
 //
-// Returns the PIDs it sent a kill signal to.
-func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
+// Returns the servers (pid + cwd) it sent a kill signal to.
+func SweepOrphanedTestServers(suiteTempRoots ...string) []SweptServer {
 	candidates := gatherDoltServerCandidates()
-	pids := selectOrphanTestServerPIDs(candidates, canonicalRoots(suiteTempRoots), tempDirRoots())
-	return reapServerPIDs(pids, isDoltServerProcess)
+	selected := selectOrphanTestServers(candidates, canonicalRoots(suiteTempRoots), tempDirRoots())
+	return reapServers(selected, isDoltServerProcess)
 }
 
 // sweepServersUnderRoots reaps only the dolt sql-servers whose working
@@ -30,11 +30,11 @@ func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
 // without the deleted-cwd arm, for callers that must not reach outside the
 // trees they name — see selectServersUnderRoots.
 //
-// Returns the PIDs it sent a kill signal to.
-func sweepServersUnderRoots(suiteTempRoots ...string) []int {
+// Returns the servers (pid + cwd) it sent a kill signal to.
+func sweepServersUnderRoots(suiteTempRoots ...string) []SweptServer {
 	candidates := gatherDoltServerCandidates()
-	pids := selectServersUnderRoots(candidates, canonicalRoots(suiteTempRoots))
-	return reapServerPIDs(pids, isDoltServerProcess)
+	selected := selectServersUnderRoots(candidates, canonicalRoots(suiteTempRoots))
+	return reapServers(selected, isDoltServerProcess)
 }
 
 func gatherDoltServerCandidates() []serverCandidate {
@@ -77,7 +77,7 @@ func readDarwinCwd(pid int) (cwd string, deleted bool, ok bool) {
 // unlinked — it prints the bare, now-dangling path. The suffix is still
 // honored (harmless, and it keeps this parser shaped like readProcCwd), but
 // when it is absent the path is stat'ed and ENOENT is the deletion signal.
-// Without that probe the deleted-cwd arm of selectOrphanTestServerPIDs could
+// Without that probe the deleted-cwd arm of selectOrphanTestServers could
 // never fire on darwin, so a `go test -timeout` panic — which skips every
 // t.Cleanup and TestMain defer — left its dolt sql-server running forever
 // even though the temp tree it served was long gone (wy-j2zc8q).

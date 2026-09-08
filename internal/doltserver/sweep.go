@@ -23,9 +23,40 @@ type serverCandidate struct {
 	cwdDeleted bool
 }
 
-// selectOrphanTestServerPIDs returns the PIDs of candidates that are safe to
-// reap as leaked test debris. A candidate qualifies only when its cmdline
-// names a dolt sql-server AND either:
+// SweptServer names one leaked `dolt sql-server` a sweep selected: the PID it
+// signaled and the working directory that process was serving.
+//
+// The cwd is the whole reason this type exists. A sweep report of bare PIDs
+// ("swept 1 orphaned test dolt sql-server process(es): [21881]") says a
+// fixture leaked but not WHICH one, and the PID is gone by the time anyone
+// reads the log — so a CI failure on a package with hundreds of tests left
+// the reader nothing to grep for. A leaked server's cwd is the .beads/dolt
+// directory under the suite's own temp tree, and Go names those after the
+// test that made them (a t.TempDir() is <root>/TestSomeName1234/001), so the
+// directory identifies the leaking test directly.
+type SweptServer struct {
+	// PID is the process that was signaled.
+	PID int
+	// Cwd is the working directory the process was serving. Never empty for
+	// a selected server: selectServers skips candidates with no known cwd,
+	// because unknown is not provably debris.
+	Cwd string
+}
+
+// String renders a swept server as "<pid> cwd=<dir>", which is what the
+// sweep's stderr lines print for each entry (fmt applies this to every
+// element of a []SweptServer formatted with %v).
+func (s SweptServer) String() string {
+	if s.Cwd == "" {
+		return strconv.Itoa(s.PID)
+	}
+	return strconv.Itoa(s.PID) + " cwd=" + s.Cwd
+}
+
+// selectOrphanTestServers returns the candidates that are safe to reap as
+// leaked test debris, each carrying the working directory it was serving. A
+// candidate qualifies only when its cmdline names a dolt sql-server AND
+// either:
 //
 //   - its working directory sits under one of suiteRoots, or
 //   - its working directory has been deleted AND the path it used to name
@@ -53,8 +84,8 @@ type serverCandidate struct {
 // a real shared server's data directory is a persistent, non-temp path, so it
 // is neither under a suite's scoped roots nor — deleted or not — under a temp
 // root, and matches neither condition.
-func selectOrphanTestServerPIDs(candidates []serverCandidate, suiteRoots, tempRoots []string) []int {
-	return selectCandidatePIDs(candidates, func(c serverCandidate) bool {
+func selectOrphanTestServers(candidates []serverCandidate, suiteRoots, tempRoots []string) []SweptServer {
+	return selectServers(candidates, func(c serverCandidate) bool {
 		if underAnyRoot(c.cwd, suiteRoots) {
 			return true
 		}
@@ -62,8 +93,8 @@ func selectOrphanTestServerPIDs(candidates []serverCandidate, suiteRoots, tempRo
 	})
 }
 
-// selectServersUnderRoots returns the PIDs of candidates whose working
-// directory sits under one of roots, and nothing else. It is the strictly
+// selectServersUnderRoots returns the candidates whose working directory sits
+// under one of roots, and nothing else. It is the strictly
 // root-scoped selection: no deleted-cwd arm, so it can never reach a process
 // outside the caller's own trees.
 //
@@ -71,26 +102,28 @@ func selectOrphanTestServerPIDs(candidates []serverCandidate, suiteRoots, tempRo
 // sibling packages (go test -p N) are mid-run: whatever it reaps must be
 // provably inside the one dead root it is cleaning up, never merely
 // "somewhere temporary".
-func selectServersUnderRoots(candidates []serverCandidate, roots []string) []int {
-	return selectCandidatePIDs(candidates, func(c serverCandidate) bool {
+func selectServersUnderRoots(candidates []serverCandidate, roots []string) []SweptServer {
+	return selectServers(candidates, func(c serverCandidate) bool {
 		return underAnyRoot(c.cwd, roots)
 	})
 }
 
-// selectCandidatePIDs applies want to every candidate that is a dolt
-// sql-server with a known working directory. A candidate whose cwd could not
-// be resolved is always skipped: unknown is not provably debris.
-func selectCandidatePIDs(candidates []serverCandidate, want func(serverCandidate) bool) []int {
-	var pids []int
+// selectServers applies want to every candidate that is a dolt sql-server
+// with a known working directory, returning the survivors as SweptServers. A
+// candidate whose cwd could not be resolved is always skipped: unknown is not
+// provably debris — which is also why every SweptServer it returns has a
+// non-empty Cwd for the sweep's report to name.
+func selectServers(candidates []serverCandidate, want func(serverCandidate) bool) []SweptServer {
+	var selected []SweptServer
 	for _, c := range candidates {
 		if !isDoltServerCmdline(c.cmdline) || c.cwd == "" {
 			continue
 		}
 		if want(c) {
-			pids = append(pids, c.pid)
+			selected = append(selected, SweptServer{PID: c.pid, Cwd: c.cwd})
 		}
 	}
-	return pids
+	return selected
 }
 
 // tempDirRoots is the set of directories under which a deleted working

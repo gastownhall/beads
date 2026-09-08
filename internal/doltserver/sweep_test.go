@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -192,9 +193,9 @@ func TestSelectOrphanTestServerPIDs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := selectOrphanTestServerPIDs(tc.candidates, tc.suiteRoots, tc.tempRoots)
+			got := sweptPIDs(selectOrphanTestServers(tc.candidates, tc.suiteRoots, tc.tempRoots))
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("selectOrphanTestServerPIDs() = %v, want %v", got, tc.want)
+				t.Errorf("selectOrphanTestServers() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -250,10 +251,49 @@ not-a-pid dolt sql-server
 		t.Fatalf("gatherPSCandidates() = %#v, want %#v", candidates, wantCandidates)
 	}
 
-	gotPIDs := selectOrphanTestServerPIDs(candidates, []string{"/tmp/my-suite"}, []string{"/tmp"})
-	wantPIDs := []int{101, 103}
-	if !reflect.DeepEqual(gotPIDs, wantPIDs) {
-		t.Errorf("darwin ps selection path = %v, want %v", gotPIDs, wantPIDs)
+	// The darwin ps/lsof path must hand the selection a cwd for every
+	// survivor, because that cwd is what the sweep's report prints
+	// (wy-j2zc8q). Assert the whole SweptServer, not just the PIDs.
+	gotServers := selectOrphanTestServers(candidates, []string{"/tmp/my-suite"}, []string{"/tmp"})
+	wantServers := []SweptServer{
+		{PID: 101, Cwd: "/tmp/my-suite/.beads/dolt"},
+		{PID: 103, Cwd: "/tmp/deleted-suite/.beads/dolt"},
+	}
+	if !reflect.DeepEqual(gotServers, wantServers) {
+		t.Errorf("darwin ps selection path = %v, want %v", gotServers, wantServers)
+	}
+}
+
+// sweptPIDs projects a selection result down to its PIDs so the big tables
+// above can stay readable. The cwd every entry carries is pinned directly by
+// TestGatherPSCandidates and TestSweptServerNamesItsDirectory.
+func sweptPIDs(servers []SweptServer) []int {
+	if len(servers) == 0 {
+		return nil
+	}
+	pids := make([]int, 0, len(servers))
+	for _, server := range servers {
+		pids = append(pids, server.PID)
+	}
+	return pids
+}
+
+// TestSweptServerNamesItsDirectory pins the rendering both sweep stderr lines
+// rely on: a reader gets the leaked server's working directory, which names
+// the test that leaked it, not just a PID that is already dead (wy-j2zc8q).
+func TestSweptServerNamesItsDirectory(t *testing.T) {
+	server := SweptServer{PID: 21881, Cwd: "/tmp/TestFoo123/001/.beads/dolt"}
+	const want = "21881 cwd=/tmp/TestFoo123/001/.beads/dolt"
+	if got := server.String(); got != want {
+		t.Errorf("SweptServer.String() = %q, want %q", got, want)
+	}
+	if got := fmt.Sprintf("%v", []SweptServer{server}); got != "["+want+"]" {
+		t.Errorf("formatted slice = %q, want %q", got, "["+want+"]")
+	}
+	// A cwd-less server can never be selected (selectServers skips them),
+	// but the renderer must not print a dangling "cwd=" if one appears.
+	if got := (SweptServer{PID: 7}).String(); got != "7" {
+		t.Errorf("SweptServer with no cwd = %q, want %q", got, "7")
 	}
 }
 
@@ -273,7 +313,10 @@ func TestSelectServersUnderSuiteRoots(t *testing.T) {
 	}
 
 	got := selectServersUnderRoots(candidates, []string{"/tmp/dead-root"})
-	want := []int{500, 501}
+	want := []SweptServer{
+		{PID: 500, Cwd: "/tmp/dead-root/.beads/dolt"},
+		{PID: 501, Cwd: "/tmp/dead-root/nested/deeper/dolt"},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("selectServersUnderRoots() = %v, want %v", got, want)
 	}

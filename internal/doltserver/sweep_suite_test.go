@@ -1,20 +1,48 @@
 package doltserver
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what
+// fn wrote there. The sweep reports its findings on stderr and nowhere else,
+// so the content of those lines is only testable this way.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	collected := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		collected <- buf.String()
+	}()
+	fn()
+	os.Stderr = orig
+	_ = w.Close()
+	out := <-collected
+	_ = r.Close()
+	return out
+}
 
 // TestDecideSuiteRoot pins the safety judgment behind SweepDeadSuiteRoots:
 // exactly one of the four states — claimed by a process that is gone — is
 // debris. In particular an UNCLAIMED root is left alone, because a directory
 // that merely matches the suite's prefix cannot be proven to be this suite's,
 // and reaping it would resurrect the cross-suite killer that
-// selectOrphanTestServerPIDs' contract exists to prevent (wy-j2zc8q).
+// selectOrphanTestServers' contract exists to prevent (wy-j2zc8q).
 func TestDecideSuiteRoot(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -115,7 +143,7 @@ func TestSweepDeadSuiteRootsSelection(t *testing.T) {
 	swept := sweepDeadSuiteRoots(
 		parent, prefix,
 		func(pid int) bool { return pid == livePID },
-		func(roots ...string) []int {
+		func(roots ...string) []SweptServer {
 			vouched = append(vouched, roots...)
 			return nil
 		},
@@ -169,7 +197,7 @@ func TestSweepDeadSuiteRootsRestoresMarkerOnPartialRemoval(t *testing.T) {
 		return errors.New("permission denied")
 	}
 
-	swept := sweepDeadSuiteRoots(parent, prefix, func(int) bool { return false }, func(...string) []int { return nil }, stubbornRemove)
+	swept := sweepDeadSuiteRoots(parent, prefix, func(int) bool { return false }, func(...string) []SweptServer { return nil }, stubbornRemove)
 	if len(swept) != 0 {
 		t.Errorf("sweepDeadSuiteRoots() = %v, want nothing reported as removed", swept)
 	}
@@ -182,7 +210,7 @@ func TestSweepDeadSuiteRootsRestoresMarkerOnPartialRemoval(t *testing.T) {
 	}
 
 	// And the next run, with removal working, finishes the job.
-	swept = sweepDeadSuiteRoots(parent, prefix, func(int) bool { return false }, func(...string) []int { return nil }, removeSuiteRoot)
+	swept = sweepDeadSuiteRoots(parent, prefix, func(int) bool { return false }, func(...string) []SweptServer { return nil }, removeSuiteRoot)
 	if want := []string{root}; !reflect.DeepEqual(swept, want) {
 		t.Errorf("retry swept %v, want %v", swept, want)
 	}
@@ -231,7 +259,7 @@ func TestSweepDeadSuiteRootsRefusesUnboundedGlob(t *testing.T) {
 	}
 
 	dead := func(int) bool { return false }
-	fatalSweep := func(roots ...string) []int {
+	fatalSweep := func(roots ...string) []SweptServer {
 		t.Errorf("SweepOrphanedTestServers must not be called: %v", roots)
 		return nil
 	}
@@ -275,20 +303,21 @@ func TestSweepDeadSuiteRootsSkipsSelf(t *testing.T) {
 // TestApplyLeakPolicyForSuite covers the exit-code arithmetic of the
 // leak-as-failure rule and its env-gated downgrade.
 func TestApplyLeakPolicyForSuite(t *testing.T) {
+	oneLeak := []SweptServer{{PID: 101, Cwd: "/tmp/TestLeaky123/001/.beads/dolt"}}
 	cases := []struct {
 		name  string
 		env   string
 		code  int
-		swept []int
+		swept []SweptServer
 		want  int
 	}{
 		{name: "no leak, passing suite", code: 0, swept: nil, want: 0},
 		{name: "no leak, failing suite", code: 2, swept: nil, want: 2},
-		{name: "leak fails a passing suite by default", code: 0, swept: []int{101}, want: 1},
-		{name: "leak never overwrites an existing failure", code: 2, swept: []int{101}, want: 2},
-		{name: "leak warns instead when opted out", env: "1", code: 0, swept: []int{101}, want: 0},
-		{name: "opt-out never revives a failing suite", env: "1", code: 2, swept: []int{101}, want: 2},
-		{name: "any value other than 1 still fails", env: "true", code: 0, swept: []int{101}, want: 1},
+		{name: "leak fails a passing suite by default", code: 0, swept: oneLeak, want: 1},
+		{name: "leak never overwrites an existing failure", code: 2, swept: oneLeak, want: 2},
+		{name: "leak warns instead when opted out", env: "1", code: 0, swept: oneLeak, want: 0},
+		{name: "opt-out never revives a failing suite", env: "1", code: 2, swept: oneLeak, want: 2},
+		{name: "any value other than 1 still fails", env: "true", code: 0, swept: oneLeak, want: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -299,4 +328,45 @@ func TestApplyLeakPolicyForSuite(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestApplyLeakPolicyNamesTheLeakingDirectory pins the payload of both leak
+// lines. A PID alone is useless to whoever reads the CI log — the process is
+// long gone and the number identifies nothing — whereas the working directory
+// is the temp tree the leaked server was serving, which Go names after the
+// test that created it. Reporting it is what turns "cmd/bd leaked a server"
+// into a specific fixture to fix (wy-j2zc8q).
+func TestApplyLeakPolicyNamesTheLeakingDirectory(t *testing.T) {
+	const cwd = "/tmp/beads-bd-tests-xyz/TestLeakyFixture123/001/.beads/dolt"
+	swept := []SweptServer{{PID: 21881, Cwd: cwd}}
+
+	t.Run("the failure line", func(t *testing.T) {
+		t.Setenv(AllowLeakEnv, "")
+		var code int
+		out := captureStderr(t, func() { code = ApplyLeakPolicy("cmd/bd", 0, swept) })
+		if code != 1 {
+			t.Errorf("ApplyLeakPolicy() = %d, want 1", code)
+		}
+		if !strings.Contains(out, "FAIL: cmd/bd leaked") {
+			t.Errorf("stderr = %q, want the FAIL line", out)
+		}
+		if !strings.Contains(out, "21881 cwd="+cwd) {
+			t.Errorf("stderr = %q, want it to name %q", out, cwd)
+		}
+	})
+
+	t.Run("the downgraded warning line", func(t *testing.T) {
+		t.Setenv(AllowLeakEnv, "1")
+		var code int
+		out := captureStderr(t, func() { code = ApplyLeakPolicy("cmd/bd", 0, swept) })
+		if code != 0 {
+			t.Errorf("ApplyLeakPolicy() = %d, want 0", code)
+		}
+		if !strings.Contains(out, "Warning: 1 leaked dolt sql-server(s)") {
+			t.Errorf("stderr = %q, want the Warning line", out)
+		}
+		if !strings.Contains(out, "21881 cwd="+cwd) {
+			t.Errorf("stderr = %q, want it to name %q", out, cwd)
+		}
+	})
 }
