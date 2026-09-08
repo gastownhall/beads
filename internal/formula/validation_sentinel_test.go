@@ -2,6 +2,7 @@ package formula
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -41,7 +42,7 @@ func TestValidateErrorKeepsItsMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("Validate() = nil, want an error")
 	}
-	if got := err.Error(); got[:len("formula validation failed")] != "formula validation failed" {
+	if got := err.Error(); !strings.HasPrefix(got, "formula validation failed") {
 		t.Errorf("Validate() error = %q, want it to still open with the original text", got)
 	}
 }
