@@ -256,13 +256,14 @@ func newDoltDependencyEditorFixture(t *testing.T, prefix string) (conformance.De
 	}
 	kit := newDoltRoleFixtureKit(store, prefix)
 	fixture := conformance.DependencyEditorFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Editor:        editor,
-		CreateIssue:   kit.CreateIssue,
-		CreateWisp:    kit.CreateWisp,
-		AddDependency: kit.AddDependency,
-		QueryScalar:   kit.QueryScalar,
-		CountHistory:  kit.CountHistory,
+		IssuePrefix:       kit.IssuePrefix,
+		Editor:            editor,
+		CreateIssue:       kit.CreateIssue,
+		CreateWisp:        kit.CreateWisp,
+		AddDependency:     kit.AddDependency,
+		QueryScalar:       kit.QueryScalar,
+		CountHistory:      kit.CountHistory,
+		SetJournalEnabled: store.SetEventsJournalEnabled,
 	}
 	return fixture, ctx, func() {
 		cancel()

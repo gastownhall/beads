@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -60,6 +61,19 @@ type DependencyEditorFixture struct {
 	// the cases that need it then skip with that reason rather than pass
 	// quietly. It is non-nil on all three backends today.
 	CountHistory func(context.Context) (int, error)
+	// SetJournalEnabled turns on durable journaling for the workspace under
+	// test (storage.EventsJournalConfigurer) — the same operator switch
+	// JournalFixture.SetJournalEnabled wires, and off by default for the same
+	// reason: a workspace that never opted in records nothing in
+	// bd_events_journal while every other write still succeeds normally.
+	//
+	// The idempotency cases need it on because bd_events_journal has no
+	// deduplication of its own (issueops.RecordDepEventInTx always inserts):
+	// a same-type re-add or an absent removal is a no-op only if nothing
+	// downstream of the role recorded a change, and the journal is the one
+	// place that is not otherwise observable through this fixture. It is
+	// non-nil on all three backends.
+	SetJournalEnabled func(enabled bool)
 }
 
 // RunDependencyEditorRoutesWispSourcedEdgeToTheWispPlane is the regression pin
@@ -252,8 +266,18 @@ func RunDependencyEditorAddedEchoesTheRequestOrder(t *testing.T, ctx context.Con
 // promises a dependency_added entry for a GENUINELY NEW edge, so a backend
 // that re-emitted on the no-op would leave a history of work that did not
 // happen even where the row count could not tell.
+//
+// bd_events_journal is the fourth, and the one none of the others catch:
+// unlike the events table it has no deduplication of its own
+// (issueops.RecordDepEventInTx always inserts), so a same-type re-add that
+// gates on TYPE alone — never the stored metadata VALUE — journals a change
+// that never happened even while the row count, the events table and the
+// history delta all read as a clean no-op. This is #5898's R3 case: a
+// change-free write must create no version and must not journal one either.
 func RunDependencyEditorSameTypeReAddIsIdempotent(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
+	fixture.SetJournalEnabled(true)
+	t.Cleanup(func() { fixture.SetJournalEnabled(false) })
 	source := fixture.IssuePrefix + "-idem-source"
 	target := fixture.IssuePrefix + "-idem-target"
 	seedDependencyEditorIssue(t, ctx, fixture, source)
@@ -267,6 +291,7 @@ func RunDependencyEditorSameTypeReAddIsIdempotent(t *testing.T, ctx context.Cont
 		t.Fatalf("AddDependencies first: %v", err)
 	}
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
 
 	assertHistoryDelta := dependencyEditorHistoryProbe(t, ctx, fixture)
 	result, err := fixture.Editor.AddDependencies(ctx, request)
@@ -279,6 +304,7 @@ func RunDependencyEditorSameTypeReAddIsIdempotent(t *testing.T, ctx context.Cont
 	assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 1)
 	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", source, target, string(publicops.DepBlocks), 1)
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
 	assertHistoryDelta(0, "every edge of the request already existed with the requested type, so nothing was written and nothing is versioned")
 }
 
@@ -454,8 +480,17 @@ func RunDependencyEditorRefusalWritesNothing(t *testing.T, ctx context.Context, 
 // missing edge is Removed false with a NIL error, not ErrNotFound, because an
 // agent replaying its own teardown should not have to classify an error to
 // discover it already ran.
+// bd_events_journal is checked alongside the events table for the same
+// reason RunDependencyEditorSameTypeReAddIsIdempotent checks it: the journal
+// has no deduplication of its own, so a removal that finds nothing must not
+// journal a dep_remove either. This side of #5898's R3 case is expected to
+// already hold — RemoveDependencyInTx only records when it actually deleted a
+// row — but it is pinned here so a future regression on this leg is caught
+// alongside the add-side one rather than only on the leg that is broken today.
 func RunDependencyEditorRemoveIsIdempotent(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
+	fixture.SetJournalEnabled(true)
+	t.Cleanup(func() { fixture.SetJournalEnabled(false) })
 	source := fixture.IssuePrefix + "-rm-source"
 	target := fixture.IssuePrefix + "-rm-target"
 	seedDependencyEditorIssue(t, ctx, fixture, source)
@@ -478,6 +513,7 @@ func RunDependencyEditorRemoveIsIdempotent(t *testing.T, ctx context.Context, fi
 	}
 	assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 0)
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyRemoved, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepRemove))
 
 	removed, err = fixture.Editor.RemoveDependency(ctx, request)
 	if err != nil {
@@ -487,6 +523,7 @@ func RunDependencyEditorRemoveIsIdempotent(t *testing.T, ctx context.Context, fi
 		t.Error("Removed = true, want false for an edge that was already gone")
 	}
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyRemoved, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepRemove))
 }
 
 // RunDependencyEditorAppliesParentChildBeforeBlockingEdges pins
@@ -2176,6 +2213,26 @@ func assertDependencyEditorEventCount(t *testing.T, ctx context.Context, fixture
 	}
 	if got != want {
 		t.Errorf("%s %s rows for %s = %d, want %d", table, eventType, issueID, got, want)
+	}
+}
+
+// assertDependencyEditorJournalCountIsOne asserts exactly one bd_events_journal
+// row exists for one issue and op — the same shape as
+// assertDependencyEditorEventCount, against the table that has no
+// deduplication of its own and so is the one an unconditional journal write on
+// a no-op would actually show up in. Every call site pins the count at one
+// (the single genuine write); there is no idempotency case that expects zero
+// or more than one, so unlike assertDependencyEditorEventCount this does not
+// take a want.
+func assertDependencyEditorJournalCountIsOne(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, issueID, op string) {
+	t.Helper()
+	var got int
+	query := "SELECT COUNT(*) FROM bd_events_journal WHERE issue_id = ? AND op = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{issueID, op}, &got); err != nil {
+		t.Fatalf("count bd_events_journal %s rows for %s: %v", op, issueID, err)
+	}
+	if got != 1 {
+		t.Errorf("bd_events_journal %s rows for %s = %d, want 1", op, issueID, got)
 	}
 }
 
