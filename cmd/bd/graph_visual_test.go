@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 
@@ -9,53 +8,53 @@ import (
 )
 
 func TestRenderGraphVisual(t *testing.T) {
-	t.Parallel()
+	// Not parallel: captureGraphOutput redirects global os.Stdout
 	subgraph, layout := makeTestSubgraph()
 
-	var output bytes.Buffer
-	renderGraphVisualTo(&output, layout, subgraph)
-	got := output.String()
+	output := captureGraphOutput(func() {
+		renderGraphVisual(layout, subgraph)
+	})
 
 	// Verify layer headers
-	if !strings.Contains(got, "LAYER 0") {
+	if !strings.Contains(output, "LAYER 0") {
 		t.Error("Visual output should contain LAYER 0 header")
 	}
-	if !strings.Contains(got, "ready") {
+	if !strings.Contains(output, "ready") {
 		t.Error("Visual output should mark layer 0 as ready")
 	}
 
 	// Verify all node IDs are present
 	for _, id := range []string{"test-a", "test-b", "test-c", "test-d"} {
-		if !strings.Contains(got, id) {
+		if !strings.Contains(output, id) {
 			t.Errorf("Visual output should contain node %q", id)
 		}
 	}
 
 	// Verify node titles are present
 	for _, title := range []string{"Root issue", "Child task", "Blocked task", "Done task"} {
-		if !strings.Contains(got, title) {
+		if !strings.Contains(output, title) {
 			t.Errorf("Visual output should contain title %q", title)
 		}
 	}
 
 	// Verify box-drawing characters are used
-	if !strings.Contains(got, "┌") || !strings.Contains(got, "┘") {
+	if !strings.Contains(output, "┌") || !strings.Contains(output, "┘") {
 		t.Error("Visual output should use box-drawing characters for node borders")
 	}
 
 	// Verify edge arrows exist (edges between layers)
-	if !strings.Contains(got, "▶") {
+	if !strings.Contains(output, "▶") {
 		t.Error("Visual output should contain arrow characters for edges")
 	}
 
 	// Verify summary
-	if !strings.Contains(got, "layers") {
+	if !strings.Contains(output, "layers") {
 		t.Error("Visual output should contain summary with layer count")
 	}
 }
 
 func TestRenderGraphVisual_Empty(t *testing.T) {
-	t.Parallel()
+	// Not parallel: captureGraphOutput redirects global os.Stdout
 	emptySubgraph := &TemplateSubgraph{
 		Root:     &types.Issue{ID: "empty"},
 		Issues:   []*types.Issue{},
@@ -67,16 +66,17 @@ func TestRenderGraphVisual_Empty(t *testing.T) {
 		RootID: "empty",
 	}
 
-	var output bytes.Buffer
-	renderGraphVisualTo(&output, layout, emptySubgraph)
+	output := captureGraphOutput(func() {
+		renderGraphVisual(layout, emptySubgraph)
+	})
 
-	if !strings.Contains(output.String(), "Empty graph") {
+	if !strings.Contains(output, "Empty graph") {
 		t.Error("Empty visual output should say 'Empty graph'")
 	}
 }
 
 func TestRenderGraphVisual_SingleNode(t *testing.T) {
-	t.Parallel()
+	// Not parallel: captureGraphOutput redirects global os.Stdout
 	issue := &types.Issue{
 		ID: "solo-1", Title: "Solo issue", Status: types.StatusOpen,
 		Priority: 0, IssueType: types.TypeTask,
@@ -88,18 +88,18 @@ func TestRenderGraphVisual_SingleNode(t *testing.T) {
 	}
 	layout := computeLayout(subgraph)
 
-	var output bytes.Buffer
-	renderGraphVisualTo(&output, layout, subgraph)
-	got := output.String()
+	output := captureGraphOutput(func() {
+		renderGraphVisual(layout, subgraph)
+	})
 
-	if !strings.Contains(got, "solo-1") {
+	if !strings.Contains(output, "solo-1") {
 		t.Error("Single-node visual should contain the issue ID")
 	}
-	if !strings.Contains(got, "Solo issue") {
+	if !strings.Contains(output, "Solo issue") {
 		t.Error("Single-node visual should contain the title")
 	}
 	// No edges for single node
-	if strings.Contains(got, "▶") {
+	if strings.Contains(output, "▶") {
 		t.Error("Single-node visual should not contain edge arrows")
 	}
 }

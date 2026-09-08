@@ -14,15 +14,13 @@ import (
 const syncLockFilename = ".linear-sync.lock"
 
 // SyncLock serializes concurrent bd linear sync invocations within a workspace.
-// The persistent kernel lock is authoritative. Platform-specific metadata only
-// improves contention diagnostics.
+// It combines a PID-annotated lock file with flock for robust mutual exclusion.
 type SyncLock struct {
-	infoPath string
-	file     *os.File
-	metadata syncLockMetadata
+	path string
+	file *os.File
 }
 
-// SyncLockInfo contains advisory metadata published while the sync lock is held.
+// SyncLockInfo contains metadata written into the lock file.
 type SyncLockInfo struct {
 	PID     int
 	Started time.Time
@@ -33,7 +31,6 @@ type SyncLockInfo struct {
 // an error immediately when the lock is held by another live process.
 func AcquireSyncLock(beadsDir string, wait bool) (*SyncLock, error) {
 	lockPath := filepath.Join(beadsDir, syncLockFilename)
-	infoPath := syncLockMetadataPath(beadsDir, lockPath)
 
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating beads directory: %w", err)
@@ -52,7 +49,7 @@ func AcquireSyncLock(beadsDir string, wait bool) (*SyncLock, error) {
 	} else {
 		if err := lockfile.FlockExclusiveNonBlocking(f); err != nil {
 			if lockfile.IsLocked(err) || err == lockfile.ErrLockBusy {
-				info := readContendedSyncLockInfo(infoPath)
+				info := readLockInfo(lockPath)
 				_ = f.Close()
 				return nil, &SyncLockHeldError{Info: info}
 			}
@@ -61,33 +58,31 @@ func AcquireSyncLock(beadsDir string, wait bool) (*SyncLock, error) {
 		}
 	}
 
-	metadata, err := publishSyncLockInfo(f, infoPath)
-	if err != nil {
+	if err := writeLockInfo(f); err != nil {
 		_ = lockfile.FlockUnlock(f)
 		_ = f.Close()
 		return nil, fmt.Errorf("writing lock info: %w", err)
 	}
 
-	return &SyncLock{infoPath: infoPath, file: f, metadata: metadata}, nil
+	return &SyncLock{path: lockPath, file: f}, nil
 }
 
-// Release releases the sync lock. The kernel-lock file is NOT removed — doing
-// so after unlocking creates a race where a blocked waiter acquires the old
-// inode while a new process creates a fresh file at the same path, splitting
-// lock identity. On Unix, inline owner metadata is truncated while still
-// holding the lock. On Windows, a separate advisory record is cleared while
-// still holding the authoritative guard.
+// Release releases the sync lock. The lock file is NOT removed — removing it
+// after unlocking creates a race where a blocked waiter acquires the old inode
+// while a new process creates a fresh file at the same path, splitting lock
+// identity. Instead the file is truncated while still holding the flock, then
+// the flock is released. The stable path is reused by subsequent Acquire calls.
 func (l *SyncLock) Release() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
 
-	// Clear or invalidate diagnostic metadata before releasing the authoritative
-	// lock. Platform helpers preserve Unix errors and make Windows diagnostics
-	// best-effort.
-	var metadataErr error
-	if err := clearSyncLockInfo(l.file, l.infoPath, &l.metadata); err != nil {
-		metadataErr = fmt.Errorf("clearing lock metadata: %w", err)
+	// Clear diagnostic metadata while still holding the flock so no reader
+	// observes a stale PID after we unlock. Truncate failure is non-fatal
+	// (metadata-only), but we capture it to surface if unlock/close succeed.
+	var truncErr error
+	if err := l.file.Truncate(0); err != nil {
+		truncErr = fmt.Errorf("clearing lock metadata: %w", err)
 	}
 
 	unlockErr := lockfile.FlockUnlock(l.file)
@@ -100,7 +95,7 @@ func (l *SyncLock) Release() error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return metadataErr
+	return truncErr
 }
 
 // SyncLockHeldError is returned when the lock is held by another process.

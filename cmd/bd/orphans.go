@@ -51,74 +51,67 @@ Examples:
 			}
 		}()
 
+		path := "."
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		labels = utils.NormalizeLabels(labels)
 		labelsAny = utils.NormalizeLabels(labelsAny)
-		fix, _ := cmd.Flags().GetBool("fix")
-		details, _ := cmd.Flags().GetBool("details")
-
-		if usesProxiedServer() {
-			return runOrphansProxiedServer(rootCtx, labels, labelsAny, fix, details)
-		}
-
-		orphans, err := findOrphanedIssues(".", labels, labelsAny)
+		orphans, err := findOrphanedIssues(path, labels, labelsAny)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		return reportOrphans(orphans, fix, details)
-	},
-}
+		fix, _ := cmd.Flags().GetBool("fix")
+		details, _ := cmd.Flags().GetBool("details")
 
-func reportOrphans(orphans []orphanIssueOutput, fix, details bool) error {
-	if jsonOutput {
-		return outputJSON(orphans)
-	}
-
-	if len(orphans) == 0 {
-		fmt.Printf("%s No orphaned issues found\n", ui.RenderPass("✓"))
-		return nil
-	}
-
-	fmt.Printf("\n%s Found %d orphaned issue(s):\n\n", ui.RenderWarn("⚠"), len(orphans))
-
-	sort.Slice(orphans, func(i, j int) bool {
-		return orphans[i].IssueID < orphans[j].IssueID
-	})
-
-	for i, orphan := range orphans {
-		fmt.Printf("%d. %s: %s\n", i+1, ui.RenderID(orphan.IssueID), orphan.Title)
-		fmt.Printf("   Status: %s\n", orphan.Status)
-		if details && orphan.LatestCommit != "" {
-			fmt.Printf("   Latest commit: %s - %s\n", orphan.LatestCommit, orphan.LatestCommitMessage)
+		if jsonOutput {
+			return outputJSON(orphans)
 		}
-	}
 
-	if fix {
-		fmt.Println()
-		fmt.Printf("This will close %d orphaned issue(s). Continue? (Y/n): ", len(orphans))
-		var response string
-		_, _ = fmt.Scanln(&response)
-		response = strings.ToLower(strings.TrimSpace(response))
-		if response != "" && response != "y" && response != "yes" {
-			fmt.Println("Canceled.")
+		if len(orphans) == 0 {
+			fmt.Printf("%s No orphaned issues found\n", ui.RenderPass("✓"))
 			return nil
 		}
 
-		closedCount := 0
-		for _, orphan := range orphans {
-			err := closeIssue(orphan.IssueID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", orphan.IssueID, err)
-			} else {
-				fmt.Printf("✓ Closed %s\n", orphan.IssueID)
-				closedCount++
+		fmt.Printf("\n%s Found %d orphaned issue(s):\n\n", ui.RenderWarn("⚠"), len(orphans))
+
+		sort.Slice(orphans, func(i, j int) bool {
+			return orphans[i].IssueID < orphans[j].IssueID
+		})
+
+		for i, orphan := range orphans {
+			fmt.Printf("%d. %s: %s\n", i+1, ui.RenderID(orphan.IssueID), orphan.Title)
+			fmt.Printf("   Status: %s\n", orphan.Status)
+			if details && orphan.LatestCommit != "" {
+				fmt.Printf("   Latest commit: %s - %s\n", orphan.LatestCommit, orphan.LatestCommitMessage)
 			}
 		}
-		fmt.Printf("\nClosed %d issue(s)\n", closedCount)
-	}
-	return nil
+
+		if fix {
+			fmt.Println()
+			fmt.Printf("This will close %d orphaned issue(s). Continue? (Y/n): ", len(orphans))
+			var response string
+			_, _ = fmt.Scanln(&response)
+			response = strings.ToLower(strings.TrimSpace(response))
+			if response != "" && response != "y" && response != "yes" {
+				fmt.Println("Canceled.")
+				return nil
+			}
+
+			closedCount := 0
+			for _, orphan := range orphans {
+				err := closeIssue(orphan.IssueID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", orphan.IssueID, err)
+				} else {
+					fmt.Printf("✓ Closed %s\n", orphan.IssueID)
+					closedCount++
+				}
+			}
+			fmt.Printf("\nClosed %d issue(s)\n", closedCount)
+		}
+		return nil
+	},
 }
 
 // orphanIssueOutput is the JSON output format for orphaned issues
@@ -197,10 +190,6 @@ func findOrphanedIssues(path string, labels, labelsAny []string) ([]orphanIssueO
 	}
 	defer cleanup()
 
-	return findOrphanedIssuesWithProvider(path, provider)
-}
-
-func findOrphanedIssuesWithProvider(path string, provider types.IssueProvider) ([]orphanIssueOutput, error) {
 	orphans, err := doctorFindOrphanedIssues(path, provider)
 	if err != nil {
 		return nil, fmt.Errorf("unable to find orphaned issues: %w", err)

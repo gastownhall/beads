@@ -132,7 +132,7 @@ func shouldReadWherePrefixFromStore(beadsDir string) bool {
 		return false
 	}
 
-	cfg, err := configfile.LoadForDiscovery(beadsDir)
+	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
 		return true
 	}

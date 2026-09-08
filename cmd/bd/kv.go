@@ -47,95 +47,6 @@ func validateKVKey(key string) error {
 	return nil
 }
 
-// printKVSetResult renders the `bd kv set` success output. Shared by the
-// classic and proxied-server paths so the output shape cannot drift.
-func printKVSetResult(key, value string) error {
-	if jsonOutput {
-		return outputJSON(map[string]string{
-			"key":   key,
-			"value": value,
-		})
-	}
-	fmt.Printf("Set %s = %s\n", key, value)
-	return nil
-}
-
-// printKVGetResult renders the `bd kv get` output (including the not-found
-// SilentExit contract). Shared by the classic and proxied-server paths.
-func printKVGetResult(key, value string) error {
-	if jsonOutput {
-		if jerr := outputJSON(map[string]interface{}{
-			"key":   key,
-			"value": value,
-			"found": value != "",
-		}); jerr != nil {
-			return jerr
-		}
-		if value == "" {
-			return SilentExit()
-		}
-		return nil
-	}
-	if value == "" {
-		fmt.Fprintf(os.Stderr, "%s (not set)\n", key)
-		return SilentExit()
-	}
-	fmt.Printf("%s\n", value)
-	return nil
-}
-
-// printKVClearResult renders the `bd kv clear` success output. Shared by the
-// classic and proxied-server paths.
-func printKVClearResult(key string) error {
-	if jsonOutput {
-		return outputJSON(map[string]string{
-			"key":     key,
-			"deleted": "true",
-		})
-	}
-	fmt.Printf("Cleared %s\n", key)
-	return nil
-}
-
-// kvPairsFromConfig filters a full config map down to the kv.* namespace,
-// stripping the prefix. Shared by the classic and proxied-server paths.
-func kvPairsFromConfig(allConfig map[string]string) map[string]string {
-	kvPairs := make(map[string]string)
-	for k, v := range allConfig {
-		if strings.HasPrefix(k, kvPrefix) {
-			userKey := strings.TrimPrefix(k, kvPrefix)
-			kvPairs[userKey] = v
-		}
-	}
-	return kvPairs
-}
-
-// printKVListResult renders the `bd kv list` output. Shared by the classic
-// and proxied-server paths (a mail client parses the --json shape; keep it
-// byte-identical across modes).
-func printKVListResult(kvPairs map[string]string) error {
-	if jsonOutput {
-		return outputJSON(kvPairs)
-	}
-
-	if len(kvPairs) == 0 {
-		fmt.Println("No key-value pairs set")
-		return nil
-	}
-
-	keys := make([]string, 0, len(kvPairs))
-	for k := range kvPairs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	fmt.Println("\nKey-Value Store:")
-	for _, k := range keys {
-		fmt.Printf("  %s = %s\n", k, kvPairs[k])
-	}
-	return nil
-}
-
 // kvCmd is the parent command for kv subcommands
 var kvCmd = &cobra.Command{
 	Use:     "kv",
@@ -179,20 +90,15 @@ Examples:
 			}
 		}()
 
+		if err := ensureDirectMode("kv set requires direct database access"); err != nil {
+			return HandleError("%v", err)
+		}
+
 		key := args[0]
 		if err := validateKVKey(key); err != nil {
 			return HandleErrorRespectJSON("invalid key: %v", err)
 		}
 		value := args[1]
-
-		if usesProxiedServer() {
-			return runKVSetProxiedServer(rootCtx, key, value)
-		}
-
-		if err := ensureDirectMode("kv set requires direct database access"); err != nil {
-			return HandleError("%v", err)
-		}
-
 		storageKey := kvPrefix + key
 
 		ctx := rootCtx
@@ -200,7 +106,14 @@ Examples:
 			return HandleErrorRespectJSON("setting key: %v", err)
 		}
 
-		return printKVSetResult(key, value)
+		if jsonOutput {
+			return outputJSON(map[string]string{
+				"key":   key,
+				"value": value,
+			})
+		}
+		fmt.Printf("Set %s = %s\n", key, value)
+		return nil
 	},
 }
 
@@ -224,16 +137,11 @@ Examples:
 			}
 		}()
 
-		key := args[0]
-
-		if usesProxiedServer() {
-			return runKVGetProxiedServer(rootCtx, key)
-		}
-
 		if err := ensureDirectMode("kv get requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
 
+		key := args[0]
 		storageKey := kvPrefix + key
 
 		ctx := rootCtx
@@ -242,7 +150,25 @@ Examples:
 			return HandleErrorRespectJSON("getting key: %v", err)
 		}
 
-		return printKVGetResult(key, value)
+		if jsonOutput {
+			if jerr := outputJSON(map[string]interface{}{
+				"key":   key,
+				"value": value,
+				"found": value != "",
+			}); jerr != nil {
+				return jerr
+			}
+			if value == "" {
+				return SilentExit()
+			}
+			return nil
+		}
+		if value == "" {
+			fmt.Fprintf(os.Stderr, "%s (not set)\n", key)
+			return SilentExit()
+		}
+		fmt.Printf("%s\n", value)
+		return nil
 	},
 }
 
@@ -268,19 +194,14 @@ Examples:
 			}
 		}()
 
-		key := args[0]
-		if err := validateKVKey(key); err != nil {
-			return HandleErrorRespectJSON("invalid key: %v", err)
-		}
-
-		if usesProxiedServer() {
-			return runKVClearProxiedServer(rootCtx, key)
-		}
-
 		if err := ensureDirectMode("kv clear requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
 
+		key := args[0]
+		if err := validateKVKey(key); err != nil {
+			return HandleErrorRespectJSON("invalid key: %v", err)
+		}
 		storageKey := kvPrefix + key
 
 		ctx := rootCtx
@@ -288,7 +209,14 @@ Examples:
 			return HandleErrorRespectJSON("deleting key: %v", err)
 		}
 
-		return printKVClearResult(key)
+		if jsonOutput {
+			return outputJSON(map[string]string{
+				"key":     key,
+				"deleted": "true",
+			})
+		}
+		fmt.Printf("Cleared %s\n", key)
+		return nil
 	},
 }
 
@@ -311,10 +239,6 @@ Examples:
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runKVListProxiedServer(rootCtx)
-		}
-
 		if err := ensureDirectMode("kv list requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
@@ -325,7 +249,34 @@ Examples:
 			return HandleErrorRespectJSON("listing keys: %v", err)
 		}
 
-		return printKVListResult(kvPairsFromConfig(allConfig))
+		kvPairs := make(map[string]string)
+		for k, v := range allConfig {
+			if strings.HasPrefix(k, kvPrefix) {
+				userKey := strings.TrimPrefix(k, kvPrefix)
+				kvPairs[userKey] = v
+			}
+		}
+
+		if jsonOutput {
+			return outputJSON(kvPairs)
+		}
+
+		if len(kvPairs) == 0 {
+			fmt.Println("No key-value pairs set")
+			return nil
+		}
+
+		keys := make([]string, 0, len(kvPairs))
+		for k := range kvPairs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		fmt.Println("\nKey-Value Store:")
+		for _, k := range keys {
+			fmt.Printf("  %s = %s\n", k, kvPairs[k])
+		}
+		return nil
 	},
 }
 

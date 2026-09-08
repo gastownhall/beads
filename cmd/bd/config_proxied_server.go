@@ -2,59 +2,146 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
-// proxiedWorkspaceConfig hands back the guarded workspace-settings surface for
-// the proxied-server provider, through the provider's OWN capability accessor —
-// the same two-step proxiedCounter performs.
-//
-// Routing the four single-key `bd config` verbs through the role fixed a copy
-// that had drifted: the proxied `set` stored `status.custom` without
-// re-synchronizing the custom_statuses and custom_types tables that reads
-// consult FIRST, so a proxied `bd config set types.custom` reported success and
-// never took effect.
-func proxiedWorkspaceConfig() (issueops.WorkspaceConfig, error) {
+func openConfigProxiedUOW(ctx context.Context) uow.UnitOfWork {
 	if uowProvider == nil {
-		return nil, errors.New("proxied-server UOW provider not initialized")
+		FatalErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
-	src, ok := uowProvider.(uow.WorkspaceConfigSource)
-	if !ok {
-		return nil, fmt.Errorf("proxied-server provider %T does not offer the workspace-settings surface", uowProvider)
+	uw, err := uowProvider.NewUOW(ctx)
+	if err != nil {
+		FatalErrorRespectJSON("open unit of work: %v", err)
 	}
-	return src.WorkspaceConfig()
+	return uw
 }
 
-// runConfigSetManyProxiedServer writes a whole batch of settings in ONE unit of
-// work, which is the fifth verb and the one that stays off the role.
-//
-// The batch is the point of `bd config set-many` — one Dolt commit for N keys
-// rather than N, which is what makes it usable in CI — and
-// TestProxiedServerConfigSetMany pins it. issueops.WorkspaceConfig writes one
-// setting per call and commits each, as its contract says, so routing this
-// through it would turn a three-key batch into three commits.
-//
-// It does NOT re-implement the role's refusals: cmd/bd/config.go applies them
-// to every pair, before any of them is written.
-func runConfigSetManyProxiedServer(ctx context.Context, keys, values []string) error {
-	if len(keys) == 0 {
-		return nil
-	}
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+func runConfigSetProxiedServer(ctx context.Context, key, value string) {
+	if key == "status.custom" && value != "" {
+		if _, err := types.ParseCustomStatusConfig(value); err != nil {
+			FatalErrorRespectJSON("invalid status.custom value: %v", err)
+		}
 	}
 
-	return uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
-		cfgUC := uw.ConfigUseCase()
-		for i, k := range keys {
-			if err := cfgUC.SetConfig(ctx, k, values[i]); err != nil {
-				return "", fmt.Errorf("setting config %s: %w", k, err)
-			}
+	uw := openConfigProxiedUOW(ctx)
+	defer uw.Close(ctx)
+
+	if err := uw.ConfigUseCase().SetConfig(ctx, key, value); err != nil {
+		FatalErrorRespectJSON("Error setting config: %v", err)
+	}
+
+	if err := uw.Commit(ctx, fmt.Sprintf("bd: config set %s", key)); err != nil && !isDoltNothingToCommit(err) {
+		FatalErrorRespectJSON("failed to commit: %v", err)
+	}
+
+	if jsonOutput {
+		_ = outputJSON(map[string]string{
+			"key":   key,
+			"value": value,
+		})
+	} else {
+		fmt.Printf("Set %s = %s\n", key, value)
+	}
+	printConfigSideEffects(checkConfigSetSideEffects(key, value))
+}
+
+func runConfigGetProxiedServer(ctx context.Context, key string) {
+	uw := openConfigProxiedUOW(ctx)
+	defer uw.Close(ctx)
+
+	value, err := uw.ConfigUseCase().GetConfig(ctx, key)
+	if err != nil {
+		FatalErrorRespectJSON("Error getting config: %v", err)
+	}
+
+	if jsonOutput {
+		_ = outputJSON(map[string]string{
+			"key":   key,
+			"value": value,
+		})
+		return
+	}
+	if value == "" {
+		fmt.Printf("%s (not set)\n", key)
+	} else {
+		fmt.Printf("%s\n", value)
+	}
+}
+
+func runConfigListProxiedServer(ctx context.Context) {
+	uw := openConfigProxiedUOW(ctx)
+	defer uw.Close(ctx)
+
+	cfg, err := uw.ConfigUseCase().GetAllConfig(ctx)
+	if err != nil {
+		FatalErrorRespectJSON("Error listing config: %v", err)
+	}
+
+	if jsonOutput {
+		_ = outputJSON(cfg)
+		return
+	}
+
+	if len(cfg) == 0 {
+		fmt.Println("No configuration set")
+		return
+	}
+
+	keys := make([]string, 0, len(cfg))
+	for k := range cfg {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	fmt.Println("\nConfiguration:")
+	for _, k := range keys {
+		fmt.Printf("  %s = %s\n", k, cfg[k])
+	}
+
+	showConfigYAMLOverrides(cfg)
+}
+
+func runConfigUnsetProxiedServer(ctx context.Context, key string) {
+	uw := openConfigProxiedUOW(ctx)
+	defer uw.Close(ctx)
+
+	if err := uw.ConfigUseCase().DeleteConfig(ctx, key); err != nil {
+		FatalErrorRespectJSON("Error deleting config: %v", err)
+	}
+
+	if err := uw.Commit(ctx, fmt.Sprintf("bd: config unset %s", key)); err != nil && !isDoltNothingToCommit(err) {
+		FatalErrorRespectJSON("failed to commit: %v", err)
+	}
+
+	if jsonOutput {
+		_ = outputJSON(map[string]string{
+			"key": key,
+		})
+	} else {
+		fmt.Printf("Unset %s\n", key)
+	}
+	printConfigSideEffects(checkConfigUnsetSideEffects(key))
+}
+
+func runConfigSetManyProxiedServer(ctx context.Context, keys, values []string) {
+	if len(keys) == 0 {
+		return
+	}
+	uw := openConfigProxiedUOW(ctx)
+	defer uw.Close(ctx)
+
+	cfgUC := uw.ConfigUseCase()
+	for i, k := range keys {
+		if err := cfgUC.SetConfig(ctx, k, values[i]); err != nil {
+			FatalErrorRespectJSON("Error setting config %s: %v", k, err)
 		}
-		return fmt.Sprintf("bd: config set-many (%d keys)", len(keys)), nil
-	})
+	}
+
+	if err := uw.Commit(ctx, fmt.Sprintf("bd: config set-many (%d keys)", len(keys))); err != nil && !isDoltNothingToCommit(err) {
+		FatalErrorRespectJSON("failed to commit: %v", err)
+	}
 }

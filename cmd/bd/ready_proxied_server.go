@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,80 +9,56 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/workapi"
-	"github.com/steveyegge/beads/issueops"
 )
 
-func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
-	// --offset is supported here and nowhere else, so this is where a negative
-	// value is rejected. It stays out of the shared gatherer because the direct
-	// route reaches that gatherer too, and `bd ready --offset -1` has always
-	// been a no-op there rather than an error. HandleError, not the RespectJSON
-	// variant, for the same reason: this message is the proxied route's alone,
-	// and it has always gone to stderr as plain text.
-	if offset, _ := cmd.Flags().GetInt("offset"); offset < 0 {
-		return HandleError("--offset must be >= 0")
-	}
-
-	// No cap resolver: the RunE that routed here has already resolved
-	// --max-rows / BEADS_MAX_ROWS, either to reject a live one or to validate
-	// the value it then ignores for --claim. Resolving it again would repeat
-	// the malformed-value warning and stamp a cap this route cannot enforce.
-	in, err := gatherReadyInput(cmd, nil)
-	if err != nil {
-		return err
-	}
+func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) {
+	in := gatherReadyInput(cmd)
 
 	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
+		FatalError("proxied-server UOW provider not initialized")
 	}
-
-	if in.claim {
-		return runReadyProxiedClaim(ctx, in)
-	}
-
-	// Wake expired dated defers before the read below. The unit of work this
-	// route opens is read-only-by-ending (Close rolls back), so the sweep runs
-	// in a committing UOW of its own first; the claim route above gets the
-	// same sweep from its role (uow.readyClaimer.ClaimNext).
-	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
-
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
+		FatalErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
 	switch {
 	case in.gated:
-		return runReadyProxiedGated(ctx, uw, in)
+		runReadyProxiedGated(ctx, uw, in)
 	case in.molID != "":
-		return runReadyProxiedMolecule(ctx, uw, in)
+		runReadyProxiedMolecule(ctx, uw, in)
 	case in.explain:
-		return runReadyProxiedExplain(ctx, uw, in)
+		runReadyProxiedExplain(ctx, uw, in)
+	case in.claim:
+		runReadyProxiedClaim(ctx, uw, in)
 	default:
-		return runReadyProxiedList(ctx, uw, in)
+		runReadyProxiedList(ctx, uw, in)
 	}
 }
 
-func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
+func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) {
 	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
+		FatalError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
+		FatalErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
-	filter := blockedFilterFromFlags(cmd)
+	var filter types.WorkFilter
+	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
+		filter.ParentID = &parentID
+	}
 
 	blocked, err := uw.IssueUseCase().GetBlockedIssues(ctx, filter)
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		FatalErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
@@ -91,11 +66,11 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 			blocked = []*types.BlockedIssue{}
 		}
 		_ = outputJSON(blocked)
-		return nil
+		return
 	}
 	if len(blocked) == 0 {
 		fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
-		return nil
+		return
 	}
 	fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
 	for _, issue := range blocked {
@@ -110,54 +85,31 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 			issue.BlockedByCount, blockedBy)
 		fmt.Println()
 	}
-	return nil
 }
 
-func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
+func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) {
 	if in.jsonOut {
 		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, in.filter)
 		if err != nil {
-			return HandleError("%v", err)
+			FatalError("%v", err)
 		}
-		// The same epilogue issueops.Reader.Ready runs, through the same
-		// function: this seam reports a has-more natively and ready has no
-		// display order, so the trim is a no-op and the verdict is the seam's
-		// — but it is reached the one way, not restated here.
-		results, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
-		truncated = truncated && in.filter.Limit > 0
-		// Parity with the direct route: the pagination key is emitted only
-		// when truncated, and it now carries the same Total, from the same
-		// role. This route published no total at all until ReadyCounter
-		// existed, so a script that read `pagination.total` got one number
-		// under a direct-mode workspace and no key at all under a proxied one.
-		//
-		// The guard is the direct route's guard: the two queries are not one
-		// snapshot (issueops.ReadyCounter.CountReady), so a close landing
-		// between them must not publish a total smaller than the page beside
-		// it.
-		var pag *PaginationMeta
-		if truncated {
-			pag = &PaginationMeta{
-				Returned:  len(results),
-				Truncated: true,
-			}
-			if n, countErr := proxiedReadyTotal(ctx, in); countErr == nil && n > len(results) {
-				pag.Total = n
-			}
+		results := page.Items
+		if results == nil {
+			results = []*types.IssueWithCounts{}
 		}
-		_ = outputJSONWithPagination(results, pag)
-		if truncated {
+		_ = outputJSON(results)
+		if page.HasMore && in.filter.Limit > 0 {
 			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
 		}
-		return nil
+		return
 	}
 
 	page, err := uw.IssueUseCase().GetReadyWork(ctx, in.filter)
 	if err != nil {
-		return HandleError("%v", err)
+		FatalError("%v", err)
 	}
-	issues, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
-	truncated = truncated && in.filter.Limit > 0
+	issues := page.Items
+	truncated := page.HasMore && in.filter.Limit > 0
 
 	maybeShowUpgradeNotification()
 
@@ -172,7 +124,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		} else {
 			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 		}
-		return nil
+		return
 	}
 
 	parentEpicMap := buildParentEpicMapProxied(ctx, uw, issues)
@@ -199,101 +151,55 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	if truncated {
 		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.", len(issues))))
 	}
-	return nil
 }
 
-// runReadyProxiedClaim is the proxied route of `bd ready --claim`, on the same
-// ReadyClaimer role the direct route reaches through the store's accessor.
-// Both build their request in claimNextRequest, so the two doors ask one
-// question — and neither opens a unit of work of its own: the role's request
-// IS the transaction, which is what lets the selection, the compare-and-set
-// and the hydration this route prints share it.
-func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
+func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput) {
 	CheckReadonly("ready --claim")
 
-	claimer, err := proxiedReadyClaimer()
+	res, err := uw.IssueUseCase().ClaimReadyIssue(ctx, in.filter, actor)
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		FatalErrorRespectJSON("%v", err)
 	}
-	res, err := claimer.ClaimNext(ctx, claimNextRequest(in))
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	if res.Claimed == nil {
+	if !res.Claimed {
 		if in.jsonOut {
 			_ = outputJSON([]*types.IssueWithCounts{})
 		} else {
 			fmt.Printf("\n%s No ready work to claim\n\n", ui.RenderWarn("○"))
 		}
-		return nil
+		return
 	}
 
-	SetLastTouchedID(res.Claimed.ID)
+	var jsonPayload []*types.IssueWithCounts
+	if in.jsonOut {
+		jsonPayload = buildReadyIssueOutputProxied(ctx, uw, []*types.Issue{res.Issue})
+	}
+
+	if err := uw.Commit(ctx, fmt.Sprintf("bd: ready --claim %s", res.Issue.ID)); err != nil && !isDoltNothingToCommit(err) {
+		FatalErrorRespectJSON("failed to commit: %v", err)
+	}
+	SetLastTouchedID(res.Issue.ID)
 
 	if in.jsonOut {
-		_ = outputJSON([]*types.IssueWithCounts{res.Claimed})
+		_ = outputJSON(jsonPayload)
 	} else {
-		fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.Claimed.ID, res.Claimed.Title))
+		fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.Issue.ID, res.Issue.Title))
 	}
-	return nil
 }
 
-// proxiedReadyTotal sizes the whole ready set through the provider's own
-// ReadyCounter accessor — the same role the direct route reaches through the
-// store's accessor, over the request both build in readyRoleRequest.
-//
-// It opens NO unit of work of its own: the role's request IS the transaction,
-// so the count runs in its own read-only unit of work rather than the one the
-// page came from, which is why the two are not one snapshot.
-func proxiedReadyTotal(ctx context.Context, in readyInput) (int, error) {
-	if uowProvider == nil {
-		return 0, errors.New("proxied-server UOW provider not initialized")
-	}
-	src, ok := uowProvider.(uow.ReadyCounterSource)
-	if !ok {
-		return 0, fmt.Errorf("proxied-server provider %T does not offer the ready-count surface", uowProvider)
-	}
-	counter, err := src.ReadyCounter()
-	if err != nil {
-		return 0, err
-	}
-	result, err := counter.CountReady(ctx, readyRoleRequest(in))
-	if err != nil {
-		return 0, err
-	}
-	return int(result.Total), nil
-}
-
-// proxiedReadyClaimer hands back the guarded claim surface for the
-// proxied-server provider, through the provider's OWN capability accessor —
-// the same two-step proxiedIssueReader performs, and for the same reason: the
-// accessor is where a decorator adds its layer.
-func proxiedReadyClaimer() (issueops.ReadyClaimer, error) {
-	if uowProvider == nil {
-		return nil, errors.New("proxied-server UOW provider not initialized")
-	}
-	src, ok := uowProvider.(uow.ReadyClaimerSource)
-	if !ok {
-		return nil, fmt.Errorf("proxied-server provider %T does not offer the ready-claim surface", uowProvider)
-	}
-	return src.ReadyClaimer()
-}
-
-func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
-	filter, err := readyExplainFilter()
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) {
+	filter := types.WorkFilter{
+		Status:     types.StatusOpen,
+		SortPolicy: types.SortPolicyPriority,
 	}
 	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, filter)
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		FatalErrorRespectJSON("%v", err)
 	}
 	readyIssues := readyPage.Items
 
 	blockedIssues, err := uw.IssueUseCase().GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		FatalErrorRespectJSON("%v", err)
 	}
 
 	readyIDs := make([]string, len(readyIssues))
@@ -348,7 +254,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 
 	if jsonOutput {
 		_ = outputJSON(explanation)
-		return nil
+		return
 	}
 
 	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("📊"))
@@ -400,14 +306,13 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		fmt.Printf(", %d cycle(s)", explanation.Summary.CycleCount)
 	}
 	fmt.Printf("\n\n")
-	return nil
 }
 
-func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
+func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInput) {
 	moleculeID := in.molID
-	subgraph, err := loadTemplateSubgraph(ctx, uowMolReader{uw: uw}, moleculeID)
+	subgraph, err := proxiedLoadTemplateSubgraph(ctx, uw, moleculeID)
 	if err != nil {
-		return HandleError("loading molecule: %v", err)
+		FatalError("loading molecule: %v", err)
 	}
 
 	analysis := analyzeMoleculeParallel(subgraph)
@@ -434,7 +339,7 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 			ParallelGroups: analysis.ParallelGroups,
 		}
 		_ = outputJSON(output)
-		return nil
+		return
 	}
 
 	fmt.Printf("\n%s Ready steps in molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
@@ -442,7 +347,7 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
 	if len(readySteps) == 0 {
 		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
-		return nil
+		return
 	}
 	if len(analysis.ParallelGroups) > 0 {
 		fmt.Printf("\n%s Parallel Groups:\n", ui.RenderPass("⚡"))
@@ -483,15 +388,156 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 		}
 	}
 	fmt.Println()
-	return nil
 }
 
-func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
-	molecules, err := findGateReadyMolecules(ctx, uowMolReader{uw: uw})
+func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) {
+	gateType := types.IssueType("gate")
+	closedStatus := types.StatusClosed
+	gatePage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{
+		IssueType: &gateType,
+		Status:    &closedStatus,
+	})
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		FatalErrorRespectJSON("error searching for closed gates: %v", err)
 	}
-	return renderGatedReadyMolecules(molecules)
+	if len(gatePage.Items) == 0 {
+		emitGatedEmpty()
+		return
+	}
+
+	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		FatalErrorRespectJSON("error getting ready work: %v", err)
+	}
+	readySet := make(map[string]*types.Issue, len(readyPage.Items))
+	for _, issue := range readyPage.Items {
+		readySet[issue.ID] = issue
+	}
+
+	hookedStatus := types.StatusHooked
+	hookedPage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &hookedStatus})
+	if err != nil {
+		FatalErrorRespectJSON("error searching for hooked issues: %v", err)
+	}
+	hookedSet := make(map[string]*types.Issue, len(hookedPage.Items))
+	for _, issue := range hookedPage.Items {
+		hookedSet[issue.ID] = issue
+	}
+
+	moleculeMap := make(map[string]*GatedMolecule)
+	for _, gate := range gatePage.Items {
+		dependents, err := uw.DependencyUseCase().ListWithIssueMetadata(ctx, gate.ID, domain.DepListFilter{
+			Direction: domain.DepDirectionIn,
+		})
+		if err != nil {
+			continue
+		}
+		for _, dep := range dependents {
+			depIssue := dep.Issue
+			ready, isReady := readySet[depIssue.ID]
+			hooked, isHooked := hookedSet[depIssue.ID]
+			if !isReady && !isHooked {
+				continue
+			}
+			var step *types.Issue
+			if isReady {
+				step = ready
+			} else {
+				step = hooked
+			}
+			moleculeID := proxiedFindParentMolecule(ctx, uw, depIssue.ID)
+			if moleculeID == "" {
+				continue
+			}
+			if _, seen := moleculeMap[moleculeID]; seen {
+				continue
+			}
+			moleculeIssue, err := uw.IssueUseCase().GetIssue(ctx, moleculeID)
+			if err != nil || moleculeIssue == nil {
+				continue
+			}
+			moleculeMap[moleculeID] = &GatedMolecule{
+				MoleculeID:    moleculeID,
+				MoleculeTitle: moleculeIssue.Title,
+				ClosedGate:    gate,
+				ReadyStep:     step,
+			}
+		}
+	}
+
+	molecules := make([]*GatedMolecule, 0, len(moleculeMap))
+	for _, m := range moleculeMap {
+		molecules = append(molecules, m)
+	}
+
+	if jsonOutput {
+		output := GatedReadyOutput{Molecules: molecules, Count: len(molecules)}
+		if output.Molecules == nil {
+			output.Molecules = []*GatedMolecule{}
+		}
+		_ = outputJSON(output)
+		return
+	}
+	if len(molecules) == 0 {
+		fmt.Printf("\n%s No molecules ready for gate-resume dispatch\n\n", ui.RenderPass("✨"))
+		return
+	}
+	fmt.Printf("\n%s Molecules ready for gate-resume dispatch (%d):\n\n", ui.RenderAccent("🚪"), len(molecules))
+	for _, m := range molecules {
+		fmt.Printf("  %s: %s\n", ui.RenderID(m.MoleculeID), m.MoleculeTitle)
+		fmt.Printf("    Closed gate: %s (%s)\n", ui.RenderID(m.ClosedGate.ID), m.ClosedGate.Title)
+		fmt.Printf("    Ready step:  %s (%s)\n", ui.RenderID(m.ReadyStep.ID), m.ReadyStep.Title)
+		fmt.Println()
+	}
+}
+
+func emitGatedEmpty() {
+	if jsonOutput {
+		_ = outputJSON(GatedReadyOutput{Molecules: []*GatedMolecule{}})
+		return
+	}
+	fmt.Printf("\n%s No closed gates found — nothing to dispatch\n\n", ui.RenderPass("✨"))
+}
+
+func buildReadyIssueOutputProxied(ctx context.Context, uw uow.UnitOfWork, issues []*types.Issue) []*types.IssueWithCounts {
+	if issues == nil {
+		issues = []*types.Issue{}
+	}
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+
+	depCounts, _ := uw.DependencyUseCase().CountsByIssueIDs(ctx, ids)
+	allDeps, _ := uw.DependencyUseCase().GetForIssueIDs(ctx, ids)
+	commentCounts, _ := uw.CommentUseCase().GetCommentCounts(ctx, ids)
+
+	for _, issue := range issues {
+		issue.Dependencies = allDeps[issue.ID]
+	}
+
+	out := make([]*types.IssueWithCounts, len(issues))
+	for i, issue := range issues {
+		counts := depCounts[issue.ID]
+		if counts == nil {
+			counts = &types.DependencyCounts{}
+		}
+		var parent *string
+		for _, dep := range allDeps[issue.ID] {
+			if dep.Type == types.DepParentChild {
+				parent = &dep.DependsOnID
+				break
+			}
+		}
+		out[i] = &types.IssueWithCounts{
+			Issue:           issue,
+			DependencyCount: counts.DependencyCount,
+			DependentCount:  counts.DependentCount,
+			CommentCount:    commentCounts[issue.ID],
+			Parent:          parent,
+		}
+	}
+	return out
 }
 
 func buildParentEpicMapProxied(ctx context.Context, uw uow.UnitOfWork, issues []*types.Issue) map[string]string {

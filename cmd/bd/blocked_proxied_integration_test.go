@@ -43,13 +43,11 @@ func bdProxiedBlockedCapture(t *testing.T, bd string, p proxiedProject, args ...
 }
 
 func TestProxiedServerBlocked(t *testing.T) {
-	requireSharedProxiedServer(t)
-	t.Parallel()
+	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 
 	t.Run("json_and_text_with_blockers", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "bk1")
+		p := bdProxiedInit(t, bd, "bk1")
 		blocker := bdProxiedCreate(t, bd, p.dir, "The blocker")
 		dependent := bdProxiedCreate(t, bd, p.dir, "I am blocked", "--deps", "depends-on:"+blocker.ID)
 
@@ -82,8 +80,7 @@ func TestProxiedServerBlocked(t *testing.T) {
 	})
 
 	t.Run("empty_case", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "bk2")
+		p := bdProxiedInit(t, bd, "bk2")
 		bdProxiedCreate(t, bd, p.dir, "Nothing blocked here")
 
 		out, err := bdProxiedRun(t, bd, p.dir, "blocked", "--json")
@@ -105,8 +102,7 @@ func TestProxiedServerBlocked(t *testing.T) {
 	})
 
 	t.Run("parent_filter_restricts_to_descendants", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "bk3")
+		p := bdProxiedInit(t, bd, "bk3")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent epic", "--type", "epic")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Inside blocker")
 		inside := bdProxiedCreate(t, bd, p.dir, "Inside blocked", "--parent", parent.ID, "--deps", "depends-on:"+blocker.ID)

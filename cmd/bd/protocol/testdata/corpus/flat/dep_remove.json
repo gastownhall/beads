@@ -1,7 +1,0 @@
-{
-  "depends_on_id": "corpus-dep",
-  "issue_id": "corpus-root",
-  "removed": true,
-  "schema_version": 1,
-  "status": "removed"
-}

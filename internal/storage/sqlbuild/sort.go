@@ -44,21 +44,6 @@ func IsGoSideSort(sortBy string) bool {
 	return sortBy == "id"
 }
 
-// LessID orders two ids for the Go-side "id" sort key: byte order — the order
-// SQL would apply — flipped by desc. This is THE membership comparator for a
-// Go-side id sort; every seam (Less, the union page's sortGoSide, the
-// per-table sortRowsGoSide, the store-backed goSideSortAndTrim) calls it
-// rather than restating the comparison, because the sortDesc bug it fixes
-// came from exactly such a restated copy drifting from its siblings. The
-// natural-numeric order a human reads (bd-9 before bd-10) is display-layer
-// (workapi.CompareIssuesBy), applied to the delivered page — never here.
-func LessID(a, b string, desc bool) bool {
-	if desc {
-		return a > b
-	}
-	return a < b
-}
-
 func flipDir(dir string) string {
 	if dir == "ASC" {
 		return "DESC"
@@ -85,12 +70,6 @@ func OrderByForColumns(sortBy string, sortDesc bool, col func(sortKey string) st
 	if sortBy == "" || sortBy == "priority" {
 		return fmt.Sprintf("ORDER BY %s %s, %s DESC, %s ASC", col("priority"), dir, col("created"), col("id"))
 	}
-	// A nullable sort column (closed_at, assignee) treats NULL as lowest: first on ASC
-	// and last on DESC. Lead with an explicit (col IS NULL) key so the contract does not
-	// depend on a driver's default NULL ordering. NOT NULL columns keep the plain clause.
-	if sortBy == "closed" || sortBy == "assignee" {
-		return fmt.Sprintf("ORDER BY (%s IS NULL) %s, %s %s, %s ASC", col(sortBy), flipDir(dir), col(sortBy), dir, col("id"))
-	}
 	return fmt.Sprintf("ORDER BY %s %s, %s ASC", col(sortBy), dir, col("id"))
 }
 
@@ -115,14 +94,12 @@ func OrderBy(sortBy string, sortDesc bool, table string) string {
 
 // Less is the Go-side mirror of OrderBy for merge sorts over rows fetched
 // from separate queries (issues + wisps). It must order exactly the way the
-// SQL does, including NULL-first ascending semantics for nullable columns;
+// SQL does, including MySQL NULL-first semantics for nullable columns;
 // otherwise a post-merge limit cut keeps a different row set than SQL
 // selected.
 func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {
 	if sortBy == "id" {
-		// This key used to ignore sortDesc, so a reversed id merge kept the
-		// byte-FIRST rows (the sibling bug idSrcPage.sortGoSide's doc named).
-		return LessID(a.ID, b.ID, sortDesc)
+		return a.ID < b.ID
 	}
 	def, ok := SortDefs[sortBy]
 	if !ok {

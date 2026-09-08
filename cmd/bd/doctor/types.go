@@ -18,7 +18,6 @@ const (
 	CategoryMaintenance = "Maintenance"
 	CategoryPerformance = "Performance"
 	CategoryFederation  = "Federation"
-	CategoryDolt        = "Dolt Storage"
 )
 
 // CategoryOrder defines the display order for categories
@@ -26,7 +25,6 @@ var CategoryOrder = []string{
 	CategoryCore,
 	CategoryData,
 	CategoryGit,
-	CategoryDolt,
 	CategoryRuntime,
 	CategoryPerformance,
 	CategoryIntegration,

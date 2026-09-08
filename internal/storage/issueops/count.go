@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -13,10 +14,10 @@ import (
 // only the count: ephemeral-only filters route to the wisps table,
 // SkipWisps=true counts the durable issues table only, and otherwise the
 // wisps count is merged in (GH#4387).
-func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) (int, error) {
+func CountIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter) (int, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		wispCount, err := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
-		if err != nil && !missingOptionalWispTable(err) {
+		if err != nil && !isTableNotExistError(err) {
 			return 0, fmt.Errorf("count wisps (ephemeral filter): %w", err)
 		}
 		if wispCount > 0 {
@@ -49,19 +50,11 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 
 	// Merge wisps count when caller hasn't opted out (same semantics as SearchIssuesInTx).
 	// Issues and wisps are always in separate tables (PromoteFromEphemeral deletes the
-	// wisps row), so the two counts don't double-count.
-	//
-	// This count TRUSTS that disjoint-table invariant and no read enforces it:
-	// SearchIssuesInTx used to be described here as the corruption detector, and
-	// it is not one — it collapses a cross-table duplicate to the canonical wisp
-	// row and answers (be-iabdi), as the union seam now does too. So a store
-	// holding one dual-resident id counts it TWICE here while the listing shows
-	// it once. `bd doctor`'s Cross-Table Duplicates check is the detector, and
-	// `--check=validate --fix` the repair. (There is no `--check=cross-table`
-	// selector: the four the flag accepts are artifacts, conventions, pollution
-	// and validate, and the cross-table check runs in the default sweep.)
+	// wisps row), so the two counts don't double-count. count trusts that disjoint-table
+	// invariant; SearchIssuesInTx is the corruption detector — it errors loudly if an ID
+	// appears in both tables ("id %q exists in both issues and wisps").
 	wispCount, wispErr := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
-	if wispErr != nil && !missingOptionalWispTable(wispErr) {
+	if wispErr != nil && !isTableNotExistError(wispErr) {
 		return 0, fmt.Errorf("count wisps (merge): %w", wispErr)
 	}
 	return count + wispCount, nil
@@ -74,10 +67,10 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 // Mirrors CountIssuesInTx's wisps-merge semantics: ephemeral-only filters
 // route to the wisps table, SkipWisps=true counts the durable issues table
 // only, and otherwise the wisps tier is merged into each group (GH#4387).
-func CountIssuesByGroupInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+func CountIssuesByGroupInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, groupBy string) (map[string]int, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		wispCounts, err := countGroupForTablesInTx(ctx, tx, filter, groupBy, WispsFilterTables)
-		if err != nil && !missingOptionalWispTable(err) {
+		if err != nil && !isTableNotExistError(err) {
 			return nil, fmt.Errorf("count wisps by %s (ephemeral filter): %w", groupBy, err)
 		}
 		total := 0
@@ -113,7 +106,7 @@ func CountIssuesByGroupInTx(ctx context.Context, tx DBTX, filter types.IssueFilt
 	// Merge wisps counts when the caller hasn't opted out (same semantics as
 	// CountIssuesInTx / SearchIssuesInTx; the two tables never share an ID).
 	wispCounts, wispErr := countGroupForTablesInTx(ctx, tx, filter, groupBy, WispsFilterTables)
-	if wispErr != nil && !missingOptionalWispTable(wispErr) {
+	if wispErr != nil && !isTableNotExistError(wispErr) {
 		return nil, fmt.Errorf("count wisps by %s (merge): %w", groupBy, wispErr)
 	}
 	for k, v := range wispCounts {
@@ -124,7 +117,7 @@ func CountIssuesByGroupInTx(ctx context.Context, tx DBTX, filter types.IssueFilt
 
 // countGroupForTablesInTx runs a grouped count against one table set
 // (issues or wisps) and normalizes keys to bd count's display format.
-func countGroupForTablesInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, groupBy string, tables FilterTables) (map[string]int, error) {
+func countGroupForTablesInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, groupBy string, tables FilterTables) (map[string]int, error) {
 	if groupBy == "label" {
 		return countByLabelInTx(ctx, tx, filter, tables)
 	}
@@ -163,7 +156,7 @@ func countGroupForTablesInTx(ctx context.Context, tx DBTX, filter types.IssueFil
 }
 
 // countTableInTx runs SELECT COUNT(*) FROM <table> WHERE <query+filter>.
-func countTableInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables) (int, error) {
+func countTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables) (int, error) {
 	clauses, args, err := BuildIssueFilterClauses(query, filter, tables)
 	if err != nil {
 		return 0, err
@@ -183,7 +176,7 @@ func countTableInTx(ctx context.Context, tx DBTX, query string, filter types.Iss
 
 // countByColumnInTx runs SELECT <col>, COUNT(*) GROUP BY <col> against a table.
 // Returns raw column values as keys (callers normalize for display).
-func countByColumnInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, col string, tables FilterTables) (map[string]int, error) {
+func countByColumnInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, col string, tables FilterTables) (map[string]int, error) {
 	clauses, args, err := BuildIssueFilterClauses("", filter, tables)
 	if err != nil {
 		return nil, err
@@ -192,10 +185,8 @@ func countByColumnInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, c
 	if len(clauses) > 0 {
 		whereSQL = " WHERE " + strings.Join(clauses, " AND ")
 	}
-	// CAST the group column to text before COALESCE so an integer column (priority)
-	// COALESCEs with '' consistently across Dolt and SQLite.
 	//nolint:gosec // G201: tables.Main hardcoded; col validated by caller
-	query := fmt.Sprintf("SELECT COALESCE(CAST(%s AS CHAR), ''), COUNT(*) FROM %s%s GROUP BY %s", col, tables.Main, whereSQL, col)
+	query := fmt.Sprintf("SELECT COALESCE(%s, ''), COUNT(*) FROM %s%s GROUP BY %s", col, tables.Main, whereSQL, col)
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count by column %s: %w", col, err)
@@ -216,7 +207,7 @@ func countByColumnInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, c
 // countByLabelInTx counts issues grouped by label using a subquery to avoid
 // Dolt's joinIter panic (join_iters.go:192). Issues with no labels are counted
 // under "(no labels)".
-func countByLabelInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, tables FilterTables) (map[string]int, error) {
+func countByLabelInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, tables FilterTables) (map[string]int, error) {
 	clauses, args, err := BuildIssueFilterClauses("", filter, tables)
 	if err != nil {
 		return nil, err

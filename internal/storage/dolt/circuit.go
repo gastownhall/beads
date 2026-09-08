@@ -2,7 +2,6 @@ package dolt
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -11,10 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	mysql "github.com/go-sql-driver/mysql"
-
-	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // Circuit breaker states.
@@ -44,21 +39,6 @@ const (
 	// ago or the machine was rebooted. The TTL is based on the TrippedAt timestamp
 	// (or LastFailure if TrippedAt is zero).
 	circuitStaleTTL = 5 * time.Minute
-
-	// legacyClosedSweepTTL is how long a CLOSED breaker file in the legacy
-	// "/tmp/beads-circuit" directory must sit unmodified before the legacy
-	// sweep removes it. The sweep's original premise — that the directory is
-	// abandoned, with "no live process left to reuse or clean" its files
-	// (GH#4636) — is false wherever os.TempDir() still resolves to /tmp: any
-	// TMPDIR-less process (launchd, cron, a bare ssh command) uses the legacy
-	// path as its LIVE directory and rewrites its closed file on every
-	// successful connection. An unconditional remove therefore fought those
-	// writers forever — recreate, delete, log, on every alternation of
-	// TMPDIR-set and TMPDIR-less invocations. A live writer keeps its file's
-	// mtime fresh, so an mtime TTL preserves the GH#4636 cleanup (a genuinely
-	// abandoned file only ages) without the churn. Generous on purpose: a
-	// writer that runs even once a day keeps its state.
-	legacyClosedSweepTTL = 24 * time.Hour
 )
 
 // circuitState is the shared file-based circuit breaker state.
@@ -77,8 +57,8 @@ type circuitState struct {
 // degradation in one project from tripping the breaker for all worktrees
 // sharing the same server (GH#3140).
 //
-// It uses a file under os.TempDir() for cross-process state sharing and an in-process
-// mutex for thread safety within a single process.
+// It uses a file in the user's cache directory for cross-process state sharing
+// and an in-process mutex for thread safety within a single process.
 type circuitBreaker struct {
 	host     string
 	port     int
@@ -102,29 +82,15 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 	return newCircuitBreaker(host, port, database)
 }
 
-// circuitBreakerDir returns the dedicated directory for circuit breaker state
-// files. Using a subdirectory avoids scanning all of the temp root (which may
-// contain millions of entries) when cleaning up stale breaker files on
-// startup. Derived from os.TempDir() so it is correct on every platform:
-// hardcoding "/tmp" resolved to C:\tmp on Windows, silently accumulating
-// breaker files there forever (GH#4636).
-func circuitBreakerDir() string {
-	return filepath.Join(os.TempDir(), "beads-circuit")
-}
-
-const (
-	legacyCircuitBreakerFile = "/tmp/beads-dolt-circuit-0.json"
-	testCircuitBreakerDirEnv = "BEADS_TEST_CIRCUIT_DIR"
-)
-
-// circuitBreakerPaths returns production paths unless the test harness provides
-// a suite-owned circuit directory. The override redirects both current and
-// legacy state even when an individual test temporarily unsets BEADS_TEST_MODE.
-func circuitBreakerPaths() (dir, legacyFile string) {
-	if testDir := filepath.Clean(os.Getenv(testCircuitBreakerDirEnv)); filepath.IsAbs(testDir) {
-		return testDir, filepath.Join(testDir, "beads-dolt-circuit-0.json")
+// CircuitBreakerDir returns the dedicated directory for circuit breaker state.
+// Breaker files coordinate independent bd processes and outlive an individual
+// invocation, so the system temporary directory is the wrong lifecycle owner.
+func CircuitBreakerDir() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil || !filepath.IsAbs(cacheDir) {
+		panic("beads: cannot resolve an absolute user cache directory for circuit breaker state")
 	}
-	return circuitBreakerDir(), legacyCircuitBreakerFile
+	return filepath.Join(cacheDir, "beads", "circuit")
 }
 
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
@@ -147,8 +113,8 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 		filename = fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)
 	}
 
-	dir, _ := circuitBreakerPaths()
-	_ = os.MkdirAll(dir, 0755)
+	dir := CircuitBreakerDir()
+	_ = os.MkdirAll(dir, 0700)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
@@ -218,15 +184,14 @@ func (cb *circuitBreaker) Allow() bool {
 }
 
 // probe performs a quick TCP dial to check if the Dolt server is reachable.
-// One-shot: reachability is based on dial success alone, so a drain timeout
-// (dial-accepted-but-mute) still counts as reachable here. Draining before
-// close still applies — it avoids sending the dolt sql-server a TCP RST that
-// it would interpret as an aborted MySQL handshake (gastownhall/beads#4132,
-// #4133).
 func (cb *circuitBreaker) probe() bool {
 	addr := net.JoinHostPort(cb.host, fmt.Sprintf("%d", cb.port))
-	_, err := doltserver.ProbeSQLServer("tcp", addr, 1*time.Second)
-	return err == nil
+	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // RecordSuccess records a successful connection. Resets the breaker to closed.
@@ -366,54 +331,23 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 //
 // Called during init to ensure a clean starting state (GH#2598).
 func CleanStaleCircuitBreakerFiles() {
-	dir, legacyFile := circuitBreakerPaths()
+	// Remove legacy files that lived directly in /tmp (before the subdirectory move).
+	// Direct path removal — no directory scan needed.
+	_ = os.Remove("/tmp/beads-dolt-circuit-0.json")
 
-	// Remove the legacy port-0 file that lived directly in the temp root before
-	// the subdirectory move (GH#2598). Best-effort: remove from the resolved
-	// legacy path and, for real (non-test) runs, from the historical hardcoded
-	// "/tmp" location too (which resolved to C:\tmp on Windows, GH#4636).
-	// Double-remove is harmless when they coincide.
-	_ = os.Remove(legacyFile)
-	if os.Getenv(testCircuitBreakerDirEnv) == "" {
-		_ = os.Remove(filepath.Join("/tmp", "beads-dolt-circuit-0.json"))
-	}
+	// Clean stale files in the user-owned cache directory.
+	dir := CircuitBreakerDir()
+	_ = os.MkdirAll(dir, 0700)
+	cleanStaleCircuitBreakerFilesIn(dir)
 
-	// Clean stale files in the dedicated subdirectory (fast — typically 0-2
-	// files). Only open/half-open state past circuitStaleTTL is removed here;
-	// closed files are left alone since a live server keeps writing them.
-	_ = os.MkdirAll(dir, 0755)
-	cleanStaleCircuitBreakerFilesIn(dir, false)
-
-	// Also sweep the legacy hardcoded "/tmp/beads-circuit" location
-	// (C:\tmp\beads-circuit on Windows) where older builds accumulated files
-	// before the os.TempDir() fix (GH#4636). Unlike the live directory above,
-	// remove *closed* files here too — but only past an mtime TTL: this
-	// directory is NOT fully abandoned. Any TMPDIR-less process (launchd,
-	// cron, a bare ssh command) resolves os.TempDir() to /tmp and uses it as
-	// its live directory, rewriting closed state on every success; only
-	// files no writer has touched in legacyClosedSweepTTL are the GH#4636
-	// accumulation this sweep exists for (ephemeral ports minting a distinct
-	// filename each time, never reused).
-	if os.Getenv(testCircuitBreakerDirEnv) == "" {
-		if legacy := filepath.Join("/tmp", "beads-circuit"); legacy != dir {
-			cleanStaleCircuitBreakerFilesIn(legacy, true)
-		}
-	}
+	// Sweep the previous production location only for backward compatibility.
+	// New state is never written under the system temporary directory.
+	cleanStaleCircuitBreakerFilesIn(filepath.Join(os.TempDir(), "beads-circuit"))
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of
 // CleanStaleCircuitBreakerFiles that accepts a directory parameter.
-//
-// removeClosed additionally removes closed-state files whose mtime is older
-// than legacyClosedSweepTTL. It exists for the legacy "/tmp/beads-circuit"
-// directory (GH#4636): a closed state file is written on every successful
-// RecordSuccess, and since ephemeral ports mint a distinct filename per
-// connection, closed sidecars accumulate there with no other cleanup path.
-// The TTL is what makes it safe alongside the directory's remaining LIVE
-// writers (TMPDIR-less processes, whose os.TempDir() is /tmp — they keep
-// their file's mtime fresh). The live directory must not pass true here —
-// a closed file there reflects a healthy, currently-in-use breaker.
-func cleanStaleCircuitBreakerFilesIn(dir string, removeClosed bool) {
+func cleanStaleCircuitBreakerFilesIn(dir string) {
 	pattern := filepath.Join(dir, "beads-dolt-circuit-*.json")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -440,20 +374,6 @@ func cleanStaleCircuitBreakerFilesIn(dir string, removeClosed bool) {
 			_ = os.Remove(path)
 			continue
 		}
-		if state.State == circuitClosed {
-			// Legacy-directory mode only — and only past an mtime TTL: the
-			// legacy dir has LIVE writers wherever os.TempDir() is /tmp
-			// (TMPDIR-less launchd/cron/ssh processes), so an unconditional
-			// remove churned against them forever (see legacyClosedSweepTTL).
-			// Silent on purpose: removing routine closed-state hygiene is not
-			// worth a stderr line per file per invocation.
-			if removeClosed {
-				if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > legacyClosedSweepTTL {
-					_ = os.Remove(path)
-				}
-			}
-			continue
-		}
 		if state.State != circuitOpen && state.State != circuitHalfOpen {
 			continue
 		}
@@ -474,12 +394,6 @@ func cleanStaleCircuitBreakerFilesIn(dir string, removeClosed bool) {
 // errors (syntax, missing table, etc.) do not.
 func isConnectionError(err error) bool {
 	if err == nil {
-		return false
-	}
-	// A typed 1105 is a semantic response from Dolt, not evidence that the
-	// server is unavailable, even if its message happens to mention a connection.
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1105 {
 		return false
 	}
 	errStr := strings.ToLower(err.Error())

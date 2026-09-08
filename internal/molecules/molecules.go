@@ -150,6 +150,7 @@ func (l *Loader) loadMolecules(ctx context.Context, molecules []*types.Issue) (i
 	// Molecules have their own ID namespace (mol-*) independent of project prefix.
 	opts := storage.BatchCreateOptions{
 		SkipPrefixValidation: true, // Molecules use their own prefix
+		OrphanHandling:       storage.OrphanAllow,
 	}
 	if err := l.store.CreateIssuesWithFullOptions(ctx, newMolecules, "molecules-loader", opts); err != nil {
 		return 0, fmt.Errorf("batch create molecules: %w", err)

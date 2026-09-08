@@ -161,13 +161,7 @@ func TestMigration0053PromotesRigWisps(t *testing.T) {
 		t.Fatalf("commit seed fixture: %v", err)
 	}
 
-	// This test exercises the rig-wisp promotion in migration 0053 specifically.
-	// MigrateUp only re-applies versions strictly greater than MAX(applied), so to
-	// replay 0053 we delete every row >= 53 (not just LatestVersion(), which now
-	// points past 0053 as later migrations like 0054 land). 0053 re-runs the
-	// promotion; any later migration replays as a guarded no-op.
-	const rigWispsMigrationVersion = 53
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigWispsMigrationVersion); err != nil {
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
 		t.Fatalf("mark 0053 pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
@@ -253,7 +247,7 @@ func TestMigration0053RepairsIssuesMissingRigColumns(t *testing.T) {
 		t.Fatalf("commit legacy fixture: %v", err)
 	}
 
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigRepairVersion); err != nil {
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
 		t.Fatalf("mark 0053 pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
@@ -270,13 +264,6 @@ func TestMigration0053RepairsIssuesMissingRigColumns(t *testing.T) {
 		t.Fatalf("promoted rig issue rows = %d, want 1 with rig columns restored and copied", promoted)
 	}
 }
-
-// rigRepairVersion is the 0053 rig-columns repair migration under test above.
-const rigRepairVersion = 53
-
-// orphanCleanupIgnoredVersion is migrations/ignored/0011_cleanup_orphaned_
-// child_counters.up.sql — the migration under test below.
-const orphanCleanupIgnoredVersion = 11
 
 // TestIgnoredMigration0011CleansOrphanedChildCounters reproduces #4534: a
 // child_counters row orphaned while fk_counter_parent was dropped (0039)
@@ -318,18 +305,7 @@ func TestIgnoredMigration0011CleansOrphanedChildCounters(t *testing.T) {
 		t.Fatalf("commit counter fixture: %v", err)
 	}
 
-	// Bind the const to its file: if the ignored series is ever renumbered,
-	// fail here with a self-explaining message instead of silently replaying
-	// the wrong tail.
-	if _, err := schema.IgnoredMigrationSQL("0011_cleanup_orphaned_child_counters.up.sql"); err != nil {
-		t.Fatalf("orphanCleanupIgnoredVersion (%d) no longer matches an ignored migration file: %v", orphanCleanupIgnoredVersion, err)
-	}
-
-	// Pending detection is MAX-based (currentVersion = MAX(version)), so
-	// deleting only one cursor row re-runs only the LATEST ignored migration.
-	// Roll the cursor back to before 0011 so the orphan cleanup itself re-runs;
-	// the 0011..latest tail is idempotent by series contract.
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM ignored_schema_migrations WHERE version >= ?", orphanCleanupIgnoredVersion); err != nil {
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM ignored_schema_migrations WHERE version = ?", schema.LatestIgnoredVersion()); err != nil {
 		t.Fatalf("mark ignored 0011 pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {

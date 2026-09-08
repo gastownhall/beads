@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	lipgloss "charm.land/lipgloss/v2"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -60,17 +59,17 @@ func TestRenderStatusAndPriority(t *testing.T) {
 		}
 	}
 
-	// RenderPriority is P-label only (no ● — that glyph is status blocked; GH#4996)
+	// RenderPriority now includes the priority icon (●)
 	priorityCases := []struct {
 		priority int
 		want     string
 	}{
-		{0, PriorityP0Style.Render("P0")},
-		{1, PriorityP1Style.Render("P1")},
-		{2, PriorityP2Style.Render("P2")},
-		{3, PriorityP3Style.Render("P3")},
-		{4, PriorityP4Style.Render("P4")},
-		{5, "P5"},
+		{0, PriorityP0Style.Render(PriorityIcon + " P0")},
+		{1, PriorityP1Style.Render(PriorityIcon + " P1")},
+		{2, PriorityP2Style.Render(PriorityIcon + " P2")},
+		{3, PriorityP3Style.Render(PriorityIcon + " P3")},
+		{4, PriorityP4Style.Render(PriorityIcon + " P4")},
+		{5, PriorityIcon + " P5"},
 	}
 	for _, tc := range priorityCases {
 		if got := RenderPriority(tc.priority); got != tc.want {
@@ -78,7 +77,7 @@ func TestRenderStatusAndPriority(t *testing.T) {
 		}
 	}
 
-	// RenderPriorityCompact returns just "P0"
+	// RenderPriorityCompact returns just "P0" without icon
 	if got := RenderPriorityCompact(0); !strings.Contains(got, "P0") {
 		t.Fatalf("compact priority should contain P0, got %q", got)
 	}
@@ -149,29 +148,6 @@ func TestRenderClosedUtilities(t *testing.T) {
 
 	if got := RenderID("bd-5"); got != IDStyle.Render("bd-5") {
 		t.Fatalf("RenderID mismatch")
-	}
-}
-
-func TestDisableColors(t *testing.T) {
-	// Save and restore mutated globals so other tests are unaffected.
-	savedStyle := AccentStyle
-	savedColor := ColorAccent
-	t.Cleanup(func() {
-		AccentStyle = savedStyle
-		ColorAccent = savedColor
-	})
-
-	// Simulate a color-enabled init: a style carrying an explicit foreground.
-	ColorAccent = lipgloss.Color("#ff0000")
-	AccentStyle = lipgloss.NewStyle().Foreground(ColorAccent)
-
-	DisableColors()
-
-	if _, ok := ColorAccent.(lipgloss.NoColor); !ok {
-		t.Errorf("ColorAccent not reset to NoColor, got %T", ColorAccent)
-	}
-	if out := AccentStyle.Render("hello"); strings.ContainsRune(out, '\x1b') {
-		t.Errorf("AccentStyle still emits ANSI escape after DisableColors: %q", out)
 	}
 }
 

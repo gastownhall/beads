@@ -9,9 +9,8 @@ This document contains detailed operational instructions for AI agents working o
 ### Code Standards
 
 - **Go version**: see `go.mod` for the required version (currently 1.26+)
-- **Linting**: `make ci-pr-lint` must pass with zero issues; see
-  [engdocs/LINTING.md](engdocs/LINTING.md)
-- **Testing**: All new features need tests; use [engdocs/TESTING.md](engdocs/TESTING.md) for command selection, test design, and PR readiness.
+- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
+- **Testing**: All new features need tests (`make test` for the normal local/CI path, `make test-icu-path` only when intentionally exercising the opt-in ICU regex path)
 - **Documentation**: Update relevant .md files
 
 ### File Organization
@@ -31,25 +30,16 @@ beads/
 
 **IMPORTANT:** Never pollute the production database with test issues!
 
-For test commands, tier selection, and test-design guidance, use the canonical
-[engdocs/TESTING.md](engdocs/TESTING.md).
-
-**For manual testing**, keep initialization and all experiments in a disposable
-working directory. This safety example supplements the canonical testing guide:
+**For manual testing**, use the `BEADS_DB` environment variable to point to a temporary database:
 
 ```bash
-beads_manual_dir="$(mktemp -d)"
-(
-  set -e
-  cd "$beads_manual_dir"
-  bd init --quiet --prefix test --skip-hooks --skip-agents
-  bd create "Test issue" -p 1
-)
-rm -rf -- "$beads_manual_dir"
-```
+# Create test issues in isolated database
+BEADS_DB=/tmp/test.db bd init --quiet --prefix test
+BEADS_DB=/tmp/test.db bd create "Test issue" -p 1
 
-`BEADS_DB` alone does not redirect `bd init` workspace setup. Do not run manual
-initialization from a production workspace even when selecting another database.
+# Or for quick testing
+BEADS_DB=/tmp/test.db bd create "Test feature" -p 1
+```
 
 **For automated tests**, use `t.TempDir()` in Go tests:
 
@@ -71,9 +61,7 @@ git config core.hooksPath .git/hooks
 Do not rely on the developer's global git config. Global `core.hooksPath` can leak
 into temp repos and produce flaky test behavior.
 
-**Warning:** bd will warn you when creating issues with a "Test" prefix in the
-production database. The disposable working directory is the isolation
-boundary for manual initialization and experiments.
+**Warning:** bd will warn you when creating issues with "Test" prefix in the production database. Always use `BEADS_DB` for manual testing.
 
 **Tmpfs hosts:** the `cmd/bd` test suite creates an isolated `$HOME` and several
 test binaries under `$TMPDIR`. They are normally cleaned by the test process,
@@ -83,9 +71,9 @@ test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
 
 ### Before Committing
 
-1. **Run tests**: follow [engdocs/TESTING.md](engdocs/TESTING.md).
-2. **Run the required lint contract when its code surface changed**:
-   `make ci-pr-lint`
+1. **Run tests**: `make test` (or `./scripts/test.sh`)
+   - Only if intentionally exercising the ICU regex path: `make test-icu-path`
+2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
 3. **Update docs**: If you changed behavior, update README.md or other docs
 4. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 
@@ -102,7 +90,7 @@ This enables `bd doctor` to detect **orphaned issues** - work that was committed
 
 For agent-prepared commits, also include the
 `Agent-Signature:` trailer described in
-[engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md). Use `unknown-model` or
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md). Use `unknown-model` or
 `unknown-reasoning` when reliable runtime metadata is unavailable.
 
 ### Git Workflow
@@ -118,15 +106,15 @@ bd hooks install
 
 **Dolt sync**: Dolt handles sync natively via `bd dolt push` / `bd dolt pull`. No export/import round-trip needed for normal sync.
 
-**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/reference/protected-branches.md](docs/reference/protected-branches.md).
+**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
 
-**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/reference/advanced.md](docs/reference/advanced.md).
+**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/ADVANCED.md](docs/ADVANCED.md).
 
 **Merge conflicts**: Rare with hash IDs. Dolt uses cell-level 3-way merge for conflict resolution.
 
 ## Git Workflow: PR by Default
 
-Crew workers use a PR-based workflow. Beads is a dependency of a downstream consumer, so we
+Crew workers use a PR-based workflow. Beads is a dependency of Gas City, so we
 defer to the standard PR flow to keep changes reviewable.
 
 - Work on a feature branch, push the branch, open a PR against `main`
@@ -145,7 +133,7 @@ value, absorb or transform it locally when practical, preserve attribution, and
 use request-changes only as a last resort.
 
 Sign agent-written GitHub comments and reviews using
-[engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md).
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
 
 ### External Contributor PRs: Check Before You Build
 
@@ -179,9 +167,87 @@ gate for PR handling.
 
 ## Landing the Plane
 
-See [AGENTS.md](AGENTS.md#landing-the-plane-session-completion) for the
-canonical session-completion protocol (quality gates, mandatory `git push`,
-cleanup, and next-session hand-off).
+**When the user says "let's land the plane"**, you MUST complete ALL steps below. The plane is NOT landed until `git push` succeeds. NEVER stop before pushing. NEVER say "ready to push when you are!" - that is a FAILURE.
+
+**MANDATORY WORKFLOW - COMPLETE ALL STEPS:**
+
+1. **File beads issues for any remaining work** that needs follow-up
+2. **Ensure all quality gates pass** (only if code changes were made):
+   - Run `golangci-lint run ./...` (if pre-commit installed: `pre-commit run --all-files`)
+   - Run `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
+   - File P0 issues if quality gates are broken
+3. **Update beads issues** - close finished work, update status
+4. **PUSH TO REMOTE - NON-NEGOTIABLE** - This step is MANDATORY. Execute ALL commands below:
+   ```bash
+   # Pull first to catch any remote changes
+   git pull --rebase
+
+   # MANDATORY: Push everything to remote
+   # DO NOT STOP BEFORE THIS COMMAND COMPLETES
+   git push
+
+   # MANDATORY: Verify push succeeded
+   git status  # MUST show "up to date with origin/main"
+   ```
+
+   **CRITICAL RULES:**
+   - The plane has NOT landed until `git push` completes successfully
+   - NEVER stop before `git push` - that leaves work stranded locally
+   - NEVER say "ready to push when you are!" - YOU must push, not the user
+   - If `git push` fails, resolve the issue and retry until it succeeds
+   - The user is managing multiple agents - unpushed work breaks their coordination workflow
+
+5. **Clean up git state** - Clear old stashes and prune dead remote branches:
+   ```bash
+   git stash clear                    # Remove old stashes
+   git remote prune origin            # Clean up deleted remote branches
+   ```
+6. **Verify clean state** - Ensure all changes are committed AND PUSHED, no untracked files remain
+7. **Choose a follow-up issue for next session**
+   - Provide a prompt for the user to give to you in the next session
+   - Format: "Continue work on bd-X: [issue title]. [Brief context about what's been done and what's next]"
+
+**REMEMBER: Landing the plane means EVERYTHING is pushed to remote. No exceptions. No "ready when you are". PUSH IT.**
+
+**Example "land the plane" session:**
+
+```bash
+# 1. File remaining work
+bd create "Add integration tests for sync" -t task -p 2 --json
+
+# 2. Run quality gates (only if code changes were made)
+make test
+golangci-lint run ./...
+
+# 3. Close finished issues
+bd close bd-42 bd-43 --reason "Completed" --json
+
+# 4. PUSH TO REMOTE - MANDATORY, NO STOPPING BEFORE THIS IS DONE
+git pull --rebase
+git push       # MANDATORY - THE PLANE IS STILL IN THE AIR UNTIL THIS SUCCEEDS
+git status     # MUST verify "up to date with origin/main"
+
+# 5. Clean up git state
+git stash clear
+git remote prune origin
+
+# 6. Verify everything is clean and pushed
+git status
+
+# 7. Choose next work
+bd ready --json
+bd show bd-44 --json
+```
+
+**Then provide the user with:**
+
+- Summary of what was completed this session
+- What issues were filed for follow-up
+- Status of quality gates (all passing / issues filed)
+- Confirmation that ALL changes have been pushed to remote
+- Recommended prompt for next session
+
+**CRITICAL: Never end a "land the plane" session without successfully pushing. The user is coordinating multiple agents and unpushed work causes severe rebase conflicts.**
 
 ## Agent Session Workflow
 
@@ -269,7 +335,7 @@ consistency.
 Use small Unicode symbols with semantic colors applied via lipgloss:
 
 - Status: `○ ◐ ● ✓ ❄`
-- Priority: `P0`–`P4` label with color (no status glyph)
+- Priority: `●` (filled circle with color)
 
 #### Status Icons
 
@@ -283,14 +349,13 @@ Use these symbols consistently across all commands:
 ❄ deferred    - Scheduled for later (blue/muted)
 ```
 
-#### Priority Labels and Colors
+#### Priority Icons and Colors
 
-Format priority as the P-label with color only (no status glyph — `●` is blocked status):
+Format priority as `● P0` (filled circle icon plus label, colored by priority):
 
-- `P0`: Red + bold (critical)
-- `P1`: Orange (high)
-- `P2`: Amber (elevated)
-- `P3`–`P4`: Default text
+- `● P0`: Red + bold (critical)
+- `● P1`: Orange (high)
+- `● P2-P4`: Default text (normal)
 
 #### Issue Type Colors
 
@@ -388,20 +453,27 @@ case types.StatusClosed:
 4. Link from `examples/README.md`
 5. Mention in main README.md
 
-## Building
+## Building and Testing
 
 ```bash
 # Build and install bd to ~/.local/bin (the canonical location)
 make install
+
+# Test (local baseline)
+make test
+
+# Optional ICU regex path smoke (maintainer-only, not normal validation)
+make test-icu-path
+
+# Coverage run
+go test -tags gms_pure_go -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
 
 # Verify installed binary
 bd init --prefix test
 bd create "Test issue" -p 1
 bd ready
 ```
-
-For testing commands, test design, and PR-readiness gates, use
-[engdocs/TESTING.md](engdocs/TESTING.md).
 
 > **WARNING**: Do NOT use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`,
 > or raw `go run ./cmd/bd ...`.
@@ -460,9 +532,26 @@ See `scripts/README.md` for more details.
 
 ## Release Process (Maintainers)
 
-See [RELEASING.md](RELEASING.md) for the complete release process, including
-the automated `./scripts/release.sh <version>` script and the manual,
-step-by-step channel-by-channel instructions.
+**Automated (Recommended):**
+
+```bash
+# One command to do everything (version bump, tests, tag, Homebrew update, local install)
+./scripts/release.sh 0.9.3
+```
+
+This handles the entire release workflow automatically, including waiting ~5 minutes for GitHub Actions to build release artifacts. See [scripts/README.md](scripts/README.md) for details.
+
+**Manual (Step-by-Step):**
+
+1. Bump version: `./scripts/bump-version.sh <version> --commit`
+2. Update CHANGELOG.md with release notes
+3. Run tests: `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
+4. Push version bump: `git push origin main`
+5. Tag release: `git tag v<version> && git push origin v<version>`
+6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
+7. Verify: `brew update && brew upgrade beads && bd version`
+
+See [RELEASING.md](RELEASING.md) for complete manual instructions.
 
 ## Checking GitHub Issues and PRs
 
@@ -509,18 +598,13 @@ collected. Events are written under `~/.beads/eventsData` and POSTed to
 Metrics are enabled by default (opt-out). The friendliest way to see or change
 them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
 which takes effect on the next command with no restart. `BD_DISABLE_METRICS=1`
-still works as a one-off, shell-scoped override. The cross-tool
-[`DO_NOT_TRACK`](https://donottrack.sh/) standard is honored as a disable-only
-opt-out: `DO_NOT_TRACK=1` opts out, while a falsey or empty value
-(`DO_NOT_TRACK=0`, `false`, or unset-but-present) falls through to your saved
-`bd metrics` preference instead of forcing metrics back on. `BD_DISABLE_METRICS`
-is the bidirectional override and takes precedence when both are set.
+still works as a one-off, shell-scoped override.
 
 ## Questions?
 
 - Check existing issues: `bd list`
 - Look at recent commits: `git log --oneline -20`
-- Read the docs: README.md, ADVANCED.md, docs/reference/configuration.md
+- Read the docs: README.md, ADVANCED.md, docs/CONFIG.md
 - Create an issue if unsure: `bd create "Question: ..." -t task -p 2`
 
 ## Important Files

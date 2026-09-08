@@ -2,16 +2,14 @@ package main
 
 import (
 	"cmp"
-	"context"
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var countCmd = &cobra.Command{
@@ -44,255 +42,317 @@ Examples:
 			}
 		}()
 
-		request, groupBy, err := parseCountRequest(cmd)
-		if err != nil {
-			return err
+		status, _ := cmd.Flags().GetString("status")
+		assignee, _ := cmd.Flags().GetString("assignee")
+		issueType, _ := cmd.Flags().GetString("type")
+		labels, _ := cmd.Flags().GetStringSlice("label")
+		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		titleSearch, _ := cmd.Flags().GetString("title")
+		idFilter, _ := cmd.Flags().GetString("id")
+
+		// Pattern matching flags
+		titleContains, _ := cmd.Flags().GetString("title-contains")
+		descContains, _ := cmd.Flags().GetString("desc-contains")
+		notesContains, _ := cmd.Flags().GetString("notes-contains")
+
+		// Date range flags
+		createdAfter, _ := cmd.Flags().GetString("created-after")
+		createdBefore, _ := cmd.Flags().GetString("created-before")
+		updatedAfter, _ := cmd.Flags().GetString("updated-after")
+		updatedBefore, _ := cmd.Flags().GetString("updated-before")
+		closedAfter, _ := cmd.Flags().GetString("closed-after")
+		closedBefore, _ := cmd.Flags().GetString("closed-before")
+
+		// Empty/null check flags
+		emptyDesc, _ := cmd.Flags().GetBool("empty-description")
+		noAssignee, _ := cmd.Flags().GetBool("no-assignee")
+		noLabels, _ := cmd.Flags().GetBool("no-labels")
+
+		// Priority range flags
+		priorityMin, _ := cmd.Flags().GetInt("priority-min")
+		priorityMax, _ := cmd.Flags().GetInt("priority-max")
+
+		// Group by flags
+		byStatus, _ := cmd.Flags().GetBool("by-status")
+		byPriority, _ := cmd.Flags().GetBool("by-priority")
+		byType, _ := cmd.Flags().GetBool("by-type")
+		byAssignee, _ := cmd.Flags().GetBool("by-assignee")
+		byLabel, _ := cmd.Flags().GetBool("by-label")
+
+		// Determine groupBy value
+		groupBy := ""
+		groupCount := 0
+		if byStatus {
+			groupBy = "status"
+			groupCount++
+		}
+		if byPriority {
+			groupBy = "priority"
+			groupCount++
+		}
+		if byType {
+			groupBy = "type"
+			groupCount++
+		}
+		if byAssignee {
+			groupBy = "assignee"
+			groupCount++
+		}
+		if byLabel {
+			groupBy = "label"
+			groupCount++
 		}
 
-		counter, err := openCounter()
+		if groupCount > 1 {
+			return HandleErrorRespectJSON("only one --by-* flag can be specified")
+		}
+
+		// Normalize labels
+		labels = utils.NormalizeLabels(labels)
+		labelsAny = utils.NormalizeLabels(labelsAny)
+
+		ctx := rootCtx
+
+		// Direct mode
+		filter := types.IssueFilter{}
+		if status != "" && status != "all" {
+			s := types.Status(status)
+			filter.Status = &s
+		}
+		if cmd.Flags().Changed("priority") {
+			priority, _ := cmd.Flags().GetInt("priority")
+			filter.Priority = &priority
+		}
+		if assignee != "" {
+			filter.Assignee = &assignee
+		}
+		if issueType != "" {
+			t := types.IssueType(issueType)
+			filter.IssueType = &t
+		}
+		if len(labels) > 0 {
+			filter.Labels = labels
+		}
+		if len(labelsAny) > 0 {
+			filter.LabelsAny = labelsAny
+		}
+		if titleSearch != "" {
+			filter.TitleSearch = titleSearch
+		}
+		if idFilter != "" {
+			ids := utils.NormalizeLabels(strings.Split(idFilter, ","))
+			if len(ids) > 0 {
+				filter.IDs = ids
+			}
+		}
+
+		// Pattern matching
+		filter.TitleContains = titleContains
+		filter.DescriptionContains = descContains
+		filter.NotesContains = notesContains
+
+		// Date ranges
+		if createdAfter != "" {
+			t, err := parseTimeFlag(createdAfter)
+			if err != nil {
+				return HandleErrorRespectJSON("parsing --created-after: %v", err)
+			}
+			filter.CreatedAfter = &t
+		}
+		if createdBefore != "" {
+			t, err := parseTimeFlag(createdBefore)
+			if err != nil {
+				return HandleErrorRespectJSON("parsing --created-before: %v", err)
+			}
+			filter.CreatedBefore = &t
+		}
+		if updatedAfter != "" {
+			t, err := parseTimeFlag(updatedAfter)
+			if err != nil {
+				return HandleErrorRespectJSON("parsing --updated-after: %v", err)
+			}
+			filter.UpdatedAfter = &t
+		}
+		if updatedBefore != "" {
+			t, err := parseTimeFlag(updatedBefore)
+			if err != nil {
+				return HandleErrorRespectJSON("parsing --updated-before: %v", err)
+			}
+			filter.UpdatedBefore = &t
+		}
+		if closedAfter != "" {
+			t, err := parseTimeFlag(closedAfter)
+			if err != nil {
+				return HandleErrorRespectJSON("parsing --closed-after: %v", err)
+			}
+			filter.ClosedAfter = &t
+		}
+		if closedBefore != "" {
+			t, err := parseTimeFlag(closedBefore)
+			if err != nil {
+				return HandleErrorRespectJSON("parsing --closed-before: %v", err)
+			}
+			filter.ClosedBefore = &t
+		}
+
+		// Empty/null checks
+		filter.EmptyDescription = emptyDesc
+		filter.NoAssignee = noAssignee
+		filter.NoLabels = noLabels
+
+		// Priority range
+		if cmd.Flags().Changed("priority-min") {
+			filter.PriorityMin = &priorityMin
+		}
+		if cmd.Flags().Changed("priority-max") {
+			filter.PriorityMax = &priorityMax
+		}
+
+		if includeInfra, _ := cmd.Flags().GetBool("include-infra"); includeInfra {
+			cfg, err := loadDirectListFilterConfig(ctx, store)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			applyCountIncludeInfra(&filter, issueType, cfg)
+		} else {
+			filter.SkipWisps = true // durable tier only; bd count's historical default
+		}
+
+		if groupBy == "" {
+			count, err := store.CountIssues(ctx, "", filter)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+			if jsonOutput {
+				return outputJSON(struct {
+					Count int64 `json:"count"`
+				}{Count: count})
+			}
+			fmt.Println(count)
+			return nil
+		}
+
+		counts, err := store.CountIssuesByGroup(ctx, filter, groupBy)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		return executeCount(rootCtx, counter, request, groupBy)
+
+		type GroupCount struct {
+			Group string `json:"group"`
+			Count int    `json:"count"`
+		}
+
+		groups := make([]GroupCount, 0, len(counts))
+		for group, count := range counts {
+			groups = append(groups, GroupCount{Group: group, Count: count})
+		}
+
+		// --by-label buckets are not mutually exclusive, so use CountIssues for the total
+		// to avoid double-counting multi-label issues.
+		total, err := store.CountIssues(ctx, "", filter)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+
+		slices.SortFunc(groups, func(a, b GroupCount) int {
+			return cmp.Compare(a.Group, b.Group)
+		})
+
+		if jsonOutput {
+			return outputJSON(struct {
+				Total  int64        `json:"total"`
+				Groups []GroupCount `json:"groups"`
+			}{
+				Total:  total,
+				Groups: groups,
+			})
+		}
+		fmt.Printf("Total: %d\n\n", total)
+		for _, g := range groups {
+			fmt.Printf("%s: %d\n", g.Group, g.Count)
+		}
+		return nil
 	},
 }
 
-// openCounter hands back the count role for whichever route this invocation is
-// on, each through its own capability accessor. Neither branch builds a filter,
-// loads config or opens a unit of work.
-func openCounter() (issueops.Counter, error) {
-	if usesProxiedServer() {
-		return proxiedCounter()
-	}
-	return store.Counter()
-}
+// applyCountIncludeInfra switches the count filter to the wisps-inclusive
+// mode of `bd list --include-infra` (GH#4387). It mirrors the buildListFilter
+// defaults that determine list's cardinality so that, for any filter set,
+// `bd count --include-infra <filters>` returns exactly the number of rows
+// `bd list --include-infra <filters> --all` materializes:
+//
+//   - the wisps table is merged into the count (SkipWisps=false), picking up
+//     no_history beads (durable work stored in the wisps tier) and ephemeral
+//     wisps, exactly like list's merge path;
+//   - template molecules are excluded (list's default without
+//     --include-templates);
+//   - gate beads are excluded unless gates are explicitly requested via
+//     --type gate (list's default without --include-gates);
+//   - counting an infra type (agent/role/message, or the store-configured
+//     set) routes to the ephemeral wisps tier, like list's infra-type listing.
+//
+// The non-flag path never calls this function: bd count without
+// --include-infra keeps its historical durable-only semantics.
+func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg listFilterConfig) {
+	filter.SkipWisps = false
 
-// parseCountRequest turns the flag set into the role's request. Normalization
-// of labels and ids, the wisp-tier policy and the workspace's infra vocabulary
-// all live behind the role, so the two routes cannot come to disagree.
-func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.CountGroup, error) {
-	groupBy, err := countGroupFlag(cmd)
-	if err != nil {
-		return issueops.CountRequest{}, "", err
-	}
+	isTemplate := false
+	filter.IsTemplate = &isTemplate
 
-	status, _ := cmd.Flags().GetString("status")
-	assignee, _ := cmd.Flags().GetString("assignee")
-	issueType, _ := cmd.Flags().GetString("type")
-	labels, _ := cmd.Flags().GetStringSlice("label")
-	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-	titleSearch, _ := cmd.Flags().GetString("title")
-	idFilter, _ := cmd.Flags().GetString("id")
-	titleContains, _ := cmd.Flags().GetString("title-contains")
-	descContains, _ := cmd.Flags().GetString("desc-contains")
-	notesContains, _ := cmd.Flags().GetString("notes-contains")
-	emptyDesc, _ := cmd.Flags().GetBool("empty-description")
-	noAssignee, _ := cmd.Flags().GetBool("no-assignee")
-	noLabels, _ := cmd.Flags().GetBool("no-labels")
-	includeInfra, _ := cmd.Flags().GetBool("include-infra")
-	metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
-
-	request := issueops.CountRequest{
-		Status:        status,
-		IssueType:     issueType,
-		Assignee:      assignee,
-		Labels:        labels,
-		LabelsAny:     labelsAny,
-		TitleSearch:   titleSearch,
-		IDFilter:      idFilter,
-		TitleContains: titleContains,
-		DescContains:  descContains,
-		NotesContains: notesContains,
-		EmptyDesc:     emptyDesc,
-		NoAssignee:    noAssignee,
-		NoLabels:      noLabels,
-		IncludeInfra:  includeInfra,
-	}
-	if len(metadataFieldFlags) > 0 {
-		request.MetadataFields = make(map[string]string, len(metadataFieldFlags))
-		for _, mf := range metadataFieldFlags {
-			k, v, ok := strings.Cut(mf, "=")
-			if !ok || k == "" {
-				return issueops.CountRequest{}, "", HandleErrorRespectJSON("invalid --metadata-field: expected key=value, got %q", mf)
-			}
-			if err := storage.ValidateMetadataKey(k); err != nil {
-				return issueops.CountRequest{}, "", HandleErrorRespectJSON("invalid --metadata-field key: %v", err)
-			}
-			request.MetadataFields[k] = v
-		}
+	if issueType != "gate" {
+		filter.ExcludeTypes = append(filter.ExcludeTypes, "gate")
 	}
 
-	if cmd.Flags().Changed("priority") {
-		priority, _ := cmd.Flags().GetInt("priority")
-		request.Priority = &priority
+	if issueType != "" && cfg.isInfra(issueType) {
+		ephemeral := true
+		filter.Ephemeral = &ephemeral
 	}
-	if cmd.Flags().Changed("priority-min") {
-		priorityMin, _ := cmd.Flags().GetInt("priority-min")
-		request.PriorityMin = &priorityMin
-	}
-	if cmd.Flags().Changed("priority-max") {
-		priorityMax, _ := cmd.Flags().GetInt("priority-max")
-		request.PriorityMax = &priorityMax
-	}
-
-	for _, bound := range []struct {
-		flag string
-		dest **time.Time
-	}{
-		{"created-after", &request.CreatedAfter},
-		{"created-before", &request.CreatedBefore},
-		{"updated-after", &request.UpdatedAfter},
-		{"updated-before", &request.UpdatedBefore},
-		{"closed-after", &request.ClosedAfter},
-		{"closed-before", &request.ClosedBefore},
-	} {
-		raw, _ := cmd.Flags().GetString(bound.flag)
-		if raw == "" {
-			continue
-		}
-		parsed, err := parseTimeFlag(raw)
-		if err != nil {
-			return issueops.CountRequest{}, "", HandleErrorRespectJSON("parsing --%s: %v", bound.flag, err)
-		}
-		*bound.dest = &parsed
-	}
-
-	return request, groupBy, nil
-}
-
-// countGroupFlag resolves the five mutually exclusive --by-* flags to one
-// dimension. The role refuses an unknown one, but it cannot refuse TWO — by
-// the time a request reaches it only one dimension is left — so the exclusivity
-// check stays here, with the flags it is about.
-func countGroupFlag(cmd *cobra.Command) (issueops.CountGroup, error) {
-	var group issueops.CountGroup
-	set := 0
-	for _, candidate := range []struct {
-		flag  string
-		group issueops.CountGroup
-	}{
-		{"by-status", issueops.CountGroupStatus},
-		{"by-priority", issueops.CountGroupPriority},
-		{"by-type", issueops.CountGroupType},
-		{"by-assignee", issueops.CountGroupAssignee},
-		{"by-label", issueops.CountGroupLabel},
-	} {
-		if on, _ := cmd.Flags().GetBool(candidate.flag); on {
-			group = candidate.group
-			set++
-		}
-	}
-	if set > 1 {
-		return "", HandleErrorRespectJSON("only one --by-* flag can be specified")
-	}
-	return group, nil
-}
-
-func executeCount(ctx context.Context, counter issueops.Counter, request issueops.CountRequest, groupBy issueops.CountGroup) error {
-	if groupBy == "" {
-		result, err := counter.Count(ctx, request)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		if jsonOutput {
-			return outputJSON(struct {
-				Count int64 `json:"count"`
-			}{Count: result.Total})
-		}
-		fmt.Println(result.Total)
-		return nil
-	}
-
-	result, err := counter.CountByGroup(ctx, issueops.CountByGroupRequest{Filter: request, GroupBy: groupBy})
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	type GroupCount struct {
-		Group string `json:"group"`
-		Count int    `json:"count"`
-	}
-
-	groups := make([]GroupCount, 0, len(result.Groups))
-	for group, count := range result.Groups {
-		groups = append(groups, GroupCount{Group: group, Count: count})
-	}
-	slices.SortFunc(groups, func(a, b GroupCount) int {
-		return cmp.Compare(a.Group, b.Group)
-	})
-
-	if jsonOutput {
-		return outputJSON(struct {
-			Total  int64        `json:"total"`
-			Groups []GroupCount `json:"groups"`
-		}{
-			Total:  result.Total,
-			Groups: groups,
-		})
-	}
-	// The total is the role's scalar count, not the sum of the buckets:
-	// --by-label buckets overlap, so a multi-label issue is one row in the
-	// total and one row in each of its buckets.
-	fmt.Printf("Total: %d\n\n", result.Total)
-	for _, g := range groups {
-		fmt.Printf("%s: %d\n", g.Group, g.Count)
-	}
-	return nil
 }
 
 func init() {
-	registerCountFlags(countCmd)
-	rootCmd.AddCommand(countCmd)
-}
-
-// registerCountFlags declares `bd count`'s flag set on cmd. It is a function
-// rather than a block inside init so a test can stand up an INDEPENDENT
-// command carrying the same flags: cobra's AddFlagSet shares the underlying
-// *Flag values, so a test that set a flag on a copy would leak it into the
-// real command and into the next test.
-func registerCountFlags(cmd *cobra.Command) {
 	// Filter flags (same as list command)
-	cmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
-	cmd.Flags().IntP("priority", "p", 0, "Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)")
-	cmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	cmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
-	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
-	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
-	cmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
-	cmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated)")
+	countCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
+	countCmd.Flags().IntP("priority", "p", 0, "Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)")
+	countCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
+	countCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
+	countCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
+	countCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
+	countCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
+	countCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated)")
 
 	// Pattern matching
-	cmd.Flags().String("title-contains", "", "Filter by title substring")
-	cmd.Flags().String("desc-contains", "", "Filter by description substring")
-	cmd.Flags().String("notes-contains", "", "Filter by notes substring")
+	countCmd.Flags().String("title-contains", "", "Filter by title substring")
+	countCmd.Flags().String("desc-contains", "", "Filter by description substring")
+	countCmd.Flags().String("notes-contains", "", "Filter by notes substring")
 
 	// Date ranges
-	cmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
+	countCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
+	countCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
+	countCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
+	countCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
+	countCmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
+	countCmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
 
 	// Empty/null checks
-	cmd.Flags().Bool("empty-description", false, "Filter issues with empty description")
-	cmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
-	cmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
-	cmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
+	countCmd.Flags().Bool("empty-description", false, "Filter issues with empty description")
+	countCmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
+	countCmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
 
 	// Priority ranges
-	cmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")
-	cmd.Flags().Int("priority-max", 0, "Filter by maximum priority (inclusive)")
+	countCmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")
+	countCmd.Flags().Int("priority-max", 0, "Filter by maximum priority (inclusive)")
 
 	// Wisps tier (GH#4387): mirrors bd list's flag of the same name so
 	// `bd count --include-infra <filters>` returns exactly the cardinality of
 	// `bd list --include-infra <filters> --all`.
-	cmd.Flags().Bool("include-infra", false, "Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)")
+	countCmd.Flags().Bool("include-infra", false, "Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)")
 
 	// Grouping flags
-	cmd.Flags().Bool("by-status", false, "Group count by status")
-	cmd.Flags().Bool("by-priority", false, "Group count by priority")
-	cmd.Flags().Bool("by-type", false, "Group count by issue type")
-	cmd.Flags().Bool("by-assignee", false, "Group count by assignee")
-	cmd.Flags().Bool("by-label", false, "Group count by label")
+	countCmd.Flags().Bool("by-status", false, "Group count by status")
+	countCmd.Flags().Bool("by-priority", false, "Group count by priority")
+	countCmd.Flags().Bool("by-type", false, "Group count by issue type")
+	countCmd.Flags().Bool("by-assignee", false, "Group count by assignee")
+	countCmd.Flags().Bool("by-label", false, "Group count by label")
+
+	rootCmd.AddCommand(countCmd)
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -58,9 +59,9 @@ func TestCredentialCLIRoutingE2ESharedServer(t *testing.T) {
 	runCmd(t, sharedTestdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
 	runCmd(t, sharedTestdbDir, "dolt", "remote", "add", "origin", remoteURL)
 
-	// Start the server before opening the store so New() initializes schema via
-	// the normal migration path. A single dolt sql -q script over all migrations
-	// can leave Dolt's analyzer unaware of columns added earlier in the script.
+	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
+	runDoltSQL(t, sharedTestdbDir, initSchemaSQL)
+
 	port, err := testutil.FindFreePort()
 	if err != nil {
 		t.Fatalf("failed to find free port: %v", err)

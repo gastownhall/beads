@@ -124,20 +124,13 @@ func TestWatchIssueDetectsFieldUpdate(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, ".beads", "test.db")
 	s := newTestStore(t, dbPath)
 
-	// Seed updated_at an hour in the past so the title update's fresh (now)
-	// timestamp is unambiguously newer. A title change is not itself reflected in
-	// singleIssueSnapshot, which compares updated_at at 1-second granularity — so a
-	// same-second create+update (the common case on a fast machine) would tie and
-	// spuriously fail. CreateIssue honors a non-zero UpdatedAt (see issueops
-	// create.go), making the gap deterministic.
-	seeded := time.Now().Add(-time.Hour)
 	issue := &types.Issue{
 		ID:        generateUniqueTestID(t, "test", 0),
 		Title:     "original title",
 		Status:    types.StatusOpen,
 		IssueType: types.TypeTask,
-		CreatedAt: seeded,
-		UpdatedAt: seeded,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := s.CreateIssue(ctx, issue, "test-actor"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -149,7 +142,7 @@ func TestWatchIssueDetectsFieldUpdate(t *testing.T) {
 	}
 	snapBefore := singleIssueSnapshot(got)
 
-	// Update title (which bumps UpdatedAt to now, an hour after the seed)
+	// Update title (which bumps UpdatedAt)
 	if err := s.UpdateIssue(ctx, issue.ID, map[string]interface{}{"title": "updated title"}, "test-actor"); err != nil {
 		t.Fatalf("UpdateIssue: %v", err)
 	}

@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -145,103 +144,14 @@ func bdProxiedListFail(t *testing.T, bd string, p proxiedProject, args ...string
 
 func bdProxiedRunBuffers(t *testing.T, bd, dir string, args ...string) (string, string, error) {
 	t.Helper()
-	return bdProxiedRunBuffersWithEnv(t, bd, dir, nil, args...)
-}
-
-// bdProxiedRunBuffersWithEnv is bdProxiedRunBuffers with extra environment
-// variables appended after the standard proxied env (so they can override
-// it, e.g. BEADS_MAX_ROWS for the proxied-server MaxRows-rejection tests).
-func bdProxiedRunBuffersWithEnv(t *testing.T, bd, dir string, envExtras []string, args ...string) (string, string, error) {
-	t.Helper()
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
-	cmd.Env = append(bdProxiedEnv(dir), envExtras...)
+	cmd.Env = bdProxiedEnv(dir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
-}
-
-// bdProxiedRunDeadline is bdProxiedRunBuffers for a command that may never exit
-// on its own — `bd list --watch` polls until it is interrupted. It reports
-// whether the deadline was what stopped it, so a case can tell "kept running"
-// from "exited" instead of hanging the suite to find out.
-func bdProxiedRunDeadline(t *testing.T, bd, dir string, timeout time.Duration, args ...string) (stdout, stderr string, err error, timedOut bool) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bd, args...)
-	cmd.Dir = dir
-	cmd.Env = bdProxiedEnv(dir)
-	var out, errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-	err = cmd.Run()
-	return out.String(), errOut.String(), err, ctx.Err() != nil
-}
-
-// bdProxiedRunUntilStderr starts a bd command that is NOT expected to exit and
-// stops it the moment marker appears on stderr. reached is false when the
-// command exited, or the timeout elapsed, before it got there.
-//
-// The alternative is to run such a command under a fixed deadline and wait the
-// whole thing out, which costs the deadline on every green run and fails on a
-// machine slow enough to render late. This waits for the state instead, so the
-// timeout is only a bound on a hang.
-func bdProxiedRunUntilStderr(t *testing.T, bd, dir, marker string, timeout time.Duration, args ...string) (stdout, stderr string, reached bool) {
-	t.Helper()
-	w := &markerWriter{marker: marker, seen: make(chan struct{})}
-	var out bytes.Buffer
-	cmd := exec.Command(bd, args...)
-	cmd.Dir = dir
-	cmd.Env = bdProxiedEnv(dir)
-	cmd.Stdout = &out
-	cmd.Stderr = w
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start bd %s: %v", strings.Join(args, " "), err)
-	}
-	exited := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(exited)
-	}()
-	select {
-	case <-w.seen:
-		reached = true
-	case <-exited:
-	case <-time.After(timeout):
-	}
-	_ = cmd.Process.Kill()
-	<-exited
-	return out.String(), w.String(), reached
-}
-
-// markerWriter buffers everything written to it and closes seen the first time
-// marker shows up.
-type markerWriter struct {
-	marker string
-	seen   chan struct{}
-
-	mu   sync.Mutex
-	buf  bytes.Buffer
-	once sync.Once
-}
-
-func (w *markerWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	n, err := w.buf.Write(p)
-	if strings.Contains(w.buf.String(), w.marker) {
-		w.once.Do(func() { close(w.seen) })
-	}
-	return n, err
-}
-
-func (w *markerWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.String()
 }
 
 func bdProxiedUpdate(t *testing.T, bd, dir string, args ...string) []*types.Issue {
@@ -392,7 +302,7 @@ func bdProxiedInitInternal(t *testing.T, bd, prefix string, skipHooks bool, extr
 	dir := t.TempDir()
 	initGitRepoAt(t, dir)
 	beadsDir := filepath.Join(dir, ".beads")
-	proxyRoot := filepath.Join(beadsDir, "dolt")
+	proxyRoot := filepath.Join(beadsDir, "proxieddb")
 	t.Cleanup(func() {
 		if err := proxy.Shutdown(proxyRoot); err != nil {
 			t.Logf("proxy.Shutdown(%s): %v", proxyRoot, err)

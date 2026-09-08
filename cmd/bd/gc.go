@@ -42,9 +42,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		if usesProxiedServer() {
-			return runGCProxiedServer(rootCtx)
-		}
 		evt := metrics.NewCommandEvent("gc")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -79,13 +76,9 @@ Examples:
 			cutoffDays := gcOlderThan
 			cutoffTime := time.Now().UTC().AddDate(0, 0, -cutoffDays)
 			statusClosed := types.StatusClosed
-			// gc is a scripted internal sweep — opt out of BEADS_MAX_ROWS
-			// (designer §4.1) so a misconfigured env doesn't abort the sweep.
 			filter := types.IssueFilter{
-				Status:        &statusClosed,
-				ClosedBefore:  &cutoffTime,
-				MaxRows:       0,
-				MaxRowsSource: "",
+				Status:       &statusClosed,
+				ClosedBefore: &cutoffTime,
 			}
 
 			closedIssues, err := store.SearchIssues(ctx, "", filter)
@@ -174,7 +167,6 @@ Examples:
 			}
 		}
 
-		var gcSizeInfo map[string]interface{}
 		if gcSkipDolt {
 			results = append(results, phaseResult{name: "Dolt GC", skipped: true})
 		} else {
@@ -194,34 +186,14 @@ Examples:
 				}
 				results = append(results, phaseResult{name: "Dolt GC", detail: "dry-run"})
 			} else {
-				// bd gc runs without a preceding squash, so remote-tracking
-				// refs are left alone here (they cache the remote tip for the
-				// migrate gate); flatten/compact prune them before their GC
-				// (bd-agctw). Sizes are reported so a no-op reclaim is visible.
-				sizeBefore := storeSizeBytes(ctx)
-				remoteRefs, tags := listRemoteRefsAndTags(ctx)
 				if err := gc.DoltGC(ctx); err != nil {
 					WarnError("dolt gc failed: %v", err)
 					results = append(results, phaseResult{name: "Dolt GC", detail: "failed"})
 				} else {
-					sizeAfter := storeSizeBytes(ctx)
-					detail := "complete"
-					if line := gcSizeLine(sizeBefore, sizeAfter); line != "" {
-						detail = "complete: " + line
-					}
 					if !jsonOutput {
-						fmt.Printf("  Done (%s)\n", detail)
-						if len(remoteRefs)+len(tags) > 0 {
-							fmt.Printf("  Note: %d remote-tracking ref(s) and %d tag(s) anchor history;\n", len(remoteRefs), len(tags))
-							fmt.Printf("  after a history squash, use bd flatten / bd compact so they are pruned first.\n")
-						}
+						fmt.Println("  Done")
 					}
-					results = append(results, phaseResult{name: "Dolt GC", detail: detail})
-					gcSizeInfo = map[string]interface{}{
-						"remote_refs": len(remoteRefs),
-						"tags":        len(tags),
-					}
-					addGCSizeJSON(gcSizeInfo, sizeBefore, sizeAfter)
+					results = append(results, phaseResult{name: "Dolt GC", detail: "complete"})
 				}
 			}
 			if !jsonOutput {
@@ -247,9 +219,6 @@ Examples:
 				phases = append(phases, p)
 			}
 			summaryMap["phases"] = phases
-			if gcSizeInfo != nil {
-				summaryMap["dolt_gc"] = gcSizeInfo
-			}
 			return outputJSON(summaryMap)
 		}
 

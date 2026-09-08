@@ -24,7 +24,6 @@ type mockTracker struct {
 	updated         map[string]*types.Issue
 	fetchErr        error
 	fetchIssueErr   error
-	fetchCalls      int // number of FetchIssue calls (asserts push fetch short-circuits)
 	createErr       error
 	createFailAfter int // fail after this many successful creates (0 = fail immediately)
 	updateErr       error
@@ -139,7 +138,6 @@ func (m *mockTracker) FetchIssues(ctx context.Context, opts FetchOptions) ([]Tra
 }
 
 func (m *mockTracker) FetchIssue(_ context.Context, identifier string) (*TrackerIssue, error) {
-	m.fetchCalls++
 	if m.fetchIssueErr != nil {
 		return nil, m.fetchIssueErr
 	}
@@ -223,7 +221,6 @@ func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
 
 type pureTestStore struct {
 	storage.Storage
-	storage.IssueLifecycleStore
 	issues        []*types.Issue
 	localMetadata map[string]string
 }

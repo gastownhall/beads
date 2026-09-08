@@ -85,21 +85,8 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
 // This helper ensures viper is reset after the test completes, preventing state pollution
 // (e.g., repo config values leaking into JSONL export tests).
-//
-// Tests automatically opt out of <module-root>/.beads/config.yaml via
-// BEADS_TEST_IGNORE_REPO_CONFIG; tests that want the repo config must override
-// before calling this helper.
-//
-// BEADS_DIR is pinned via t.Setenv here so that a test earlier in the binary which
-// resolved a real BEADS_DIR via raw os.Setenv (e.g. running actual CLI command
-// dispatch) doesn't leak it forward past this test. config.Initialize honors
-// BEADS_TEST_IGNORE_REPO_CONFIG on the BEADS_DIR source too, so such a leaked value
-// can no longer re-import the repo's own config (ga-e6h6i); tests that want the repo
-// config must unset the flag before calling this helper.
 func initConfigForTest(t *testing.T) {
 	t.Helper()
-	t.Setenv("BEADS_DIR", os.Getenv("BEADS_DIR"))
-	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
@@ -120,10 +107,6 @@ func ensureCleanGlobalState(t *testing.T) {
 	t.Helper()
 	// Reset CommandContext so accessor functions fall back to globals
 	resetCommandContext()
-	// Pin BEADS_DIR so real CLI command dispatch this test triggers (which sets
-	// BEADS_DIR via raw os.Setenv with no restore, e.g. prepareSelectedCommandContext)
-	// doesn't leak into later tests in the same binary.
-	t.Setenv("BEADS_DIR", os.Getenv("BEADS_DIR"))
 }
 
 // savedGlobals holds a snapshot of package-level globals for safe restoration.
@@ -223,36 +206,19 @@ func captureStdout(t *testing.T, fn func() error) string {
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
-
-	done := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(r)
-		done <- buf.String()
-	}()
-
 	os.Stdout = w
-	restored := false
-	restore := func() string {
-		if restored {
-			return ""
-		}
-		restored = true
-		w.Close()
-		os.Stdout = oldStdout
-		out := <-done
-		_ = r.Close()
-		return out
-	}
-	defer restore()
 
 	err := fn()
 
-	out := restore()
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	os.Stdout = oldStdout
+
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	return out
+	return buf.String()
 }
 
 // captureStderr captures stderr output from fn and returns it as a string.
@@ -268,6 +234,7 @@ func captureStderr(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
+	os.Stderr = w
 
 	var buf bytes.Buffer
 	done := make(chan struct{})
@@ -276,22 +243,11 @@ func captureStderr(t *testing.T, fn func()) string {
 		close(done)
 	}()
 
-	os.Stderr = w
-	restored := false
-	restore := func() {
-		if restored {
-			return
-		}
-		restored = true
-		_ = w.Close()
-		os.Stderr = old
-		<-done
-		_ = r.Close()
-	}
-	defer restore()
-
 	fn()
-	restore()
+	_ = w.Close()
+	os.Stderr = old
+	<-done
+	_ = r.Close()
 
 	return buf.String()
 }
@@ -318,15 +274,6 @@ func findPrebuiltBDBinary() (string, error) {
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
 // run without the test package itself depending on cgo at compile time.
-//
-// The fast path is BEADS_TEST_BD_BINARY (exported by scripts/test.sh and CI),
-// via findPrebuiltBDBinary. There is deliberately NO repo-root ./bd reuse
-// here anymore: that "optimization" silently ran subprocess tests against
-// whatever stale binary happened to sit in the checkout root — a two-day-old
-// one produced phantom TestCreateDepsAtomicity failures (features the source
-// under test had, the binary didn't). Tests must exercise the checkout's
-// source or an explicitly supplied binary, never an incidental artifact
-// (wy-4mtr0).
 func buildBDForInitTests(t *testing.T) string {
 	t.Helper()
 	initTestBDOnce.Do(func() {
@@ -342,6 +289,13 @@ func buildBDForInitTests(t *testing.T) string {
 		bdBinary := "bd"
 		if runtime.GOOS == windowsOS {
 			bdBinary = "bd.exe"
+		}
+		// Preserve the existing local optimization: if a bd binary exists in
+		// the repository root, init-style subprocess tests can reuse it.
+		existingBD := filepath.Join("..", "..", bdBinary)
+		if _, err := os.Stat(existingBD); err == nil {
+			initTestBD, _ = filepath.Abs(existingBD)
+			return
 		}
 		// Fall back to building.
 		tmpDir, err := testTempDir("bd-init-test-*")
@@ -372,30 +326,5 @@ func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
-	}
-}
-
-// initGitRepoAt turns dir into a git repository with a test identity, giving
-// the no-workspace tests a walk boundary so FindBeadsDir cannot climb out of
-// the temp dir into a real .beads above it.
-//
-// This lives in the pure-Go helper file, not alongside the embedded-Dolt
-// helpers: cmd/bd/where_test.go carries no build tag, so it compiles under
-// CGO_ENABLED=0 where every `//go:build cgo` file is excluded. Keep this
-// helper stdlib-only and keep it here.
-func initGitRepoAt(t *testing.T, dir string) {
-	t.Helper()
-	for _, args := range [][]string{
-		{"init"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test"},
-		// Force repo-local hooks so tests ignore any global hooksPath override.
-		{"config", "core.hooksPath", ".git/hooks"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
-		}
 	}
 }

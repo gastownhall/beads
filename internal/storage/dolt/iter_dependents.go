@@ -23,7 +23,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -50,17 +49,14 @@ func (s *DoltStore) IterDependentsWithMetadata(ctx context.Context, issueID stri
 		SELECT %s, d.type
 		FROM issues i
 		JOIN dependencies d ON d.issue_id = i.id
-		%s
 		WHERE %s = ?
 		UNION ALL
 		SELECT %s, d.type
 		FROM wisps w
 		JOIN wisp_dependencies d ON d.issue_id = w.id
-		%s
 		WHERE %s = ?
 		ORDER BY created_at ASC
-	`, prefixedIssueColumns("i"), sqlbuild.LeaseJoin("i"), depTargetExprWithAlias("d"),
-		prefixedIssueColumns("w"), sqlbuild.LeaseJoin("w"), depTargetExprWithAlias("d"))
+	`, prefixedIssueColumns("i"), depTargetExprWithAlias("d"), prefixedIssueColumns("w"), depTargetExprWithAlias("d"))
 	return s.iterIssuesWithDepType(ctx, q, issueID, issueID)
 }
 
@@ -146,16 +142,16 @@ func (it *doltDependentsIter) Close() error {
 	return nil
 }
 
-// prefixedIssueColumns returns IssueSelectColumns with each issues-row column
-// prefixed by the given table alias (e.g. "i") so it can be used in JOIN
-// queries. The lease overlay columns keep their own leases. qualifier — the
-// caller's FROM must include sqlbuild.LeaseJoin(alias).
+// prefixedIssueColumns returns IssueSelectColumns with each column prefixed
+// by the given table alias (e.g. "i") so it can be used in JOIN queries.
+// The columns string is a comma-separated list with newlines/whitespace;
+// we split on commas and prepend the alias.
 func prefixedIssueColumns(alias string) string {
-	cols := splitCommaList(sqlbuild.IssueBaseColumns)
+	cols := splitCommaList(issueops.IssueSelectColumns)
 	for i, c := range cols {
 		cols[i] = alias + "." + c
 	}
-	return joinCommaList(cols) + ", " + sqlbuild.LeaseSelectColumns
+	return joinCommaList(cols)
 }
 
 // splitCommaList splits a multi-line comma-separated column list into

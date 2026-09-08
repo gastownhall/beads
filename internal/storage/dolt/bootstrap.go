@@ -6,11 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/githooksenv"
-	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/remotecache"
 )
@@ -55,8 +54,8 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 		return false, fmt.Errorf("invalid remote URL: %w", err)
 	}
 
-	if err := ValidateDatabaseName(database); err != nil {
-		return false, fmt.Errorf("invalid database name %q (use cfg.GetDoltDatabase() to resolve the configured name): %w", database, err)
+	if strings.TrimSpace(database) == "" {
+		return false, fmt.Errorf("database name must not be empty; use cfg.GetDoltDatabase() to resolve the configured name")
 	}
 
 	// Verify dolt CLI is available
@@ -72,98 +71,18 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 	// Clone into <doltDir>/<database>/ so the embedded driver can find it.
 	// `dolt clone <url> <target>` creates <target>/.dolt/ directly.
 	cloneTarget := filepath.Join(doltDir, database)
-	// Record whether the target already existed before this clone attempt.
-	// If it did, the failed-clone cleanup below must never touch it: it
-	// wasn't created by us, so it could be a pre-existing Dolt repo (e.g.
-	// from an earlier bootstrap that a stale/empty doltExists() check
-	// missed) that we must not delete.
-	targetPreExisted := pathExists(cloneTarget)
-	cmd := bootstrapCloneCmd(ctx, remoteURL, cloneTarget)
+	cmd := exec.CommandContext(ctx, "dolt", "clone", remoteURL, cloneTarget)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		if targetPreExisted {
-			return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s\nClone target %q already existed before this attempt; left untouched to avoid deleting a pre-existing Dolt repo", err, output, cloneTarget)
-		}
-		cleaned, cleanupErr := removeFailedCloneTargetWithRetry(cloneTarget)
-		return false, formatFailedCloneTargetError(err, output, cloneTarget, cleaned, cleanupErr)
+		return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s", err, output)
 	}
 
 	fmt.Fprintf(os.Stderr, "Bootstrapped from remote: %s\n", remoteURL)
 	return true, nil
 }
 
-// bootstrapCloneCmd builds the `dolt clone` for remote bootstrap. It does not
-// route through prepareDoltCLITransferCommand, so it applies the remote env
-// guards itself (see internal/gittraceenv and internal/githooksenv).
-func bootstrapCloneCmd(ctx context.Context, remoteURL, cloneTarget string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget)...)
-	cmd.Env = githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
-	return cmd
-}
-
-var failedCloneCleanupRetryDelays = []time.Duration{
-	50 * time.Millisecond,
-	100 * time.Millisecond,
-	250 * time.Millisecond,
-	500 * time.Millisecond,
-}
-
-func removeFailedCloneTargetWithRetry(path string) (bool, error) {
-	info, err := os.Lstat(filepath.Join(path, ".dolt"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return false, nil
-	}
-
-	for attempt := 0; ; attempt++ {
-		err := os.RemoveAll(path)
-		if err == nil || os.IsNotExist(err) {
-			return true, nil
-		}
-		if attempt >= len(failedCloneCleanupRetryDelays) {
-			return true, err
-		}
-		time.Sleep(failedCloneCleanupRetryDelays[attempt])
-	}
-}
-
-func formatFailedCloneTargetError(cloneErr error, output []byte, cloneTarget string, cleaned bool, cleanupErr error) error {
-	if cleanupErr == nil && cleaned {
-		return fmt.Errorf("dolt clone failed: %w\nOutput: %s\nCleaned up failed clone target %q; fix the clone error above and retry `bd bootstrap`", cloneErr, output, cloneTarget)
-	}
-	if cleanupErr == nil {
-		return fmt.Errorf("dolt clone failed: %w\nOutput: %s", cloneErr, output)
-	}
-	if !cleaned {
-		return fmt.Errorf("dolt clone failed: %w\nOutput: %s\nCould not inspect failed clone target %q before cleanup: %v\nOn Windows this usually means a dolt or bd process, or antivirus scanner, still has a file handle open under `.dolt/noms/LOCK`. Stop stuck dolt/bd processes, wait a moment, delete the directory manually if it remains, then retry `bd bootstrap`", cloneErr, output, cloneTarget, cleanupErr)
-	}
-	return fmt.Errorf("dolt clone failed: %w\nOutput: %s\nCould not clean up failed clone target %q after retrying: %v\nOn Windows this usually means a dolt or bd process, or antivirus scanner, still has a file handle open under `.dolt/noms/LOCK`. Stop stuck dolt/bd processes, wait a moment, delete the directory manually if it remains, then retry `bd bootstrap`", cloneErr, output, cloneTarget, cleanupErr)
-}
-
-func doltCloneArgs(remoteURL, target string) []string {
-	args := []string{"clone"}
-	if user := os.Getenv("DOLT_REMOTE_USER"); user != "" {
-		args = append(args, "--user", user)
-	}
-	return append(args, remoteURL, target)
-}
-
 // BootstrapFromGitRemoteWithDB is deprecated. Use BootstrapFromRemoteWithDB instead.
 func BootstrapFromGitRemoteWithDB(ctx context.Context, doltDir, gitRemoteURL, database string) (bool, error) {
 	return BootstrapFromRemoteWithDB(ctx, doltDir, gitRemoteURL, database)
-}
-
-// pathExists reports whether path exists (of any type), without following
-// symlinks. Used to detect whether a clone target pre-existed before a
-// clone attempt, so failed-clone cleanup never deletes something it didn't
-// create.
-func pathExists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
 }
 
 // doltExists checks if a Dolt database directory exists

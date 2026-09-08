@@ -25,7 +25,6 @@ bd ready                              # Show issues ready to work (no blockers)
 bd list --status=open                 # List all open issues
 bd create "title" -t task -p 2        # Create new issue
 bd update <id> --claim                # Claim work atomically
-bd unclaim <id>                       # Release stuck issue (agent crashed)
 bd close <id>                         # Mark complete
 bd dep add <issue> <depends-on>       # Add dependency
 bd dolt push                          # Sync with remote when authorized
@@ -60,8 +59,7 @@ bd dolt push                          # Sync with remote when authorized
 Run ` + "`bd prime`" + ` to get complete workflow documentation in AI-optimized format.
 ` + "`bd prime`" + ` is the single source of truth for operational commands and session workflow.
 
-For detailed docs: see AGENTS.md, the beads quickstart
-(https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md), or run ` + "`bd --help`" + `
+For detailed docs: see AGENTS.md, QUICKSTART.md, or run ` + "`bd --help`" + `
 `
 
 // CopilotInstructionsTemplate is the repository instructions file used by the

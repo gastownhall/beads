@@ -3,12 +3,12 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,32 +98,6 @@ func bdListCapture(t *testing.T, bd, dir string, args ...string) (string, string
 		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String(), stderr.String()
-}
-
-// bdListJSONWithEnv runs "bd list --json" with extra environment variables.
-func bdListJSONWithEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) []*types.IssueWithCounts {
-	t.Helper()
-	fullArgs := append([]string{"list", "--json"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = append(bdEnv(dir), extraEnv...)
-	stdout, stderr, err := runCommandBuffers(t, cmd)
-	if err != nil {
-		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
-	}
-	s := stdout.String()
-	start := strings.Index(s, "[")
-	if start < 0 {
-		if strings.Contains(s, "null") || strings.TrimSpace(s) == "" {
-			return nil
-		}
-		t.Fatalf("no JSON array found in output:\n%s", s)
-	}
-	var issues []*types.IssueWithCounts
-	if err := json.Unmarshal([]byte(s[start:]), &issues); err != nil {
-		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, s[start:])
-	}
-	return issues
 }
 
 // bdListFail runs "bd list" expecting failure.
@@ -279,54 +253,6 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
-	t.Run("list_limit_config_env", func(t *testing.T) {
-		// BD_LIST_LIMIT env var sets the default limit when --limit not passed.
-		// With BD_LIST_LIMIT=1, default list should return at most 1 issue.
-		limitedIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"})
-		if len(limitedIssues) > 1 {
-			t.Errorf("BD_LIST_LIMIT=1 should limit to at most 1, got %d", len(limitedIssues))
-		}
-
-		// --limit flag still takes precedence over env var.
-		allIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"}, "--limit", "0")
-		if len(allIssues) <= 1 {
-			t.Errorf("--limit 0 should override BD_LIST_LIMIT=1, got %d", len(allIssues))
-		}
-
-		// --all is also an explicit list request and should override the configured default.
-		allFlagIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"}, "--all")
-		if len(allFlagIssues) <= 1 {
-			t.Errorf("--all should override BD_LIST_LIMIT=1, got %d", len(allFlagIssues))
-		}
-	})
-
-	t.Run("list_limit_config_file", func(t *testing.T) {
-		// Write project config.yaml with list.limit: 1.
-		configPath := filepath.Join(dir, ".beads", "config.yaml")
-		if err := os.WriteFile(configPath, []byte("list:\n  limit: 1\n"), 0o644); err != nil {
-			t.Fatalf("write config.yaml: %v", err)
-		}
-		defer func() { _ = os.Remove(configPath) }()
-
-		// Config file should limit to at most 1 issue.
-		limitedIssues := bdListJSON(t, bd, dir)
-		if len(limitedIssues) > 1 {
-			t.Errorf("list.limit=1 in config should limit to at most 1, got %d", len(limitedIssues))
-		}
-
-		// --limit flag still takes precedence over config file.
-		allIssues := bdListJSON(t, bd, dir, "--limit", "0")
-		if len(allIssues) <= 1 {
-			t.Errorf("--limit 0 should override config list.limit=1, got %d", len(allIssues))
-		}
-
-		// --all is also an explicit list request and should override the configured default.
-		allFlagIssues := bdListJSON(t, bd, dir, "--all")
-		if len(allFlagIssues) <= 1 {
-			t.Errorf("--all should override config list.limit=1, got %d", len(allFlagIssues))
-		}
-	})
-
 	t.Run("id_filter", func(t *testing.T) {
 		idList := seed.openBug + "," + seed.readyTask
 		issues := bdListJSON(t, bd, dir, "--id", idList)
@@ -365,48 +291,6 @@ func TestEmbeddedList(t *testing.T) {
 		issues := bdListJSON(t, bd, dir, "--label-pattern", "back*")
 		if !containsID(issues, seed.openBug) {
 			t.Error("openBug with label 'backend' should match pattern 'back*'")
-		}
-		// be-ucslk4 regression guard: prior version returned the full set
-		// because LabelPattern was set on IssueFilter but never consumed by
-		// the SQL builder. Issues without a 'back*' label must be excluded.
-		if containsID(issues, seed.feature) {
-			t.Error("feature (no 'back*' label) should NOT match pattern 'back*'")
-		}
-		if containsID(issues, seed.chore) {
-			t.Error("chore (no 'back*' label) should NOT match pattern 'back*'")
-		}
-	})
-
-	t.Run("label_regex", func(t *testing.T) {
-		issues := bdListJSON(t, bd, dir, "--label-regex", "back(end|log)")
-		if !containsID(issues, seed.openBug) {
-			t.Error("openBug with label 'backend' should match regex 'back(end|log)'")
-		}
-		if !containsID(issues, seed.readyTask) {
-			t.Error("readyTask with label 'backend' should match regex 'back(end|log)'")
-		}
-		// be-ucslk4 regression guard: prior version returned the full set
-		// because LabelRegex was set on IssueFilter but never consumed by
-		// the SQL builder. Issues without a 'back(end|log)' label must be excluded.
-		if containsID(issues, seed.feature) {
-			t.Error("feature (label 'frontend') should NOT match regex 'back(end|log)'")
-		}
-		if containsID(issues, seed.epic) {
-			t.Error("epic (label 'planning') should NOT match regex 'back(end|log)'")
-		}
-
-		// Alternation across unrelated labels: verifies REGEXP semantics
-		// (not just glob-style prefix matching) — 'urgent' and 'planning'
-		// share no substring, so only a true regex OR catches both.
-		altIssues := bdListJSON(t, bd, dir, "--label-regex", "urgent|planning")
-		if !containsID(altIssues, seed.openBug) {
-			t.Error("openBug with label 'urgent' should match regex 'urgent|planning'")
-		}
-		if !containsID(altIssues, seed.epic) {
-			t.Error("epic with label 'planning' should match regex 'urgent|planning'")
-		}
-		if containsID(altIssues, seed.task) {
-			t.Error("task (label 'backend' only) should NOT match regex 'urgent|planning'")
 		}
 	})
 
@@ -747,16 +631,6 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
-	t.Run("format_dot_output_error", func(t *testing.T) {
-		stderr, err := runWithReadOnlyStdout(t, bd, dir, bdEnv(dir), "list", "--format", "dot", "--flat", "--all")
-		if err == nil {
-			t.Fatalf("list --format dot succeeded with read-only stdout; stderr:\n%s", stderr)
-		}
-		if !strings.Contains(stderr, "writing DOT output") {
-			t.Fatalf("list --format dot stderr = %q, want writer diagnostic", stderr)
-		}
-	})
-
 	t.Run("compact_default", func(t *testing.T) {
 		out := bdList(t, bd, dir, "--flat")
 		if !strings.Contains(out, seed.openBug) {
@@ -912,8 +786,8 @@ func seedTestData(t *testing.T, bd, dir string) testSeedData {
 	return s
 }
 
-// TestEmbeddedListConcurrent verifies one simultaneous embedded-Dolt writer
-// and reader complete without corrupting the list snapshot or durable state.
+// TestEmbeddedListConcurrent verifies that 20 concurrent workers can each
+// run 10 creates and 10 lists without data loss, corruption, or errors.
 func TestEmbeddedListConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -922,82 +796,136 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "cl")
-	seedID := bdCreateSilent(t, bd, dir, "seed")
 
-	createCmd := exec.Command(bd, "create", "--silent", "concurrent")
-	createCmd.Dir = dir
-	createCmd.Env = bdEnv(dir)
-	var createStdout, createStderr bytes.Buffer
-	createCmd.Stdout = &createStdout
-	createCmd.Stderr = &createStderr
+	const (
+		numWorkers      = 20
+		issuesPerWorker = 10
+	)
 
-	listCmd := exec.Command(bd, "list", "--json", "--limit", "0")
-	listCmd.Dir = dir
-	listCmd.Env = bdEnv(dir)
-	var listStdout, listStderr bytes.Buffer
-	listCmd.Stdout = &listStdout
-	listCmd.Stderr = &listStderr
-
-	if err := createCmd.Start(); err != nil {
-		t.Fatalf("start concurrent create: %v", err)
-	}
-	if err := listCmd.Start(); err != nil {
-		_ = createCmd.Wait()
-		t.Fatalf("start concurrent list: %v", err)
-	}
-	createErr := createCmd.Wait()
-	listErr := listCmd.Wait()
-	if createErr != nil {
-		t.Fatalf("concurrent create failed: %v\nstdout:\n%s\nstderr:\n%s", createErr, createStdout.String(), createStderr.String())
-	}
-	if listErr != nil {
-		t.Fatalf("concurrent list failed: %v\nstdout:\n%s\nstderr:\n%s", listErr, listStdout.String(), listStderr.String())
+	type workerResult struct {
+		worker     int
+		createIDs  []string
+		listCounts []int // number of issues returned by each list call
+		err        error
 	}
 
-	createdID := strings.TrimSpace(createStdout.String())
-	if createdID == "" {
-		t.Fatalf("concurrent create returned an empty ID\nstderr:\n%s", createStderr.String())
-	}
+	results := make([]workerResult, numWorkers)
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
 
-	listOutput := listStdout.String()
-	start := strings.Index(listOutput, "[")
-	if start < 0 {
-		t.Fatalf("concurrent list returned no JSON array:\n%s", listOutput)
-	}
-	var concurrentIssues []*types.IssueWithCounts
-	if err := json.Unmarshal([]byte(listOutput[start:]), &concurrentIssues); err != nil {
-		t.Fatalf("decode concurrent list JSON: %v\nstdout:\n%s\nstderr:\n%s", err, listOutput, listStderr.String())
-	}
+	for w := 0; w < numWorkers; w++ {
+		go func(worker int) {
+			defer wg.Done()
+			r := workerResult{worker: worker}
 
-	concurrentIDs := make(map[string]struct{}, len(concurrentIssues))
-	for _, issue := range concurrentIssues {
-		if _, duplicate := concurrentIDs[issue.ID]; duplicate {
-			t.Fatalf("concurrent list returned duplicate ID %q", issue.ID)
+			// Interleave creates and lists: create one, list once, repeat.
+			for i := 0; i < issuesPerWorker; i++ {
+				// Create
+				title := fmt.Sprintf("w%d-issue-%d", worker, i)
+				out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title)
+				if err != nil {
+					r.err = fmt.Errorf("create %d: %v\n%s", i, err, out)
+					results[worker] = r
+					return
+				}
+				id := strings.TrimSpace(string(out))
+				if id == "" {
+					r.err = fmt.Errorf("create %d: empty ID", i)
+					results[worker] = r
+					return
+				}
+				r.createIDs = append(r.createIDs, id)
+
+				// List (JSON for easy parsing)
+				listCmd := exec.Command(bd, "list", "--json", "--limit", "0")
+				listCmd.Dir = dir
+				listCmd.Env = bdEnv(dir)
+				listStdout, listStderr, err := runCommandBuffers(t, listCmd)
+				if err != nil {
+					r.err = fmt.Errorf("list after create %d: %v\nstdout:\n%s\nstderr:\n%s", i, err, listStdout.String(), listStderr.String())
+					results[worker] = r
+					return
+				}
+				// Parse JSON array to count issues
+				s := listStdout.String()
+				start := strings.Index(s, "[")
+				if start < 0 {
+					r.listCounts = append(r.listCounts, 0)
+					continue
+				}
+				var issues []json.RawMessage
+				if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
+					r.err = fmt.Errorf("list parse after create %d: %v\nstdout:\n%s\nstderr:\n%s", i, jsonErr, s, listStderr.String())
+					results[worker] = r
+					return
+				}
+				r.listCounts = append(r.listCounts, len(issues))
+			}
+
+			results[worker] = r
+		}(w)
+	}
+	wg.Wait()
+
+	// Collect all created IDs and check for errors.
+	allIDs := make(map[string]bool)
+	var successes int
+	for _, r := range results {
+		if r.err != nil {
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
+			continue
 		}
-		concurrentIDs[issue.ID] = struct{}{}
-	}
-	if _, found := concurrentIDs[seedID]; !found {
-		t.Fatalf("concurrent list did not contain seed ID %q", seedID)
+		successes++
+		for _, id := range r.createIDs {
+			if allIDs[id] {
+				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
+			}
+			allIDs[id] = true
+		}
 	}
 
+	if successes == 0 {
+		t.Fatal("all workers failed — expected at least 1 success")
+	}
+	expectedIDs := successes * issuesPerWorker
+	if len(allIDs) != expectedIDs {
+		t.Errorf("expected %d unique IDs from %d successful workers, got %d", expectedIDs, successes, len(allIDs))
+	}
+
+	// Verify list counts were monotonically non-decreasing within each worker
+	// (each worker creates then lists, so count should never decrease).
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		for i := 1; i < len(r.listCounts); i++ {
+			if r.listCounts[i] < r.listCounts[i-1] {
+				t.Errorf("worker %d: list count decreased from %d to %d between iterations %d and %d",
+					r.worker, r.listCounts[i-1], r.listCounts[i], i-1, i)
+			}
+		}
+	}
+
+	// Final verification: one authoritative list should see all created issues.
 	finalIssues := bdListJSON(t, bd, dir, "--limit", "0")
-	finalIDCounts := make(map[string]int, len(finalIssues))
+	finalIDSet := make(map[string]bool, len(finalIssues))
 	for _, issue := range finalIssues {
-		finalIDCounts[issue.ID]++
+		finalIDSet[issue.ID] = true
 	}
-	for id, count := range finalIDCounts {
-		if count != 1 {
-			t.Fatalf("authoritative list returned ID %q %d times", id, count)
+	var missing int
+	for id := range allIDs {
+		if !finalIDSet[id] {
+			t.Errorf("created ID %s not found in final list", id)
+			missing++
 		}
 	}
-	for _, id := range []string{seedID, createdID} {
-		if finalIDCounts[id] != 1 {
-			t.Fatalf("authoritative list returned ID %q %d times, want once", id, finalIDCounts[id])
-		}
+	if missing > 0 {
+		t.Errorf("%d/%d created issues missing from final list (%d total in list)",
+			missing, len(allIDs), len(finalIssues))
 	}
-	for id := range concurrentIDs {
-		if finalIDCounts[id] == 0 {
-			t.Fatalf("authoritative list omitted concurrent snapshot ID %q", id)
-		}
-	}
+
+	t.Logf("concurrency test: %d/%d workers succeeded, %d IDs created, %d in final list",
+		successes, numWorkers, len(allIDs), len(finalIssues))
 }

@@ -2,17 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/beads"
 )
-
-// ErrNoBeadsDatabase reports that no beads workspace could be resolved at all,
-// as distinct from a workspace whose storage failed to open. Callers that must
-// tell "nothing here" apart from "the store is broken" — `bd prime`'s memory
-// injection, for one — match on it with errors.Is rather than on the message.
-var ErrNoBeadsDatabase = errors.New("no beads database found")
 
 // ensureDirectMode makes sure the CLI is operating in direct-storage mode.
 func ensureDirectMode(_ string) error {
@@ -40,8 +33,8 @@ func ensureStoreActiveWithContext(ctx context.Context) error {
 	// Find the .beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		return fmt.Errorf("%w.\n"+
-			"Hint: run 'bd init' to create a database in the current directory", ErrNoBeadsDatabase)
+		return fmt.Errorf("no beads database found.\n" +
+			"Hint: run 'bd init' to create a database in the current directory")
 	}
 
 	// Use the factory to create the appropriate backend

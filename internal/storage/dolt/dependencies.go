@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -17,29 +16,15 @@ func isCrossPrefixDep(sourceID, targetID string) bool {
 	return types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
 }
 
-// AddDependency adds a dependency between two issues without recording a
-// dependency_added event. Create-with-deps and structural callers use this
-// no-event default; the explicit dep verbs call AddDependencyWithOptions with
-// EmitEvent set.
-func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	return s.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{})
-}
-
-// AddDependencyWithOptions adds a dependency between two issues.
+// AddDependency adds a dependency between two issues.
 // Delegates SQL work to issueops.AddDependencyInTx; handles Dolt versioning
-// and cache invalidation. EmitEvent records a dependency_added history event.
-func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
-	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
-		return s.addDependencyWithOptions(ctx, dep, actor, addOpts)
-	})
-}
-
-func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
+// and cache invalidation.
+func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
 
 	// Route to wisp_dependencies if the source is an active wisp.
 	if s.isActiveWisp(ctx, dep.IssueID) {
-		return s.addWispDependency(ctx, dep, actor, isCrossPrefix, addOpts.EmitEvent)
+		return s.addWispDependency(ctx, dep, actor, isCrossPrefix)
 	}
 
 	targetTable := "issues"
@@ -54,7 +39,6 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 		}
 	}
 
-	var eventWritten bool
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
@@ -62,85 +46,49 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 			WriteTable:    "dependencies",
 			IsCrossPrefix: isCrossPrefix,
 			TargetKind:    &kind,
-			EmitEvent:     addOpts.EmitEvent,
 		}
-		var e error
-		eventWritten, e = issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
-		return e
+		return issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
 	}); err != nil {
 		return err
 	}
 	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	// Stage events only when AddDependencyInTx actually recorded a
-	// dependency_added event (explicit verb + genuine new edge). A structural or
-	// idempotent add writes no event, so staging events would sweep unrelated
-	// pending event rows into this dependency commit.
-	tables := []string{"dependencies"}
-	if eventWritten {
-		tables = append(tables, "events")
-	}
-	return s.doltAddAndCommit(ctx, tables, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
+	return s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
 }
 
-// RemoveDependency removes a dependency between two issues without recording a
-// dependency_removed event — the no-event default for structural callers (issue
-// delete, reparent, batch, duplicate cleanup). The explicit bd dep remove verb
-// calls RemoveDependencyWithOptions with EmitEvent set.
-func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	return s.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, storage.DependencyRemoveOptions{})
-}
-
-// RemoveDependencyWithOptions removes a dependency between two issues.
+// RemoveDependency removes a dependency between two issues.
 // Delegates SQL work to issueops.RemoveDependencyInTx which handles wisp routing.
-// EmitEvent records a dependency_removed history event for the explicit dep verb.
-func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, rmOpts storage.DependencyRemoveOptions) error {
-	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
-		// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
-		if s.isActiveWisp(ctx, issueID) {
-			tx, err := s.db.BeginTx(ctx, nil)
-			if err != nil {
-				return fmt.Errorf("failed to begin transaction: %w", err)
-			}
-			defer func() { _ = tx.Rollback() }()
-			clearJournalScope := s.scopeEventsJournalTransaction(tx)
-			defer clearJournalScope()
-			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
-				return err
-			}
-			if err := s.commitSQLTx(ctx, "commit remove wisp dependency", tx); err != nil {
-				return err
-			}
-			return nil
-		}
-
+func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
+	// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
+	if s.isActiveWisp(ctx, issueID) {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-
-		clearJournalScope := s.scopeEventsJournalTransaction(tx)
-		defer clearJournalScope()
-
-		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
-		if err != nil {
+		if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
 			return err
 		}
+		return wrapTransactionError("commit remove wisp dependency", tx.Commit())
+	}
 
-		if err := s.commitSQLTx(ctx, "sql commit", tx); err != nil {
-			return err
-		}
-		// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-		// Stage events only when RemoveDependencyInTx actually recorded a
-		// dependency_removed event (explicit verb + genuine edge removal). A
-		// structural or missing-edge remove writes no event, so staging events would
-		// sweep unrelated pending event rows into this dependency commit.
-		tables := []string{"dependencies"}
-		if eventWritten {
-			tables = append(tables, "events")
-		}
-		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
-	})
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sql commit: %w", err)
+	}
+	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
+	if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetDependencies retrieves issues that this issue depends on
@@ -266,44 +214,6 @@ func (s *DoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([
 	return scanDependencyRows(rows)
 }
 
-// GetDependentRecords returns raw dependency rows whose target is issueID,
-// without hydrating the source issues. Delegates to
-// issueops.GetDependentRecordsInTx for shared query logic.
-func (s *DoltStore) GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error) {
-	var result []*types.Dependency
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetDependentRecordsInTx(ctx, tx, targetID, depType, limit, afterID)
-		return err
-	})
-	return result, err
-}
-
-// CountDependentRecords returns the total inbound-edge count of targetID across
-// both dependency tables. Delegates to issueops.CountDependentRecordsInTx.
-func (s *DoltStore) CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error) {
-	var n int
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		n, err = issueops.CountDependentRecordsInTx(ctx, tx, targetID, depType)
-		return err
-	})
-	return n, err
-}
-
-// GetDependentRecordsForIssues returns the raw inbound dependency rows for a SET
-// of target ids in one batched read, keyed by target id. Delegates to
-// issueops.GetDependentRecordsForIssuesInTx for shared query logic.
-func (s *DoltStore) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
-	var result map[string][]*types.Dependency
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetDependentRecordsForIssuesInTx(ctx, tx, targetIDs)
-		return err
-	})
-	return result, err
-}
-
 // GetAllDependencyRecords returns all dependency records.
 // Delegates to issueops.GetAllDependencyRecordsInTx for shared query logic.
 func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
@@ -311,18 +221,6 @@ func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetAllDependencyRecordsInTx(ctx, tx)
-		return err
-	})
-	return result, err
-}
-
-// GetExternalBlockingDependencyRecords returns explicit external blockers
-// without scanning unrelated graph edges.
-func (s *DoltStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	var result map[string][]*types.Dependency
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetExternalBlockingDependencyRecordsInTx(ctx, tx)
 		return err
 	})
 	return result, err
@@ -406,19 +304,21 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 	return blocked, blockers, nil
 }
 
-// IsBlockedBatch returns the denormalized transitive is_blocked flag for each id
-// in one batched read. Delegates to issueops.IsBlockedBatchInTx.
+// IsBlockedBatch reads the denormalized is_blocked column for every id in one
+// batched read over issues and wisps; ids without a row are absent from the
+// result. Serves ready projections that would otherwise issue one IsBlocked
+// per issue.
 func (s *DoltStore) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
-	var result map[string]bool
+	var blocked map[string]bool
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.IsBlockedBatchInTx(ctx, tx, ids)
+		blocked, err = issueops.IsBlockedBatchInTx(ctx, tx, ids)
 		return err
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to batch-check blockers: %w", err)
+		return nil, fmt.Errorf("failed to read blocked flags: %w", err)
 	}
-	return result, nil
+	return blocked, nil
 }
 
 // GetNewlyUnblockedByClose finds issues that become unblocked when an issue is closed.

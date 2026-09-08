@@ -1,6 +1,8 @@
 package gitlab
 
 import (
+	"fmt"
+
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -82,7 +84,11 @@ func (m *gitlabFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.Issu
 	// Convert gitlab.DependencyInfo to tracker.DependencyInfo
 	var deps []tracker.DependencyInfo
 	for _, d := range conv.Dependencies {
-		deps = append(deps, trackerDependencyFromGitLab(d))
+		deps = append(deps, tracker.DependencyInfo{
+			FromExternalID: fmt.Sprintf("%d", d.FromGitLabIID),
+			ToExternalID:   fmt.Sprintf("%d", d.ToGitLabIID),
+			Type:           d.Type,
+		})
 	}
 
 	return &tracker.IssueConversion{

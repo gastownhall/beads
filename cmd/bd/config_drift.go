@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -261,24 +262,10 @@ func checkServerDrift() []DriftItem {
 		}}
 	}
 
-	wantServer := doltserver.IsSharedServerMode()
+	sharedServerEnabled := config.GetString("dolt.shared-server")
+	wantServer := strings.EqualFold(sharedServerEnabled, "true")
 
-	serverDir := beadsDir
-	if wantServer {
-		var err error
-		serverDir, err = doltserver.SharedServerPath()
-		if err != nil {
-			return []DriftItem{{
-				Check:    "server",
-				Status:   driftStatusDrift,
-				Message:  fmt.Sprintf("dolt.shared-server is enabled but its state directory cannot be resolved: %v", err),
-				Expected: "resolvable shared server state directory",
-				Actual:   "unavailable",
-			}}
-		}
-	}
-
-	serverRunning := isServerProbablyRunning(serverDir)
+	serverRunning := isServerProbablyRunning(beadsDir)
 
 	if wantServer && !serverRunning {
 		return []DriftItem{{
@@ -328,7 +315,14 @@ func isServerProbablyRunning(beadsDir string) bool {
 		return false
 	}
 
-	return pidAlive(pid)
+	// Check if the process exists (signal 0 = existence check)
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// On Unix, FindProcess always succeeds; use Signal(0) to verify
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
 }
 
 // printDriftItems renders drift results in human-readable format.

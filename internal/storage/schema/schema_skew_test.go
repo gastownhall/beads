@@ -22,7 +22,6 @@ func TestCheckSchemaSkew_FreshDB_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(0))
 
@@ -41,7 +40,6 @@ func TestCheckSchemaSkew_EqualVersion_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(LatestVersion()))
 
@@ -61,7 +59,6 @@ func TestCheckSchemaSkew_OneAhead_ReturnsSchemaSkewError(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 1
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -92,7 +89,6 @@ func TestCheckSchemaSkew_ThreeAhead_ReturnsSchemaSkewError(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 3
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -125,7 +121,6 @@ func TestCheckSchemaSkew_EscapeHatch_ReturnsNilAndWarns(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 3
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -175,9 +170,8 @@ func TestCheckSchemaSkew_MissingTable_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
-	// With the be-bv7x probe in front, an absent cursor table is reported by
-	// the probe returning 0 rather than by the cursor read erroring out.
-	expectCursorProbe(mock, "schema_migrations", false)
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnError(errors.New("Error 1146 (42S02): Table 'beads.schema_migrations' doesn't exist"))
 
 	if err := checkSchemaSkew(context.Background(), db); err != nil {
 		t.Fatalf("checkSchemaSkew = %v, want nil when schema_migrations is absent (fresh DB)", err)
@@ -206,7 +200,6 @@ func TestCheckForwardDrift_Conn_Ahead(t *testing.T) {
 	defer conn.Close()
 
 	dbVersion := LatestVersion() + 2
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -255,6 +248,51 @@ func TestSchemaSkewError_UserMessage_ExactCopy(t *testing.T) {
 		"    bd --ignore-schema-skew <command>\n"
 	if got := e.UserMessage(); got != want {
 		t.Errorf("UserMessage() mismatch.\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestSchemaSkewError_UserMessage_Accidental12Window_ExactCopy(t *testing.T) {
+	e := &SchemaSkewError{DBVersion: 65, BinaryVersion: 53}
+	want := "schema version mismatch: database is at v65, binary knows up to v53 (12 migrations ahead)\n" +
+		"\n" +
+		"  This database was migrated by the accidental, untested v1.2.0/v1.2.1\n" +
+		"  release. This binary is the supported release; do not reinstall v1.2.1.\n" +
+		"\n" +
+		"  Recovery guide (rolls the schema cursor back to v53, ~2 minutes):\n" +
+		"    https://github.com/gastownhall/beads/blob/v1.2.2/docs/RECOVERY-1.2.1.md\n" +
+		"\n" +
+		"  To keep working right now, before recovering (verified safe for this\n" +
+		"  schema range; audit-event versioning is paused until you recover):\n" +
+		"    BD_IGNORE_SCHEMA_SKEW=1 bd <command>\n" +
+		"    bd --ignore-schema-skew <command>\n"
+	if got := e.UserMessage(); got != want {
+		t.Errorf("UserMessage() mismatch.\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// The incident copy must apply to the whole (53, 65] window, and ONLY to a
+// binary whose own schema ceiling is v53 — a future binary at v66+ seeing a
+// forward-drifted DB must get the generic stale-binary advice again, as must
+// a v53 binary seeing a DB past v65 (some post-1.2.x migrator produced it).
+func TestSchemaSkewError_UserMessage_Accidental12Window_Bounds(t *testing.T) {
+	cases := []struct {
+		name       string
+		db, binary int
+		incident   bool
+	}{
+		{"window floor", 54, 53, true},
+		{"window ceiling", 65, 53, true},
+		{"past ceiling", 66, 53, false},
+		{"future binary", 70, 66, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &SchemaSkewError{DBVersion: tc.db, BinaryVersion: tc.binary}
+			gotIncident := strings.Contains(e.UserMessage(), "RECOVERY-1.2.1.md")
+			if gotIncident != tc.incident {
+				t.Errorf("UserMessage() incident copy = %v, want %v:\n%s", gotIncident, tc.incident, e.UserMessage())
+			}
+		})
 	}
 }
 

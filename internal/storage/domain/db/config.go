@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -11,7 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -44,18 +44,6 @@ func (r *configSQLRepositoryImpl) SetMetadata(ctx context.Context, key, value st
 	return nil
 }
 
-func (r *configSQLRepositoryImpl) GetLocalMetadata(ctx context.Context, key string) (string, error) {
-	var value string
-	err := r.runner.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("db: GetLocalMetadata %s: %w", key, err)
-	}
-	return value, nil
-}
-
 func (r *configSQLRepositoryImpl) SetLocalMetadata(ctx context.Context, key, value string) error {
 	if _, err := r.runner.ExecContext(ctx, "REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, value); err != nil {
 		return fmt.Errorf("db: SetLocalMetadata %s: %w", key, err)
@@ -80,20 +68,6 @@ func (r *configSQLRepositoryImpl) SetConfig(ctx context.Context, key, value stri
 		value = strings.TrimSuffix(value, "-")
 	}
 	if _, err := r.runner.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES (?, ?)", key, value); err != nil {
-		return fmt.Errorf("db: SetConfig %s: %w", key, err)
-	}
-	// Re-sync the normalized lookup table a value backs, mirroring
-	// DoltStore.SetConfig. Reads are TABLE-FIRST — GetCustomTypes above
-	// consults custom_types and falls back to the string only when the table is
-	// empty, and GetCustomStatuses reads custom_statuses outright — so a write
-	// that updated only the string left the table holding the previous set,
-	// forever: `bd config set types.custom` on a proxied deployment reported
-	// success and `bd create -t <the new type>` kept answering "invalid issue
-	// type", with doctor re-verifying against the string and reporting all-OK.
-	//
-	// The caller supplies a transactional runner, so the row and its projection
-	// commit together or neither does.
-	if _, err := issueops.SyncConfigTables(ctx, r.runner, key, value); err != nil {
 		return fmt.Errorf("db: SetConfig %s: %w", key, err)
 	}
 	return nil
@@ -174,7 +148,15 @@ func (r *configSQLRepositoryImpl) readCustomTypesConfig(ctx context.Context) ([]
 	if err != nil {
 		return nil, fmt.Errorf("db: GetCustomTypes: %w", err)
 	}
-	return issueops.ParseTypesConfigValue(value), nil
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	var jsonTypes []string
+	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
+		return parseCustomTypesList(jsonTypes), nil
+	}
+	return parseCustomTypesList(strings.Split(value, ",")), nil
 }
 
 func unionWithYAMLCustomTypes(dbTypes, yamlTypes []string) []string {
@@ -193,6 +175,20 @@ func unionWithYAMLCustomTypes(dbTypes, yamlTypes []string) []string {
 				continue
 			}
 			seen[t] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseCustomTypesList(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, t := range in {
+		t = strings.TrimSpace(t)
+		if t != "" {
 			out = append(out, t)
 		}
 	}
@@ -241,7 +237,26 @@ func (r *configSQLRepositoryImpl) GetAdaptiveIDConfig(ctx context.Context) (doma
 }
 
 func (r *configSQLRepositoryImpl) GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error) {
-	return issueops.ResolveCustomStatusesDetailedInTx(ctx, r.runner)
+	rows, err := r.runner.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
+	if err != nil {
+		return nil, fmt.Errorf("db: GetCustomStatuses: query custom_statuses: %w", err)
+	}
+	defer rows.Close()
+	var result []types.CustomStatus
+	for rows.Next() {
+		var name, category string
+		if err := rows.Scan(&name, &category); err != nil {
+			return nil, fmt.Errorf("db: GetCustomStatuses: scan: %w", err)
+		}
+		result = append(result, types.CustomStatus{
+			Name:     name,
+			Category: types.StatusCategory(category),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: GetCustomStatuses: read custom_statuses: %w", err)
+	}
+	return result, nil
 }
 
 func (r *configSQLRepositoryImpl) ListAllStatusNames(ctx context.Context) ([]string, error) {

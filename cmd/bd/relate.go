@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -63,10 +62,6 @@ func runRelate(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	if usesProxiedServer() {
-		return runRelateProxiedServer(ctx, args)
-	}
-
 	// Resolve partial IDs
 	var id1, id2 string
 	var err error
@@ -109,9 +104,7 @@ func runRelate(cmd *cobra.Command, args []string) error {
 		DependsOnID: id2,
 		Type:        types.DepRelatesTo,
 	}
-	// bd relate is an explicit dependency verb, so it records history like
-	// bd link / bd dep add (EmitEvent); only structural edge wiring stays silent.
-	if err := store.AddDependencyWithOptions(ctx, dep1, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+	if err := store.AddDependency(ctx, dep1, actor); err != nil {
 		return fmt.Errorf("failed to add relates-to %s -> %s: %w", id1, id2, err)
 	}
 	// Add id2 -> id1 (bidirectional)
@@ -120,7 +113,7 @@ func runRelate(cmd *cobra.Command, args []string) error {
 		DependsOnID: id1,
 		Type:        types.DepRelatesTo,
 	}
-	if err := store.AddDependencyWithOptions(ctx, dep2, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+	if err := store.AddDependency(ctx, dep2, actor); err != nil {
 		return fmt.Errorf("failed to add relates-to %s -> %s: %w", id2, id1, err)
 	}
 
@@ -150,10 +143,6 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 	}()
 
 	ctx := rootCtx
-
-	if usesProxiedServer() {
-		return runUnrelateProxiedServer(ctx, args)
-	}
 
 	// Resolve partial IDs
 	var id1, id2 string
@@ -186,15 +175,13 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Remove relates-to dependency in both directions
-	// Per Decision 004, relates-to links are now stored in dependencies table.
-	// bd unrelate is an explicit dependency verb, so it records history
-	// (EmitEvent) like bd dep remove; only structural teardown stays silent.
+	// Per Decision 004, relates-to links are now stored in dependencies table
 	// Remove id1 -> id2
-	if err := store.RemoveDependencyWithOptions(ctx, id1, id2, actor, storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
+	if err := store.RemoveDependency(ctx, id1, id2, actor); err != nil {
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id1, id2, err)
 	}
 	// Remove id2 -> id1 (bidirectional)
-	if err := store.RemoveDependencyWithOptions(ctx, id2, id1, actor, storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
+	if err := store.RemoveDependency(ctx, id2, id1, actor); err != nil {
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id2, id1, err)
 	}
 

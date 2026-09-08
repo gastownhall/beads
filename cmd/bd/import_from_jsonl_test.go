@@ -10,25 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-type dependencySkipCapturingStore struct {
-	storage.DoltStorage
-	skippedDependencies []string
-}
-
-func (s *dependencySkipCapturingStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
-	onSkipped := opts.OnSkippedDependency
-	opts.OnSkippedDependency = func(issueID, dependsOnID, reason string) {
-		s.skippedDependencies = append(s.skippedDependencies, issueID+" -> "+dependsOnID+": "+reason)
-		if onSkipped != nil {
-			onSkipped(issueID, dependsOnID, reason)
-		}
-	}
-	return s.DoltStorage.CreateIssuesWithFullOptions(ctx, issues, actor, opts)
-}
 
 func TestImportFromLocalJSONL(t *testing.T) {
 	skipIfNoDolt(t)
@@ -400,7 +383,7 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
-	t.Run("wires mixed regular and wisp in-batch dependencies through the dependency pass", func(t *testing.T) {
+	t.Run("skips mixed regular and wisp in-batch dependencies instead of aborting import", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")
 		store := newTestStore(t, dbPath)
@@ -440,11 +423,9 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		if result.Created != 2 {
 			t.Fatalf("Created = %d, want 2", result.Created)
 		}
-		// The engine's per-batch cross-bucket filter would skip-report the
-		// regular -> wisp edge in a mixed batch, so the import defers it to a
-		// single-plane dependency pass instead (wy-4276q8).
-		if len(result.SkippedDependencies) != 0 {
-			t.Fatalf("SkippedDependencies = %#v, want none", result.SkippedDependencies)
+		if got := strings.Join(result.SkippedDependencies, "\n"); !strings.Contains(got, "test-mixed-regular -> test-mixed-wisp") ||
+			!strings.Contains(got, "cross-bucket dependency") {
+			t.Fatalf("SkippedDependencies = %#v, want mixed regular/wisp dependency detail", result.SkippedDependencies)
 		}
 
 		for _, id := range []string{"test-mixed-regular", "test-mixed-wisp"} {
@@ -456,8 +437,8 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetDependencyRecords(test-mixed-regular): %v", err)
 		}
-		if len(deps) != 1 || deps[0].DependsOnID != "test-mixed-wisp" {
-			t.Fatalf("test-mixed-regular deps = %#v, want the regular -> wisp edge wired by the dependency pass", deps)
+		if len(deps) != 0 {
+			t.Fatalf("test-mixed-regular deps = %#v, want none", deps)
 		}
 	})
 
@@ -492,40 +473,6 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 		if deps[0].CreatedBy != "someone.else" {
 			t.Fatalf("dependency created_by = %q, want someone.else", deps[0].CreatedBy)
-		}
-	})
-
-	t.Run("preserves bare cross-prefix dependency", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		dbPath := filepath.Join(tmpDir, "dolt")
-		baseStore := newTestStoreWithPrefix(t, dbPath, "sym")
-		store := &dependencySkipCapturingStore{DoltStorage: baseStore}
-
-		jsonlContent := `{"id":"sym-3su","title":"Cross-project source","status":"open","priority":2,"issue_type":"task","dependencies":[{"depends_on_id":"mkt-456","type":"related"}],"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
-`
-		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
-		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
-			t.Fatalf("Failed to write JSONL file: %v", err)
-		}
-
-		ctx := context.Background()
-		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
-		if err != nil {
-			t.Fatalf("importFromLocalJSONL failed: %v", err)
-		}
-		if count != 1 {
-			t.Fatalf("imported count = %d, want 1", count)
-		}
-		if len(store.skippedDependencies) != 0 {
-			t.Fatalf("skipped dependencies = %#v, want none", store.skippedDependencies)
-		}
-
-		deps, err := baseStore.GetDependencyRecords(ctx, "sym-3su")
-		if err != nil {
-			t.Fatalf("GetDependencyRecords(sym-3su): %v", err)
-		}
-		if len(deps) != 1 || deps[0].DependsOnID != "mkt-456" || deps[0].Type != types.DepRelated {
-			t.Fatalf("sym-3su deps = %#v, want one related dependency on mkt-456", deps)
 		}
 	})
 
@@ -640,14 +587,13 @@ func TestImportFromLocalJSONL(t *testing.T) {
 			t.Errorf("Expected 1 issue on re-import, got %d", count2)
 		}
 
-		// Verify comments were NOT duplicated. GetIssue does not hydrate
-		// comments, so read them through the dedicated accessor.
-		comments, err := store.GetIssueComments(ctx, "test-cmt1")
+		// Verify comments were NOT duplicated
+		issue, err := store.GetIssue(ctx, "test-cmt1")
 		if err != nil {
-			t.Fatalf("Failed to get comments: %v", err)
+			t.Fatalf("Failed to get issue: %v", err)
 		}
-		if len(comments) != 2 {
-			t.Errorf("Expected 2 comments after re-import, got %d (duplicates!)", len(comments))
+		if len(issue.Comments) != 2 {
+			t.Errorf("Expected 2 comments after re-import, got %d (duplicates!)", len(issue.Comments))
 		}
 	})
 
@@ -720,16 +666,15 @@ func TestImportFromLocalJSONL_LegacyFormats(t *testing.T) {
 			t.Errorf("Expected 1 issue imported, got %d", count)
 		}
 
-		// GetIssue does not hydrate comments; read them through the accessor.
-		comments, err := store.GetIssueComments(ctx, "test-numcmt")
+		issue, err := store.GetIssue(ctx, "test-numcmt")
 		if err != nil {
-			t.Fatalf("Failed to get comments: %v", err)
+			t.Fatalf("Failed to get issue: %v", err)
 		}
-		if len(comments) != 1 {
-			t.Fatalf("Expected 1 comment, got %d", len(comments))
+		if len(issue.Comments) != 1 {
+			t.Fatalf("Expected 1 comment, got %d", len(issue.Comments))
 		}
-		if comments[0].Text != "numeric id comment" {
-			t.Errorf("Comment text = %q, want %q", comments[0].Text, "numeric id comment")
+		if issue.Comments[0].Text != "numeric id comment" {
+			t.Errorf("Comment text = %q, want %q", issue.Comments[0].Text, "numeric id comment")
 		}
 	})
 

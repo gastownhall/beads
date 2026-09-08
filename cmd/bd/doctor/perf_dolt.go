@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -48,8 +49,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 	// Verify this is a Dolt backend
 	if !IsDoltBackend(beadsDir) {
-		backend, _ := getBackendAndBeadsDir(path)
-		return nil, fmt.Errorf("Dolt server performance diagnostics do not apply to the configured backend %q", backend)
+		return nil, fmt.Errorf("SQLite backend is no longer supported. Migrate to Dolt with 'bd migrate'")
 	}
 
 	metrics := &DoltPerfMetrics{
@@ -88,7 +88,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 	// Connect and run diagnostics via server
 	if !serverRunning {
-		return metrics, fmt.Errorf("dolt sql-server is not running on %s:%d; start it with 'bd dolt start'", dsCfg.Host, dsCfg.Port)
+		return metrics, fmt.Errorf("dolt sql-server is not running on %s:%d; start it with '%s'", dsCfg.Host, dsCfg.Port, doltserver.StartHint(""))
 	}
 
 	if err := runDoltServerDiagnostics(metrics, dsCfg.Host, dsCfg.Port, dbName, beadsDir); err != nil {
@@ -254,8 +254,12 @@ func measureQueryTime(ctx context.Context, db *sql.DB, query string) int64 {
 
 // isDoltServerRunning checks if a dolt sql-server is responding.
 func isDoltServerRunning(host string, port int) bool {
-	_, err := doltserver.ProbeSQLServer("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
-	return err == nil
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close() // Best effort cleanup
+	return true
 }
 
 // getDoltDatabaseSize returns the total size of the Dolt database directory
@@ -361,7 +365,7 @@ func assessDoltPerformance(metrics *DoltPerfMetrics) {
 
 	// Check database size
 	if metrics.TotalIssues > 5000 && metrics.ClosedIssues > 4000 {
-		recommendations = append(recommendations, "Many closed issues. Consider 'bd prune --older-than 90d' to prune old issues.")
+		recommendations = append(recommendations, "Many closed issues. Consider 'bd cleanup' to prune old issues.")
 	}
 
 	if len(warnings) == 0 {

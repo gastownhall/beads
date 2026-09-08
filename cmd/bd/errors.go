@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/migration"
 )
 
 type exitError struct {
@@ -101,8 +100,8 @@ func HandleErrorWithHint(message, hint string) error {
 	if jsonOutput {
 		jsonStderrError(message, hint)
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", message) //nolint:gosec // G705: stderr, not a browser context
-		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)     //nolint:gosec // G705: stderr, not a browser context
+		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
 	}
 	return &exitError{Code: 1}
 }
@@ -121,77 +120,82 @@ func SilentExit() error {
 	return &exitError{Code: 1}
 }
 
+// FatalError writes an error message to stderr (structured JSON when --json is
+// set) and exits with code 1.
+//
+// It is retained ONLY for the proxied-server code paths, which run outside
+// cobra's RunE error-return convention; every RunE-converted command uses
+// HandleError and friends instead. Because FatalError calls os.Exit it bypasses
+// the per-command deferred metrics CloseEventAndAdd and main()'s
+// metrics.Global().Close()/MaybeSpawnFlusher, so a command that exits through a
+// proxied-server FatalError* path records no usage event. That telemetry gap is
+// latent today: proxied-server mode cannot be entered ("bd init --proxied-server"
+// is rejected as "not yet implemented", see init.go), so usesProxiedServer() is
+// never true and these paths never run (verified by
+// TestInitProxiedServerRejectedKeepsMetricsGapLatent). When proxied-server mode
+// is completed, convert these helpers to return errors up through RunE — like
+// HandleError — so the deferred metrics close/flush is preserved.
+func FatalError(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if jsonOutput {
+		jsonStderrError(msg, "")
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+	}
+	os.Exit(1)
+}
+
+// FatalErrorRespectJSON writes an error message and exits with code 1. If
+// --json is set, outputs structured JSON to stdout; otherwise plain text to
+// stderr.
+func FatalErrorRespectJSON(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if jsonOutput {
+		jsonStdoutError(msg, "")
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+	}
+	os.Exit(1)
+}
+
+// FatalErrorWithHintRespectJSON writes an error message with a hint and exits.
+// If --json is set, emits structured JSON to stdout so callers can parse it.
+func FatalErrorWithHintRespectJSON(message, hint string) {
+	if jsonOutput {
+		jsonStdoutError(message, hint)
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+	}
+	os.Exit(1)
+}
+
+// FatalErrorWithHint writes an error message with a hint to stderr and exits.
+func FatalErrorWithHint(message, hint string) {
+	if jsonOutput {
+		jsonStderrError(message, hint)
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+	}
+	os.Exit(1)
+}
+
 func WarnError(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
 }
 
 // CheckReadonly aborts the command when bd is running in read-only mode (the
-// worker-sandbox posture, see readonlyMode), or when a MIGRATION-FREEZE
-// sentinel is active at the town root (dc-6jaq, folded in here rather than
-// requiring every write command to remember a second call — see
-// CheckMigrationFreeze below). This is the chokepoint essentially every
-// write command already calls first, so folding the freeze check in here
-// covers the whole write surface at once, including commands added after
-// this comment is written — not just a hand-picked list that rots (one
-// concrete instance the hand-picked list missed: "bd q", cmd/bd/quick.go,
-// the create alias). It exits via os.Exit and so cannot run the per-command
-// deferred CloseEventAndAdd — a command blocked here records no
-// cli_command event of its own (it never actually ran). It does flush
-// metrics first, so events already queued earlier in this run are still
-// written and scheduled for upload rather than stranded until the next
-// clean exit.
+// worker-sandbox posture, see readonlyMode). Like the proxied-server FatalError*
+// family above, it exits via os.Exit and so cannot run the per-command deferred
+// CloseEventAndAdd — a command blocked here records no cli_command event of its
+// own (it never actually ran). It does flush metrics first, so events already
+// queued earlier in this run are still written and scheduled for upload rather
+// than stranded until the next clean exit.
 func CheckReadonly(operation string) {
 	if readonlyMode {
 		fmt.Fprintf(os.Stderr, "Error: operation '%s' is not allowed in read-only mode\n", operation)
 		metrics.CloseAndFlush()
 		os.Exit(1)
 	}
-	CheckMigrationFreeze(operation)
-}
-
-// CheckMigrationFreeze aborts the command when a MIGRATION-FREEZE sentinel is
-// present at the town root (dc-6jaq). The gt CLI already refuses to write
-// under the same sentinel (gt mail send, gt nudge, gt sling, gt assign);
-// mail-poller/daemon patrols that also write via bd are stopped separately
-// via the migration playbook's plist-unload step, so this closes the
-// remaining gap: a human typing 'bd create'/'bd update' etc. mid-migration,
-// bypassing the gt-layer gate. Same exit-via-os.Exit tradeoff as
-// CheckReadonly above — no cli_command event for a command blocked here,
-// but queued metrics are still flushed.
-//
-// Three callers, each closing a different hole:
-//  1. CheckReadonly above — the per-command chokepoint covering the write
-//     surface at large (create/update/close/... and everything that calls
-//     CheckReadonly, ~120 sites).
-//  2. The root PersistentPreRunE in main.go, before autoMigrateOnVersionBump
-//     and maybeAutoImportJSONL — those run as store-open side effects
-//     *before* any RunE, so waiting for a write command's own CheckReadonly
-//     call would let a version-bump migration or a JSONL auto-import slip
-//     through a freeze first (the most dangerous writes here, since they
-//     run against the very store the freeze protects).
-//  3. import.go directly — bd import (runImport) is not gated by
-//     CheckReadonly at all today (a pre-existing, separate gap: readonlyMode
-//     doesn't block it either), so it cannot inherit the freeze check from
-//     caller 1 and needs its own explicit call.
-func CheckMigrationFreeze(operation string) {
-	townRoot := findTownRoot()
-	if !migration.IsFrozen(townRoot) {
-		return
-	}
-
-	info := migration.Read(townRoot)
-	operator := "unknown"
-	reason := ""
-	if info != nil {
-		operator = info.Operator
-		reason = info.Reason
-	}
-
-	fmt.Fprintf(os.Stderr, "⛔ ERROR: town is frozen for migration (by %s).\n", operator)
-	if reason != "" {
-		fmt.Fprintf(os.Stderr, "   Reason: %s\n", reason)
-	}
-	fmt.Fprintf(os.Stderr, "   bd %s is blocked. Clear the freeze: gt migrate thaw\n", operation)
-	metrics.CloseAndFlush()
-	os.Exit(1)
 }

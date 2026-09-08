@@ -14,22 +14,19 @@ beads_test_env_enter() {
         return 0
     fi
 
-    local root
+    local repo_root root
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+    cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
     # The sandbox root itself must sit on ancestor-clean ground (/tmp), never
-    # under the caller's TMPDIR: once TMPDIR="$root/tmp" is exported below,
-    # every t.TempDir() inherits $root's ancestors, and a caller TMPDIR nested
-    # inside a real home would re-expose ~/.beads to directory-walk tests.
+    # under the caller's TMPDIR or real home: once TMPDIR="$root/tmp" is
+    # exported below, every t.TempDir() inherits $root's ancestors, and a root
+    # nested inside a real home would re-expose ~/.beads to directory-walk
+    # tests. (Root holds only small fake homes; Go caches set their own paths.)
     root="$(mktemp -d /tmp/beads-test-env-XXXXXX)"
     export BEADS_TEST_ENV_ROOT="$root"
     export BEADS_TEST_ENV_ACTIVE=1
+    export BEADS_TEST_DISCOVERY_CEILING="$root"
 
-    if [[ -z "${GOCACHE:-}" ]]; then
-        local go_cache
-        go_cache="$(go env GOCACHE 2>/dev/null || true)"
-        if [[ -n "$go_cache" ]]; then
-            export GOCACHE="$go_cache"
-        fi
-    fi
     if [[ -z "${GOMODCACHE:-}" ]]; then
         local go_mod_cache
         go_mod_cache="$(go env GOMODCACHE 2>/dev/null || true)"
@@ -38,21 +35,29 @@ beads_test_env_enter() {
         fi
     fi
 
-    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp"
+    local go_cache
+    go_cache="${BEADS_TEST_GOCACHE:-$cache_home/beads/go-build}"
+    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp" "$root/go-tmp" "$go_cache"
+    : >"$root/.beads-test-discovery-ceiling"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
-    # Sandbox TMPDIR as well: t.TempDir() otherwise lands under the caller's
-    # real TMPDIR tree, and every directory-walk test (findProjectBeadsDir,
-    # repo-root fallback) then sees the developer's real ~/.beads as an
-    # ancestor — the runner's isolation contract is "no developer filesystem
-    # state".
-    export TMPDIR="$root/tmp"
     export USERPROFILE="$root/home"
     export XDG_CONFIG_HOME="$root/xdg-config"
     export DOLT_ROOT_PATH="$root/dolt-root"
+    export TMPDIR="$root/tmp"
+    export GOTMPDIR="$root/go-tmp"
+    # Keep the Go build cache persistent and separate from the disposable test
+    # root. A private race-enabled cache is several GiB per invocation and can
+    # exhaust a host before the EXIT trap has a chance to reclaim it. The Go
+    # cache itself is content-addressed and concurrency-safe; callers that need
+    # a one-shot cache can override BEADS_TEST_GOCACHE explicitly.
+    export GOCACHE="$go_cache"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
+    # Keep package tests isolated from the invoking checkout's repository and
+    # user configuration. Focused tests can explicitly clear this variable
+    # when repository-config behavior is the subject under test.
     export BEADS_TEST_IGNORE_REPO_CONFIG=1
     if [[ "${BEADS_TEST_ENV_RUN_DOLT:-0}" != "1" ]]; then
         beads_test_env_add_skip "dolt"
@@ -104,5 +109,6 @@ beads_test_env_cleanup() {
     if [[ -n "${BEADS_TEST_ENV_ROOT:-}" ]]; then
         rm -rf "$BEADS_TEST_ENV_ROOT"
         unset BEADS_TEST_ENV_ROOT
+        unset BEADS_TEST_DISCOVERY_CEILING
     fi
 }

@@ -29,7 +29,6 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"directory.labels", true},
 		{"repos.primary", true},
 		{"external_projects.beads", true},
-		{"list.limit", true},
 
 		// Hierarchy settings (GH#995)
 		{"hierarchy.max-depth", true},
@@ -42,11 +41,9 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"backup.git-repo", true},
 		{"backup.future-key", true}, // prefix match
 
-		// Import settings. import.* is exact-match, not a prefix namespace:
-		// an unlisted import.* key must not be treated as yaml-only.
-		{"import.auto", true},
+		// Import settings
 		{"import.path", true},
-		{"import.unlisted-key", false},
+		{"import.orphan_handling", false},
 
 		// Secret keys (stored in yaml to avoid leaking via Dolt push)
 		{"github.token", true},
@@ -577,10 +574,38 @@ func TestFindProjectBeadsDir_NonGitTreeWithoutConfig(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()
 
-	t.Chdir(t.TempDir())
+	// Cap the walk-up at the synthetic tree: an operator host can carry
+	// real ~/.beads or /tmp/.beads above TMPDIR that must not be found.
+	tmp := t.TempDir()
+	t.Setenv("BEADS_TEST_DISCOVERY_CEILING", tmp)
+
+	t.Chdir(tmp)
 
 	if got := findProjectBeadsDir(); got != "" {
 		t.Fatalf("findProjectBeadsDir() = %q, want empty", got)
+	}
+}
+
+func TestFindProjectBeadsDirHonorsHermeticDiscoveryCeiling(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	outer := t.TempDir()
+	outerBeads := filepath.Join(outer, ".beads")
+	if err := os.MkdirAll(outerBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ceiling := filepath.Join(outer, "sandbox")
+	start := filepath.Join(ceiling, "tmp", "case")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_TEST_ENV_ACTIVE", "1")
+	t.Setenv("BEADS_TEST_DISCOVERY_CEILING", ceiling)
+	t.Chdir(start)
+
+	if got := findProjectBeadsDir(); got != "" {
+		t.Fatalf("findProjectBeadsDir escaped test ceiling: got %q, outer ledger %q", got, outerBeads)
 	}
 }
 
@@ -700,76 +725,6 @@ func TestValidateYamlConfigValue_DoltMode(t *testing.T) {
 	}
 }
 
-// TestValidateYamlConfigValue_PrimeMaxMemories tests validation of prime.max-memories
-func TestValidateYamlConfigValue_PrimeMaxMemories(t *testing.T) {
-	tests := []struct {
-		name      string
-		value     string
-		expectErr bool
-		errMsg    string
-	}{
-		{"valid zero (unlimited)", "0", false, ""},
-		{"valid positive", "10", false, ""},
-		{"valid large value", "1000", false, ""},
-		{"invalid negative", "-1", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"-1\""},
-		{"invalid non-integer", "abc", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"abc\""},
-		{"invalid float", "3.5", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"3.5\""},
-		{"invalid empty", "", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"\""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateYamlConfigValue("prime.max-memories", tt.value)
-			if tt.expectErr {
-				if err == nil {
-					t.Errorf("expected error for value %q, got nil", tt.value)
-				} else if err.Error() != tt.errMsg {
-					t.Errorf("expected error %q, got %q", tt.errMsg, err.Error())
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error for value %q: %v", tt.value, err)
-				}
-			}
-		})
-	}
-}
-
-// TestValidateYamlConfigValue_PrimeMaxMemoryChars tests validation of prime.max-memory-chars
-func TestValidateYamlConfigValue_PrimeMaxMemoryChars(t *testing.T) {
-	tests := []struct {
-		name      string
-		value     string
-		expectErr bool
-		errMsg    string
-	}{
-		{"valid zero (unlimited)", "0", false, ""},
-		{"valid positive", "25000", false, ""},
-		{"valid large value", "1000000", false, ""},
-		{"invalid negative", "-1", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"-1\""},
-		{"invalid non-integer", "abc", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"abc\""},
-		{"invalid float", "3.5", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"3.5\""},
-		{"invalid empty", "", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"\""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateYamlConfigValue("prime.max-memory-chars", tt.value)
-			if tt.expectErr {
-				if err == nil {
-					t.Errorf("expected error for value %q, got nil", tt.value)
-				} else if err.Error() != tt.errMsg {
-					t.Errorf("expected error %q, got %q", tt.errMsg, err.Error())
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error for value %q: %v", tt.value, err)
-				}
-			}
-		})
-	}
-}
-
 func TestIsSecretKey(t *testing.T) {
 	tests := []struct {
 		key      string
@@ -781,38 +736,11 @@ func TestIsSecretKey(t *testing.T) {
 		{"some.secret", true},
 		{"some.api-key", true},
 
-		// Spellings the wire redaction has to cover. GET /v0/beads/config
-		// publishes a value for any key this returns false for, and bd serve's
-		// bearer — optional, and shared and surface-wide where it is
-		// configured — cannot withhold one value from one caller, so each of
-		// these is a credential in cleartext if it regresses. "apikey" in
-		// particular is the spelling the published schema promises is covered.
-		{"integrations.apikey", true},
-		{"github.pat", true},
-		{"github.auth", true},
-		{"db.pwd", true},
-		{"db.passwd", true},
-		{"ssh.key", true},
-		{"registry.bearer", true},
-		{"aws.credentials", true},
-		{"tls.cert", true},
-		{"signing.private_key", true},
-
 		{"no-db", false},
 		{"json", false},
 		{"routing.mode", false},
 		{"sync.remote", false},
 		{"linear.team_id", false},
-
-		// The near misses that make the short spellings SEGMENT matches rather
-		// than substring matches. Redacting these would be a bug in the other
-		// direction: every one is an ordinary key that merely starts with a
-		// sensitive word.
-		{"issue.path", false},
-		{"export.pattern", false},
-		{"commit.author", false},
-		{"sort.keyword", false},
-		{"build.compat", false},
 	}
 
 	for _, tt := range tests {

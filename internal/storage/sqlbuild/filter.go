@@ -10,57 +10,9 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// KeysetCreatedAtIDPredicate is the SARGABLE (created_at DESC, id ASC) keyset
-// predicate emitted for IssueFilter.AfterCreatedAt/AfterID. Its three ?
-// placeholders bind, in order: created_at (the sargable upper bound), created_at
-// (strict, drops the same-second rows already returned), and id (the same-second
-// tie-break).
-//
-// It is logically "(created_at, id) is strictly after (cursor)" under
-// created_at DESC, id ASC — i.e. (created_at < ?) OR (created_at = ? AND id > ?)
-// — but rewritten with a redundant `created_at <= ?` leading bound so the planner
-// seeks idx_issues_created_at (an IndexedTableAccess range on Dolt, an index/
-// BitmapOr scan on Postgres) instead of full-scanning and filtering. The two
-// forms select the same rows: created_at <= C is true whenever the OR is, and
-// prunes only created_at > C, which the OR already excludes. It is exported so
-// the backend sargability guards EXPLAIN this exact string rather than a copy —
-// a change here then breaks the guard.
-const KeysetCreatedAtIDPredicate = "(created_at <= ? AND ((created_at < ?) OR (id > ?)))"
-
-// KeysetPriorityCreatedAtIDPredicate is the SARGABLE (priority ASC,
-// created_at DESC, id ASC) keyset predicate emitted when the position carries a
-// priority (IssueFilter.AfterPriority set alongside AfterCreatedAt/AfterID).
-// Its five ? placeholders bind, in order: priority (the sargable lower bound),
-// priority (strict), created_at (the sargable upper bound), created_at
-// (strict), id (the tie-break).
-//
-// IT NESTS THE CREATED PREDICATE RATHER THAN RESTATING IT, which is both a
-// single-sourcing choice and the correctness argument. The created/id
-// comparison is only reachable for rows at the cursor's OWN priority, so it has
-// to sit inside the priority-equal arm. Flattening it the way the created
-// predicate's own leading-bound trick invites —
-// `(priority >= ? AND ((priority > ?) OR (created_at < ?) OR (id > ?)))` —
-// looks equivalent and is not: at the cursor's priority it admits a row created
-// AFTER the cursor whenever that row's id sorts later, and that row was already
-// delivered on an earlier page.
-//
-// The leading `priority >= ?` bound is redundant in the same way and for the
-// same reason as the created predicate's: it prunes only priority < P, which
-// the OR already excludes, and it gives the planner an index range to seek
-// instead of a full scan.
-const KeysetPriorityCreatedAtIDPredicate = "(priority >= ? AND ((priority > ?) OR " + KeysetCreatedAtIDPredicate + "))"
-
 // BuildIssueFilterClauses builds WHERE clause fragments and args from a query
 // string and IssueFilter. The tables parameter controls which table names are
 // referenced in subqueries (issues vs wisps).
-//
-// Invariant: every clause must reference only main-table columns or correlated
-// subqueries keyed by id — never the counts mega-query's aggregate aliases
-// (labels_json, dep_count, rdep_count, comment_count, parent_id, deps_json).
-// SearchCountsSQL renders this WHERE inside a pre-join subquery where those
-// aliases are out of scope; a count-driven predicate (e.g. "issues with >5
-// blockers") cannot live here and would need a separate outer predicate
-// parameter. See the SearchCountsSQL doc comment for why a violation fails loud.
 func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables FilterTables) ([]string, []any, error) {
 	var whereClauses []string
 	var args []any
@@ -96,10 +48,6 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 	if filter.ExternalRefContains != "" {
 		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
 		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
-	}
-	if filter.ExternalRef != nil {
-		whereClauses = append(whereClauses, "external_ref = ?")
-		args = append(args, *filter.ExternalRef)
 	}
 
 	if filter.Status != nil {
@@ -214,14 +162,6 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 	if filter.NoLabels {
 		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT DISTINCT issue_id FROM %s)", tables.Labels))
 	}
-	if filter.LabelPattern != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label LIKE ? ESCAPE '|')", tables.Labels))
-		args = append(args, globToLikePattern(filter.LabelPattern))
-	}
-	if filter.LabelRegex != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label REGEXP ?)", tables.Labels))
-		args = append(args, filter.LabelRegex)
-	}
 
 	if filter.Pinned != nil {
 		if *filter.Pinned {
@@ -241,34 +181,12 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
 		}
 	}
-	if filter.EphemeralTier != nil {
-		// The tier discriminator, not the raw flag: typed wisps minted without
-		// the ephemeral flag are still ephemeral-tier (types.IssueFilter).
-		if *filter.EphemeralTier {
-			whereClauses = append(whereClauses, "(ephemeral = 1 OR (wisp_type IS NOT NULL AND wisp_type <> ''))")
-		} else {
-			whereClauses = append(whereClauses, "((ephemeral = 0 OR ephemeral IS NULL) AND (wisp_type = '' OR wisp_type IS NULL))")
-		}
-	}
 	if filter.IsTemplate != nil {
 		if *filter.IsTemplate {
 			whereClauses = append(whereClauses, "is_template = 1")
 		} else {
 			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
 		}
-	}
-	if filter.IsBlocked != nil {
-		// is_blocked is NOT NULL DEFAULT 0 on both issues and wisps, so a plain
-		// equality is exact (no IS NULL arm needed) and index-backed by
-		// idx_issues_is_blocked(is_blocked, status). Bound as an int so the same
-		// clause is portable across every backend (Dolt/MySQL/SQLite native, and
-		// pgdialect rewrites ? → $n).
-		blocked := 0
-		if *filter.IsBlocked {
-			blocked = 1
-		}
-		whereClauses = append(whereClauses, "is_blocked = ?")
-		args = append(args, blocked)
 	}
 
 	if filter.EmptyDescription {
@@ -298,30 +216,6 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		if tc.v != nil {
 			whereClauses = append(whereClauses, fmt.Sprintf("%s %s ?", tc.col, tc.op))
 			args = append(args, tc.v.Format(time.RFC3339))
-		}
-	}
-
-	if filter.AfterCreatedAt != nil {
-		// Bind the cursor time as time.Time, not a formatted string: the issues/
-		// wisps created_at columns are DATETIME (NUMERIC affinity), so an RFC3339
-		// string parameter mis-compares on the SQLite backend, while a time.Time
-		// value compares correctly on every backend — the same binding EventsSince
-		// uses. It is bound twice under either order (the sargable upper bound
-		// and the strict bound), followed by the id tie-break.
-		ac := *filter.AfterCreatedAt
-		// AfterCreatedAt alone decides that a position was supplied; AfterPriority
-		// decides which ORDER it is a position in. The two predicates are
-		// ALTERNATIVES, never conjuncts: ANDing them would keep the created
-		// predicate's `created_at <= ?` bound in force across every priority,
-		// which excludes exactly the rows a priority walk exists to reach —
-		// everything of a higher-numbered priority created after the cursor.
-		if filter.AfterPriority != nil {
-			ap := *filter.AfterPriority
-			whereClauses = append(whereClauses, KeysetPriorityCreatedAtIDPredicate)
-			args = append(args, ap, ap, ac, ac, filter.AfterID)
-		} else {
-			whereClauses = append(whereClauses, KeysetCreatedAtIDPredicate)
-			args = append(args, ac, ac, filter.AfterID)
 		}
 	}
 
@@ -368,29 +262,6 @@ func AppendMetadataClauses(where []string, args []any, hasKey string, fields map
 		}
 	}
 	return where, args, nil
-}
-
-// globToLikePattern converts a shell-style glob (* and ?) to a SQL LIKE
-// pattern. Literal % and _ in the input — and the '|' escape char itself —
-// are escaped so they don't act as LIKE wildcards. The resulting SQL must
-// use ESCAPE '|'.
-func globToLikePattern(pattern string) string {
-	var b strings.Builder
-	b.Grow(len(pattern))
-	for _, c := range pattern {
-		switch c {
-		case '%', '_', '|':
-			b.WriteByte('|')
-			b.WriteRune(c)
-		case '*':
-			b.WriteByte('%')
-		case '?':
-			b.WriteByte('_')
-		default:
-			b.WriteRune(c)
-		}
-	}
-	return b.String()
 }
 
 // LooksLikeIssueID returns true if the query string looks like a beads issue ID.

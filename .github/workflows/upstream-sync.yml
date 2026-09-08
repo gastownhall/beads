@@ -1,0 +1,73 @@
+name: Upstream topology audit
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      apply_main:
+        description: Atomically update fork main to the audited upstream main commit
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: upstream-topology
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    if: github.repository == 'marlon-costa-dc/beads'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout downstream dev
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Fetch canonical upstream and fork topology
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote add canonical https://github.com/gastownhall/beads.git
+          git fetch --no-tags canonical main
+          git fetch --tags canonical
+          git fetch --no-tags origin main dev
+
+          upstream_main=$(git rev-parse canonical/main)
+          fork_main=$(git rev-parse origin/main)
+          latest_tag=$(gh api repos/gastownhall/beads/releases/latest --jq .tag_name)
+          latest_release=$(git rev-parse "refs/tags/$latest_tag^{}")
+          dev_base=$(git merge-base origin/dev "$latest_release")
+
+          {
+            echo "upstream_main=$upstream_main"
+            echo "fork_main=$fork_main"
+            echo "latest_tag=$latest_tag"
+            echo "latest_release=$latest_release"
+            echo "dev_base=$dev_base"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$dev_base" != "$latest_release" ]]; then
+            echo "dev is not based on the latest stable upstream release" >&2
+            exit 1
+          fi
+
+          if [[ "$fork_main" == "$upstream_main" ]]; then
+            echo "main already mirrors canonical upstream" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [[ "${{ github.event_name }}" != workflow_dispatch || "${{ inputs.apply_main }}" != true ]]; then
+            echo "main drift detected; rerun manually with apply_main=true after review" >&2
+            exit 1
+          fi
+
+          git push origin "$upstream_main:refs/heads/main" \
+            --force-with-lease="refs/heads/main:$fork_main"
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$upstream_main"

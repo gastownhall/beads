@@ -81,13 +81,11 @@ func proxiedDoltCommitCountSince(t *testing.T, db *sql.DB, sinceHash string) int
 }
 
 func TestProxiedServerConfig(t *testing.T) {
-	requireSharedProxiedServer(t)
-	t.Parallel()
+	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 
 	t.Run("config_set_and_get", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcs")
+		p := bdProxiedInit(t, bd, "pcs")
 		bdProxiedConfig(t, bd, p.dir, "set", "test.key1", "hello")
 		out := bdProxiedConfig(t, bd, p.dir, "get", "test.key1")
 		if !strings.Contains(out, "hello") {
@@ -96,8 +94,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_set_overwrite", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pco")
+		p := bdProxiedInit(t, bd, "pco")
 		bdProxiedConfig(t, bd, p.dir, "set", "test.overwrite", "first")
 		bdProxiedConfig(t, bd, p.dir, "set", "test.overwrite", "second")
 		out := bdProxiedConfig(t, bd, p.dir, "get", "test.overwrite")
@@ -107,8 +104,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_set_namespaced", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcn")
+		p := bdProxiedInit(t, bd, "pcn")
 		bdProxiedConfig(t, bd, p.dir, "set", "jira.url", "https://example.atlassian.net")
 		out := bdProxiedConfig(t, bd, p.dir, "get", "jira.url")
 		if !strings.Contains(out, "https://example.atlassian.net") {
@@ -117,8 +113,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_set_and_get_linear_state_map_dotted_key", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcd")
+		p := bdProxiedInit(t, bd, "pcd")
 		bdProxiedConfig(t, bd, p.dir, "set", "linear.state_map.closed", "Done")
 		out := bdProxiedConfig(t, bd, p.dir, "get", "linear.state_map.closed")
 		if strings.TrimSpace(out) != "Done" {
@@ -127,8 +122,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_list", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcl")
+		p := bdProxiedInit(t, bd, "pcl")
 		out := bdProxiedConfig(t, bd, p.dir, "list")
 		if !strings.Contains(out, "issue_prefix") {
 			t.Errorf("expected issue_prefix in list output: %s", out)
@@ -136,8 +130,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_list_json", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcj")
+		p := bdProxiedInit(t, bd, "pcj")
 		bdProxiedConfig(t, bd, p.dir, "set", "test.key1", "hello")
 		m := bdProxiedConfigListJSON(t, bd, p.dir)
 		if _, ok := m["issue_prefix"]; !ok {
@@ -149,8 +142,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_unset", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcu")
+		p := bdProxiedInit(t, bd, "pcu")
 		bdProxiedConfig(t, bd, p.dir, "set", "test.removeme", "temp")
 		out := bdProxiedConfig(t, bd, p.dir, "get", "test.removeme")
 		if !strings.Contains(out, "temp") {
@@ -168,8 +160,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_get_missing_key", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcm")
+		p := bdProxiedInit(t, bd, "pcm")
 		out := bdProxiedConfig(t, bd, p.dir, "get", "nonexistent.key.xyz")
 		if !strings.Contains(out, "not set") {
 			t.Errorf("expected 'not set' for missing key: %s", out)
@@ -177,20 +168,17 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_set_no_args", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcsna")
+		p := bdProxiedInit(t, bd, "pcsna")
 		bdProxiedConfigFail(t, bd, p.dir, "set")
 	})
 
 	t.Run("config_unset_no_args", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcuna")
+		p := bdProxiedInit(t, bd, "pcuna")
 		bdProxiedConfigFail(t, bd, p.dir, "unset")
 	})
 
 	t.Run("config_set_creates_dolt_commit", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcsc")
+		p := bdProxiedInit(t, bd, "pcsc")
 		db := openProxiedDB(t, p)
 		before := proxiedDoltHead(t, db)
 
@@ -203,8 +191,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_unset_creates_dolt_commit", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcuc")
+		p := bdProxiedInit(t, bd, "pcuc")
 		bdProxiedConfig(t, bd, p.dir, "set", "test.commit", "v1")
 
 		db := openProxiedDB(t, p)
@@ -219,8 +206,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_yaml_only_key_skips_dolt_commit", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcy")
+		p := bdProxiedInit(t, bd, "pcy")
 		db := openProxiedDB(t, p)
 		before := proxiedDoltHead(t, db)
 
@@ -254,8 +240,7 @@ func TestProxiedServerConfig(t *testing.T) {
 	})
 
 	t.Run("config_beads_role_skips_dolt_commit", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcr")
+		p := bdProxiedInit(t, bd, "pcr")
 		db := openProxiedDB(t, p)
 		before := proxiedDoltHead(t, db)
 
@@ -286,13 +271,11 @@ func TestProxiedServerConfig(t *testing.T) {
 }
 
 func TestProxiedServerConfigSetMany(t *testing.T) {
-	requireSharedProxiedServer(t)
-	t.Parallel()
+	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 
 	t.Run("set_many_single_dolt_commit", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcsm")
+		p := bdProxiedInit(t, bd, "pcsm")
 		db := openProxiedDB(t, p)
 		before := proxiedDoltHead(t, db)
 
@@ -313,8 +296,7 @@ func TestProxiedServerConfigSetMany(t *testing.T) {
 	})
 
 	t.Run("set_many_cli_round_trip", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pcsmr")
+		p := bdProxiedInit(t, bd, "pcsmr")
 		bdProxiedConfig(t, bd, p.dir, "set-many",
 			"jira.url=https://example.atlassian.net",
 			"jira.project=PROJ",
@@ -343,11 +325,10 @@ func TestProxiedServerConfigSetMany(t *testing.T) {
 }
 
 func TestProxiedServerConfigConcurrent(t *testing.T) {
-	requireSharedProxiedServer(t)
-	t.Parallel()
+	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 
-	p := newSharedProxiedProject(t, bd, "pcc")
+	p := bdProxiedInit(t, bd, "pcc")
 
 	const numWorkers = 8
 

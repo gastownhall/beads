@@ -3,12 +3,12 @@ package dolt
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/conformance"
 )
 
 // TestConformance runs the backend-agnostic storage conformance suite
-// (backend/conformance) against the server-mode Dolt backend, so the
+// (internal/storage/conformance) against the server-mode Dolt backend, so the
 // storage contract is enforced against a real implementation rather than only
 // asserted.
 //

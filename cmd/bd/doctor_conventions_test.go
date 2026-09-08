@@ -10,10 +10,7 @@ func TestConventionsLint_NoStore(t *testing.T) {
 	store = nil
 	defer func() { store = origStore }()
 
-	checks, err := runConventionsLint()
-	if err != nil {
-		t.Fatalf("runConventionsLint: unexpected error: %v", err)
-	}
+	checks := runConventionsLint()
 	if len(checks) != 1 {
 		t.Fatalf("expected 1 check, got %d", len(checks))
 	}

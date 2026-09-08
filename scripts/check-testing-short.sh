@@ -10,10 +10,6 @@ internal/hooks/hooks_test.go::TestRunSync_KillsDescendants
 internal/testutil/fixtures/fixtures_test.go::TestXLargeDolt
 internal/testutil/fixtures/fixtures_test.go::TestLargeFromJSONL
 internal/storage/dolt/concurrent_test.go::TestHighContentionStress
-internal/storage/dolt/concurrent_test.go::TestConcurrentWorkQueueDrain
-internal/storage/dolt/lease_test.go::TestConcurrentHeartbeatReclaimClose
-internal/storage/uow/lostupdate_dolt_test.go::TestUOW_ConcurrentMergeOps_NoLostUpdate
-internal/workapi/sweep_test.go::TestCandidateIDMatcherLargeFixture
 EOF
 )
 
@@ -25,21 +21,13 @@ while IFS=: read -r file line _; do
     continue
   fi
 
-  content=$(sed -n "${line}p" "$file")
-  if [[ "$content" =~ ^[[:space:]]*// ]]; then
-    continue
-  fi
-
   func=$(
     awk -v target="$line" '
-      NR > target { exit }
-      /^func [A-Za-z0-9_]+\(/ {
+      NR <= target && /^func [A-Za-z0-9_]+\(/ {
         current = $0
         sub(/^func /, "", current)
         sub(/\(.*/, "", current)
-        next
       }
-      current != "" && /^}/ { current = "" }
       END { print current }
     ' "$file"
   )

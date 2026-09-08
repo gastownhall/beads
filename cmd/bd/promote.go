@@ -8,37 +8,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
-
-// promotionComment is the audit comment both routes record on the promoted
-// bead. Shared by the classic and proxied-server paths so the text cannot
-// drift.
-func promotionComment(reason string) string {
-	comment := "Promoted from Level 0"
-	if reason != "" {
-		comment += ": " + reason
-	}
-	return comment
-}
-
-// printPromoteResult renders the `bd promote` success output. updated is the
-// best-effort post-promote re-read used only by --json (it may be nil, in
-// which case the JSON path prints nothing, matching the classic behavior).
-// Shared by the classic and proxied-server paths so the output shape cannot
-// drift.
-func printPromoteResult(fullID string, updated *types.Issue) error {
-	if jsonOutput {
-		if updated != nil {
-			return outputJSON(updated)
-		}
-		return nil
-	}
-	fmt.Printf("%s Promoted %s to permanent bead\n", ui.RenderPass("✓"), fullID)
-	return nil
-}
 
 var promoteCmd = &cobra.Command{
 	Use:     "promote <wisp-id>",
@@ -71,10 +43,6 @@ Examples:
 		id := args[0]
 		reason, _ := cmd.Flags().GetString("reason")
 
-		if usesProxiedServer() {
-			return runPromoteProxiedServer(rootCtx, id, reason)
-		}
-
 		ctx := rootCtx
 
 		if store == nil {
@@ -101,19 +69,25 @@ Examples:
 			return HandleErrorRespectJSON("promoting %s: %v", fullID, err)
 		}
 
-		// Add promotion comment (issue is now in permanent table, AddComment routes correctly
-		// via GetIssue fallback)
-		if err := store.AddComment(ctx, fullID, actor, promotionComment(reason)); err != nil {
+		comment := "Promoted from wisp to permanent bead"
+		if reason != "" {
+			comment += ": " + reason
+		}
+		if err := store.AddComment(ctx, fullID, actor, comment); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to add promotion comment to %s: %v\n", fullID, err)
 		}
 
 		commandDidWrite.Store(true)
 
-		var updated *types.Issue
 		if jsonOutput {
-			updated, _ = store.GetIssue(ctx, fullID)
+			updated, _ := store.GetIssue(ctx, fullID)
+			if updated != nil {
+				return outputJSON(updated)
+			}
+			return nil
 		}
-		return printPromoteResult(fullID, updated)
+		fmt.Printf("%s Promoted %s to permanent bead\n", ui.RenderPass("✓"), fullID)
+		return nil
 	},
 }
 

@@ -22,16 +22,14 @@ func (s *testSuite) TestDependencyUseCase_Extras() {
 		s.Run("EmptySliceReturnsEmptyResult", s.ducAddBulkEmpty)
 		s.Run("NilDepReturnsError", s.ducAddBulkNilDep)
 		s.Run("EmptyIDsReturnError", s.ducAddBulkEmptyIDs)
-		s.Run("SelfEdgeReturnsSelfDependency", s.ducAddBulkSelfEdge)
 		s.Run("InsertsEdgesAndReturnsAdded", s.ducAddBulkInserts)
-		s.Run("RejectsHierarchyBlockingButAllowsSiblings", s.ducAddBulkHierarchyBlocking)
 		s.Run("PerEdgeCycleCheckBlocksCycleCreation", s.ducAddBulkPerEdgeCycle)
 		s.Run("SkipPerEdgeStillRunsFinalCheck", s.ducAddBulkFinalCycleCheck)
 		s.Run("SkipPerEdgeAcceptsAcyclicBulk", s.ducAddBulkSkipPerEdgeAcyclic)
 		s.Run("NonBlockingEdgesSkipCycleChecks", s.ducAddBulkNonBlockingNoCheck)
-		s.Run("WispSourceRoutesToWispDepsTable", s.ducAddBulkWispRoutes)
-		s.Run("MixedBatchLandsEachEdgeInItsSourcePlane", s.ducAddBulkSourceRoutesMixedBatch)
-		s.Run("RefusesCrossPlaneCycle", s.ducAddBulkSourceRoutesRefusesCrossPlaneCycle)
+	})
+	s.Run("AddWispDependencies", func() {
+		s.Run("RoutesToWispDepsTable", s.ducAddBulkWispRoutes)
 	})
 }
 
@@ -158,47 +156,6 @@ func (s *testSuite) ducAddBulkInserts() {
 	s.Require().Len(out["bd-duc-bulk-a"], 2)
 }
 
-func (s *testSuite) ducAddBulkHierarchyBlocking() {
-	for _, id := range []string{
-		"bd-duc-hier-parent",
-		"bd-duc-hier-child",
-		"bd-duc-hier-sibling",
-	} {
-		s.seedIssueRow(id)
-	}
-
-	repo := NewDependencySQLRepository(s.Runner())
-	for _, child := range []string{"bd-duc-hier-child", "bd-duc-hier-sibling"} {
-		s.Require().NoError(repo.Insert(s.Ctx(),
-			newDep(child, "bd-duc-hier-parent", types.DepParentChild),
-			"tester", domain.DepInsertOpts{}))
-	}
-
-	uc := s.depUseCase()
-	_, err := uc.AddDependencies(s.Ctx(), []*types.Dependency{
-		newDep("bd-duc-hier-sibling", "bd-duc-hier-child", types.DepBlocks),
-	}, "tester", domain.BulkAddDepsOpts{})
-	s.Require().NoError(err, "siblings may carry ordering edges")
-
-	_, err = uc.AddDependencies(s.Ctx(), []*types.Dependency{
-		newDep("bd-duc-hier-child", "bd-duc-hier-parent", types.DepBlocks),
-	}, "tester", domain.BulkAddDepsOpts{})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "cannot be blocked by its ancestor")
-
-	_, err = uc.AddDependencies(s.Ctx(), []*types.Dependency{
-		newDep("bd-duc-hier-parent", "bd-duc-hier-child", types.DepBlocks),
-	}, "tester", domain.BulkAddDepsOpts{})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "cannot be blocked by its descendant")
-
-	_, err = uc.AddDependencies(s.Ctx(), []*types.Dependency{
-		newDep("bd-duc-hier-child", "bd-duc-hier-parent", types.DepConditionalBlocks),
-	}, "tester", domain.BulkAddDepsOpts{})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "cannot be blocked by its ancestor")
-}
-
 func (s *testSuite) ducAddBulkPerEdgeCycle() {
 	// Existing a -> b. Trying to add b -> a must fail the per-edge cycle check
 	// and NOT insert the new edge.
@@ -212,13 +169,6 @@ func (s *testSuite) ducAddBulkPerEdgeCycle() {
 		[]*types.Dependency{newDep("bd-duc-pec-b", "bd-duc-pec-a", types.DepBlocks)},
 		"tester", domain.BulkAddDepsOpts{})
 	s.Require().Error(err, "per-edge cycle check must block the new edge")
-	s.Require().ErrorIs(err, domain.ErrDependencyCycle,
-		"per-edge bulk cycle rejection must be typed so callers can errors.Is it")
-	// The proxied bulk CLI surfaces this message verbatim (HandleErrorRespectJSON
-	// "%v"), so typing it must keep the pre-taxonomy text byte-for-byte and must
-	// NOT append the sentinel string.
-	s.Equal("add deps[0]: adding bd-duc-pec-b -> bd-duc-pec-a would create a cycle", err.Error(),
-		"per-edge bulk cycle message must preserve its exact pre-taxonomy text")
 
 	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
@@ -244,14 +194,7 @@ func (s *testSuite) ducAddBulkFinalCycleCheck() {
 		[]*types.Dependency{newDep("bd-duc-fcc-b", "bd-duc-fcc-a", types.DepBlocks)},
 		"tester", domain.BulkAddDepsOpts{SkipPerEdgeCycleCheck: true})
 	s.Require().Error(err, "final whole-graph cycle check must fail the bulk add")
-	// The proxied bulk CLI surfaces this message verbatim (HandleErrorRespectJSON
-	// "%v"), so typing it must keep the pre-taxonomy text byte-for-byte and must
-	// NOT append the sentinel string.
-	s.Equal("add deps: dependency cycle would be created: bd-duc-fcc-b → bd-duc-fcc-a → bd-duc-fcc-b", err.Error(),
-		"final bulk cycle message must preserve its exact pre-taxonomy text")
-	s.Require().ErrorIs(err, domain.ErrDependencyCycle,
-		"final CycleThroughEdges rejection must be typed so callers can errors.Is it, "+
-			"including on the SkipPerEdgeCycleCheck path where it is the sole cycle guard")
+	s.Contains(err.Error(), "cycle")
 }
 
 func (s *testSuite) ducAddBulkSkipPerEdgeAcyclic() {
@@ -280,7 +223,7 @@ func (s *testSuite) ducAddBulkNonBlockingNoCheck() {
 	s.Require().NoError(depRepo.Insert(s.Ctx(),
 		newDep("bd-duc-nbnc-a", "bd-duc-nbnc-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 
-	// related edge b -> a: cycle checks cover only the static scheduling types, so
+	// related edge b -> a: cycle check is per-edge for blocking types only, so
 	// this should always be accepted.
 	res, err := s.depUseCase().AddDependencies(s.Ctx(),
 		[]*types.Dependency{newDep("bd-duc-nbnc-b", "bd-duc-nbnc-a", types.DepRelated)},
@@ -289,51 +232,8 @@ func (s *testSuite) ducAddBulkNonBlockingNoCheck() {
 	s.Require().Len(res.Added, 1)
 }
 
-func (s *testSuite) ducAddBulkSelfEdge() {
-	// A self-edge (IssueID == DependsOnID) must be rejected as ErrSelfDependency
-	// for ALL dep types before any cycle probe — including the scheduling types
-	// that would otherwise trip HasCycle (default mode) or the final
-	// CycleThroughEdges gate (SkipPerEdgeCycleCheck mode) and be misreported as a
-	// cycle. The message is byte-identical to the single-edge and issueops
-	// self-dep sites so the proxied bulk CLI shows one consistent self-dep error.
-	s.seedIssueRow("bd-duc-self-a")
-	const wantMsg = "cannot add self-dependency: bd-duc-self-a cannot depend on itself"
+// ---- AddWispDependencies ----
 
-	for _, tc := range []struct {
-		name string
-		typ  types.DependencyType
-		opts domain.BulkAddDepsOpts
-	}{
-		{"DefaultBlocks", types.DepBlocks, domain.BulkAddDepsOpts{}},
-		{"SkipPerEdgeBlocks", types.DepBlocks, domain.BulkAddDepsOpts{SkipPerEdgeCycleCheck: true}},
-		{"NonSchedulingRelated", types.DepRelated, domain.BulkAddDepsOpts{}},
-	} {
-		_, err := s.depUseCase().AddDependencies(s.Ctx(),
-			[]*types.Dependency{newDep("bd-duc-self-a", "bd-duc-self-a", tc.typ)},
-			"tester", tc.opts)
-		s.Require().Error(err, "%s: self-edge must be rejected", tc.name)
-		s.Require().ErrorIs(err, domain.ErrSelfDependency,
-			"%s: self-edge must be typed ErrSelfDependency so callers can errors.Is it", tc.name)
-		s.Require().NotErrorIs(err, domain.ErrDependencyCycle,
-			"%s: a self-edge must NOT be classified as a dependency cycle", tc.name)
-		s.Equal(wantMsg, err.Error(),
-			"%s: self-dep message must match every other self-dep site byte-for-byte", tc.name)
-	}
-
-	// The guard fires before any insert, so nothing is written even on the
-	// SkipPerEdgeCycleCheck path where inserts otherwise precede the final gate.
-	var count int
-	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
-		"bd-duc-self-a", "bd-duc-self-a").Scan(&count))
-	s.Equal(0, count, "self-edge must not have been inserted")
-}
-
-// ---- AddDependencies: source routing ----
-
-// ducAddBulkWispRoutes pins the all-wisp batch: a source that lives in the wisp
-// plane gets its edge written to wisp_dependencies and nothing written to the
-// issues plane.
 func (s *testSuite) ducAddBulkWispRoutes() {
 	s.seedWispRow("bd-duc-bw-src")
 	s.seedIssueRow("bd-duc-bw-tgt")
@@ -341,7 +241,7 @@ func (s *testSuite) ducAddBulkWispRoutes() {
 	deps := []*types.Dependency{
 		newDep("bd-duc-bw-src", "bd-duc-bw-tgt", types.DepBlocks),
 	}
-	res, err := s.depUseCase().AddDependencies(s.Ctx(), deps, "tester", domain.BulkAddDepsOpts{})
+	res, err := s.depUseCase().AddWispDependencies(s.Ctx(), deps, "tester", domain.BulkAddDepsOpts{})
 	s.Require().NoError(err)
 	s.Require().Len(res.Added, 1)
 
@@ -352,56 +252,4 @@ func (s *testSuite) ducAddBulkWispRoutes() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", "bd-duc-bw-src").Scan(&permCount))
 	s.Equal(0, permCount, "wisp-routed bulk add must not touch the issues dep table")
-}
-
-// ducAddBulkSourceRoutesMixedBatch pins the mixed-plane batch at the layer
-// that decides the plane: one call, two write paths, each edge in the table
-// its own source lives in.
-func (s *testSuite) ducAddBulkSourceRoutesMixedBatch() {
-	s.seedWispRow("bd-duc-sr-wisp")
-	s.seedIssueRow("bd-duc-sr-issue")
-	s.seedIssueRow("bd-duc-sr-tgt")
-
-	res, err := s.depUseCase().AddDependencies(s.Ctx(), []*types.Dependency{
-		newDep("bd-duc-sr-wisp", "bd-duc-sr-tgt", types.DepBlocks),
-		newDep("bd-duc-sr-issue", "bd-duc-sr-tgt", types.DepBlocks),
-	}, "tester", domain.BulkAddDepsOpts{})
-	s.Require().NoError(err)
-	s.Require().Len(res.Added, 2)
-
-	s.Equal(1, s.countDepRows("wisp_dependencies", "bd-duc-sr-wisp"))
-	s.Equal(0, s.countDepRows("dependencies", "bd-duc-sr-wisp"))
-	s.Equal(1, s.countDepRows("dependencies", "bd-duc-sr-issue"))
-	s.Equal(0, s.countDepRows("wisp_dependencies", "bd-duc-sr-issue"))
-}
-
-// ducAddBulkSourceRoutesRefusesCrossPlaneCycle pins bd-xe27 at this layer: the
-// final gate walks both tables, so a loop that leaves the issues plane and
-// returns through the wisp plane is still a loop.
-//
-// It asserts the REFUSAL only. Undoing the edge the gate refused is the
-// caller's transaction's job, and this suite runs the use case on a bare
-// runner; the rolled-back-across-both-planes half is pinned against the real
-// unit of work (conformance.RunDependencyEditorMixedBatchRefusalRollsBackBothPlanes).
-func (s *testSuite) ducAddBulkSourceRoutesRefusesCrossPlaneCycle() {
-	s.seedIssueRow("bd-duc-sx-issue")
-	s.seedWispRow("bd-duc-sx-wisp")
-
-	_, err := s.depUseCase().AddDependencies(s.Ctx(), []*types.Dependency{
-		newDep("bd-duc-sx-issue", "bd-duc-sx-wisp", types.DepBlocks),
-	}, "tester", domain.BulkAddDepsOpts{})
-	s.Require().NoError(err)
-
-	_, err = s.depUseCase().AddDependencies(s.Ctx(), []*types.Dependency{
-		newDep("bd-duc-sx-wisp", "bd-duc-sx-issue", types.DepBlocks),
-	}, "tester", domain.BulkAddDepsOpts{SkipPerEdgeCycleCheck: true})
-	s.Require().ErrorIs(err, domain.ErrDependencyCycle)
-}
-
-//nolint:gosec // G201: table is one of two hardcoded test constants.
-func (s *testSuite) countDepRows(table, sourceID string) int {
-	var count int
-	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM "+table+" WHERE issue_id = ?", sourceID).Scan(&count))
-	return count
 }

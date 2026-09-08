@@ -1,17 +1,22 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"slices"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // storageExecutor handles operations that need a store connection
@@ -34,6 +39,219 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 	return fmt.Errorf("no storage available")
 }
 
+func withFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
+	if filter.Limit > 0 {
+		filter.Limit++
+	}
+	return filter
+}
+
+func readyWorkFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
+	wf := types.WorkFilter{
+		Status:         types.StatusOpen,
+		Limit:          filter.Limit,
+		Offset:         filter.Offset,
+		Labels:         filter.Labels,
+		LabelsAny:      filter.LabelsAny,
+		ExcludeLabels:  filter.ExcludeLabels,
+		LabelPattern:   filter.LabelPattern,
+		LabelRegex:     filter.LabelRegex,
+		ParentID:       filter.ParentID,
+		MolType:        filter.MolType,
+		WispType:       filter.WispType,
+		ExcludeTypes:   filter.ExcludeTypes,
+		MetadataFields: filter.MetadataFields,
+		HasMetadataKey: filter.HasMetadataKey,
+	}
+	if filter.IssueType != nil {
+		wf.Type = string(*filter.IssueType)
+	}
+	if filter.Priority != nil {
+		wf.Priority = filter.Priority
+	}
+	if filter.Assignee != nil {
+		wf.Assignee = filter.Assignee
+	}
+	if filter.NoAssignee {
+		wf.Unassigned = true
+	}
+	if filter.Ephemeral != nil && *filter.Ephemeral {
+		wf.IncludeEphemeral = true
+	}
+	return wf
+}
+
+// getHierarchicalChildren handles the --tree --parent combination logic.
+// baseFilter carries CLI filters (--type, --status, etc.) through the recursive walk.
+func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter) ([]*types.Issue, error) {
+	// First verify that the parent issue exists
+	var parentIssue *types.Issue
+	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
+		var err error
+		parentIssue, err = s.GetIssue(ctx, parentID)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error checking parent issue: %v", err)
+	}
+	if parentIssue == nil {
+		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
+	}
+
+	// Use recursive search to find all descendants using the same logic as --parent filter.
+	// The parent itself is NOT included in the result set — only actual children and
+	// their descendants. This matches the behavior of --json and --flat (GH#3349).
+	allDescendants := make(map[string]*types.Issue)
+
+	err = findAllDescendants(ctx, store, dbPath, parentID, baseFilter, allDescendants)
+	if err != nil {
+		return nil, fmt.Errorf("error finding descendants: %v", err)
+	}
+
+	if len(allDescendants) == 0 {
+		return nil, nil
+	}
+
+	// Include the parent as the tree root only when descendants exist,
+	// so the tree renderer can draw the hierarchy with the parent at the top.
+	allDescendants[parentID] = parentIssue
+
+	treeIssues := make([]*types.Issue, 0, len(allDescendants))
+	for _, issue := range allDescendants {
+		treeIssues = append(treeIssues, issue)
+	}
+
+	return treeIssues, nil
+}
+
+// findAllDescendants recursively finds all descendants using parent filtering.
+// baseFilter carries CLI filters (--type, --status, etc.) so the tree respects them.
+func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
+	var children []*types.Issue
+	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
+		filter := baseFilter
+		filter.ParentID = &parentID
+		filter.Limit = 0 // unlimited per level to avoid truncating the tree walk
+		var err error
+		children, err = s.SearchIssues(ctx, "", filter)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, child := range children {
+		if _, exists := result[child.ID]; !exists {
+			result[child.ID] = child
+			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// watchIssues polls for changes and re-displays (GH#654)
+// Uses polling instead of fsnotify because Dolt stores data in a server-side
+// database, not files — file watchers never fire.
+type watchListDependencyStore interface {
+	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
+}
+
+func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool) ([]*types.Issue, error) {
+	if ready {
+		issues, err := store.GetReadyWork(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
+		if err != nil {
+			return nil, err
+		}
+		sortIssues(issues, sortBy, reverse)
+		return issues, nil
+	}
+
+	if parentID != "" {
+		issues, err := getHierarchicalChildren(ctx, store, "", parentID, filter)
+		if err != nil {
+			return nil, err
+		}
+		// getHierarchicalChildren builds its result from a map, so normalize the
+		// slice before snapshot comparison to avoid spurious redraws.
+		sortIssues(issues, "id", false)
+		return issues, nil
+	}
+
+	issues, err := store.SearchIssues(ctx, "", withFetchOneExtra(filter))
+	if err != nil {
+		return nil, err
+	}
+	sortIssues(issues, sortBy, reverse)
+	return issues, nil
+}
+
+func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue) {
+	var allDeps map[string][]*types.Dependency
+	if store != nil {
+		deps, err := store.GetAllDependencyRecords(ctx)
+		if err == nil {
+			allDeps = deps
+		}
+	}
+	displayPrettyListWithDeps(issues, true, allDeps)
+}
+
+func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int) {
+	// Initial display
+	issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying issues: %v\n", err)
+		return
+	}
+	truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
+	if truncated {
+		issues = issues[:effectiveLimit]
+	}
+	displayWatchedIssueList(ctx, store, issues)
+	printTruncationHint(truncated, effectiveLimit)
+	lastSnapshot := issueSnapshot(issues)
+
+	fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
+
+	// Handle Ctrl+C — deferred Stop prevents signal handler leak
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	pollInterval := 2 * time.Second
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sigChan:
+			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
+			return
+		case <-ticker.C:
+			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
+				continue
+			}
+			truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
+			if truncated {
+				issues = issues[:effectiveLimit]
+			}
+			snap := issueSnapshot(issues)
+			if snap != lastSnapshot {
+				lastSnapshot = snap
+				displayWatchedIssueList(ctx, store, issues)
+				printTruncationHint(truncated, effectiveLimit)
+				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
+			}
+		}
+	}
+}
+
 // issueSnapshot builds a comparable string from issue IDs, statuses, and
 // update times so we can detect when the result set has changed.
 func issueSnapshot(issues []*types.Issue) string {
@@ -42,6 +260,80 @@ func issueSnapshot(issues []*types.Issue) string {
 		fmt.Fprintf(&b, "%s:%s:%d;", issue.ID, issue.Status, issue.UpdatedAt.UnixNano())
 	}
 	return b.String()
+}
+
+func compareIssuesBy(a, b *types.Issue, sortBy string) int {
+	switch sortBy {
+	case "priority":
+		return cmp.Compare(a.Priority, b.Priority)
+	case "created":
+		return b.CreatedAt.Compare(a.CreatedAt)
+	case "updated":
+		return b.UpdatedAt.Compare(a.UpdatedAt)
+	case "closed":
+		if a.ClosedAt == nil && b.ClosedAt == nil {
+			return 0
+		} else if a.ClosedAt == nil {
+			return 1
+		} else if b.ClosedAt == nil {
+			return -1
+		}
+		return b.ClosedAt.Compare(*a.ClosedAt)
+	case "status":
+		return cmp.Compare(a.Status, b.Status)
+	case "id":
+		return utils.NaturalCompareIDs(a.ID, b.ID)
+	case "title":
+		return cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+	case "type":
+		return cmp.Compare(a.IssueType, b.IssueType)
+	case "assignee":
+		return cmp.Compare(a.Assignee, b.Assignee)
+	}
+	return 0
+}
+
+func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
+	if sortBy == "" {
+		return
+	}
+	slices.SortFunc(issues, func(a, b *types.Issue) int {
+		r := compareIssuesBy(a, b, sortBy)
+		if reverse {
+			return -r
+		}
+		return r
+	})
+}
+
+func sortIssuesWithCounts(items []*types.IssueWithCounts, sortBy string, reverse bool) {
+	if sortBy == "" {
+		return
+	}
+	slices.SortFunc(items, func(a, b *types.IssueWithCounts) int {
+		ai, bi := issueOrNil(a), issueOrNil(b)
+		if ai == nil {
+			if bi == nil {
+				return 0
+			}
+			return 1
+		}
+		if bi == nil {
+			return -1
+		}
+		r := compareIssuesBy(ai, bi, sortBy)
+		if reverse {
+			return -r
+		}
+		return r
+	})
+}
+
+func issueOrNil(iwc *types.IssueWithCounts) *types.Issue {
+	if iwc == nil {
+		return nil
+	}
+	return iwc.Issue
 }
 
 // skipLabelsIssueView wraps IssueWithCounts so the JSON encoder always emits
@@ -189,39 +481,23 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	out := cmd.OutOrStdout()
 
 	if usesProxiedServer() {
-		// The cap USED to be rejected here: the proxied query path threaded no
-		// MaxRows, so honoring it would have been silence. It threads one now
-		// (internal/storage/domain/db sizes its bound and enforces the cap
-		// through the same two functions the store seam uses), so this route
-		// answers *ErrTooManyRows the same way the direct route below does —
-		// same message, same exit code.
-		if err := runListProxiedServer(cmd, rootCtx, out, in); err != nil {
-			if capErr := handleMaxRowsError(err); capErr != nil {
-				return capErr
-			}
+		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
 			return HandleError("%v", err)
 		}
 		return nil
 	}
 
-	if in.Offset > 0 {
+	if in.offset > 0 {
 		return HandleError("--offset is only supported under --proxied-server")
 	}
 
-	// `bd list`'s PAGE is on issueops.Reader. The filter is still built here
-	// because --watch and the hierarchical --parent tree consume it as a VALUE:
-	// the poll loop re-runs it on a ticker and the tree walk re-parents a copy
-	// of it at every level, neither of which a page can express. Building it
-	// unconditionally also keeps the page query ahead of the tree branch, so
-	// `--parent --pretty --max-rows N` still refuses on the cap where it did.
-	cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
+	cfg, err := loadDirectListFilterConfig(rootCtx, store)
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	filter, err := workapi.BuildListFilter(in.ListRequest, cfg)
+	filter, err := buildListFilter(in, cfg)
 	if err != nil {
 		return HandleError("%v", err)
 	}
@@ -229,110 +505,104 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	ctx := rootCtx
 
 	activeStore := store
-	routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
+	routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
 	if err != nil {
 		return HandleError("%v", err)
 	}
 	if routed {
 		defer func() { _ = routedStore.Close() }()
-		printContributorRoutingNotice(ctx, activeStore, routingRule)
 		activeStore = routedStore
 	}
 
 	if in.watchMode {
-		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit, in.Status); err != nil {
-			if capErr := handleMaxRowsError(err); capErr != nil {
-				return capErr
-			}
-			return HandleError("querying issues: %v", err)
-		}
+		watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit)
 		return nil
 	}
 
-	// The accessor on the ROUTED store, not on the global one: a contributor
-	// listing is answered from the repository the routing rule picked, and a
-	// reader taken off `store` would read the wrong database.
-	reader, err := activeStore.IssueReader()
-	if err != nil {
-		return HandleError("%v", err)
-	}
-
-	// --json. The role's List runs the same LoadStoreListConfig, the same
-	// BuildListFilter and the same workapi.FinishPage this branch ran longhand,
-	// and the --ready arm is its ReadyFlag, so the page, its order, its trim and
-	// its has-more verdict are unchanged bytes. The cap still arrives as
-	// *ErrTooManyRows, which is why handleMaxRowsError still wraps the call.
 	if jsonOutput {
-		page, err := reader.List(ctx, in.ListRequest)
+		var iwc []*types.IssueWithCounts
+		var err error
+		if in.readyFlag {
+			iwc, err = activeStore.GetReadyWorkWithCounts(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
+		} else {
+			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
+		}
 		if err != nil {
-			if capErr := handleMaxRowsError(err); capErr != nil {
-				return capErr
-			}
 			return HandleError("%v", err)
 		}
-		if in.SkipLabels {
-			if err := outputJSON(newSkipLabelsListJSONResponse(page.Items)); err != nil {
+		sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
+		truncated := in.effectiveLimit > 0 && len(iwc) > in.effectiveLimit
+		if truncated {
+			iwc = iwc[:in.effectiveLimit]
+		}
+		if iwc == nil {
+			iwc = []*types.IssueWithCounts{}
+		}
+		if in.skipLabels {
+			if err := outputJSON(newSkipLabelsListJSONResponse(iwc)); err != nil {
 				return err
 			}
-			printTruncationHint(page.HasMore, in.effectiveLimit)
+			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		if err := outputJSON(page.Items); err != nil {
+		if err := outputJSON(iwc); err != nil {
 			return err
 		}
-		printTruncationHint(page.HasMore, in.effectiveLimit)
+		printTruncationHint(truncated, in.effectiveLimit)
 		return nil
 	}
 
-	// The text renderings print no cardinality, so the request carries SkipCounts
-	// (issueops.ListRequest.SkipCounts). Without it this would trade a plain scan
-	// for three aggregate joins on the most-run command in the tree.
-	textRequest := in.ListRequest
-	textRequest.SkipCounts = true
-	page, err := reader.List(ctx, textRequest)
-	if err != nil {
-		if capErr := handleMaxRowsError(err); capErr != nil {
-			return capErr
+	var issues []*types.Issue
+	if in.readyFlag {
+		wf := readyWorkFilterFromIssueFilter(withFetchOneExtra(filter))
+		var err error
+		issues, err = activeStore.GetReadyWork(ctx, wf)
+		if err != nil {
+			return HandleError("%v", err)
 		}
-		return HandleError("%v", err)
+	} else {
+		var err error
+		issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
+		if err != nil {
+			return HandleError("%v", err)
+		}
 	}
-	issues, truncated := listPageIssues(page)
+
+	sortIssues(issues, in.sortBy, in.reverse)
+
+	truncated := in.effectiveLimit > 0 && len(issues) > in.effectiveLimit
+	if truncated {
+		issues = issues[:in.effectiveLimit]
+	}
 
 	if in.prettyFormat && !jsonOutput {
-		if in.ParentID != "" && !in.ReadyFlag {
-			treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.ParentID, filter)
+		if in.parentID != "" && !in.readyFlag {
+			treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.parentID, filter)
 			if err != nil {
 				return HandleError("%v", err)
 			}
 
 			if len(treeIssues) == 0 {
-				fmt.Printf("Issue '%s' has no children\n", in.ParentID)
+				fmt.Printf("Issue '%s' has no children\n", in.parentID)
 				return nil
 			}
 
-			allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
-			if depErr != nil && in.depsMode != "" {
-				return HandleError("loading dependencies for --deps: %v", depErr)
-			}
-			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
-			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status)
-			printSkipLabelsFooter(in.SkipLabels)
+			allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
+			displayPrettyListWithDeps(treeIssues, false, allDeps)
+			printSkipLabelsFooter(in.skipLabels)
 			return nil
 		}
 
-		allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
-		if depErr != nil && in.depsMode != "" {
-			return HandleError("loading dependencies for --deps: %v", depErr)
-		}
-		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status)
+		allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
+		displayPrettyListWithDeps(issues, false, allDeps)
 		printTruncationHint(truncated, in.effectiveLimit)
-		printSkipLabelsFooter(in.SkipLabels)
+		printSkipLabelsFooter(in.skipLabels)
 		return nil
 	}
 
 	if in.formatStr != "" {
 		depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
-		if err := outputFormattedList(out, issues, depsByIssueID, in.formatStr); err != nil {
+		if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
 			return HandleError("%v", err)
 		}
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -350,17 +620,12 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// The decoration goes through issueops.BlockingAnnotator. Its failure is
-	// still swallowed: this route has always rendered the page undecorated
-	// rather than failing on it, while the proxied route fails — a difference
-	// between the two CALLERS, recorded for the owner in AMBIGUITIES.md
-	// (A-blk-1) rather than converged here.
-	blocking := annotateListBlocking(ctx, activeStore, issueIDs)
+	blockedByMap, blocksMap, parentMap, _ := activeStore.GetBlockingInfoForIssues(ctx, issueIDs)
 
 	var buf strings.Builder
 	if ui.IsAgentMode() {
 		for _, issue := range issues {
-			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatAgentIssue(&buf, issue, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
 		}
 		fmt.Print(buf.String())
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -369,16 +634,16 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		buf.WriteString(fmt.Sprintf("\nFound %d issues:\n\n", len(issues)))
 		for _, issue := range issues {
 			labels := labelsMap[issue.ID]
-			formatIssueLong(&buf, issue, labels, in.SkipLabels)
+			formatIssueLong(&buf, issue, labels, in.skipLabels)
 		}
 	} else {
 		for _, issue := range issues {
 			labels := labelsMap[issue.ID]
-			formatIssueCompact(&buf, issue, labels, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatIssueCompact(&buf, issue, labels, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
 		}
 	}
 
-	if in.SkipLabels && !isQuiet() {
+	if in.skipLabels && !isQuiet() {
 		buf.WriteString(skipLabelsFooterText())
 	}
 
@@ -409,20 +674,18 @@ func init() {
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
-	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (default 50, use 0 for unlimited)")
+	listCmd.Flags().IntP("limit", "n", 50, "Limit results (default 50, use 0 for unlimited)")
 	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
-	listCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
+	listCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
 
 	// Pattern matching
 	listCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
 	listCmd.Flags().String("desc-contains", "", "Filter by description substring (case-insensitive)")
 	listCmd.Flags().String("notes-contains", "", "Filter by notes substring (case-insensitive)")
-	listCmd.Flags().String("external-contains", "", "Filter by external ref substring (case-insensitive)")
-	listCmd.Flags().String("external-ref", "", "Filter by exact external_ref value")
 
 	// Date ranges
 	listCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
@@ -444,15 +707,6 @@ func init() {
 			"Cannot combine with --label, --label-any, --label-pattern, --label-regex, "+
 			"--exclude-label, or --no-labels.")
 
-	// Projection toggle. Like --skip-labels it trades data for bytes, and
-	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
-	listCmd.Flags().Bool("brief", false,
-		"Omit the free-form text (description, design, acceptance criteria, notes, "+
-			"payload, waiters) from each row. Filters that read those fields, such as "+
-			"--desc-contains, still select on them. An omitted field is"+
-			" indistinguishable from an empty one in --json; fetch a whole issue"+
-			" with bd show.")
-
 	// Priority ranges
 	listCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
 	listCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
@@ -469,14 +723,6 @@ func init() {
 
 	// Infra type filtering: exclude agent/role/message by default
 	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/role/message) in output")
-
-	// Ephemeral plane: the wisps table is suppressed by default. This is the
-	// PLANE knob on its own — ListRequest.IncludeEphemeral — as distinct from
-	// --include-infra, which admits the plane AND lifts the infra-type
-	// exclusions above. Without it the plane is reachable from the CLI only
-	// through --include-infra's wider bundle, which leaves --wisp-type below
-	// with no narrow way to match anything.
-	listCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in output (normally hidden)")
 
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
@@ -506,12 +752,6 @@ func init() {
 	listCmd.Flags().Bool("tree", true, "Hierarchical tree format (default: true; use --flat to disable)")
 	listCmd.Flags().Bool("flat", false, "Disable tree format and use legacy flat list output")
 	listCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-update display (implies --pretty)")
-	// --deps annotates the tree with dependency edges and orders siblings by them.
-	// Bare --deps means "scheduling"; --deps=all also shows knowledge-graph edges.
-	listCmd.Flags().String("deps", "", "Annotate tree with dependency edges and order siblings by them: 'scheduling' (bare --deps) or 'all'")
-	if f := listCmd.Flags().Lookup("deps"); f != nil {
-		f.NoOptDefVal = "scheduling"
-	}
 
 	// Metadata filtering (GH#1406)
 	listCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
@@ -522,10 +762,6 @@ func init() {
 
 	// Ready filter: show only issues ready to be worked on (bd-ihu31)
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
-
-	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	// ROUTED, not direct-only: both routes thread the cap now.
-	addRoutedMaxRowsFlag(listCmd)
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

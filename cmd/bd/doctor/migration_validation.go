@@ -1,3 +1,5 @@
+//go:build cgo
+
 package doctor
 
 import (
@@ -10,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/utils"
@@ -146,7 +149,7 @@ func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResul
 		Status:   status,
 		Message:  message,
 		Detail:   strings.Join(result.Warnings, "\n"),
-		Fix:      "Follow 'bd help init-safety' to reinitialize with Dolt, then import and verify this JSONL export",
+		Fix:      "Run 'bd migrate dolt' to start migration",
 		Category: CategoryMaintenance,
 	}, result
 }
@@ -193,7 +196,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 			Status:   StatusError,
 			Message:  "Not using Dolt backend",
 			Detail:   fmt.Sprintf("Current backend: %s", result.Backend),
-			Fix:      "Follow 'bd help init-safety' to reinitialize with Dolt, then import and verify the issue export",
+			Fix:      "Run 'bd migrate dolt' to migrate to Dolt",
 			Category: CategoryMaintenance,
 		}, result
 	}
@@ -300,7 +303,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 			Status:   StatusError,
 			Message:  fmt.Sprintf("Migration incomplete: %d error(s)", len(result.Errors)),
 			Detail:   strings.Join(result.Errors, "\n"),
-			Fix:      "Check the export/import results; follow 'bd help init-safety' before reinitializing again",
+			Fix:      "Re-run 'bd migrate dolt' or check for data issues",
 			Category: CategoryMaintenance,
 		}, result
 	}
@@ -342,7 +345,7 @@ func CheckDoltLocks(path string) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  "Could not check Dolt locks",
 			Detail:   err.Error(),
-			Fix:      "Ensure the Dolt server is running: gt dolt status",
+			Fix:      "Ensure the Dolt server is running: " + doltserver.StatusHint(""),
 			Category: CategoryMaintenance,
 		}
 	}
@@ -497,12 +500,28 @@ func checkDoltLocks(beadsDir string) (bool, string, error) {
 	}
 	defer rows.Close()
 
-	// Same filter as the "Dolt Status" check — see describeUncommittedTables.
-	scanned, err := scanDoltStatus(rows)
-	if err != nil {
+	var changes []string
+	for rows.Next() {
+		var tableName string
+		var staged bool
+		var status string
+		if err := rows.Scan(&tableName, &staged, &status); err != nil {
+			continue
+		}
+		// Skip wisp tables — they are ephemeral and expected to have
+		// uncommitted changes (covered by dolt_ignore).
+		if isWispTable(tableName) {
+			continue
+		}
+		mark := ""
+		if staged {
+			mark = " (staged)"
+		}
+		changes = append(changes, fmt.Sprintf("%s: %s%s", tableName, status, mark))
+	}
+	if err := rows.Err(); err != nil {
 		return false, "", fmt.Errorf("row iteration error: %w", err)
 	}
-	changes := describeUncommittedTables(scanned)
 
 	if len(changes) > 0 {
 		return true, strings.Join(changes, ", "), nil

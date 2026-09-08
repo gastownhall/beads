@@ -2,7 +2,6 @@ package types
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -679,11 +678,7 @@ func TestIssueCompoundHelpers(t *testing.T) {
 }
 
 func TestDependencyTypeIsValid(t *testing.T) {
-	// IsValid accepts any non-empty string the type column can hold (Decision
-	// 004 for the open vocabulary; MaxDependencyTypeLen for the bound). The
-	// boundary cases below are the load-bearing ones: at the limit the type is
-	// storable and must be accepted, one past it no edge could carry it and a
-	// filter built from it would match nothing, so it is refused up front.
+	// IsValid now accepts any non-empty string up to 50 chars (Decision 004)
 	tests := []struct {
 		depType DependencyType
 		valid   bool
@@ -702,8 +697,6 @@ func TestDependencyTypeIsValid(t *testing.T) {
 		{DependencyType("custom-type"), true}, // Custom types are now valid
 		{DependencyType("any-string"), true},  // Any non-empty string is valid
 		{DependencyType(""), false},           // Empty is still invalid
-		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen)), true},                            // Exactly the column width
-		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen+1)), false},                         // One past it: unstorable
 		{DependencyType("this-is-a-very-long-dependency-type-that-exceeds-fifty-characters"), false}, // Too long
 	}
 
@@ -895,149 +888,6 @@ func TestIssueStructFields(t *testing.T) {
 	}
 	if issue.ClosedAt == nil || *issue.ClosedAt != closedAt {
 		t.Errorf("ClosedAt = %v, want %v", issue.ClosedAt, closedAt)
-	}
-}
-
-// TestIssueLeaseJSONSerialization verifies the leasing columns (migration 0054)
-// are surfaced in JSON when present and omitted when absent, while the internal
-// row_lock is never exposed. Backs `bd show <id> --json` (wy-9cdw).
-func TestIssueLeaseJSONSerialization(t *testing.T) {
-	now := time.Now().UTC()
-	expires := now.Add(15 * time.Minute)
-
-	// With an active lease: both keys appear, row_lock never does.
-	leased := IssueDetails{Issue: Issue{
-		ID:             "test-1",
-		Title:          "Leased",
-		Status:         StatusInProgress,
-		LeaseExpiresAt: &expires,
-		HeartbeatAt:    &now,
-	}}
-	b, err := json.Marshal(leased)
-	if err != nil {
-		t.Fatalf("marshal leased issue: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, ok := m["lease_expires_at"]; !ok {
-		t.Errorf("expected lease_expires_at in JSON, got: %s", b)
-	}
-	if _, ok := m["heartbeat_at"]; !ok {
-		t.Errorf("expected heartbeat_at in JSON, got: %s", b)
-	}
-	if _, ok := m["row_lock"]; ok {
-		t.Errorf("row_lock must never be surfaced, got: %s", b)
-	}
-
-	// Without a lease (the common case): keys are omitted, not null.
-	unleased := IssueDetails{Issue: Issue{ID: "test-2", Title: "Open", Status: StatusOpen}}
-	b2, err := json.Marshal(unleased)
-	if err != nil {
-		t.Fatalf("marshal unleased issue: %v", err)
-	}
-	if strings.Contains(string(b2), "lease_expires_at") {
-		t.Errorf("lease_expires_at should be omitted when nil, got: %s", b2)
-	}
-	if strings.Contains(string(b2), "heartbeat_at") {
-		t.Errorf("heartbeat_at should be omitted when nil, got: %s", b2)
-	}
-}
-
-// TestRowVersionNeverSerialized locks in the storage/interchange boundary:
-// RowVersion stays absent from generic Issue JSON and from the LIST/INTERCHANGE
-// wrapper, whatever the detail view publishes. IssueWithCounts is the row
-// `bd export` writes to JSONL, so a token there would put a per-write-random
-// value into a git-tracked file; the detail view neither lists nor
-// interchanges, which is why it is the one shape allowed to project the token
-// (see TestNewIssueDetailsProjectsTheRevisionToken).
-func TestRowVersionNeverSerialized(t *testing.T) {
-	iss := Issue{ID: "test-1", Title: "Versioned", Status: StatusOpen, RowVersion: 123456789}
-
-	// The Go field stays populated — this is what library call sites read.
-	if iss.RowVersion != 123456789 {
-		t.Fatalf("RowVersion Go field = %d, want 123456789", iss.RowVersion)
-	}
-
-	surfaces := []struct {
-		name string
-		v    any
-	}{
-		{"Issue", iss},
-		{"IssueWithCounts", IssueWithCounts{Issue: &iss}},
-	}
-	for _, tc := range surfaces {
-		b, err := json.Marshal(tc.v)
-		if err != nil {
-			t.Fatalf("marshal %s: %v", tc.name, err)
-		}
-		s := string(b)
-		for _, forbidden := range []string{"row_version", "RowVersion", "row_lock", "123456789"} {
-			if strings.Contains(s, forbidden) {
-				t.Errorf("%s JSON must not contain %q, got: %s", tc.name, forbidden, s)
-			}
-		}
-	}
-}
-
-// TestNewIssueDetailsProjectsTheRevisionToken pins the constructor that is the
-// only door to the published token: it reads RowVersion off the row and writes
-// it under the storage-neutral wire name, always present and never under a
-// storage spelling.
-//
-// The zero case is not a formality. 0 is the migration-0054 backfill token, a
-// legitimate value a guarded client must be able to send, so `revision` carries
-// no omitempty and an absent member never stands in for a legacy-zero row.
-func TestNewIssueDetailsProjectsTheRevisionToken(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		token int64
-		want  string
-	}{
-		{"a mutated row", 123456789, `"revision":123456789`},
-		{"a legacy un-mutated row", 0, `"revision":0`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			details := NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: tc.token})
-			if details.Revision != tc.token {
-				t.Errorf("Revision = %d, want %d", details.Revision, tc.token)
-			}
-
-			b, err := json.Marshal(details)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			s := string(b)
-			if !strings.Contains(s, tc.want) {
-				t.Errorf("IssueDetails JSON missing %s, got: %s", tc.want, s)
-			}
-			for _, forbidden := range []string{"row_version", "RowVersion", "row_lock"} {
-				if strings.Contains(s, forbidden) {
-					t.Errorf("IssueDetails JSON leaked storage field %q: %s", forbidden, s)
-				}
-			}
-		})
-	}
-}
-
-func TestReclaimedLeaseJSONSerialization(t *testing.T) {
-	b, err := json.Marshal(ReclaimedLease{ID: "bd-1", PreviousOwner: "worker-a"})
-	if err != nil {
-		t.Fatalf("marshal reclaimed lease: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal reclaimed lease: %v", err)
-	}
-	if m["id"] != "bd-1" || m["previous_owner"] != "worker-a" {
-		t.Fatalf("reclaimed lease JSON = %s, want snake_case id/previous_owner", b)
-	}
-	if _, ok := m["ID"]; ok {
-		t.Fatalf("reclaimed lease JSON leaked Go field name: %s", b)
-	}
-	if _, ok := m["PreviousOwner"]; ok {
-		t.Fatalf("reclaimed lease JSON leaked Go field name: %s", b)
 	}
 }
 
@@ -1760,125 +1610,5 @@ func TestBondRefUnmarshalJSON(t *testing.T) {
 				t.Errorf("BondType = %q, want %q", b.BondType, tt.wantBondType)
 			}
 		})
-	}
-}
-
-// validIssue returns a minimal issue that passes ValidateWithCustom, so
-// field-length tests below isolate the assignee/owner bound.
-func validIssue() Issue {
-	return Issue{
-		Title:     "Test Issue",
-		Status:    StatusOpen,
-		Priority:  1,
-		IssueType: TypeTask,
-	}
-}
-
-// TestValidateFieldLength proves ValidateWithCustom bounds assignee and owner at
-// MaxFieldLen and that the bound is measured in runes, not bytes: a 255-rune
-// multibyte value (~510 bytes) fits the VARCHAR(255) column and passes, while a
-// 256-rune value is rejected with a typed ErrFieldTooLong.
-func TestValidateFieldLength(t *testing.T) {
-	// "é" (U+00E9) encodes as 2 bytes, so 255 of them is 255 runes / 510 bytes.
-	const multibyte = "é"
-
-	tests := []struct {
-		name    string
-		mutate  func(*Issue)
-		wantErr bool
-	}{
-		{
-			name:    "255-rune assignee passes",
-			mutate:  func(i *Issue) { i.Assignee = strings.Repeat("a", MaxFieldLen) },
-			wantErr: false,
-		},
-		{
-			name:    "256-rune assignee fails",
-			mutate:  func(i *Issue) { i.Assignee = strings.Repeat("a", MaxFieldLen+1) },
-			wantErr: true,
-		},
-		{
-			name:    "255-rune owner passes",
-			mutate:  func(i *Issue) { i.Owner = strings.Repeat("o", MaxFieldLen) },
-			wantErr: false,
-		},
-		{
-			name:    "256-rune owner fails",
-			mutate:  func(i *Issue) { i.Owner = strings.Repeat("o", MaxFieldLen+1) },
-			wantErr: true,
-		},
-		{
-			name:    "255-rune multibyte assignee passes (rune-count, not byte-count)",
-			mutate:  func(i *Issue) { i.Assignee = strings.Repeat(multibyte, MaxFieldLen) },
-			wantErr: false,
-		},
-		{
-			name:    "256-rune multibyte assignee fails",
-			mutate:  func(i *Issue) { i.Assignee = strings.Repeat(multibyte, MaxFieldLen+1) },
-			wantErr: true,
-		},
-		{
-			name:    "255-rune multibyte owner passes (rune-count, not byte-count)",
-			mutate:  func(i *Issue) { i.Owner = strings.Repeat(multibyte, MaxFieldLen) },
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			issue := validIssue()
-			tt.mutate(&issue)
-			err := issue.ValidateWithCustom(nil, nil)
-			if tt.wantErr {
-				if !errors.Is(err, ErrFieldTooLong) {
-					t.Errorf("ValidateWithCustom() error = %v, want errors.Is(ErrFieldTooLong)", err)
-				}
-			} else if err != nil {
-				t.Errorf("ValidateWithCustom() error = %v, want nil", err)
-			}
-		})
-	}
-}
-
-// TestValidateForImportFieldLength proves the import path bounds assignee and
-// owner too, so a federated import can't smuggle in an over-length value that
-// the backend would otherwise reject with a raw "data too long" error.
-func TestValidateForImportFieldLength(t *testing.T) {
-	t.Run("256-rune assignee fails", func(t *testing.T) {
-		issue := validIssue()
-		issue.Assignee = strings.Repeat("a", MaxFieldLen+1)
-		if err := issue.ValidateForImport(nil); !errors.Is(err, ErrFieldTooLong) {
-			t.Errorf("ValidateForImport() error = %v, want errors.Is(ErrFieldTooLong)", err)
-		}
-	})
-	t.Run("256-rune owner fails", func(t *testing.T) {
-		issue := validIssue()
-		issue.Owner = strings.Repeat("o", MaxFieldLen+1)
-		if err := issue.ValidateForImport(nil); !errors.Is(err, ErrFieldTooLong) {
-			t.Errorf("ValidateForImport() error = %v, want errors.Is(ErrFieldTooLong)", err)
-		}
-	})
-	t.Run("255-rune multibyte assignee passes", func(t *testing.T) {
-		issue := validIssue()
-		issue.Assignee = strings.Repeat("é", MaxFieldLen)
-		if err := issue.ValidateForImport(nil); err != nil {
-			t.Errorf("ValidateForImport() error = %v, want nil", err)
-		}
-	})
-}
-
-// TestCheckFieldLen unit-tests the helper directly, including the rune vs byte
-// boundary and the wrapped, typed error it returns.
-func TestCheckFieldLen(t *testing.T) {
-	if err := CheckFieldLen("assignee", strings.Repeat("a", MaxFieldLen)); err != nil {
-		t.Errorf("CheckFieldLen(255 runes) = %v, want nil", err)
-	}
-	if err := CheckFieldLen("assignee", strings.Repeat("é", MaxFieldLen)); err != nil {
-		t.Errorf("CheckFieldLen(255 multibyte runes / %d bytes) = %v, want nil",
-			len(strings.Repeat("é", MaxFieldLen)), err)
-	}
-	err := CheckFieldLen("assignee", strings.Repeat("é", MaxFieldLen+1))
-	if !errors.Is(err, ErrFieldTooLong) {
-		t.Errorf("CheckFieldLen(256 runes) = %v, want errors.Is(ErrFieldTooLong)", err)
 	}
 }

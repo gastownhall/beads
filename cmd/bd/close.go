@@ -10,13 +10,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
-	"github.com/steveyegge/beads/issueops"
 )
 
 var closeCmd = &cobra.Command{
@@ -27,29 +25,17 @@ var closeCmd = &cobra.Command{
 	Long: `Close one or more issues.
 
 If no issue ID is provided, closes the last touched issue (from most recent
-create, update, show, or close operation). This fallback only applies in
-interactive sessions (stdin is a terminal); in scripts and agent sessions a
-missing ID is an error, so a command built from an empty variable cannot
-silently close an unrelated issue. Set BD_LAST_TOUCHED_FALLBACK=1 to allow
-the fallback anywhere, or =0 to disable it entirely.
+create, update, show, or close operation).
 
 When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.`,
-	// Refuse a missing ID in argument validation, before root's
-	// PersistentPreRunE can open the store, migrate, or auto-import
-	// (bd-m00pb); see updateCmd for the full rationale.
-	Args: func(cmd *cobra.Command, args []string) error {
-		if len(args) == 0 && !AllowLastTouchedFallback() {
-			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
-		}
-		return nil
-	},
+	Args:          cobra.MinimumNArgs(0),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("close") // also covers CheckMigrationFreeze (dc-6jaq)
+		CheckReadonly("close")
 
 		evt := metrics.NewCommandEvent("close")
 		defer func() {
@@ -59,11 +45,11 @@ the flags appear in the command line.`,
 		}()
 
 		if usesProxiedServer() {
-			return runCloseProxiedServer(cmd, rootCtx, args)
+			runCloseProxiedServer(cmd, rootCtx, args)
+			return nil
 		}
 
-		// If no IDs provided, use last touched issue (interactive only;
-		// the non-interactive case was already refused in Args validation)
+		// If no IDs provided, use last touched issue
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
@@ -94,10 +80,6 @@ the flags appear in the command line.`,
 		}
 
 		ctx := rootCtx
-		opsCtx, err := issueOpsContext(ctx)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
 
 		if continueFlag && len(args) > 1 {
 			return HandleErrorRespectJSON("--continue only works when closing a single issue")
@@ -121,6 +103,83 @@ the flags appear in the command line.`,
 		// cleanup closes the routed handle. Deduped by pointer.
 		mutatedStores := map[storage.DoltStorage][]string{}
 
+		// Direct mode
+		closedIssues := []*types.Issue{}
+		closedCount := 0
+
+		for i, id := range resolvedIDs {
+			result := results[i]
+			activeStore := result.Store
+			reason := reasonForCloseIndex(reasons, i)
+			// Get issue for checks (nil issue is handled by validateIssueClosable)
+			issue := result.Issue
+
+			if err := validateIssueClosable(id, issue, force); err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+				continue
+			}
+
+			// Epic close guard: prevent closing epics with open children (mw-local-4so.5.2)
+			if !force && issue != nil && issue.IssueType == types.TypeEpic {
+				openChildren := countEpicOpenChildren(ctx, activeStore, id)
+				if openChildren > 0 {
+					fmt.Fprintf(os.Stderr, "cannot close epic %s: %d open child issue(s); close children first or use --force to override\n", id, openChildren)
+					continue
+				}
+			}
+
+			// Check gate satisfaction for machine-checkable gates (GH#1467)
+			if !force {
+				if err := checkGateSatisfaction(issue); err != nil {
+					fmt.Fprintf(os.Stderr, "cannot close %s: %s\n", id, err)
+					continue
+				}
+			}
+
+			// Check if issue has open blockers (GH#962)
+			if !force {
+				blocked, blockers, err := activeStore.IsBlocked(ctx, id)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error checking blockers for %s: %v\n", id, err)
+					continue
+				}
+				if blocked && len(blockers) > 0 {
+					fmt.Fprintf(os.Stderr, "cannot close %s: blocked by open issues %v (use --force to override)\n", id, blockers)
+					continue
+				}
+			}
+
+			if err := activeStore.CloseIssue(ctx, id, reason, actor, session); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+				continue
+			}
+			mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
+
+			// Audit log the close (survives Dolt GC flatten)
+			oldStatus := "open"
+			if issue != nil {
+				oldStatus = string(issue.Status)
+			}
+			audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
+
+			closedCount++
+
+			// Auto-close parent molecule if all steps are now complete.
+			// Runs against the same store the step was closed in.
+			autoCloseCompletedMolecule(ctx, activeStore, id, actor, session)
+
+			// Re-fetch for display
+			closedIssue, _ := activeStore.GetIssue(ctx, id)
+
+			if jsonOutput {
+				if closedIssue != nil {
+					closedIssues = append(closedIssues, closedIssue)
+				}
+			} else {
+				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+			}
+		}
+
 		// Pick a store for post-close work (--suggest-next, --continue, --claim-next).
 		// All three flags are documented as single-issue paths; for the multi-id case
 		// we use the first resolved ID's store, which matches the common case where
@@ -130,143 +189,7 @@ the flags appear in the command line.`,
 			postCloseStore = results[0].Store
 		}
 
-		// THE BATCH. The CLI's own close policy runs first and read-only, then
-		// every id it passed goes to the BatchCloser role as one request per
-		// store: one transaction, one Dolt commit over N ids, and an id the
-		// batch refuses skipped while the survivors commit. --claim-next rides
-		// inside that transaction, and the engine's own is_blocked guard runs
-		// there too (GH#962), so there is no read-then-write TOCTOU window
-		// between the check and the close.
-		plan := closeDirectPreflight(results, resolvedIDs, reasons, force)
-		outcomes, claimedNext := closeDirectRun(opsCtx, closeDirectBatches(plan.items), len(resolvedIDs),
-			session, force, postCloseStore, closeClaimNextRequest(claimNext, continueFlag))
-
-		// Report and follow up on every argument, in the order it was typed.
-		closedIssues := []*types.Issue{}
-		closedCount := 0
-		alreadyClosed := 0
-		firstSettledID := ""
-
-		for i, id := range resolvedIDs {
-			res := outcomes[i]
-			if res == nil {
-				// The CLI's own close policy refused this argument, so the
-				// batch never saw it.
-				fmt.Fprintln(os.Stderr, plan.refusals[i])
-				continue
-			}
-			if res.Err != nil {
-				fmt.Fprintln(os.Stderr, closeDirectRefusal(id, res.Err))
-				continue
-			}
-
-			// Open children only survive to here when --force waived the
-			// engine's refusal. Say so, so orphaned children are never silent.
-			if res.OpenChildren > 0 {
-				fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", id, res.OpenChildren)
-			}
-
-			activeStore := results[i].Store
-			reason := reasonForCloseIndex(reasons, i)
-			// Pre-close snapshot, for the audit entry's old status and the
-			// success line's title.
-			issue := results[i].Issue
-
-			if !res.Changed {
-				// Already closed: an idempotent no-op on the step's stored state. The
-				// old CloseIssue path also returned nil here and still reported the
-				// (already-closed) issue, so keep OUTPUT parity via the shared display
-				// block below — the issue stays in --json output and the text report
-				// exactly as before. Suppress the step's own real-state-change side
-				// effects (the audit entry, so no spurious closed→closed; the
-				// closedCount bump; step-level pending-commit tracking, since the step
-				// write itself is a no-op), but still count the command as a successful
-				// close for its retry-safe post-close contracts (last-touched,
-				// --continue, --suggest-next, --claim-next) via alreadyClosed below.
-				// Exit stays 0.
-				alreadyClosed++
-
-				// Molecule auto-close is itself a retry-safe, fully state-derived
-				// post-close contract, so it must replay on an already-closed re-close
-				// just like the contracts above. If the final step's real close
-				// persisted but its molecule auto-close did not (a crash between the two
-				// commits, or the root CloseIssue failing with only a warning), this
-				// idempotent re-close is the ONLY thing that re-drives it — otherwise the
-				// molecule root is stranded open forever. autoCloseCompletedMolecule
-				// early-returns unless the root is genuinely open, auto-close-eligible,
-				// and complete, so it heals only that case and reintroduces none of the
-				// suppressed real-close side effects (no audit, no closed→closed on the
-				// step). Register the store when it actually closed the root so the
-				// pending-commit sweep persists it — closedCount==0 would not commit.
-				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, actor, session); molID != "" {
-					mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
-				}
-			} else {
-				mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
-
-				// Audit log the close (survives Dolt GC flatten)
-				oldStatus := "open"
-				if issue != nil {
-					oldStatus = string(issue.Status)
-				}
-				audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
-
-				closedCount++
-
-				// Auto-close parent molecule if all steps are now complete.
-				// Runs against the same store the step was closed in.
-				autoCloseCompletedMolecule(ctx, activeStore, id, actor, session)
-			}
-
-			// First id this command settled as closed — a real close or an
-			// already-closed no-op both "touch" it. Drives the retry-safe last-touched
-			// contract below so a re-close still points default-target commands at it.
-			if firstSettledID == "" {
-				firstSettledID = id
-			}
-
-			// The operation's own post-state snapshot is what gets reported. A
-			// real close and an idempotent no-op both report the closed issue
-			// here, matching the historical output shape. Dependency records are
-			// dropped from it because `bd close` has never printed them: the
-			// re-read this replaced did not hydrate them either.
-			closedIssue := res.Issue
-			if closedIssue != nil {
-				closedIssue.Dependencies = nil
-			}
-
-			if jsonOutput {
-				if closedIssue != nil {
-					closedIssues = append(closedIssues, closedIssue)
-				}
-			} else {
-				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
-			}
-		}
-
-		// A close command "succeeds" for its user-facing, retry-safe contracts when it
-		// settled the target as closed — whether it performed the real state change
-		// (closedCount) or confirmed an already-closed idempotent no-op
-		// (alreadyClosed). last-touched, --continue, --suggest-next, and --claim-next
-		// all re-derive their result from current state, so they must replay on an
-		// already-closed retry; `bd close --continue` in particular is a workflow-
-		// advancement trigger a crash/retry has to be able to re-drive. The real
-		// close-mutation side effects (audit, event, molecule auto-close) stay
-		// suppressed for an already-closed no-op via the `else` branch above; the
-		// pending-commit sweep is gated on mutatedStores, which a post-close claim
-		// also populates.
-		closedForCommand := closedCount > 0 || alreadyClosed > 0
-
-		// Record the closed issue as last-touched so `bd close` honors its own
-		// documented contract (the "last touched issue ... from create, update,
-		// show, or close" behavior) and downstream write-marker consumers see the
-		// close (GH#3965). Mirrors bd update's firstUpdatedID pattern. A later
-		// --claim-next overwrites this with the claimed issue (the newer touch).
-		if closedForCommand {
-			SetLastTouchedID(firstSettledID)
-		}
-
-		if suggestNext && len(resolvedIDs) == 1 && closedForCommand {
+		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
 			unblocked, err := postCloseStore.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
 				if jsonOutput {
@@ -282,26 +205,12 @@ the flags appear in the command line.`,
 			}
 		}
 
-		if continueFlag && len(resolvedIDs) == 1 && closedForCommand {
+		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
 			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, actor)
+			result, err := AdvanceToNextStep(ctx, postCloseStore, resolvedIDs[0], autoClaim, actor)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
-				// Mirror --claim-next: when AdvanceToNextStep auto-claims the
-				// next step, update .beads/last-touched so subsequent default-
-				// target commands (e.g. bare `bd update`, `bd close`) target
-				// it. Without this, last-touched stays pointed at the just-
-				// closed step. See gastownhall/beads#3769.
-				if result.AutoAdvanced && result.NextStep != nil {
-					SetLastTouchedID(result.NextStep.ID)
-					// The auto-claim mutated postCloseStore's working set. Register it
-					// so the pending-commit sweep below persists the advance — parity
-					// with --claim-next, and required when the close itself was an
-					// already-closed no-op (closedCount==0 wouldn't otherwise commit).
-					// Same-pointer key dedupes with the closed store on a real close.
-					mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], result.NextStep.ID)
-				}
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{
 						"closed":   closedIssues,
@@ -312,23 +221,33 @@ the flags appear in the command line.`,
 			}
 		}
 
-		// Report --claim-next. The claim itself already happened, inside the
-		// batch's own transaction and only when something landed, so what is
-		// left here is the report and the last-touched hand-off. Register the
-		// claimed store anyway: the batch committed the claim, but the sweep
-		// below still has to name it if a molecule auto-close made the store
-		// dirty again.
+		// Handle --claim-next flag
 		var claimedNextIssue *types.Issue
-		if claimNext && closedForCommand && !continueFlag {
-			if claimedNext != nil {
-				claimedNextIssue = claimedNext.Issue
-				mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], claimedNextIssue.ID)
-				if !jsonOutput {
-					debug.PrintNormal("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(claimedNextIssue.ID, claimedNextIssue.Title), claimedNextIssue.Priority)
+		if claimNext && closedCount > 0 && !continueFlag {
+			readyIssues, err := postCloseStore.GetReadyWork(ctx, types.WorkFilter{
+				Status:     "open",
+				Limit:      1,
+				SortPolicy: types.SortPolicy("priority"),
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not get ready issues: %v\n", err)
+			} else if len(readyIssues) > 0 {
+				nextIssue := readyIssues[0]
+				err := postCloseStore.ClaimIssue(ctx, nextIssue.ID, actor)
+				if err == nil {
+					claimedNextIssue = nextIssue
+					mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], nextIssue.ID)
+					if jsonOutput {
+						// JSON handled below
+					} else {
+						fmt.Printf("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(nextIssue.ID, nextIssue.Title), nextIssue.Priority)
+					}
+					SetLastTouchedID(nextIssue.ID)
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: could not claim next issue %s: %v\n", nextIssue.ID, err)
 				}
-				SetLastTouchedID(claimedNextIssue.ID)
 			} else if !jsonOutput {
-				debug.PrintNormal("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
+				fmt.Printf("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
 			}
 		}
 
@@ -347,15 +266,7 @@ the flags appear in the command line.`,
 			}
 		}
 
-		// Commit whenever a store was actually mutated — a real close, an auto-claimed
-		// --continue advance, or a --claim-next claim. Gating on mutatedStores rather
-		// than closedCount matters for an already-closed re-close that still advanced
-		// or claimed via a retry-safe post-close flag: the mutation lives in the
-		// working set and must be persisted, not left for a later write to sweep. For
-		// existing paths this is equivalent to closedCount>0 (only real closes and
-		// post-close claims populate mutatedStores). Commit is a no-op if there is
-		// genuinely nothing pending.
-		if len(mutatedStores) > 0 {
+		if closedCount > 0 {
 			for s, ids := range mutatedStores {
 				if s == nil {
 					continue
@@ -370,7 +281,7 @@ the flags appear in the command line.`,
 		}
 
 		totalAttempted := len(resolvedIDs)
-		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
+		if totalAttempted > 0 && closedCount == 0 {
 			return SilentExit()
 		}
 		return nil
@@ -492,25 +403,6 @@ func reasonForCloseIndex(reasons []string, i int) string {
 	return reasons[i]
 }
 
-// closeClaimNextRequest is --claim-next as the batch expresses it. BOTH of
-// `bd close`'s routes build it here, so the claim asks one question no matter
-// which door it came through.
-//
-// The role runs it inside the closes' transaction and only when at least one
-// item landed, which is the rule each route used to enforce by hand; --continue
-// still wins, because the two flags have always been mutually exclusive here.
-//
-// It asks for priority order and no limit. The old two-step read the single top
-// ready row and warned if that one row happened to be taken; the role's claim
-// walks the ready order and takes the first row it can win, so a race with
-// another agent now claims the next candidate instead of claiming nothing.
-func closeClaimNextRequest(claimNext, continueOn bool) *issueops.ReadyRequest {
-	if !claimNext || continueOn {
-		return nil
-	}
-	return &issueops.ReadyRequest{Sort: string(types.SortPolicyPriority)}
-}
-
 func validateCloseReasons(reasons []string) error {
 	closeValidation := config.GetString("validation.on-close")
 	if closeValidation != "error" && closeValidation != "warn" {
@@ -562,13 +454,13 @@ func checkGateSatisfaction(issue *types.Issue) error {
 
 	switch {
 	case strings.HasPrefix(issue.AwaitType, "gh:run"):
-		resolved, escalated, reason, err = checkGHRun(issue, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
+		resolved, escalated, reason, err = checkGHRun(issue, true)
 	case strings.HasPrefix(issue.AwaitType, "gh:pr"):
 		resolved, escalated, reason, err = checkGHPR(issue)
 	case issue.AwaitType == "timer":
 		resolved, escalated, reason, err = checkTimer(issue, time.Now())
 	case issue.AwaitType == "bead":
-		resolved, reason = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
+		resolved, reason = checkBeadGate(rootCtx, issue.AwaitID)
 		if resolved {
 			return nil
 		}
@@ -595,45 +487,38 @@ func checkGateSatisfaction(issue *types.Issue) error {
 // autoCloseCompletedMolecule checks if closing a step completed an auto-closing
 // parent molecule, and if so, closes the molecule root. Ordinary epics remain
 // open when all children finish so they can become explicitly close-eligible
-// instead of being closed as a side effect of the final child close. It returns
-// the molecule root ID when it actually closed the root (and "" otherwise) so a
-// caller that did not otherwise mutate the store — an already-closed re-close in
-// particular — can register the store for the pending-commit sweep. The check is
-// fully state-derived and idempotent: it early-returns unless the root is open,
-// auto-close-eligible, and has all steps complete, so re-invoking it never
-// double-closes or reintroduces side effects.
-func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) string {
+// instead of being closed as a side effect of the final child close.
+func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) {
 	moleculeID := findParentMolecule(ctx, s, closedStepID)
 	if moleculeID == "" {
-		return "" // Not part of a molecule
+		return // Not part of a molecule
 	}
 
 	// Check if molecule root is already closed
 	root, err := s.GetIssue(ctx, moleculeID)
 	if err != nil || root == nil || root.Status == types.StatusClosed || !shouldAutoCloseCompletedRoot(root) {
-		return ""
+		return
 	}
 
 	// Load progress to check completion
 	progress, err := getMoleculeProgress(ctx, s, moleculeID)
 	if err != nil {
-		return "" // Best effort — don't fail the close
+		return // Best effort — don't fail the close
 	}
 
 	if progress.Completed < progress.Total {
-		return "" // Not all steps complete yet
+		return // Not all steps complete yet
 	}
 
 	// All steps complete — auto-close the molecule root
 	if err := s.CloseIssue(ctx, moleculeID, "all steps complete", actorName, session); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule %s: %v\n", moleculeID, err)
-		return ""
+		return
 	}
 
 	if !jsonOutput {
-		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
+		fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
 	}
-	return moleculeID
 }
 
 // shouldAutoCloseCompletedRoot returns true for molecule roots that should
@@ -718,7 +603,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, fmt.Errorf("no auto-routed store available")
 		}
 		sharedRoutedTried = true
-		rs, routed, _, err := openRoutedReadStore(ctx, localStore)
+		rs, routed, err := openRoutedReadStore(ctx, localStore)
 		if err != nil {
 			return nil, err
 		}
@@ -756,4 +641,22 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 		return nil, func() {}, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
 	}
 	return results, cleanup, nil
+}
+
+// countEpicOpenChildren returns the number of open (non-closed) children for an epic.
+// Uses GetDependentsWithMetadata to find parent-child relationships.
+// Takes an explicit store so callers can route to the store actually holding the epic
+// (relevant for contributor auto-routing where the epic lives in the planning repo).
+func countEpicOpenChildren(ctx context.Context, s storage.DoltStorage, epicID string) int {
+	dependents, err := s.GetDependentsWithMetadata(ctx, epicID)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, dep := range dependents {
+		if dep.DependencyType == types.DepParentChild && dep.Issue.Status != types.StatusClosed {
+			count++
+		}
+	}
+	return count
 }

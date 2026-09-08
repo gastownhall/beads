@@ -25,23 +25,31 @@ check_version() {
     local _file=$1
     local version=$2
     local description=$3
+    local expected=${4:-$CANONICAL}
 
-    if [ "$version" != "$CANONICAL" ]; then
-        echo -e "${RED}❌ $description: $version (expected $CANONICAL)${NC}"
+    if [ "$version" != "$expected" ]; then
+        echo -e "${RED}❌ $description: $version (expected $expected)${NC}"
         MISMATCH=1
     else
         echo -e "${GREEN}✓ $description: $version${NC}"
     fi
 }
 
+# Mirror python_version() in scripts/update-versions.sh: downstream fork
+# builds (-dcN, -fdN) are not PEP 440 versions, so Python metadata carries the
+# normalized dev+local form while the Go side keeps the readable tag.
+PYTHON_EXPECTED=$(printf '%s' "$CANONICAL" | sed -E 's/-rc\.?([0-9]+)/rc\1/; s/-(dc|fd)([0-9]+)/.dev\2+\1\2/')
+
 # Check all version files
 check_version "integrations/beads-mcp/pyproject.toml" \
     "$(grep '^version = ' integrations/beads-mcp/pyproject.toml 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')" \
-    "MCP pyproject.toml"
+    "MCP pyproject.toml" \
+    "$PYTHON_EXPECTED"
 
 check_version "integrations/beads-mcp/src/beads_mcp/__init__.py" \
     "$(grep '__version__ = ' integrations/beads-mcp/src/beads_mcp/__init__.py 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')" \
-    "MCP __init__.py"
+    "MCP __init__.py" \
+    "$PYTHON_EXPECTED"
 
 check_version "plugins/beads/.claude-plugin/plugin.json" \
     "$(jq -r '.version' plugins/beads/.claude-plugin/plugin.json 2>/dev/null)" \
@@ -69,7 +77,7 @@ check_version "npm-package/package.json" \
 #
 # uv.lock records the PEP 440-normalized version (1.1.0-rc.1 → 1.1.0rc1), so
 # normalize the canonical form before comparing.
-LOCK_EXPECTED=$(printf '%s' "$CANONICAL" | sed -E 's/-rc\.?/rc/')
+LOCK_EXPECTED=$PYTHON_EXPECTED
 LOCK_VERSION=$(awk -F '"' '/^name = "beads-mcp"$/ { found=1; next } found && /^version = / { print $2; exit }' integrations/beads-mcp/uv.lock 2>/dev/null)
 if [ "$LOCK_VERSION" != "$LOCK_EXPECTED" ]; then
     echo -e "${RED}❌ MCP uv.lock (beads-mcp pin): ${LOCK_VERSION:-missing} (expected $LOCK_EXPECTED) — run: uv lock --directory integrations/beads-mcp${NC}"
@@ -87,28 +95,15 @@ if command -v uv >/dev/null 2>&1; then
     fi
 fi
 
-# Tracked managed git-hook sections (.githooks/*): the BEGIN/END markers embed
-# the binary Version, and TestTrackedManagedHookSectionsMatchGenerator holds
-# them equal to the cmd/bd/hooks.go generator output. A version bump that skips
-# them reddens main only after the push (that was the v1.2.0 bump), so gate the
-# markers here. Marker version only — full body equality stays the test's job.
-for hook in .githooks/*; do
-    [ -f "$hook" ] || continue
-    for prefix in "BEGIN" "END"; do
-        marker=$(grep -oE -- "--- $prefix BEADS INTEGRATION v[^ ]+ ---" "$hook" | head -1)
-        if [ -z "$marker" ]; then
-            echo -e "${RED}❌ $hook: no '$prefix BEADS INTEGRATION' marker found${NC}"
-            MISMATCH=1
-            continue
-        fi
-        check_version "$hook" \
-            "$(printf '%s' "$marker" | sed -E 's/.* v([^ ]+) ---/\1/')" \
-            "$hook $prefix marker"
-    done
-done
+# Hook templates are now generated dynamically by cmd/bd/hooks.go using the
+# Version constant from version.go, so no separate file check is needed.
+# (Previously checked cmd/bd/templates/hooks/pre-commit which no longer exists.)
 
 echo ""
 
+if ! ./scripts/check-docs-version.sh; then
+    MISMATCH=1
+fi
 
 echo ""
 

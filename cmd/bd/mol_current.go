@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -67,6 +68,7 @@ Use --limit or --range to view specific steps:
 			}
 		}()
 
+		ctx := rootCtx
 		forAgent, _ := cmd.Flags().GetString("for")
 		limit, _ := cmd.Flags().GetInt("limit")
 		rangeStr, _ := cmd.Flags().GetString("range")
@@ -75,12 +77,6 @@ Use --limit or --range to view specific steps:
 		if agent == "" {
 			agent = actor
 		}
-
-		if usesProxiedServer() {
-			return runMolCurrentProxiedServer(rootCtx, args, agent, limit, rangeStr)
-		}
-
-		ctx := rootCtx
 
 		if store == nil {
 			return HandleErrorRespectJSON("no database connection")
@@ -165,7 +161,7 @@ Use --limit or --range to view specific steps:
 }
 
 // getMoleculeProgress loads a molecule and computes progress
-func getMoleculeProgress(ctx context.Context, s molReader, moleculeID string) (*MoleculeProgress, error) {
+func getMoleculeProgress(ctx context.Context, s storage.DoltStorage, moleculeID string) (*MoleculeProgress, error) {
 	subgraph, err := loadTemplateSubgraph(ctx, s, moleculeID)
 	if err != nil {
 		return nil, err
@@ -244,7 +240,7 @@ func getMoleculeProgress(ctx context.Context, s molReader, moleculeID string) (*
 }
 
 // findInProgressMolecules finds molecules with in_progress steps for an agent
-func findInProgressMolecules(ctx context.Context, s molReader, agent string) []*MoleculeProgress {
+func findInProgressMolecules(ctx context.Context, s storage.DoltStorage, agent string) []*MoleculeProgress {
 	var inProgressIssues []*types.Issue
 
 	status := types.StatusInProgress
@@ -300,7 +296,7 @@ func findInProgressMolecules(ctx context.Context, s molReader, agent string) []*
 // findHookedMolecules finds molecules bonded to hooked issues for an agent.
 // This is a fallback when no in_progress steps exist but a molecule is attached
 // to the agent's hooked work via a "blocks" dependency.
-func findHookedMolecules(ctx context.Context, s molReader, agent string) []*MoleculeProgress {
+func findHookedMolecules(ctx context.Context, s storage.DoltStorage, agent string) []*MoleculeProgress {
 	// Query for hooked issues assigned to the agent
 	status := types.StatusHooked
 	filter := types.IssueFilter{Status: &status}
@@ -387,7 +383,7 @@ func findHookedMolecules(ctx context.Context, s molReader, agent string) []*Mole
 // in a loop, issuing GetDependencyRecords + GetIssue per level per issue.
 // Instead, this walks parent-child chains level-by-level using batch queries,
 // reducing O(N * depth) round-trips to O(depth). (bd-hn4q)
-func findParentMolecules(ctx context.Context, s molReader, issueIDs []string) map[string]string {
+func findParentMolecules(ctx context.Context, s storage.DoltStorage, issueIDs []string) map[string]string {
 	if len(issueIDs) == 0 {
 		return nil
 	}
@@ -493,7 +489,7 @@ func findParentMolecules(ctx context.Context, s molReader, issueIDs []string) ma
 
 // findParentMolecule walks up the parent-child chain to find the root molecule
 // for a single issue. Returns "" if the issue is not part of a molecule.
-func findParentMolecule(ctx context.Context, s molReader, issueID string) string {
+func findParentMolecule(ctx context.Context, s storage.DoltStorage, issueID string) string {
 	roots := findParentMolecules(ctx, s, []string{issueID})
 	return roots[issueID]
 }
@@ -589,11 +585,11 @@ type ContinueResult struct {
 
 // AdvanceToNextStep finds the next ready step in a molecule after closing a step.
 // If autoClaim is true, it marks the next step as in_progress using optimistic
-// concurrency control: the step's status is re-verified before claiming to
+// concurrency control: the step's status is re-verified inside a transaction to
 // guard against TOCTOU races where multiple agents identify and try to claim the
 // same step concurrently.
 // Returns nil if the issue is not part of a molecule.
-func AdvanceToNextStep(ctx context.Context, s molWriter, closedStepID string, autoClaim bool, actorName string) (*ContinueResult, error) {
+func AdvanceToNextStep(ctx context.Context, s storage.DoltStorage, closedStepID string, autoClaim bool, actorName string) (*ContinueResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -644,9 +640,30 @@ func AdvanceToNextStep(ctx context.Context, s molWriter, closedStepID string, au
 
 	result.NextStep = readySteps[0]
 
+	// Auto-claim if requested, using optimistic concurrency control.
+	// Re-read the step inside a transaction to verify it hasn't been claimed
+	// by another agent between our read and write (TOCTOU guard).
 	if autoClaim {
 		for _, candidate := range readySteps {
-			if err := s.ClaimStepIfOpen(ctx, candidate.ID, actorName); err == nil {
+			err := s.RunInTransaction(ctx, fmt.Sprintf("bd: advance to step %s", candidate.ID), func(tx storage.Transaction) error {
+				// Re-read inside transaction to check current status
+				current, txErr := tx.GetIssue(ctx, candidate.ID)
+				if txErr != nil {
+					return txErr
+				}
+				if current == nil {
+					return fmt.Errorf("step %s not found", candidate.ID)
+				}
+				// Only claim if still in open status (not already claimed)
+				if current.Status != types.StatusOpen {
+					return fmt.Errorf("step %s already claimed (status: %s)", candidate.ID, current.Status)
+				}
+				updates := map[string]interface{}{
+					"status": types.StatusInProgress,
+				}
+				return tx.UpdateIssue(ctx, candidate.ID, updates, actorName)
+			})
+			if err == nil {
 				result.NextStep = candidate
 				result.AutoAdvanced = true
 				break

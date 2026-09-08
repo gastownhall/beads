@@ -9,24 +9,11 @@ import (
 // DoltClone clones a Dolt database from a remote URL.
 // conn must be a non-transactional database connection.
 // The database parameter specifies the local database name for the clone.
-// If user is non-empty, authenticates with that user. Dolt reads the remote
-// password from DOLT_REMOTE_PASSWORD.
-func DoltClone(ctx context.Context, conn DBConn, remoteURL, database, user string) error {
-	query := "CALL DOLT_CLONE(?, ?)"
-	args := []any{remoteURL, database}
-	if user != "" {
-		query = "CALL DOLT_CLONE('--user', ?, ?, ?)"
-		args = []any{user, remoteURL, database}
+func DoltClone(ctx context.Context, conn DBConn, remoteURL, database string) error {
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CLONE(?, ?)", remoteURL, database); err != nil {
+		return fmt.Errorf("dolt clone %s: %w", sanitizeURL(remoteURL), err)
 	}
-
-	// GH#4272: the initial fetch runs git hooks just like push/pull; disable
-	// them for the clone window too (see remotes.go for the full rationale).
-	return withRemoteEnvGuards(func() error {
-		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("dolt clone %s: %w", sanitizeURL(remoteURL), err)
-		}
-		return nil
-	})
+	return nil
 }
 
 // sanitizeURL removes credentials from a URL for safe error reporting.

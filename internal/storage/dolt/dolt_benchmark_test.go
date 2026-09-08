@@ -12,10 +12,8 @@ package dolt
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,133 +28,51 @@ func benchDatabaseName() string {
 	return fmt.Sprintf("beads_test_bench_%d", time.Now().UnixNano())
 }
 
-// benchDoltServerPort decides whether benchmarks may connect to a real Dolt
-// server. Benchmarks must never resolve their server port from ambient
-// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT: gc agent shells set those to point
-// at a shared production Dolt server, and there is no way to distinguish "a
-// dedicated throwaway benchmark port" from "the shared prod port" other than
-// requiring an explicit, benchmark-only opt-in (be-cfm3z).
-//
-// Returns skip=true with a reason when BEADS_BENCH_DOLT_PORT is unset or
-// invalid; the caller should b.Skip(reason) rather than connect.
-func benchDoltServerPort() (port int, skip bool, reason string) {
-	v := os.Getenv("BEADS_BENCH_DOLT_PORT")
-	if v == "" {
-		return 0, true, "set BEADS_BENCH_DOLT_PORT to a dedicated throwaway dolt server to run benchmarks"
-	}
-	p, err := strconv.Atoi(v)
-	if err != nil || p <= 0 {
-		return 0, true, fmt.Sprintf("BEADS_BENCH_DOLT_PORT=%q is not a valid port", v)
-	}
-	return p, false, ""
-}
-
-// dropBenchDatabase best-effort drops a benchmark-created database from the
-// server described by cfg. Opens its own short-lived admin connection rather
-// than reusing a *DoltStore's pool, so it works regardless of that store's
-// close state. Errors are ignored: this is cleanup, not the test assertion.
-func dropBenchDatabase(cfg *Config, name string) {
-	dsn := buildServerDSN(cfg, "")
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return
-	}
-	defer db.Close()
-	_, _ = db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name))
-}
-
-// setupBenchStore creates a store for benchmarks.
-//
-// Each call uses a unique per-invocation database name so accumulated row
-// state from a prior bench sample cannot saturate the shared Dolt server —
-// addresses the testcontainer i/o timeouts observed at 10K-scale in
-// be-nu4.4.1 / be-s54 when all samples reused "benchdb". Cleanup drops the
-// database so the container's memory footprint does not grow unbounded
-// across `-count=N` samples.
-//
-// Accepts testing.TB so the regression test in TestBenchDBPurgeDoesNotLeak
-// can drive the bench setup/teardown from a *testing.T context.
-func setupBenchStore(tb testing.TB) (*DoltStore, func()) {
-	tb.Helper()
+// setupBenchStore creates a store for benchmarks
+func setupBenchStore(b *testing.B) (*DoltStore, func()) {
+	b.Helper()
 
 	if _, err := os.LookupEnv("DOLT_PATH"); err != false {
 		// Check if dolt binary exists
 		if _, err := os.Stat("/usr/local/bin/dolt"); os.IsNotExist(err) {
 			if _, err := os.Stat("/usr/bin/dolt"); os.IsNotExist(err) {
-				tb.Skip("Dolt not installed, skipping benchmark")
+				b.Skip("Dolt not installed, skipping benchmark")
 			}
 		}
-	}
-
-	// Never resolve the benchmark's server port from ambient env — gc agent
-	// shells set BEADS_DOLT_SERVER_PORT to point at a shared production
-	// server (be-cfm3z).
-	tb.Setenv("BEADS_DOLT_SERVER_PORT", "")
-	tb.Setenv("BEADS_DOLT_PORT", "")
-	tb.Setenv("BEADS_TEST_MODE", "1")
-	tb.Setenv("BEADS_TEST_SERVER", "1") // forward-compat opt-in for PR #3632/AD-01's firewall
-
-	port, skip, reason := benchDoltServerPort()
-	if skip {
-		tb.Skip(reason)
 	}
 
 	ctx := context.Background()
 	tmpDir, err := os.MkdirTemp("", "dolt-bench-*")
 	if err != nil {
-		tb.Fatalf("failed to create temp dir: %v", err)
+		b.Fatalf("failed to create temp dir: %v", err)
 	}
 
-	dbName := benchDatabaseName()
 	cfg := &Config{
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        dbName,
-		ServerPort:      port,
+		Database:        benchDatabaseName(),
 		CreateIfMissing: true,
 	}
 
 	store, err := New(ctx, cfg)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		tb.Fatalf("failed to create Dolt store: %v", err)
+		b.Fatalf("failed to create Dolt store: %v", err)
 	}
 
 	if err := store.SetConfig(ctx, "issue_prefix", "bench"); err != nil {
 		store.Close()
 		os.RemoveAll(tmpDir)
-		tb.Fatalf("failed to set prefix: %v", err)
+		b.Fatalf("failed to set prefix: %v", err)
 	}
 
 	cleanup := func() {
-		dropBenchDB(tb, store, dbName)
 		store.Close()
-		dropBenchDatabase(cfg, dbName)
 		os.RemoveAll(tmpDir)
 	}
 
 	return store, cleanup
-}
-
-// dropBenchDB issues DROP DATABASE to keep the shared Dolt server from
-// accumulating sample data across `-count=N` iterations. Logs (does not
-// fail) if the drop errors — a stuck drop should not mask the benchmark
-// result the caller already recorded.
-//
-// DROP only marks the database as dropped; the on-disk dir lingers in
-// .dolt_dropped_databases/ until purged. Without the PURGE step below,
-// repeated bench samples leak GBs of disk (be-pq5).
-func dropBenchDB(tb testing.TB, store *DoltStore, dbName string) {
-	tb.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := store.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)); err != nil {
-		tb.Logf("drop bench database %q: %v", dbName, err)
-	}
-	if _, err := store.db.ExecContext(ctx, "CALL DOLT_PURGE_DROPPED_DATABASES()"); err != nil {
-		tb.Logf("purge dropped databases after drop %q: %v", dbName, err)
-	}
 }
 
 // =============================================================================
@@ -174,19 +90,6 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 		}
 	}
 
-	// Never resolve the benchmark's server port from ambient env — gc agent
-	// shells set BEADS_DOLT_SERVER_PORT to point at a shared production
-	// server (be-cfm3z).
-	b.Setenv("BEADS_DOLT_SERVER_PORT", "")
-	b.Setenv("BEADS_DOLT_PORT", "")
-	b.Setenv("BEADS_TEST_MODE", "1")
-	b.Setenv("BEADS_TEST_SERVER", "1") // forward-compat opt-in for PR #3632/AD-01's firewall
-
-	port, skip, reason := benchDoltServerPort()
-	if skip {
-		b.Skip(reason)
-	}
-
 	tmpDir, err := os.MkdirTemp("", "dolt-bootstrap-bench-*")
 	if err != nil {
 		b.Fatalf("failed to create temp dir: %v", err)
@@ -196,13 +99,11 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 	ctx := context.Background()
 
 	// Create initial store to set up schema
-	dbName := benchDatabaseName()
 	cfg := &Config{
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        dbName,
-		ServerPort:      port,
+		Database:        benchDatabaseName(),
 		CreateIfMissing: true,
 	}
 
@@ -211,7 +112,6 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 		b.Fatalf("failed to create initial store: %v", err)
 	}
 	initStore.Close()
-	defer dropBenchDatabase(cfg, dbName)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1095,15 +995,11 @@ func insertBenchIssues(ctx context.Context, tx *sql.Tx, table string, issues []*
 			if metadata == "" {
 				metadata = "{}"
 			}
-			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			placeholders = append(placeholders, "(?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			args = append(args,
 				issue.ID,
 				issue.ContentHash,
 				issue.Title,
-				issue.Description,
-				issue.Design,
-				issue.AcceptanceCriteria,
-				issue.Notes,
 				issue.Status,
 				issue.Priority,
 				issue.IssueType,
@@ -1293,95 +1189,6 @@ func BenchmarkPerfResolvePartialIDInvalidInput_5K(b *testing.B) {
 	}
 }
 
-// BenchmarkPerfIDProjectionVsHydration_5K isolates the value of the narrow
-// id-only projection (SearchIssueIDs) against the two hydration alternatives on
-// an identical, large result set. All three arms share the same WHERE clause
-// via issueops.searchInTx, so the only variable is projection + row hydration:
-//
-//   - SearchIssueIDs          — projects only `id`; no row structs, no labels.
-//   - SearchIssues+SkipLabels — full IssueSelectColumns scan into *types.Issue
-//     (description/design/notes/metadata/...), but skips the labels JOIN.
-//   - SearchIssues (full)     — full column scan plus label hydration.
-//
-// The narrow-vs-SkipLabels delta is the figure that justifies the projection
-// over simply reusing upstream's SkipLabels: SkipLabels suppresses labels but
-// still materializes every heavy TEXT column, which this fixture populates.
-func BenchmarkPerfIDProjectionVsHydration_5K(b *testing.B) {
-	store, cleanup := setupBenchStore(b)
-	defer cleanup()
-
-	const total = 5000
-	// Heavy TEXT payloads approximate real issues. The narrow projection never
-	// scans these columns; SkipLabels does not help with them.
-	bigText := strings.Repeat("lorem ipsum dolor sit amet consectetur ", 24) // ~936 B
-	bigJSON := json.RawMessage(`{"k":"` + strings.Repeat("v", 256) + `"}`)
-
-	issues := make([]*types.Issue, 0, total)
-	for i := 0; i < total; i++ {
-		issues = append(issues, &types.Issue{
-			ID:                 fmt.Sprintf("narrowbench-%05d", i),
-			Title:              fmt.Sprintf("narrowbench issue %05d", i),
-			Description:        bigText,
-			Design:             bigText,
-			AcceptanceCriteria: bigText,
-			Notes:              bigText,
-			Metadata:           bigJSON,
-			Status:             types.StatusOpen,
-			Priority:           (i % 4) + 1,
-			IssueType:          types.TypeTask,
-			Labels:             []string{"area-narrow", fmt.Sprintf("bucket-%03d", i%100)},
-		})
-	}
-	createBenchIssueBatch(b, store, issues)
-
-	ctx := context.Background()
-	// "narrowbench" appears in every id and title, so id/title LIKE matches the
-	// full set — maximizing per-row hydration cost, the dimension under test.
-	const query = "narrowbench"
-
-	// Guard: all three arms must see the same cardinality, else the comparison
-	// would be measuring row count rather than projection.
-	if ids, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
-		b.Fatalf("setup SearchIssueIDs: %v", err)
-	} else if len(ids) != total {
-		b.Fatalf("fixture: expected %d matches, got %d", total, len(ids))
-	}
-
-	b.Run("SearchIssueIDs_narrow", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if got, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
-				b.Fatalf("SearchIssueIDs: %v", err)
-			} else if len(got) != total {
-				b.Fatalf("SearchIssueIDs: got %d want %d", len(got), total)
-			}
-		}
-	})
-
-	b.Run("SearchIssues_SkipLabels", func(b *testing.B) {
-		b.ReportAllocs()
-		filter := types.IssueFilter{SkipLabels: true}
-		for i := 0; i < b.N; i++ {
-			if got, err := store.SearchIssues(ctx, query, filter); err != nil {
-				b.Fatalf("SearchIssues SkipLabels: %v", err)
-			} else if len(got) != total {
-				b.Fatalf("SearchIssues SkipLabels: got %d want %d", len(got), total)
-			}
-		}
-	})
-
-	b.Run("SearchIssues_full", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if got, err := store.SearchIssues(ctx, query, types.IssueFilter{}); err != nil {
-				b.Fatalf("SearchIssues full: %v", err)
-			} else if len(got) != total {
-				b.Fatalf("SearchIssues full: got %d want %d", len(got), total)
-			}
-		}
-	})
-}
-
 func BenchmarkPerfAddDependencyCycleCheck_DiamondDAG(b *testing.B) {
 	store, cleanup := setupBenchStore(b)
 	defer cleanup()
@@ -1491,13 +1298,13 @@ func BenchmarkPerfReadyWorkLimited_LargeBlockedGraph(b *testing.B) {
 	}
 }
 
-func BenchmarkPerfReadyWorkLimited_ExampleOrgWispHeavy(b *testing.B) {
+func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
 	const (
 		wispCount    = 8000
 		readyLimit   = 20
-		gcAssignee   = "example-org/workflows.codex-min-11"
-		gcRoute      = "example-org/workflows.codex-min-11"
-		routeJSON    = `{"route.routed_to":"example-org/workflows.codex-min-11"}`
+		gcAssignee   = "gascity/workflows.codex-min-11"
+		gcRoute      = "gascity/workflows.codex-min-11"
+		routeJSON    = `{"gc.routed_to":"gascity/workflows.codex-min-11"}`
 		emptyJSON    = `{}`
 		closedStatus = types.StatusClosed
 	)
@@ -1548,7 +1355,7 @@ func BenchmarkPerfReadyWorkLimited_ExampleOrgWispHeavy(b *testing.B) {
 			name: "MetadataRouteDenseLimit20Of8000",
 			filter: types.WorkFilter{
 				Unassigned:       true,
-				MetadataFields:   map[string]string{"route.routed_to": gcRoute},
+				MetadataFields:   map[string]string{"gc.routed_to": gcRoute},
 				IncludeEphemeral: true,
 				Limit:            readyLimit,
 				SortPolicy:       types.SortPolicyPriority,
@@ -1645,10 +1452,10 @@ func BenchmarkPerfReadyWorkLimited_ExampleOrgWispHeavy(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				results, err := store.GetReadyWork(ctx, tc.filter)
 				if err != nil {
-					b.Fatalf("GetReadyWork example-org wisps: %v", err)
+					b.Fatalf("GetReadyWork gascity wisps: %v", err)
 				}
 				if len(results) != readyLimit {
-					b.Fatalf("GetReadyWork example-org wisps returned %d issues, want %d", len(results), readyLimit)
+					b.Fatalf("GetReadyWork gascity wisps returned %d issues, want %d", len(results), readyLimit)
 				}
 			}
 		})
@@ -2094,47 +1901,4 @@ func BenchmarkGetIssuesByIDs_SmallNLargeW_10_10K(b *testing.B) {
 }
 func BenchmarkGetIssuesByIDs_SmallNLargeW_100_5K(b *testing.B) {
 	benchmarkGetIssuesByIDsSmallN(b, 5000, 100)
-}
-
-// =============================================================================
-// Schema Probe Benchmarks
-// =============================================================================
-
-// BenchmarkContentHashColumnProbe compares the retired INFORMATION_SCHEMA.COLUMNS
-// existence probe against the SHOW COLUMNS probe that replaced it.
-// schema.MigrateUp's migrationWorkNeeded runs this probe twice on every
-// connection. INFORMATION_SCHEMA.COLUMNS forces Dolt to materialize the full
-// column catalog because the predicate is not pushed down; SHOW COLUMNS reads a
-// single table's schema directly. The gap measured here understates production:
-// on a multi-database deployment the old probe was measured at 19-60 ms/conn
-// versus ~0 ms on the new one.
-func BenchmarkContentHashColumnProbe(b *testing.B) {
-	store, cleanup := setupBenchStore(b)
-	defer cleanup()
-	ctx := context.Background()
-
-	b.Run("InformationSchema", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			var count int
-			if err := store.db.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'content_hash'`,
-				"schema_migrations").Scan(&count); err != nil {
-				b.Fatalf("information_schema probe: %v", err)
-			}
-		}
-	})
-
-	b.Run("ShowColumns", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			rows, err := store.db.QueryContext(ctx, "SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")
-			if err != nil {
-				b.Fatalf("show columns probe: %v", err)
-			}
-			for rows.Next() { //nolint:revive // draining the result set is the point
-			}
-			_ = rows.Close()
-		}
-	})
 }
