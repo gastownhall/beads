@@ -75,8 +75,14 @@ fi
 
 python_version() {
     local version=$1
-    if [[ $version =~ ^([0-9]+\.[0-9]+\.[0-9]+)-dc([0-9]+)$ ]]; then
-        printf '%s.dev%s+dc%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[2]}"
+    # Downstream fork builds (-dcN, -fdN) are not PEP 440 versions: Python
+    # rejects "1.2.2-dc3" / "1.2.2-fd1" outright ("found -fd1, which is not
+    # part of a valid version"). Map them to a dev release with the fork tag
+    # preserved as local metadata, so pyproject/uv.lock stay installable while
+    # the Go side keeps the human-readable tag.
+    if [[ $version =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(dc|fd)([0-9]+)$ ]]; then
+        printf '%s.dev%s+%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" \
+            "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
         return
     fi
     printf '%s\n' "${version/-rc./rc}"

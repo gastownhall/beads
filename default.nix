@@ -7,7 +7,7 @@
 }:
 buildGoModule {
   pname = "beads";
-  version = "1.2.2";
+  version = "1.2.2-fd3";
 
   src = self;
 

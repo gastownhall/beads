@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2-fd3] - 2026-09-08
+
+Fork diet release: rebuilt directly on the stable upstream v1.2.2 release
+with only the load-bearing downstream patches retained. Replaces the
+accumulated -fd1/-fd2 drift (S1.5 text normalization, circuit-cache,
+schema-inspect diagnostics, dead-code refactors) with a minimal,
+classifiable patch set.
+
+No schema change: max migration stays 0053, identical to v1.2.2, so this
+build opens the same databases without any migration.
+
+### Kept (downstream patch set)
+
+- `bd list` hierarchy-cycle guard and its regression tests (upstream #5887
+  shape, diamond guard; parity with upstream PR #6085).
+- `bd dedup` gates skip orchestrator-managed workflow beads.
+- `DOLT_BACKUP` add/sync/restore routed through long-timeout connections
+  (pool's 10s read timeout killed large backups; measured on a 716MB db).
+- Hermetic CI: bounded test scratch and Go caches outside system tmp and
+  repository discovery; broad test runtime isolated from host state.
+- Release confinement: distribution published only on this fork's GitHub
+  Releases; dc/fd versions projected onto PEP 440 for Python metadata;
+  upstream main mirror sync audit-protected; install publishes the binary
+  atomically (reflink-capable).
+- Conflict-marker CI check on the fork's real marker shapes.
+
+### Removed vs 1.2.2-fd2
+
+- S1.5 bead-id/command text normalization sweep.
+- Circuit-breaker state kept in user cache.
+- `bd migrate` physical-schema-state diagnostics.
+- Duplicate `.beads` discovery walker dead-code removal.
+- Dropped customization merges (schema-inspect, test-persistent-scratch
+  catalog wrappers).
+
 ## [1.2.2] - 2026-08-15
 
 Recovery release. v1.2.0 and v1.2.1 were published by accident on

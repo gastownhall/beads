@@ -35,7 +35,10 @@ check_version() {
     fi
 }
 
-PYTHON_EXPECTED=$(printf '%s' "$CANONICAL" | sed -E 's/-rc\.?([0-9]+)/rc\1/; s/-dc([0-9]+)/.dev\1+dc\1/')
+# Mirror python_version() in scripts/update-versions.sh: downstream fork
+# builds (-dcN, -fdN) are not PEP 440 versions, so Python metadata carries the
+# normalized dev+local form while the Go side keeps the readable tag.
+PYTHON_EXPECTED=$(printf '%s' "$CANONICAL" | sed -E 's/-rc\.?([0-9]+)/rc\1/; s/-(dc|fd)([0-9]+)/.dev\2+\1\2/')
 
 # Check all version files
 check_version "integrations/beads-mcp/pyproject.toml" \

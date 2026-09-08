@@ -214,6 +214,14 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.2.2-fd3",
+		Date:    "2026-09-08",
+		Changes: []string{
+			"RELEASE: fork diet — rebuilt directly on upstream v1.2.2 with only the load-bearing downstream patches (bd list cycle guard + tests, dedup workflow-bead skip, DOLT_BACKUP long-timeout routing, hermetic CI, fork-confined release tooling). Same schema ceiling as v1.2.2: max migration 0053, no migration on open.",
+			"NOTE: replaces 1.2.2-fd1/fd2 drift; no behavior change for stores at schema v53.",
+		},
+	},
+	{
 		Version: "1.2.2",
 		Date:    "2026-08-15",
 		Changes: []string{
