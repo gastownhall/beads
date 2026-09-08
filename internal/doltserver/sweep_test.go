@@ -485,3 +485,54 @@ func TestIsCredibleTempRoot(t *testing.T) {
 		t.Error("isCredibleTempRoot must reject the filesystem root even with no home")
 	}
 }
+
+// TestSandboxHomeUnderPerUserTempRoot is the macOS half of the sandbox-home
+// carve-out. On Linux the throwaway HOME lands under /tmp; on macOS os.TempDir()
+// is a per-user tree under /var/folders, so a suite that pins HOME to a
+// t.TempDir() (cmd/bd/test_repo_beads_guard_test.go:128,
+// internal/beads/testmain_test.go:50) puts HOME *inside* os.TempDir(). Judging
+// sandbox-ness against /tmp alone made that home disqualify os.TempDir()
+// itself, tempDirRoots() dropped to [/tmp /private/tmp], and the deleted-cwd
+// arm went inert on every Mac (wy-j2zc8q).
+func TestSandboxHomeUnderPerUserTempRoot(t *testing.T) {
+	// The platform table, exercised from any platform: goos is a parameter so
+	// the darwin row is pinned on Linux CI too, not skipped there.
+	t.Run("fixed temp roots by platform", func(t *testing.T) {
+		cases := []struct {
+			path string
+			goos string
+			want bool
+		}{
+			{"/var/folders/zz/qqqqqqqq/T/fake-home", "darwin", true},
+			{"/private/var/folders/zz/qqqqqqqq/T/fake-home", "darwin", true},
+			{"/var/folders/zz/qqqqqqqq/T/fake-home", "linux", false},
+			{"/tmp/beads-test-env-abc123/home", "darwin", true},
+			{"/tmp/beads-test-env-abc123/home", "linux", true},
+			// The invariant the bound exists for: a real home is never a
+			// sandbox home, whatever TMPDIR says.
+			{"/home/runner", "linux", false},
+			{"/home/runner", "darwin", false},
+			{"/Users/dev", "darwin", false},
+		}
+		for _, tc := range cases {
+			if got := isUnderFixedTempRoots(tc.path, tc.goos); got != tc.want {
+				t.Errorf("isUnderFixedTempRoots(%q, %q) = %v, want %v", tc.path, tc.goos, got, tc.want)
+			}
+		}
+	})
+
+	// End to end on THIS platform: HOME inside the real os.TempDir() must not
+	// cost us os.TempDir() as a root.
+	t.Run("HOME inside the real os.TempDir keeps it a root", func(t *testing.T) {
+		home := filepath.Join(os.TempDir(), "beads-sandbox-home-probe")
+		t.Setenv("HOME", home)
+		roots := tempDirRoots()
+		if len(roots) == 0 {
+			t.Fatal("tempDirRoots() is empty; the deleted-cwd arm could never fire")
+		}
+		if !underAnyRoot(filepath.Join(os.TempDir(), "beads-bd-tests-xyz", ".beads", "dolt"), roots) {
+			t.Errorf("tempDirRoots() = %v with HOME=%s, want os.TempDir() %q still covered",
+				roots, home, os.TempDir())
+		}
+	})
+}

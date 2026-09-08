@@ -3,6 +3,7 @@ package doltserver
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -129,12 +130,13 @@ func tempDirRoots() []string {
 //
 // The one home that anchors no workspaces is a SANDBOX home: CI harnesses
 // (scripts/ci/lib/test-env.sh) export HOME under a mktemp -d root so a test
-// can never read or write the runner's real dotfiles. That home lives under
-// /tmp, and without this carve-out it would disqualify /tmp itself, leaving
-// tempDirRoots empty and the deleted-cwd arm silently disabled on exactly the
-// boxes whose killed runs it exists to clean up after. A root that merely
-// contains a sandbox home stays credible; a root that IS the home does not,
-// whatever the home looks like.
+// can never read or write the runner's real dotfiles, and several suites pin
+// HOME to a t.TempDir() for the same reason. Such a home lives under a fixed
+// system temp location (isSandboxHome), and without this carve-out it would
+// disqualify that location itself, leaving tempDirRoots empty and the
+// deleted-cwd arm silently disabled on exactly the boxes whose killed runs it
+// exists to clean up after. A root that merely contains a sandbox home stays
+// credible; a root that IS the home does not, whatever the home looks like.
 func isCredibleTempRoot(root, home string) bool {
 	cleaned := filepath.Clean(root)
 	if cleaned == "" || cleaned == "." || cleaned == string(filepath.Separator) {
@@ -158,13 +160,42 @@ func isCredibleTempRoot(root, home string) bool {
 	return true
 }
 
-// isSandboxHome reports whether home lives inside the fixed /tmp fallback —
-// the shape a test harness's throwaway HOME takes. It is judged against the
-// hardcoded fallback, never os.TempDir(), so TMPDIR cannot vote on its own
-// credibility: TMPDIR=/home with HOME=/home/runner must still read as a real
-// home under an overbroad root.
+// isSandboxHome reports whether home lives inside a FIXED system temp
+// location — the shape a test harness's throwaway HOME takes. It is judged
+// against hardcoded locations, never os.TempDir(), so TMPDIR cannot vote on
+// its own credibility: TMPDIR=/home with HOME=/home/runner must still read as
+// a real home under an overbroad root (TestTempDirRootsRejectsOverbroadTMPDIR).
 func isSandboxHome(home string) bool {
-	return underAnyRoot(home, canonicalRoots([]string{"/tmp"}))
+	return isUnderFixedTempRoots(home, runtime.GOOS)
+}
+
+// isUnderFixedTempRoots reports whether path lies under one of the temp
+// locations goos puts at a FIXED, non-configurable place. goos is a parameter
+// rather than a read of runtime.GOOS so the platform table is testable from
+// any platform (TestFixedTempRootsAreCredibleSandboxHomes).
+//
+// The list is deliberately hardcoded — see isSandboxHome — and canonicalRoots
+// expands each entry so macOS's /private/var/folders form matches too.
+func isUnderFixedTempRoots(path, goos string) bool {
+	return underAnyRoot(path, canonicalRoots(fixedTempRoots(goos)))
+}
+
+// fixedTempRoots is the platform table behind isUnderFixedTempRoots.
+//
+// /tmp is everywhere: it is os.MkdirTemp's fallback when TMPDIR is unset, and
+// CI harnesses (scripts/ci/lib/test-env.sh) mktemp -d their sandbox HOME under
+// it. macOS additionally gives every user a per-user temp tree under
+// /var/folders and points TMPDIR at it, so a suite that pins HOME to a
+// t.TempDir() (cmd/bd/test_repo_beads_guard_test.go, internal/beads/testmain_test.go)
+// puts HOME under /var/folders/xx/yy/T — which without this entry disqualified
+// os.TempDir() itself and left the deleted-cwd arm inert on every Mac
+// (wy-j2zc8q).
+func fixedTempRoots(goos string) []string {
+	roots := []string{"/tmp"}
+	if goos == "darwin" {
+		roots = append(roots, "/var/folders")
+	}
+	return roots
 }
 
 // canonicalRoots expands each non-empty root into every form a process's
