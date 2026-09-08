@@ -284,7 +284,11 @@ func recordBlockedJournalChanges(
 		return changed[i].id < changed[j].id
 	})
 	for _, key := range changed {
-		if err := RecordEventInTx(ctx, tx, EventUpdate, key.id); err != nil {
+		// Derived maintenance runs from dozens of mutation paths (recompute /
+		// mark passes) that carry no actor of their own; attributing the
+		// triggering mutation here would mean threading an actor through the
+		// whole blocked-state layer, so these rows record no actor.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, key.id, ""); err != nil {
 			return fmt.Errorf("journal: record derived is_blocked update for %s: %w", key.id, err)
 		}
 	}
@@ -296,7 +300,13 @@ func recordBlockedJournalChanges(
 // Use it for every op except delete (which has no surviving row — use
 // RecordDeleteInTx) and dependency ops (use RecordDepEventInTx). A no-op when
 // journaling is disabled.
-func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID string) error {
+//
+// actor is the acting identity that performed the mutation, as resolved for
+// the audit-events table; "" when the mutation path genuinely has none
+// (derived maintenance, actorless delete plumbing). It is an explicit
+// parameter, not ambient context, so a new call site cannot compile without
+// deciding attribution.
+func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) error {
 	if !journalEnabled(ctx, tx) {
 		return nil
 	}
@@ -307,16 +317,17 @@ func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID string) e
 		// record a hole.
 		return fmt.Errorf("journal: snapshot %s for %s: %w", op, issueID, err)
 	}
-	return insertEventRow(ctx, tx, op, issueID, issue, nil, nil)
+	return insertEventRow(ctx, tx, op, issueID, issue, nil, nil, actor)
 }
 
 // RecordDeleteInTx records a delete for issueID with a null issue payload (the
-// row no longer exists). A no-op when journaling is disabled.
-func RecordDeleteInTx(ctx context.Context, tx DBTX, issueID string) error {
+// row no longer exists). A no-op when journaling is disabled. actor as on
+// RecordEventInTx.
+func RecordDeleteInTx(ctx context.Context, tx DBTX, issueID, actor string) error {
 	if !journalEnabled(ctx, tx) {
 		return nil
 	}
-	return insertEventRow(ctx, tx, EventDelete, issueID, nil, nil, nil)
+	return insertEventRow(ctx, tx, EventDelete, issueID, nil, nil, nil, actor)
 }
 
 // journalableDeletesInTx narrows ids to the ones that actually exist in table,
@@ -336,8 +347,8 @@ func journalableDeletesInTx(ctx context.Context, tx DBTX, table string, ids []st
 
 // RecordDepEventInTx records a dependency add or remove for issueID, carrying
 // the edge kind and target. The issue snapshot is the post-mutation state as of
-// tx. A no-op when journaling is disabled.
-func RecordDepEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind, target, metadata string) error {
+// tx. A no-op when journaling is disabled. actor as on RecordEventInTx.
+func RecordDepEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind, target, metadata, actor string) error {
 	if !journalEnabled(ctx, tx) {
 		return nil
 	}
@@ -346,14 +357,16 @@ func RecordDepEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind,
 		// The dependency source may itself have been deleted (cascade); record
 		// the edge change with a null snapshot rather than failing.
 		if errors.Is(err, storage.ErrNotFound) {
-			return insertEventRow(ctx, tx, op, issueID, nil, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil)
+			return insertEventRow(ctx, tx, op, issueID, nil, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil, actor)
 		}
 		return fmt.Errorf("journal: snapshot %s for %s: %w", op, issueID, err)
 	}
-	return insertEventRow(ctx, tx, op, issueID, issue, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil)
+	return insertEventRow(ctx, tx, op, issueID, issue, &EventDep{Kind: kind, Target: target, Metadata: metadata}, nil, actor)
 }
 
-// RecordCommentEventInTx records a replayable structured or audit comment.
+// RecordCommentEventInTx records a replayable structured or audit comment. The
+// journal row's actor is the comment's Author — the identity that wrote it —
+// so this takes no separate actor parameter.
 func RecordCommentEventInTx(ctx context.Context, tx DBTX, issueID string, comment *EventComment) error {
 	if !journalEnabled(ctx, tx) {
 		return nil
@@ -362,7 +375,7 @@ func RecordCommentEventInTx(ctx context.Context, tx DBTX, issueID string, commen
 	if err != nil {
 		return fmt.Errorf("journal: snapshot comment for %s: %w", issueID, err)
 	}
-	return insertEventRow(ctx, tx, EventCommentWrite, issueID, issue, nil, comment)
+	return insertEventRow(ctx, tx, EventCommentWrite, issueID, issue, nil, comment, comment.Author)
 }
 
 // getJournalIssueInTx augments the normal issue snapshot with the persisted
@@ -402,8 +415,9 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 // plumbings funnel through, so the seq mechanism cannot drift between them. A
 // nil issue is stored as SQL NULL (deletes); a nil dep is stored as SQL NULL
 // (non-dependency ops). ts is the insert time, stamped inside the committing
-// transaction.
-func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment) error {
+// transaction. actor is stored as-is — "" for the genuinely unattributable
+// paths — in the NOT NULL DEFAULT ” actor column.
+func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment, actor string) error {
 	var issueJSON any
 	if issue != nil {
 		b, err := json.Marshal(issue)
@@ -430,9 +444,9 @@ func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, is
 	}
 	insert := func(seq int64) error {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO bd_events_journal (seq, ts, op, issue_id, issue_json, dep_json, comment_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, seq, time.Now().UTC(), string(op), issueID, issueJSON, depJSON, commentJSON)
+			INSERT INTO bd_events_journal (seq, ts, op, issue_id, actor, issue_json, dep_json, comment_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, seq, time.Now().UTC(), string(op), issueID, actor, issueJSON, depJSON, commentJSON)
 		return err
 	}
 

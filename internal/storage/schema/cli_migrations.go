@@ -17,6 +17,31 @@ package schema
 // databases, where PREPARE/EXECUTE runs over a real driver connection and
 // this limitation does not apply.
 //
+// Dolt 2.3.0 fixed #11345, and that fix MASKS a missing override here rather
+// than removing the need for one: on 2.3.x the CLI executes the prepared
+// ALTER, so a bundle that forgot the direct statement still lands the right
+// schema and TestCLIBundleMatchesRuntimeCommittedSchema goes green against a
+// 2.2.0 sql-server. So every override below must be justified against the
+// pre-2.3 behavior, and the string assertions in
+// TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities — which need
+// no Dolt binary at all — are the guard that survives a CLI version bump.
+//
+// The measurement that check stands in for: run AllMigrationsSQL() through
+// each CLI and diff information_schema. On 2026-08-21, with 0060's and 0065's
+// overrides both in place, dolt 2.1.8, 2.2.0 (the pinned CLI) and 2.3.1 agree
+// on all 504 snapshot lines including the wisp_ tables the parity oracle
+// excludes — so no prepared statement the bundle still carries changes its
+// committed schema. Before that, 2.3.1 landed three extra columns (0060's
+// storage_class, gastownhall/beads#5903) and one extra widening (0065's
+// wisp_comments.text). cli_prepared_ddl.go is what keeps a new migration from
+// re-opening that gap.
+//
+// Every override below is written for the fresh bundle, where the whole main
+// series has run in order. A caller replaying the substitution over a drifted
+// database — one that never synced the clone-local wisp tables, say — must
+// consult cliSubstituteAssumesWispTables first and fall back to the frozen
+// source text, whose own PREPARE guards cover the absent-table case.
+//
 // For a migration whose PREPARE'd DML matters on this path (not just DDL),
 // the fix is not a direct-SQL override here — it is to not depend on
 // PREPARE'd writes to real tables in the source migration at all. Migration
@@ -79,8 +104,62 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// schema delta: create the ephemeral leases table, drop the issues/
 		// wisps lease columns 0054 added. row_lock stays (see the migration).
 		return cliMigration0055MoveLeasesToTable
+	case "0060_add_storage_class.up.sql":
+		// Direct DDL for the same reason as 0054: the source migration's
+		// PREPARE guards make it idempotent on upgraded databases, and a
+		// fresh bundle always needs the column on both planes.
+		return cliMigration0060AddStorageClass
+	case "0065_widen_wisp_comments_text.up.sql":
+		// Direct DDL for the same reason as 0060. wisp_comments is created
+		// by main-plane 0021, so a fresh bundle always has the table and
+		// always needs the widening. Replays over a database that never
+		// synced the wisp tables must use the frozen source text instead --
+		// see cliSubstituteAssumesWispTables.
+		return cliMigration0065WidenWispCommentsText
+	case "0066_add_events_journal_actor.up.sql":
+		// Direct DDL for the same reason as 0060: the source migration's
+		// PREPARE guard (INFORMATION_SCHEMA probe) makes it idempotent on
+		// upgraded databases, and the 2.2.x CLI no-ops the prepared ALTER
+		// (measured 2026-08-20: AllMigrationsSQL() through dolt 2.2.0 lands
+		// bd_events_journal WITHOUT actor; 2.3.1 — and 2.2.3, which already
+		// carries the #11345 fix — land it; CI pins 2.2.0). The table
+		// itself is always present here: 0064's prepared RENAME executes on
+		// 2.2.0 (same measurement), so a fresh bundle always needs the column.
+		return cliMigration0066AddEventsJournalActor
 	default:
 		return sqlText
+	}
+}
+
+// cliSubstituteAssumesWispTables reports whether cliCompatibleMigrationSQL's
+// substitute for name presumes the clone-local wisp_* tables already exist.
+//
+// AllMigrationsSQL() always satisfies that presumption — the main series
+// creates every wisp table on its way past — so the bundle route is
+// unaffected. A replay over a drifted database is not: #4695/#4176 is the
+// shape where the main cursor arrives at-latest with the wisp tables never
+// synced (they are dolt_ignored, so a clone can simply not have them), and
+// 0047's repair recreates only wisps and wisp_dependencies. On that database
+// the substitute's direct DDL aborts the batch with `table not found` while
+// the frozen source text's own PREPARE guards correctly no-op: an
+// INFORMATION_SCHEMA probe for a missing table yields NULL, and
+// `IF(NULL = 1, '<ddl>', 'SELECT 1')` takes the no-op branch.
+//
+// So a replay caller must use the frozen text for these, and only these.
+// The other substitutes are safe to replay because they touch main-plane
+// tables that are always present.
+func cliSubstituteAssumesWispTables(name string) bool {
+	switch name {
+	case "0053_repair_rig_wisps.up.sql":
+		// cliMigration0053RepairRigWisps drops every @has_wisp_* guard and
+		// reads all five wisp tables unconditionally.
+		return true
+	case "0065_widen_wisp_comments_text.up.sql":
+		// cliMigration0065WidenWispCommentsText is a bare MODIFY on
+		// wisp_comments.
+		return true
+	default:
+		return false
 	}
 }
 
@@ -119,6 +198,12 @@ ALTER TABLE issues DROP COLUMN lease_expires_at;
 ALTER TABLE issues DROP COLUMN heartbeat_at;
 ALTER TABLE wisps DROP COLUMN lease_expires_at;
 ALTER TABLE wisps DROP COLUMN heartbeat_at;`
+
+const cliMigration0060AddStorageClass = `ALTER TABLE issues ADD COLUMN storage_class VARCHAR(16);
+ALTER TABLE wisps ADD COLUMN storage_class VARCHAR(16);`
+
+const cliMigration0065WidenWispCommentsText = `ALTER TABLE wisp_comments MODIFY COLUMN text LONGTEXT NOT NULL;`
+const cliMigration0066AddEventsJournalActor = `ALTER TABLE bd_events_journal ADD COLUMN actor VARCHAR(255) NOT NULL DEFAULT '';`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

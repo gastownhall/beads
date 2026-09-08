@@ -1120,6 +1120,74 @@ func TestEmbeddedCreateCrossRepoUninit(t *testing.T) {
 	}
 }
 
+// TestEmbeddedCreateRepoRelativeUninitRefused is a regression test for
+// bd-8d3f: a bare/relative --repo value with no existing workspace resolves
+// silently against the current working directory (routing.ExpandPath has no
+// concept of an external rig/alias registry), so it must be refused instead
+// of auto-creating a disconnected database that the caller never intended
+// and nothing else will ever route to. Contrast with
+// TestEmbeddedCreateCrossRepoUninit, which uses an absolute --repo path and
+// must still succeed.
+func TestEmbeddedCreateRepoRelativeUninitRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	relTarget := "some-other-rig"
+	out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--json", "Should not land anywhere", "--repo", relTarget)
+	if err == nil {
+		t.Fatalf("expected bd create --repo %q to fail for an uninitialized relative target, got success: %s", relTarget, out)
+	}
+	if !strings.Contains(string(out), "absolute") {
+		t.Errorf("expected error to explain the absolute/~-prefixed path requirement, got: %s", out)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, relTarget, ".beads")); !os.IsNotExist(statErr) {
+		t.Errorf("expected no .beads directory to be fabricated at %s, stat err = %v", filepath.Join(dir, relTarget), statErr)
+	}
+}
+
+// TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected verifies the
+// bd-8d3f gate only blocks *fabricating* a new workspace: a relative --repo
+// value that already has an initialized workspace at the resolved path must
+// keep working exactly as before, since ensureBeadsDirForPath's existing
+// os.Stat(metadata.json) check returns early before the new gate runs.
+func TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	relTarget := "already-initialized-sibling"
+	absTarget := filepath.Join(dir, relTarget)
+	if err := os.MkdirAll(absTarget, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, absTarget)
+
+	// Initialize the target workspace first via an absolute --repo path
+	// (the already-covered, unambiguous case).
+	first := bdCreate(t, bd, dir, "Seed issue", "--repo", absTarget)
+	if first.ID == "" {
+		t.Fatal("expected issue ID for absolute --repo seed create")
+	}
+
+	// A relative --repo pointing at that SAME, now-initialized workspace
+	// must succeed unaffected by the bd-8d3f gate: the gate only blocks
+	// fabricating a workspace that doesn't exist yet.
+	second := bdCreate(t, bd, dir, "Should land in the pre-existing workspace", "--repo", relTarget)
+	if second.ID == "" {
+		t.Fatal("expected issue ID for relative --repo pointing at an existing workspace")
+	}
+}
+
 // TestEmbeddedCreateWithGitRemote verifies bd create works end-to-end when a
 // git remote exists (which enables auto-backup in PersistentPostRun). This
 // catches panics from unimplemented methods called after the create succeeds.

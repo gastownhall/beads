@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -71,6 +72,7 @@ func TestCycleWarningSpellsTheWholePathIncludingUndescribableMembers(t *testing.
 		t.Fatal(err)
 	}
 	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
 
 	printCycleWarnings([]issueops.Cycle{{Partial: true, Members: []issueops.CycleMember{
 		{ID: "bd-a", Issue: &types.Issue{ID: "bd-a"}},
@@ -79,7 +81,6 @@ func TestCycleWarningSpellsTheWholePathIncludingUndescribableMembers(t *testing.
 	}}})
 
 	_ = w.Close()
-	os.Stderr = origStderr
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
 		t.Fatal(err)
@@ -106,11 +107,11 @@ func TestCycleWarningIsSilentWithoutCycles(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
 
 	printCycleWarnings(nil)
 
 	_ = w.Close()
-	os.Stderr = origStderr
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
 		t.Fatal(err)
@@ -168,16 +169,62 @@ func captureCycleStdout(t *testing.T, run func()) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Drain concurrently: a synchronous drain deadlocks once the command
+	// writes more than the 64KiB pipe buffer, and it cannot run at all when
+	// run() exits via Goexit.
+	done := make(chan string, 1)
+	go func() {
+		var b bytes.Buffer
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+
 	os.Stdout = w
+	restored := false
+	restore := func() string {
+		if restored {
+			return ""
+		}
+		restored = true
+		_ = w.Close()          // unblocks the drain goroutine
+		os.Stdout = origStdout // ALWAYS runs, including on Goexit/panic
+		out := <-done
+		_ = r.Close()
+		return out
+	}
+	defer restore()
 
 	run()
 
-	_ = w.Close()
-	os.Stdout = origStdout
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
-		t.Fatal(err)
+	return restore()
+}
+
+// TestCaptureCycleStdoutRestoresOnFatal pins be-gh02: a callback that Goexits
+// must still leave os.Stdout restored. Before the fix this left os.Stdout as an
+// orphaned pipe whose read end the GC finalizer later closed, making every
+// subsequent write in the binary fail with "write |1: broken pipe".
+//
+// The leaking callback runs on a manually created goroutine that calls
+// runtime.Goexit() directly rather than a t.Run subtest calling t.Fatal: the
+// unwind-and-run-deferred-calls mechanism is identical, but this keeps the test
+// itself green instead of always reporting a deliberately-failed subtest.
+func TestCaptureCycleStdoutRestoresOnFatal(t *testing.T) {
+	real := os.Stdout
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = captureCycleStdout(t, func() {
+			runtime.Goexit()
+		})
+	}()
+	<-done
+
+	if os.Stdout != real {
+		os.Stdout = real
+		t.Fatalf("captureCycleStdout leaked os.Stdout after a Goexit")
 	}
-	_ = r.Close()
-	return buf.String()
+	if _, err := os.Stdout.Write(nil); err != nil {
+		t.Fatalf("os.Stdout unusable after capture: %v", err)
+	}
 }

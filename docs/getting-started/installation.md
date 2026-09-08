@@ -266,6 +266,8 @@ Move-Item bd.exe $env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\
 **Windows notes:**
 - The Dolt server listens on a loopback TCP endpoint
 - Allow `bd.exe` loopback traffic through any host firewall
+- Installed from npm, `bd` is a `bd.cmd` shim — Node's `execFile`/`spawn`
+  need `shell: true` to run it ([details](/reference/troubleshooting#platform-specific-issues))
 
 ## IDE and Editor Integrations
 

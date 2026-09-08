@@ -151,6 +151,7 @@ func runPromptAutoExport(t *testing.T, input string) (bool, string, error) {
 	setRootContext(ctx, cancel)
 	os.Stdin = stdinFile
 	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
 
 	got, promptErr := promptAutoExport()
 
@@ -159,7 +160,6 @@ func runPromptAutoExport(t *testing.T, input string) (bool, string, error) {
 	_, _ = io.Copy(&b, r)
 	_ = r.Close()
 	os.Stdin = oldStdin
-	os.Stdout = oldStdout
 	cancel()
 	rootCtx = oldRootCtx
 	rootCancel = oldRootCancel

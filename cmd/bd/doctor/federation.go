@@ -36,7 +36,10 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 	}
 	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
 		cfg.ServerHost = bcfg.GetDoltServerHost()
-		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+		// Carries PortSource with the port: this cfg reaches applyConfigDefaults,
+		// which reads a sourceless port as caller-explicit (see
+		// dolt.ApplyResolvedServerPort).
+		dolt.ApplyResolvedServerPort(beadsDir, cfg)
 		cfg.ServerUser = bcfg.GetDoltServerUser()
 		cfg.ServerTLS = bcfg.GetDoltServerTLS()
 		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)

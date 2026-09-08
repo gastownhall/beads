@@ -88,6 +88,9 @@ func readLocalVersion(path string) string {
 }
 
 // writeLocalVersion writes the current version to the local version file.
+// The value is main.Version verbatim, which release tooling sets by ldflags and
+// may be a release candidate, a build carrying metadata, or a Go pseudo-version.
+// Readers must accept every shape this can write; see classifyVersionWitness.
 func writeLocalVersion(path, version string) error {
 	return os.WriteFile(path, []byte(version+"\n"), 0600)
 }

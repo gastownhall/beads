@@ -15,11 +15,12 @@ func TestResolveStorageClassExplicit(t *testing.T) {
 		t.Errorf("explicit unversioned: got %q, %v", got, err)
 	}
 
-	// Explicit versioned normalizes to unset (C2.4 omitted-when-versioned)
-	// while still overriding any per-type config default upstream.
+	// Explicit versioned is returned verbatim; callers normalize it to the unset
+	// marker (C2.4 omitted-when-versioned) only after plane-conflict validation,
+	// so the durable request survives long enough to be honored or rejected.
 	got, err = resolveStorageClass("versioned", types.TypeTask)
-	if err != nil || got != "" {
-		t.Errorf("explicit versioned should normalize to unset: got %q, %v", got, err)
+	if err != nil || got != types.StorageClassVersioned {
+		t.Errorf("explicit versioned should be preserved: got %q, %v", got, err)
 	}
 
 	got, err = resolveStorageClass("ephemeral", types.TypeTask)
@@ -58,5 +59,41 @@ func TestValidateStorageClassConfig(t *testing.T) {
 	}
 	if err := validateStorageClassConfig("storage-class.task", "unversioned"); err != nil {
 		t.Errorf("canonical built-in suffix rejected: %v", err)
+	}
+}
+
+// reconcileStorageClassPlane is the flag-over-config decision shared by
+// single-issue create and graph-apply (Protocol v0.1 §C1.3). A durable class on
+// an effective wisp plane is a contradiction: an explicit class is rejected so
+// the durable intent is not silently erased, while a config-derived class yields
+// to the explicit plane. versioned normalizes to the unset marker only after the
+// check, so on conflict the class is returned verbatim for the caller's message.
+func TestReconcileStorageClassPlane(t *testing.T) {
+	tests := []struct {
+		name      string
+		class     types.StorageClass
+		explicit  bool
+		wispPlane bool
+		wantClass types.StorageClass
+		wantConf  bool
+	}{
+		{"explicit unversioned + wisp plane conflicts", types.StorageClassUnversioned, true, true, types.StorageClassUnversioned, true},
+		{"explicit versioned + wisp plane conflicts (verbatim)", types.StorageClassVersioned, true, true, types.StorageClassVersioned, true},
+		{"config unversioned yields to wisp plane", types.StorageClassUnversioned, false, true, "", false},
+		{"config versioned yields to wisp plane", types.StorageClassVersioned, false, true, "", false},
+		{"explicit unversioned stays on a durable row", types.StorageClassUnversioned, true, false, types.StorageClassUnversioned, false},
+		{"config unversioned stays on a durable row", types.StorageClassUnversioned, false, false, types.StorageClassUnversioned, false},
+		{"versioned normalizes to unset on a durable row", types.StorageClassVersioned, true, false, "", false},
+		{"unset class with a wisp plane is a no-op", "", true, true, "", false},
+		{"unset class without a wisp plane is a no-op", "", false, false, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotClass, gotConf := reconcileStorageClassPlane(tt.class, tt.explicit, tt.wispPlane)
+			if gotClass != tt.wantClass || gotConf != tt.wantConf {
+				t.Errorf("reconcileStorageClassPlane(%q, explicit=%v, wisp=%v) = (%q, %v), want (%q, %v)",
+					tt.class, tt.explicit, tt.wispPlane, gotClass, gotConf, tt.wantClass, tt.wantConf)
+			}
+		})
 	}
 }

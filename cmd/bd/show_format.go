@@ -79,16 +79,16 @@ func formatIssueHeader(issue *types.Issue) string {
 }
 
 // formatIssueMetadata returns the metadata line(s) with grouped info
-// Format: Owner: user · Type: task
+// Format: Created by: user · Type: task
 //
 //	Created: 2026-01-06 · Updated: 2026-01-08
 func formatIssueMetadata(issue *types.Issue) string {
 	var lines []string
 
-	// Line 1: Owner/Assignee · Type
+	// Line 1: Created by/Assignee · Type
 	metaParts := []string{}
 	if issue.CreatedBy != "" {
-		metaParts = append(metaParts, fmt.Sprintf("Owner: %s", issue.CreatedBy))
+		metaParts = append(metaParts, fmt.Sprintf("Created by: %s", issue.CreatedBy))
 	}
 	if issue.Assignee != "" {
 		metaParts = append(metaParts, fmt.Sprintf("Assignee: %s", issue.Assignee))

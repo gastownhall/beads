@@ -18,10 +18,10 @@ func TestHandleFreshCloneError_UsesBootstrapFirstGuidance(t *testing.T) {
 		t.Fatal(pipeErr)
 	}
 	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
 
 	handled := handleFreshCloneError(err)
 	_ = w.Close()
-	os.Stderr = origStderr
 
 	var buf bytes.Buffer
 	if _, copyErr := io.Copy(&buf, r); copyErr != nil {

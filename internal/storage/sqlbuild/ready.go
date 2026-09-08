@@ -95,7 +95,15 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	var args []any
 	switch {
 	case filter.Status != "":
-		statusClause = "status = ?"
+		// Singular StatusOpen is the `bd ready` pin and means the ready-
+		// eligible set: built-in open plus category-active custom statuses,
+		// matching the ready_issues view since migration 0025 (GH#5831).
+		// Any other singular status stays exact.
+		if filter.Status == types.StatusOpen {
+			statusClause = "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))"
+		} else {
+			statusClause = "status = ?"
+		}
 		args = append(args, string(filter.Status))
 	case len(filter.Statuses) > 0:
 		ph, statusArgs := InPlaceholders(filter.Statuses)
@@ -143,6 +151,15 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			args = append(args, batchArgs...)
 			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
 		}
+	}
+	for start := 0; start < len(filter.ExcludeIDs); start += QueryBatchSize {
+		end := start + QueryBatchSize
+		if end > len(filter.ExcludeIDs) {
+			end = len(filter.ExcludeIDs)
+		}
+		placeholders, batchArgs := InPlaceholders(filter.ExcludeIDs[start:end])
+		args = append(args, batchArgs...)
+		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
 	}
 
 	if len(filter.Labels) > 0 {

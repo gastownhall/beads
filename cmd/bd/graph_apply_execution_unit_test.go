@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -815,5 +816,141 @@ func TestExecuteGraphApplyUnitAllowsExplicitParentChildDuplicate(t *testing.T) {
 	}
 	if deps[0].DependencyType != types.DepParentChild {
 		t.Fatalf("dependency type = %s, want %s", deps[0].DependencyType, types.DepParentChild)
+	}
+}
+
+// An explicit durable storage_class on an effective wisp-plane node must be
+// rejected, not silently erased into an effective-ephemeral record
+// (Protocol v0.1 §C1.3). versioned is normalized to the unset marker (C2.4)
+// only after that conflict check. Cases pin an explicit class so resolution
+// never reads the config global and the test stays hermetic; config-default
+// interaction is covered by the embedded create tests.
+func TestGraphApplyNodeStorageClassConflicts(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name      string
+		node      GraphApplyNode
+		opts      GraphApplyOptions
+		wantErr   string // substring; "" means no error expected
+		wantEphem bool
+		wantClass types.StorageClass
+	}{
+		{
+			name:    "explicit versioned with node ephemeral is rejected",
+			node:    GraphApplyNode{Key: "n1", Type: "task", StorageClass: "versioned", Ephemeral: boolPtr(true)},
+			wantErr: "storage_class versioned conflicts with ephemeral/no_history",
+		},
+		{
+			name:    "explicit versioned with node no_history is rejected",
+			node:    GraphApplyNode{Key: "n2", Type: "task", StorageClass: "versioned", NoHistory: boolPtr(true)},
+			wantErr: "storage_class versioned conflicts with ephemeral/no_history",
+		},
+		{
+			name:    "explicit unversioned with plan-wide ephemeral is rejected",
+			node:    GraphApplyNode{Key: "n3", Type: "task", StorageClass: "unversioned"},
+			opts:    GraphApplyOptions{Ephemeral: true},
+			wantErr: "storage_class unversioned conflicts with ephemeral/no_history",
+		},
+		{
+			name:      "explicit versioned alone normalizes to unset",
+			node:      GraphApplyNode{Key: "n4", Type: "task", StorageClass: "versioned"},
+			wantClass: "",
+		},
+		{
+			name:      "storage_class ephemeral spelling routes to wisp",
+			node:      GraphApplyNode{Key: "n5", Type: "task", StorageClass: "ephemeral"},
+			wantEphem: true,
+			wantClass: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ephemeral, _, class, err := graphApplyNodeStorageClass(tt.node, tt.opts)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil (ephemeral=%v class=%q)", tt.wantErr, ephemeral, class)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ephemeral != tt.wantEphem {
+				t.Errorf("ephemeral = %v, want %v", ephemeral, tt.wantEphem)
+			}
+			if class != tt.wantClass {
+				t.Errorf("class = %q, want %q", class, tt.wantClass)
+			}
+		})
+	}
+}
+
+// A per-type config default (storage-class.<type>=unversioned) must yield to an
+// effective wisp plane rather than reaching validation and blocking the node
+// (flag > config, Protocol v0.1 §C1.3). Unlike the hermetic conflict cases
+// above, these leave node.StorageClass unset so resolution reads the config
+// global, so the subtests share one process-wide config and cannot run in
+// parallel. The precondition assert guards against a silent pass if config
+// never initialized (Set is a no-op on an uninitialized viper).
+func TestGraphApplyNodeStorageClassConfigDefaultYieldsToWispPlane(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	config.Set("storage-class.task", "unversioned")
+	if got := config.GetString("storage-class.task"); got != "unversioned" {
+		t.Fatalf("precondition: storage-class.task = %q, want unversioned", got)
+	}
+
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name      string
+		node      GraphApplyNode
+		opts      GraphApplyOptions
+		wantEphem bool
+		wantNoHis bool
+	}{
+		{
+			name:      "plan-wide ephemeral clears config-derived unversioned",
+			node:      GraphApplyNode{Key: "n1", Type: "task"},
+			opts:      GraphApplyOptions{Ephemeral: true},
+			wantEphem: true,
+		},
+		{
+			name:      "node-level ephemeral clears config-derived unversioned",
+			node:      GraphApplyNode{Key: "n2", Type: "task", Ephemeral: boolPtr(true)},
+			wantEphem: true,
+		},
+		{
+			name:      "plan-wide no_history clears config-derived unversioned",
+			node:      GraphApplyNode{Key: "n3", Type: "task"},
+			opts:      GraphApplyOptions{NoHistory: true},
+			wantNoHis: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ephemeral, noHistory, class, err := graphApplyNodeStorageClass(tt.node, tt.opts)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if class != "" {
+				t.Errorf("class = %q, want empty (config default yields to wisp plane)", class)
+			}
+			if ephemeral != tt.wantEphem {
+				t.Errorf("ephemeral = %v, want %v", ephemeral, tt.wantEphem)
+			}
+			if noHistory != tt.wantNoHis {
+				t.Errorf("noHistory = %v, want %v", noHistory, tt.wantNoHis)
+			}
+		})
 	}
 }

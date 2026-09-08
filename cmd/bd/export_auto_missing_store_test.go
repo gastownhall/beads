@@ -85,7 +85,7 @@ func TestMissingJSONLIssueIDsInStore_IgnoresCompactedWisp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	missing, err := missingJSONLIssueIDsInStore(ctx, jsonlPath)
+	missing, err := missingJSONLIssueIDsInStore(ctx, jsonlPath, "")
 	if err != nil {
 		t.Fatalf("missingJSONLIssueIDsInStore: %v", err)
 	}

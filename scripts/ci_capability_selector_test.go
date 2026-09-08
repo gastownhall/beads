@@ -96,7 +96,7 @@ func TestCICapabilitySelectorWorkflowPreservesExistingAuthority(t *testing.T) {
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse workflow: %v", err)
 	}
-	wantJobs := map[string]bool{"detect-ci-tier": true, "build-embedded": true, "test-embedded-storage": true, "test-embedded-conformance": true, "test-server-storage": true, "test-embedded-cmd": true, "test-proxied-cmd": true, "test-nix": true, "ci-gate": true}
+	wantJobs := map[string]bool{"detect-ci-tier": true, "build-embedded": true, "test-embedded-storage": true, "test-embedded-conformance": true, "test-server-storage": true, "test-server-storage-full": true, "test-embedded-cmd": true, "test-proxied-cmd": true, "test-nix": true, "ci-gate": true}
 	if len(workflow.Jobs) != len(wantJobs) {
 		t.Errorf("job count = %d, want %d", len(workflow.Jobs), len(wantJobs))
 	}
@@ -118,7 +118,7 @@ func TestCICapabilitySelectorWorkflowPreservesExistingAuthority(t *testing.T) {
 	if tier.ID != "tier" || shadow.ID != "shadow-selector" || !shadow.ContinueOnError || detector.stepIndex(t, shadow.Name) != detector.stepIndex(t, tier.Name)+1 {
 		t.Errorf("shadow step is not immediately after tier: tier=%+v shadow=%+v", tier, shadow)
 	}
-	for _, name := range []string{"build-embedded", "test-embedded-storage", "test-embedded-conformance", "test-server-storage", "test-embedded-cmd", "test-proxied-cmd"} {
+	for _, name := range []string{"build-embedded", "test-embedded-storage", "test-embedded-conformance", "test-server-storage", "test-server-storage-full", "test-embedded-cmd", "test-proxied-cmd"} {
 		if got := workflow.Jobs[name].If; got != "needs.detect-ci-tier.outputs.full_embedded == 'true'" {
 			t.Errorf("%s if = %q", name, got)
 		}
@@ -127,9 +127,9 @@ func TestCICapabilitySelectorWorkflowPreservesExistingAuthority(t *testing.T) {
 		t.Errorf("test-nix if = %q, want ungated", workflow.Jobs["test-nix"].If)
 	}
 	gate := workflow.Jobs["ci-gate"]
-	wantNeeds := []string{"detect-ci-tier", "build-embedded", "test-embedded-storage", "test-embedded-conformance", "test-server-storage", "test-embedded-cmd", "test-proxied-cmd", "test-nix"}
+	wantNeeds := []string{"detect-ci-tier", "build-embedded", "test-embedded-storage", "test-embedded-conformance", "test-server-storage", "test-server-storage-full", "test-embedded-cmd", "test-proxied-cmd", "test-nix"}
 	gateStep := gate.step(t, "Evaluate CI gate")
-	if gate.If != "${{ always() }}" || strings.Join(gate.Needs, ",") != strings.Join(wantNeeds, ",") || gateStep.Env["FULL_EMBEDDED"] != "${{ needs.detect-ci-tier.outputs.full_embedded }}" || gateStep.Env["CI_GATE_REQUIRED"] != "DETECT_CI_TIER BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_EMBEDDED_CMD TEST_PROXIED_CMD TEST_NIX" || !strings.Contains(gateStep.Run, "skipped_ok=\"BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_EMBEDDED_CMD TEST_PROXIED_CMD\"") {
+	if gate.If != "${{ always() }}" || strings.Join(gate.Needs, ",") != strings.Join(wantNeeds, ",") || gateStep.Env["FULL_EMBEDDED"] != "${{ needs.detect-ci-tier.outputs.full_embedded }}" || gateStep.Env["CI_GATE_REQUIRED"] != "DETECT_CI_TIER BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_SERVER_STORAGE_FULL TEST_EMBEDDED_CMD TEST_PROXIED_CMD TEST_NIX" || !strings.Contains(gateStep.Run, "skipped_ok=\"BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_SERVER_STORAGE_FULL TEST_EMBEDDED_CMD TEST_PROXIED_CMD\"") {
 		t.Errorf("ci-gate authority changed: needs=%v env=%v", gate.Needs, gateStep.Env)
 	}
 	for name, job := range workflow.Jobs {
