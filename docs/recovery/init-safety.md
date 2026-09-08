@@ -3,14 +3,16 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-06-09
+Last reviewed: 2026-09-07
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, and `cmd/bd/dolt.go`.
 
-This document lives next to the ADRs and matches the structure of `bd`'s
-error messages: each named refusal in `bd init` and `bd dolt push`/`pull`
-points here to a labeled anchor with step-by-step recovery instructions.
+This document lives under `docs/recovery/`, beside the invariants it explains
+(`engdocs/adr/0002-init-safety-invariants.md`), and matches the structure of
+`bd`'s error messages: each named refusal in `bd dolt push`/`pull` points here
+at a labeled anchor with step-by-step recovery instructions, and each named
+refusal in `bd init` points at `bd help init-safety`, which names this document.
 
 See also: `bd help init-safety`, and
 [ADR 0002 — `bd init` safety invariants](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md).
@@ -39,8 +41,8 @@ bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
 **Why this happens**
 
 `bd init --force` (or `--reinit-local`) tells `bd` to bypass the local
-data-safety guard. `bd init --from-jsonl` selects a local JSONL export as
-the source. But the remote already has project history. Proceeding would
+data-safety guard. `bd init --from-jsonl` imports issues from the configured
+`import.path` (a local JSONL export) instead of the remote. But the remote already has project history. Proceeding would
 create an orphan local Dolt branch with no common ancestor on origin. The
 next `bd dolt push` would either fail (no common ancestor) or — worse, if
 force-pushed — destroy the team's data.
@@ -55,8 +57,13 @@ Pick the one that matches your intent.
 bd bootstrap
 ```
 
-This clones the remote's Dolt database into a fresh local `.beads/`.
-Your local state is ignored; the team's history becomes yours.
+`bd bootstrap` is non-destructive: with no local database it clones the
+remote's Dolt database into a fresh local `.beads/`, and the team's history
+becomes yours; with a database already present it validates and reports
+status, and never deletes existing issues. So if you got here with local data
+in place and want the remote's history instead, save the local records first
+(`bd export --all -o issue-export.jsonl`), move the local database directory
+(`.beads/dolt`) aside, and then run `bd bootstrap`.
 
 ### 2. You want to diagnose what went wrong before deciding
 
@@ -122,7 +129,9 @@ for why the token is never echoed in `bd`'s error messages.
 
 ## init-local-exists
 
-**Exit code:** `11` (`ExitLocalExistsRefused`)
+**Exit code:** `12` (`ExitDestroyTokenMissing`) for the non-interactive refusal
+quoted below; `11` (`ExitLocalExistsRefused`) when you declined the interactive
+`destroy N issues` confirmation.
 
 **Symptom**
 
@@ -133,6 +142,13 @@ Refusing to destroy N issues in non-interactive mode.
 
 Or, in interactive mode, you declined the typed `destroy N issues`
 confirmation.
+
+A plain `bd init` over an existing database, with no `--force` or
+`--reinit-local`, is a different and softer stop: it prints
+`Found existing Dolt database: <path>` / `This workspace is already initialized.`
+and exits `1` without touching anything. Nothing needs recovering there; run
+`bd` commands normally, or come back to this section only if you really mean
+to replace the local database.
 
 **Why this happens**
 
@@ -155,8 +171,8 @@ enough to create a restorable backup before reinitializing.
 ### 2. Investigate why you hit this
 
 If you did NOT expect `bd init` to be the right command here, run
-`bd doctor` first — you may be looking at a server config issue that a
-re-init won't fix.
+`bd dolt status` (the refusal's own hint) and `bd doctor` first — you may be
+looking at a server config issue that a re-init won't fix.
 
 ---
 
@@ -187,10 +203,10 @@ changes existed on both sides, across a release whose schema migrations
 reshape a primary key. Concretely: the
 [#4259](https://github.com/gastownhall/beads/issues/4259) incident — clones
 straddling the `0041`/`0043`/`0050` reshapes of `dependencies` (v1.0.4 →
-v1.0.6) hit exactly this on the first post-upgrade pull if both sides had
+v1.1.0-rc.1) hit exactly this on the first post-upgrade pull if both sides had
 unpushed dependency edits.
 
-The remote-migrate prevention gate (v1.0.6+) exists to stop this from being
+The remote-migrate prevention gate (v1.1.0-rc.1+) exists to stop this from being
 created: it refuses to auto-migrate a remote-backed database and tells you to
 designate a single migrator. This playbook is for when the fork already
 exists.
@@ -222,7 +238,8 @@ bd dolt push --force       # make the remote authoritative
 
 (`bd`'s migration gate may block here; that is exactly the designated-migrator
 case the gate is asking about — follow the guidance it prints on the canonical
-clone.)
+clone. The override it names, `bd migrate --force` or
+`BD_ALLOW_REMOTE_MIGRATE=1`, is for that one designated clone only.)
 
 ### 3. On EVERY other clone: save local-only work, re-clone, re-apply
 
@@ -246,8 +263,11 @@ remote already has are skipped. Spot-check with `bd stats` afterwards.
 - **One designated migrator**: upgrade one machine, let it migrate, then
   `bd dolt push`.
 - **Every other clone adopts, does not pull**: after the migrator pushes, each
-  other clone upgrades the binary and runs `bd bootstrap` to adopt the migrated
-  database. `bd dolt pull` is *refused* while the clone still has pending
-  migrations, so do not rely on it; the "sync before" step above is what
-  preserves these clones' work, because `bd bootstrap` replaces the local
-  database.
+  other clone upgrades the binary, saves its local-only records
+  (`bd export --all -o issue-export.jsonl`), moves its local database
+  directory (`.beads/dolt`) aside, and runs `bd bootstrap`, which clones the
+  migrated database because none is present. `bd bootstrap` never replaces a
+  database it finds, so the move-aside is the step that makes it adopt; and
+  `bd dolt pull` is *refused* while the clone still has pending migrations, so
+  do not rely on it. The "sync before" step above is what preserves these
+  clones' work.
