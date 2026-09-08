@@ -162,43 +162,6 @@ func RunStatsReporterBreaksOutAGateThatIsAlsoATemplate(t *testing.T, ctx context
 	})
 }
 
-// RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows is the scoped half of
-// the pair. `bd status --assigned` reaches a different implementation - the
-// fold over one actor's rows in internal/workapi/stats.go, not
-// ScanIssueCountsInTx - and its filter sets only Assignee, so the actor's gates
-// and protos ARE in these rows while `bd list --assignee` suppresses both. The
-// two counts must therefore be populated here too; a zero would be the same
-// silent disagreement, one scope down.
-func RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
-	t.Helper()
-	assignee := statsReporterAssignee(fixture, "asuppressed")
-
-	plain := statsReporterSeed(fixture, "asuppressed-plain", types.StatusOpen)
-	plain.Assignee = assignee
-	seedStatsReporterIssue(t, ctx, fixture, plain)
-
-	gate := statsReporterSeed(fixture, "asuppressed-gate", types.StatusOpen)
-	gate.Assignee = assignee
-	gate.IssueType = types.TypeGate
-	seedStatsReporterIssue(t, ctx, fixture, gate)
-
-	proto := statsReporterSeed(fixture, "asuppressed-proto", types.StatusOpen)
-	proto.Assignee = assignee
-	proto.IsTemplate = true
-	seedStatsReporterIssue(t, ctx, fixture, proto)
-
-	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
-	if summary.TotalIssues != 3 {
-		t.Fatalf("TotalIssues = %d, want 3 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
-	}
-	if summary.GateIssues != 1 {
-		t.Errorf("GateIssues = %d, want 1 — the actor's gate is in this answer but not in `bd list --assignee`", summary.GateIssues)
-	}
-	if summary.TemplateIssues != 1 {
-		t.Errorf("TemplateIssues = %d, want 1 — the actor's proto is in this answer but not in `bd list --assignee`", summary.TemplateIssues)
-	}
-}
-
 // RunStatsReporterAStatusOutsideTheTalliesIsCountedOnlyInTotal pins the second
 // half of statsreporter.go:92-98 — the tallies are exact equality against the
 // stored status, so a row whose status is none of the four lands in Total and
@@ -545,6 +508,43 @@ func RunStatsReporterAssigneeStatsMergesTheWispTier(t *testing.T, ctx context.Co
 	}
 	if summary.OpenIssues != 2 {
 		t.Errorf("OpenIssues = %d, want 2", summary.OpenIssues)
+	}
+}
+
+// RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows is the scoped half of
+// the pair. `bd status --assigned` reaches a different implementation - the
+// fold over one actor's rows in internal/workapi/stats.go, not
+// ScanIssueCountsInTx - and its filter sets only Assignee, so the actor's gates
+// and protos ARE in these rows while `bd list --assignee` suppresses both. The
+// two counts must therefore be populated here too; a zero would be the same
+// silent disagreement, one scope down.
+func RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	assignee := statsReporterAssignee(fixture, "asuppressed")
+
+	plain := statsReporterSeed(fixture, "asuppressed-plain", types.StatusOpen)
+	plain.Assignee = assignee
+	seedStatsReporterIssue(t, ctx, fixture, plain)
+
+	gate := statsReporterSeed(fixture, "asuppressed-gate", types.StatusOpen)
+	gate.Assignee = assignee
+	gate.IssueType = types.TypeGate
+	seedStatsReporterIssue(t, ctx, fixture, gate)
+
+	proto := statsReporterSeed(fixture, "asuppressed-proto", types.StatusOpen)
+	proto.Assignee = assignee
+	proto.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, proto)
+
+	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
+	if summary.TotalIssues != 3 {
+		t.Fatalf("TotalIssues = %d, want 3 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
+	}
+	if summary.GateIssues != 1 {
+		t.Errorf("GateIssues = %d, want 1 — the actor's gate is in this answer but not in `bd list --assignee`", summary.GateIssues)
+	}
+	if summary.TemplateIssues != 1 {
+		t.Errorf("TemplateIssues = %d, want 1 — the actor's proto is in this answer but not in `bd list --assignee`", summary.TemplateIssues)
 	}
 }
 
