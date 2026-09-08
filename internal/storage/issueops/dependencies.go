@@ -159,7 +159,8 @@ type DepTargetPrecheck struct {
 //   - Source/target existence validation
 //   - Hierarchy deadlock validation for blocking deps (GH#1495, bd-wg7ve)
 //   - Cycle detection via recursive CTE across both dependency tables
-//   - Idempotent same-type updates (metadata only)
+//   - Idempotent same-type re-adds: a metadata change updates it, a
+//     change-free re-add writes and journals nothing (#5898 R3)
 //   - Type conflict detection
 //
 // The caller is responsible for transaction lifecycle, dolt commits, and
@@ -272,14 +273,20 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// Check for existing dependency between the same pair. Use the resolved
 	// target expression defensively so stale/reclassified rows in another typed
 	// target column cannot bypass the idempotency/conflict check.
-	var existingType string
+	var existingType, existingMetadata string
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType)
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadata)
 	if err == nil {
 		if existingType == string(dep.Type) {
-			// Same type — idempotent; update metadata. No event is written, so the
-			// caller must not stage the events table for this re-add.
+			if existingMetadata == metadata {
+				// Same type, same metadata: a change-free write. Nothing is
+				// written and nothing is journaled (#5898 R3).
+				return false, nil
+			}
+			// Same type, different metadata — idempotent; update metadata. No
+			// event is written, so the caller must not stage the events table
+			// for this re-add.
 			//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
 			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
 				metadata, dep.IssueID, dep.DependsOnID); err != nil {
