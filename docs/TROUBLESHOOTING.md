@@ -546,15 +546,15 @@ This means bd found multiple `.beads` directories in your directory hierarchy. T
 
 **Symptom:** Every `bd` command fails with `dolt circuit breaker is open: server appears down, failing fast (cooldown 30s)`. This persists across repeated invocations.
 
-**Cause:** The circuit breaker tripped after repeated connection failures. Its state is stored in a file at `/tmp/beads-dolt-circuit-<host>-<port>.json` (keyed on host:port) and shared across all `bd` processes. Once tripped, all commands to that specific host:port are rejected until a successful probe resets it.
+**Cause:** The circuit breaker tripped after repeated connection failures. Its state is stored in the user's cache directory under `beads/circuit/` (for example, `$XDG_CACHE_HOME/beads/circuit/` on Linux) and shared across `bd` processes. Once tripped, commands to that specific endpoint are rejected until a successful probe resets it.
 
 **Note:** `bd dolt status` checks the server's PID file, not whether the server is actually accepting connections. A "running" status does not guarantee the server is reachable on the expected port.
 
 **Diagnosis:**
 
 ```bash
-# Check circuit breaker state
-cat /tmp/beads-dolt-circuit-*.json
+# Check circuit breaker state (Linux)
+find "${XDG_CACHE_HOME:-$HOME/.cache}/beads/circuit" -name 'beads-dolt-circuit-*.json' -print
 
 # Check if the Dolt server is actually listening
 lsof -i :<port>
@@ -566,13 +566,9 @@ cat .beads/metadata.json | grep port
 **Fix:**
 
 ```bash
-rm /tmp/beads-dolt-circuit-*.json
-bd dolt stop
-bd dolt start
+bd doctor --fix
 bd list
 ```
-
-**Note (macOS):** On macOS, `/tmp` is a symlink to `/private/tmp`. The circuit breaker state file may persist across reboots since `/private/tmp` is not always cleared on restart.
 
 ### Connection failures after upgrading from pre-Dolt versions
 
