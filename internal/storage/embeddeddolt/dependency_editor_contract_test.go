@@ -255,12 +255,13 @@ func newEmbeddedDependencyEditorFixture(t *testing.T, ctx context.Context, prefi
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.DependencyEditorFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Editor:        editor,
-		CreateIssue:   kit.CreateIssue,
-		CreateWisp:    kit.CreateWisp,
-		AddDependency: kit.AddDependency,
-		QueryScalar:   kit.QueryScalar,
-		CountHistory:  kit.CountHistory,
+		IssuePrefix:       kit.IssuePrefix,
+		Editor:            editor,
+		CreateIssue:       kit.CreateIssue,
+		CreateWisp:        kit.CreateWisp,
+		AddDependency:     kit.AddDependency,
+		QueryScalar:       kit.QueryScalar,
+		CountHistory:      kit.CountHistory,
+		SetJournalEnabled: te.store.SetEventsJournalEnabled,
 	}
 }
