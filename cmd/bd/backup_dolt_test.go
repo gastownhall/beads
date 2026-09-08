@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -241,7 +242,21 @@ func TestDoltBackupSizeFromSizer(t *testing.T) {
 }
 
 func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
-	t.Parallel()
+	// Isolate from the ambient checkout: a developer's repo (or a session
+	// that ran `bd backup init` on this rig) legitimately carries
+	// .beads/dolt-backup.json, which must not leak into this test.
+	// Serial on purpose: t.Chdir swaps the process-wide working directory.
+	t.Chdir(t.TempDir())
+	// Pin the resolution contract: this test must resolve the workspace from
+	// the (temp) working directory only. An empty BEADS_DIR disables the env
+	// override entirely, so a sibling test's env state can never leak the
+	// ambient checkout in; t.Setenv restores it afterwards.
+	t.Setenv("BEADS_DIR", "")
+	// RepoContext resolves once per process (sync.Once) and the first
+	// resolution may have happened while the working directory was still the
+	// ambient checkout. t.Chdir alone cannot invalidate that cache, so reset
+	// it before resolving — the same contract the init isolation tests follow.
+	beads.ResetCaches()
 	// When no .beads dir exists, should return configured=false
 	result := showDoltBackupStatusJSON()
 	configured, ok := result["configured"].(bool)

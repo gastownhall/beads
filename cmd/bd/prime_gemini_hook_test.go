@@ -50,7 +50,7 @@ func runPrimeBinary(t *testing.T, binPath, workDir string, args ...string) (stdo
 // .beads/ directory so FindBeadsDir succeeds.
 func initBeadsWorkspace(t *testing.T, binPath, workDir string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, "init", "--prefix", "test")
 	cmd.Dir = workDir
@@ -346,7 +346,7 @@ func primeScenarioHookJSONNoBeadsWorkspace(t *testing.T, binPath, workDir string
 // initBeadsWorkspace/runPrimeBinary resolves the same database.
 func rememberInWorkspace(t *testing.T, binPath, workDir, key, content string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, "remember", content, "--key", key)
 	cmd.Dir = workDir

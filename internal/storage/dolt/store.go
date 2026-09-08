@@ -1275,7 +1275,12 @@ func (s *DoltStore) RemoteName() string {
 
 // BackupAdd registers a Dolt backup destination.
 func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
-	return versioncontrolops.BackupAdd(ctx, s.db, name, url)
+	db, err := s.oneShotConn(0)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return versioncontrolops.BackupAdd(ctx, db, name, url)
 }
 
 // BackupSync pushes the database to the named backup destination.

@@ -6,7 +6,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func runFindDuplicatesProxiedServer(ctx context.Context, filter types.IssueFilter, status, method string, threshold float64, limit int, model string) error {
+func runFindDuplicatesProxiedServer(ctx context.Context, filter types.IssueFilter, status, method string, threshold float64, limit int, model string, includeWorkflow bool) error {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
 		return HandleError("%v", err)
@@ -19,5 +19,5 @@ func runFindDuplicatesProxiedServer(ctx context.Context, filter types.IssueFilte
 	}
 	issues := filterClosedIfNoStatus(page.Items, status)
 
-	return reportFindDuplicates(ctx, issues, method, threshold, limit, model)
+	return reportFindDuplicates(ctx, issues, method, threshold, limit, model, includeWorkflow)
 }

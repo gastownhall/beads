@@ -6,7 +6,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func runDuplicatesProxiedServer(ctx context.Context, autoMerge, dryRun bool) error {
+func runDuplicatesProxiedServer(ctx context.Context, autoMerge, dryRun, includeWorkflow bool) error {
 	if autoMerge && !dryRun {
 		return HandleErrorRespectJSON("duplicates --auto-merge is not supported in proxied-server mode")
 	}
@@ -23,14 +23,15 @@ func runDuplicatesProxiedServer(ctx context.Context, autoMerge, dryRun bool) err
 	}
 	allIssues := page.Items
 
-	duplicateGroups := findDuplicateGroups(openIssuesOf(allIssues))
+	candidates, workflowSkipped := duplicateCandidates(allIssues, includeWorkflow)
+	duplicateGroups := findDuplicateGroups(candidates)
 	if len(duplicateGroups) == 0 {
-		return outputNoDuplicates()
+		return outputNoDuplicates(workflowSkipped, includeWorkflow)
 	}
 
 	refCounts := countReferences(allIssues)
 	depCounts, _ := uw.DependencyUseCase().CountsByIssueIDs(ctx, collectDuplicateGroupIDs(duplicateGroups))
 	structuralScores := buildStructuralScores(duplicateGroups, depCounts)
 
-	return outputDuplicates(duplicateGroups, refCounts, structuralScores, autoMerge, dryRun, nil)
+	return outputDuplicates(duplicateGroups, refCounts, structuralScores, autoMerge, dryRun, nil, workflowSkipped, includeWorkflow)
 }

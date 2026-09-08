@@ -20,11 +20,18 @@ Groups issues by content hash and reports duplicates with suggested merge target
 The merge target is chosen by:
 1. Reference count (most referenced issue wins)
 2. Lexicographically smallest ID if reference counts are equal
-Only groups issues with matching status (open with open, closed with closed).
+Only non-closed issues are considered.
+
+Orchestrator-managed workflow beads (metadata carrying "gc."-prefixed keys,
+e.g. Gas City spec/logical/control template instances) are skipped: their
+identical template text is owned by the orchestrator lifecycle, not by
+content deduplication. Pass --include-workflow to include them anyway.
+
 Example:
   bd duplicates                    # Show all duplicate groups
   bd duplicates --auto-merge       # Automatically merge all duplicates
-  bd duplicates --dry-run          # Show what would be merged`,
+  bd duplicates --dry-run          # Show what would be merged
+  bd duplicates --include-workflow # Also consider orchestrator-managed beads`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -37,9 +44,10 @@ Example:
 
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		includeWorkflow, _ := cmd.Flags().GetBool("include-workflow")
 
 		if usesProxiedServer() {
-			return runDuplicatesProxiedServer(rootCtx, autoMerge, dryRun)
+			return runDuplicatesProxiedServer(rootCtx, autoMerge, dryRun, includeWorkflow)
 		}
 
 		if autoMerge && !dryRun {
@@ -51,9 +59,10 @@ Example:
 		if err != nil {
 			return HandleError("fetching issues: %v", err)
 		}
-		duplicateGroups := findDuplicateGroups(openIssuesOf(allIssues))
+		candidates, workflowSkipped := duplicateCandidates(allIssues, includeWorkflow)
+		duplicateGroups := findDuplicateGroups(candidates)
 		if len(duplicateGroups) == 0 {
-			return outputNoDuplicates()
+			return outputNoDuplicates(workflowSkipped, includeWorkflow)
 		}
 		refCounts := countReferences(allIssues)
 		depCounts, _ := store.GetDependencyCounts(ctx, collectDuplicateGroupIDs(duplicateGroups))
@@ -64,8 +73,20 @@ Example:
 			mergeResults = executeDuplicateMerges(duplicateGroups, refCounts, structuralScores)
 			commandDidWrite.Store(true)
 		}
-		return outputDuplicates(duplicateGroups, refCounts, structuralScores, autoMerge, dryRun, mergeResults)
+		return outputDuplicates(duplicateGroups, refCounts, structuralScores, autoMerge, dryRun, mergeResults, workflowSkipped, includeWorkflow)
 	},
+}
+
+// duplicateCandidates narrows all issues to the dedup-eligible set: non-closed
+// issues, minus orchestrator-managed workflow instances unless the operator
+// passed --include-workflow. It is the single choke point shared by the local
+// and proxied-server paths so both behave identically.
+func duplicateCandidates(allIssues []*types.Issue, includeWorkflow bool) ([]*types.Issue, int) {
+	openIssues := openIssuesOf(allIssues)
+	if includeWorkflow {
+		return openIssues, 0
+	}
+	return partitionWorkflowIssues(openIssues)
 }
 
 func openIssuesOf(allIssues []*types.Issue) []*types.Issue {
@@ -88,15 +109,26 @@ func collectDuplicateGroupIDs(groups [][]*types.Issue) []string {
 	return ids
 }
 
-func outputNoDuplicates() error {
+func outputNoDuplicates(workflowSkipped int, includeWorkflow bool) error {
 	if !jsonOutput {
 		fmt.Println("No duplicates found!")
+		printWorkflowSkipped(workflowSkipped)
 		return nil
 	}
 	return outputJSON(map[string]interface{}{
 		"duplicate_groups": 0,
 		"groups":           []interface{}{},
+		"workflow_skipped": workflowSkipped,
+		"include_workflow": includeWorkflow,
 	})
+}
+
+// printWorkflowSkipped reports how many orchestrator-managed workflow beads
+// were excluded from consideration unless --include-workflow was passed.
+func printWorkflowSkipped(workflowSkipped int) {
+	if workflowSkipped > 0 {
+		fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
+	}
 }
 
 func executeDuplicateMerges(duplicateGroups [][]*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore) []map[string]interface{} {
@@ -114,7 +146,7 @@ func executeDuplicateMerges(duplicateGroups [][]*types.Issue, refCounts map[stri
 	return mergeResults
 }
 
-func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore, autoMerge, dryRun bool, mergeResults []map[string]interface{}) error {
+func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore, autoMerge, dryRun bool, mergeResults []map[string]interface{}, workflowSkipped int, includeWorkflow bool) error {
 	var mergeCommands []string
 	for _, group := range duplicateGroups {
 		target := chooseMergeTarget(group, refCounts, structuralScores)
@@ -137,6 +169,8 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 		output := map[string]interface{}{
 			"duplicate_groups": len(duplicateGroups),
 			"groups":           formatDuplicateGroupsJSON(duplicateGroups, refCounts, structuralScores),
+			"workflow_skipped": workflowSkipped,
+			"include_workflow": includeWorkflow,
 		}
 		if autoMerge || dryRun {
 			output["merge_commands"] = mergeCommands
@@ -147,6 +181,10 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 		return outputJSON(output)
 	}
 	fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
+	printWorkflowSkipped(workflowSkipped)
+	if workflowSkipped > 0 {
+		fmt.Println()
+	}
 	for i, group := range duplicateGroups {
 		target := chooseMergeTarget(group, refCounts, structuralScores)
 		fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
@@ -188,6 +226,7 @@ func outputDuplicates(duplicateGroups [][]*types.Issue, refCounts map[string]int
 func init() {
 	duplicatesCmd.Flags().Bool("auto-merge", false, "Automatically merge all duplicates")
 	duplicatesCmd.Flags().Bool("dry-run", false, "Show what would be merged without making changes")
+	duplicatesCmd.Flags().Bool("include-workflow", false, "Also consider orchestrator-managed workflow beads (metadata with gc.* keys); they are skipped by default")
 	rootCmd.AddCommand(duplicatesCmd)
 }
 

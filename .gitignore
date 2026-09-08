@@ -26,6 +26,10 @@ pkg/
 
 # Agent local state (skills, settings, etc.)
 .amp/
+# Gas City runtime projections into this rig (skill symlinks, ownership
+# manifest, pack scripts): runtime state, never source.
+.claude/skills/
+.gc/
 
 # Claude Code - local/runtime state
 .claude/settings.local.json

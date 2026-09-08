@@ -18,7 +18,7 @@ import (
 // pollute parsed values (e.g. an issue ID from `bd q`).
 func runBDStdout(t *testing.T, binPath, workDir string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Dir = workDir

@@ -10,8 +10,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check for merge conflict markers
         run: |
-          markers=$(git grep -l '<<<<<<< HEAD\|=======$' -- \
-            $(git ls-files | grep -vE '\.venv/|node_modules/|dist/|build/|\.cache/|_vendor/' | tr '\n' ' ') 2>/dev/null || true)
+          # A conflict leaves an opening marker and a closing marker in the
+          # same file. Matching a bare "=======" line alone flagged SQL,
+          # shell and Markdown separators fleet-wide (false red on every PR),
+          # so a file is reported only when it carries both real markers.
+          excludes=":(exclude)**/.venv/** :(exclude)**/node_modules/** :(exclude)**/dist/** :(exclude)**/build/** :(exclude)**/.cache/** :(exclude)**/_vendor/**"
+          # shellcheck disable=SC2086 -- $excludes is a space-separated pathspec list on purpose
+          opening=$(git grep -l -E '^<<<<<<< ' -- . $excludes || true)
+          closing=$(git grep -l -E '^>>>>>>> ' -- . $excludes || true)
+          markers=$(comm -12 <(printf '%s\n' "$opening" | sort -u) <(printf '%s\n' "$closing" | sort -u) | sed '/^$/d')
           if [ -n "$markers" ]; then
             echo "::error::Merge conflict markers found in tracked files:"
             echo "$markers"

@@ -274,11 +274,15 @@ func (rc *RepoContext) RelPath(absPath string) (string, error) {
 	return filepath.Rel(rc.RepoRoot, absPath)
 }
 
-// ResetCaches clears the cached RepoContext, forcing re-resolution on next call.
+// ResetCaches clears every cached workspace-resolution input: the RepoContext
+// here and the git context in internal/git, forcing re-resolution on next call.
 //
 // This is intended for tests that need to change directory or BEADS_DIR
 // between test cases. In production, the cache is safe because these
-// values don't change during command execution.
+// values don't change during command execution. Workspace resolution reads
+// the git context (worktree detection, repo root), so resetting only one of
+// the two caches leaves resolution pinned to the pre-chdir state — the
+// composition here is what makes this a single complete reset verb.
 //
 // WARNING: Not thread-safe. Only call from single-threaded test contexts.
 //
@@ -286,9 +290,9 @@ func (rc *RepoContext) RelPath(absPath string) (string, error) {
 //
 //	t.Cleanup(func() {
 //	    beads.ResetCaches()
-//	    git.ResetCaches()
 //	})
 func ResetCaches() {
+	git.ResetCaches()
 	repoCtxOnce = sync.Once{}
 	repoCtx = nil
 	repoCtxErr = nil

@@ -53,7 +53,13 @@ Examples:
   bd find-duplicates --method ai           # Use AI for semantic comparison
   bd find-duplicates --status open         # Only check open issues
   bd find-duplicates --limit 20            # Show top 20 pairs
-  bd find-duplicates --json                # JSON output`,
+  bd find-duplicates --include-workflow    # Also consider orchestrator-managed beads
+  bd find-duplicates --json                # JSON output
+
+Orchestrator-managed workflow beads (metadata carrying "gc."-prefixed keys,
+e.g. Gas City spec/logical/control template instances) are skipped: their
+identical template text is owned by the orchestrator lifecycle, not by
+content deduplication. Pass --include-workflow to include them anyway.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runFindDuplicates,
@@ -65,6 +71,7 @@ func init() {
 	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
+	findDuplicatesCmd.Flags().Bool("include-workflow", false, "Also consider orchestrator-managed workflow beads (metadata with gc.* keys); they are skipped by default")
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
 	addMaxRowsFlag(findDuplicatesCmd)
 	rootCmd.AddCommand(findDuplicatesCmd)
@@ -92,6 +99,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	status, _ := cmd.Flags().GetString("status")
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
+	includeWorkflow, _ := cmd.Flags().GetBool("include-workflow")
 	if model == "" {
 		_, keySource := config.ResolveAIAPIKey("")
 		model = config.DefaultAIModelFor(keySource)
@@ -129,7 +137,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 		if err := rejectResolvedMaxRowsUnderProxiedServer(maxRows); err != nil {
 			return err
 		}
-		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
+		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model, includeWorkflow)
 	}
 
 	issues, err := store.SearchIssues(rootCtx, "", filter)
@@ -141,7 +149,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 	issues = filterClosedIfNoStatus(issues, status)
 
-	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model)
+	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model, includeWorkflow)
 }
 
 func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue {
@@ -157,15 +165,21 @@ func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue
 	return filtered
 }
 
-func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string) error {
+func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string, includeWorkflow bool) error {
+	workflowSkipped := 0
+	if !includeWorkflow {
+		issues, workflowSkipped = partitionWorkflowIssues(issues)
+	}
 	if len(issues) < 2 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"pairs": []interface{}{},
-				"count": 0,
+				"pairs":            []interface{}{},
+				"count":            0,
+				"workflow_skipped": workflowSkipped,
 			})
 		}
 		fmt.Println("Not enough issues to compare (need at least 2)")
+		printWorkflowSkipped(workflowSkipped)
 		return nil
 	}
 
@@ -212,20 +226,27 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 			}
 		}
 		return outputJSON(map[string]interface{}{
-			"pairs":     jsonPairs,
-			"count":     len(jsonPairs),
-			"method":    method,
-			"threshold": threshold,
+			"pairs":            jsonPairs,
+			"count":            len(jsonPairs),
+			"method":           method,
+			"threshold":        threshold,
+			"workflow_skipped": workflowSkipped,
+			"include_workflow": includeWorkflow,
 		})
 	}
 
 	if len(pairs) == 0 {
 		fmt.Printf("No similar issues found (threshold: %.0f%%)\n", threshold*100)
+		printWorkflowSkipped(workflowSkipped)
 		return nil
 	}
 
 	fmt.Printf("%s Found %d potential duplicate pair(s) (threshold: %.0f%%):\n\n",
 		ui.RenderWarn("🔍"), len(pairs), threshold*100)
+	printWorkflowSkipped(workflowSkipped)
+	if workflowSkipped > 0 {
+		fmt.Println()
+	}
 
 	for i, p := range pairs {
 		pct := p.Similarity * 100

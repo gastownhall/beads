@@ -14,9 +14,27 @@ const (
 	EnvEndpoint = "BEADS_METRICS_ENDPOINT"
 
 	flushTimeout = 30 * time.Second
+
+	// hardStop is the process-level backstop for the flusher child. The
+	// ctx bound above covers the POST itself, but the child also runs
+	// queue pruning and collector teardown outside that context; a lock
+	// left wedged by a SIGKILLed parent must not turn the flusher into
+	// an immortal orphan. When hardStop fires the child exits in place —
+	// worst case a batch is re-sent on the next flush, which the queue's
+	// idempotent batching already tolerates.
+	hardStop = 60 * time.Second
 )
 
 func RunSendMetrics() int {
+	// Arm the watchdog before anything else: DataDir, pruning and teardown
+	// all run outside the flush ctx and none of them is allowed to wedge
+	// this process past hardStop.
+	watchdog := time.AfterFunc(hardStop, func() {
+		fmt.Fprintln(os.Stderr, "send-metrics: hard stop after 60s (wedged lock or stall); exiting")
+		os.Exit(1)
+	})
+	defer watchdog.Stop()
+
 	dir, err := DataDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "send-metrics: %v\n", err)

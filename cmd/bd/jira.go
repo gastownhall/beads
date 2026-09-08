@@ -17,7 +17,7 @@ var jiraCmd = &cobra.Command{
 	Use:     "jira",
 	GroupID: "advanced",
 	Short:   "Jira integration commands",
-Long: `Synchronize issues between beads and Jira.
+	Long: `Synchronize issues between beads and Jira.
 
 Configuration:
   bd config set jira.url "https://company.atlassian.net"
