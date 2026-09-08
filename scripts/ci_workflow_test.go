@@ -1328,6 +1328,32 @@ func TestPinnedDoltCLIMatchesContainerImage(t *testing.T) {
 	}
 }
 
+// TestProxiedLocalSmokeMatchesPinnedDoltVersion keeps the proxied-local-smoke
+// lane's standalone Dolt CLI install on the same release as the rest of the
+// suite. That lane downloads its own dolt binary straight from GitHub
+// releases instead of going through scripts/ci/install-dolt.sh, so nothing
+// else catches it drifting off the measured pin (see "Which Dolt version to
+// install" in docs/architecture/dolt.md for why the pin is not just "latest").
+func TestProxiedLocalSmokeMatchesPinnedDoltVersion(t *testing.T) {
+	root := sourceRepoRoot(t)
+
+	installer, err := os.ReadFile(filepath.Join(root, "scripts", "ci", "install-dolt.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliVersion := captureOne(t, `(?m)^readonly version="([0-9]+\.[0-9]+\.[0-9]+)"$`, string(installer), "scripts/ci/install-dolt.sh")
+
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "proxied-local-smoke.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	smokeVersion := captureOne(t, `(?m)^\s*DOLT_VERSION:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$`, string(workflow), "proxied-local-smoke.yml:DOLT_VERSION")
+
+	if cliVersion != smokeVersion {
+		t.Errorf("dolt pins disagree: CLI %s, proxied-local-smoke.yml DOLT_VERSION %s", cliVersion, smokeVersion)
+	}
+}
+
 func captureOne(t *testing.T, pattern, body, source string) string {
 	t.Helper()
 

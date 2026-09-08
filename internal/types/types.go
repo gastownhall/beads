@@ -2178,6 +2178,11 @@ type WorkFilter struct {
 	// When Type is set, ExcludeTypes is ignored (explicit type inclusion wins).
 	ExcludeTypes []IssueType
 
+	// ID exclusion: omit these issues before ordering, pagination, or atomic
+	// ready-claim selection. Storage policy decorators use this to inject
+	// query-time blockers that cannot be represented by local is_blocked state.
+	ExcludeIDs []string
+
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)

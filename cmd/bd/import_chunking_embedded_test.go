@@ -120,12 +120,28 @@ func TestImportChunkedRealStoreResumeConverges(t *testing.T) {
 	}
 
 	// Re-run the identical import: it must converge.
+	//
+	// Created counts the rows THIS invocation wrote, not the rows the file
+	// put in the store (it is len(ImportedIDs), the post-filter write set).
+	// The durable prefix the crash left behind is proven a no-op by the
+	// resume fast path — same updated_at, same columns, every incoming
+	// label, comment and dependency already stored — so those rows leave the
+	// write set and are reported as Unchanged instead (wy-sbgucn). "All 12
+	// rows accounted for" is therefore Created+Unchanged, which is exactly
+	// the total `bd import` reports as its issue count (ImportData sets
+	// result.Issues = Created + Unchanged). Counting the skipped prefix as
+	// Created again would report rows the import never wrote and would put
+	// the real run out of step with --dry-run, which classifies the same
+	// rows through the same pre-filter.
 	result, err := importIssuesCore(ctx, "", store, makeIssues(), ImportOptions{SkipPrefixValidation: true})
 	if err != nil {
 		t.Fatalf("re-run importIssuesCore: %v", err)
 	}
-	if result.Created != 12 {
-		t.Fatalf("re-run Created = %d, want all 12 rows accounted for", result.Created)
+	// 5 durable rows skipped + 7 written = the 12 input rows, and a nonzero
+	// Unchanged is what proves the fast path skipped the committed prefix
+	// rather than rewriting it (the pre-wy-sbgucn behavior, Created=12).
+	if result.Created != 7 || result.Unchanged != 5 {
+		t.Fatalf("re-run Created = %d, Unchanged = %d; want 7 written + the 5 durable rows skipped (all 12 accounted for)", result.Created, result.Unchanged)
 	}
 	for i := 1; i <= 12; i++ {
 		id := fmt.Sprintf("bd-chunk%02d", i)

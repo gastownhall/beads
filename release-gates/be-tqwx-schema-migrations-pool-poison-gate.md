@@ -290,3 +290,21 @@ reconciliation above). Per this rig's contributor-only carve-out for
 `gastownhall/beads`, the deployer's job ends here: no merge (`gh pr merge`
 is forbidden for all rig agents), no merge-request routed to mayor/mpr, no
 mayor handoff — mirroring be-tqwx's own precedent on this identical branch.
+
+## Correction note (added 2026-08-20)
+
+The original criterion 3 "Tests pass" PASS verdict near the top of this file
+was based on a test run narrower than this project's required full-scope
+command: a 9-test `-run` filter across only 2 of 3 relevant packages
+(`internal/storage/dolt`, `internal/storage/schema`), never including
+`internal/storage/uow`. A full-suite run on this same PR found 37 failing
+tests across `internal/storage/schema` and `internal/storage/uow`.
+
+This gap and its fix are tracked in be-mv0ww (process fix: be-mv0ww.1,
+currently open). See also the "Post-hoc annotation" section above, which
+documents the same underlying finding from be-crwzj's investigation and
+cites the parent epic be-mv0ww; this note adds the specific process-fix
+sub-task id that epic tracks (be-mv0ww.1). Filed as be-mv0ww.2.
+
+This note does not change that original verdict — it documents that the
+verdict was reached on incomplete evidence.
