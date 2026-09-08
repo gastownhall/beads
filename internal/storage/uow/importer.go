@@ -61,7 +61,6 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 			staleRejected := make(map[string]struct{})
 			skippedSeen := make(map[string]struct{})
 			opts := storage.BatchCreateOptions{
-				OrphanHandling:                 storage.OrphanAllow,
 				SkipPrefixValidation:           request.SkipPrefixValidation,
 				RejectStaleUpserts:             !request.AllowStale,
 				SkipDependencyValidationErrors: true,
@@ -139,8 +138,17 @@ func importBatchCommitMessage(request publicops.ImportBatchRequest, result publi
 // already live in internal/storage/issueops behind the DBTX seam, and the
 // domain/db Runner satisfies that seam, so the proxied path runs the SAME
 // code the classic stores run instead of mirroring it in parallel SQL.
+//
+// The unit of work is UNWRAPPED first because a decorated one is still the
+// caller's unit of work: the hook-notifying wrapper stands in front of the use
+// cases (notifying.go), and asserting on the concrete type through it would
+// fail every import in a workspace that has hooks. Reaching the runner past a
+// decorator is exactly what unwrapUOW is for, and it is why an import fires no
+// hooks on this plumbing — the statements never pass a use case for the
+// recorder to see. Same on the DoltStorage plumbing, where import runs through
+// the batch engine rather than the hook-firing store methods.
 func importStatementRunner(uw UnitOfWork) (storageissueops.DBTX, error) {
-	b, ok := uw.(*baseUOW)
+	b, ok := unwrapUOW(uw).(*baseUOW)
 	if !ok {
 		return nil, fmt.Errorf("uow: importer: %T does not expose a statement runner", uw)
 	}

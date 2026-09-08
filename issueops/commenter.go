@@ -65,17 +65,18 @@ type AddCommentResult struct {
 // attempt-local clones. Deterministic request-validation failures match
 // ErrValidation and leave persistent state unchanged.
 type Commenter interface {
-	// AddComment appends one comment as ONE atomic mutation, with at most one
-	// history entry. A blank Text is ErrValidation, and so is an empty
-	// IssueID; a NON-EMPTY id that names neither an issue nor a wisp is
-	// ErrNotFound. Refusals use the same typed vocabulary Lifecycle returns,
-	// so a caller classifies them with errors.Is rather than by reading prose.
+	// AddComment appends one comment as ONE atomic mutation, with EXACTLY ONE
+	// history entry — a comment is one act, and not none. A blank Text is
+	// ErrValidation, and so is an empty IssueID; a NON-EMPTY id that names
+	// neither an issue nor a wisp is ErrNotFound. Refusals use the same typed
+	// vocabulary Lifecycle returns, so a caller classifies them with errors.Is
+	// rather than by reading prose.
 	//
 	// A comment on an EPHEMERAL row records NO durable history entry — none,
-	// not "at most one". Ephemeral rows are not versioned, and the wisp tables
-	// are dolt-ignored precisely so ephemeral work never ships, so a history
-	// entry naming a wisp thread would be the sync artifact ignoring those
-	// tables exists to prevent. The comment itself lands on the ephemeral
+	// not one. Ephemeral rows are not versioned, and the wisp tables are
+	// dolt-ignored precisely so ephemeral work never ships, so a history entry
+	// naming a wisp thread would be the sync artifact ignoring those tables
+	// exists to prevent. The comment itself lands on the ephemeral
 	// thread and reads back from it; only the durable trace is absent, so a
 	// caller reconstructing threads from durable history alone will not see
 	// it.

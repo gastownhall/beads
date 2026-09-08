@@ -58,11 +58,37 @@ type SweeperFixture struct {
 	// A nil hook means "this backend cannot observe history", and the case
 	// that needs it SKIPS with that reason rather than passing quietly.
 	CountHistory func(context.Context) (int, error)
+	// CommitPending puts everything written so far into the version history,
+	// so a later CountHistory delta measures the call under test and nothing
+	// that led up to it.
+	//
+	// IT IS A PRECONDITION OF THE HISTORY CASE, NOT A CONVENIENCE. Sweeping
+	// rows that never reached the history is not a change AGAINST the history:
+	// the working set returns to the state HEAD is already at, every backend's
+	// commit finds an empty diff, and none of them records an entry. Two of
+	// the three kits happen to version each seed as a side effect of writing
+	// it and one does not, so without this hook the same case measures a
+	// versioned sweep on two legs and an unversioned one on the third — and on
+	// that third leg it also depends on which OTHER subtests ran first,
+	// because their uncommitted seeds are what keep the working set dirty.
+	//
+	// A nil hook means the backend cannot settle its history on demand, and
+	// the case that needs it SKIPS with that reason rather than passing
+	// quietly.
+	CommitPending func(context.Context) error
 	// AddComment attaches a comment to an issue OR a wisp. It is filled from
 	// the backend's Commenter role, which resolves the plane itself, so a case
 	// can cite a candidate from a wisp's comment without knowing how that
 	// backend reaches wisp_comments.
 	AddComment func(ctx context.Context, issueID, author, text string) error
+	// Exec runs a raw seeding script, the same hook shape the cycle-detector
+	// kit uses. The tier-boundary case needs it to manufacture the LEGACY
+	// typed-wisp row (issues plane, wisp_type set, ephemeral 0) that no
+	// current create path can mint — every one of them now infers ephemeral
+	// from wisp_type, which is exactly why the legacy rows have to be built
+	// by hand. A nil Exec means "this backend cannot seed raw rows", and the
+	// case that needs it SKIPS with that reason rather than passing quietly.
+	Exec func(ctx context.Context, statements []SQLStatement) error
 }
 
 // sweeperClosedAt is the stamp every seeded candidate carries, and
@@ -158,6 +184,81 @@ func RunSweeperClearsOneTierAndLeavesTheOther(t *testing.T, ctx context.Context,
 		t.Fatalf("ephemeral sweep reported Swept = %d, want 1", result.Swept)
 	}
 	sweeperAssertWispRows(t, ctx, fixture, 0, wispID)
+}
+
+// RunSweeperTreatsALegacyTypedWispAsEphemeralTier pins the tier boundary on
+// the row shape that motivated it: a closed row in the ISSUES plane carrying a
+// wisp_type but not the ephemeral flag — the shape older creators minted, 858
+// of which survived every purge in one production DB because the candidate
+// filter matched the flag alone (and the flag's search route never left the
+// wisps plane).
+//
+// The ephemeral sweep must take it; the durable sweep must not — a typed wisp
+// is ephemeral-tier however it was minted. The durable sibling proves the
+// boundary moved rather than collapsed into "purge takes everything".
+//
+// The legacy shape is manufactured with a raw UPDATE because every current
+// create path infers ephemeral from wisp_type; the rows this case guards were
+// minted before the inference existed.
+func RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.Exec == nil {
+		t.Skip("backend cannot seed raw rows (no Exec hook)")
+	}
+	legacy := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "legacywisp", "typed", false), nil)
+	durable := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "legacywisp", "plain", false), nil)
+	if err := fixture.Exec(ctx, []SQLStatement{{
+		Query: "UPDATE issues SET wisp_type = 'patrol' WHERE id = ?",
+		Args:  []any{legacy},
+	}}); err != nil {
+		t.Fatalf("manufacturing the legacy typed-wisp shape: %v", err)
+	}
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "legacywisp"),
+	})
+	if result.Swept != 1 {
+		t.Fatalf("ephemeral sweep Swept = %d, want 1 (the legacy typed wisp)", result.Swept)
+	}
+	sweeperAssertIssueRows(t, ctx, fixture, 0, legacy)
+	sweeperAssertIssueRows(t, ctx, fixture, 1, durable)
+
+	result = sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepDurable,
+		IDPattern: sweeperPattern(fixture, "legacywisp"),
+	})
+	if result.Swept != 1 {
+		t.Fatalf("durable sweep Swept = %d, want 1 (the plain closed issue)", result.Swept)
+	}
+	sweeperAssertIssueRows(t, ctx, fixture, 0, durable)
+}
+
+// RunSweeperLeavesNoHistoryBeadsToTheDurableTier pins the other edge of the
+// same boundary: a NoHistory bead lives in the WISPS plane with ephemeral=0
+// and no wisp_type, and it is durable-tier (GH#3649) — widening the ephemeral
+// tier to typed wisps must not sweep it up.
+func RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	// Seeded through CreateWisp, not CreateIssue: putting a NoHistory bead in
+	// the wisps plane is the CREATE verb's routing, and not every fixture's
+	// CreateIssue goes through that verb (the uow kit calls the domain-level
+	// create, which takes the plane as an argument). The sweeper contract
+	// needs the row SHAPE in the wisps plane, however a backend gets it there.
+	noHistory := sweeperIssue(fixture, "nohist", "keep", false)
+	noHistory.NoHistory = true
+	if err := fixture.CreateWisp(ctx, noHistory, "sweeper-seed"); err != nil {
+		t.Fatalf("seeding %s: %v", noHistory.ID, err)
+	}
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "nohist"),
+	})
+	if result.Swept != 0 {
+		t.Fatalf("ephemeral sweep Swept = %d, want 0 — a NoHistory bead is durable-tier", result.Swept)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 1, noHistory.ID)
 }
 
 // RunSweeperProtectsPinnedRows pins the protection no request field overrides
@@ -409,19 +510,38 @@ func RunSweeperEmptyMatchIsZeroAndNil(t *testing.T, ctx context.Context, fixture
 	}
 }
 
-// RunSweeperRecordsAtMostOneHistoryEntry pins the versioning clause
+// RunSweeperRecordsExactlyOneHistoryEntry pins the versioning clause
 // (issueops.Sweeper.Sweep, "A DRY RUN CHANGES NOTHING, including history"): a
-// dry run and a no-op record NONE, and a sweep that deleted rows records at
-// most ONE — the deletion is one act, not one per row.
+// dry run and a no-op record NONE, and a sweep that deleted durable rows
+// records EXACTLY ONE — the deletion is one act, not none and not one per row.
 //
-// "AT MOST" rather than "exactly" is the honest promise across these backends:
-// the server-backed store records a Dolt commit, the embedded one commits
-// outside the SQL transaction and records none here, and an ephemeral sweep
-// touches only tables the version-control plane ignores.
-func RunSweeperRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+// The two zeros and the one are all exact. The range this case used to assert
+// on the last half absorbed a real split — the embedded store minted no Dolt
+// commit for a sweep at all — and passed either way; a lower bound that cannot
+// fail pins nothing. The zeros were always exact and stay that way: they are
+// what makes a preview a preview.
+//
+// AN EPHEMERAL SWEEP IS DELIBERATELY NOT THIS CASE'S SUBJECT. It touches only
+// tables the version-control plane ignores, so every wiring records none for
+// it — a uniform property of dolt_ignore rather than of the role.
+//
+// THE ENTRY IS NOT PROMISED TO BE CRASH-ATOMIC WITH THE SWEEP. The
+// server-backed store writes it inside the write transaction; the embedded one
+// writes it after its SQL commit, on a second connection, so a crash in that
+// window leaves the rows swept and the entry unwritten until the next flush.
+// What all three wirings promise, and what this case reads, is the steady
+// state one returned call leaves behind.
+//
+// THE SEEDS ARE SETTLED INTO THE HISTORY BEFORE ANYTHING IS MEASURED; see
+// SweeperFixture.CommitPending for why sweeping unversioned rows records
+// nothing anywhere.
+func RunSweeperRecordsExactlyOneHistoryEntry(t *testing.T, ctx context.Context, fixture SweeperFixture) {
 	t.Helper()
 	if fixture.CountHistory == nil {
 		t.Skip("this backend cannot observe history, so the entry-per-call clause is unobservable here")
+	}
+	if fixture.CommitPending == nil {
+		t.Skip("this backend cannot settle its history on demand, so a sweep of these seeds is not a change against the history and the clause is unobservable here")
 	}
 	ids := []string{
 		sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "hist", "1", false), nil),
@@ -430,6 +550,9 @@ func RunSweeperRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context, f
 	request := publicops.SweepRequest{
 		Tier:      publicops.SweepDurable,
 		IDPattern: sweeperPattern(fixture, "hist"),
+	}
+	if err := fixture.CommitPending(ctx); err != nil {
+		t.Fatalf("CommitPending() after seeding: %v", err)
 	}
 
 	before := sweeperHistory(t, ctx, fixture)
@@ -450,8 +573,8 @@ func RunSweeperRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context, f
 	before = sweeperHistory(t, ctx, fixture)
 	sweeperSweep(t, ctx, fixture, request)
 	after := sweeperHistory(t, ctx, fixture)
-	if after < before || after > before+1 {
-		t.Errorf("history went %d -> %d across one sweep of %d rows, want at most one more entry",
+	if after != before+1 {
+		t.Errorf("history went %d -> %d across one sweep of %d rows, want exactly one more entry",
 			before, after, len(ids))
 	}
 }

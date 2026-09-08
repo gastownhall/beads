@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -376,6 +377,37 @@ func TestProxiedServerReopen(t *testing.T) {
 		}
 	})
 
+	// A batch where ONE id fails is the case that exposed the teardown wait:
+	// the good id's reopen commits and fires its hook, then the command returns
+	// an error for the bad id — and cobra skips PersistentPostRunE entirely when
+	// RunE errors, so the process would exit with the hook goroutine unstarted.
+	// The wait in main() after ExecuteC is what makes this land.
+	t.Run("partial_batch_failure_still_delivers_the_committed_hook", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == "windows" {
+			t.Skip("hook script form is POSIX shell")
+		}
+		marker := filepath.Join(t.TempDir(), "on_update_marker")
+		script := "#!/bin/sh\nprintf '%s\\n' \"$1\" > " + shellQuote(marker) + "\n"
+		p := newSharedProxiedProjectWithHooks(t, bd, "ropf", map[string]string{"on_update": script})
+		issue := bdProxiedCreate(t, bd, p.dir, "Hook partial batch")
+		bdProxiedClose(t, bd, p.dir, issue.ID)
+		_ = os.Remove(marker)
+
+		out := bdProxiedReopenFail(t, bd, p.dir, issue.ID, "ropf-does-not-exist")
+		if !strings.Contains(out, "ropf-does-not-exist") {
+			t.Errorf("expected the missing id to be reported; got: %s", out)
+		}
+
+		data, err := waitForMarker(marker, 5*time.Second)
+		if err != nil {
+			t.Fatalf("on_update hook for the committed id did not fire though the command failed on another: %v\noutput:\n%s", err, out)
+		}
+		if !strings.Contains(data, issue.ID) {
+			t.Errorf("hook marker missing the committed issue ID; got: %q", data)
+		}
+	})
+
 	t.Run("hooks_fire_on_update", func(t *testing.T) {
 		t.Parallel()
 		if runtime.GOOS == "windows" {
@@ -388,12 +420,14 @@ func TestProxiedServerReopen(t *testing.T) {
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		_ = os.Remove(marker)
 		bdProxiedReopen(t, bd, p.dir, issue.ID)
-		data, err := os.ReadFile(marker)
+		// Polled for the reason close_proxied_integration_test.go gives: the
+		// hook now fires off the write plumbing, after the command returns.
+		data, err := waitForMarker(marker, 5*time.Second)
 		if err != nil {
-			t.Fatalf("on_update hook marker not written after reopen: %v", err)
+			t.Fatalf("on_update hook did not fire after reopen within timeout: %v", err)
 		}
-		if !strings.Contains(string(data), issue.ID) {
-			t.Errorf("hook marker missing issue ID; got: %q", string(data))
+		if !strings.Contains(data, issue.ID) {
+			t.Errorf("hook marker missing issue ID; got: %q", data)
 		}
 	})
 

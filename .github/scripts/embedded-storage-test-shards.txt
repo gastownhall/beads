@@ -8,11 +8,10 @@
 # per-test timing here either). This manifest assigns tests round-robin over
 # the alphabetically sorted discovered-test list for the 5-shard CI matrix,
 # which spreads adjacent same-prefix families (e.g. the seven
-# TestEmbeddedMergeAndSettle* tests, the TestEmbeddedMigration* tests, and the
-# four TestSearchIssues_MaxRows_* tests) across different shards instead of
-# clustering them in one, as a balance heuristic in the absence of timing
-# data. embedded-storage-test-shard.sh continues to hash-distribute
-# newly-added tests that are not listed here. TestConformance is deliberately
+# TestEmbeddedMergeAndSettle* tests and the TestEmbeddedMigration* tests)
+# across different shards instead of clustering them in one, as a balance
+# heuristic in the absence of timing data. embedded-storage-test-shard.sh
+# continues to hash-distribute newly-added tests that are not listed here. TestConformance is deliberately
 # excluded — it runs in the separate test-embedded-conformance job, which
 # shards by sub-test path (core/audit), not by top-level function name, and
 # is a different mechanism from this manifest.
@@ -85,11 +84,6 @@
 5 2 TestReclaimRefusesForeignReplicaLease
 5 3 TestReopenIssue
 5 4 TestSchemaAfterInit
-5 5 TestSearchIssuesKeysetEmbedded
-5 1 TestSearchIssues_MaxRows_Exceeded_ReturnsErrTooManyRows
-5 2 TestSearchIssues_MaxRows_NotExceeded
-5 3 TestSearchIssues_MaxRows_WithLimit
-5 4 TestSearchIssues_MaxRows_Zero_NoCap
 5 5 TestUnknownProvenanceLeaseStaysReclaimable
 5 1 TestUpdateIssueType
 5 2 TestUpdateMergeOps_DoltEngine

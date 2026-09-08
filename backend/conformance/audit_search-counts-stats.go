@@ -160,7 +160,7 @@ func testAuditReadyWorkDepCreatedAtParity(t *testing.T, f Factory) {
 				{IssueID: "dca-s", DependsOnID: "dca-t", Type: types.DepBlocks, CreatedAt: depCreatedAt},
 			},
 		}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 
 	// Rendered path: SearchIssuesWithCounts (bd list --with-counts) and
 	// GetReadyWorkWithCounts (bd ready) share ScanReadyWorkRowWithCounts, which parses
@@ -527,6 +527,14 @@ func testAuditSearchSortNullsDirectional(t *testing.T, f Factory) {
 // own byte order would break the id sort for every caller. Sequence is not asserted:
 // the natural-numeric display order is owned above the store (internal/workapi/sort.go
 // CompareIssuesBy via utils.NaturalCompareIDs), which is why callers push Limit 0 here.
+//
+// RunReaderListNaturalNumericIDSortTrimsAfterTheFetch looks like a dominator and
+// is not: it drives the Reader, which rides SearchIssuesWithCountsInTx (and the
+// unit-of-work UNION), while this drives the PLAIN SearchIssues verb over
+// searchInTx. Those are separate bodies — make searchInTx refuse the go-side sort
+// key and the reader case stays green while this one goes red (measured with
+// scripts/mutation-equivalence.sh). This is the only place the go-side sort key
+// meets the plain search projection.
 func testAuditSearchSortByIDCompleteSet(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()

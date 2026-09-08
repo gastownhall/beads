@@ -513,7 +513,12 @@ var (
 	ErrVersionMismatch = storage.ErrVersionMismatch
 	ErrSelfDependency  = domain.ErrSelfDependency
 	ErrDependencyCycle = domain.ErrDependencyCycle
-	ErrFieldTooLong    = types.ErrFieldTooLong
+	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
+	// endpoint-existence refusals AddDependency and AddDependencies raise; the
+	// typed value carrying the missing id is DependencyEndpointNotFoundError.
+	ErrDependencySourceNotFound = domain.ErrDependencySourceNotFound
+	ErrDependencyTargetNotFound = domain.ErrDependencyTargetNotFound
+	ErrFieldTooLong             = types.ErrFieldTooLong
 	// ErrGateBusy is returned by OpenGated when a maintenance operation
 	// holds the workspace or physical-root gate exclusively and the wait
 	// budget ran out. Alias of the internal sentinel so errors.Is works
@@ -530,3 +535,8 @@ type DependencyTypeConflictError = domain.DependencyTypeConflictError
 // edge would gate an issue on its own ancestor/descendant (a gate that can
 // never clear).
 type DependencyHierarchyConflictError = domain.DependencyHierarchyConflictError
+
+// DependencyEndpointNotFoundError is returned by AddDependency when an edge
+// names an endpoint this database can see the absence of; callers errors.As it
+// to read the missing id instead of parsing the message.
+type DependencyEndpointNotFoundError = domain.DependencyEndpointNotFoundError

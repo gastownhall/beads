@@ -34,6 +34,11 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
 		return fmt.Errorf("affected by delete for %s: %w", id, aerr)
 	}
 
+	// Edges are journaled before the rows go, while their source snapshots can
+	// still be read.
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}); err != nil {
+		return fmt.Errorf("journal dependency removals for %s: %w", id, err)
+	}
 	if err := deleteIssueRowInTx(ctx, tx, id, isWisp); err != nil {
 		return err
 	}
@@ -61,6 +66,15 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 		// matching GetIssue/UpdateIssue. The storage conformance suite asserts
 		// this parity across not-found paths.
 		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	// Journal the delete in the same transaction. This worker backs single
+	// deletes (DeleteIssueInTx) and the per-wisp branch of the bulk delete
+	// (DeleteResolvedSetInTx); the bulk regular-issue branch journals its own
+	// ids directly. The rows==0 return above is what keeps this
+	// actually-deleted-only. The delete plumbing (storage.DeleteIssue and the
+	// bulk/cascade resolvers) carries no actor, so the row records none.
+	if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
+		return err
 	}
 	if isWisp {
 		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
@@ -271,6 +285,20 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 		return nil, fmt.Errorf("affected by batch delete: %w", aerr)
 	}
 
+	// Resolve WHICH regular ids this delete actually removes before the batched
+	// DELETE runs: afterwards the rows are gone, and RowsAffected reports a
+	// count, not a set. A journal record for an id that was already absent would
+	// tell a consumer to drop a bead this transaction never touched.
+	journaledDeletes, err := journalableDeletesInTx(ctx, tx, "issues", set.RegularIDs)
+	if err != nil {
+		return nil, err
+	}
+	// Edges are journaled before the rows go, while their source snapshots can
+	// still be read.
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, set.All); err != nil {
+		return nil, fmt.Errorf("journal dependency removals for batch delete: %w", err)
+	}
+
 	for _, id := range set.WispIDs {
 		if err := deleteIssueRowInTx(ctx, tx, id, true); err != nil {
 			return nil, fmt.Errorf("delete wisp %s: %w", id, err)
@@ -304,11 +332,70 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 	}
 	result.DeletedCount = totalRegularsDeleted + len(set.WispIDs)
 
+	// Journal every regular issue this bulk/cascade delete removed. Wisps went
+	// through deleteIssueRowInTx above, which journals each itself; set.All is
+	// cascade-expanded, so this records cascade deletes too. The delete
+	// plumbing carries no actor, so the rows record none.
+	for _, id := range journaledDeletes {
+		if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after batch delete: %w", err)
 	}
 
 	return result, nil
+}
+
+// ExistingIssueIDsInTableInTx returns the requested IDs that currently exist
+// in the selected issue table. It preserves caller ordering so delete and
+// journal records are deterministic across batches.
+func ExistingIssueIDsInTableInTx(ctx context.Context, tx DBTX, table string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	switch table {
+	case "issues", "wisps":
+	default:
+		return nil, fmt.Errorf("unsupported issue table %q", table)
+	}
+	exists := make(map[string]struct{}, len(ids))
+	for i := 0; i < len(ids); i += deleteBatchSize {
+		end := i + deleteBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		inClause, args := buildSQLInClause(ids[i:end])
+		//nolint:gosec // table is validated above and inClause contains only placeholders.
+		rows, err := tx.QueryContext(ctx, "SELECT id FROM "+table+" WHERE id IN ("+inClause+")", args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			exists[id] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	actual := make([]string, 0, len(exists))
+	for _, id := range ids {
+		if _, ok := exists[id]; ok {
+			actual = append(actual, id)
+		}
+	}
+	return actual, nil
 }
 
 // findAllDependentsRecursiveInTx finds all issues that depend on the given

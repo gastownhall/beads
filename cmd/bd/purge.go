@@ -148,7 +148,15 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	result, err := sweeper.Sweep(rootCtx, request)
+	// The role mints the sweep's version commit itself, so batch and off modes
+	// have to be said on the CONTEXT — the same way `bd delete` says them. Left
+	// off, an embedded `bd prune --dolt-auto-commit batch` advances HEAD, which
+	// is the one thing batch mode promises it will not do.
+	opsCtx, err := issueOpsContext(rootCtx)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	result, err := sweeper.Sweep(opsCtx, request)
 	if err != nil {
 		return HandleErrorRespectJSON("%s failed: %v", scope.cmdName, err)
 	}

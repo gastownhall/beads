@@ -269,7 +269,7 @@ consistency.
 Use small Unicode symbols with semantic colors applied via lipgloss:
 
 - Status: `○ ◐ ● ✓ ❄`
-- Priority: `●` (filled circle with color)
+- Priority: `P0`–`P4` label with color (no status glyph)
 
 #### Status Icons
 
@@ -283,13 +283,14 @@ Use these symbols consistently across all commands:
 ❄ deferred    - Scheduled for later (blue/muted)
 ```
 
-#### Priority Icons and Colors
+#### Priority Labels and Colors
 
-Format priority as `● P0` (filled circle icon plus label, colored by priority):
+Format priority as the P-label with color only (no status glyph — `●` is blocked status):
 
-- `● P0`: Red + bold (critical)
-- `● P1`: Orange (high)
-- `● P2-P4`: Default text (normal)
+- `P0`: Red + bold (critical)
+- `P1`: Orange (high)
+- `P2`: Amber (elevated)
+- `P3`–`P4`: Default text
 
 #### Issue Type Colors
 

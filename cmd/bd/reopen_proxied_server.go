@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -88,9 +87,6 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		}
 
 		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), actor, reason)
-		if err := fireProxiedReopenHooks(ctx, result.Issue); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", target.id, err)
-		}
 		if jsonOut {
 			if issue := result.Issue; issue != nil {
 				// `bd reopen` has never printed dependency records, on either
@@ -145,21 +141,4 @@ func reopenProxiedResolve(ctx context.Context, ids []string) ([]reopenProxiedTar
 		return struct{}{}, nil
 	})
 	return targets, failed, err
-}
-
-func fireProxiedReopenHooks(ctx context.Context, after *types.Issue) error {
-	if after == nil {
-		return nil
-	}
-	runner, err := proxiedHookRunner(ctx)
-	if err != nil {
-		return fmt.Errorf("hook runner: %w", err)
-	}
-	if runner == nil {
-		return nil
-	}
-	if err := runner.RunSync(hooks.EventUpdate, after); err != nil {
-		return fmt.Errorf("on_update hook: %w", err)
-	}
-	return nil
 }

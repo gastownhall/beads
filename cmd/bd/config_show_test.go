@@ -409,7 +409,10 @@ func TestCollectViperEntriesMetricsUserGlobalProvenance(t *testing.T) {
 	}
 	// Source is the explicit user-global path, matching `bd config get`, not the
 	// generic project "config.yaml" label.
-	wantSource := config.UserConfigYamlPath()
+	wantSource, err := config.UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("resolve user config path: %v", err)
+	}
 	if entry.Source != wantSource {
 		t.Errorf("metrics.disabled source = %q, want %q (user-global path)", entry.Source, wantSource)
 	}

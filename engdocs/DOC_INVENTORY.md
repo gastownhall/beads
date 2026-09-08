@@ -61,7 +61,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `CLAUDE.md` | Revise | Kept as architecture orientation only; command/workflow duplication was reduced in favour of root `AGENTS.md` and `AGENT_INSTRUCTIONS.md`. |
 | `CLI_REFERENCE.md` | Keep/generated | Generated command reference from live help output. |
 | `CI_CLEANUP_PLAN.md` | Keep as maintainer context | Dated CI policy, measurements, and implementation roadmap; current commands live in workflows and the `Makefile`. |
-| `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep | Design note for the required-check aggregate gate topology; explicitly flags pre-rollout status and gates branch-protection changes on the new checks passing first. |
+| `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep as maintainer context | Implemented workflow design record for aggregate-gate policy; branch-protection and ruleset adoption remain pending. Live job membership and display names come from `.github/workflows/*.yml` and their structural tests; copied wiring and rollout steps are historical snapshots. |
 | `CI_TEST_SURFACE_AUDIT.md` | Keep as historical snapshot | Dated test-surface inventory; current commands live in workflows and the `Makefile`. |
 | `plugins/beads/skills/beads/resources/CLI_REFERENCE.md` | Keep pointer | Plugin skill resource intentionally points at live CLI sources to avoid duplicate generated command snapshots. |
 | `CODEX_INTEGRATION.md` | Keep | User-facing Codex integration guide. |

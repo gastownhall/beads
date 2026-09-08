@@ -269,3 +269,87 @@ func TestProxiedServerGateLifecycle(t *testing.T) {
 		}
 	})
 }
+
+// TestProxiedServerGateCreateInheritsRepoMetadata pins parity with the direct
+// route (bd-rd5u8): a gh:* gate created through a proxied server inherits the
+// blocked issue's validated GitHub "repo" metadata via repoMetadataForGate,
+// so cross-repo gh:run/gh:pr checks route to the right repository. Non-gh
+// gates must stay exempt (SF4), and malformed repo metadata must fail the
+// create rather than silently dropping the routing.
+func TestProxiedServerGateCreateInheritsRepoMetadata(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "ghm")
+
+	showMetadata := func(t *testing.T, id string) json.RawMessage {
+		t.Helper()
+		out, err := bdProxiedRun(t, bd, p.dir, "show", id, "--json")
+		if err != nil {
+			t.Fatalf("show %s: %v\n%s", id, err, out)
+		}
+		var arr []struct {
+			Metadata json.RawMessage `json:"metadata"`
+		}
+		if err := json.Unmarshal(out, &arr); err != nil {
+			t.Fatalf("unmarshal show output: %v\n%s", err, out)
+		}
+		if len(arr) == 0 {
+			t.Fatalf("show returned nothing for %s", id)
+		}
+		return arr[0].Metadata
+	}
+
+	t.Run("gh_gate_inherits_repo", func(t *testing.T) {
+		target := bdProxiedCreate(t, bd, p.dir, "Cross-repo gated bead",
+			"--metadata", `{"repo":"acme/widgets"}`)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"gate", "create", "--type=gh:run", "--await-id", "ci.yml", "--blocks", target.ID)
+		if err != nil {
+			t.Fatalf("gate create failed: %v\nstderr:\n%s", err, stderr)
+		}
+		gateID := parseCreatedGateID(t, out)
+
+		var m map[string]string
+		if err := json.Unmarshal(showMetadata(t, gateID), &m); err != nil {
+			t.Fatalf("gate %s metadata is not a string map: %v", gateID, err)
+		}
+		if m["repo"] != "acme/widgets" {
+			t.Errorf("gate %s metadata repo = %q, want %q", gateID, m["repo"], "acme/widgets")
+		}
+	})
+
+	t.Run("human_gate_ignores_repo_shaped_metadata", func(t *testing.T) {
+		// SF4 parity: "repo" is legal, unrelated metadata on any issue, so a
+		// human gate must neither validate nor inherit it.
+		target := bdProxiedCreate(t, bd, p.dir, "Human gated bead",
+			"--metadata", `{"repo":"not a github repo"}`)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"gate", "create", "--type=human", "--blocks", target.ID, "--reason", "review")
+		if err != nil {
+			t.Fatalf("human gate create must tolerate non-GitHub repo metadata: %v\nstderr:\n%s", err, stderr)
+		}
+		gateID := parseCreatedGateID(t, out)
+
+		if md := showMetadata(t, gateID); len(md) != 0 && string(md) != "null" {
+			t.Errorf("human gate %s inherited metadata %s, want none", gateID, md)
+		}
+	})
+
+	t.Run("invalid_repo_metadata_fails_closed", func(t *testing.T) {
+		target := bdProxiedCreate(t, bd, p.dir, "Bad repo bead",
+			"--metadata", `{"repo":"owner/repo;echo"}`)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"gate", "create", "--type=gh:run", "--await-id", "ci.yml", "--blocks", target.ID)
+		if err == nil {
+			t.Fatalf("gate create should fail on malformed repo metadata; got:\n%s", out)
+		}
+		combined := out + stderr
+		if !strings.Contains(combined, "invalid GitHub repository metadata") {
+			t.Errorf("error output missing metadata diagnosis:\n%s", combined)
+		}
+	})
+}

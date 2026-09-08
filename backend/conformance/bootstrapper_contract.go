@@ -26,8 +26,15 @@ import (
 // pinned without a database in internal/workapi/bootstrap_test.go. What only a
 // real backend can show is the SUBSTRATE half: that the identity is there for the
 // NEXT caller, that a REFUSAL WROTE NOTHING, that a failed read is an error
-// rather than an empty identity, and that a bootstrap costs AT MOST ONE
-// version-control entry.
+// rather than an empty identity, and what a bootstrap costs in version-control
+// entries.
+//
+// THAT LAST COST IS THE ONE THING THE THREE WIRINGS DELIBERATELY DIFFER ON, and
+// it is asserted per-leg rather than as a shared range: the stores record none
+// and the unit-of-work provider records one, each because of the front door it
+// stands behind. RunBootstrapperRecordsNoHistoryEntryOfItsOwn and
+// RunBootstrapperRecordsExactlyOneHistoryEntry state the two halves and cross-
+// reference each other, so neither reads as the other's bug.
 //
 // THE IDENTITY IS GLOBAL TO A WORKSPACE and cannot be namespaced the way the
 // issue contracts namespace their seeded ids. Every case therefore SEEDS the
@@ -56,8 +63,8 @@ type BootstrapperFixture struct {
 	// its own test harness already initialized.
 	SeedIdentity func(ctx context.Context, prefix, projectID string) error
 	// CountHistory reports how many history entries the fixture's branch has.
-	// A nil hook means "this backend cannot observe history", and the case that
-	// needs it SKIPS with that reason rather than passing quietly.
+	// A nil hook means "this backend cannot observe history", and the cases
+	// that need it SKIP with that reason rather than passing quietly.
 	CountHistory func(context.Context) (int, error)
 }
 
@@ -216,14 +223,79 @@ func RunBootstrapperLeavesTheSubstrateUntouchedWhenItCannotComplete(t *testing.T
 	assertWorkspaceIdentity(t, ctx, fixture, "", "")
 }
 
-// RunBootstrapperRecordsAtMostOneHistoryEntry pins bootstrapper.go's "AT MOST
-// ONE VERSION-CONTROL ENTRY".
+// RunBootstrapperRecordsNoHistoryEntryOfItsOwn is the STORE half of
+// bootstrapper.go's "AT MOST ONE VERSION-CONTROL ENTRY ... and a backend that
+// records none is conforming".
 //
-// The promise is an upper bound rather than a number: a backend that commits at
-// all is right to record the bootstrap, and one whose front door commits the
-// whole of `bd init` afterwards is right to record none. What it forbids is the
-// one-entry-per-key shape six ordinary setters would produce.
-func RunBootstrapperRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context, fixture BootstrapperFixture) {
+// That clause is a range, and a range cannot fail in the direction that
+// matters: "after-before <= 1" holds whether an entry was written or not, so
+// one shared case would pass on a leg that stopped recording and on a leg that
+// never did, without ever saying which was which. Each wiring therefore pins
+// its own exact number, and this is the number the two stores pin.
+//
+// THEY RECORD NONE BECAUSE THE FRONT DOOR RECORDS IT. dolt's bootstrapper says
+// so in the body it would have to change — "NO VERSION-CONTROL ENTRY IS
+// RECORDED HERE ... the front door's own initial commit is what records them.
+// Adding a DOLT_COMMIT would give a bootstrap an entry that `bd init`'s commit
+// then duplicates" — and embeddeddolt's reaches its transaction through
+// withConn, which mints no Dolt commit either. The commit they defer to is
+// commitInitState's CommitWithConfig(ctx, "bd init") on the direct init route
+// in cmd/bd/init.go. A store that started committing in-role would double-
+// record every `bd init`, and that is what this zero forbids.
+//
+// A ZERO IS ONLY WORTH ASSERTING IF THE HOOK CAN MOVE, which is the question
+// an exact zero has to answer about its own fixture. It can: both store
+// wirings fill CountHistory from the same roleFixtureKit hook that
+// RunCommenterRecordsExactlyOneHistoryEntry drives from n to n+1 on those same
+// two backends. So this zero reads "nothing was recorded", not "nothing is
+// observable here" — the shape a nil hook would have, which skips loudly
+// instead.
+//
+// The unit-of-work wiring pins ONE instead, from
+// RunBootstrapperRecordsExactlyOneHistoryEntry, which owns the other half of
+// the argument. Neither number is the other's bug.
+func RunBootstrapperRecordsNoHistoryEntryOfItsOwn(t *testing.T, ctx context.Context, fixture BootstrapperFixture) {
+	t.Helper()
+	assertBootstrapHistoryDelta(t, ctx, fixture, 0,
+		"this backend leaves the identity entry to `bd init`'s own commit at the front door, and an in-role commit would duplicate it")
+}
+
+// RunBootstrapperRecordsExactlyOneHistoryEntry is the UNIT-OF-WORK half, and
+// the reason the split is ratified rather than queued for convergence.
+//
+// THE PROXIED INIT ROUTE HAS NO OTHER COMMIT POINT: cmd/bd/init_proxied_server.go
+// calls the role and stops, with no commitInitState equivalent behind it, so
+// the entry this body labels ("ONE VERSION-CONTROL ENTRY ... one entry rather
+// than one per key", uow/bootstrapper.go) is the only thing that versions the
+// identity there. Making this leg record none to match the stores would leave a
+// proxied workspace's identity unversioned; making the stores record one to
+// match this leg would duplicate a commit `bd init` already makes. Each leg is
+// right for the front door it stands behind, and the front-door OUTCOME
+// converges: every init route ends with exactly one entry carrying the
+// identity, labeled "bd init" on the store routes and "bd: bootstrap <prefix>"
+// on this one.
+//
+// WHY THIS IS NOT skipKnownDivergence. That mechanism parks a case as
+// UNDECIDED, pending an owner's behavior-unification ruling, and it leaves the
+// parked leg's behavior unpinned while it waits — which is the same blind spot
+// the shared range had, moved to a different file. Here there is nothing to
+// decide, so both numbers get an assertion that RUNS: a stated per-leg promise,
+// where a skip would be a silence.
+//
+// What both halves keep from the single case they replace is its original
+// point: no leg records ONE ENTRY PER KEY. Six ordinary setters would show up
+// as six, and 0 != 6 and 1 != 6 both catch it.
+func RunBootstrapperRecordsExactlyOneHistoryEntry(t *testing.T, ctx context.Context, fixture BootstrapperFixture) {
+	t.Helper()
+	assertBootstrapHistoryDelta(t, ctx, fixture, 1,
+		"the proxied init route has no other commit point, so the role's own entry is the only thing that versions the identity there")
+}
+
+// assertBootstrapHistoryDelta bootstraps a fresh substrate once and pins the
+// history delta at want. why is the leg's rationale, carried into the failure
+// so a reader who trips it lands on the topology that chose the number rather
+// than on a bare count they might "fix" by copying the other leg.
+func assertBootstrapHistoryDelta(t *testing.T, ctx context.Context, fixture BootstrapperFixture, want int, why string) {
 	t.Helper()
 	if fixture.CountHistory == nil {
 		t.Skip("fixture cannot observe history on this backend")
@@ -242,8 +314,8 @@ func RunBootstrapperRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Conte
 	if err != nil {
 		t.Fatalf("CountHistory() after: %v", err)
 	}
-	if after-before > 1 {
-		t.Fatalf("history entries %d -> %d, want a bootstrap to record at most one", before, after)
+	if after-before != want {
+		t.Fatalf("history entries %d -> %d across one bootstrap, want exactly %d more: %s", before, after, want, why)
 	}
 }
 

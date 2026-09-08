@@ -175,6 +175,10 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 }
 
 func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
+		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
+	}
+
 	// Auto-detect source routing if not provided.
 	sourceTable := opts.SourceTable
 	writeTable := opts.WriteTable
@@ -214,7 +218,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	//nolint:gosec // G201: sourceTable is from WispTableRouting ("issues" or "wisps")
 	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, sourceTable), dep.IssueID).Scan(&sourceType); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("issue %s not found", dep.IssueID)
+			return false, MissingDependencySource(dep.IssueID, dep.DependsOnID)
 		}
 		return false, fmt.Errorf("failed to check issue existence: %w", err)
 	}
@@ -229,7 +233,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		//nolint:gosec // G201: targetTable is from WispTableRouting ("issues" or "wisps")
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetType); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return false, fmt.Errorf("issue %s not found", dep.DependsOnID)
+				return false, MissingDependencyTarget(dep.IssueID, dep.DependsOnID)
 			}
 			return false, fmt.Errorf("failed to check target issue existence: %w", err)
 		}
@@ -271,7 +275,10 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 				metadata, dep.IssueID, dep.DependsOnID); err != nil {
 				return false, fmt.Errorf("failed to update dependency metadata: %w", err)
 			}
-			return false, nil
+			// A same-type add refreshes edge metadata. It is an observable graph
+			// mutation, so emit the complete replacement edge for replay even
+			// though no audit event is written.
+			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 		}
 		return false, &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -343,12 +350,16 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			return false, fmt.Errorf("recompute is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
-		return eventWritten, nil
+		// Snapshot only after all derived blocked-state maintenance has completed.
+		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
-	return eventWritten, nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
+	// as real to a replaying consumer as one added by an explicit dep verb.
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -435,7 +446,7 @@ func CheckDependencyCycleInTx(ctx context.Context, tx DBTX, dep *types.Dependenc
 	if dep.IssueID == dep.DependsOnID {
 		return fmt.Errorf("%w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
-	if !isSchedulingEdge(dep.Type) {
+	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
 	wouldCycle, err := WouldCreateSchedulingCycleInTx(ctx, tx, dep.IssueID, dep.DependsOnID, depTables)
@@ -505,18 +516,6 @@ func cycleReachabilityQuery(depTables []string) string {
 
 func cycleDetectionTables() []string {
 	return []string{"dependencies", "wisp_dependencies"}
-}
-
-// isSchedulingEdge reports whether a dependency type belongs to the static
-// combined-cycle set: blocks, conditional-blocks, and parent-child. Waits-for
-// also affects readiness but is intentionally outside this validation rule.
-func isSchedulingEdge(t types.DependencyType) bool {
-	switch t {
-	case types.DepBlocks, types.DepConditionalBlocks, types.DepParentChild:
-		return true
-	default:
-		return false
-	}
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue
@@ -932,11 +931,11 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 
 	// Capture the row's type before deleting so we can dispatch the right
 	// affected-set helper. If no row matches, treat as a no-op.
-	var depType string
+	var depType, depMetadata string
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(
-		`SELECT type FROM %s WHERE issue_id = ? AND %s = ?`, depTable, DepTargetExpr),
+		`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s = ?`, depTable, DepTargetExpr),
 		issueID, dependsOnID)
-	if err := row.Scan(&depType); err != nil {
+	if err := row.Scan(&depType, &depMetadata); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
@@ -978,7 +977,10 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
-	return eventWritten, nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// Never gated on emitEvent — a structural removal is as real to a replaying
+	// consumer as one from an explicit dep verb.
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor)
 }
 
 func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {

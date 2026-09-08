@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
@@ -70,8 +71,12 @@ func TestBlockedAfterMergeRecomputerFor_PeelsHookAndTelemetryLayers(t *testing.T
 	if !ok {
 		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", decorated)
 	}
-	if _, ok := hf.Unwrap().(*telemetry.InstrumentedStorage); !ok {
-		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", hf.Unwrap())
+	ext, ok := hf.Unwrap().(*externaldeps.Store)
+	if !ok {
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
+	}
+	if _, ok := ext.Unwrap().(*telemetry.InstrumentedStorage); !ok {
+		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", ext.Unwrap())
 	}
 
 	assertRecomputeReachesRaw(t, decorated, raw)
@@ -85,8 +90,12 @@ func TestBlockedAfterMergeRecomputerFor_PeelsHookLayerOnly(t *testing.T) {
 	raw := &recomputingStore{}
 	decorated := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
 
-	if _, ok := decorated.(*storage.HookFiringStore); !ok {
+	hf, ok := decorated.(*storage.HookFiringStore)
+	if !ok {
 		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", decorated)
+	}
+	if _, ok := hf.Unwrap().(*externaldeps.Store); !ok {
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
 	}
 
 	assertRecomputeReachesRaw(t, decorated, raw)
@@ -98,8 +107,8 @@ func TestBlockedAfterMergeRecomputerFor_UndecoratedStore(t *testing.T) {
 
 	raw := &recomputingStore{}
 	decorated := wireStorageDecorators(raw, nil, true)
-	if decorated.(*recomputingStore) != raw {
-		t.Fatalf("expected the raw store back with hooks and telemetry off; got %T", decorated)
+	if storage.UnwrapStore(decorated) != raw {
+		t.Fatalf("expected the external decorator to unwrap to the raw store; got %T", storage.UnwrapStore(decorated))
 	}
 
 	rs, ok := blockedAfterMergeRecomputerFor(decorated)

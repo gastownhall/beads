@@ -23,16 +23,35 @@ so.
 
 ## The surface
 
-Six operations, all under `/v0` except liveness.
+Everything is under `/v0` except liveness. The operation list is **not
+reproduced here**, on purpose: `internal/httpapi/routes.go` is the router,
+`TestSpecRouteParity` welds that table to `openapi.v0.yaml` by exact set
+equality in both directions, and `capabilities` on the handshake is derived
+from the same table. A fourth copy in this page could only ever go stale — as
+one did — so read the surface from the document, from the route table, or from
+a running server.
 
-| Operation | Route | What it answers |
-|---|---|---|
-| `health` | `GET /healthz` | Process liveness. Never touches the database. |
-| `getContext` | `GET /v0/beads/context` | Workspace and API identity, from a startup snapshot. |
-| `listReadyWork` | `GET /v0/beads/ready` | Unblocked open work, in the requested sort order. |
-| `listIssues` | `GET /v0/beads/issues` | A page of issues under the request's filters. |
-| `getIssue` | `GET /v0/beads/issues/{id}` | One issue's detail view. |
-| `claimIssue` | `POST /v0/beads/issues/{id}:claim` | Compare-and-set claim for a caller-named actor. |
+What the shape is, and will stay:
+
+- **Liveness and identity answer from the process.** `GET /healthz` and
+  `GET /v0/beads/context` touch no database, which is what keeps them
+  answerable while every connection slot is held. They alone carry
+  `bypassSemaphore`.
+- **Reads are collection reads plus one detail read per resource.** Issues,
+  ready work, dependencies, config, memories and stats each publish their own,
+  and each hands its whole request to one `issueops` role — never to a filter
+  built in the handler.
+- **Writes come in two spellings.** A custom method (`:claim`, `:close`,
+  `:reopen`, `:sweep`, `:delete`, `:add`, `:remove`, `:batchCreate`) where the
+  operation is not CRUD, and a plain method (`PATCH` on one issue, `POST` and
+  `DELETE` on one memory) where it is. `routes.go` states the rule per row.
+- **Every write carries the same posture.** The `actor` is caller-asserted
+  provenance, not authenticated identity; hooks do not fire; the per-command
+  auto-commit machinery does not run. Durability is one storage commit per
+  request, inside the role's own transaction. The claim was the first write and
+  the others adopted its posture verbatim; [No hooks](#no-hooks),
+  [No auto-commit](#no-auto-commit) and [Write throughput](#write-throughput)
+  state it once for all of them.
 
 `GET /v0/beads/context` reports which operations this build actually
 implements, in `capabilities`. That list is derived from the registered
@@ -78,6 +97,9 @@ on.
 | `not_found` | 404 | No issue or wisp with that id. | — |
 | `already_claimed` | 409 | Another actor holds the claim. Carries `assignee`. | — |
 | `not_claimable` | 409 | The issue is not in a claimable state. Carries `issue_status`. | — |
+| `not_closable` | 409 | Close policy refused an unforced close: open children, or a blocker. | Close the children or clear the blocker, or re-send with force. |
+| `dependency_cycle` | 409 | The requested edges would never clear — a scheduling cycle, or a blocking edge against the issue's own ancestor or descendant. The hierarchy case carries `issue_id`, `blocker_id` and `blocker_is_ancestor`; their absence is what identifies the plain cycle. | Send different edges. Nothing was written. |
+| `dependency_exists` | 409 | The pair already carries an edge of a different type. Carries `existing_type` and `requested_type`. | Remove the existing edge before re-adding. |
 | `busy` | 503 | Retryable contention: the transaction retry budget was spent, or the in-flight limit was saturated. Carries `Retry-After`. | Retry after the header's delay. |
 | `db_unavailable` | 503 | Retryable connectivity failure reaching the database. Carries `Retry-After`. | Retry after the header's delay. |
 | `internal` | 500 | Anything else. | — |
@@ -115,6 +137,15 @@ losing transaction, never from parsing fragments out of the sentinel's message.
 That substring classification is exactly what an adopting client gets to
 delete, and it can only delete it because the server never does it either.
 
+The dependency conflicts work the same way and are read the same way.
+`dependency_exists` carries `existing_type` and `requested_type`;
+`dependency_cycle` carries `issue_id`, `blocker_id` and `blocker_is_ancestor`
+when the refusal is the hierarchy rule, and carries nothing when it is a plain
+scheduling cycle — the ABSENCE is what tells the two apart. Every one of those
+members is read off the role's typed error inside the refusing transaction,
+which is the only place the hierarchy members can come from at all: the
+conflicting edge may exist only inside the batch that was rolled back.
+
 ## The cursor contract
 
 `GET /v0/beads/issues` pages with an opaque keyset cursor.
@@ -129,42 +160,97 @@ which is legible enough that someone will read it — so the contract is enforce
 by the version prefix rather than by obscurity. A client that mints its own
 token gets `invalid_cursor` the moment the encoding moves.
 
-**No lifetime.** The token carries a position and a private encoding version,
-and nothing else. The server keeps no state for it, so it does not expire, does
-not become invalid across a restart, and is not tied to the connection that
-issued it. The only thing that invalidates one is an encoding change.
+**No lifetime.** The token carries a position, the ORDER that position is in,
+and a private encoding version — and nothing else. The server keeps no state
+for it, so it does not expire, does not become invalid across a restart, and is
+not tied to the connection that issued it. The only thing that invalidates one
+is an encoding change, and the one encoding change made so far (`v1` → `v2`,
+adding the order tag) kept every outstanding `v1` token readable as the
+`created`-order position it is, so no traversal in flight had to restart.
 
 **One recovery.** Every failure mode — wrong version, undecodable base64,
-malformed JSON, an empty position — is the same answer, because it is the same
-client situation: restart paging with no `cursor`. Re-sending the value cannot
-succeed.
+malformed JSON, an empty position, a position in another order — is the same
+answer, because it is the same client situation: restart paging with no
+`cursor`. Re-sending the value cannot succeed.
 
-**Misuse is not detectable.** Because the token carries no filters, a page
-fetched with a cursor minted under different filters is *not* refused. The
-server applies the current request's filters from the old request's position,
-silently skipping every row the new filter set would have placed before it.
-Repeat every filter verbatim for the whole traversal, and start a new traversal
-when they change.
+**Filter misuse is not detectable; ORDER misuse is.** Those are two different
+properties and the difference is the whole of the design here.
 
-That last property is a deliberate trade. Embedding the filters would make the
-token a second, opaque copy of the request that can disagree with the request
-itself; keeping it a bare position makes the failure mode a documented client
-obligation instead of a hidden server-side reconciliation.
+Because the token carries no filters, a page fetched with a cursor minted under
+different filters is *not* refused. The server applies the current request's
+filters from the old request's position, silently skipping every row the new
+filter set would have placed before it. Repeat every filter verbatim for the
+whole traversal, and start a new traversal when they change. That is a
+deliberate trade: embedding the filters would make the token a second, opaque
+copy of the request that can disagree with the request itself, and keeping it a
+bare position makes the failure mode a documented client obligation instead of
+a hidden server-side reconciliation.
+
+The ORDER is not a filter, and it does not get the same treatment. A filter
+selects the SET; the order decides what the position MEANS. The same instant
+and id name one row's place under `sort=created` and a different row's place
+under `sort=priority`, and there is nothing in the bytes to say which was
+intended — so a token replayed under a different `sort` is refused with
+`invalid_cursor` rather than reinterpreted. This is not a second copy of the
+request; it is the position's own type tag, and without it adding `sort` at all
+would mean serving skipped-and-duplicated pages with a 200 and no way for a
+client to notice.
+
+**Only orders with a proven total key are served.** `sort` takes `created` and
+`priority` and nothing else, because each value is a keyset contract — a
+position shape, a strictly-after predicate, an index — rather than a display
+preference. Both of these keys are total (`priority` and `created_at` are
+non-null, `id` is unique), so a page boundary inside a run of equal keys
+resolves on `id` with no dropped and no repeated row. The seven other orders
+`bd list --sort` accepts have no such key: `id` is a natural-numeric order no
+database expresses, `updated` moves on every write, `closed` is nullable, and
+`status`/`title`/`type`/`assignee` are mutable and unindexed. A client that
+wants one of those still pages in `created` order and sorts what it received.
+
+`priority` is itself mutable, which `created_at` is not, and the consequence is
+stated rather than hidden: under `created` only new rows move relative to a
+walk, while under `priority` a priority update moves an existing row too, so it
+can be seen twice or missed. That is the same "a cursor pins a position, not a
+snapshot" caveat reached by a second route, not a new class of error —
+unchanged data never skips or repeats under either order.
+
+`GET /v0/beads/ready` still publishes a `sort` with a wider vocabulary and no
+cursor at all, which is consistent rather than contradictory: without a cursor
+an order is only a display decision, and nothing has to be able to resume into
+the middle of it.
 
 ## The loopback posture
 
-v0 has no authentication and no TLS. The trust model is the loopback boundary
-— the same boundary the database behind it already relies on.
+v0 has **optional** bearer authentication and no TLS. On loopback the trust
+model is the loopback boundary — the same boundary the database behind it
+already relies on — and a `bd serve` with no auth flags is byte for byte the
+server it has always been.
+
+`--auth-token-file` turns authentication on: every operation except
+`GET /healthz` then requires `Authorization: Bearer <token>`, including
+`GET /v0/beads/context`, which reports the repo root, beads directory and
+database name. The file holds one token per line and every line is accepted;
+it is re-read while the server runs, so rotation and revocation both take
+effect within about a second and neither needs a restart. There is
+deliberately no `--auth-token` flag: an argument is readable out of the process
+listing by every local user.
+
+The token is a shared secret that grants the WHOLE surface. It is not an
+identity, it carries no scopes, and it therefore never makes `actor` an
+authenticated principal — see below.
 
 `--addr` defaults to `127.0.0.1:0`. The host must be a numeric IP literal.
 `--allow-non-loopback` is the operator decision to bind beyond loopback; it is
-never taken by default, it prints a warning naming what it exposes, and nothing
-else about the server changes. Every peer that can reach the address gets full
-read and claim access.
+never taken by default, and it now **requires `--auth-token-file`**, because
+otherwise reaching the address would be the whole authorization: every peer
+that can reach it would get full read and claim access.
+`--insecure-no-auth` is the explicit, auditable way to say you meant that
+anyway — it applies only beside `--allow-non-loopback`, contradicts a token
+file, and logs a warning naming what it exposes.
 
 Three things bound the posture regardless of bind mode:
 
-**The Host allowlist**, which has no off switch. An unauthenticated service on
+**The Host allowlist**, which has no off switch. A service on
 loopback is reachable from any browser on the host, and a page that re-resolves
 its own name to `127.0.0.1` issues requests the browser treats as same-origin,
 so no CORS rule stops them. What the browser does preserve is the attacker's
@@ -176,11 +262,12 @@ IP-literal `Host`, because the browser sends the hostname from the attacker's
 URL. Matching is on parsed addresses, so every spelling of an allowed address
 is allowed.
 
-**The JSON-only content type on the claim**, which is a CSRF control rather
+**The JSON-only content type on every body**, which is a CSRF control rather
 than pedantry: a JSON content type is not CORS-"simple", so a cross-origin
-claim always triggers a preflight this server never approves. Accepting
-`text/plain` or a form encoding would let a page skip the preflight and drive
-the one write on this surface from any browser on the host.
+write always triggers a preflight this server never approves. Accepting
+`text/plain` or a form encoding would let a page skip the preflight and drive a
+write from any browser on the host. The document states the rule once, at the
+document level, because it holds for every body-carrying operation.
 
 **The mode-dependent refusal of an unlimited read.** `limit=0` means unlimited
 on both list operations, exactly as `bd list --limit 0` does — except under
@@ -193,16 +280,18 @@ one and, on that 400, re-issues with an explicit limit and pages with `cursor`.
 It is a client-side fix, never a retry.
 
 An `actor` on an HTTP request is caller-asserted provenance for the audit
-trail, not authenticated identity — the same thing it has always been on the
-CLI, where any local process can pass any `--actor`. The claim's
+trail and is not the authenticated principal, even where a bearer is required:
+one shared token admits a client to everything, so it can neither confirm nor
+contradict the name a request sends. That is the same thing `actor` has always
+been on the CLI, where any local process can pass any `--actor`. The claim's
 compare-and-set is therefore a correctness fence against *concurrent* claims,
 not an authorization boundary: it guarantees that two racing claimants cannot
 both win, and guarantees nothing about who either of them really is.
 
 ## No hooks
 
-Hooks do not fire on an HTTP claim. A CLI claim runs `on_update`; this does
-not.
+Hooks do not fire on any write over this surface. A CLI claim runs `on_update`;
+the HTTP one does not, and neither does any write added since.
 
 A hook is a user-controlled subprocess per mutation. In a concurrent server
 that is an unbounded latency multiplier and an orphaned child at shutdown, and
@@ -210,29 +299,32 @@ the working-directory-derived hook lookup that finds them is meaningless in a
 server process that does not share the client's working directory.
 
 This is a contract statement, not a gap to be closed later. A client that needs
-hook side effects on a claim runs the claim through the CLI.
+hook side effects on a mutation runs that mutation through the CLI.
 
 ## No auto-commit
 
 The per-command auto-commit, export and push maintenance that wraps a CLI
-invocation does not run here. Durability is per request: a successful claim
-commits inside its own transaction, exactly as a proxied CLI claim does today.
+invocation does not run here. Durability is per request: a write that changes
+something commits inside its own transaction, exactly as the proxied CLI does
+today.
 
 Two consequences worth stating for an adopting client:
 
 - There is no end-of-process flush. Anything the server did is already durable
   when the response is written, or it is not going to be.
-- An idempotent re-claim by the current holder writes no commit. The
-  compare-and-set matched no row because there was nothing to change, and an
-  empty commit message tells the transaction runner to skip the commit — so a
-  polling client cannot mint an empty storage commit per call.
+- An idempotent write by the party that already got the outcome it asked for
+  writes no commit. A re-claim by the current holder, a re-close of a closed
+  issue, a reopen of an open one: the compare-and-set matched no row because
+  there was nothing to change, and an empty commit message tells the
+  transaction runner to skip the commit — so a polling client cannot mint an
+  empty storage commit per call.
 
-## Claim throughput
+## Write throughput
 
-The claim is the only mutation in v0, and its cost is a storage commit. Sizing
-follows from that, not from HTTP:
+Every mutation on this surface costs a storage commit. Sizing follows from
+that, not from HTTP:
 
-- **A claim that changes something commits.** Its throughput ceiling is the
+- **A write that changes something commits.** Its throughput ceiling is the
   store's write path, which serializes commits, and not the request pipeline in
   front of it. HTTP concurrency does not raise that ceiling.
 - **Contention surfaces as a retryable 503, not as a stall.** The transaction
@@ -246,7 +338,7 @@ follows from that, not from HTTP:
   `Retry-After: 1`, because slot pressure clears quickly. Shedding load
   introduces no new status vocabulary — one code, two delays, and the header is
   the thing to obey.
-- **An idempotent re-claim costs no commit** (above), so a client polling to
+- **An idempotent write costs no commit** (above), so a client polling to
   confirm it still holds a claim does not consume write throughput.
 - **Reads are bounded by slots, not by commits.** Every database-touching
   handler holds one of a fixed number of in-flight slots, and each slot pins one
@@ -262,8 +354,10 @@ Carried across from `internal/httpapi/doc.go` and `issueops/reader.go`, which
 are the source of truth for it. Stated once and in full so it can be checked
 sentence by sentence, and deliberately not strengthened here.
 
-**SHARED.** All three issue reads on this surface go through `issueops.Reader`,
-and so does `bd show --json`'s detail view on both its routes. `bd list` and
+**SHARED.** `GET /v0/beads/ready`, `GET /v0/beads/issues` and
+`GET /v0/beads/issues/{id}` go through `issueops.Reader`, and so does
+`bd show --json`'s detail view on both its routes. This says nothing about the
+surface's other reads, which are on sibling roles. `bd list` and
 `bd ready` are *not* on the role and share instead the request types, the two
 builders in `internal/workapi` that their golden files pin, and
 `workapi.FinishPage` — `bd list` on both routes in every mode but the

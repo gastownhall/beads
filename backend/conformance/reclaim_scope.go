@@ -14,8 +14,9 @@ import (
 // filter selects and leaving every other stale lease in_progress. The filters
 // never widen the set — an unmatched scope reclaims nothing even though a global
 // reclaim would grab everything — which is the property a federated deployment
-// partitions reclaim on. Runs identically on Dolt and SQLite because both route
-// through issueops.ReclaimExpiredLeasesInTx + sqlbuild.ReclaimScopeSQL.
+// partitions reclaim on. Any backend routing through
+// issueops.ReclaimExpiredLeasesInTx + sqlbuild.ReclaimScopeSQL answers it the
+// same way; one with a reclaim path of its own is what this case measures.
 //
 // The whole test runs one reaper cutoff (-time.Hour), so every fresh lease is
 // already "expired": scoping, not staleness, decides what each call reclaims.

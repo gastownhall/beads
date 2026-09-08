@@ -316,6 +316,15 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 		return fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
 	}
 
+	// The bead keeps its id across demotion; only its plane changes. Journal one
+	// update carrying the demoted snapshot, after the derived blocked-state
+	// maintenance has settled. UpdateIssueWithoutEventInTx above suppressed only
+	// the human audit event — its own journal row already recorded the field
+	// change, and this one records the plane move.
+	if err := issueops.RecordEventInTx(ctx, tx, issueops.EventUpdate, id, actor); err != nil {
+		return err
+	}
+
 	return s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables, fmt.Sprintf("bd: demote %s to wisp", id))
 }
 

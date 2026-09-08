@@ -17,7 +17,7 @@ func (s *testSuite) TestIssueGetReadyWorkWithCounts() {
 	s.Run("LabelHydration", s.readyCountsLabelHydration)
 	s.Run("SortByPriority", s.readyCountsSortByPriority)
 	s.Run("LimitRespected", s.readyCountsLimit)
-	s.Run("CollisionAcrossTablesIsError", s.readyCountsCollision)
+	s.Run("CollisionAcrossTablesKeepsTheWispCopy", s.readyCountsCollision)
 }
 
 func (s *testSuite) readyCountsReturnsReady() {
@@ -224,6 +224,16 @@ func (s *testSuite) readyCountsLimit() {
 	s.Len(out.Items, 3)
 }
 
+// readyCountsCollision pins what a CROSS-PLANE DUPLICATE answers with. One id resident in both
+// tables is corruption — no local write path can produce it, only replication —
+// and this read used to fail the whole query over it, which left a store with
+// one bad id unable to answer any question about the others.
+//
+// The canonical copy is the WISPS one, and the read answers with it. That is
+// the verdict the per-table seam has always reached (issueops, be-iabdi) and
+// the one `bd doctor --check=validate --fix` acts on: it deletes the stale
+// ISSUES copy, the same row this drops. scanIDSrcPage carries the full
+// argument.
 func (s *testSuite) readyCountsCollision() {
 	r := s.issueRepo()
 	const id = "bd-rdyc-coll-1"
@@ -232,7 +242,14 @@ func (s *testSuite) readyCountsCollision() {
 	w.Ephemeral = false
 	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
 
-	_, err := r.GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "exists in both issues and wisps")
+	out, err := r.GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	seen := 0
+	for _, iwc := range out.Items {
+		if iwc != nil && iwc.Issue != nil && iwc.Issue.ID == id {
+			seen++
+			s.Equal("wisp", iwc.Issue.Title, "the wisps copy is canonical; the issues copy is the stale one")
+		}
+	}
+	s.Equal(1, seen, "the id must come back once, not once per plane")
 }

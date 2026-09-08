@@ -17,6 +17,23 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
+// openMigrationPlanningStore opens the personal planning workspace's store for
+// the copy phase below.
+//
+// It is a factory rather than an inline dolt.New because the store it returns
+// is WRITTEN THROUGH: the migration creates every issue in the planning
+// workspace and then deletes them from the project. Those are ordinary bead
+// mutations in another workspace, so they belong in that workspace's events
+// journal if it has one enabled — and the setting is read from there, not from
+// the workspace bd was launched in.
+func openMigrationPlanningStore(ctx context.Context, planningBeadsDir string) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateEventsJournalStore(planningBeadsDir, s, err) }()
+	return dolt.New(ctx, &dolt.Config{
+		Path:     doltserver.ResolveDoltDir(planningBeadsDir),
+		BeadsDir: planningBeadsDir,
+	})
+}
+
 var migratePersonalCmd = &cobra.Command{
 	Use:   "migrate-personal",
 	Short: "Move personal planning issues from the project database to your planning repo",
@@ -118,12 +135,11 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Open planning store (writable)
-	planningDBPath := doltserver.ResolveDoltDir(planningBeadsDir)
-	planningStore, err := dolt.New(ctx, &dolt.Config{
-		Path:     planningDBPath,
-		BeadsDir: planningBeadsDir,
-	})
+	// Open planning store (writable). This is a SECOND workspace's store, and
+	// the copy below creates and deletes real beads in it, so it takes the
+	// planning workspace's own events-journal setting — not the launching
+	// workspace's. See openMigrationPlanningStore.
+	planningStore, err := openMigrationPlanningStore(ctx, planningBeadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open planning store at %s: %w", planningPath, err)
 	}

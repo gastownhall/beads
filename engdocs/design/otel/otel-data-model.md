@@ -42,7 +42,8 @@ OTel SDK names use **dot notation** internally. Prometheus-compatible backends (
 | Event | Category | Status |
 |-------|----------|--------|
 | `bd.command` | CLI | ✅ Implemented |
-| `storage.*` | Storage | ✅ Implemented |
+| `storage.<Method>` | Storage (direct) | ✅ Implemented |
+| `storage.<Role>.<Method>` | Storage (issueops surface) | ✅ Implemented |
 | `dolt.*` | Dolt Backend | ✅ Implemented |
 | `doltserver.*` | Server Lifecycle | 🔲 Roadmap (Tier 1) |
 | `hook.exec` | Hooks | ✅ Implemented (span only) |
@@ -159,6 +160,68 @@ Emitted when executing a transaction.
 |---|---|---|
 | `db.operation` | string | `"RunInTransaction"` |
 | `db.commit_msg` | string | Commit message |
+
+### Naming rule and complete inventory
+
+Every storage span is named `storage.` + the operation name, and carries that
+same bare name in the `db.operation` attribute
+(`internal/telemetry/storage.go`, `InstrumentedStorage.op`). The sections above
+detail the highest-traffic spans; the rest follow the identical shape, so they
+are inventoried here rather than repeated.
+
+There are two families.
+
+**Direct storage operations** — `storage.<Method>`, one per storage method
+(72 spans):
+
+```
+AddDependency AddIssueComment AddLabel CloseIssue CloseIssueChecked
+CountDependencies CountDependents CountEvents CountIssueComments CountIssues
+CountIssuesByGroup CreateIssue CreateIssues DeleteIssue GetAllConfig
+GetAllEventsSince GetBlockedIssues GetConfig GetDependencies
+GetDependenciesWithMetadata GetDependencyTree GetDependents
+GetDependentsWithMetadata GetEpicsEligibleForClosure GetEvents GetIssue
+GetIssueByExternalRef GetIssueComments GetIssueCommentsPage GetIssuesByIDs
+GetIssuesByLabel GetLabels GetLocalMetadata GetProvenanceByRef
+GetProvenanceEvents GetReadyWork GetReadyWorkWithCounts GetStatistics
+IterAllEventsSince IterBlockedIssues IterDependenciesWithMetadata
+IterDependentsWithMetadata IterEvents IterIssueComments IterIssues
+IterReadyWork IterWisps ListWisps MergeMetadata MergeSlotAcquire
+MergeSlotCheck MergeSlotCreate MergeSlotRelease RecordProvenanceEvent
+RemoveDependency RemoveLabel ReopenIssue RunInIssueLifecycleTransaction
+RunInTransaction SearchIssueIDs SearchIssues SearchIssuesWithCounts SetConfig
+SetLocalMetadata SlotClear SlotGet SlotSet UnclaimIssue UnclaimIssueIfAssignee
+UpdateIssue UpdateIssueChecked UpdateIssueType
+```
+
+**Issueops role operations** — `storage.<Role>.<Method>`, emitted when a caller
+goes through the guarded issueops surface instead of calling storage directly
+(39 spans):
+
+```
+BatchCloser.CloseBatch BatchCreator.CreateBatch
+BlockingAnnotator.AnnotateBlocking Bootstrapper.Bootstrap Commenter.AddComment
+Counter.Count Counter.CountByGroup CycleDetector.DetectCycles Deleter.Delete
+DependencyEditor.AddDependencies DependencyEditor.RemoveDependency
+EdgeReader.ReadEdges InitVerifier.VerifyIdentity IssueClaimer.Claim
+IssueOperations.Close IssueOperations.Create IssueOperations.Reopen
+IssueOperations.Update IssueReader.Get IssueReader.List IssueReader.Ready
+IssueRelations.Related Memories.Forget Memories.List Memories.Recall
+Memories.Remember Querier.Query ReadyClaimer.ClaimNext ReadyCounter.CountReady
+StatsReporter.AssigneeStats StatsReporter.Stats Sweeper.Sweep
+TreeWalker.WalkTree VersionReconciler.ReconcileVersion
+VersionReconciler.RecordedVersion WorkspaceConfig.GetSetting
+WorkspaceConfig.ListSettings WorkspaceConfig.SetSetting
+WorkspaceConfig.UnsetSetting
+```
+
+The two families do **not** double-count. The role decorators wrap the
+*uninstrumented* store (`InstrumentedStorage.IssueLifecycle` calls `Unwrap()`
+before wrapping), so one logical operation through the issueops front door emits
+its role span only — not a second `storage.<Method>` span beneath it. A create
+via issueops is one `storage.IssueOperations.Create`; a create via direct
+storage is one `storage.CreateIssue`. Counters and duration histograms are
+therefore comparable across both paths.
 
 ---
 

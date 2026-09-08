@@ -111,7 +111,36 @@ func SortIssuesWithCounts(items []*types.IssueWithCounts, sortBy string, reverse
 // surface that serializes one, and a caller must not have to tell null from
 // empty to learn that nothing matched.
 func FinishPage[T PageRow](rows []T, sortBy string, reverse bool, limit int, hasMore bool) ([]T, bool) {
+	return FinishPageAt(rows, sortBy, reverse, 0, limit, hasMore)
+}
+
+// FinishPageAt is FinishPage for a request that also carries an OFFSET: the
+// display order, the skip, the cut, and the verdict.
+//
+// THE SKIP IS THE EPILOGUE'S ON EVERY BACKEND, and not because no seam can
+// render OFFSET — one of them can. It is here for the same reason SQLLimit
+// sends `--sort id` to the database unbounded: the rows have to be skipped in
+// the ORDER THE CALLER ASKED FOR, and a sort SQL cannot express first exists
+// on the line above. A seam that skipped rows itself under that sort would
+// hand back a page cut out of the middle of storage order.
+//
+// It also decides what a MaxRows cap counts. A row skipped by the database is
+// a row the query matched, and the store-backed seam — which renders LIMIT
+// without OFFSET — has always counted it. Both implementations of
+// issueops.Reader therefore ask their seam for the rows BEFORE the page too
+// (see WithRowsBeforeThePage) and skip them here, so the same request trips
+// the same circuit breaker on either one.
+//
+// An offset past the end of the result set is an empty page, not an error: a
+// pager that walks off the end has its answer.
+func FinishPageAt[T PageRow](rows []T, sortBy string, reverse bool, offset, limit int, hasMore bool) ([]T, bool) {
 	SortRows(rows, sortBy, reverse)
+	switch {
+	case offset >= len(rows):
+		rows = rows[:0]
+	case offset > 0:
+		rows = rows[offset:]
+	}
 	if limit > 0 && len(rows) > limit {
 		rows, hasMore = rows[:limit], true
 	}

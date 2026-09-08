@@ -22,16 +22,16 @@ import (
 // the stored ROWS rather than through the role's own answer.
 //
 // What moved out, and where it landed:
-//   - the occupied-ID refusal -> RunIssueOperationsCreateRefusesAnOccupiedID;
-//   - the foreign-ID-prefix refusal -> RunIssueOperationsCreateRefusesAForeignIDPrefix;
+//   - the occupied-ID refusal -> RunLifecycleCreateRefusesAnOccupiedID;
+//   - the foreign-ID-prefix refusal -> RunLifecycleCreateRefusesAForeignIDPrefix;
 //   - the metadata Merge/Set/Unset ordering and the Replace exclusivity guard ->
-//     RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset;
+//     RunLifecycleUpdateMetadataPatchOrdersMergeSetUnset;
 //   - the LabelPatch ordering and its no-op -> RunIssueOperationsUpdateLabelPatchOrdering;
 //   - the ParentID replacement, clear and both no-ops ->
-//     RunIssueOperationsUpdateParentIDReplacesTheParentEdge and
+//     RunLifecycleUpdateParentIDReplacesTheParentEdge and
 //     ...ReplacesEveryParent;
 //   - the version and field compare-and-sets ->
-//     RunIssueOperationsUpdateAssigneeTransferFence and
+//     RunLifecycleUpdateAssigneeTransferFence and
 //     ...UpdateConditionalGuardsGateOrdinaryEdits;
 //   - the close/reopen refusals, the idempotent re-close and the configured
 //     done category -> the Lifecycle close/reopen contract.

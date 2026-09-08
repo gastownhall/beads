@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/journalops"
 	"github.com/steveyegge/beads/memoryops"
 )
 
@@ -44,7 +45,12 @@ type CloseOpenChildrenError = issueops.CloseOpenChildrenError
 // ErrNotOwner is returned when an actor tries to unclaim an issue that is claimed
 // by a different actor. Releasing another actor's claim requires the force
 // escape hatch (bd unclaim --force), reserved for admin/reaper use.
-var ErrNotOwner = errors.New("issue claimed by a different actor")
+//
+// It is an ALIAS of issueops.ErrNotOwner, which now declares it: a refusal the
+// public Releaser role raises has to be classifiable by a caller that cannot
+// import this package. The identity is preserved, so every errors.Is site in
+// the tree keeps matching the same value.
+var ErrNotOwner = issueops.ErrNotOwner
 
 // ErrCommitIndeterminate marks a write error whose durable outcome may be
 // unknown. Such errors must not be replayed because the write may already have
@@ -67,7 +73,7 @@ var ErrCommitIndeterminate = errors.New("write commit result indeterminate")
 // before wrapping it in an issueops.ClaimConflictError. That type's Error() is
 // a PASSTHROUGH, so the fragments must be in the wrapped error; a caller
 // reading the type's FIELDS needs none of this. These stay for the parser, and
-// TestClaimConflictFormatRoundTrip (internal/storage/dolt) plus the
+// the conformance suite's RunClaimRefusalMessagesCarryTheirFragments plus the
 // root-package ParseClaimConflict tests are the tripwires that producer and
 // consumer still agree character for character.
 //
@@ -240,6 +246,14 @@ type Storage interface {
 	// walk has a depth, a cycle policy and a node shape of its own. Reads fire
 	// no hooks, as for IssueReader.
 	TreeWalker() (issueops.TreeWalker, error)
+	// GraphCounter returns the guarded edge-count surface for this store: how
+	// many dependency edges each of several anchors has, in one named
+	// direction, spanning both dependency planes. Its own role rather than a
+	// third Counter method (that one's predicate is a filter over the issues
+	// table and says nothing about an edge) and rather than a counted
+	// EdgeReader (that one answers with the stored ROWS, outbound only). Reads
+	// fire no hooks, as for IssueReader.
+	GraphCounter() (issueops.GraphCounter, error)
 	// ReadyCounter returns the guarded ready-count surface for this store: the
 	// size of the ready set, which is the number `bd ready`'s pagination
 	// publishes and which no other role answers. Counter's predicate is a
@@ -293,6 +307,39 @@ type Storage interface {
 	//
 	// Reads fire no hooks, as for IssueReader.
 	InitVerifier() (issueops.InitVerifier, error)
+	// MetadataCAS returns the conditional single-key metadata write for this
+	// store: set metadata[key] only if it currently holds the value the caller
+	// expected. It is its own role rather than another Lifecycle guard because
+	// Lifecycle's ExpectedVersion/Assignee/Status gate an ordinary edit on the
+	// row's LIFECYCLE, and coordination state that is not a claim lives on keys
+	// the caller invented, which no lifecycle guard can name.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a swap that lands is an
+	// update to an issue, which is a hook the vocabulary publishes. See
+	// hook_metadata_cas.go.
+	MetadataCAS() (issueops.MetadataCAS, error)
+	// BatchApplier returns the guarded apply-many surface for this store:
+	// a HETEROGENEOUS list of creates, updates, closes and edges applied in
+	// declaration order as one durable act. It is its own role rather than a
+	// fifth batch verb because its unit is a PLAN — create these, wire them,
+	// close the step that spawned them — and each of BatchCreator, BatchCloser
+	// and DependencyEditor is one verb repeated, so composing two of them means
+	// two transactions with a window in between.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: every landed item is an
+	// event the hook vocabulary publishes. See hook_batch_applier.go.
+	BatchApplier() (issueops.BatchApplier, error)
+	// Releaser returns the claim-release surface for this store: give up the
+	// claim on one issue, optionally only while a named holder still has it.
+	// It is its own role beside IssueClaimer rather than a method on it,
+	// because a caller entitled to release its own work is often not entitled
+	// to take new work, and a surface carrying both hands it a capability it
+	// should not be able to reach.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a release changes
+	// assignee and status, which is on_update — the same event the journal
+	// already records for it. See hook_releaser.go.
+	Releaser() (issueops.Releaser, error)
 
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
@@ -696,6 +743,83 @@ type StateHasher interface {
 	GetStateHash(ctx context.Context) (string, error)
 }
 
+// The durable mutation journal's vocabulary lives in the journalops leaf, and
+// these four names are ALIASES of it — not copies, and not a compatibility
+// shim to be deleted later. The canon is journalops: what a record carries,
+// what a page promises and what a truncation means are stated there, once, and
+// every citation in this tree points at those symbols rather than repeating
+// them here.
+//
+// THE ALIAS DIRECTION IS THE LOAD-BEARING PART. journalops imports context and
+// fmt and nothing else, so it cannot name anything in this package; this
+// package can name it. Declaring the canon down there and aliasing up here is
+// what makes the leaf a leaf. And because a Go alias is the SAME TYPE, every
+// existing implementation, every errors.As site and every caller compiles
+// unchanged across the move — which is why the journal became a role without a
+// line of behavior changing.
+//
+// The two interfaces BELOW these aliases stay declared here on purpose. They
+// are the operator's half of the plane — retention and per-instance activation
+// — and journalops states why they are deliberately not on the role.
+type (
+	// EventsJournalRow is journalops.Row: one raw bd_events_journal record.
+	EventsJournalRow = journalops.Row
+	// EventsJournalPage is journalops.Page: rows plus the journal head.
+	EventsJournalPage = journalops.Page
+	// EventsJournalTruncatedError is journalops.TruncatedError: a checkpoint
+	// below the retained window, carrying the window that can still be served.
+	EventsJournalTruncatedError = journalops.TruncatedError
+	// EventsJournalCursor is journalops.Journal: the role a consumer holds to
+	// page through the journal from a checkpoint.
+	EventsJournalCursor = journalops.Journal
+)
+
+// EventsJournalTruncatedCode is journalops.TruncatedCode: the stable wire
+// spelling of a truncation.
+const EventsJournalTruncatedCode = journalops.TruncatedCode
+
+// EventsJournalAccessor reads and prunes the durable events journal
+// (bd_events_journal) through the store's own transaction machinery. Unlike
+// RawDBAccessor — which only the server-mode store provides — this works on the
+// embedded store too, which owns its connections and exposes no stable *sql.DB.
+//
+// IT IS THE OPERATOR SURFACE, and it is deliberately not the role. Retention is
+// a decision the workspace makes, so a caller that only READS the journal asks
+// for EventsJournalCursor — journalops.Journal — instead, and a surface
+// documented never to retain then cannot prune rather than merely promising not
+// to. journalops' package doc states the split; this is the half it excludes.
+//
+// ReadEventsJournal is also a SECOND read body, not a narrowing of the role's:
+// it pays for the head read only in the cases where the truncation verdict is
+// ambiguous, because `bd events tail --follow` runs it every second. The two
+// share the row query and the verdict (issueops.ComputeEventsTruncation) and
+// differ in exactly that, so they are pinned separately.
+type EventsJournalAccessor interface {
+	// ReadEventsJournal returns rows with seq greater than since, ordered by
+	// seq ascending, optionally capped by limit (0 = no cap). It returns
+	// *EventsJournalTruncatedError when since sits below the retained window,
+	// on the terms journalops.Journal.ReadEventsJournalPage states.
+	ReadEventsJournal(ctx context.Context, since int64, limit int) ([]EventsJournalRow, error)
+	// PruneEventsJournal deletes rows with seq below before, honoring the
+	// retain-days / retain-rows floors (0 = floor disabled), and returns the
+	// number of rows deleted.
+	PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+}
+
+// EventsJournalConfigurer controls durable events journal activation on ONE
+// storage instance. Implementations must never use process-global state: a
+// process can hold several stores at once (multiple projects, a test binary's
+// parallel fixtures), and opening one with the journal enabled must not turn it
+// on for any other. Callers type-assert; a store that does not implement it
+// simply cannot journal.
+//
+// Activation is operator surface for the reason retention is: it is the
+// workspace's answer to "do we record at all", read from the workspace's own
+// config, and a consumer holding the read role has no business changing it.
+type EventsJournalConfigurer interface {
+	SetEventsJournalEnabled(enabled bool)
+}
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool
@@ -745,6 +869,13 @@ type BackupStore interface {
 // answer fails to compile rather than falling back to an unbounded query.
 type ReadyWorkCounter interface {
 	CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error)
+}
+
+// ExternalDependencyQueryStore returns the narrow set of explicit external
+// blocking edges. Policy decorators use this instead of scanning every graph
+// edge on each ready-work query.
+type ExternalDependencyQueryStore interface {
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 }
 
 // Transaction provides atomic multi-operation support within a single database transaction.

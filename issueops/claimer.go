@@ -36,7 +36,8 @@ type ClaimResult struct {
 // Lifecycle and Reader, reached by its own accessor; a new capability gets a
 // new role interface and its own accessor, so never append a method here.
 //
-// Implementations never mutate caller-owned request values. Result values are
+// Implementations never mutate caller-owned request values. Deterministic
+// request-validation failures match ErrValidation. Result values are
 // unspecified when error is non-nil.
 type Claimer interface {
 	// Claim validates and commits the complete request as one atomic

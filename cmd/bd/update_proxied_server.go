@@ -5,13 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/fs"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -86,8 +83,10 @@ func proxiedIssueLifecycle() (issueops.Lifecycle, error) {
 // applyUpdateProxiedOne applies one issue's update — plain or --claim —
 // through issueops.Lifecycle. What stays here is this surface's own protocol:
 // the template guard, the advisory reassign pre-read, the per-id failure
-// taxonomy the multi-id batch needs, the notes-overwrite warning and the
-// completion hooks.
+// taxonomy the multi-id batch needs and the notes-overwrite warning. Hooks are
+// NOT among them: they fire from the write plumbing now (the notifying provider
+// wired in main.go), which is what makes an update fire the same events here as
+// it does on the embedded path.
 //
 // Provenance carries the commit message this path has always written, so `bd
 // dolt log` reads the same after the move as before it. The plane is
@@ -168,9 +167,6 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if notesOverwritten {
 		warnNotesReplacement(id)
 	}
-	if err := fireProxiedUpdateHooks(ctx, before, updated); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", id, err)
-	}
 	return updated, nil, nil
 }
 
@@ -178,8 +174,10 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 // for the things the mutation's own result cannot answer: whether the target is
 // a template, whether an unguarded assignee edit is about to take the issue
 // from a live foreign holder, whether --notes is about to replace existing
-// notes, whether --defer="" should also clear a deferred status, and whether
-// the update closes an open issue (which fires a second hook).
+// notes, and whether --defer="" should also clear a deferred status. It no
+// longer reads the pre-state to decide a hook: a status-crossing update fires
+// on_update and nothing else, from the plumbing, exactly as it does on the
+// embedded path.
 func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure) {
 	rd, err := proxiedIssueReader()
 	if err != nil {
@@ -318,44 +316,4 @@ func proxiedUpdatePatch(in *updateInput, before *types.Issue) (issueops.IssuePat
 		patch.Status = setField(types.StatusOpen)
 	}
 	return patch, nil
-}
-
-func fireProxiedUpdateHooks(ctx context.Context, before, after *types.Issue) error {
-	if after == nil {
-		return nil
-	}
-	runner, err := proxiedHookRunner(ctx)
-	if err != nil {
-		return fmt.Errorf("hook runner: %w", err)
-	}
-	if runner == nil {
-		return nil
-	}
-	if err := runner.RunSync(hooks.EventUpdate, after); err != nil {
-		return fmt.Errorf("on_update hook: %w", err)
-	}
-	if before != nil &&
-		before.Status != types.StatusClosed &&
-		after.Status == types.StatusClosed {
-		if err := runner.RunSync(hooks.EventClose, after); err != nil {
-			return fmt.Errorf("on_close hook: %w", err)
-		}
-	}
-	return nil
-}
-
-func proxiedHookRunner(ctx context.Context) (*hooks.Runner, error) {
-	if hookRunner != nil {
-		return hookRunner, nil
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("getwd: %w", err)
-	}
-	fsProvider := fs.NewFileSystemProvider(cwd, newBeadsDirTemplates(), newFileSystemAdapters())
-	resolution := fsProvider.BeadsDirFSUseCase().ResolveBeadsDir(ctx)
-	if resolution.BeadsDir == "" {
-		return nil, nil
-	}
-	return hooks.NewRunner(filepath.Join(resolution.BeadsDir, "hooks")), nil
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,45 @@ func TestProxiedServerImport(t *testing.T) {
 			},
 		}
 	}
+
+	// A workspace WITH hooks is the case that broke: proxied mode wraps its
+	// provider so writes fire the workspace's hook scripts, and the import role
+	// asks the unit of work for its raw statement runner (importer.go) — an
+	// assertion on the concrete type, which the wrapper is not. Every import in
+	// a hooks-enabled proxied workspace failed on it.
+	//
+	// The import itself still fires no hook, on either plumbing: both run the
+	// shared batch-upsert engine rather than the per-issue verbs.
+	t.Run("import_runs_in_a_workspace_with_hooks", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == "windows" {
+			t.Skip("hook script form is POSIX shell")
+		}
+		marker := filepath.Join(t.TempDir(), "any_hook_marker")
+		script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> " + shellQuote(marker) + "\n"
+		p := newSharedProxiedProjectWithHooks(t, bd, "imph", map[string]string{
+			"on_create": script,
+			"on_update": script,
+			"on_close":  script,
+		})
+		db := openProxiedDB(t, p)
+
+		path := filepath.Join(p.dir, "hooked.jsonl")
+		if err := os.WriteFile(path, []byte(importFixtureJSONL(t, fixtureIssues("imph"))), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		report := bdProxiedImport(t, bd, p.dir, path)
+		if !strings.Contains(report, "Imported 3 issues") {
+			t.Errorf("import report = %q, want 'Imported 3 issues'", report)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'imph-r%'"); got != 3 {
+			t.Errorf("issue rows = %d, want 3", got)
+		}
+		if data, err := os.ReadFile(marker); err == nil {
+			t.Errorf("import fired hooks: %q", string(data))
+		}
+	})
 
 	t.Run("roundtrip_one_commit_with_content", func(t *testing.T) {
 		t.Parallel()
@@ -243,6 +283,95 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'impw-wisp-real'"); got != 0 {
 			t.Errorf("marked no-history wisp leaked into issues table: %d rows, want 0", got)
+		}
+	})
+
+	// wy-zdfs6r: the proxied path used to lose every regular<->wisp edge whose
+	// BOTH endpoints were rows of the import file. It writes the whole import
+	// in one ImportBatch, and the engine skip-reports a cross-plane edge while
+	// both of its endpoints are rows of one batch — so the edge was reported
+	// and dropped, and because a re-run upserts the same batch it could never
+	// be backfilled either (the loss wy-4276q8 measured on the classic path,
+	// where a restored export lost all 22 such `blocks` edges). The importer
+	// role now writes the rows first and those edges after, in single-plane
+	// batches, WITHIN THE SAME unit of work.
+	t.Run("cross_plane_in_batch_edges_are_wired", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impx")
+		db := openProxiedDB(t, p)
+
+		// Edges in BOTH directions, so neither plane is only ever a target:
+		// impx-reg -> impx-wisp lands in `dependencies` against the wisp
+		// column, impx-wisp -> impx-other in `wisp_dependencies` against the
+		// issue column. The second is also what makes the single-plane split
+		// load-bearing — impx-wisp is one edge's target and the other's
+		// source, so a mixed second pass would skip-report the first again.
+		fixture := importFixtureJSONL(t, []*types.Issue{
+			{
+				ID: "impx-reg", Title: "Regular source", Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				Dependencies: []*types.Dependency{{IssueID: "impx-reg", DependsOnID: "impx-wisp", Type: types.DepBlocks}},
+				CreatedAt:    when, UpdatedAt: when,
+			},
+			{
+				ID: "impx-other", Title: "Regular target", Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				CreatedAt: when, UpdatedAt: when,
+			},
+		},
+			`{"id":"impx-wisp","title":"Wisp end","status":"open","issue_type":"task","priority":2,"wisp_plane":true,`+
+				`"dependencies":[{"issue_id":"impx-wisp","depends_on_id":"impx-other","type":"blocks"}],`+
+				`"created_at":"2026-08-01T12:00:00Z","updated_at":"2026-08-01T12:00:00Z"}`,
+		)
+		path := filepath.Join(p.dir, "crossplane.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		head := proxiedDoltHead(t, db)
+		report := bdProxiedImport(t, bd, p.dir, path)
+		if strings.Contains(report, "Skipped dependency") {
+			t.Errorf("import skip-reported a cross-plane in-batch edge:\n%s", report)
+		}
+
+		// Both rows land on their own planes: an import that had quietly
+		// re-planed the wisp would satisfy every edge assertion below for the
+		// wrong reason.
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id IN ('impx-reg','impx-other')"); got != 2 {
+			t.Errorf("durable rows = %d, want 2", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM wisps WHERE id = 'impx-wisp'"); got != 1 {
+			t.Errorf("wisp row = %d, want 1", got)
+		}
+
+		// The edges themselves, on the plane's own dependency table and
+		// against the target plane's own column.
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'impx-reg' AND depends_on_wisp_id = 'impx-wisp' AND type = 'blocks'"); got != 1 {
+			t.Errorf("regular -> wisp edge = %d, want 1 (the wy-zdfs6r loss)", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = 'impx-wisp' AND depends_on_issue_id = 'impx-other' AND type = 'blocks'"); got != 1 {
+			t.Errorf("wisp -> regular edge = %d, want 1 (the wy-zdfs6r loss)", got)
+		}
+
+		// STILL ONE COMMIT. The deferred edges are a second pass over the same
+		// unit of work, not a second import: splitting the transaction to wire
+		// them would trade this loss for a torn import.
+		if n := proxiedDoltCommitCountSince(t, db, head); n != 1 {
+			t.Errorf("commits for one import = %d, want exactly 1", n)
+		}
+
+		// And it converges: re-importing the same snapshot writes no second
+		// copy of either edge and commits nothing.
+		headBeforeReimport := proxiedDoltHead(t, db)
+		_ = bdProxiedImport(t, bd, p.dir, path)
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'impx-reg'"); got != 1 {
+			t.Errorf("regular -> wisp edges after re-import = %d, want 1", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = 'impx-wisp'"); got != 1 {
+			t.Errorf("wisp -> regular edges after re-import = %d, want 1", got)
+		}
+		if n := proxiedDoltCommitCountSince(t, db, headBeforeReimport); n != 0 {
+			t.Errorf("re-import of an identical snapshot made %d commits, want 0", n)
 		}
 	})
 

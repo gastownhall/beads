@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -780,12 +781,15 @@ func TestProxiedServerClose2(t *testing.T) {
 		p := newSharedProxiedProjectWithHooks(t, bd, "hfc", map[string]string{"on_close": script})
 		issue := bdProxiedCreate(t, bd, p.dir, "Hook fire")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
-		data, err := os.ReadFile(marker)
+		// Polled, not read once: hooks fire fire-and-forget off the write
+		// plumbing now, so the marker appears shortly AFTER the command exits
+		// rather than during it.
+		data, err := waitForMarker(marker, 5*time.Second)
 		if err != nil {
-			t.Fatalf("hook marker not written: %v", err)
+			t.Fatalf("on_close hook did not fire within timeout: %v", err)
 		}
-		if !strings.Contains(string(data), issue.ID) {
-			t.Errorf("hook marker missing issue ID; got: %q", string(data))
+		if !strings.Contains(data, issue.ID) {
+			t.Errorf("hook marker missing issue ID; got: %q", data)
 		}
 	})
 }

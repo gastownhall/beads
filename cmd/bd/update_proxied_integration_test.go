@@ -1033,26 +1033,40 @@ func TestProxiedServerUpdateHooks(t *testing.T) {
 		}
 	})
 
-	t.Run("on_close_fires_when_status_transitions_to_closed", func(t *testing.T) {
+	// An update that CROSSES to closed fires on_update and nothing else, which
+	// is what `bd update -s closed` has always done on the embedded plumbing
+	// (HookFiringStore.UpdateIssue fires on_update; hookIssueOperations.Update
+	// fires the update hook). Proxied mode used to fire on_close as well, from
+	// a hook call wired into the update COMMAND rather than into the write
+	// plumbing. That call is gone: one firing site per plumbing, and the same
+	// events from both. `bd close` is what fires on_close.
+	t.Run("status_crossing_update_fires_on_update_only", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		markerPath := filepath.Join(dir, "on_close_marker")
-		hookBody := "#!/bin/sh\necho \"$1\" > " + markerPath + "\n"
+		updateMarker := filepath.Join(dir, "on_update_marker")
+		closeMarker := filepath.Join(dir, "on_close_marker")
 
 		p := newSharedProxiedProjectWithHooks(t, bd, "uphc", map[string]string{
-			"on_close": hookBody,
+			"on_update": "#!/bin/sh\necho \"$1\" > " + updateMarker + "\n",
+			"on_close":  "#!/bin/sh\necho \"$1\" > " + closeMarker + "\n",
 		})
 		issue := bdProxiedCreate(t, bd, p.dir, "Hook close test")
 
-		_ = os.Remove(markerPath)
+		_ = os.Remove(updateMarker)
+		_ = os.Remove(closeMarker)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "-s", "closed")
 
-		gotID, err := waitForMarker(markerPath, 5*time.Second)
+		gotID, err := waitForMarker(updateMarker, 5*time.Second)
 		if err != nil {
-			t.Fatalf("on_close hook did not fire within timeout: %v", err)
+			t.Fatalf("on_update hook did not fire within timeout: %v", err)
 		}
 		if strings.TrimSpace(gotID) != issue.ID {
-			t.Errorf("on_close marker: got %q, want issue ID %q", strings.TrimSpace(gotID), issue.ID)
+			t.Errorf("on_update marker: got %q, want issue ID %q", strings.TrimSpace(gotID), issue.ID)
+		}
+		// The update hook has landed, so anything the same command was going to
+		// fire has had its chance.
+		if data, err := os.ReadFile(closeMarker); err == nil {
+			t.Errorf("on_close fired for an update that crossed to closed: %q", string(data))
 		}
 	})
 }

@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/backend/conformance"
 )
@@ -25,6 +26,12 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("ResultMirrorsTheStoredRow", func(t *testing.T) {
 		conformance.RunCommenterResultMirrorsTheStoredRow(t, ctx, fixture)
 	})
+	t.Run("AdvancesALiveStampPastTheThreadsNewestComment", func(t *testing.T) {
+		conformance.RunCommenterAdvancesALiveStampPastTheThreadsNewestComment(t, ctx, fixture)
+	})
+	t.Run("TakesTheClockWhenTheThreadIsBehindIt", func(t *testing.T) {
+		conformance.RunCommenterTakesTheClockWhenTheThreadIsBehindIt(t, ctx, fixture)
+	})
 	t.Run("CommentOnAWispLandsOnTheWispThread", func(t *testing.T) {
 		conformance.RunCommenterCommentOnAWispLandsOnTheWispThread(t, ctx, fixture)
 	})
@@ -37,8 +44,8 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("DoesNotResolvePrefixes", func(t *testing.T) {
 		conformance.RunCommenterDoesNotResolvePrefixes(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunCommenterRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunCommenterRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("LeavesTheAnchorIssueUntouched", func(t *testing.T) {
 		conformance.RunCommenterLeavesTheAnchorIssueUntouched(t, ctx, fixture)
@@ -72,6 +79,16 @@ func newDoltCommenterFixture(t *testing.T, prefix string) (conformance.Commenter
 		CreateWisp:   kit.CreateWisp,
 		QueryScalar:  kit.QueryScalar,
 		CountHistory: kit.CountHistory,
+		// Not on the kit: the role fixtures the scaffolding slice froze have no
+		// comment hook. ImportIssueComment is this backend's import path, and
+		// the import path is DEFINED as the one that keeps the caller's
+		// timestamp (issueops.AddIssueCommentInTx advances a live stamp;
+		// ImportIssueCommentInTx does not), which is exactly what the hook
+		// promises.
+		SeedCommentAt: func(ctx context.Context, issueID, author, text string, at time.Time) error {
+			_, err := store.ImportIssueComment(ctx, issueID, author, text, at)
+			return err
+		},
 	}
 	return fixture, ctx, func() {
 		cancel()

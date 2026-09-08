@@ -38,10 +38,13 @@ var _ publicops.Querier = (*querier)(nil)
 //
 // It differs from the store-backed body in exactly two places, and both are
 // this seam's capabilities rather than a second opinion about the query. It
-// renders OFFSET, so a filter-expressible query pushes the skip down; and it
-// reports HasMore natively, so the epilogue's seed is that verdict rather than
-// an over-fetched row. The plan itself is workapi.BuildQueryPlan, the same
-// function the other body calls.
+// renders OFFSET, so a filter-expressible query pushes the skip down instead of
+// reaching past it and dropping rows in Go; and it reports HasMore natively, so
+// the epilogue's seed is that verdict rather than an over-fetched row. The two
+// bodies answer the same page either way — a query request refuses an offset
+// under a display order (workapi.BuildQueryPlan), so where the skip happens is
+// the only thing the choice decides. The plan itself is workapi.BuildQueryPlan,
+// the same function the other body calls.
 func (q *querier) Query(ctx context.Context, req publicops.QueryRequest) (publicops.IssuePage, error) {
 	plan, err := workapi.BuildQueryPlan(req)
 	if err != nil {

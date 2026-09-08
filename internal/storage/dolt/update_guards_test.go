@@ -9,8 +9,8 @@ import (
 )
 
 // The single-threaded half of this file is gone.
-// RunIssueOperationsUpdateAssigneeTransferFence and
-// RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits state the same
+// RunLifecycleUpdateAssigneeTransferFence and
+// RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits state the same
 // guard promises at three backends and are strictly stronger on the one this
 // file claimed and could not pin: whether `--if-assignee ''` is a real
 // "expected unassigned" guard rather than an absent one. What the wrapper

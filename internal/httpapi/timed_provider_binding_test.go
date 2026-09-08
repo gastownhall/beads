@@ -20,11 +20,11 @@ import (
 // symmetry".
 //
 // WHY THIS TEST IS STRUCTURAL. The behavioral pins are per route, and only two
-// of the thirteen roles have one. The other eleven — including all three WRITE
-// roles, whose transactions are the longest this server runs — had none, so the
-// symmetric refactor could be applied to them with the whole package green.
+// of the roles have one. The rest — including every WRITE role, whose
+// transactions are the longest this server runs — have none, so the symmetric
+// refactor could be applied to them with the whole package green.
 //
-// Reading the binding off the AST covers all thirteen at once. It says nothing
+// Reading the binding off the AST covers all of them at once. It says nothing
 // about what the roles DO, only that each is constructed over the receiver, so
 // it is not a replacement for the behavioral pins.
 func TestEveryTimedProviderAccessorBindsToTheWrapper(t *testing.T) {
@@ -79,8 +79,8 @@ func TestEveryTimedProviderAccessorBindsToTheWrapper(t *testing.T) {
 
 	// The count is asserted so that deleting accessors, or renaming the type,
 	// cannot make this pass by having nothing to check.
-	if checked < 13 {
-		t.Errorf("checked %d timedProvider accessors, want at least 13: the roles this surface answers from "+
+	if checked < 15 {
+		t.Errorf("checked %d timedProvider accessors, want at least 15: the roles this surface answers from "+
 			"all bind here, so a smaller number means some are no longer being read", checked)
 	}
 }

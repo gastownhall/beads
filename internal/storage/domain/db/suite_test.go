@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -20,6 +21,7 @@ type testSuite struct {
 	dbName         string
 	baselineCommit string
 	eventsDDL      string
+	journalEnabled bool
 }
 
 func (s *testSuite) SetupSuite() {
@@ -93,6 +95,7 @@ func (s *testSuite) TearDownSuite() {
 }
 
 func (s *testSuite) SetupTest() {
+	s.journalEnabled = false
 	ctx := context.Background()
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_RESET('--hard', ?)", s.baselineCommit)
 	s.Require().NoError(err, "reset to baseline %s", s.baselineCommit)
@@ -109,7 +112,7 @@ func (s *testSuite) Runner() Runner {
 }
 
 func (s *testSuite) Ctx() context.Context {
-	return context.Background()
+	return issueops.WithEventsJournal(context.Background(), s.journalEnabled)
 }
 
 var suffixLetters = []rune("abcdefghijklmnopqrstuvwxyz")

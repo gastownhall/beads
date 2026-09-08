@@ -317,3 +317,60 @@ func TestRunInTransactionMixedTierCycleSameTierClosingEdgeRejected(t *testing.T)
 	// The committed C -> W edge is untouched by the rolled-back transaction.
 	assertDepEdge(ctx, t, store, regularC.ID, wispW.ID)
 }
+
+// The gate's guard arm: an edge OUTSIDE the scheduling set is waved through
+// even when it CLOSES A LOOP in the scheduling graph, because a non-scheduling
+// edge cannot deadlock ready-work computation and so is not a cycle to reject.
+//
+// THE SHAPE IS THE POINT, and it is why the edge type is the only difference
+// between this case and TestRunInTransactionCrossTierCycleRejected: a committed
+// scheduling edge R -> W already exists, and the edge under test runs W -> R.
+// Were the guard to stop excusing the type, the merged two-session probe would
+// find W -> R -> W and refuse — so this case fails the moment the arm stops
+// answering "not my edge type", which is what makes it worth its runtime.
+//
+// It is the arm worth pinning because it is the SILENT one. It refuses nothing
+// and logs nothing, so the day types.IsSchedulingEdge grows a fifth member, a
+// stale inline copy of that set here would drop the new type into this arm and
+// commit real cycles with no signal at all (ga-2ltro.10).
+func TestRunInTransactionCrossTierNonSchedulingEdgeIsNotGated(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	regular := crossTierRegularIssue("test-xtier-related-regular", "regular issue in cross-tier related loop")
+	if err := store.CreateIssue(ctx, regular, "tester"); err != nil {
+		t.Fatalf("CreateIssue regular: %v", err)
+	}
+	wisp := crossTierWispIssue("test-xtier-related-wisp", "wisp in cross-tier related loop")
+	if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+
+	// Committed scheduling edge R -> W, the half that puts a path in the graph.
+	if err := store.RunInTransaction(ctx, "seed committed R blocks-on W", func(tx storage.Transaction) error {
+		return tx.AddDependency(ctx, &types.Dependency{
+			IssueID:     regular.ID,
+			DependsOnID: wisp.ID,
+			Type:        types.DepBlocks,
+		}, "tester")
+	}); err != nil {
+		t.Fatalf("seed committed R -> W edge: %v", err)
+	}
+
+	// The edge under test closes the loop W -> R, but as `related`.
+	if err := store.RunInTransaction(ctx, "test: cross-tier related edge closing a scheduling loop", func(tx storage.Transaction) error {
+		return tx.AddDependency(ctx, &types.Dependency{
+			IssueID:     wisp.ID,
+			DependsOnID: regular.ID,
+			Type:        types.DepRelated,
+		}, "tester")
+	}); err != nil {
+		t.Fatalf("RunInTransaction error = %v, want the related edge to land — `related` is outside the scheduling set", err)
+	}
+
+	assertDepEdge(ctx, t, store, wisp.ID, regular.ID)
+	assertDepEdge(ctx, t, store, regular.ID, wisp.ID)
+}

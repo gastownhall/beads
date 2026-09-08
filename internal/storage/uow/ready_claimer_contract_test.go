@@ -30,12 +30,14 @@ func TestReadyClaimerContract(t *testing.T) {
 		name string
 		run  func(*testing.T, context.Context, conformance.ReadyClaimerFixture)
 	}{
-		{name: "RejectsLimitOffsetAndEmptyActor", run: conformance.RunReadyClaimerRejectsLimitOffsetAndEmptyActor},
+		{name: "RejectsLimitOffsetBriefAndEmptyActor", run: conformance.RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor},
 		{name: "EmptyFrontIsNormal", run: conformance.RunReadyClaimerEmptyFrontIsNormal},
 		{name: "ClaimsTheFrontRowAndReturnsThePostClaimState", run: conformance.RunReadyClaimerClaimsTheFrontRowAndReturnsThePostClaimState},
 		{name: "ClaimsAnEphemeralRowTheFilterAdmits", run: conformance.RunReadyClaimerClaimsAnEphemeralRowTheFilterAdmits},
 		{name: "LeavesEphemeralRowsOutOfTheDefaultReadySet", run: conformance.RunReadyClaimerLeavesEphemeralRowsOutOfTheDefaultReadySet},
 		{name: "LeasesADurableWinButNotAnEphemeralOne", run: conformance.RunReadyClaimerLeasesADurableWinButNotAnEphemeralOne},
+		{name: "FencesTheClaimByEveryLabelSetAndTheParentItWasGiven", run: conformance.RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven},
+		{name: "HydratesOnlyItsBlocksEdgesIntoTheCardinalities", run: conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities},
 		{name: "AnswersTheQuestionReaderReadyLists", run: conformance.RunReadyClaimerAnswersTheQuestionReaderReadyLists},
 		{name: "SkipsIneligibleFrontRows", run: conformance.RunReadyClaimerSkipsIneligibleFrontRows},
 		{name: "RecordsOneHistoryEntryForAWin", run: conformance.RunReadyClaimerRecordsOneHistoryEntryForAWin},

@@ -125,6 +125,12 @@ func TestBatchCloserDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunBatchCloserDoesNotMutateTheCallerRequest(t, ctx, fixture)
 }
 
+func TestBatchCloserSettlesTheDependersOfWhatItClosed(t *testing.T) {
+	fixture, ctx, cleanup := newDoltBatchCloserFixture(t, "bcblocked")
+	defer cleanup()
+	conformance.RunBatchCloserSettlesTheDependersOfWhatItClosed(t, ctx, fixture)
+}
+
 func newDoltBatchCloserFixture(t *testing.T, prefix string) (conformance.BatchCloserFixture, context.Context, func()) {
 	t.Helper()
 	store, storeCleanup := setupTestStore(t)
@@ -145,9 +151,10 @@ func newDoltBatchCloserFixture(t *testing.T, prefix string) (conformance.BatchCl
 		// Local, because the shared kit exposes no comment hook. Folding it in
 		// is an S0 follow-up (bd-kue5t); editing the frozen kit from this slice
 		// would collide with the five running beside it.
-		AddComment:   store.AddComment,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		AddComment:           store.AddComment,
+		QueryScalar:          kit.QueryScalar,
+		CountHistory:         kit.CountHistory,
+		CountHistoryMatching: kit.CountHistoryMatching,
 	}
 	return fixture, ctx, func() {
 		cancel()

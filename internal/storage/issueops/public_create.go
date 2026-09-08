@@ -102,13 +102,16 @@ func ClassifyPublicCreateError(err error) error {
 	if errors.Is(err, storage.ErrPrefixMismatch) || errors.Is(err, domain.ErrSelfDependency) || errors.Is(err, types.ErrFieldTooLong) || errors.Is(err, domain.ErrDependencyCycle) || errors.As(err, &conflict) || errors.As(err, &hierarchyConflict) {
 		return publicCreateValidationError(err)
 	}
-	// A create whose requested relationship names a row that does not exist
-	// fails the dependency table's target foreign key. The caller asked for an
-	// edge to something absent, so this is a deterministic refusal rather than
-	// an infrastructure error: classify it the same way ExecuteCreate refuses a
-	// skipped dependency, so every backend reports a missing dependency,
-	// parent, or waits-for target as ErrValidation wrapping ErrNotFound.
-	if dberrors.IsMissingForeignKeyTarget(err) {
+	// A create whose requested relationship names a row that does not exist is
+	// refused by the dependency write: as the typed endpoint refusal where the
+	// write could name the absent endpoint, and as the target foreign key where
+	// it could not. The caller asked for an edge to something absent, so this
+	// is a deterministic refusal rather than an infrastructure error: classify
+	// it the same way ExecuteCreate refuses a skipped dependency, so every
+	// backend reports a missing dependency, parent, or waits-for target as
+	// ErrValidation wrapping ErrNotFound.
+	var missingEndpoint *domain.DependencyEndpointNotFoundError
+	if errors.As(err, &missingEndpoint) || dberrors.IsMissingForeignKeyTarget(err) {
 		return publicCreateValidationError(fmt.Errorf("create: dependency target does not exist: %w: %w", err, storage.ErrNotFound))
 	}
 	return err

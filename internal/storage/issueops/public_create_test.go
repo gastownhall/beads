@@ -60,6 +60,10 @@ func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 		"ContentHash": true, "LeaseExpiresAt": true, "HeartbeatAt": true, "LeaseGrantedNode": true, "RowVersion": true,
 		"CompactionLevel": true, "CompactedAt": true, "CompactedAtCommit": true, "OriginalSize": true,
 		"IDPrefix": true, "PrefixOverride": true, "IsLitePartial": true,
+		// IsBlocked is the persisted readiness projection, computed from the
+		// dependency graph. A caller cannot declare it; it is populated only
+		// where it is read back (journal snapshots).
+		"IsBlocked": true,
 		// WispPlaneOverride is import-plumbing (the export stream's explicit
 		// plane marker, bd-r9uce); a public create routes by the flags it
 		// accepts (Ephemeral/NoHistory), so the override is dropped here.

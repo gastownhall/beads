@@ -57,6 +57,9 @@ func (s *DoltStore) mergeMetadataWisp(ctx context.Context, issueID, key string, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+
 	if err := issueops.MergeMetadataInTx(ctx, tx, issueID, key, value, actor); err != nil {
 		return err
 	}
@@ -154,6 +157,9 @@ func (s *DoltStore) clearMetadataWisp(ctx context.Context, issueID, key, actor s
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
 
 	if err := issueops.DeleteMetadataInTx(ctx, tx, issueID, key, actor); err != nil {
 		return err

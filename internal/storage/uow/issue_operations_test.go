@@ -250,6 +250,20 @@ func TestIssueOperationsCreateUsesConfiguredStatusesAndTypes(t *testing.T) {
 	}
 }
 
+// TestIssueOperationsLifecycleWithRealUnitOfWork is one issue's whole life
+// through one real unit-of-work provider, and what it is for after the
+// IssueOperations and LifecycleCloseReopen contracts took the per-verb
+// semantics is the SEQUENCE: state each step leaves for the next one, which no
+// contract case assembles.
+//
+// What only this test still holds: a durable row claimed and demoted to the
+// wisp plane in ONE update, carrying its labels and its dependency across; a
+// foreign claim refused on that WISP row (every contract claim-conflict case is
+// on the durable plane); the same-persistence no-op and the promotion back; a
+// dependency's Metadata and ThreadID surviving create hydration; and a create
+// that fails on a missing dependency target leaving no residue in ANY of the
+// five tables it would have written, with the caller's own values still
+// pristine — the contract's create-refusal cases count the issue row only.
 func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 	ctx := context.Background()
 	provider := newTestUOWProvider(t)
@@ -306,47 +320,14 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 		t.Fatalf("Create(main) mutated caller input: issue=%#v dependency=%#v", importedIssue, importedDependency)
 	}
 
-	beforeGuard := readIssueMutationSnapshot(t, ctx, provider, created.Issue.ID, false)
-	wrongAssignee := "different-owner"
-	_, err = operations.Update(ctx, issueops.UpdateRequest{
-		Actor:            "tester",
-		IssueID:          created.Issue.ID,
-		ExpectedAssignee: &wrongAssignee,
-		Patch: issueops.IssuePatch{
-			Title: issueops.Field[string]{Set: true, Value: "must not persist"},
-		},
-	})
-	if !errors.Is(err, issueops.ErrAssigneeMismatch) {
-		t.Fatalf("Update(assignee guard) error = %v, want ErrAssigneeMismatch", err)
-	}
-	expectedAssignee := ""
-	wrongStatus := issueops.StatusClosed
-	_, err = operations.Update(ctx, issueops.UpdateRequest{
-		Actor:            "tester",
-		IssueID:          created.Issue.ID,
-		ExpectedAssignee: &expectedAssignee,
-		ExpectedStatus:   &wrongStatus,
-		Patch: issueops.IssuePatch{
-			Title: issueops.Field[string]{Set: true, Value: "must still not persist"},
-		},
-	})
-	if !errors.Is(err, issueops.ErrStatusMismatch) {
-		t.Fatalf("Update(status guard) error = %v, want ErrStatusMismatch", err)
-	}
-	staleCreateVersion := created.Issue.RowVersion + 1
-	_, err = operations.Update(ctx, issueops.UpdateRequest{
-		Actor:           "tester",
-		IssueID:         created.Issue.ID,
-		Claim:           true,
-		ExpectedVersion: &staleCreateVersion,
-	})
-	if !errors.Is(err, issueops.ErrVersionMismatch) {
-		t.Fatalf("Update(stale claim) error = %v, want ErrVersionMismatch", err)
-	}
-	afterGuard := readIssueMutationSnapshot(t, ctx, provider, created.Issue.ID, false)
-	if afterGuard != beforeGuard {
-		t.Fatalf("stale claim changed durable state: before=%+v after=%+v", beforeGuard, afterGuard)
-	}
+	// The three compare-and-set refusals that used to sit here — a stale
+	// --if-assignee, a stale --if-status, and a stale ExpectedVersion on a
+	// claim — are RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits
+	// and the stale-version arm of RunLifecycleUpdateClosePolicy, which
+	// run at this backend and assert the refusal against the raw row and an
+	// event-count delta rather than against a snapshot comparison. Because they
+	// wrote nothing, created.Issue.RowVersion below is still the version the
+	// create returned.
 
 	updated, err := operations.Update(ctx, issueops.UpdateRequest{
 		Actor:           "tester",
@@ -442,7 +423,6 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 	if err != nil || noOp.Changed {
 		t.Fatalf("Reopen(no-op) = %#v, %v", noOp, err)
 	}
-	_ = closedChild
 	rollbackIssue := &issueops.Issue{
 		ID:        "bd-life-rollback",
 		Title:     "rollback",
@@ -760,74 +740,14 @@ func (createIssueUseCaseStub) GetIssue(_ context.Context, id string) (*types.Iss
 	return &types.Issue{ID: id}, nil
 }
 
-type lifecycleIssueUseCaseStub struct {
-	domain.IssueUseCase
-	applyUpdate func(context.Context, string, domain.UpdateSpec, string) (*types.Issue, error)
-	getIssue    func(context.Context, string) (*types.Issue, error)
-	getWisp     func(context.Context, string) (*types.Issue, error)
-}
-
-func (s lifecycleIssueUseCaseStub) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
-	return s.applyUpdate(ctx, id, spec, actor)
-}
-
-func (s lifecycleIssueUseCaseStub) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	return s.getIssue(ctx, id)
-}
-
-func (s lifecycleIssueUseCaseStub) GetWisp(ctx context.Context, id string) (*types.Issue, error) {
-	return s.getWisp(ctx, id)
-}
-
-func TestIssueOperationsCloseMissingIssueReturnsPublicNotFoundBeforeVersionCheck(t *testing.T) {
-	calledApply := false
-	operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{{
-		issueUseCase: lifecycleIssueUseCaseStub{
-			applyUpdate: func(context.Context, string, domain.UpdateSpec, string) (*types.Issue, error) {
-				calledApply = true
-				return nil, errors.New("version check ran before lookup")
-			},
-			getWisp:  func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-			getIssue: func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-		},
-	}}})
-	if err != nil {
-		t.Fatalf("NewIssueOperations() error = %v", err)
-	}
-
-	_, err = operations.Close(context.Background(), issueops.CloseRequest{Actor: "actor", IssueID: "bd-missing"})
-	if !errors.Is(err, issueops.ErrNotFound) {
-		t.Fatalf("Close() error = %v, want ErrNotFound", err)
-	}
-	if calledApply {
-		t.Fatal("Close() checked version before resolving the issue")
-	}
-}
-
-func TestIssueOperationsReopenMissingIssueReturnsPublicNotFoundBeforeVersionCheck(t *testing.T) {
-	calledApply := false
-	operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{{
-		issueUseCase: lifecycleIssueUseCaseStub{
-			applyUpdate: func(context.Context, string, domain.UpdateSpec, string) (*types.Issue, error) {
-				calledApply = true
-				return nil, errors.New("version check ran before lookup")
-			},
-			getWisp:  func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-			getIssue: func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-		},
-	}}})
-	if err != nil {
-		t.Fatalf("NewIssueOperations() error = %v", err)
-	}
-
-	_, err = operations.Reopen(context.Background(), issueops.ReopenRequest{Actor: "actor", IssueID: "bd-missing"})
-	if !errors.Is(err, issueops.ErrNotFound) {
-		t.Fatalf("Reopen() error = %v, want ErrNotFound", err)
-	}
-	if calledApply {
-		t.Fatal("Reopen() checked version before resolving the issue")
-	}
-}
+// The two stub cases that used to sit here — Close and Reopen at a missing id
+// answering ErrNotFound rather than ErrVersionMismatch — are now
+// RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps, which names an id that
+// was never created both with and without a precondition and asserts the
+// sentinel on all three backends. Their second assertion, that no row-level
+// update was ATTEMPTED, went with them: the flag never caught the reorder it
+// was written for, because the requests carried no ExpectedVersion and so never
+// entered the guarded branch a version-first body would hoist.
 
 func TestIssueOperationsCreateRetriesOnSerializationSQLStates(t *testing.T) {
 	for _, state := range []string{"40001", "40P01"} {

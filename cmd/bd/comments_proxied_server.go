@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -71,40 +69,8 @@ func runCommentsProxiedServer(cmd *cobra.Command, ctx context.Context, args []st
 	return nil
 }
 
-func runCommentProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
-	id := args[0]
-	textArgs := args[1:]
-
-	stdinFlag, _ := cmd.Flags().GetBool("stdin")
-	fileFlag, _ := cmd.Flags().GetString("file")
-
-	var commentText string
-	switch {
-	case stdinFlag:
-		content, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return HandleErrorRespectJSON("reading from stdin: %v", err)
-		}
-		commentText = strings.TrimRight(string(content), "\n")
-	case fileFlag != "":
-		content, err := readBodyFile(fileFlag)
-		if err != nil {
-			return HandleErrorRespectJSON("reading file: %v", err)
-		}
-		commentText = content
-	case len(textArgs) > 0:
-		commentText = strings.Join(textArgs, " ")
-	default:
-		return HandleErrorRespectJSON("no comment text provided (use positional args, --stdin, or --file)")
-	}
-
-	if strings.TrimSpace(commentText) == "" {
-		return HandleErrorRespectJSON("comment text cannot be empty")
-	}
-
-	author := getActorWithGit()
-
-	comment, issue, err := addCommentProxied(ctx, id, author, commentText)
+func runCommentProxiedServer(ctx context.Context, id, author, text string) error {
+	comment, issue, err := addCommentProxied(ctx, id, author, text)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -118,32 +84,8 @@ func runCommentProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	return nil
 }
 
-func runCommentsAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
-	issueID := args[0]
-
-	commentText, _ := cmd.Flags().GetString("file")
-	if commentText != "" {
-		data, err := os.ReadFile(commentText) // #nosec G304 - user-provided file path is intentional
-		if err != nil {
-			return HandleErrorRespectJSON("reading file: %v", err)
-		}
-		commentText = string(data)
-	} else if len(args) < 2 {
-		return HandleErrorRespectJSON("comment text required (use -f to read from file)")
-	} else {
-		commentText = strings.Join(args[1:], " ")
-	}
-
-	if strings.TrimSpace(commentText) == "" {
-		return HandleErrorRespectJSON("comment text cannot be empty")
-	}
-
-	author, _ := cmd.Flags().GetString("author")
-	if author == "" {
-		author = getActorWithGit()
-	}
-
-	comment, issue, err := addCommentProxied(ctx, issueID, author, commentText)
+func runCommentsAddProxiedServer(ctx context.Context, issueID, author, text string) error {
+	comment, issue, err := addCommentProxied(ctx, issueID, author, text)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}

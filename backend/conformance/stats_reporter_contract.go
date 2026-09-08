@@ -182,6 +182,56 @@ func RunStatsReporterBlockedExcludesByStatusNotByThePinnedFlag(t *testing.T, ctx
 	})
 }
 
+// RunStatsReporterBlockedCountsEveryUnfinishedStatusNotJustOpen pins the
+// POSITIVE half of the same clause the case above pins from the exclusion
+// side: BlockedIssues counts a blocked row whose status is anything other
+// than closed or pinned, not only an open one.
+//
+// IT EXISTS BECAUSE OF THE FIXTURES, not because of the assertions. Every
+// blocked row any other case in this file seeds is status OPEN — the graph
+// case, the exclusion case and the arithmetic case all seed `open`. So a body
+// that spelled the clause `is_blocked = 1 AND status = 'open'` answers all
+// three of them correctly and is wrong for every workspace where somebody has
+// claimed a blocked bead. This is the one fixture in which nothing blocked is
+// open.
+//
+// THE BLOCKER IS THE ONLY OPEN ROW HERE, deliberately: OpenIssues moves by one
+// while BlockedIssues moves by two, so a body that read the blocked count off
+// the open tally cannot land on the right number by accident. The deferred row
+// is the second arm — "not open" is not a synonym for "in progress" either.
+//
+// It is worth its own case rather than a seed on the exclusion case because
+// the query is written out THREE times (dolt/queries.go,
+// embeddeddolt/statistics.go, domain/db/issue.go), so this is three votes and
+// not one; and because `bd status`'s headline ReadyIssues is OpenIssues minus
+// this number, so a body that under-counts here reports work as ready that no
+// agent can start.
+//
+// WHAT THIS FIXTURE CANNOT SEE: the exclusion side. Nothing here is closed or
+// pinned, so a body that dropped both status terms entirely still passes —
+// RunStatsReporterBlockedExcludesByStatusNotByThePinnedFlag is the half that
+// fails then. The two cases are one clause read from its two ends.
+func RunStatsReporterBlockedCountsEveryUnfinishedStatusNotJustOpen(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	blocker := statsReporterSeed(fixture, "unfinished-blocker", types.StatusOpen)
+	seedStatsReporterIssue(t, ctx, fixture, blocker)
+
+	claimed := statsReporterSeed(fixture, "unfinished-wip", types.StatusInProgress)
+	seedStatsReporterIssue(t, ctx, fixture, claimed)
+	blockStatsReporterIssue(t, ctx, fixture, claimed.ID, blocker.ID)
+
+	deferred := statsReporterSeed(fixture, "unfinished-deferred", types.StatusDeferred)
+	seedStatsReporterIssue(t, ctx, fixture, deferred)
+	blockStatsReporterIssue(t, ctx, fixture, deferred.ID, blocker.ID)
+
+	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, after, statsReporterCounts{
+		total: 3, open: 1, inProgress: 1, deferred: 1, blocked: 2,
+	})
+}
+
 // RunStatsReporterReadyIsOpenMinusBlocked pins statsreporter.go:103-108:
 // ReadyIssues is arithmetic over two numbers in the same answer, not a query.
 // The identity is asserted on the ABSOLUTE summary because it is a property of

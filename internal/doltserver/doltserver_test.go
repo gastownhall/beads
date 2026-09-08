@@ -16,7 +16,39 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/githooksenv"
 )
+
+// The sql-server outlives the shell that started it: an inherited GIT_TRACE=1
+// would poison every server-side git-protocol transfer until restart. The
+// scrub is value-aware (file targets survive) and the hooks override
+// (GH#4272) must be the effective GIT_CONFIG_PARAMETERS entry.
+func TestServerSpawnEnvIsGuarded(t *testing.T) {
+	absPath := "/tmp/git.trace"
+	if runtime.GOOS == "windows" {
+		absPath = `C:\temp\git.trace`
+	}
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_CURL_VERBOSE", "1")
+	t.Setenv("GIT_TRACE2", absPath)
+
+	env := ServerSpawnEnv()
+	keptFileTarget := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_TRACE=") || strings.HasPrefix(kv, "GIT_CURL_VERBOSE=") {
+			t.Errorf("ServerSpawnEnv() kept %q; stderr-directed git tracing must be scrubbed", kv)
+		}
+		if kv == "GIT_TRACE2="+absPath {
+			keptFileTarget = true
+		}
+	}
+	if !keptFileTarget {
+		t.Errorf("ServerSpawnEnv() dropped file-target GIT_TRACE2=%s; only stderr-directed forms may be scrubbed", absPath)
+	}
+	if got := githooksenv.Extract(env); !strings.Contains(got, githooksenv.NoHooksParam) {
+		t.Errorf("ServerSpawnEnv() effective %s = %q, want the no-hooks override (GH#4272)", githooksenv.ParametersEnv, got)
+	}
+}
 
 func TestAllocateEphemeralPort(t *testing.T) {
 	// Should return a valid port in the ephemeral range
@@ -2394,7 +2426,9 @@ func TestWaitForReady(t *testing.T) {
 
 	// Spawn a goroutine that delays binding the port. This simulates a
 	// "slow server" -- the TCP listener is not yet bound when waitForReady
-	// is first called.
+	// is first called. Once bound, each accepted connection is sent a fake
+	// MySQL handshake greeting so waitForReady's post-F7 "must be greeted,
+	// not just accepted" check is satisfiable.
 	bindAfter := 200 * time.Millisecond
 	listenerReady := make(chan net.Listener, 1)
 	go func() {
@@ -2404,6 +2438,18 @@ func TestWaitForReady(t *testing.T) {
 			close(listenerReady)
 			return
 		}
+		go func() {
+			for {
+				conn, acceptErr := ln.Accept()
+				if acceptErr != nil {
+					return
+				}
+				go func(c net.Conn) {
+					_, _ = c.Write([]byte{0x08, 0x00, 0x00, 0x00, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a})
+					_ = c.Close()
+				}(conn)
+			}
+		}()
 		listenerReady <- ln
 	}()
 	t.Cleanup(func() {

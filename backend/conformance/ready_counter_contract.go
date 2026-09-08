@@ -55,6 +55,12 @@ type ReadyCounterFixture struct {
 	// AddDependency seeds ONE edge, which is how a case takes a row OFF the
 	// ready front without deleting or closing it.
 	AddDependency func(context.Context, *types.Dependency, string) error
+	// QueryScalar runs a single-row query and scans it, and RETURNS the error
+	// rather than failing the test. A count case reads rows through it for one
+	// reason: to prove a row this role must NOT count was really seeded in the
+	// state that excludes it. Both surfaces this contract compares hide such a
+	// row, so neither can tell "excluded" from "never written".
+	QueryScalar func(context.Context, string, []any, ...any) error
 	// CountHistory reports how many history entries the fixture's branch has.
 	// A nil hook means "this backend cannot observe history", and the case
 	// that needs it SKIPS with that reason rather than passing quietly.
@@ -320,6 +326,84 @@ func RunReadyCounterDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Cont
 	if !reflect.DeepEqual(request, want) {
 		t.Errorf("CountReady mutated the caller's request:\n got %+v\nwant %+v", request, want)
 	}
+}
+
+// RunReadyCounterCountsOnlyTheOpenRowsItsListingLists pins the STATUS half of
+// the identity this role is (issueops/readycounter.go:60-70). Ready work is
+// open work — "Open only, not in_progress" (internal/workapi.BuildReadyFilter)
+// — and a count that sized a wider set than the page beside it would publish
+// `bd ready`'s "showing 2 of 5" over two different questions.
+//
+// EVERY OTHER CASE IN THIS FILE SEEDS OPEN ROWS AND NOTHING ELSE, so the status
+// predicate is unreachable from all of them: drop it and every count in this
+// contract still ties with its listing, because the only rows in scope were
+// open to begin with. That is a fixture gap rather than a missing assertion,
+// and it matters here more than at the listing — the reader contract pins the
+// ready set's status decision through Reader.Ready
+// (RunReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions), but the two store
+// backends answer THIS role from a different body: one indexed COUNT(*) per
+// plane over its own copy of the filter
+// (internal/storage/issueops.CountReadyWorkInTx), assembled beside the listing
+// rather than by it. A predicate that went missing on that side alone widens
+// the total while the page it sizes stays right.
+//
+// THE TWO EXCLUDED ROWS ARE READ BACK RAW before anything is counted. A closed
+// row and an in-progress row are both invisible to both surfaces, so "excluded"
+// and "the seed never landed in that status" produce byte-identical answers; the
+// raw read is the only thing that tells them apart, and without it a create that
+// silently normalized either to `open` would turn this case into a slow copy of
+// the identity case.
+//
+// WHAT THIS FIXTURE CANNOT SEE: the OR-set form of the same predicate.
+// types.WorkFilter carries a Statuses member and the ready builder renders it,
+// but publicops.ReadyRequest has no status field of any kind, so no
+// implementation of this role can be asked for one — the arm is reachable only
+// from the storage seam. That is not what this case is named for: the promise
+// at THIS seam is that the count's set is the listing's set, and the singular
+// status the builder always sends is the whole of what decides it here.
+func RunReadyCounterCountsOnlyTheOpenRowsItsListingLists(t *testing.T, ctx context.Context, fixture ReadyCounterFixture) {
+	t.Helper()
+	label := fixture.IssuePrefix + "-rcstatus"
+	open := fixture.IssuePrefix + "-rcstatus-open"
+	inProgress := fixture.IssuePrefix + "-rcstatus-wip"
+	closed := fixture.IssuePrefix + "-rcstatus-closed"
+
+	seedReadyCounterIssue(t, ctx, fixture, readyCounterIssue(open, 1, label))
+	wip := readyCounterIssue(inProgress, 1, label)
+	wip.Status = types.StatusInProgress
+	seedReadyCounterIssue(t, ctx, fixture, wip)
+	done := readyCounterIssue(closed, 1, label)
+	done.Status = types.StatusClosed
+	seedReadyCounterIssue(t, ctx, fixture, done)
+
+	for _, seed := range []struct {
+		id   string
+		want types.Status
+	}{{inProgress, types.StatusInProgress}, {closed, types.StatusClosed}} {
+		if got := readyCounterStoredStatus(t, ctx, fixture, seed.id); got != string(seed.want) {
+			t.Fatalf("the row seeded as %s is stored with status %q; a row that is not in the status this case "+
+				"excludes cannot show that the count excludes it", seed.want, got)
+		}
+	}
+
+	assertReadyCounterAgreesWithTheListing(t, ctx, fixture,
+		publicops.ReadyRequest{Labels: []string{label}, Sort: readyCounterSort}, 1,
+		"ready work is open work: neither the in-progress row nor the closed one is in the set this role sizes")
+}
+
+// readyCounterStoredStatus reads one durable row's status column. It is the
+// only raw read in this contract, and it exists because the rows a count
+// EXCLUDES are invisible to both surfaces the rest of the file compares.
+func readyCounterStoredStatus(t *testing.T, ctx context.Context, fixture ReadyCounterFixture, id string) string {
+	t.Helper()
+	if fixture.QueryScalar == nil {
+		t.Skip("fixture cannot read rows: QueryScalar is nil, so an excluded row cannot be told from an unseeded one")
+	}
+	var status string
+	if err := fixture.QueryScalar(ctx, "SELECT status FROM issues WHERE id = ?", []any{id}, &status); err != nil {
+		t.Fatalf("read status for %s: %v", id, err)
+	}
+	return status
 }
 
 // readyCounterSort is the order every case names: the policy whose SQL is a

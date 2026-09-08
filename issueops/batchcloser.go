@@ -134,6 +134,12 @@ type CloseBatchResult struct {
 // is restricted: the close itself lands on the ephemeral row, reads back from
 // it, and counts toward ClaimNext's coupling like any other landing.
 //
+// WHAT LANDS MAINTAINS BLOCKED STATE under BlockedStateInvariant: every item
+// that actually closed leaves its dependers — and everything that inherits
+// from them, in both planes — settled in the SAME transaction the batch
+// commits, so a ClaimNext running after the closes sees the state those closes
+// produced rather than the state that preceded them.
+//
 // Implementations never mutate caller-owned request values, snapshot the
 // request at method entry, and apply validation and normalization only to
 // attempt-local clones. Deterministic request-validation failures match

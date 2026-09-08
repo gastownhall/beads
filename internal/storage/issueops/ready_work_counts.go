@@ -11,6 +11,22 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// readyHydrationFor reads a ready filter's hydration opt-outs, the twin of
+// search_counts.go's hydrationFor. A WORK filter carries only one of the three:
+// SkipLabels and SkipCounts are not carried onto the ready arm (see
+// runReadyCountsInTx and issueops.ListRequest.SkipCounts), so ready work still
+// hydrates labels and cardinalities unconditionally. Lite is carried, because
+// it bounds the SIZE of a row the caller asked for rather than dropping a
+// number the ready renderings print.
+//
+// It is one function per filter type rather than one shared read so that the
+// asymmetry above is stated in code at the one place it applies, instead of
+// being a field quietly absent from a struct literal at four call sites. That
+// absence is what left this path on a hardcoded zero value.
+func readyHydrationFor(filter types.WorkFilter) sqlbuild.CountsHydration {
+	return sqlbuild.CountsHydration{Lite: filter.Lite}
+}
+
 func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
 	wispDepsExist, err := optionalTableExistsInTx(ctx, tx, "wisp_dependencies")
 	if err != nil {
@@ -21,7 +37,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	out, err := runReadyCountsInTx(ctx, tx, IssuesFilterTables, filter.Limit, issuePreds, wispDepsExist, sqlbuild.CountsHydration{})
+	out, err := runReadyCountsInTx(ctx, tx, IssuesFilterTables, filter.Limit, issuePreds, wispDepsExist, readyHydrationFor(filter))
 	if err != nil {
 		return nil, err
 	}
@@ -41,9 +57,9 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	wisps, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, sqlbuild.CountsHydration{})
+	wisps, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, readyHydrationFor(filter))
 	if err != nil {
-		if isTableNotExistError(err) {
+		if missingOptionalWispTable(err) {
 			return finishReadyWorkWithCounts(out, filter)
 		}
 		return nil, err
@@ -128,10 +144,11 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 // For limit <= 0 (unbounded) there is no page to push down, so it runs the
 // predicate-form mega-query unchanged.
 //
-// Both callers pass the ZERO hydration, so ready work is always fully
-// hydrated. types.WorkFilter carries neither opt-out — the projection that
-// builds it drops both — and issueops.ListRequest says so where a caller reads
-// it: SkipLabels and SkipCounts are not carried onto the ReadyFlag arm.
+// Both callers pass readyHydrationFor(filter), which carries Lite and nothing
+// else: ready work always hydrates labels and cardinalities, because
+// types.WorkFilter carries neither opt-out — the projection that builds it
+// drops both — and issueops.ListRequest says so where a caller reads it,
+// SkipLabels and SkipCounts are not carried onto the ReadyFlag arm.
 //
 //nolint:gosec // G201: whereSQL/orderBySQL/limitSQL are hardcoded fragments; user input rides ? placeholders.
 func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, limit int, preds *readyWorkPredicates, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
@@ -157,7 +174,7 @@ func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, li
 			end = len(pageIDs)
 		}
 		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, pageIDs[start:end], "", "", "", includeWispReverseDeps, hyd)
-		rows, scanErr := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs)
+		rows, scanErr := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs, hyd)
 		if scanErr != nil {
 			return nil, scanErr
 		}
@@ -222,7 +239,7 @@ func CountReadyWorkInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter
 	}
 	wispCount, err := countReadyPredicateInTx(ctx, tx, "wisps", wispPreds.whereSQL, wispPreds.whereArgs)
 	if err != nil {
-		if isTableNotExistError(err) {
+		if missingOptionalWispTable(err) {
 			return issueCount, nil
 		}
 		return 0, fmt.Errorf("count ready work: wisps: %w", err)
@@ -295,10 +312,15 @@ func sortIssuesWithCountsByPolicy(items []*types.IssueWithCounts, policy types.S
 }
 
 // ScanReadyWorkRowWithCounts scans one row of the counts mega-query
-// (sqlbuild.SearchCountsSQL): IssueSelectColumns followed by labels JSON,
+// (sqlbuild.SearchCountsSQL): the issue columns followed by labels JSON,
 // dep/rdep/comment counts, parent ID, and dependency JSON. Exported so the
 // domain/db stack hydrates counts rows through the exact same code path.
-func ScanReadyWorkRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) {
+//
+// It takes the whole hydration rather than a bool because hyd is what chose
+// the SELECT list on the other side: reading the same value here is what keeps
+// the two in agreement, where a separately-passed flag could disagree with the
+// query it is scanning.
+func ScanReadyWorkRowWithCounts(rows *sql.Rows, hyd sqlbuild.CountsHydration) (*types.IssueWithCounts, error) {
 	var labelsJSON, depsJSON sql.NullString
 	var parentID sql.NullString
 	var depCount, rdepCount, commentCount sql.NullInt64
@@ -314,7 +336,11 @@ func ScanReadyWorkRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) 
 			&depsJSON,
 		},
 	}
-	issue, err := ScanIssueFrom(composite)
+	scan := ScanIssueFrom
+	if hyd.Lite {
+		scan = ScanIssueLiteFrom
+	}
+	issue, err := scan(composite)
 	if err != nil {
 		return nil, fmt.Errorf("scan issue with counts: %w", err)
 	}

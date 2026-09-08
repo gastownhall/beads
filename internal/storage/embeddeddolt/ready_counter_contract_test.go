@@ -36,6 +36,9 @@ func TestReadyCounterContract(t *testing.T) {
 	t.Run("EphemeralGateMatchesTheListing", func(t *testing.T) {
 		conformance.RunReadyCounterEphemeralGateMatchesTheListing(t, ctx, fixture)
 	})
+	t.Run("CountsOnlyTheOpenRowsItsListingLists", func(t *testing.T) {
+		conformance.RunReadyCounterCountsOnlyTheOpenRowsItsListingLists(t, ctx, fixture)
+	})
 	t.Run("EmptyFrontIsZeroAndNil", func(t *testing.T) {
 		conformance.RunReadyCounterEmptyFrontIsZeroAndNil(t, ctx, fixture)
 	})
@@ -65,6 +68,7 @@ func newEmbeddedReadyCounterFixture(t *testing.T, te *testEnv, prefix string) co
 		CreateIssue:   kit.CreateIssue,
 		CreateWisp:    kit.CreateWisp,
 		AddDependency: kit.AddDependency,
+		QueryScalar:   kit.QueryScalar,
 		CountHistory:  kit.CountHistory,
 	}
 }

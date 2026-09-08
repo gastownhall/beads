@@ -257,7 +257,7 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("remember")
+		CheckReadonly("remember") // also covers CheckMigrationFreeze (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("remember")
 		defer func() {
@@ -480,10 +480,7 @@ Examples:
 func truncateMemory(s string, maxLen int) string {
 	// Replace newlines with spaces for single-line display
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+	return truncate(s, maxLen)
 }
 
 func init() {

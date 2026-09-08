@@ -261,7 +261,7 @@ func TestBatchCreateRefusesANonJSONContentType(t *testing.T) {
 	creator := &roleBatchCreator{}
 	ts := newBatchCreateServer(t, creator)
 
-	resp := ts.claimRequest(t, batchCreatePath, "text/plain", `{"actor":"alice","items":[{"title":"t"}]}`)
+	resp := ts.postBody(t, batchCreatePath, "text/plain", `{"actor":"alice","items":[{"title":"t"}]}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 	}

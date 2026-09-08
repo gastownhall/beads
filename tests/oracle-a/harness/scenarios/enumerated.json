@@ -14824,7 +14824,7 @@
     "--short"
    ]
   ],
-  "pins": "--short prints single formatShortIssue line: '<icon> sh-sho ● P1 [bug] Shorty' style (one line, no full sections)",
+  "pins": "--short prints single formatShortIssue line: '<icon> sh-sho P1 [bug] Shorty' style (one line, no full sections)",
   "deterministic": true
  },
  {

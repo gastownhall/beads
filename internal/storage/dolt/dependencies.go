@@ -102,6 +102,8 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 				return fmt.Errorf("failed to begin transaction: %w", err)
 			}
 			defer func() { _ = tx.Rollback() }()
+			clearJournalScope := s.scopeEventsJournalTransaction(tx)
+			defer clearJournalScope()
 			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
 				return err
 			}
@@ -116,6 +118,9 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
+
+		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		defer clearJournalScope()
 
 		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 		if err != nil {
@@ -306,6 +311,18 @@ func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetAllDependencyRecordsInTx(ctx, tx)
+		return err
+	})
+	return result, err
+}
+
+// GetExternalBlockingDependencyRecords returns explicit external blockers
+// without scanning unrelated graph edges.
+func (s *DoltStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	var result map[string][]*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetExternalBlockingDependencyRecordsInTx(ctx, tx)
 		return err
 	})
 	return result, err

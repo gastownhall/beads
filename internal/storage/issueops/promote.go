@@ -128,5 +128,12 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after promote for %s: %w", id, err)
 	}
+
+	// The bead keeps its ID across promotion; only its plane changes. Journal
+	// one update carrying the now-durable snapshot, after derived blocked-state
+	// maintenance has settled.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+		return err
+	}
 	return nil
 }

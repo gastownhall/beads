@@ -189,12 +189,19 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	out := cmd.OutOrStdout()
 
 	if usesProxiedServer() {
-		if err := rejectResolvedMaxRowsUnderProxiedServer(in.MaxRows); err != nil {
-			return err
-		}
-		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
+		// The cap USED to be rejected here: the proxied query path threaded no
+		// MaxRows, so honoring it would have been silence. It threads one now
+		// (internal/storage/domain/db sizes its bound and enforces the cap
+		// through the same two functions the store seam uses), so this route
+		// answers *ErrTooManyRows the same way the direct route below does —
+		// same message, same exit code.
+		if err := runListProxiedServer(cmd, rootCtx, out, in); err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 		return nil
@@ -233,7 +240,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.watchMode {
-		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit); err != nil {
+		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit, in.Status); err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
@@ -307,7 +314,8 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			if depErr != nil && in.depsMode != "" {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
-			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode)
+			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
+			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status)
 			printSkipLabelsFooter(in.SkipLabels)
 			return nil
 		}
@@ -316,7 +324,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
-		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode)
+		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
@@ -324,7 +332,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 
 	if in.formatStr != "" {
 		depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
-		if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
+		if err := outputFormattedList(out, issues, depsByIssueID, in.formatStr); err != nil {
 			return HandleError("%v", err)
 		}
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -407,7 +415,7 @@ func init() {
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
-	listCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
+	listCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
 
 	// Pattern matching
 	listCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
@@ -436,6 +444,15 @@ func init() {
 			"Cannot combine with --label, --label-any, --label-pattern, --label-regex, "+
 			"--exclude-label, or --no-labels.")
 
+	// Projection toggle. Like --skip-labels it trades data for bytes, and
+	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
+	listCmd.Flags().Bool("brief", false,
+		"Omit the free-form text (description, design, acceptance criteria, notes, "+
+			"payload, waiters) from each row. Filters that read those fields, such as "+
+			"--desc-contains, still select on them. An omitted field is"+
+			" indistinguishable from an empty one in --json; fetch a whole issue"+
+			" with bd show.")
+
 	// Priority ranges
 	listCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
 	listCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
@@ -452,6 +469,14 @@ func init() {
 
 	// Infra type filtering: exclude agent/role/message by default
 	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/role/message) in output")
+
+	// Ephemeral plane: the wisps table is suppressed by default. This is the
+	// PLANE knob on its own — ListRequest.IncludeEphemeral — as distinct from
+	// --include-infra, which admits the plane AND lifts the infra-type
+	// exclusions above. Without it the plane is reachable from the CLI only
+	// through --include-infra's wider bundle, which leaves --wisp-type below
+	// with no narrow way to match anything.
+	listCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in output (normally hidden)")
 
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
@@ -499,7 +524,8 @@ func init() {
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
 
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	addMaxRowsFlag(listCmd)
+	// ROUTED, not direct-only: both routes thread the cap now.
+	addRoutedMaxRowsFlag(listCmd)
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

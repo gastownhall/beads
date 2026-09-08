@@ -20,7 +20,7 @@ const memoriesPath = "/v0/beads/memories"
 
 func (ts *testServer) remember(t *testing.T, body string) *http.Response {
 	t.Helper()
-	return ts.claimRequest(t, memoriesPath, "application/json", body)
+	return ts.postBody(t, memoriesPath, "application/json", body)
 }
 
 func (ts *testServer) forget(t *testing.T, path string) *http.Response {
@@ -224,7 +224,7 @@ func TestRememberRefusesAQueryString(t *testing.T) {
 	memories := &roleMemories{}
 	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
 
-	resp := ts.claimRequest(t, memoriesPath+"?key=k", "application/json", `{"content":"x"}`)
+	resp := ts.postBody(t, memoriesPath+"?key=k", "application/json", `{"content":"x"}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 	}

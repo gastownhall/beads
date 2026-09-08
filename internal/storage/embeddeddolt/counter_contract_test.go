@@ -50,6 +50,15 @@ func TestCounterContract(t *testing.T) {
 	t.Run("PrefixesPriorityBuckets", func(t *testing.T) {
 		conformance.RunCounterPrefixesPriorityBuckets(t, ctx, fixture)
 	})
+	t.Run("PriorityBucketsCountZeroAndCountEveryRow", func(t *testing.T) {
+		conformance.RunCounterPriorityBucketsCountZeroAndCountEveryRow(t, ctx, fixture)
+	})
+	t.Run("TheNoLabelBucketIsAbsentWhenEveryRowIsLabeled", func(t *testing.T) {
+		conformance.RunCounterTheNoLabelBucketIsAbsentWhenEveryRowIsLabeled(t, ctx, fixture)
+	})
+	t.Run("TypeBucketsAreTheRawTypeNames", func(t *testing.T) {
+		conformance.RunCounterTypeBucketsAreTheRawTypeNames(t, ctx, fixture)
+	})
 	t.Run("RefusesAnUnknownGroup", func(t *testing.T) {
 		conformance.RunCounterRefusesAnUnknownGroup(t, ctx, fixture)
 	})

@@ -22,18 +22,48 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// TestServeFlags pins the flag surface. v0 has two flags and no more: every
-// other bound in this server (in-flight limit, connection cap, wait budget,
-// deadline, pool caps) is a constant precisely so that it can become a flag
-// later, deliberately, rather than arriving as one nobody designed.
+// TestServeFlags pins the flag surface. Every bound that is NOT here — the
+// connection cap, the wait budget, the request deadline, the connection
+// lifetimes — is still a constant precisely so that it becomes a flag later,
+// deliberately, rather than arriving as one nobody designed.
+//
+// Every flag added here defaults to the behavior that existed without it, so
+// `bd serve` with no arguments is the same server it has always been.
 func TestServeFlags(t *testing.T) {
 	var got []string
 	serveCmd.Flags().VisitAll(func(f *pflag.Flag) { got = append(got, f.Name) })
 	sort.Strings(got)
 
-	want := []string{"addr", "allow-non-loopback"}
+	want := []string{
+		"addr", "allow-non-loopback", "allowed-host", "auth-token-file",
+		"insecure-no-auth",
+	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("bd serve flags = %v, want %v", got, want)
+	}
+
+	// The defaults ARE the compatibility promise: no token file, no extra
+	// hosts, and no waiver.
+	for _, tc := range []struct{ flag, want string }{
+		{"auth-token-file", ""},
+		{"insecure-no-auth", "false"},
+		{"allowed-host", "[]"},
+	} {
+		f := serveCmd.Flags().Lookup(tc.flag)
+		if f == nil {
+			t.Errorf("no --%s flag", tc.flag)
+			continue
+		}
+		if f.DefValue != tc.want {
+			t.Errorf("--%s default = %q, want %q: a non-neutral default would change an existing deployment", tc.flag, f.DefValue, tc.want)
+		}
+	}
+
+	// A raw --auth-token flag would put the credential in the process listing,
+	// where every local user reads it out of ps. There is no such flag and
+	// there must never be one.
+	if f := serveCmd.Flags().Lookup("auth-token"); f != nil {
+		t.Error("--auth-token takes the credential as an argument, which publishes it in ps output; the token belongs in a file")
 	}
 
 	addr := serveCmd.Flags().Lookup("addr")
@@ -459,4 +489,204 @@ func runServeUnderReadonly(t *testing.T, dir string) (string, error) {
 	var err error
 	stderr := captureBootstrapStderr(t, func() { err = runServe() })
 	return stderr, err
+}
+
+// clearServeEnv removes the BEADS_SERVE_* fallback for one test. Without it a
+// developer (or a CI runner) with it exported in their shell would silently
+// change what these tests assert — env is read only in this package, which is
+// what keeps the library and the dev binary immune to the same hazard.
+func clearServeEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{serveTokenFileEnv} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+}
+
+// withServeFlags sets the serve globals for one test and restores them, so a
+// table row cannot leak its posture into the next one.
+func withServeFlags(t *testing.T) {
+	t.Helper()
+	addr, nonLoopback := serveAddr, serveAllowNonLoopback
+	token, insecure := serveAuthTokenFile, serveInsecureNoAuth
+	hosts := serveAllowedHosts
+	t.Cleanup(func() {
+		serveAddr, serveAllowNonLoopback = addr, nonLoopback
+		serveAuthTokenFile, serveInsecureNoAuth = token, insecure
+		serveAllowedHosts = hosts
+	})
+	serveAddr, serveAllowNonLoopback = "127.0.0.1:0", false
+	serveAuthTokenFile, serveInsecureNoAuth = "", false
+	serveAllowedHosts = nil
+}
+
+func serveTokenFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte("a-token\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	return path
+}
+
+// TestServeConfigRefusesAnUnservablePosture drives the flag resolution alone —
+// no listener, no workspace — because the refusal must not depend on either.
+// The row that matters most is the first: reaching the address used to BE the
+// authorization, so a bind beyond loopback with no credential is now a refusal
+// rather than a warning nobody reads.
+func TestServeConfigRefusesAnUnservablePosture(t *testing.T) {
+	token := serveTokenFile(t)
+
+	for _, tc := range []struct {
+		name    string
+		apply   func(t *testing.T)
+		wantErr string
+	}{
+		{
+			name:  "loopback with no token is unchanged",
+			apply: func(*testing.T) {},
+		},
+		{
+			name:  "loopback with a token",
+			apply: func(*testing.T) { serveAuthTokenFile = token },
+		},
+		{
+			name: "non-loopback with a token",
+			apply: func(*testing.T) {
+				serveAddr, serveAllowNonLoopback = "0.0.0.0:0", true
+				serveAuthTokenFile = token
+			},
+		},
+		{
+			name: "non-loopback with no credential",
+			apply: func(*testing.T) {
+				serveAddr, serveAllowNonLoopback = "0.0.0.0:0", true
+			},
+			wantErr: "--auth-token-file",
+		},
+		{
+			name: "non-loopback waived explicitly",
+			apply: func(*testing.T) {
+				serveAddr, serveAllowNonLoopback = "0.0.0.0:0", true
+				serveInsecureNoAuth = true
+			},
+		},
+		{
+			name: "a token file that does not exist",
+			apply: func(*testing.T) {
+				serveAuthTokenFile = filepath.Join(t.TempDir(), "absent")
+			},
+			wantErr: "no such file",
+		},
+		{
+			name:    "an allowed host with a port",
+			apply:   func(*testing.T) { serveAllowedHosts = []string{"bd.beads.svc:8080"} },
+			wantErr: "--allowed-host",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearServeEnv(t)
+			withServeFlags(t)
+			tc.apply(t)
+
+			_, err := resolveServeConfig()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("resolveServeConfig() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("resolveServeConfig() = nil, want a refusal naming %s", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("refusal %q does not name %s, so it does not say how to proceed", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestServeEnvFallbackAppliesOnlyWhenTheFlagIsUnset. The env alias exists for
+// container deployments where the flag list is awkward; a flag the operator
+// typed must still win.
+func TestServeEnvFallbackAppliesOnlyWhenTheFlagIsUnset(t *testing.T) {
+	envToken := serveTokenFile(t)
+
+	t.Run("env supplies what the flag did not", func(t *testing.T) {
+		clearServeEnv(t)
+		withServeFlags(t)
+		t.Setenv(serveTokenFileEnv, envToken)
+
+		cfg, err := resolveServeConfig()
+		if err != nil {
+			t.Fatalf("resolveServeConfig: %v", err)
+		}
+		if cfg.Auth == nil {
+			t.Errorf("%s did not enable authentication", serveTokenFileEnv)
+		}
+	})
+
+	t.Run("an explicit flag wins", func(t *testing.T) {
+		clearServeEnv(t)
+		withServeFlags(t)
+		t.Setenv(serveTokenFileEnv, filepath.Join(t.TempDir(), "absent"))
+		serveAuthTokenFile = serveTokenFile(t)
+
+		if _, err := resolveServeConfig(); err != nil {
+			t.Fatalf("the flag lost to an unreadable environment fallback: %v", err)
+		}
+	})
+}
+
+// TestServeConfigCarriesTheOperatorsChoicesThrough. resolveServeConfig is the
+// only place the flags become a Config, so this is where a field that is
+// parsed but never wired would show up.
+func TestServeConfigCarriesTheOperatorsChoicesThrough(t *testing.T) {
+	clearServeEnv(t)
+	withServeFlags(t)
+	serveAuthTokenFile = serveTokenFile(t)
+	serveAllowedHosts = []string{"bd-proj.beads.svc.cluster.local", "bd-proj.beads.svc"}
+
+	cfg, err := resolveServeConfig()
+	if err != nil {
+		t.Fatalf("resolveServeConfig: %v", err)
+	}
+	if cfg.Auth == nil {
+		t.Error("--auth-token-file did not reach the server config")
+	}
+	if strings.Join(cfg.AllowedHosts, ",") != strings.Join(serveAllowedHosts, ",") {
+		t.Errorf("AllowedHosts = %v, want %v", cfg.AllowedHosts, serveAllowedHosts)
+	}
+	if cfg.InsecureNoAuth {
+		t.Error("InsecureNoAuth is set without the flag")
+	}
+}
+
+// TestServeHelpDescribesTheAuthPosture. The help text is where an operator
+// learns what this server does and does not protect, and it used to say "No
+// authentication and no TLS" flatly. Half of that is now false; leaving it
+// would be a false security statement shipped in the binary.
+func TestServeHelpDescribesTheAuthPosture(t *testing.T) {
+	long := serveCmd.Long
+	for _, want := range []string{"--auth-token-file", "--allowed-host", "rotat", "tls"} {
+		if !strings.Contains(strings.ToLower(long), want) {
+			t.Errorf("`bd serve --help` does not mention %q", want)
+		}
+	}
+	if strings.Contains(long, "No authentication and no TLS") {
+		t.Error("the help still claims this server has no authentication; it has optional bearer authentication and it is mandatory beyond loopback")
+	}
+
+	// The two refusal messages that make the same claim must not contradict
+	// the help either.
+	if _, err := httpapi.ValidateBindAddr("10.0.0.5:8080", false); err == nil {
+		t.Fatal("a non-loopback bind without the opt-in was accepted")
+	} else if strings.Contains(err.Error(), "no authentication") {
+		t.Errorf("the bind refusal still claims the server has no authentication: %q", err)
+	}
+	if usage := serveCmd.Flags().Lookup("allow-non-loopback").Usage; strings.Contains(usage, "no authentication") {
+		t.Errorf("--allow-non-loopback still advertises that the server has no authentication: %q", usage)
+	}
 }

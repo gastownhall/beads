@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -32,6 +33,7 @@ var deleteMembers = []string{
 	deleteCascadeMember,
 	deleteForceMember,
 	deleteDryRunMember,
+	expectedVersionMember,
 }
 
 // maxDeleteIDs bounds the `ids` array, matching the document's maxItems. It
@@ -73,7 +75,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := deleter.Delete(r.Context(), request)
 	if err != nil {
-		s.failDeleteErr(w, r, err)
+		s.failDeleteErr(w, r, request, err)
 		return
 	}
 	writeJSON(w, deleteResponse(result))
@@ -134,7 +136,48 @@ func (s *Server) deleteRequest(w http.ResponseWriter, r *http.Request) (issueops
 			"`"+deleteIDsMember+"` carries more ids than this operation accepts in one request"))
 		return issueops.DeleteRequest{}, false
 	}
+	// A blank entry. The ROLE refuses it too, and it is refused here for the
+	// empty-array refusal's reason — the client gets the member name — plus one
+	// the guard below adds: the arity rule counts DISTINCT TRIMMED ids, so a
+	// blank entry would otherwise count as an id and could earn the guard's
+	// refusal for a request whose actual fault is a broken id list.
+	// ValidateDeleteRequest puts the blank refusal ahead of the arity one; this
+	// keeps the wire's order the same as the library's.
+	for i, id := range *ids {
+		if strings.TrimSpace(id) == "" {
+			s.fail(w, r, InvalidArgument(deleteIDsMember, ReasonInvalidValue,
+				fmt.Sprintf("`%s[%d]` is blank; every id must name a bead", deleteIDsMember, i)))
+			return issueops.DeleteRequest{}, false
+		}
+	}
 	request.IDs = *ids
+
+	// The guard, and the arity rule that comes with it. Both are decided here,
+	// before any database work, because both are statements about the REQUEST:
+	// the role refuses the same pair as ErrValidation, and reaching the wire
+	// through that route would cost the member name a client dispatches on.
+	//
+	// DISTINCT, TRIMMED ids — the role's own counting rule
+	// (workapi.NormalizeDeleteIDs), respelled here because the transport
+	// boundary keeps internal/workapi out of this package. That respelling is
+	// the drift risk this slice carries, and the case that pins it is the one
+	// asserting `["be-1", " be-1"]` beside a guard is ACCEPTED: an edge that
+	// counted mentions, or counted untrimmed, would refuse a request the role
+	// calls legal.
+	expectedVersion, res := applyVersionGuardMember(members, "")
+	if res != nil {
+		s.fail(w, r, *res)
+		return issueops.DeleteRequest{}, false
+	}
+	if expectedVersion != nil {
+		if distinct := distinctDeleteIDs(request.IDs); distinct > 1 {
+			s.fail(w, r, InvalidArgument(expectedVersionMember, ReasonInvalidValue,
+				fmt.Sprintf("`%s` guards ONE bead and this request names %d distinct ids; a row version describes one row. Send one guarded request per bead",
+					expectedVersionMember, distinct)))
+			return issueops.DeleteRequest{}, false
+		}
+		request.ExpectedVersion = expectedVersion
+	}
 
 	if raw, ok := members[deleteActorMember]; ok {
 		var value *string
@@ -176,6 +219,17 @@ func (s *Server) deleteRequest(w http.ResponseWriter, r *http.Request) (issueops
 	return request, true
 }
 
+// distinctDeleteIDs counts the ids a request really names, collapsing
+// duplicates after trimming so that the arity rule above agrees with the
+// library's own normalization. See the call site for why it is spelled here.
+func distinctDeleteIDs(ids []string) int {
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[strings.TrimSpace(id)] = true
+	}
+	return len(seen)
+}
+
 func deleteMemberList() string {
 	quoted := make([]string, len(deleteMembers))
 	for i, name := range deleteMembers {
@@ -186,17 +240,32 @@ func deleteMemberList() string {
 
 // failDeleteErr answers a failed delete.
 //
-// It draws the same ErrValidation-is-a-400 line the sweep draws, and adds ONE
-// more: the role's dependents refusal. That one is a 400 rather than a 409
-// because the fix is to change the REQUEST — send `cascade` or `force`.
+// It draws the same ErrValidation-is-a-400 line the sweep draws, and adds two
+// more arms: the row-version guard's 409, and the role's dependents refusal.
+// That last one is a 400 rather than a 409 because the fix is to change the
+// REQUEST — send `cascade` or `force`.
+//
+// THE PRECONDITION ARM IS FIRST, ABOVE THE ErrValidation LINE, and the order is
+// load-bearing rather than cosmetic. ErrVersionMismatch wraps neither
+// ErrValidation nor ErrNotFound, so under ClassifyError's rule it falls straight
+// through failErr's default into a GENERIC 500 — for the one refusal on this
+// operation that reports an irreversible act being stopped because the caller's
+// view had moved. Verified by mutation: dropping the arm turns
+// TestDeleteRefusesAStaleGuard into a 500, not a 400.
 //
 // THE ABSENT-ID REFUSAL NEEDS NO BRANCH AT ALL, and does not get one: the
 // role's *NotFoundError wraps issueops.ErrNotFound, which ClassifyError already
 // maps to a 404 carrying NotFound()'s FIXED detail. The role's own message
 // names every id that did not resolve and the wire deliberately does not repeat
 // it — NotFound's doc says why. `bd delete` still names them, because it is
-// talking to the person who typed them.
-func (s *Server) failDeleteErr(w http.ResponseWriter, r *http.Request, err error) {
+// talking to the person who typed them. Its rank ABOVE the guard is the role's:
+// a request that named no row has nothing to be stale about, so no branch here
+// has to arrange it.
+func (s *Server) failDeleteErr(w http.ResponseWriter, r *http.Request, request issueops.DeleteRequest, err error) {
+	if errors.Is(err, issueops.ErrVersionMismatch) {
+		s.fail(w, r, versionPreconditionResult(request.ExpectedVersion))
+		return
+	}
 	if errors.Is(err, issueops.ErrValidation) || errors.Is(err, issueops.ErrDependentsOutsideRequest) {
 		// No `param`: neither refusal is about one member of the request. The
 		// dependents one is about the absence of a CHOICE between two of them.

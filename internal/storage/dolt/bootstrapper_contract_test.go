@@ -42,8 +42,14 @@ func TestBootstrapperContract(t *testing.T) {
 	t.Run("LeavesTheSubstrateUntouchedWhenItCannotComplete", func(t *testing.T) {
 		conformance.RunBootstrapperLeavesTheSubstrateUntouchedWhenItCannotComplete(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunBootstrapperRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	// ZERO, not one, and not a range. This store leaves the identity entry to
+	// `bd init`'s own CommitWithConfig at the front door and says so in
+	// bootstrapper.go's body; the unit-of-work wiring pins ONE because its
+	// proxied front door has no commit of its own. The two are a ratified
+	// split, so do not "fix" either by matching it to the other — read
+	// RunBootstrapperRecordsExactlyOneHistoryEntry first.
+	t.Run("RecordsNoHistoryEntryOfItsOwn", func(t *testing.T) {
+		conformance.RunBootstrapperRecordsNoHistoryEntryOfItsOwn(t, ctx, fixture)
 	})
 	t.Run("VerifierAnswersEmptyForAnUnidentifiedSubstrate", func(t *testing.T) {
 		conformance.RunInitVerifierAnswersEmptyForAnUnidentifiedSubstrate(t, ctx, fixture)

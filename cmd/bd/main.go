@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
@@ -168,6 +169,7 @@ var readOnlyCommands = map[string]bool{
 	"ping":       true,
 	"backup":     true, // reads from Dolt, writes only to .beads/backup/
 	"export":     true, // reads from Dolt, writes JSONL to file/stdout
+	"tail":       true, // bd events tail: reads bd_events_journal, writes nothing
 }
 
 // isReadOnlyCommand returns true if the command only reads from the database.
@@ -250,9 +252,11 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 // bypasses.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
 	doltCfg.ServerHost = fileCfg.GetDoltServerHost()
-	// Use doltserver.DefaultConfig for port resolution (env > port file >
-	// config.yaml). Port 0 is fine here — auto-start will resolve it.
-	doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+	// Port 0 is fine here — auto-start will resolve it. Use the shared helper
+	// rather than DefaultConfig(...).Port: this hand-built doltCfg is handed
+	// straight to dolt.New, and a port arriving there without its source is
+	// read as a caller assertion (see ApplyResolvedServerPort).
+	dolt.ApplyResolvedServerPort(beadsDir, doltCfg)
 	doltCfg.ServerSocket = fileCfg.GetDoltServerSocket()
 	// A configured credential command targets an authenticating gateway server:
 	// run it for a short-lived token used as the connection username. Fail closed
@@ -1377,13 +1381,52 @@ var rootCmd = &cobra.Command{
 		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
 
+		// dc-6jaq: consult the MIGRATION-FREEZE sentinel here, before any of
+		// this hook's own store-touching side effects — trackBdVersion below
+		// (writes .local_version), autoMigrateOnVersionBump (opens its own
+		// store connection and can apply a schema migration), and
+		// maybeAutoImportJSONL (imports into the store when empty) all run
+		// before the command's RunE, where CheckReadonly would otherwise
+		// catch a frozen write first. By then the most dangerous writes this
+		// gate exists to prevent would already be done. useReadOnly already
+		// carries the exact classification this early gate must skip (strict
+		// --readonly, or a command on the read-only allowlist) — reusing it
+		// here means there is no second, independently-maintained list of
+		// "write" commands to drift out of sync with the one useReadOnly is
+		// built from. An explicit --dry-run/--inspect preview also sets
+		// useReadOnly and so skips this early gate the same way, but is NOT
+		// exempt overall: CheckReadonly's own freeze check runs again,
+		// unconditionally, at the per-command chokepoint once RunE is
+		// reached, and that later call has no preview awareness — so a
+		// preview on a frozen town still exits 1 there, fail-closed, same as
+		// strict --readonly already blocks `create --dry-run` today.
+		if !useReadOnly {
+			CheckMigrationFreeze(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" "))
+		}
+
+		// dc-6jaq (review round 2, ask #1): a command classified read-only —
+		// or an explicit preview — is deliberately allowed past the gate
+		// above; diagnosis must keep working during a freeze. But
+		// trackBdVersion/autoMigrateOnVersionBump below are this hook's OWN
+		// writes against the (possibly frozen) store, run regardless of the
+		// command's own classification — so "the command is a read" must not
+		// imply "these side effects may still run". Reproduced pre-fix:
+		// freeze the town, seed .local_version with a stale version, run
+		// `bd list` — exit 0 (correct, it's a read), but .local_version was
+		// silently rewritten mid-freeze anyway. Skip both calls under an
+		// active freeze without blocking the read itself. Short-circuits on
+		// !policy.runMaintenance (strict --readonly) so the IsFrozen/
+		// findTownRoot filesystem walk isn't paid on that path, where these
+		// calls are already skipped for an unrelated reason.
+		frozenForMaintenance := policy.runMaintenance && migration.IsFrozen(findTownRoot())
+
 		// Track bd version changes unless strict readonly forbids repository mutation.
 		// Best-effort tracking - failures are silent.
 		//
 		// A preview detects the change but must not consume it: .local_version
 		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
 		// skips that reconciliation (see below). See trackBdVersionPreview.
-		if policy.runMaintenance {
+		if policy.runMaintenance && !frozenForMaintenance {
 			if previewMode {
 				trackBdVersionPreview()
 			} else {
@@ -1415,8 +1458,9 @@ var rootCmd = &cobra.Command{
 		// Preview paths must never call this helper: it opens a separate
 		// writable store before the main read-only store and can therefore
 		// apply schema migrations before RunE validates arguments or renders a
-		// dry-run plan.
-		if policy.runMaintenance && !previewMode {
+		// dry-run plan. frozenForMaintenance excludes it for the same reason
+		// as the trackBdVersion call above — see that comment.
+		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
 			autoMigrateOnVersionBump(beadsDir)
 		}
 
@@ -1432,6 +1476,9 @@ var rootCmd = &cobra.Command{
 			DisableAutoStart: policy.disableAutoStart,
 			BeadsDir:         beadsDir,
 			LenientOpen:      isWorkingSetReconcileCommand(cmd),
+			// Bulk loads outlive the pool's 10s fast-fail on every server
+			// pause (wy-sbgucn); explicit env/config settings still win.
+			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),
 		}
 
 		// Load config to get database name and server connection settings.
@@ -1555,7 +1602,18 @@ var rootCmd = &cobra.Command{
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
 			}
-			uowProvider = p
+			// Fire the workspace's script hooks after commits on the
+			// unit-of-work plumbing, which notified no one: hooks now fire on
+			// both write plumbings, from the plumbing rather than from each
+			// command. This is the proxied twin of the wireStorageDecorators
+			// call below. With hooks disabled the sinks are empty and the
+			// provider comes back unwrapped.
+			var uowSinks uow.Sinks
+			if beadsDir != "" && !config.GetBool("no-hooks") {
+				hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
+				uowSinks.Hook = hookRunner
+			}
+			uowProvider = wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(p, uowSinks))
 
 			if !previewMode {
 				reconcileVersionProxiedServer(rootCtx)
@@ -1585,12 +1643,8 @@ var rootCmd = &cobra.Command{
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
 
-		if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
-			if useReadOnly {
-				store, err = backend.OpenReadOnly(rootCtx, beadsDir)
-			} else {
-				store, err = backend.Open(rootCtx, beadsDir)
-			}
+		if _, ok := backends.Lookup(cfg.GetBackend()); ok {
+			store, err = newRegisteredBackendStore(rootCtx, cfg.GetBackend(), beadsDir, useReadOnly)
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}
@@ -1724,6 +1778,24 @@ var rootCmd = &cobra.Command{
 			setRootContext(nil, nil)
 		}()
 		defer restoreChangeDirSelection()
+		// Give the hooks this command fired their moment before the process
+		// exits. Both plumbings run them fire-and-forget on their own
+		// goroutines, and a bd command is short enough that returning from main
+		// can kill one that has not reached exec yet — a hook that silently did
+		// not fire, which is the failure this whole seam exists to stop.
+		// Bounded by the runner's own per-hook budget: a script that outlives it
+		// is being killed anyway, so waiting longer buys nothing.
+		//
+		// Deferred order is load-bearing on both sides. It runs AFTER the
+		// close-and-release below, because a hook script commonly shells out to
+		// bd and an EMBEDDED workspace's Dolt lock is held until this process
+		// closes its store — the child would fail to open it. (The workspace
+		// gates are not the reason: a normal command holds them SHARED, and the
+		// child takes them shared too, so those never contend.) It runs BEFORE
+		// restoreChangeDirSelection above, because under `-C` the child inherits
+		// this process's environment and must see the workspace the command
+		// actually ran against.
+		defer waitForCommandHooks()
 		// Release the workspace/physical-root gates on EVERY exit from
 		// PostRunE — deferred so the early error returns below cannot leak
 		// the handle past the function. Ordering is enforced, not assumed:
@@ -1737,6 +1809,13 @@ var rootCmd = &cobra.Command{
 		}()
 
 		if proxiedServerMode {
+			// Retention maintenance before the provider closes: the journal
+			// this workspace just wrote to is reached through it. In the body
+			// rather than beside the deferred hook wait, for the reason spelled
+			// out at the other trigger site below.
+			if shouldAutoPruneEventsJournal(cmd) {
+				maybeAutoPruneEventsJournal(rootCtx, beads.FindBeadsDir())
+			}
 			if uowProvider != nil {
 				_ = uowProvider.Close(rootCtx)
 				uowProvider = nil
@@ -1814,6 +1893,32 @@ var rootCmd = &cobra.Command{
 				// and metadata writes on commands like bd list/show/ready (GH#2191).
 				if !isReadOnlyCommand(cmd.Name()) {
 					runPostRunAutoPush(rootCtx)
+				}
+
+				// Events-journal retention, LAST in the maintenance net. It is
+				// the only step here that serves nobody but the database
+				// itself, so everything the user can observe — the commit, the
+				// backup, the export, the push — is already done and durable
+				// before a maintenance transaction opens. Its failures are
+				// logged, never returned.
+				//
+				// COMBINED ORDERING with the hook teardown above, since both
+				// land in this function and each has its own reason:
+				// maintenance runs in the BODY, so it is finished before the
+				// first defer; the defers then run close-and-release, then
+				// waitForCommandHooks, then restoreChangeDirSelection, then the
+				// context cancel. That is the only order in which both hold.
+				// Auto-prune needs an OPEN store, which the body still has and
+				// the hook wait deliberately does not (it is sequenced after
+				// the close so a hook that shells out to bd can take the
+				// embedded Dolt lock). And it must not be deferred alongside
+				// them: it would then either run after the store closed, or
+				// delay the close the hook children are waiting on. Its cost is
+				// bounded — one indexed query when nothing is due, a 30s pass
+				// budget at worst — so the hook wait it precedes starts
+				// essentially on time.
+				if shouldAutoPruneEventsJournal(cmd) {
+					maybeAutoPruneEventsJournal(rootCtx, beads.FindBeadsDir())
 				}
 			}
 
@@ -2090,6 +2195,14 @@ func main() {
 	registerHelpAllFlag()
 
 	executedCmd, err := rootCmd.ExecuteC()
+
+	// Let this command's fire-and-forget hooks finish, for the same
+	// every-exit-path reason the metrics flush below is here rather than in
+	// PersistentPostRunE: cobra SKIPS PostRunE when RunE returns an error, so a
+	// partial batch — `bd close A B` where A commits and B refuses — would exit
+	// with A's committed mutation never reaching its hook script. Idempotent, so
+	// the PostRunE call on the clean path makes this one free.
+	waitForCommandHooks()
 
 	// Finalize queued metrics and detach the uploader. Shared with the os.Exit
 	// guards (CheckReadonly and the pre-run gates) so every exit path flushes the

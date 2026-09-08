@@ -614,11 +614,11 @@ func TestOutputMermaidTree(t *testing.T) {
 			old := os.Stdout
 			r, w, _ := os.Pipe()
 			os.Stdout = w
+			defer func() { os.Stdout = old }()
 
 			outputMermaidTree(tt.tree, tt.rootID)
 
 			w.Close()
-			os.Stdout = old
 
 			var buf bytes.Buffer
 			io.Copy(&buf, r)
@@ -674,11 +674,11 @@ func TestOutputMermaidTree_Siblings(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	outputMermaidTree(tree, "BD-1")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
@@ -913,11 +913,11 @@ func TestRenderTreeOutput(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	renderTree(tree, 50, "down")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
@@ -933,6 +933,34 @@ func TestRenderTreeOutput(t *testing.T) {
 		if !strings.Contains(output, node.ID) {
 			t.Errorf("Expected node %s in output, got:\n%s", node.ID, output)
 		}
+	}
+}
+
+func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
+	tree := []*types.TreeNode{
+		{
+			Issue: types.Issue{ID: "BD-root", Title: "Root", Status: types.StatusOpen, Priority: 1},
+		},
+		{
+			Issue:          types.Issue{ID: "external:remote:payments", Title: "○ payments", Status: types.StatusOpen},
+			Depth:          1,
+			ParentID:       "BD-root",
+			EdgeFromParent: types.DepBlocks,
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	renderTree(tree, 50, "down")
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+	if !strings.Contains(output, "[BLOCKED]") || strings.Contains(output, "[READY]") {
+		t.Fatalf("external blocker should mark root blocked, got:\n%s", output)
 	}
 }
 
@@ -968,11 +996,11 @@ func TestRenderTreeOutputShowsDependencyTypeLabelsInMixedGraph(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	renderTree(tree, 3, "both")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)

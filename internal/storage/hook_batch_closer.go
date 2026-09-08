@@ -30,6 +30,24 @@ type hookBatchCloser struct {
 // batch because a hook script is written against one issue: collapsing N
 // closes into one firing would silently stop reporting N-1 of them.
 //
+// CHANGED IS THE TEST for "landed", not a nil per-item Err — the rule
+// issueops.CloseOutcome.Changed states and the sibling hookBatchApplier applies
+// to its own ItemClose. An idempotent re-close is a per-item SUCCESS that
+// persisted nothing, so announcing it would run the workspace's on_close script
+// again on every replayed teardown, for a close that already happened.
+//
+// BOTH WRITE PLUMBINGS ANSWER THIS WAY. The proxied-server path composes the
+// same close through a unit of work, and its batch compositions
+// (uow.closeBatchItem, uowApplyRun.applyClose) rewind the recorded notification
+// for an item that persisted nothing — so `bd serve` and the direct store agree
+// about what a replayed teardown announces.
+//
+// THE SINGLE-CLOSE PATHS DELIBERATELY DIFFER: HookFiringStore.CloseIssueChecked
+// and hookIssueOperations.Close both fire on any success, re-close included,
+// for the legacy parity their own comments claim. The batch verbs are where a
+// replay is cheap to produce and N times as loud, which is why they answer the
+// narrower question. uow's notifying parity table pins both halves.
+//
 // The claim, when one happened, fires the update hook the claim paths fire,
 // after the closes — the same order the transaction applied them in.
 func (o *hookBatchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
@@ -38,7 +56,7 @@ func (o *hookBatchCloser) CloseBatch(ctx context.Context, request issueops.Close
 		return result, err
 	}
 	for _, outcome := range result.Outcomes {
-		if outcome.Err == nil {
+		if outcome.Changed {
 			o.hooks.CompleteIssueOperationClose(outcome.Issue)
 		}
 	}

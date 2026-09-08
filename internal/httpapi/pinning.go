@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -43,6 +44,14 @@ var (
 	// `bd list` renders its decoration from.
 	_ apigen.IssueBlocking = issueops.IssueBlocking{}
 
+	// The journal record is pinned to neither internal/types nor a role package
+	// but to the journal's own leaf: eventsjournal.Record is what
+	// `bd events tail` prints one of per line, and the committed golden fixture
+	// is a byte-level pin on that encoding. This assignment is what stops a
+	// regenerated mirror from quietly giving GET /v0/beads/events a record shape
+	// the golden never sees.
+	_ apigen.EventRecord = eventsjournal.Record{}
+
 	// The envelopes carry the canonical types too — pinning the schema is not
 	// enough if a page's items resolve to something else.
 	_ []types.IssueWithCounts = apigen.ReadyPage{}.Items
@@ -62,6 +71,8 @@ var (
 	_ []types.Dependency       = apigen.DependencyEdges{}.Items
 	_ []issueops.IssueBlocking = apigen.BlockingAnnotations{}.Items
 	_ []types.Issue            = apigen.BatchCreateResponse{}.Items
+
+	_ []eventsjournal.Record = apigen.EventsPage{}.Records
 )
 
 // SettingsPage.Items and BatchCreateRequest.Items are deliberately absent:

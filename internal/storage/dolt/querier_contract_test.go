@@ -29,6 +29,15 @@ func TestQuerierContract(t *testing.T) {
 	t.Run("SortBoundsThePageInOrder", func(t *testing.T) {
 		conformance.RunQuerierSortBoundsThePageInOrder(t, ctx, fixture)
 	})
+	t.Run("SortByTitleFoldsCaseBeforeItCutsThePage", func(t *testing.T) {
+		conformance.RunQuerierSortByTitleFoldsCaseBeforeItCutsThePage(t, ctx, fixture)
+	})
+	t.Run("SortByClosedPutsTheUnclosedRowsAtTheFarEnd", func(t *testing.T) {
+		conformance.RunQuerierSortByClosedPutsTheUnclosedRowsAtTheFarEnd(t, ctx, fixture)
+	})
+	t.Run("SortTieBreaksByIDInBothDirections", func(t *testing.T) {
+		conformance.RunQuerierSortTieBreaksByIDInBothDirections(t, ctx, fixture)
+	})
 	t.Run("SortSeesTheWholeMatchingSet", func(t *testing.T) {
 		conformance.RunQuerierSortSeesTheWholeMatchingSet(t, ctx, fixture)
 	})
@@ -38,8 +47,8 @@ func TestQuerierContract(t *testing.T) {
 	t.Run("RefusesAMalformedRequest", func(t *testing.T) {
 		conformance.RunQuerierRefusesAMalformedRequest(t, ctx, fixture)
 	})
-	t.Run("OffsetIsHonoredOrRefused", func(t *testing.T) {
-		conformance.RunQuerierOffsetIsHonoredOrRefused(t, ctx, fixture)
+	t.Run("OffsetSkipsMatches", func(t *testing.T) {
+		conformance.RunQuerierOffsetSkipsMatches(t, ctx, fixture)
 	})
 	t.Run("EmptyMatchIsAWellFormedPage", func(t *testing.T) {
 		conformance.RunQuerierEmptyMatchIsAWellFormedPage(t, ctx, fixture)

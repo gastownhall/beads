@@ -73,8 +73,8 @@ type ReadyClaimerFixture struct {
 	CountHistory func(context.Context) (int, error)
 }
 
-// RunReadyClaimerRejectsLimitOffsetAndEmptyActor pins the deterministic
-// request-validation refusals — Limit set, Offset set, Actor empty
+// RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor pins the deterministic
+// request-validation refusals — Limit set, Offset set, Brief set, Actor empty
 // (issueops/readyclaimer.go:15-23 and :7-8) — and the state clause that comes
 // with them: "a validation failure leaves persistent state unchanged"
 // (issueops/readyclaimer.go:56).
@@ -89,6 +89,14 @@ type ReadyClaimerFixture struct {
 // (issueops/reader.go:85-100), and only the first of those is what this request
 // permits.
 //
+// Brief is refused on a sharper version of the same argument. The claim does
+// not read its row through the page's query at all — it refetches the winner
+// whole and hydrates the cardinalities itself — so the projection has nothing
+// to apply to. Accepting it would return a fully-hydrated row, carrying
+// IsLitePartial=false, from a request that has ALREADY MUTATED STATE: the one
+// field a caller could check to notice would be the field asserting nothing
+// went wrong. That is why it is here and not merely documented.
+//
 // The claimable row seeded here is the point of the state half: each refusal
 // runs against a front that WOULD have yielded it, so an implementation that
 // validated after claiming fails on the row rather than on the error.
@@ -98,7 +106,7 @@ type ReadyClaimerFixture struct {
 // so a case checking that the refused call also returned a zero result would be
 // pinning today's implementations rather than the contract. The state
 // assertions below are the part the contract does promise.
-func RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
+func RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
 	t.Helper()
 	label := fixture.IssuePrefix + "-rcreject"
 	candidate := fixture.IssuePrefix + "-rcreject-a"
@@ -123,6 +131,10 @@ func RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T, ctx context.Co
 			Actor:  "claimer",
 			Filter: publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort, Offset: 1},
 		}},
+		{"brief", publicops.ClaimNextRequest{
+			Actor:  "claimer",
+			Filter: publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort, Brief: true},
+		}},
 		{"empty actor", publicops.ClaimNextRequest{
 			Filter: publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort},
 		}},
@@ -135,7 +147,7 @@ func RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T, ctx context.Co
 	// Unchanged means unchanged: the row a valid request would have won is
 	// still open and unassigned, and nothing was written to history.
 	assertReadyClaimerRowState(t, ctx, fixture, candidate, string(types.StatusOpen), "")
-	assertReadyClaimerHistoryDelta(t, ctx, fixture, before, 0, "four refused requests")
+	assertReadyClaimerHistoryDelta(t, ctx, fixture, before, 0, "five refused requests")
 }
 
 // RunReadyClaimerEmptyFrontIsNormal pins the outcome most likely to diverge: a
@@ -601,6 +613,295 @@ func RunReadyClaimerDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Cont
 	if !reflect.DeepEqual(request, want) {
 		t.Errorf("ClaimNext mutated the caller's request:\n got %+v\nwant %+v", request, want)
 	}
+}
+
+// RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven pins the
+// clause that makes ClaimNext safe to point at a lane: the filter it is given
+// is the filter it claims through (issueops/readyclaimer.go:9-14), so a request
+// that fences the ready set to one lane never returns work from another.
+//
+// THIS IS THE DROPPED-FILTER BUG, and it is the reason the case is shaped the
+// way it is. --label-any used to be discarded on the ready/claim path, so a
+// worker asking for its own lane atomically claimed another lane's work while
+// believing it was fenced — a failure that looks exactly like success at every
+// surface a caller can see. Nothing in this contract can see it today:
+// LabelsAny appears only in RunReadyClaimerDoesNotMutateTheCallerRequest, where
+// it is populated and never asserted as a filter, and the two cases that do
+// fence fence with Labels alone.
+//
+// EVERY SEEDED ROW CARRIES THE CASE'S SCOPE LABEL and every request names it in
+// Labels, because the ready front is a property of the whole database. The
+// FENCE under test is therefore LabelsAny and ParentID, layered on top of that
+// scope — which is also what makes the unsatisfiable-AND arm meaningful, since
+// an implementation that let the OR-set stand in for the AND-set answers a row
+// there.
+//
+// THE DECOY IS TOP-PRIORITY AND IN NO LANE. Every arm below is a claim that
+// must NOT take it, so each one doubles as a check that the fence was applied
+// at all rather than a check that some row came back. The requested order is
+// `priority`, so "the fence was dropped" and "the fence was honored" name
+// different rows every time.
+//
+// FOUR THINGS FAIL INDEPENDENTLY and each has an arm:
+//
+//   - the OR-set is an OR. The first request names a lane that matches nothing
+//     alongside the one that does; an implementation reading LabelsAny as a
+//     second AND-set claims nothing.
+//   - the AND-set still binds. An unsatisfiable Labels entry beside a
+//     satisfiable LabelsAny must claim NOTHING, not the row the OR-set alone
+//     would have matched.
+//   - the parent restricts, through BOTH of its arms. The parent clause is a
+//     disjunction — a dotted-id descendant that owns no parent-child edge, OR a
+//     row the recursive descendant walk reached — and the two are separate
+//     bodies of code (issueops.GetDescendantIDsInTx and the unit of work's
+//     hand-copied getDescendantIDs). One row of each shape is seeded, and the
+//     second claim is what proves the walk arm is live.
+//   - an EXHAUSTED fence claims nothing. This is the safety property: the
+//     failure mode worth preventing is not an empty answer, it is a FULL one
+//     from outside the lane. The final unfenced claim takes the decoy, so the
+//     nils above are the fence's doing and not a drained front.
+//
+// WHAT THIS FIXTURE CANNOT SEE: ExcludeLabels, LabelPattern and LabelRegex,
+// which are three more members of the same fence. They are not what the case is
+// named for — the historical defect and the leaf's clause are both about the
+// filter reaching the claim path at all, and a request that carries five
+// predicates through the same builder does not carry three of them and drop
+// two. Adding them would lengthen the case without adding a failure mode.
+func RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
+	t.Helper()
+	scope := fixture.IssuePrefix + "-rcfence"
+	laneA := scope + "-lane-a"
+	laneB := scope + "-lane-b"
+	emptyLane := scope + "-lane-c"
+	nobody := scope + "-nobody"
+
+	decoy := scope + "-free"
+	root := scope + "-p"
+	wrongLaneChild := scope + "-p.1"
+	dottedChild := scope + "-p.2"
+	walkedChild := scope + "-pchild"
+	outsider := scope + "-x"
+
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(decoy, 0, scope))
+	// The root sits at the BACK of the scope's order (priorities run 0..4), so
+	// the unfenced claim that closes the case takes the decoy rather than it.
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(root, 4, scope))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(wrongLaneChild, 1, scope, laneB))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(outsider, 2, scope, laneA))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(dottedChild, 3, scope, laneA))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(walkedChild, 4, scope, laneA))
+	// walkedChild is a descendant of root only through this edge; dottedChild
+	// is one only through its id. The parent clause is a disjunction of those
+	// two shapes and this case drives both.
+	seedReadyClaimerTypedEdge(t, ctx, fixture, walkedChild, root, types.DepParentChild)
+
+	scoped := publicops.ReadyRequest{Labels: []string{scope}, Sort: readyClaimerSort}
+	page, err := fixture.Reader.Ready(ctx, scoped)
+	if err != nil {
+		t.Fatalf("Reader.Ready over the seeded scope: %v", err)
+	}
+	for _, id := range []string{decoy, root, wrongLaneChild, outsider, dottedChild, walkedChild} {
+		if !readyClaimerPageHas(page, id) {
+			t.Fatalf("Reader.Ready did not offer the seeded row %s (page: %v); every arm below is about WHICH ready row "+
+				"the fence selects, so a row missing from the front makes its arm vacuous", id, readyClaimerPageIDs(page))
+		}
+	}
+
+	// The OR-set narrows, the parent narrows, and the two compose: the only
+	// lane-A descendant of root, ahead of a lane-A row outside it and a
+	// higher-priority child in the wrong lane.
+	inLane := publicops.ReadyRequest{
+		Labels:    []string{scope},
+		LabelsAny: []string{laneA, emptyLane},
+		ParentID:  root,
+		Sort:      readyClaimerSort,
+	}
+	if won := readyClaimerWin(t, ctx, fixture, inLane); won != dottedChild {
+		t.Fatalf("ClaimNext(labels-any %v, parent %s) claimed %s, want %s — %s is the wrong lane, %s is outside the "+
+			"parent, and %s is fenced out by both", []string{laneA, emptyLane}, root, won, dottedChild,
+			wrongLaneChild, outsider, decoy)
+	}
+	// The parent clause's OTHER arm: this row is a descendant only through the
+	// parent-child edge, so a body whose descendant walk went missing answers
+	// nil here while the dotted-id arm above still passed.
+	if won := readyClaimerWin(t, ctx, fixture, inLane); won != walkedChild {
+		t.Fatalf("the second ClaimNext(parent %s) claimed %s, want %s — that row is a descendant only through its "+
+			"parent-child edge, which is the arm of the parent clause the dotted id above does not exercise",
+			root, won, walkedChild)
+	}
+
+	// The AND-set still binds beside a satisfiable OR-set.
+	unsatisfiable := publicops.ReadyRequest{
+		Labels:    []string{scope, nobody},
+		LabelsAny: []string{laneA},
+		Sort:      readyClaimerSort,
+	}
+	assertReadyClaimerClaimsNothing(t, ctx, fixture, unsatisfiable,
+		"an unsatisfiable AND-set beside a satisfiable OR-set")
+
+	// The OR-set alone still fences: the lane row, not the top-priority decoy.
+	laneOnly := publicops.ReadyRequest{Labels: []string{scope}, LabelsAny: []string{laneA}, Sort: readyClaimerSort}
+	if won := readyClaimerWin(t, ctx, fixture, laneOnly); won != outsider {
+		t.Fatalf("ClaimNext(labels-any %s) claimed %s, want %s — %s is higher priority and in no lane, so claiming it "+
+			"is the dropped-filter failure this case exists for", laneA, won, outsider, decoy)
+	}
+
+	// THE SAFETY PROPERTY: with the lane drained, the claim takes nothing
+	// rather than falling back to unfenced work.
+	assertReadyClaimerClaimsNothing(t, ctx, fixture, laneOnly, "an exhausted lane")
+
+	// And the rows were claimable all along, so every nil above was the
+	// fence's doing.
+	if won := readyClaimerWin(t, ctx, fixture, scoped); won != decoy {
+		t.Errorf("the unfenced claim took %s, want %s — the refusals above only mean something while this row is still claimable",
+			won, decoy)
+	}
+}
+
+// RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities pins what the
+// two numbers on a claimed row COUNT. ClaimNext hydrates the row it won
+// (RunReadyClaimerClaimsTheFrontRowAndReturnsThePostClaimState asserts they are
+// populated from real edges), but every fixture in this contract seeds
+// `blocks` edges and nothing else, so a body that counted every edge type
+// answers exactly the same numbers.
+//
+// The two count sets are genuinely different sets. `bd show`'s dependent count
+// is all-types (storage.CountDependents), while the cardinalities carried on a
+// work row are blocks-only (sqlbuild.SearchCountsSQL's dc/rc joins both say
+// `WHERE type = 'blocks'`), and the unit of work computes them in a body of its
+// own. Nothing anywhere tells the two apart at this seam: swap them and every
+// count assertion in this suite still passes.
+//
+// THE WINNER SITS AT THE CENTER OF SIX EDGES, three out and three in, one pair
+// per type — and the raw edge counts are asserted FIRST. That is what makes the
+// answer falsifiable rather than merely small: without them, "DependencyCount
+// is 1" is equally consistent with a body that counts only blocks edges and
+// with a fixture whose extra edges were never written. The case says three
+// edges exist and one is counted.
+//
+// THE NON-BLOCKS EDGES ARE CHOSEN NOT TO MOVE THE ROW OFF THE READY FRONT: the
+// blocks target is CLOSED, relates-to never gates, and a parent-child edge
+// gates a child only through a parent that is itself blocked. So the winner
+// stays claimable and the case is about the counts rather than about readiness,
+// which the blocker-aware cases already own.
+//
+// WHAT THIS FIXTURE CANNOT SEE: the all-types count itself, which no verb on
+// this role reports — the raw edge total stands in for it. That is not what the
+// case is named for; the promise here is that the claim's cardinalities are the
+// blocks-only ones, and a body answering 3 fails on exactly that.
+func RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
+	t.Helper()
+	scope := fixture.IssuePrefix + "-rccount"
+	offstage := scope + "-off"
+	winner := scope + "-a"
+	blocker := scope + "-blocker"
+	dependent := scope + "-dependent"
+	relatedOut := scope + "-related-out"
+	relatedIn := scope + "-related-in"
+	parent := scope + "-parent"
+	child := scope + "-child"
+
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(winner, 0, scope))
+	// A CLOSED blocks target: it gives the winner a counted dependency without
+	// taking it off the ready front.
+	closed := readyClaimerIssue(blocker, 1, offstage)
+	closed.Status = types.StatusClosed
+	seedReadyClaimerIssue(t, ctx, fixture, closed)
+	for _, id := range []string{dependent, relatedOut, relatedIn, parent, child} {
+		seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(id, 1, offstage))
+	}
+
+	seedReadyClaimerTypedEdge(t, ctx, fixture, winner, blocker, types.DepBlocks)
+	seedReadyClaimerTypedEdge(t, ctx, fixture, winner, relatedOut, types.DepRelatesTo)
+	seedReadyClaimerTypedEdge(t, ctx, fixture, winner, parent, types.DepParentChild)
+	seedReadyClaimerTypedEdge(t, ctx, fixture, dependent, winner, types.DepBlocks)
+	seedReadyClaimerTypedEdge(t, ctx, fixture, relatedIn, winner, types.DepRelatesTo)
+	seedReadyClaimerTypedEdge(t, ctx, fixture, child, winner, types.DepParentChild)
+
+	// Three edges each way really are on the row. Without this the equalities
+	// below hold just as well over a fixture that wrote one edge of each.
+	if out := readyClaimerEdgesFrom(t, ctx, fixture, winner); out != 3 {
+		t.Fatalf("%s carries %d outgoing edges, want the 3 this case seeded; the blocks-only assertion below cannot "+
+			"fail while the other two types are missing", winner, out)
+	}
+	if in := readyClaimerEdgesTo(t, ctx, fixture, winner); in != 3 {
+		t.Fatalf("%s carries %d incoming edges, want the 3 this case seeded", winner, in)
+	}
+
+	result, err := fixture.Claimer.ClaimNext(ctx, publicops.ClaimNextRequest{
+		Actor:  "claimer",
+		Filter: publicops.ReadyRequest{Labels: []string{scope}, Sort: readyClaimerSort},
+	})
+	if err != nil {
+		t.Fatalf("ClaimNext over the seeded scope: %v", err)
+	}
+	if result.Claimed == nil {
+		t.Fatal("ClaimNext returned no row against a front holding one claimable issue")
+	}
+	if result.Claimed.ID != winner {
+		t.Fatalf("claimed %s, want %s", result.Claimed.ID, winner)
+	}
+	if result.Claimed.DependencyCount != 1 {
+		t.Errorf("returned DependencyCount = %d over 3 outgoing edges (one blocks, one relates-to, one parent-child), "+
+			"want 1 — a work row's cardinalities count blocks edges only", result.Claimed.DependencyCount)
+	}
+	if result.Claimed.DependentCount != 1 {
+		t.Errorf("returned DependentCount = %d over 3 incoming edges (one blocks, one relates-to, one parent-child), "+
+			"want 1 — a work row's cardinalities count blocks edges only", result.Claimed.DependentCount)
+	}
+}
+
+// assertReadyClaimerClaimsNothing runs one claim that must take no row and says
+// which row it took when it does, because "the fence was dropped" is only
+// diagnosable from the id.
+func assertReadyClaimerClaimsNothing(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture, filter publicops.ReadyRequest, subject string) {
+	t.Helper()
+	result, err := fixture.Claimer.ClaimNext(ctx, publicops.ClaimNextRequest{Actor: "claimer", Filter: filter})
+	if err != nil {
+		t.Fatalf("ClaimNext with %s: error = %v, want nil — a fence that matches nothing is an EMPTY front, not a failure", subject, err)
+	}
+	if result.Claimed != nil {
+		t.Fatalf("ClaimNext with %s claimed %s; a claim that falls back past its own fence hands an agent work from "+
+			"another lane while the caller believes it is fenced", subject, result.Claimed.ID)
+	}
+}
+
+// seedReadyClaimerTypedEdge seeds ONE edge of a named type.
+// seedReadyClaimerEdge is the blocks-only shorthand every other case uses; the
+// cases that are ABOUT edge type need to say which.
+func seedReadyClaimerTypedEdge(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture, issueID, dependsOnID string, depType types.DependencyType) {
+	t.Helper()
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: issueID, DependsOnID: dependsOnID, Type: depType,
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s edge %s -> %s: %v", depType, issueID, dependsOnID, err)
+	}
+}
+
+// readyClaimerEdgesFrom counts every dependency row leaving id, whatever its
+// type. It is the all-types control the role itself never reports.
+func readyClaimerEdgesFrom(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture, id string) int {
+	t.Helper()
+	var rows int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", []any{id}, &rows); err != nil {
+		t.Fatalf("count outgoing edges for %s: %v", id, err)
+	}
+	return rows
+}
+
+// readyClaimerEdgesTo counts every dependency row arriving at id. The target's
+// own class decides which typed column holds it, so it is resolved through the
+// same COALESCE the rest of the contract family uses.
+func readyClaimerEdgesTo(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture, id string) int {
+	t.Helper()
+	var rows int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+		[]any{id}, &rows); err != nil {
+		t.Fatalf("count incoming edges for %s: %v", id, err)
+	}
+	return rows
 }
 
 // readyClaimerSort is the order every case names. It is the policy whose SQL is

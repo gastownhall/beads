@@ -9,8 +9,12 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-// The three read operations. Each one decodes its parameters, hands the whole
-// request to the reader role, and shapes the answer onto the wire.
+// The issue-collection reads. Each one decodes its parameters, hands the whole
+// request to a role, and shapes the answer onto the wire. Three are on
+// issueops.Reader (ready, list, detail); the count and the query are on
+// ReadyCounter and Querier, siblings reached the same way through the same
+// provider accessors. What follows is about the Reader three, and holds for
+// the other two in every respect but which role they name.
 //
 // WHAT IS NOT HERE IS THE POINT. No filter is built, no ConfigSource is wired,
 // no default limit is applied, no status exclusion is chosen, no wisp fallback
@@ -61,6 +65,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	// and never sends empty.
 	req.Sort = q.oneOf("sort", readySortDefault, "hybrid", "priority", "oldest")
 	req.Limit = q.limit()
+	// Decoded here and not in readyFilters, which is the vocabulary the count
+	// shares: this is a projection of the rows a page returns, in the same
+	// class as the two lines above it, and the count returns no rows to project.
+	req.Brief = q.boolean("brief")
 
 	if !s.acceptQuery(w, r, q) {
 		return
@@ -163,6 +171,164 @@ func (s *Server) handleCountReady(w http.ResponseWriter, r *http.Request) {
 // value it could take.
 const readySortDefault = "priority"
 
+// countFilters decodes the count's predicate: every filter the role publishes
+// and nothing about a page, an order or a bucket.
+//
+// It is a function of its own for readyFilters' reason turned inside out. That
+// one is shared because two operations must admit the same parameters; this one
+// has a single caller, and it is split off so a test can drive it over an empty
+// query and read back the EXACT set of names this handler asks for
+// (query.read). That is what makes the parameter-parity check mechanical rather
+// than a second hand-rolled list beside the document's.
+func countFilters(q *query) issueops.CountRequest {
+	return issueops.CountRequest{
+		// ONE status, not the listing's comma-separated OR set. The role says so
+		// and the document says so; reading it with q.csv here would publish a
+		// set the role would answer 0 for.
+		Status:    q.str("status"),
+		IssueType: q.str("type"),
+		Assignee:  q.str("assignee"),
+
+		Priority:    q.integer("priority"),
+		PriorityMin: q.integer("priority_min"),
+		PriorityMax: q.integer("priority_max"),
+
+		Labels:    q.list("label"),
+		LabelsAny: q.list("label_any"),
+
+		TitleSearch: q.str("title"),
+		// A COMMA-SEPARATED string, handed over as written: the role splits,
+		// trims and de-duplicates it, and a handler that pre-split it would be
+		// deciding what an id set means.
+		IDFilter: q.str("id"),
+
+		TitleContains: q.str("title_contains"),
+		DescContains:  q.str("desc_contains"),
+		NotesContains: q.str("notes_contains"),
+
+		CreatedAfter:  q.timestamp("created_after"),
+		CreatedBefore: q.timestamp("created_before"),
+		UpdatedAfter:  q.timestamp("updated_after"),
+		UpdatedBefore: q.timestamp("updated_before"),
+		ClosedAfter:   q.timestamp("closed_after"),
+		ClosedBefore:  q.timestamp("closed_before"),
+
+		EmptyDesc:      q.boolean("empty_description"),
+		NoAssignee:     q.boolean("no_assignee"),
+		NoLabels:       q.boolean("no_labels"),
+		MetadataFields: q.metadataFields("metadata_field"),
+
+		// The plane switch, forwarded as the boolean the caller sent. What it
+		// MEANS — merge the wisps tier, drop templates, drop gates, and route an
+		// infra type to the ephemeral tier — is four decisions the role makes
+		// from the WORKSPACE's own infra vocabulary, which is a config load this
+		// handler must never perform.
+		IncludeInfra: q.boolean("include_infra"),
+	}
+}
+
+// countGroupOf reads the bucketing dimension and reports whether one was asked
+// for.
+//
+// PRESENCE is the signal, which is why this returns a boolean beside the value:
+// an absent `group_by` selects the scalar method, and q.oneOf's fallback alone
+// would collapse "no bucketing asked for" into a dimension. An unknown value is
+// refused HERE rather than at the role, so the 400 names the parameter — the
+// role's own rule (an unknown dimension is ErrValidation, never an empty
+// answer) with the member name a client dispatches on added.
+func countGroupOf(q *query) (issueops.CountGroup, bool) {
+	grouped := q.has("group_by")
+	return issueops.CountGroup(q.oneOf("group_by", "", countGroupNames()...)), grouped
+}
+
+// countGroups is the closed dimension vocabulary, in the document's order, so
+// the schema's enum and the values this server accepts are one list read twice
+// rather than two lists kept in step by hand.
+//
+// It is spelled with the ROLE's constants rather than as bare strings: the wire
+// names and issueops.CountGroup's values are the same strings today, and
+// deriving one from the other is what keeps them the same tomorrow.
+var countGroups = []issueops.CountGroup{
+	issueops.CountGroupStatus,
+	issueops.CountGroupPriority,
+	issueops.CountGroupType,
+	issueops.CountGroupAssignee,
+	issueops.CountGroupLabel,
+}
+
+// countGroupNames is countGroups as the strings q.oneOf compares against.
+func countGroupNames() []string {
+	names := make([]string, len(countGroups))
+	for i, g := range countGroups {
+		names[i] = string(g)
+	}
+	return names
+}
+
+// handleCountIssues answers GET /v0/beads/issues:count.
+//
+// ONE HANDLER FOR BOTH OF THE ROLE'S METHODS, because `group_by` chooses
+// between two shapes of one answer rather than between two questions: the same
+// predicate over the same set, differing only in whether the reply is one
+// number or a number per bucket. The grouped result carries the scalar total
+// itself, which is why splitting them would have put one role's promise inside
+// the other's result.
+//
+// WHAT IS NOT HERE is this file's whole point, and on a count it is more than
+// usual. No filter is built, no ConfigSource is wired, and the workspace's
+// INFRA VOCABULARY is never read — that config load is precisely what
+// issueops.Counter exists to keep off a front door.
+//
+// The default answer is the ROLE's too, and it is NOT the listing's: an empty
+// request counts every durable row including closed, pinned, template and gate
+// ones. A handler that "helpfully" applied the listing's exclusions would be
+// answering a different question with the same parameters.
+func (s *Server) handleCountIssues(w http.ResponseWriter, r *http.Request) {
+	q := newQuery(r.URL.Query())
+
+	req := countFilters(q)
+	group, grouped := countGroupOf(q)
+
+	if !s.acceptQuery(w, r, q) {
+		return
+	}
+
+	counter, err := s.counter(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	if grouped {
+		// THE SAME PREDICATE reaches both methods, which is the identity the
+		// role promises: a grouped count is a scalar count plus a dimension, so
+		// the two cannot be asked of different sets.
+		result, err := counter.CountByGroup(r.Context(), issueops.CountByGroupRequest{Filter: req, GroupBy: group})
+		if err != nil {
+			s.failReadErr(w, r, err)
+			return
+		}
+		// `groups` is PRESENT because the request asked for buckets, even when
+		// the answer has none: an empty object means "nothing matched" and an
+		// absent member means "you did not ask", and a client must be able to
+		// tell those apart without re-reading its own request. The role promises
+		// a non-nil map; this does not lean on that promise, because a nil map
+		// would marshal as `{}` anyway and leaning on it would make the
+		// difference invisible if it ever broke.
+		groups := result.Groups
+		if groups == nil {
+			groups = map[string]int{}
+		}
+		writeJSON(w, apigen.IssueCount{Total: result.Total, Groups: &groups})
+		return
+	}
+	result, err := counter.Count(r.Context(), req)
+	if err != nil {
+		s.failReadErr(w, r, err)
+		return
+	}
+	writeJSON(w, apigen.IssueCount{Total: result.Total})
+}
+
 // handleListIssues answers GET /v0/beads/issues.
 func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	q := newQuery(r.URL.Query())
@@ -178,10 +344,12 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 
 		ParentID: q.str("parent"),
 
+		Brief:            q.boolean("brief"),
 		AllFlag:          q.boolean("all"),
 		IncludeTemplates: q.boolean("include_templates"),
 		IncludeGates:     q.boolean("include_gates"),
 		IncludeInfra:     q.boolean("include_infra"),
+		IncludeEphemeral: q.boolean("include_ephemeral"),
 
 		CreatedBefore: q.timestamp("created_before"),
 		CreatedAfter:  q.timestamp("created_after"),
@@ -189,15 +357,23 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		MetadataFields: q.metadataFields("metadata_field"),
 		HasMetadataKey: q.str("has_metadata_key"),
 
-		// ORDERING IS FIXED AND DIVERGES FROM `bd list` DELIBERATELY, which is
-		// why there is no `sort` parameter to decode. The cursor is a keyset
-		// position in the created order, so a first page under `bd list`'s
-		// priority-first default would make the second page skip and duplicate
-		// rows. The order is welded to the cursor contract.
-		SortBy: "created",
-
 		Limit: q.limit(),
 	}
+
+	// THE ORDER AND THE CURSOR ARE ONE DECISION. Each served order is a keyset
+	// contract — its own position shape and its own strictly-after predicate —
+	// so `sort` selects the ORDER BY and, with it, what a position means. The
+	// vocabulary is closed for that reason and not for tidiness: the seven
+	// other orders `bd list --sort` takes have no proven total key (mutable,
+	// nullable, or not expressible in SQL at all), and serving one behind a
+	// cursor would page a walk that skips and repeats rows.
+	//
+	// SortBy takes the wire value verbatim, which is safe only because the two
+	// vocabularies coincide by construction: sqlbuild.SortDefs already spells
+	// these orders `created` and `priority`, and `priority` there is exactly
+	// (priority ASC, created_at DESC, id ASC) — `bd list`'s flagless order.
+	order := listOrder(q.oneOf("sort", string(listOrderDefault), listOrders...))
+	req.SortBy = string(order)
 
 	token := q.str("cursor")
 
@@ -205,7 +381,11 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if token != "" {
-		pos, ok := decodeCursor(token)
+		// Decoded AGAINST the order this request asked for. A token minted in
+		// the other order is refused rather than reinterpreted: its instant and
+		// its id would decode perfectly and mean something else, which is a
+		// skipped-and-duplicated page served with a 200.
+		pos, ok := decodeCursor(token, order)
 		if !ok {
 			requestInfo(r.Context()).refuse(token)
 			s.fail(w, r, InvalidCursor())
@@ -213,6 +393,7 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		req.AfterCreatedAt = &pos.CreatedAt
 		req.AfterID = pos.ID
+		req.AfterPriority = pos.Priority
 	}
 	if !s.allowUnlimited(w, r, req.Limit) {
 		return
@@ -237,7 +418,10 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		// Present if and only if has_more, which the document states as a
 		// biconditional: a client that sees one and not the other has no way
 		// to know whether paging is finished.
-		if next := cursorFor(page.Items); next != "" {
+		// Minted in the order this page was SERVED in, so the token a client
+		// hands back is a position the next request can only be read against
+		// the same way.
+		if next := cursorFor(page.Items, order); next != "" {
 			body.NextCursor = &next
 		}
 	}
@@ -296,7 +480,20 @@ var querySorts = []string{"priority", "created", "updated", "closed", "status", 
 
 // handleGetIssue answers GET /v0/beads/issues/{id}.
 func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
-	if !s.requireNoQuery(w, r) {
+	q := newQuery(r.URL.Query())
+
+	// Both default off, so a request that names neither builds the request this
+	// handler built when the operation had no parameters at all.
+	req := issueops.GetRequest{
+		IncludeComments:   q.boolean("include_comments"),
+		IncludeDependents: q.boolean("include_dependents"),
+		BriefDeps:         q.boolean("brief_deps"),
+	}
+
+	// Before the id bound, which is the order this operation had when
+	// requireNoQuery ran first: a refused query string is a 400 that names what
+	// to fix, and deciding the id first would answer it with a 404 instead.
+	if !s.acceptQuery(w, r, q) {
 		return
 	}
 	id := r.PathValue("id")
@@ -314,15 +511,14 @@ func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.ID = id
+
 	rd, err := s.reader(r)
 	if err != nil {
 		s.failErr(w, r, err)
 		return
 	}
-	// IncludeDependents and IncludeComments stay at their zero values: v0
-	// takes no parameter that asks for those rows, so `dependents` and
-	// `comments` are always absent and `comments_omitted` says so.
-	details, err := rd.Get(r.Context(), issueops.GetRequest{ID: id})
+	details, err := rd.Get(r.Context(), req)
 	if err != nil {
 		s.failReadErr(w, r, err)
 		return

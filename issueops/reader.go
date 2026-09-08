@@ -87,17 +87,30 @@ type ReadyRequest struct {
 	// stay distinguishable, which is what lets one constant serve both
 	// surfaces.
 	Limit *int
-	// Offset skips the first N matching rows. It is honored by the
-	// unit-of-work implementation, which renders OFFSET; the store-backed one
-	// cannot, and REFUSES a non-zero Offset with a typed *ErrUnsupported
-	// naming the operation and the backend. What it never does is silently
-	// return an unpaged answer, so a caller that sets it either gets the page
-	// it asked for or an error it can classify with errors.As.
+	// Offset skips the first N matching rows, on EVERY implementation. The
+	// page a caller receives is the rows at positions [Offset, Offset+Limit)
+	// of the answer the same request returns unpaged, in the same order.
+	//
+	// WHERE the skip happens is not a backend's choice either. One seam
+	// renders OFFSET and one renders LIMIT without it, so both bodies reach
+	// past the skipped rows and drop them in the shared page epilogue
+	// (internal/workapi.FinishPageAt) — which is also the only sequence that
+	// is right for a sort SQL cannot express, since that order first exists
+	// after the fetch.
+	//
+	// An Offset past the end of the result set is an empty page and a nil
+	// error, not a failure: a pager that walks off the end has its answer.
 	//
 	// A ready request carries no keyset position, so there is no portable way
 	// to page ready work. A caller that must page across backends pages a
 	// ListRequest instead — see ListRequest.Offset.
 	Offset int
+
+	// Brief drops the free-form text from every row: Description, Design,
+	// AcceptanceCriteria, Notes, Payload and Waiters come back zero-valued and
+	// the row carries types.Issue.IsLitePartial. See ListRequest.Brief, which
+	// is the same knob on the other operation and carries the full contract.
+	Brief bool
 }
 
 // ListRequest describes one issue-list query.
@@ -174,6 +187,33 @@ type ListRequest struct {
 	// hydrated there either way, which costs time and not correctness.
 	SkipCounts bool
 
+	// Brief suppresses the FREE-FORM TEXT the way SkipLabels suppresses labels
+	// and SkipCounts the cardinalities: Description, Design,
+	// AcceptanceCriteria, Notes, Payload and Waiters are not selected and come
+	// back zero-valued. Nothing else about the page moves — the rows, their
+	// order, Parent and the has-more verdict are what they would have been —
+	// because this chooses what is HYDRATED, never which rows match. A
+	// predicate over a heavy column (DescContains, NotesContains, EmptyDesc)
+	// keeps selecting exactly the rows it selects today: WHERE is independent
+	// of the SELECT shape.
+	//
+	// A BLANK FIELD IS AMBIGUOUS ON THE WIRE and the row says so in process:
+	// all six are omitempty, so a projected row marshals identically to a
+	// genuinely textless one, and the row carries types.Issue.IsLitePartial to
+	// tell them apart for an in-process caller. That flag is json:"-", so a
+	// wire consumer distinguishes them by having asked — the same shape the
+	// repo has already argued about twice (ga-clgh/CommentsOmitted, #5550).
+	//
+	// UNLIKE SkipLabels and SkipCounts it IS carried onto the ReadyFlag arm,
+	// and onto ReadyRequest.Brief beside it. Those two drop a NUMBER the ready
+	// renderings print; this drops a body no listing prints, so carrying it is
+	// what makes `--ready` and `bd ready` answer the same request the same way.
+	//
+	// It is the storage layer's types.IssueFilter.Lite / types.WorkFilter.Lite
+	// under the name the CLI and the MCP integration already use for a
+	// projection (bd show --brief-deps, the MCP's brief).
+	Brief bool
+
 	// Priority is exact; PriorityMin and PriorityMax bound a range. All three
 	// are pointers for the same reason ReadyRequest.Priority is.
 	Priority    *int
@@ -200,12 +240,88 @@ type ListRequest struct {
 	IncludeTemplates bool
 	IncludeGates     bool
 	IncludeInfra     bool
+	// IncludeEphemeral admits the EPHEMERAL PLANE — the wisps TABLE, which a
+	// default listing does not read at all — and admits nothing else.
+	//
+	// WHAT IS IN THAT PLANE is not only true ephemerals. The wisps table holds
+	// every row the durable plane does not: wisps proper (ephemeral = 1) AND
+	// no-history rows, which live there with ephemeral = 0. Both arrive
+	// together, because this selects a TABLE rather than testing a column.
+	//
+	// False, the zero value, is the listing every caller has today: the durable
+	// issues table alone. True merges the wisps table IN ADDITION, so under the
+	// same filters the answer is a SUPERSET of the false answer. It never
+	// narrows, and it never becomes ephemeral-only.
+	//
+	// IT IS NOT THE SAME MECHANISM AS ReadyRequest.IncludeEphemeral, despite
+	// the shared name and the shared "admit in addition" reading, and the
+	// difference is observable. The ready query reads BOTH planes either way
+	// and its flag adds a per-ROW predicate (ephemeral = 0) when unset; this
+	// one selects which TABLES are read at all. So a no-history row — in the
+	// wisps table with ephemeral = 0 — is already in a DEFAULT ready answer and
+	// is absent from a default listing until this flag is set. Match the two
+	// fields for intent, never for row-level equivalence.
+	//
+	// IT IS A PLANE KNOB, NOT A TYPE KNOB — the difference from the three
+	// fields above it. Each of those takes a TYPE exclusion back off; this
+	// takes none off, so an ephemeral row whose type a default listing already
+	// excludes stays excluded. THAT INCLUDES THE INFRA TYPES, which is the
+	// combination most likely to surprise: the configured infra vocabulary
+	// (agent, role and message by default) is excluded by TYPE, so ephemeral
+	// agent/role/message rows need IncludeInfra as well as — or instead of —
+	// this. IncludeInfra does BOTH, which makes it strictly wider; what this
+	// field alone reaches is the ephemeral rows of the types a listing already
+	// shows.
+	//
+	// THE MERGED ANSWER IS ONE ORDER. Both planes are ordered together by
+	// SortBy as if they were a single table — not the durable rows followed by
+	// the ephemeral ones — so a Limit truncates the merged order rather than
+	// one plane's. Both implementations produce it (one merge-sorts two ordered
+	// legs, the other ORDERs a SQL union), and the keyset position
+	// (AfterCreatedAt/AfterID) is applied to BOTH legs, so a paged walk over
+	// the merged order drops no row and repeats none.
+	//
+	// The caveat that walk inherits is the one every multi-page walk already
+	// has, and this does not deepen it: a page is not a snapshot. A row written
+	// — or, for a wisp, compacted away — between two pages is seen or missed
+	// according to where it falls relative to the position, and the ephemeral
+	// plane merely turns over faster than the durable one.
+	//
+	// On the ReadyFlag arm it is CARRIED rather than dropped; see that field.
+	IncludeEphemeral bool
+	// IncludeAllTypes lifts every default suppression that hides a bead from a
+	// listing on account of WHAT IT IS: the three type knobs above (templates,
+	// gates, infra types) AND the ephemeral plane, so the wisps table is read
+	// too. Frontends whose contract is "never hide a bead" — `bd human list`,
+	// where a human label is an explicit request for a person's attention —
+	// set this one field instead of enumerating the knobs and then drifting
+	// from them when a fourth suppression lands.
+	//
+	// IT IS THE UNION OF THOSE FLAGS, NOT A NEW MECHANISM. Setting it is
+	// equivalent to IncludeTemplates + IncludeGates + IncludeInfra +
+	// IncludeEphemeral; it narrows nothing and admits nothing they cannot.
+	// Both the type suppressions and the plane decision live in workapi's
+	// applyTypeSuppressions, which this flag skips entirely — so a suppression
+	// added there is lifted here automatically, which is the whole point.
+	//
+	// IT SAYS NOTHING ABOUT STATUS. The done/frozen exclusions and the pinned
+	// default are a separate axis and still apply; --status (including "all")
+	// is how a caller lifts those.
+	IncludeAllTypes bool
 	// ExcludeTypes entries may be comma-separated; splitting happens inside.
 	ExcludeTypes []string
 
 	ParentID string
 	NoParent bool
 	MolType  *MolType
+	// WispType matches the wisp_type COLUMN, which both tables carry. It is
+	// therefore a predicate and not a plane selector: it does not admit the
+	// ephemeral plane, and on a default listing — where that plane is
+	// suppressed — it narrows the durable rows to those whose wisp_type
+	// matches, which no ordinary durable row has. The combination that answers
+	// with rows is IncludeEphemeral (or IncludeInfra) plus this, and it is
+	// lawful rather than refused: the two compose as an ordinary AND, admitting
+	// the plane and then narrowing it to one classification.
 	WispType *WispType
 
 	DeferredFlag bool
@@ -224,14 +340,17 @@ type ListRequest struct {
 	// narrower filter vocabulary than this request can describe, and only part
 	// of the request reaches it.
 	//
-	// WHAT IT CARRIES: IssueType, all five label forms, Assignee, NoAssignee,
+	// WHAT IT CARRIES: Status/Statuses (an explicit --status is the
+	// intersection; AllFlag and `--status all` still take the open default),
+	// IssueType, all five label forms, Assignee, NoAssignee,
 	// the exact Priority, ParentID, MolType, WispType, MetadataFields,
 	// HasMetadataKey, the type exclusions (ExcludeTypes, and with them
-	// IncludeGates and IncludeInfra), Limit, Offset and the MaxRows cap with
-	// its attribution. SortBy and Reverse
+	// IncludeGates and IncludeInfra), IncludeEphemeral — the ready query has an
+	// ephemeral gate of its own, so the plane bit crosses intact and
+	// IncludeInfra's plane half crosses with it — Limit, Offset and the MaxRows
+	// cap with its attribution. SortBy and Reverse
 	// still apply, because the display order is applied to the page after the
-	// query rather than inside it. Status and AllFlag are resolved to "open"
-	// and have no further effect: ready work is open work.
+	// query rather than inside it.
 	//
 	// WHAT IT REFUSES: every other filter here is one the ready query cannot
 	// carry, so combining it with ReadyFlag returns ErrValidation naming the
@@ -266,12 +385,10 @@ type ListRequest struct {
 	// is derived from it inside the implementation, together with the
 	// over-fetch that detects truncation.
 	Limit *int
-	// Offset skips the first N matching rows. It is honored by the
-	// unit-of-work implementation, which renders OFFSET; the store-backed one
-	// cannot, and REFUSES a non-zero Offset with a typed *ErrUnsupported
-	// naming the operation and the backend. What it never does is silently
-	// return an unpaged answer, so a caller that sets it either gets the page
-	// it asked for or an error it can classify with errors.As.
+	// Offset skips the first N matching rows, on EVERY implementation, and the
+	// page is the rows at positions [Offset, Offset+Limit) of the answer the
+	// same request returns unpaged. See ReadyRequest.Offset for where the skip
+	// is applied and why that is not a backend's choice either.
 	//
 	// THE PORTABLE WAY TO PAGE IS THE KEYSET POSITION below,
 	// AfterCreatedAt/AfterID: every implementation honors it, and it does not
@@ -282,8 +399,24 @@ type ListRequest struct {
 	// AfterCreatedAt and AfterID carry a decoded keyset position in the
 	// (created_at DESC, id ASC) order. The opaque token that encodes them is a
 	// transport concern and never reaches this contract.
+	//
+	// AfterPriority EXTENDS that position to the (priority ASC, created_at
+	// DESC, id ASC) order — the order SortBy="priority" and the empty default
+	// render — and is honored by every implementation, on BOTH tier legs, the
+	// same way the pair above is. It is the same position and not a second
+	// one: AfterCreatedAt alone decides whether one was supplied, so a
+	// priority with no instant is ignored exactly as an AfterID with no instant
+	// is.
+	//
+	// SET IT ONLY UNDER THE ORDER IT NAMES. A priority position under
+	// SortBy="created" positions in an order the ORDER BY does not render, and
+	// the page that comes back is a walk through rows neither side agrees on.
+	// The order the request asks for and the order the position was minted in
+	// are one decision; the transport above this contract is what keeps them
+	// from drifting.
 	AfterCreatedAt *time.Time
 	AfterID        string
+	AfterPriority  *int
 
 	// MaxRows is a DEFENSIVE CAP rather than a page. It bounds how many rows
 	// the query may match before the whole answer is refused; 0 disables it.
@@ -296,16 +429,16 @@ type ListRequest struct {
 	// caller can tell the cap firing from any other failure with errors.As;
 	// this leaf does not import it, and no answer depends on that.
 	//
-	// It is HONORED by the store-backed implementation and REFUSED by the
-	// unit-of-work one, with a typed *ErrUnsupported naming the operation and
-	// the backend. That is the exact INVERSE of Offset above, and for the same
-	// kind of reason: the unit-of-work query path threads no cap, so a body
-	// that accepted the field would answer an uncapped query to a caller who
-	// asked for a circuit breaker. What no implementation does is silently
-	// ignore it, so a caller either gets the cap it asked for or an error it
-	// can classify with errors.As. `bd list --max-rows --proxied-server`
-	// already refuses one layer up, in the CLI; this is the same refusal for
-	// the callers that are not the CLI.
+	// EVERY IMPLEMENTATION HONORS IT, and they agree on when it fires: when
+	// the query matched more rows than the cap allows AND the window the
+	// request asked the query to TOUCH could have exceeded it. THAT WINDOW IS
+	// Limit+Offset, NOT Limit. A row Offset skips is a row the query matched,
+	// so an offset walks a caller toward the breaker and never past it: a cap
+	// of Limit+Offset or looser never fires, because a query bounded to that
+	// many rows cannot break it, and one more row of offset is what flips the
+	// same request to a refusal. The two seams size that window through one
+	// function (internal/storage/issueops.SearchProbeLimit) so they cannot
+	// disagree about the boundary.
 	//
 	// Unlike SkipCounts and SkipLabels it IS carried onto the ReadyFlag arm.
 	MaxRows int
@@ -367,6 +500,9 @@ type GetRequest struct {
 	// that wants the rows asks for them.
 	IncludeDependents bool
 	IncludeComments   bool
+
+	// BriefDeps reduces each dependency to its identity-and-shape fields.
+	BriefDeps bool
 }
 
 // IssuePage is one page of work. Ready and List share it deliberately: both

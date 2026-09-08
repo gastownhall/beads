@@ -145,13 +145,26 @@ func ValidateScalarUpdates(ctx context.Context, tx DBTX, updates map[string]inte
 // it, so the two cannot drift into disagreeing about which transfers are
 // fenced.
 //
+// The no-op and self-transfer exits (request.Patch.Assignee.Value against
+// before.Assignee, and before.Assignee against request.Actor) are judged
+// under actorMatches, not verbatim equality (ga-5ksp5): the same Gas Town
+// identity arrives here spelled differently depending on which layer
+// produced the string (a dotted alias vs its session-name form — see
+// canonicalActor), and a byte-for-byte comparison would wrongly fence a
+// holder editing its own claim, or reject an idempotent re-assert, just
+// because the caller named the holder under a different layer's spelling.
+//
 // Passing nil pools answers every question except pool membership, so a caller
 // that wants the config read only when it matters calls with nil first and
 // re-evaluates with the loaded aliases on refusal.
 func AuthorizeAssigneeTransferWithPools(before *types.Issue, request publicops.UpdateRequest, pools []string) error {
-	if !request.Patch.Assignee.Set || request.Patch.Assignee.Value == before.Assignee || request.ExpectedAssignee != nil || request.ForceAssigneeTransfer || before.Status != types.StatusInProgress || before.Assignee == "" || before.Assignee == request.Actor {
+	if !request.Patch.Assignee.Set || actorMatches(request.Patch.Assignee.Value, before.Assignee) || request.ExpectedAssignee != nil || request.ForceAssigneeTransfer || before.Status != types.StatusInProgress || before.Assignee == "" || actorMatches(before.Assignee, request.Actor) {
 		return nil
 	}
+	// Exact-string membership, deliberately not actorMatches (ga-v2k49, same
+	// reason as claim.go's identical pool checks): a pool alias is a literal
+	// claim.pools config value, not a Gas Town identity that gets respelled
+	// per layer, so there is no cross-spelling variant to reconcile.
 	for _, pool := range pools {
 		if pool == before.Assignee {
 			return nil

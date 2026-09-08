@@ -14,7 +14,7 @@ type PersistenceMoveResult struct {
 }
 
 // MoveIssuePersistenceInTx moves a complete issue aggregate to the requested persistence mode.
-func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode) (PersistenceMoveResult, error) {
+func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode, actor string) (PersistenceMoveResult, error) {
 	if tx == nil || current == nil || current.ID == "" {
 		return PersistenceMoveResult{}, fmt.Errorf("move issue persistence: issue and transaction are required")
 	}
@@ -53,6 +53,11 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 			return PersistenceMoveResult{}, fmt.Errorf("normalize local issue persistence: %s names no row in %s", current.ID, table)
 		}
 		result.ChangedTables[table] = true
+		// The flags are part of the bead snapshot, so a normalize journals as
+		// an update. The no-change early return above emits nothing.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
+			return PersistenceMoveResult{}, err
+		}
 		return result, nil
 	}
 	if !sourceWisp && targetWisp {
@@ -117,6 +122,12 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	}
 	result.ChangedTables[persistenceIssueTable(sourceWisp)] = true
 	result.ChangedTables[persistenceIssueTable(targetWisp)] = true
+	// The bead keeps its ID across a plane move; only where it is stored
+	// changes. Journal one update carrying the moved snapshot, after derived
+	// blocked-state maintenance has settled.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
+		return PersistenceMoveResult{}, err
+	}
 	return result, nil
 }
 

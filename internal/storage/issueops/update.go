@@ -237,6 +237,13 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 		}
 	}
 
+	// newAssignee == oldIssue.Assignee is deliberately verbatim, not
+	// actorMatches (ga-v2k49): a generic update that hand-doles the same
+	// identity back under a different layer's spelling genuinely rewrites the
+	// assignee column's bytes, so clearing the lease here (as any other
+	// transfer would) is defensible rather than a false positive — it costs
+	// the holder's live lease, but HeartbeatIssueInTx's fallback re-arms one
+	// under the caller's current spelling on the next beat, so it self-heals.
 	sameClaim := newStatus == string(types.StatusInProgress) && newAssignee != "" &&
 		oldIssue.Status == types.StatusInProgress && newAssignee == oldIssue.Assignee
 	return !sameClaim
@@ -499,6 +506,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		}
 	}
 
+	updateResult := &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp, WispRowsChanged: isWisp}
 	if rawStatus, hasStatus := updates["status"]; hasStatus {
 		var newStatus string
 		switch v := rawStatus.(type) {
@@ -524,11 +532,19 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 			if err != nil {
 				return nil, fmt.Errorf("recompute is_blocked after status change for %s: %w", id, err)
 			}
-			return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp || recompute.IssueRowsChanged, WispRowsChanged: isWisp || recompute.WispRowsChanged}, nil
+			updateResult.IssueRowsChanged = !isWisp || recompute.IssueRowsChanged
+			updateResult.WispRowsChanged = isWisp || recompute.WispRowsChanged
 		}
 	}
 
-	return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp, WispRowsChanged: isWisp}, nil
+	// Snapshot only after all derived blocked-state maintenance has completed,
+	// so the journal row carries the settled bead. recordEvent controls the
+	// human-facing audit event only: the journal is a machine replay feed and
+	// must never have a hole punched in it by an audit-suppressing caller.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+		return nil, err
+	}
+	return updateResult, nil
 }
 
 func cloneUpdateFields(updates map[string]interface{}) map[string]interface{} {

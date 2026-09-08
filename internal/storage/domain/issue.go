@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -38,9 +39,29 @@ type ClaimRowResult struct {
 type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
-	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (changed bool, err error)
+	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (changed bool, err error)
 	PromoteFromEphemeral(ctx context.Context, id, actor string) error
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
+	// CompareAndSetMetadataKey runs the SHARED compare-and-set body on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It takes no table option:
+	// the body routes both planes itself, the way the metadata merge does.
+	//
+	// The bool reports whether a row change actually LANDED, which the caller
+	// needs and the result does not carry — a swap can hold its precondition
+	// and write nothing (see issueops.MetadataCAS.CompareAndSetKey).
+	CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error)
+	// ReleaseIssue runs the SHARED claim-release body on this repository's
+	// transaction, which is how the unit-of-work provider reaches the same
+	// function the two store backends wrap. It takes no table option: the body
+	// routes both planes itself, the way the compare-and-set above does.
+	//
+	// The bool reports whether a row write actually LANDED, which the caller
+	// needs and the result does not carry in the shape it needs it: an
+	// ephemeral release writes a row and versions nothing, and a caller whose
+	// commit message is also what commits its SQL transaction must compose one
+	// either way (see issueops.Releaser.Release).
+	ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error)
 	Claim(ctx context.Context, id, actor string, opts IssueTableOpts) (ClaimRowResult, error)
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
 	AsOf(ctx context.Context, id, ref string) (*types.Issue, error)
@@ -304,6 +325,12 @@ type IssueUseCase interface {
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]any, actor string) error
+	// CompareAndSetMetadataKey is the shape issueops.MetadataCAS publishes; see
+	// IssueSQLRepository.CompareAndSetMetadataKey for what the bool carries.
+	CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error)
+	// ReleaseIssue is the shape issueops.Releaser publishes; see
+	// IssueSQLRepository.ReleaseIssue for what the bool carries.
+	ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error)
 	ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error)
 	ClaimIssueIfOpen(ctx context.Context, id, actor string) (ClaimResult, error)
 	CloseIssue(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error)
@@ -457,6 +484,26 @@ func (u *issueUseCaseImpl) UpdateWisp(ctx context.Context, id string, updates ma
 	return u.update(ctx, id, updates, actor, true)
 }
 
+// CompareAndSetMetadataKey passes the plan straight through.
+//
+// No pre-check and no error wrapping, for the reason WalkDependencyTree gives:
+// the request's whole vocabulary was validated before the transaction opened,
+// and the refusals the body raises — storage.ErrNotFound for an id on neither
+// plane — are typed sentinels both front doors classify.
+func (u *issueUseCaseImpl) CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error) {
+	return u.issueRepo.CompareAndSetMetadataKey(ctx, plan)
+}
+
+// ReleaseIssue passes the request straight through.
+//
+// No pre-check and no error wrapping, for the reason CompareAndSetMetadataKey
+// gives: the request's whole vocabulary was validated before the transaction
+// opened, and every refusal the body raises is a typed sentinel both front
+// doors classify.
+func (u *issueUseCaseImpl) ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error) {
+	return u.issueRepo.ReleaseIssue(ctx, req)
+}
+
 func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[string]any, actor string, useWisp bool) error {
 	if id == "" {
 		return fmt.Errorf("update: id must not be empty")
@@ -568,7 +615,7 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	if row.Updated {
 		return ClaimResult{}, nil
 	}
-	if row.CurrentAssignee == actor && row.CurrentStatus == types.StatusInProgress {
+	if validation.ActorMatches(row.CurrentAssignee, actor) && row.CurrentStatus == types.StatusInProgress {
 		return ClaimResult{AlreadyClaimed: true, PriorAssignee: actor}, nil
 	}
 	// The refusal carries the assignee and status the repository read back in
@@ -588,7 +635,7 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	// domain-stack twin of that producer and must answer the same three ways
 	// (bd-at6rc).
 	refusal := fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, row.CurrentStatus)
-	if row.CurrentAssignee != "" && row.CurrentAssignee != actor {
+	if row.CurrentAssignee != "" && !validation.ActorMatches(row.CurrentAssignee, actor) {
 		switch {
 		// Pool aliases refuse on the STATUS, checked first so a pool never
 		// reaches the holder-steering copy below.
@@ -614,6 +661,14 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	}
 }
 
+// ApplyUpdate applies spec's guarded field updates and returns the resulting
+// issue. When ExpectedAssignee is set, the guard compares under
+// validation.ActorMatches, not verbatim ==, so two spellings of the same
+// identity (ga-wzl83) don't false-mismatch — the unit-of-work twin of
+// issueops.CheckExpectedFieldsInTx's SQL-CAS guard; both paths of
+// AuthorizeAssigneeTransferWithPools already made this fix, this was the
+// third, previously-split verbatim-comparison surface (ga-5ksp5, gate review
+// on #5439).
 func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec UpdateSpec, actor string) (*types.Issue, error) {
 	if id == "" {
 		return nil, fmt.Errorf("ApplyUpdate: id must not be empty")
@@ -640,7 +695,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
 			return nil, fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, *spec.ExpectedVersion, current.RowVersion)
 		}
-		if spec.ExpectedAssignee != nil && current.Assignee != *spec.ExpectedAssignee {
+		if spec.ExpectedAssignee != nil && !validation.ActorMatches(current.Assignee, *spec.ExpectedAssignee) {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
 				storage.ErrAssigneeMismatch, id, current.Assignee, *spec.ExpectedAssignee)
 		}
@@ -732,7 +787,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	if spec.Persistence != nil {
-		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence); err != nil {
+		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence, actor); err != nil {
 			return nil, fmt.Errorf("ApplyUpdate: move persistence for %s: %w", id, err)
 		}
 		useWisp, err = u.isWispID(ctx, id)
@@ -1208,7 +1263,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 			if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 				return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d (%s -> %s): %w", i, fromID, toID, err)
 			}
-			if isSchedulingDep(depType) {
+			if types.IsSchedulingEdge(depType) {
 				newSchedulingEdges = append(newSchedulingEdges, [2]string{fromID, toID})
 			}
 		}
@@ -1227,7 +1282,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 				if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 					return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: adding dep to %q: %w", node.Key, nd.Target, err)
 				}
-				if isSchedulingDep(dep.Type) {
+				if types.IsSchedulingEdge(dep.Type) {
 					newSchedulingEdges = append(newSchedulingEdges, [2]string{dep.IssueID, dep.DependsOnID})
 				}
 			}

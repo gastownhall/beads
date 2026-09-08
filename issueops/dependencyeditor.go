@@ -125,6 +125,11 @@ type RemoveDependencyResult struct {
 // A TARGET's plane is independent of its source's: either class may depend on
 // the other.
 //
+// EITHER METHOD MAINTAINS BLOCKED STATE under BlockedStateInvariant: an edge
+// that lands or is removed leaves the column settled — for the source, for
+// everything that inherits from it, and for any waiter whose gate the edge
+// changed — inside the same transaction that wrote the edge.
+//
 // EACH METHOD LEAVES A TRAIL IN THE SOURCE'S EVENT STREAM, attributed to the
 // request's Actor: a genuinely new edge records a dependency_added entry, and
 // a removal that found its edge a dependency_removed one. Work that wrote
@@ -145,23 +150,24 @@ type DependencyEditor interface {
 	// scheduling cycle (ErrDependencyCycle), a conflicting type on a pair that
 	// already has an edge (*DependencyTypeConflictError), a blocking edge that
 	// would gate an issue on its own ancestor or descendant
-	// (*DependencyHierarchyConflictError), or a SOURCE that does not exist.
+	// (*DependencyHierarchyConflictError), or a SOURCE that does not exist
+	// (ErrDependencySourceNotFound).
 	//
 	// A target's existence is checked only where the backend can see it. A
 	// target may legitimately be an "external:" reference or an issue in
 	// another repository, neither of which this database holds, so there is no
 	// blanket unknown-target refusal to promise. Where the backend CAN see the
 	// absence — an id in this database's own namespace, carrying no
-	// "external:" marker and matching no row — the edge is refused, and the
-	// request writes nothing like any other refusal.
+	// "external:" marker and matching no row — the edge is refused with
+	// ErrDependencyTargetNotFound, and the request writes nothing like any
+	// other refusal.
 	//
-	// NEITHER EXISTENCE REFUSAL NAMES AN IDENTITY YET. The four refusals above
-	// hand a caller a sentinel or a typed value to branch on; a ghost source
-	// and a missing local target are only "an error", and not even the same
-	// error text on every implementation. So a caller cannot today tell a
-	// ghost endpoint from an infrastructure failure. That is a known gap
-	// (bd-yby99.9) rather than a promise the refusal will stay anonymous, and
-	// nothing should be written that string-matches it.
+	// BOTH EXISTENCE REFUSALS CARRY THEIR IDENTITY. Each is a
+	// *DependencyEndpointNotFoundError naming the refused edge and the
+	// endpoint that was absent, wrapping its own sentinel, so a caller tells a
+	// ghost endpoint from an infrastructure failure — and the source case from
+	// the target case — with errors.Is and errors.As rather than by reading
+	// the message. The message itself remains prose and is not a promise.
 	//
 	// An edge that already exists with the SAME type is idempotent and refuses
 	// nothing, and REPETITION WITHIN ONE REQUEST answers the same way: the

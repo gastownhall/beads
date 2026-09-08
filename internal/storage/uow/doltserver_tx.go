@@ -13,6 +13,11 @@ import (
 type doltServerTx struct {
 	conn *sql.Conn
 	done bool
+	// clearJournalScope releases the events-journal activation BeginTx bound to
+	// conn. It is called from the two places the connection leaves this tx —
+	// releaseConn and poisonConn — so the activation entry cannot outlive the
+	// transaction it describes, whichever way the transaction ends.
+	clearJournalScope func()
 }
 
 var _ Tx = (*doltServerTx)(nil)
@@ -149,9 +154,20 @@ func (t *doltServerTx) rollbackConn(ctx context.Context) error {
 }
 
 func (t *doltServerTx) releaseConn() {
+	t.releaseJournalScope()
 	if t.conn != nil {
 		_ = t.conn.Close()
 		t.conn = nil
+	}
+}
+
+// releaseJournalScope drops this transaction's events-journal activation entry.
+// Idempotent: both connection-release paths call it, and Rollback may follow a
+// failed Commit that already released.
+func (t *doltServerTx) releaseJournalScope() {
+	if t.clearJournalScope != nil {
+		t.clearJournalScope()
+		t.clearJournalScope = nil
 	}
 }
 
@@ -162,6 +178,7 @@ func (t *doltServerTx) releaseConn() {
 // commit the orphaned writes. Returning driver.ErrBadConn from Raw makes
 // database/sql close the connection and drop it from the pool.
 func (t *doltServerTx) poisonConn() {
+	t.releaseJournalScope()
 	if t.conn == nil {
 		return
 	}

@@ -81,6 +81,24 @@ type roleFixtureKit struct {
 	// pass quietly. It is non-nil on all three backends today; see
 	// uow/role_fixture_kit_test.go for the evidence on the awkward one.
 	CountHistory func(context.Context) (int, error)
+	// CountHistoryMatching is CountHistory scoped to what the entries READ: it
+	// counts the entries whose message matches pattern, where "" means every
+	// entry and anything else is a SQL LIKE pattern the backend applies with
+	// its own escaping.
+	//
+	// Three role cases assert on a MESSAGE rather than on a bare count — "an
+	// entry naming this wisp", "an entry reading the caller's provenance
+	// label" — and before this hook existed they reached past the fixture into
+	// `dolt_log` through QueryScalar to get one. That was the only Dolt-engine
+	// dependency left in the role contracts.
+	//
+	// It does NOT replace CountHistory: a backend can know how long its
+	// history is without being able to match on the text of an entry, and 25
+	// cases run on the narrow hook alone. Where both are available CountHistory
+	// is DEFINED as CountHistoryMatching(ctx, "") so the two cannot disagree.
+	// Nil carries the same meaning as a nil CountHistory, and the cases that
+	// need it skip LOUDLY.
+	CountHistoryMatching func(context.Context, string) (int, error)
 }
 
 // roleFixtureKitComposesConformanceFixtures is the compile-time half of the
@@ -120,6 +138,17 @@ func newEmbeddedRoleFixtureKit(te *testEnv, prefix string) roleFixtureKit {
 		defer func() { _ = cleanup() }()
 		return db.QueryRowContext(ctx, query, args...).Scan(dest...)
 	}
+	countHistoryMatching := func(ctx context.Context, pattern string) (int, error) {
+		query := "SELECT COUNT(*) FROM dolt_log"
+		var args []any
+		if pattern != "" {
+			query += " WHERE message LIKE ?"
+			args = append(args, pattern)
+		}
+		var entries int
+		err := queryScalar(ctx, query, args, &entries)
+		return entries, err
+	}
 	return roleFixtureKit{
 		IssuePrefix: prefix,
 		CreateIssue: te.store.CreateIssue,
@@ -127,12 +156,11 @@ func newEmbeddedRoleFixtureKit(te *testEnv, prefix string) roleFixtureKit {
 		AddDependency: func(ctx context.Context, dep *types.Dependency, actor string) error {
 			return te.store.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true})
 		},
-		SetConfig:   te.store.SetConfig,
-		QueryScalar: queryScalar,
+		SetConfig:            te.store.SetConfig,
+		QueryScalar:          queryScalar,
+		CountHistoryMatching: countHistoryMatching,
 		CountHistory: func(ctx context.Context) (int, error) {
-			var entries int
-			err := queryScalar(ctx, "SELECT COUNT(*) FROM dolt_log", nil, &entries)
-			return entries, err
+			return countHistoryMatching(ctx, "")
 		},
 	}
 }
@@ -220,6 +248,26 @@ func assertRoleFixtureKitHooksAreUsable(t *testing.T, ctx context.Context, kit r
 	}
 	if entries < 1 {
 		t.Fatalf("history entries = %d, want at least the initializing commit", entries)
+	}
+
+	if kit.CountHistoryMatching == nil {
+		t.Fatal("kit.CountHistoryMatching is nil — this backend cannot observe history BY MESSAGE, which the role contracts' provenance and wisp-naming clauses need")
+	}
+	all, err := kit.CountHistoryMatching(ctx, "")
+	if err != nil {
+		t.Fatalf("kit.CountHistoryMatching(all): %v", err)
+	}
+	if all != entries {
+		t.Fatalf("CountHistoryMatching with an empty pattern = %d, want the %d CountHistory reports — the empty pattern means every entry", all, entries)
+	}
+	// The pattern has to FILTER. A hook that accepted one and answered the
+	// total anyway would leave every message-scoped assertion vacuous.
+	none, err := kit.CountHistoryMatching(ctx, "%no entry in this fixture reads this%")
+	if err != nil {
+		t.Fatalf("kit.CountHistoryMatching(miss): %v", err)
+	}
+	if none != 0 {
+		t.Fatalf("CountHistoryMatching of a message no entry carries = %d, want 0 — the pattern must narrow the count", none)
 	}
 }
 

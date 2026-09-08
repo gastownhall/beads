@@ -109,6 +109,7 @@ func testMainInner(m *testing.M) int {
 
 	_ = os.Setenv("HOME", tmp)
 	_ = os.Setenv("USERPROFILE", tmp) // Windows compatibility
+	_ = os.Setenv("APPDATA", filepath.Join(tmp, "AppData", "Roaming"))
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "xdg-config"))
 	_ = os.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 

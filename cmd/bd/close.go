@@ -49,7 +49,7 @@ the flags appear in the command line.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("close")
+		CheckReadonly("close") // also covers CheckMigrationFreeze (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("close")
 		defer func() {
@@ -568,7 +568,7 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	case issue.AwaitType == "timer":
 		resolved, escalated, reason, err = checkTimer(issue, time.Now())
 	case issue.AwaitType == "bead":
-		resolved, reason = checkBeadGate(rootCtx, store, issue.AwaitID)
+		resolved, reason = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
 		if resolved {
 			return nil
 		}
