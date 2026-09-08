@@ -4229,9 +4229,18 @@ func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error
 		return err
 	}
 	defer db.Close()
-	return withRemoteOperationEnv(s.credentialsForRemote(remote), s.isS3Remote(ctx, remote), func() error {
-		return schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch)
+	creds := s.credentialsForRemote(remote)
+	return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
+		query, args := authenticatedFetchCall(creds, remote, s.branch)
+		return schema.DrainCall(ctx, db, query, args...)
 	})
+}
+
+func authenticatedFetchCall(creds *remoteCredentials, remote, branch string) (string, []any) {
+	if creds != nil && creds.username != "" {
+		return "CALL DOLT_FETCH('--user', ?, ?, ?)", []any{creds.username, remote, branch}
+	}
+	return "CALL DOLT_FETCH(?, ?)", []any{remote, branch}
 }
 
 // pullTransport routes one pull through CLI or SQL based on the remote's

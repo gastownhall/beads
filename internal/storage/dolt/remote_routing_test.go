@@ -30,6 +30,31 @@ func TestEnsureMatchingCLIRemoteSurfacesValidationErrors(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedFetchCall(t *testing.T) {
+	query, args := authenticatedFetchCall(
+		&remoteCredentials{username: "root", password: "secret"},
+		"origin",
+		"main",
+	)
+	if query != "CALL DOLT_FETCH('--user', ?, ?, ?)" {
+		t.Fatalf("authenticated query = %q", query)
+	}
+	wantArgs := []any{"root", "origin", "main"}
+	if len(args) != len(wantArgs) {
+		t.Fatalf("authenticated args = %#v, want %#v", args, wantArgs)
+	}
+	for i := range wantArgs {
+		if args[i] != wantArgs[i] {
+			t.Fatalf("authenticated args = %#v, want %#v", args, wantArgs)
+		}
+	}
+
+	query, args = authenticatedFetchCall(nil, "origin", "main")
+	if query != "CALL DOLT_FETCH(?, ?)" || len(args) != 2 {
+		t.Fatalf("anonymous fetch = %q %#v", query, args)
+	}
+}
+
 func TestSQLCapableCLIRoutingFallsBackWhenCLIDirIsNotDoltRepo(t *testing.T) {
 	ctx := context.Background()
 	creds := &remoteCredentials{username: "user", password: "pass"}
