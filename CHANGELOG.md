@@ -154,6 +154,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode still fails closed there — a repo-local auto-start is a different
   database, not a port refresh — but now says so in its own words.
 
+- **`bd status` now discloses the counted rows a default `bd list` will not
+  show.** `Total Issues` counts the database; `bd list` shows a filtered view of
+  it, and the two disagreed silently — an operator reconciling a total against
+  a listing found rows they could not account for. A new line names the
+  breakdown and the flag that reveals each part: `Not shown by bd list: 2 gates
+  (--include-gates), 1 template (--include-templates)`, omitted entirely when
+  there is nothing to disclose. `gate_issues` and `template_issues` join the
+  `--json` payload and the OpenAPI `Statistics` schema, additively; they are
+  broken out of `TotalIssues` rather than removed from it, so the buckets still
+  do not sum to the total in either direction. `bd status --assigned` gets the
+  same breakdown, which it needs for the same reason against `bd list
+  --assignee`. Not yet covered: durable rows carrying a configured infra type
+  (GH#6439), which need the workspace's `types.infra` set that the portable
+  count has no seam to read.
+
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica
   is by construction never reclaimed here, so the audit was not a one-off: it
