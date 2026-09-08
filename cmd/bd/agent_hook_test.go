@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -16,24 +17,52 @@ func TestValidatePrimeArgsAcceptsHookFlags(t *testing.T) {
 }
 
 func TestValidatePrimeArgsRejectsUnknownFlag(t *testing.T) {
-	err := validatePrimeArgs([]string{"--memories-only", "--config", "/tmp/evil"})
+	err := validatePrimeArgs([]string{"--config"})
 	if err == nil {
 		t.Fatal("expected unknown flag to be rejected")
 	}
-	if !strings.Contains(err.Error(), "unsupported hook argument") {
-		t.Fatalf("unexpected error: %v", err)
+	if !strings.Contains(err.Error(), `"--config"`) {
+		t.Fatalf("rejection should name the offending argument, got: %v", err)
 	}
 }
 
 // runBdPrime must refuse non-allowlisted arguments before it resolves the
-// executable or builds a subprocess, so a caller can never steer the
-// re-executed command.
+// executable or builds a subprocess. The resolver is stubbed so the test also
+// proves validation runs first — if a future change drops or reorders the
+// validatePrimeArgs call, the resolver (and with it the subprocess) would be
+// reached and this test fails instead of live-exec'ing anything.
 func TestRunBdPrimeRejectsUnknownArgsBeforeExec(t *testing.T) {
-	_, err := runBdPrime(context.Background(), "--config", "/tmp/evil")
+	called := false
+	orig := primeExecutable
+	primeExecutable = func() (string, error) {
+		called = true
+		return "", errors.New("resolver must not run for rejected args")
+	}
+	t.Cleanup(func() { primeExecutable = orig })
+
+	_, err := runBdPrime(context.Background(), "--config")
 	if err == nil {
 		t.Fatal("expected runBdPrime to reject unknown args")
 	}
-	if !strings.Contains(err.Error(), "unsupported hook argument") {
-		t.Fatalf("unexpected error: %v", err)
+	if !strings.Contains(err.Error(), `"--config"`) {
+		t.Fatalf("rejection should name the offending argument, got: %v", err)
+	}
+	if called {
+		t.Fatal("executable resolver ran before argument validation")
+	}
+}
+
+// With allowlisted args, a resolver failure surfaces as the wrapped
+// resolve-executable error and no subprocess is built.
+func TestRunBdPrimeExecutableResolutionError(t *testing.T) {
+	orig := primeExecutable
+	primeExecutable = func() (string, error) {
+		return "", errors.New("no executable")
+	}
+	t.Cleanup(func() { primeExecutable = orig })
+
+	_, err := runBdPrime(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "resolve executable") {
+		t.Fatalf("want resolve-executable error, got: %v", err)
 	}
 }

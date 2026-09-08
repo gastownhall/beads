@@ -22,6 +22,11 @@ import (
 // error and is refused before the subprocess is built.
 var allowedPrimeArgs = map[string]bool{"--memories-only": true}
 
+// primeExecutable resolves the re-exec target for runBdPrime. A var so tests
+// can stub resolution and prove no subprocess is ever built from unexpected
+// input.
+var primeExecutable = os.Executable
+
 // validatePrimeArgs rejects any argument outside allowedPrimeArgs so the
 // re-exec below can never be steered by caller-supplied strings.
 func validatePrimeArgs(args []string) error {
@@ -40,7 +45,7 @@ func runBdPrime(ctx context.Context, args ...string) (string, error) {
 	if err := validatePrimeArgs(args); err != nil {
 		return "", err
 	}
-	exe, err := os.Executable()
+	exe, err := primeExecutable()
 	if err != nil {
 		return "", fmt.Errorf("bd prime: resolve executable: %w", err)
 	}
