@@ -13,6 +13,7 @@ import (
 	"go/token"
 	"io/fs"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -32,9 +33,13 @@ type FuncInfo struct {
 // Call is one call expression in a function body: the called name (a bare
 // identifier, or the selector name of x.Foo) and its arguments, each reduced
 // to the bare identifier or literal it passes — "" for any other expression.
-// The predeclared false and true therefore read as "false" and "true", and a
-// caller forwarding its own parameter reads as that parameter's name, which
-// is what lets a guard tell "switched off here" from "left to the caller".
+// The predeclared false and true read as "false" and "true"; a false or true
+// that names a declaration of the package's own instead — a shadow, whether
+// the parser resolved it within its file or some file declares the name at
+// package level — is "" like any other expression the scanner cannot vouch
+// for, so a shadow never reads as the literal. A caller forwarding its own
+// parameter reads as that parameter's name, which is what lets a guard tell
+// "switched off here" from "left to the caller".
 type Call struct {
 	Name string
 	Args []string
@@ -82,11 +87,30 @@ func ReceiverTypeName(expr ast.Expr) string {
 // top-level function/method, keyed by "Recv.Name" (or "Name" for free funcs).
 func ParsePackage(dir string) (map[string]*FuncInfo, error) {
 	fset := token.NewFileSet()
+	// Mode 0 keeps the parser's per-file identifier resolution on. It is what
+	// lets argNames tell the predeclared false and true from a shadow of the
+	// same name; under SkipObjectResolution every shadow would read as the
+	// literal. TestCallsOnlyWithLiteralFalse pins this.
 	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")
 	}, 0)
 	if err != nil {
 		return nil, err
+	}
+	// That resolution stops at the file: a use in one file of a false another
+	// file declares at package level stays unresolved, exactly like the
+	// predeclared one, though to the compiler it denotes the declaration.
+	// Fold every file's package-level declarations in so argNames refuses
+	// those too (TestPackageLevelShadowCrossesFiles).
+	shadowed := map[string]bool{}
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			for name := range predeclaredBools {
+				if file.Scope != nil && file.Scope.Lookup(name) != nil {
+					shadowed[name] = true
+				}
+			}
+		}
 	}
 	out := map[string]*FuncInfo{}
 	for _, pkg := range pkgs {
@@ -106,10 +130,10 @@ func ParsePackage(dir string) (map[string]*FuncInfo, error) {
 						switch fun := node.Fun.(type) {
 						case *ast.Ident:
 							f.IdentCalls = append(f.IdentCalls, fun.Name)
-							f.Calls = append(f.Calls, Call{Name: fun.Name, Args: argNames(node.Args)})
+							f.Calls = append(f.Calls, Call{Name: fun.Name, Args: argNames(node.Args, shadowed)})
 						case *ast.SelectorExpr:
 							f.SelCalls = append(f.SelCalls, fun.Sel.Name)
-							f.Calls = append(f.Calls, Call{Name: fun.Sel.Name, Args: argNames(node.Args)})
+							f.Calls = append(f.Calls, Call{Name: fun.Sel.Name, Args: argNames(node.Args, shadowed)})
 						}
 					case *ast.BasicLit:
 						if node.Kind == token.STRING && SQLWritesBeadTable(node.Value) {
@@ -149,13 +173,24 @@ func paramNames(sig *ast.FuncType) []string {
 	return names
 }
 
+// predeclaredBools are the names argNames reads as the boolean literals when
+// nothing in the package declares them.
+var predeclaredBools = map[string]bool{"false": true, "true": true}
+
 // argNames reduces call arguments to the bare identifier or literal each one
-// passes; anything else (a call, a selector, a composite literal) is "".
-func argNames(args []ast.Expr) []string {
+// passes; anything else (a call, a selector, a composite literal) is "". So
+// is a false or true that does not denote the predeclared identifier: one the
+// parser resolved to a declaration in its own file (a.Obj != nil — a local, a
+// parameter, a package-level declaration in the same file) or whose name some
+// file declares at package level (shadowed, from ParsePackage).
+func argNames(args []ast.Expr, shadowed map[string]bool) []string {
 	names := make([]string, len(args))
 	for i, arg := range args {
 		switch a := arg.(type) {
 		case *ast.Ident:
+			if predeclaredBools[a.Name] && (a.Obj != nil || shadowed[a.Name]) {
+				continue
+			}
 			names[i] = a.Name
 		case *ast.BasicLit:
 			names[i] = a.Value
@@ -164,40 +199,62 @@ func argNames(args []ast.Expr) []string {
 	return names
 }
 
-// resolve maps a called name to the function keys it can denote: the free
-// function of that name, if any, and every method of that name (name-based
-// resolution, sufficient for a guard).
-func resolve(fns map[string]*FuncInfo, name string) []string {
+// Resolve maps a called bare name to the function keys it can denote: the
+// free function of that name, if any, then every method of that name in key
+// order (name-based resolution, sufficient for a guard). It is the one
+// resolution Fixpoint and CallsOnlyWithLiteralFalse use, exported so a guard
+// reasoning about a called name's targets — whether a switch-off is
+// unambiguous, whether a live edge reaches the seam through a method — sees
+// exactly the keys the fixpoint follows.
+func Resolve(fns map[string]*FuncInfo, name string) []string {
 	var keys []string
 	if _, ok := fns[name]; ok {
 		keys = append(keys, name)
 	}
+	var methods []string
 	for key, f := range fns {
 		if f.Recv != "" && f.Name == name {
-			keys = append(keys, key)
+			methods = append(methods, key)
 		}
 	}
-	return keys
+	sort.Strings(methods)
+	return append(keys, methods...)
 }
 
 // CallsOnlyWithLiteralFalse reports whether f calls callee, and every one of
-// those calls passes the predeclared false for callee's boolean parameter
-// named gate — the argument callee's own body reads as "skip the gated
-// write". A guard that follows call edges to find who reaches a seam uses it
-// to drop the edges a caller has explicitly switched off, so a composite
-// mutation that runs its constituents with the gate off and performs the
-// gated write once itself is not credited with the one it told them to skip.
+// those calls passes the predeclared identifier false for callee's boolean
+// parameter named gate — the argument callee's own body reads as "skip the
+// gated write". A guard that follows call edges to find who reaches a seam
+// uses it to drop the edges a caller has explicitly switched off, so a
+// composite mutation that runs its constituents with the gate off and
+// performs the gated write once itself is not credited with the one it told
+// them to skip.
+//
+// What is checked is the reduced argument (see Call): the bare name false,
+// counted as the predeclared identifier only when it resolves to no
+// declaration of the package's own. Go lets a local, a parameter or a
+// package-level declaration shadow false, and any such shadow reads as an
+// unknown expression, never as a switch-off. A consumer can pin that its
+// package declares no such shadow at all, so that the name-based reading is
+// exact there rather than merely conservative; issueops does, in
+// TestFalseIsNotShadowedInIssueops.
 //
 // The edge stays live (false is returned) whenever the switch-off is not
 // certain: callee is unknown or declares no parameter named gate, f never
 // calls it, at least one of f's calls passes anything but the literal (true,
-// a variable, f's own parameter of that name, an expression), or a call is
-// too short to line up with the signature. callee resolves the way Fixpoint
-// resolves edges — the free function of that name and every method of that
-// name — and every resolution that declares the gate must see false.
+// a variable, f's own parameter of that name, a shadowed false, an
+// expression), or a call is too short to line up with the signature. callee
+// resolves the way Fixpoint resolves edges — Resolve: the free function of
+// that name and every method of that name — and every resolution that
+// declares the gate must see false. A resolution that declares no gate is
+// not consulted, so when a gated function shares its name with an ungated
+// one a true result drops the fixpoint's edge to the ungated one too; a
+// consumer relying on the switch-off should pin that no literal-false
+// callee's name is shared that way (issueops does, in
+// TestLiteralFalseCalleesResolveUnambiguously).
 func CallsOnlyWithLiteralFalse(fns map[string]*FuncInfo, f *FuncInfo, callee, gate string) bool {
 	var gateAt []int
-	for _, key := range resolve(fns, callee) {
+	for _, key := range Resolve(fns, callee) {
 		if i := fns[key].ParamIndex(gate); i >= 0 {
 			gateAt = append(gateAt, i)
 		}
@@ -223,7 +280,7 @@ func CallsOnlyWithLiteralFalse(fns map[string]*FuncInfo, f *FuncInfo, callee, ga
 // Fixpoint returns the set of function keys for which seed is true or which
 // (transitively) call a name for which it becomes true, following edges. A
 // called bare name resolves to a free function of that name and to any method
-// with that name (name-based resolution, sufficient for a guard).
+// with that name (Resolve: name-based resolution, sufficient for a guard).
 func Fixpoint(fns map[string]*FuncInfo, seed func(*FuncInfo) bool, edges func(*FuncInfo) []string) map[string]bool {
 	got := map[string]bool{}
 	for key, f := range fns {
@@ -238,7 +295,7 @@ func Fixpoint(fns map[string]*FuncInfo, seed func(*FuncInfo) bool, edges func(*F
 				continue
 			}
 			for _, callee := range edges(f) {
-				for _, ck := range resolve(fns, callee) {
+				for _, ck := range Resolve(fns, callee) {
 					if got[ck] {
 						got[key] = true
 						changed = true
