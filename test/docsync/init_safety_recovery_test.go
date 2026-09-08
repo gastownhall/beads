@@ -47,14 +47,24 @@ func TestInitSafetyRecoveryDocCoversReCloneGotchas(t *testing.T) {
 	}
 }
 
-// TestInitSafetyCLIReferenceCoversReCloneGotchas guards the same two
-// re-clone gotchas (at CLI-help brevity) in the auto-generated CLI
-// reference page. The page is generated from cmd/bd/init_safety_help.go's
-// Long field via scripts/generate-cli-docs.sh — edit the Go source, not
-// this generated file, then regenerate.
-func TestInitSafetyCLIReferenceCoversReCloneGotchas(t *testing.T) {
+// TestInitSafetyCLIHelpCoversReCloneGotchas guards the same two re-clone
+// gotchas (at CLI-help brevity) in cmd/bd/init_safety_help.go's Long field,
+// the generator source for docs/cli-reference/init-safety.md.
+//
+// The generated page itself is intentionally NOT checked here: per
+// docs/cli-docs.pin, docs/cli-reference/ is regenerated from a pinned
+// *released* bd tag (built in a detached worktree), not from this checkout,
+// so a Long-field edit at HEAD does not flow into the committed generated
+// page until a maintainer bumps the pin as part of a release (see
+// docs/cli-docs.pin's own header comment and scripts/resolve-docs-bd.sh).
+// CI's generated-docs drift gate (scripts/check-cli-docs-drift.sh, driven by
+// scripts/check-doc-flags.sh) is blame-scoped for exactly this reason: it
+// does not fail a PR whose regenerated CLI surface is unchanged from the
+// merge-base. Testing the Long field directly checks the content a PR can
+// actually change and that will ship in the doc at the next pin bump.
+func TestInitSafetyCLIHelpCoversReCloneGotchas(t *testing.T) {
 	root := repoRoot()
-	path := filepath.Join(root, "docs", "cli-reference", "init-safety.md")
+	path := filepath.Join(root, "cmd", "bd", "init_safety_help.go")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
@@ -71,7 +81,7 @@ func TestInitSafetyCLIReferenceCoversReCloneGotchas(t *testing.T) {
 	}
 	for _, c := range cases {
 		if !strings.Contains(lower, strings.ToLower(c.substr)) {
-			t.Errorf("docs/cli-reference/init-safety.md missing %s: expected to find %q (edit cmd/bd/init_safety_help.go and regenerate)", c.name, c.substr)
+			t.Errorf("cmd/bd/init_safety_help.go missing %s: expected to find %q in the Long help text", c.name, c.substr)
 		}
 	}
 }
