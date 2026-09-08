@@ -432,9 +432,13 @@ func substituteVariables(text string, vars map[string]string) string {
 	})
 }
 
-// maxMetadataSubstitutionDepth bounds the recursion in substituteJSONVars.
-// Metadata is arbitrary JSON that can arrive from an untrusted proto, and a
-// deeply nested value must not blow the stack.
+// maxMetadataSubstitutionDepth bounds the recursion in walkJSONStrings and in
+// cook.go's substituteMetadataValueDepth. Metadata is arbitrary JSON that can
+// arrive from an untrusted proto, and a deeply nested value must not blow the
+// stack. Reaching the bound deliberately stops substituting and returns the
+// value as-is rather than erroring: a `{{var}}` nested deeper than this ships
+// as a literal placeholder. That is the intended trade - a fence against a
+// hostile proto, not a limit any real formula is expected to meet.
 const maxMetadataSubstitutionDepth = 32
 
 // substituteMetadataVars substitutes {{variable}} placeholders in every string

@@ -1405,3 +1405,104 @@ func TestFlattenUnregisteredIssueTypes(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildAttachCloneOpts_VarResolutionMatchesPour pins that `bd mol bond`
+// resolves variables exactly the way pour and wisp do, rather than demanding
+// every handlebar the subgraph mentions.
+//
+// buildAttachCloneOpts used the unfiltered extractAllVariables and applied no
+// defaults, so widening the scanned field set to assignee/labels/metadata
+// (GH#5110, GH#5754) would have widened bond's hard refusal along with it: a
+// proto whose label or metadata carried an undeclared documentation handlebar
+// would newly fail with "missing required variables". It now runs
+// applyVariableDefaults + extractRequiredVariables, matching cmd/bd/pour.go
+// and cmd/bd/wisp.go.
+func TestBuildAttachCloneOpts_VarResolutionMatchesPour(t *testing.T) {
+	t.Parallel()
+
+	mol := &types.Issue{ID: "mol-host", Title: "Host molecule"}
+
+	tests := []struct {
+		name        string
+		issues      []*types.Issue
+		varDefs     map[string]formula.VarDef
+		vars        map[string]string
+		wantErr     string
+		wantVarVals map[string]string
+	}{
+		{
+			name: "undeclared handlebars in the widened fields do not block the bond",
+			issues: []*types.Issue{{
+				Title:    "Review {{component}}",
+				Assignee: "{{reviewer_placeholder}}",
+				Labels:   []string{"owner:{{team_placeholder}}"},
+				Metadata: json.RawMessage(`{"runbook":"see {{runbook_placeholder}}"}`),
+			}},
+			varDefs:     map[string]formula.VarDef{"component": {Required: true}},
+			vars:        map[string]string{"component": "api"},
+			wantVarVals: map[string]string{"component": "api"},
+		},
+		{
+			name: "a declared var that only has a default is filled, not demanded",
+			issues: []*types.Issue{{
+				Title:    "Deploy {{component}} to {{env}}",
+				Assignee: "{{agent}}",
+			}},
+			varDefs: map[string]formula.VarDef{
+				"component": {Required: true},
+				"env":       {Default: formula.StringPtr("prod")},
+				"agent":     {Default: formula.StringPtr("deploy-agent")},
+			},
+			vars: map[string]string{"component": "api"},
+			wantVarVals: map[string]string{
+				"component": "api",
+				"env":       "prod",
+				"agent":     "deploy-agent",
+			},
+		},
+		{
+			name:        "a declared var with no default is still demanded",
+			issues:      []*types.Issue{{Title: "Deploy {{component}}"}},
+			varDefs:     map[string]formula.VarDef{"component": {Required: true}},
+			vars:        map[string]string{},
+			wantErr:     "missing required variables: component",
+			wantVarVals: nil,
+		},
+		{
+			name:        "a legacy template with no VarDefs still requires every var it mentions",
+			issues:      []*types.Issue{{Title: "Deploy {{component}}", Assignee: "{{agent}}"}},
+			varDefs:     nil,
+			vars:        map[string]string{"component": "api"},
+			wantErr:     "missing required variables: agent",
+			wantVarVals: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			subgraph := &TemplateSubgraph{Issues: tt.issues, VarDefs: tt.varDefs}
+			opts, err := buildAttachCloneOpts(subgraph, mol, types.BondTypeSequential, tt.vars, "", "actor", false, false)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildAttachCloneOpts: %v", err)
+			}
+			// The defaults have to land in opts.Vars too, not just in the
+			// missing-var check - cloneSubgraphInto substitutes from this map.
+			for name, want := range tt.wantVarVals {
+				if got := opts.Vars[name]; got != want {
+					t.Errorf("opts.Vars[%q] = %q, want %q", name, got, want)
+				}
+			}
+		})
+	}
+}
