@@ -342,3 +342,18 @@ func TestCheckTeamServerSchemaAndIdentity_NoExpectedID_SkipsProbe(t *testing.T) 
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestCheckTeamServerSchemaAndIdentity_Behind_RefusesWithBtsMigrate(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectConvergedProbe(mock, schema.LatestVersion()-1, "project-AAAA")
+	expectVersionQuery(mock, schema.LatestVersion()-1)
+
+	err := checkTeamServerSchemaAndIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil || !strings.Contains(err.Error(), "bts migrate") {
+		t.Fatalf("checkTeamServerSchemaAndIdentity = %v, want the bts-migrate refusal for a behind schema even with a matching identity", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

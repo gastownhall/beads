@@ -10,6 +10,12 @@ import (
 )
 
 func checkTeamServerSchemaAndIdentity(ctx context.Context, conn schema.DBConn, database, expectedProjectID string) error {
+	// This SELECT can fail against a database without the beads schema, which
+	// schema.currentVersion avoids by probing information_schema first (be-bv7x:
+	// a failed statement can pin a pooled Dolt session to a stale catalog). It
+	// does not bind here: a failure falls through to the two-step checks, every
+	// path out of those on such a database is a refusal, and a refused open
+	// closes the pool, so the session never serves another statement.
 	if expectedProjectID != "" {
 		var current int
 		var projectID sql.NullString

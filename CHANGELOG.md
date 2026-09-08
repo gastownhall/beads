@@ -59,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **The proxied-server open path uses one pool instead of two, and fewer
-  statements on it.** Every bd invocation on a proxied server opened a
+  statements on it** ([#6364](https://github.com/gastownhall/beads/pull/6364)).
+  Every bd invocation on a proxied server opened a
   database-less pool for the schema probe, closed it, then opened a second
   pool bound to the database: two full TCP, TLS and auth handshakes plus a
   COM_PING on each, before any command ran. The open now binds the pool to

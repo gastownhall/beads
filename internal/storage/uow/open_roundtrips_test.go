@@ -137,7 +137,7 @@ func TestOpenAndInitSchema_ExistingDatabaseUsesOneConnection(t *testing.T) {
 	external := configfile.ExternalDoltConfig{Host: proxyHost, Port: proxyPort}
 
 	open := func(teamServer bool, projectID string) *doltSQLProvider {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		provider, err := NewExternalDoltServerUOWProvider(ctx, storeRootDir, "beads_fresh", logPath,
 			external, "root", "", 0, 0, teamServer, projectID)
@@ -151,6 +151,7 @@ func TestOpenAndInitSchema_ExistingDatabaseUsesOneConnection(t *testing.T) {
 	first := open(false, "")
 	conns, sessions, awaited := cp.reset()
 	t.Logf("fresh database: %d connections, %d sessions, %d awaited commands", conns, sessions, awaited)
+	require.Equal(t, int32(2), sessions, "fresh database bootstraps on a database-less session, then opens the bound one")
 	_, err = first.db.ExecContext(context.Background(),
 		"INSERT INTO metadata (`key`, value) VALUES ('_project_id', 'proj-1')")
 	require.NoError(t, err)

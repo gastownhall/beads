@@ -60,5 +60,5 @@ func isUnknownDatabaseError(err error) bool {
 		return false
 	}
 	errLower := strings.ToLower(err.Error())
-	return strings.Contains(errLower, "database not found") || strings.Contains(errLower, "unknown database") || strings.Contains(errLower, "1049")
+	return strings.Contains(errLower, "database not found") || strings.Contains(errLower, "unknown database")
 }

@@ -168,18 +168,23 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 }
 
 // selectProbeDatabase lets schema's pre-lock convergence probe reach the
-// database on a session that is not yet on one. openAndInitSchema pins its
-// schema-init pool with an EMPTY DSN database, so without this the probe reads
-// NULL from DATABASE(), declines, and every invocation queues on the
-// server-wide migration lock it exists to skip.
+// database on a session that is not yet on one. openAndInitSchema binds its
+// pool to the database up front, so on the ordinary open the probe finds
+// DATABASE() already answering the target name and never calls this. It is
+// reached on the fallback only: a database that does not exist yet refuses the
+// bound connect, the probe then runs on a database-less pool, and without this
+// it would read NULL from DATABASE(), decline, and queue on the server-wide
+// migration lock it exists to skip.
 //
 // The USE MUST remain the DDL repository's own UseDatabase — the exact
 // statement prepareBootstrap issues below. That identity is the reason the
 // probe may skip locked preparation when it reports converged: preparation's
 // contribution on an existing database is precisely this USE (its bare CREATE
 // DATABASE can only have failed with "database exists" and captured no heal
-// authority). Reimplementing the statement here, or letting the two quote
-// identifiers differently, would silently break that argument.
+// authority). On the bound pool the session is on the database by handshake,
+// which is the same state the USE would leave it in, so the argument holds
+// there without any statement. Reimplementing the statement here, or letting
+// the two quote identifiers differently, would silently break it.
 //
 // It is injected rather than reached for from schema/: domain/db's own test
 // suite migrates a scratch database with schema, so a schema -> domain/db
@@ -465,6 +470,8 @@ func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff
 	}, backoff.WithContext(bo, ctx))
 }
 
+// poolConnector answers pingWithRetry with a connect instead of a COM_PING:
+// the handshake is the liveness proof, and the connection stays in the pool.
 type poolConnector struct{ db *sql.DB }
 
 func (c poolConnector) PingContext(ctx context.Context) error {

@@ -61,12 +61,18 @@ func TestClassifyInitSchemaErrorKeepsBootstrapPreparationErrorsDistinct(t *testi
 }
 
 // expectNoSessionDatabase mocks the opening question of the pre-lock
-// convergence probe on the shape every production seat presents: initSchema
-// pins its connection from a pool opened with an EMPTY DSN database (see
-// openAndInitSchema), so DATABASE() is NULL until something issues USE.
+// convergence probe on the fallback shape: openAndInitSchema could not bind
+// its pool to the database (it does not exist yet) and pins the connection
+// from a pool opened with an EMPTY DSN database, so DATABASE() is NULL until
+// something issues USE. expectSessionDatabase is the ordinary shape.
 func expectNoSessionDatabase(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE()")).
 		WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow(nil))
+}
+
+func expectSessionDatabase(mock sqlmock.Sqlmock, database string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow(database))
 }
 
 // expectDatabaseExistsProbe mocks the always-succeeding existence probe the
@@ -138,13 +144,13 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 }
 
 // TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase is the caller-side
-// regression for the fast path that could not fire. openAndInitSchema opens
-// its schema-init pool with an EMPTY DSN database and the USE happens only
-// inside the locked bootstrap preparation, so when the pre-lock convergence
-// probe asked DATABASE() it read NULL on every production seat's open, gave
-// up on its first statement, and took the server-wide GET_LOCK exactly as
-// before — the change measured on the shared rig was a no-op on the only path
-// that mattered.
+// regression for the fast path that could not fire. When openAndInitSchema
+// falls back to a schema-init pool with an EMPTY DSN database (the database
+// does not exist yet), the USE happens only inside the locked bootstrap
+// preparation, so when the pre-lock convergence probe asked DATABASE() it read
+// NULL, gave up on its first statement, and took the server-wide GET_LOCK
+// exactly as before — the change measured on the shared rig was a no-op on
+// the path every seat took at the time.
 //
 // From this caller, with the database already present, the probe must reach
 // the schema predicates: prove the database exists with a query that cannot
@@ -199,6 +205,55 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("the convergence probe must reach the schema predicates on a session with no database selected: %v", err)
+	}
+}
+
+// TestInitSchemaConvergenceProbeRunsOnBoundSession is the ordinary open:
+// openAndInitSchema bound its pool to the database, so the probe finds
+// DATABASE() already answering and goes straight to the schema predicates,
+// with no existence probe and no USE of its own. The cursor is far behind, so
+// the probe declines and the locked pass follows as before.
+func TestInitSchemaConvergenceProbeRunsOnBoundSession(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	lockName := schema.MigrationLockName("beads")
+	expectSessionDatabase(mock, "beads")
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.tables`).
+		WithArgs("schema_migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, 5).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+		WillReturnError(&mysql.MySQLError{Number: 1007, Message: "database exists"})
+	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnError(errors.New("first migration statement failed"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	p := &doltSQLProvider{
+		defaultBranch:  defaultBranch,
+		db:             db,
+		serverEndpoint: "tcp:127.0.0.1:3306",
+		dbSelected:     true,
+	}
+	err = p.initSchema(context.Background(), "beads")
+	if err == nil || !strings.Contains(err.Error(), "first migration statement failed") {
+		t.Fatalf("initSchema() error = %v, want first migration sentinel", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("the convergence probe must reach the schema predicates on a bound session without an existence probe or USE: %v", err)
 	}
 }
 
