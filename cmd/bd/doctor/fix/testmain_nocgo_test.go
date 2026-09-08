@@ -42,6 +42,7 @@ func testMainInner(m *testing.M) int {
 	}
 
 	code := m.Run()
-	doltserver.SweepOrphanedTestServers(root)
+	swept := doltserver.SweepOrphanedTestServers(root)
+	code = doltserver.ApplyLeakPolicy("cmd/bd/doctor/fix", code, swept)
 	return code
 }

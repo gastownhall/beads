@@ -115,7 +115,8 @@ func testMainInner(m *testing.M) int {
 	// Best-effort reap of any dolt sql-server left running under a temp dir
 	// this suite created (e.g. a SIGKILLed run) — see
 	// gastownhall/beads mybd-q6cz / #5631.
-	doltserver.SweepOrphanedTestServers(root, testBDDir)
+	swept := doltserver.SweepOrphanedTestServers(root, testBDDir)
+	code = doltserver.ApplyLeakPolicy("cmd/bd/doctor", code, swept)
 
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
