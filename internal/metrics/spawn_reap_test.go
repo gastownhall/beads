@@ -13,7 +13,9 @@ import (
 // TestStartDetachedReapsExitedChild is the GH#5900 regression: a child that
 // exits while the parent stays alive must be waitpid'd, not left as a zombie.
 // The helper re-execs this test binary and exits immediately; startDetached
-// must reap it so `ps` never reports STAT Z under this process.
+// must reap it so the child is never left as STAT Z under this process. A
+// transient Z between the child's exit and the Wait goroutine's waitpid is
+// the normal reaped-child path, not a failure -- see the poll loop below.
 func TestStartDetachedReapsExitedChild(t *testing.T) {
 	if os.Getenv("BD_TEST_FLUSHER_HELPER") == "1" {
 		// Stay alive long enough for the parent to observe a live pid.
