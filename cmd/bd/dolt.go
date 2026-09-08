@@ -25,6 +25,18 @@ import (
 	"golang.org/x/term"
 )
 
+// refuseWhenCityOwnsDolt exits before any Dolt lifecycle effect when Gas City
+// owns the active store's server (gc.endpoint_origin stamped by the city).
+// The city is the only lifecycle surface; bd never starts, stops, re-points
+// or kills that server.
+func refuseWhenCityOwnsDolt(verb string) {
+	if !config.CityOwnsDolt("") {
+		return
+	}
+	fmt.Fprintln(os.Stderr, doltserver.CityRefusal("", verb))
+	os.Exit(1)
+}
+
 var doltCmd = &cobra.Command{
 	Use:     "dolt",
 	GroupID: "setup",
@@ -105,6 +117,7 @@ Examples:
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt set' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
+		refuseWhenCityOwnsDolt("set")
 		key := args[0]
 		value := args[1]
 		updateConfig, _ := cmd.Flags().GetBool("update-config")
@@ -508,6 +521,7 @@ required. Use this command for explicit control or diagnostics.`,
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt start' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
+		refuseWhenCityOwnsDolt("start")
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
@@ -550,6 +564,7 @@ on the next bd command unless auto-start is disabled.`,
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt stop' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
+		refuseWhenCityOwnsDolt("stop")
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
@@ -608,7 +623,7 @@ reachability, server version, and database.`,
 			// — which is the exact failure mode this PR addresses.
 			fmt.Fprintf(os.Stderr, "Warning: cannot load .beads config (%v); falling back to PID-file status path\n", cfgErr)
 		}
-		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled()) {
+		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled("")) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return
 		}
@@ -829,6 +844,7 @@ servers are preserved.`,
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt killall' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
+		refuseWhenCityOwnsDolt("killall")
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			beadsDir = "." // best effort
@@ -1592,7 +1608,7 @@ func testDoltConnection() {
 		fmt.Printf("%s\n", ui.RenderPass("✓ Connection successful"))
 	} else {
 		fmt.Printf("%s\n", ui.RenderWarn("✗ Connection failed"))
-		fmt.Println("\nStart the server with: bd dolt start")
+		fmt.Printf("\nStart the server with: %s\n", doltserver.StartHint(""))
 		os.Exit(1)
 	}
 
@@ -1761,7 +1777,7 @@ func openDoltServerConnection() (*sql.DB, func()) {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s:%d: %v\n", host, port, err)
-		fmt.Fprintln(os.Stderr, "Start the server with: bd dolt start")
+		fmt.Fprintln(os.Stderr, "Start the server with:", doltserver.StartHint(""))
 		os.Exit(1)
 	}
 

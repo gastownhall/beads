@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // configSideEffect describes a hint or warning to show after a config change.
@@ -38,13 +40,13 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 	case key == "dolt.debug" && strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode will apply on the next Dolt server start (loglevel=debug, --prof cpu).",
-			Command: "bd dolt stop && bd dolt start",
+			Command: doltserver.RestartHint(""),
 		})
 
 	case key == "dolt.debug" && !strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode disabled. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: doltserver.RestartHint(""),
 		})
 
 	case key == "routing.mode":
@@ -90,7 +92,7 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 	case "dolt.debug":
 		effects = append(effects, configSideEffect{
 			Message: "Debug config removed. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: doltserver.RestartHint(""),
 		})
 
 	case "backup.enabled":

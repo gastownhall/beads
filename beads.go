@@ -34,6 +34,18 @@ type RemoteStore = storage.RemoteStore
 // SyncStore provides high-level sync operations with peers.
 type SyncStore = storage.SyncStore
 
+// BlockedQuerier is the batched readiness read an orchestrator projects from:
+// one round trip over the denormalized is_blocked column for many ids. Every
+// Dolt-backed Storage returned by this package implements it; assert on a
+// Storage value to use it:
+//
+//	if q, ok := store.(beads.BlockedQuerier); ok {
+//	    blocked, err := q.IsBlockedBatch(ctx, ids)
+//	}
+type BlockedQuerier interface {
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
+}
+
 // VersionControlReader provides read-only version control operations.
 // Write operations (Branch, Checkout, Merge, DeleteBranch) are not yet
 // part of the public API. If you need them, please open an issue.

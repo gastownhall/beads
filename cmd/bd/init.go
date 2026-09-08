@@ -983,7 +983,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				} else if debugMode {
 					fmt.Fprintf(os.Stderr, "Warning: shared Dolt server (PID %d, port %d) is already running without debug flags.\n", state.PID, state.Port)
 					fmt.Fprintf(os.Stderr, "  Restart to pick up debug mode:\n")
-					fmt.Fprintf(os.Stderr, "    bd dolt stop && bd dolt start\n")
+					fmt.Fprintf(os.Stderr, "    %s\n", doltserver.RestartHint(""))
 				}
 			}
 

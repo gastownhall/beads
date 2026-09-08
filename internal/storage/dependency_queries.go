@@ -14,6 +14,11 @@ type DependencyQueryStore interface {
 	GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
 	GetBlockingInfoForIssues(ctx context.Context, issueIDs []string) (blockedByMap map[string][]string, blocksMap map[string][]string, parentMap map[string]string, err error)
 	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
+	// IsBlockedBatch reads the denormalized is_blocked column for every id in
+	// one round trip (issues and wisps) and returns id -> blocked. Ids that
+	// resolve to no row are absent from the result. This is the batched read
+	// a ready projection needs instead of one IsBlocked per issue.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
 	GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)

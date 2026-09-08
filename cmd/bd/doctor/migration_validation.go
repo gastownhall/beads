@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/utils"
@@ -344,7 +345,7 @@ func CheckDoltLocks(path string) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  "Could not check Dolt locks",
 			Detail:   err.Error(),
-			Fix:      "Ensure the Dolt server is running: gt dolt status",
+			Fix:      "Ensure the Dolt server is running: " + doltserver.StatusHint(""),
 			Category: CategoryMaintenance,
 		}
 	}
