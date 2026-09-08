@@ -568,7 +568,13 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	case issue.AwaitType == "timer":
 		resolved, escalated, reason, err = checkTimer(issue, time.Now())
 	case issue.AwaitType == "bead":
-		resolved, reason = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
+		resolved, reason, err = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
+		if err != nil {
+			// Unlike the gh:* and timer arms above, a bead gate whose store
+			// cannot be read stays closed: the close would need that same
+			// store, and "could not read" must not pass as "satisfied".
+			return fmt.Errorf("gate condition not satisfied: could not check bead gate: %v (use --force to override)", err)
+		}
 		if resolved {
 			return nil
 		}

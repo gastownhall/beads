@@ -185,6 +185,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd gate check` no longer reports an unreadable store as "pending".** The
+  bead arm of the check dropped the lookup error on the floor, so with dolt
+  down (or any backend or transport failure on the awaited bead's read) every
+  bead gate printed as still waiting and the command exited 0 — the same
+  output as a healthy, genuinely pending gate. A read that fails for any
+  reason other than not-found is now an error row (`✗ <gate>: error checking -
+  ...`), counted in the summary, and `bd gate check` exits non-zero whenever
+  any gate could not be checked, on the classic and proxied routes alike. A
+  missing bead still stays pending. `bd close` on such a gate keeps refusing
+  (`could not check bead gate`, `--force` to override) rather than letting a
+  dead store read as satisfied.
+
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
   unreachable store made prime omit the memory section entirely, so a session
