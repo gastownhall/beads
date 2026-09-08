@@ -97,4 +97,22 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 			t.Errorf("future defer must stay deferred, got %q", status)
 		}
 	})
+
+	t.Run("expired_dated_defer_stays_hidden_under_strict_readonly", func(t *testing.T) {
+		issue := bdCreate(t, bd, p.dir, "Expired snooze under strict --readonly (server mode)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+		status, _ := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" {
+			t.Fatalf("precondition: expected status=deferred, got %q", status)
+		}
+
+		ids := wakeReadyIDs(t, bd, p.dir, "--readonly")
+		if ids[issue.ID] {
+			t.Errorf("expired defer %s must not appear in bd --readonly ready — strict --readonly must never sweep", issue.ID)
+		}
+		status, _ = showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" {
+			t.Errorf("expired defer must stay deferred under strict --readonly, got %q", status)
+		}
+	})
 }
