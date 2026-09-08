@@ -15,7 +15,10 @@ func checkTeamServerSchemaAndIdentity(ctx context.Context, conn schema.DBConn, d
 	// a failed statement can pin a pooled Dolt session to a stale catalog). It
 	// does not bind here: a failure falls through to the two-step checks, every
 	// path out of those on such a database is a refusal, and a refused open
-	// closes the pool, so the session never serves another statement.
+	// closes the pool, so the session never serves another statement. The one
+	// exception is a serialization-class failure, which backoff retries on the
+	// same pool; that session keeps the pin, on a bts-managed schema that any
+	// skew already refuses.
 	if expectedProjectID != "" {
 		var current int
 		var projectID sql.NullString
