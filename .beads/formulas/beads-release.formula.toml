@@ -40,14 +40,14 @@ bd mol wisp create beads-release --var version=0.44.0
 
 Or assign to a polecat:
 ```bash
-gt sling beads/polecats/p1 --formula beads-release --var version=0.44.0
+gc sling beads/polecats/p1 --formula beads-release --var version=0.44.0
 ```
 
 The polecat will complete Phase 1, then signal phase-complete. The gate blocks
 until release.yml finishes. A new polecat (or the same one) resumes for Phases 2-3.
 """
 type = "workflow"
-phase = "vapor"  # Ensures this runs as a wisp - bd pour will warn, gt sling --formula creates wisp
+phase = "vapor"  # Ensures this runs as a wisp - bd pour will warn, gc sling --formula creates wisp
 pour = true      # Materialize release steps for checkpoint/resume visibility
 version = 1
 

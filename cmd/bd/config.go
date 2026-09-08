@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/types"
@@ -677,30 +676,6 @@ func validateSyncConfig(repoPath string) []string {
 // rejects control characters, and validates per-scheme requirements.
 func isValidRemoteURL(rawURL string) bool {
 	return remotecache.ValidateRemoteURL(rawURL) == nil
-}
-
-// findBeadsRepoRoot walks up from the given path to find the repo root (containing .beads)
-func findBeadsRepoRoot(startPath string) string {
-	path := startPath
-	for {
-		beadsDir := filepath.Join(path, ".beads")
-		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-			return path
-		}
-		parent := filepath.Dir(path)
-		if parent == path {
-			break
-		}
-		path = parent
-	}
-
-	if isGitRepo() && git.IsWorktree() {
-		if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
-			return filepath.Dir(fallbackDir)
-		}
-	}
-
-	return ""
 }
 
 // resolvedConfigRepoRoot returns the repository root for the active beads
