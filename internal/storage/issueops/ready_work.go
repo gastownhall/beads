@@ -114,7 +114,26 @@ func GetReadyWorkInTx(
 		return nil, err
 	}
 
-	issues, err := GetIssuesByIDsInTx(ctx, tx, issueIDs, nil)
+	// THE READY SCAN IS THE OTHER HOT SHAPE, and this is where its bytes are.
+	// The query above projects `id` only; this call is what hydrates the page,
+	// and until now it always hydrated it WHOLE - every description, design,
+	// acceptance_criteria, notes, payload and waiters column for every ready
+	// row, on a scan the claim path deliberately leaves UNBOUNDED (see
+	// ClaimReadyIssueInTx). Measured on one live store 2026-09-04: 874.7 MB of
+	// `description` across 36,704 rows against 51.4 MB in the columns routing
+	// reads.
+	//
+	// filter.Lite has always described exactly this - "the heavy TEXT columns
+	// were not fetched; refetch by id if you need a body" - and reached the
+	// counts mega-query alone. Honoring it here makes the bare ready scan agree
+	// with the counted one instead of quietly hydrating six columns the caller
+	// said it did not want. Rows come back with IsLitePartial=true, which is
+	// what lets a consumer tell "no description" from "description not read".
+	fetch := GetIssuesByIDsInTx
+	if filter.Lite {
+		fetch = GetIssuesByIDsLiteInTx
+	}
+	issues, err := fetch(ctx, tx, issueIDs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get ready work: fetch issues: %w", err)
 	}
@@ -178,7 +197,11 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 	wispFilter := readyWorkWispIssueFilter(filter)
 	if filter.Limit <= 0 {
 		wispFilter.Limit = 0
-		wisps, err := searchTableInTxT(ctx, tx, "", wispFilter, WispsFilterTables, issueProjection)
+		wispProj := issueProjection
+		if filter.Lite {
+			wispProj = issueLiteProjection
+		}
+		wisps, err := searchTableInTxT(ctx, tx, "", wispFilter, WispsFilterTables, wispProj)
 		if err != nil {
 			if missingOptionalWispTable(err) {
 				return nil, nil
@@ -203,7 +226,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 			break
 		}
 
-		pageWisps, err := getWispIssuesByIDsInOrderInTx(ctx, tx, pageIDs)
+		pageWisps, err := getWispIssuesByIDsInOrderInTx(ctx, tx, pageIDs, filter.Lite)
 		if err != nil {
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
@@ -269,7 +292,11 @@ func queryReadyWispIssueIDPage(ctx context.Context, tx DBTX, filter types.IssueF
 	return ids, nil
 }
 
-func getWispIssuesByIDsInOrderInTx(ctx context.Context, tx DBTX, ids []string) ([]*types.Issue, error) {
+// lite selects the projection, so the wisp leg of a ready page is hydrated the
+// same way its issues leg is: a merged result whose two legs disagreed would
+// carry IsLitePartial on some rows and not others for no reason a caller could
+// read off the request.
+func getWispIssuesByIDsInOrderInTx(ctx context.Context, tx DBTX, ids []string, lite bool) ([]*types.Issue, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -277,7 +304,11 @@ func getWispIssuesByIDsInOrderInTx(ctx context.Context, tx DBTX, ids []string) (
 	for _, id := range ids {
 		wispSet[id] = struct{}{}
 	}
-	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, wispSet)
+	fetch := GetIssuesByIDsInTx
+	if lite {
+		fetch = GetIssuesByIDsLiteInTx
+	}
+	issues, err := fetch(ctx, tx, ids, wispSet)
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +351,10 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 		// lets EffectiveSearchLimit bound that query to cap+1 up front.
 		MaxRows:       filter.MaxRows,
 		MaxRowsSource: filter.MaxRowsSource,
+		// The projection travels with the request across the WorkFilter ->
+		// IssueFilter boundary. Every other field here is a PREDICATE; this one
+		// is not, and dropping it silently re-hydrated the wisp leg in full.
+		Lite: filter.Lite,
 	}
 	switch {
 	case filter.Status != "":

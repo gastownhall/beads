@@ -746,7 +746,18 @@ func init() {
 			"payload, waiters) from each row. Filters that read those fields still "+
 			"select on them. An omitted field is indistinguishable from an empty "+
 			"one; fetch a whole issue with bd show. Requires --json, and cannot be "+
-			"combined with --claim, --gated, --mol or --explain.")
+			"combined with --claim, --gated, --mol or --explain. NOTE: --json "+
+			"listings omit that text by DEFAULT now, so this flag only restates it.")
+	// The opt-OUT, and the flag half of the lite default's rollback (the other
+	// half is BEADS_READY_HYDRATION=full, which moves the default for every
+	// caller at once rather than one command line at a time).
+	readyCmd.Flags().Bool("full", false,
+		"Hydrate the free-form text (description, design, acceptance criteria, "+
+			"notes, payload, waiters) on every row. --json listings omit it by "+
+			"default because no polling caller reads it and it is ~94% of the "+
+			"bytes those queries carry; pass this when you do read it, or set "+
+			"BEADS_READY_HYDRATION=full to move the default back. Cannot be "+
+			"combined with --brief.")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")

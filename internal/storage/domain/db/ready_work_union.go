@@ -86,13 +86,20 @@ func (r *issueSQLRepositoryImpl) getReadyWorkUnion(ctx context.Context, filter t
 		return domain.SearchPage{}, err
 	}
 
-	issuesByID, err := r.fetchIssuesByIDs(ctx, page.issueIDs, issuesFilterTables, types.IssueFilter{})
+	// filter.Lite is CARRIED into the hydration rather than dropped with the
+	// rest of the WorkFilter. The empty IssueFilter here used to mean "no
+	// predicates to re-apply, the ID page already selected the rows" — true of
+	// every filtering field, and false of this one, which is not a predicate
+	// but a PROJECTION, and describes exactly the fetch this line performs. A
+	// caller that asked for a lite ready scan got a fully hydrated one on this
+	// backend and no error to say so.
+	issuesByID, err := r.fetchIssuesByIDs(ctx, page.issueIDs, issuesFilterTables, types.IssueFilter{Lite: filter.Lite})
 	if err != nil {
 		return domain.SearchPage{}, fmt.Errorf("ready work union: hydrate issues: %w", err)
 	}
 	var wispsByID map[string]*types.Issue
 	if len(page.wispIDs) > 0 {
-		wispsByID, err = r.fetchIssuesByIDs(ctx, page.wispIDs, wispsFilterTables, types.IssueFilter{})
+		wispsByID, err = r.fetchIssuesByIDs(ctx, page.wispIDs, wispsFilterTables, types.IssueFilter{Lite: filter.Lite})
 		if err != nil && !dberrors.IsTableNotExist(err) {
 			return domain.SearchPage{}, fmt.Errorf("ready work union: hydrate wisps: %w", err)
 		}

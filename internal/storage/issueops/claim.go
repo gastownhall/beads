@@ -280,6 +280,29 @@ func ClaimReadyIssueInTx(
 	claimFilter.MaxRows = 0
 	claimFilter.MaxRowsSource = ""
 
+	// THE SCAN IS PROJECTED, UNCONDITIONALLY, AND NOTHING IT DROPS CAN ESCAPE.
+	// The loop below reads exactly one field off these rows - issue.ID - and
+	// the row it wins is refetched WHOLE by GetIssueInTx before it is returned,
+	// which is the contract ClaimNextRequest.Filter already states in prose
+	// ("the claim refetches its winning row whole rather than reading it
+	// through the page's query"). So the six heavy TEXT columns are read from
+	// the database, carried across the wire and discarded on every claim, for
+	// every candidate in an UNBOUNDED ready front.
+	//
+	// That cost is the reason this line exists rather than a preference for
+	// smaller queries. Measured on this town's store 2026-09-04: `description`
+	// alone is 874.7 MB across 36,704 rows (~25 KB/row), against 51.4 MB in the
+	// columns routing actually reads - about 94% of the bytes every claim's
+	// scan carries. The counts mega-query behind this scan and the ready-scan
+	// iteration together were 76.8% of server time at ~449 q/s.
+	//
+	// It is set HERE, on the claim's own copy of the filter, rather than being
+	// asked of the caller: ValidateClaimNextRequest REFUSES a projected
+	// ReadyRequest precisely because a caller must not be able to project the
+	// row it gets BACK. The scan's projection is not that row and is not the
+	// caller's to choose.
+	claimFilter.Lite = true
+
 	readyIssues, err := GetReadyWorkInTx(ctx, tx, claimFilter)
 	if err != nil {
 		return nil, err
