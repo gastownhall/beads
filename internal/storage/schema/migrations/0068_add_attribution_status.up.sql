@@ -38,6 +38,9 @@
 -- table it does not know, so enabling versioned history is safe only with a
 -- single writer per store until the UUID version_id primary key lands and
 -- the ordinal is demoted to an index. Those steps follow as their own PR.
+-- "Single writer" means one writer at a time per store, not merely one
+-- clone: MAX(revision)+1 is not a safe allocator for two concurrent
+-- transactions in one store either (gastownhall/beads#6379, item 4).
 --
 -- Guarded the same way 0067's ADD COLUMNs are (see that file's header for
 -- the full explanation of why: no MariaDB-only IF NOT EXISTS on Dolt 2.2.3's

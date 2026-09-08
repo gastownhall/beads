@@ -836,8 +836,10 @@ type EventsJournalConfigurer interface {
 // know. Enabling versioned history is therefore safe only with a SINGLE
 // writer per store until migration 0068 steps 1-3 (UUID version_id primary
 // key, ordinal demoted to an index) land; those steps follow as their own
-// PR. See issueops/version_history.go for why the ordinal is never an
-// address.
+// PR. "Single writer" means one writer at a time per store, not merely one
+// clone: MAX(revision)+1 is not a safe allocator for two concurrent
+// transactions in one store either (gastownhall/beads#6379, item 4). See
+// issueops/version_history.go for why the ordinal is never an address.
 type VersionedHistoryConfigurer interface {
 	SetVersionedHistoryEnabled(enabled bool)
 }
