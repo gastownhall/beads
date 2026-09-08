@@ -150,6 +150,9 @@ func TestDeferWakeSweepEligibleHonorsClassifiedRead(t *testing.T) {
 		// the sweep silently early-returned for every read-only-classified
 		// command in server mode, not just strict --readonly/preview).
 		{name: "classified-read still sweeps despite readOnly", readOnly: true, classifiedRead: true, want: true},
+		// readOnly=false already short-circuits the predicate to true on its
+		// own, so this case documents totality (every input combination has
+		// an asserted output), not a state any caller actually produces.
 		{name: "classifiedRead without readOnly stays eligible", readOnly: false, classifiedRead: true, want: true},
 	}
 	for _, tc := range cases {
