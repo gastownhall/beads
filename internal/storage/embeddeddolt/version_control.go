@@ -26,7 +26,7 @@ func (s *EmbeddedDoltStore) withDBConn(ctx context.Context, fn func(db versionco
 
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = s.openSQL(ctx, s.database, s.branch)
 	if err != nil {
 		return
 	}
@@ -57,7 +57,7 @@ func (s *EmbeddedDoltStore) withPinnedDBConn(ctx context.Context, fn func(db ver
 
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = s.openSQL(ctx, s.database, s.branch)
 	if err != nil {
 		return
 	}

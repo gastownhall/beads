@@ -1683,6 +1683,10 @@ var rootCmd = &cobra.Command{
 				}
 				return SilentExit()
 			}
+			var filesystemFullErr *embeddeddolt.FilesystemFullError
+			if errors.As(err, &filesystemFullErr) {
+				return HandleError("%v", filesystemFullErr)
+			}
 			return HandleError("failed to open database: %v", err)
 		}
 
