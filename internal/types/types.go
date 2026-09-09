@@ -203,6 +203,13 @@ type Issue struct {
 // --json` is one of that command's primary modes: a summary-backed list must
 // serialize to the same wire shape a full-Issue-backed one does, or every
 // consumer parsing bd output breaks silently. Keep them in sync with Issue.
+//
+// That promise covers wisp rows, not only durable ones: issueops.searchInTx
+// merges the wisps table into every result whose filter does not set
+// SkipWisps, so the four wisp-plane markers below are part of the projection
+// rather than an optional extra. They are narrow scalar columns (two
+// TINYINT(1), two short VARCHARs), so carrying them costs none of the
+// TEXT/JSON hydration D3 exists to eliminate.
 type IssueSummary struct {
 	ID        string     `json:"id"`
 	Title     string     `json:"title"`
@@ -215,6 +222,16 @@ type IssueSummary struct {
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	ClosedAt  *time.Time `json:"closed_at,omitempty"`
+
+	// ===== Wisp-plane markers =====
+	// A summary-backed list renders wisps as well as durable beads (see the
+	// doc comment above), and these four are what distinguish one. Dropping
+	// them would make a wisp indistinguishable from a durable bead in
+	// `bd list --json` while every other key stayed identical.
+	Ephemeral    bool         `json:"ephemeral,omitempty"`
+	NoHistory    bool         `json:"no_history,omitempty"`
+	WispType     WispType     `json:"wisp_type,omitempty"`
+	StorageClass StorageClass `json:"storage_class,omitempty"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.

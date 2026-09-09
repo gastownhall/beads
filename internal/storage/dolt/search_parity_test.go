@@ -135,6 +135,13 @@ func TestSearchIssuesAndSearchIssueSummaries_Parity(t *testing.T) {
 // for the same row, including the nullable/derived fields most likely to
 // silently drift from ScanIssueFrom if ScanIssueSummaryFrom's column list or
 // scan order falls out of sync: Pinned, Labels, Assignee, and ClosedAt.
+//
+// The fixture seeds wisps as well as durable beads, because the wisp-plane
+// markers are the fields with the most room to drift: they are read from a
+// second table (searchInTx merges wisps into every non-SkipWisps result) and
+// they are the newest columns in IssueSummaryColumns. A durable-only fixture
+// would leave all four at their zero values and pass whether or not the
+// summary path reads them at all.
 func TestSearchIssueSummaries_FieldsMatchSearchIssues(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -173,6 +180,32 @@ func TestSearchIssueSummaries_FieldsMatchSearchIssues(t *testing.T) {
 		t.Fatalf("CloseIssue: %v", err)
 	}
 
+	// Wisp-plane rows. Ephemeral and NoHistory are mutually exclusive
+	// (types.Issue.Validate), so they need one row each; both carry a WispType
+	// so a dropped wisp_type column cannot pass as an empty-string match.
+	ephemeralWisp := &types.Issue{
+		Title:     "ephemeral summary wisp",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+		WispType:  types.WispTypeHeartbeat,
+	}
+	if err := store.CreateIssue(ctx, ephemeralWisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue (ephemeral wisp): %v", err)
+	}
+	noHistoryWisp := &types.Issue{
+		Title:     "no-history summary wisp",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+		NoHistory: true,
+		WispType:  types.WispTypeEscalation,
+	}
+	if err := store.CreateIssue(ctx, noHistoryWisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue (no-history wisp): %v", err)
+	}
+
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		t.Fatalf("SearchIssues: %v", err)
@@ -188,6 +221,19 @@ func TestSearchIssueSummaries_FieldsMatchSearchIssues(t *testing.T) {
 	byID := make(map[string]*types.Issue, len(issues))
 	for _, issue := range issues {
 		byID[issue.ID] = issue
+	}
+
+	// Guard against a vacuous pass: if the wisp merge stopped returning wisps,
+	// every marker assertion below would compare zero to zero and succeed.
+	wispRows := 0
+	for _, s := range summaries {
+		if s.Ephemeral || s.NoHistory {
+			wispRows++
+		}
+	}
+	if wispRows < 2 {
+		t.Fatalf("expected both seeded wisps in the summary result, got %d wisp rows out of %d; "+
+			"the marker assertions below would be vacuous", wispRows, len(summaries))
 	}
 
 	for _, s := range summaries {
@@ -229,6 +275,18 @@ func TestSearchIssueSummaries_FieldsMatchSearchIssues(t *testing.T) {
 			t.Errorf("%s: ClosedAt nil-ness mismatch: summary=%v issue=%v", s.ID, s.ClosedAt, issue.ClosedAt)
 		case !s.ClosedAt.Equal(*issue.ClosedAt):
 			t.Errorf("%s: ClosedAt = %v, want %v", s.ID, *s.ClosedAt, *issue.ClosedAt)
+		}
+		if s.Ephemeral != issue.Ephemeral {
+			t.Errorf("%s: Ephemeral = %v, want %v", s.ID, s.Ephemeral, issue.Ephemeral)
+		}
+		if s.NoHistory != issue.NoHistory {
+			t.Errorf("%s: NoHistory = %v, want %v", s.ID, s.NoHistory, issue.NoHistory)
+		}
+		if s.WispType != issue.WispType {
+			t.Errorf("%s: WispType = %q, want %q", s.ID, s.WispType, issue.WispType)
+		}
+		if s.StorageClass != issue.StorageClass {
+			t.Errorf("%s: StorageClass = %q, want %q", s.ID, s.StorageClass, issue.StorageClass)
 		}
 	}
 }
