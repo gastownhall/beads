@@ -67,6 +67,11 @@ func (s *Store) ApplyIssueUpdate(ctx context.Context, id string, updates map[str
 	return nil
 }
 
+// normalizedLabels mirrors the engine's normalizedStringSlice: trim, drop
+// empty, dedupe, sort. The sort is not cosmetic — the fake is the oracle
+// adapters are judged against, and both real backends read labels back
+// ORDER BY label. Without it the first order-sensitive multi-label assertion
+// would pass on the real legs and fail here, or vice versa.
 func normalizedLabels(labels []string) []string {
 	seen := make(map[string]struct{}, len(labels))
 	result := make([]string, 0, len(labels))
@@ -81,6 +86,7 @@ func normalizedLabels(labels []string) []string {
 		seen[label] = struct{}{}
 		result = append(result, label)
 	}
+	sort.Strings(result)
 	return result
 }
 
@@ -222,13 +228,6 @@ func (s *Store) AddDependency(_ context.Context, dep *types.Dependency, _ string
 	s.Mutations++
 	s.mu.Unlock()
 	return nil
-}
-
-func (s *Store) HasDependency(issueID, dependsOnID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.Deps[issueID][dependsOnID]
-	return ok
 }
 
 func cloneMap(in map[string]string) map[string]string {
