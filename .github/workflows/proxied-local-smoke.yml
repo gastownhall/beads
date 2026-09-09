@@ -10,6 +10,18 @@
 # loopback up — proving no outbound network is needed once the binaries are
 # installed. Linux first; the test lane defines Windows/macOS parity but does
 # not implement those OS-specific observation helpers yet.
+#
+# The paths: filters below track every file compiled into this lane's test
+# binary that hosts or feeds a `^TestManagedLocalProxied` test, so an edit to a
+# test or its fixture re-fires the lane that runs it instead of failing later in
+# the merge queue. Production files are listed only when they implement the
+# proxy/store plumbing the lane exists to prove (db_proxy_child.go,
+# store_factory*.go, uow_factory.go, init*.go). cmd/bd/linear.go is
+# deliberately NOT listed: the status parity test pins a little of its behavior,
+# but it is a 1.5k-line tracker command whose OAuth, id-mode, and help-text
+# edits are almost never proxy-relevant, and firing this 25-minute netns lane on
+# all of them costs more than it catches. The merge_group trigger still gates
+# those edits before they land.
 
 name: Proxied Local Lifecycle
 
@@ -20,13 +32,17 @@ on:
     branches: [main]
     paths:
       - 'cmd/bd/proxied_local_*'
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/proxied_server*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/linear_mock_fixture_test.go'
+      - 'cmd/bd/linear_proxy_*'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
       - 'internal/configfile/**'
       - 'internal/doltserver/**'
@@ -38,13 +54,17 @@ on:
   pull_request:
     paths:
       - 'cmd/bd/proxied_local_*'
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/proxied_server*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/linear_mock_fixture_test.go'
+      - 'cmd/bd/linear_proxy_*'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
       - 'internal/configfile/**'
       - 'internal/doltserver/**'
@@ -102,7 +122,9 @@ jobs:
             TestManagedLocalProxiedLegacyRecordFailClosed \
             TestManagedLocalProxiedOrphanBackendReaped \
             TestManagedLocalProxiedNProcessColdStartConvergence \
-            TestManagedLocalProxiedStopStartInterleave
+            TestManagedLocalProxiedStopStartInterleave \
+            TestManagedLocalProxiedLinearStatusParity \
+            TestManagedLocalProxiedLinearPullPushParity
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2
