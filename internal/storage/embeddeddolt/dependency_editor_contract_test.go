@@ -45,6 +45,12 @@ func TestEmbeddedDependencyEditorSameTypeReAddIsIdempotent(t *testing.T) {
 	conformance.RunDependencyEditorSameTypeReAddIsIdempotent(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idem"))
 }
 
+func TestEmbeddedDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemmeta"))
+}
+
 func TestEmbeddedDependencyEditorRepeatsWithinOneRequestCollapse(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -255,13 +261,14 @@ func newEmbeddedDependencyEditorFixture(t *testing.T, ctx context.Context, prefi
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.DependencyEditorFixture{
-		IssuePrefix:       kit.IssuePrefix,
-		Editor:            editor,
-		CreateIssue:       kit.CreateIssue,
-		CreateWisp:        kit.CreateWisp,
-		AddDependency:     kit.AddDependency,
-		QueryScalar:       kit.QueryScalar,
-		CountHistory:      kit.CountHistory,
-		SetJournalEnabled: te.store.SetEventsJournalEnabled,
+		IssuePrefix:                kit.IssuePrefix,
+		Editor:                     editor,
+		CreateIssue:                kit.CreateIssue,
+		CreateWisp:                 kit.CreateWisp,
+		AddDependency:              kit.AddDependency,
+		QueryScalar:                kit.QueryScalar,
+		CountHistory:               kit.CountHistory,
+		SetJournalEnabled:          te.store.SetEventsJournalEnabled,
+		SetVersionedHistoryEnabled: te.store.SetVersionedHistoryEnabled,
 	}
 }
