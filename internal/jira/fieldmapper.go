@@ -183,8 +183,42 @@ func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueC
 	}
 
 	return &tracker.IssueConversion{
-		Issue: issue,
+		Issue:        issue,
+		Dependencies: jiraDependencies(ji),
 	}
+}
+
+func jiraDependencies(ji *Issue) []tracker.DependencyInfo {
+	source := extractBrowseURL(ji)
+	if source == "" {
+		return nil
+	}
+	ref := func(issue *IssueReference) string {
+		if issue == nil || issue.Key == "" {
+			return ""
+		}
+		if idx := strings.Index(ji.Self, "/rest/api/"); idx > 0 {
+			return ji.Self[:idx] + "/browse/" + issue.Key
+		}
+		return ""
+	}
+	var deps []tracker.DependencyInfo
+	if parent := ref(ji.Fields.Parent); parent != "" {
+		deps = append(deps, tracker.DependencyInfo{FromExternalID: source, ToExternalID: parent, Type: string(types.DepParentChild), Source: tracker.DependencySourceParent})
+	}
+	for _, link := range ji.Fields.IssueLinks {
+		if strings.EqualFold(link.Type.Outward, "blocks") {
+			if target := ref(link.OutwardIssue); target != "" {
+				deps = append(deps, tracker.DependencyInfo{FromExternalID: target, ToExternalID: source, Type: string(types.DepBlocks), Source: tracker.DependencySourceRelation})
+			}
+		}
+		if strings.EqualFold(link.Type.Inward, "is blocked by") {
+			if target := ref(link.InwardIssue); target != "" {
+				deps = append(deps, tracker.DependencyInfo{FromExternalID: source, ToExternalID: target, Type: string(types.DepBlocks), Source: tracker.DependencySourceRelation})
+			}
+		}
+	}
+	return deps
 }
 
 func (m *jiraFieldMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {

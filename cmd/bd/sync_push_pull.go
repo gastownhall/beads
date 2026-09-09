@@ -348,7 +348,7 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 	}()
 
 	if len(args) == 0 {
-		return HandleError("at least one bead ID is required")
+		return HandleErrorRespectJSON("at least one bead ID is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	if !dryRun {
@@ -357,20 +357,22 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 
 	trackerStore, err := trackerStoreForCommand(rootCtx)
 	if err != nil {
-		return HandleError("database not available: %v", err)
+		return HandleErrorRespectJSON("database not available: %v", err)
 	}
 	if err := validateJiraConfigForStore(trackerStore); err != nil {
-		return HandleError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	ctx := rootCtx
 	jt := &jira.Tracker{}
 	if err := jt.Init(ctx, trackerStore); err != nil {
-		return HandleError("initializing Jira tracker: %v", err)
+		return HandleErrorRespectJSON("initializing Jira tracker: %v", err)
 	}
 
 	engine := tracker.NewEngine(jt, trackerStore, actor)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	if !jsonOutput {
+		engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	}
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
 
@@ -381,6 +383,12 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 		IssueIDs: args,
 	})
 	if err != nil {
+		if jsonOutput {
+			if jerr := outputJSON(result); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
+		}
 		return HandleError("sync failed: %v", err)
 	}
 	outputSyncResult(result, dryRun)
@@ -396,7 +404,7 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 	}()
 
 	if len(args) == 0 {
-		return HandleError("at least one bead ID or external reference is required")
+		return HandleErrorRespectJSON("at least one bead ID or external reference is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	if !dryRun {
@@ -405,20 +413,22 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 
 	trackerStore, err := trackerStoreForCommand(rootCtx)
 	if err != nil {
-		return HandleError("database not available: %v", err)
+		return HandleErrorRespectJSON("database not available: %v", err)
 	}
 	if err := validateJiraConfigForStore(trackerStore); err != nil {
-		return HandleError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	ctx := rootCtx
 	jt := &jira.Tracker{}
 	if err := jt.Init(ctx, trackerStore); err != nil {
-		return HandleError("initializing Jira tracker: %v", err)
+		return HandleErrorRespectJSON("initializing Jira tracker: %v", err)
 	}
 
 	engine := tracker.NewEngine(jt, trackerStore, actor)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	if !jsonOutput {
+		engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	}
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
@@ -428,6 +438,12 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 		IssueIDs: args,
 	})
 	if err != nil {
+		if jsonOutput {
+			if jerr := outputJSON(result); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
+		}
 		return HandleError("sync failed: %v", err)
 	}
 	outputSyncResult(result, dryRun)

@@ -140,7 +140,11 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	}
 
 	engine := tracker.NewEngine(jt, trackerStore, actor)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	// JSON output is a single machine-readable document. Conflict and dry-run
+	// planning messages belong in the structured sync result, not on stdout.
+	if !jsonOutput {
+		engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	}
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
@@ -243,7 +247,7 @@ func runJiraStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	jiraURL, _ := trackerStore.GetConfig(ctx, "jira.url")
-	lastSync, _ := trackerStore.GetConfig(ctx, "jira.last_sync")
+	lastSync, _ := trackerStore.GetLocalMetadata(ctx, "jira.last_sync")
 
 	pluralProjects, _ := trackerStore.GetConfig(ctx, "jira.projects")
 	singularProject, _ := trackerStore.GetConfig(ctx, "jira.project")
