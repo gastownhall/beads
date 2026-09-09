@@ -55,15 +55,18 @@ func (m *memories) Recall(ctx context.Context, req memoryops.RecallRequest) (mem
 	if err != nil {
 		return memoryops.RecallResult{}, err
 	}
-	var value string
+	var (
+		value string
+		found bool
+	)
 	if err := m.store.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		value, err = storagememoryops.RecallInTx(ctx, tx, key)
+		value, found, err = storagememoryops.RecallInTx(ctx, tx, key)
 		return err
 	}); err != nil {
 		return memoryops.RecallResult{}, err
 	}
-	return memoryops.RecallResult{Key: key, Value: value, Found: value != ""}, nil
+	return memoryops.RecallResult{Key: key, Value: value, Found: found}, nil
 }
 
 func (m *memories) Forget(ctx context.Context, req memoryops.ForgetRequest) (memoryops.ForgetResult, error) {

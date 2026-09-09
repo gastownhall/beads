@@ -84,9 +84,7 @@ func MemoriesFromConfig(all map[string]string) map[string]string {
 // destroyed.
 //
 // replaced is about the ROW, not the value: a memory stored as the empty string
-// reports true even though a Recall of it would report Found false. See
-// memoryops.RememberResult.Replaced, which states that divergence rather than
-// smoothing it over.
+// reports true, just as Recall reports it found.
 func RememberInTx(ctx context.Context, tx *sql.Tx, key, content string) (replaced bool, err error) {
 	storageKey := StorageKey(key)
 	replaced, err = configRowExistsInTx(ctx, tx, storageKey)
@@ -99,31 +97,33 @@ func RememberInTx(ctx context.Context, tx *sql.Tx, key, content string) (replace
 	return replaced, nil
 }
 
-// RecallInTx reads one memory in the caller's transaction. A key nothing stored
-// answers "" with a nil error: the seam cannot tell that from a row stored
-// empty, and the role's Found field is where that conflation is stated.
-func RecallInTx(ctx context.Context, tx *sql.Tx, key string) (string, error) {
-	return issueops.GetConfigInTx(ctx, tx, StorageKey(key))
+// RecallInTx reads one memory in the caller's transaction and reports whether
+// its row exists. A stored empty value is therefore distinct from no row.
+func RecallInTx(ctx context.Context, tx *sql.Tx, key string) (value string, found bool, err error) {
+	storageKey := StorageKey(key)
+	err = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", storageKey).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("recall memory %s: %w", storageKey, err)
+	}
+	return value, true, nil
 }
 
 // ForgetInTx removes one memory and returns what it held, both in the caller's
 // transaction — which is what makes the returned value the one that was
 // actually deleted rather than the one an earlier read happened to see.
 //
-// found is Recall's found, not the row's: a memory stored as the empty string
-// reports found false and IS NOT DELETED. That keeps Forget's answer and
-// Recall's answer the same statement, which is what a front door printing
-// "No memory with key ..." after a successful Recall would otherwise contradict.
-//
 // The delete names the one encoded key. There is no LIKE and no prefix sweep in
 // it, so forgetting "a" cannot take "a-b" with it.
 func ForgetInTx(ctx context.Context, tx *sql.Tx, key string) (previous string, found bool, err error) {
 	storageKey := StorageKey(key)
-	previous, err = issueops.GetConfigInTx(ctx, tx, storageKey)
+	previous, found, err = RecallInTx(ctx, tx, key)
 	if err != nil {
 		return "", false, err
 	}
-	if previous == "" {
+	if !found {
 		return "", false, nil
 	}
 	if err := issueops.DeleteConfigInTx(ctx, tx, storageKey); err != nil {

@@ -23,13 +23,8 @@ var ErrValidation = beadserrors.ErrValidation
 
 // THERE IS DELIBERATELY NO ErrNotFound ON THIS ROLE.
 //
-// beadserrors declares one; this leaf does not re-export it. The storage seam
-// beneath it cannot tell an absent config row from a row stored as the empty
-// string (issueops/workspaceconfig.go states the same conflation for settings,
-// and it is the same table). A role that answered a Recall of an unknown key
-// with ErrNotFound would be minting an error out of a distinction it cannot
-// actually see, and the first out-of-band empty write would make it a lie.
-//
-// Misses are RESULT-CARRIED instead — RecallResult.Found, ForgetResult.Found —
-// and the front doors translate: the CLI to its SilentExit contract, an HTTP
-// door to its 404. That keeps the invention where a door can justify it.
+// beadserrors declares one; this leaf does not re-export it. Misses are
+// RESULT-CARRIED instead — RecallResult.Found, ForgetResult.Found — and the
+// front doors translate: the CLI to its SilentExit contract, an HTTP door to
+// its 404. That lets callers handle absence without classifying an operational
+// error and keeps presentation policy at the door.
