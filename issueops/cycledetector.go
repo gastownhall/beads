@@ -8,16 +8,37 @@ import (
 
 // DetectCyclesRequest asks for the whole blocking graph's cycles.
 //
-// It carries NOTHING, and the empty struct is the honest shape rather than a
-// placeholder. A cycle is a property of the graph as a whole: there is no
-// predicate that narrows it, because narrowing the EDGE set would delete
-// cycles that exist and narrowing the reported set would need an anchor this
-// question does not have. `bd dep cycles` takes no flags for the same reason.
+// The zero value carries no NARROWING predicate, and that absence is the
+// honest shape rather than a placeholder: a cycle is a property of the graph
+// as a whole, so there is no predicate that narrows it — narrowing the EDGE
+// set would delete cycles that exist and narrowing the reported set would need
+// an anchor this question does not have. `bd dep cycles` takes no flags to
+// narrow either question for the same reason.
 //
-// It exists as a type so that a later option — a bound on how much of the graph
-// is walked, say — is a new field rather than a new method or a changed
-// signature, which is what every other role's request buys.
-type DetectCyclesRequest struct{}
+// IncludeTracks is the one WIDENING option, not a narrowing one, which is why
+// it does not contradict the paragraph above. It exists as a field rather than
+// a new method precisely for the reason this type does: a later option is a
+// field, not a changed signature.
+type DetectCyclesRequest struct {
+	// IncludeTracks additionally walks `tracks` edges on top of the default
+	// blocks/conditional-blocks graph, so a cycle that closes through a
+	// tracking edge is reported — the shape where a molecule root
+	// blocks-depends (transitively) on its own entry step, which
+	// tracks-depends back to the root.
+	//
+	// It does not report a cycle made ENTIRELY of tracks edges. Ordinary
+	// convoy/tracking topology is densely interconnected through tracks
+	// alone, and reporting every loop in it is the regression a previous
+	// change to `bd doctor`'s cycle check caused and had to revert (it
+	// produced "thousands of cycles" that were not deadlocks). A cycle is
+	// therefore reported under this option only when at least one of its
+	// edges — the closing edge included — is a blocks/conditional-blocks
+	// edge; tracks edges may only complete a path, never make one up alone.
+	//
+	// Default false: the base walk this type's doc above describes is
+	// unchanged.
+	IncludeTracks bool `json:"include_tracks,omitempty"`
+}
 
 // CycleMember is one node on a detected cycle.
 //
@@ -78,18 +99,20 @@ type CycleReport struct {
 	// Cycles is the canonical, sorted set. It is empty — never nil — when the
 	// graph is acyclic.
 	//
-	// ITS LENGTH IS THE TOTAL, and that is the point of carrying unhydratable
+	// ITS LENGTH IS THE TOTAL FOUND BY THE SELECTED WALK, and that is the point
+	// of carrying unhydratable
 	// members rather than dropping them: a cycle nothing can describe is still
 	// counted here, so "found N cycles" cannot shrink because a row went
 	// missing. There is no separate count field, because there is no cycle this
 	// slice omits.
 	//
 	// IT IS NOT PROMISED TO BE EVERY SIMPLE CYCLE IN THE GRAPH. Enumerating
-	// those is exponential in the worst case; the detector records one cycle per
-	// back edge of a depth-first walk, so two cycles sharing every node but one
-	// edge may be reported as one. What IS promised is that the slice is empty
-	// exactly when the graph is acyclic, and that the same graph always yields
-	// the same slice.
+	// those is exponential in the worst case. The default detector records one
+	// cycle per back edge of a depth-first walk, while IncludeTracks records one
+	// qualifying cycle per strongly connected component. Two cycles sharing
+	// every node but one edge may therefore be reported as one. What IS promised
+	// is that the slice is empty exactly when the selected walk has no qualifying
+	// cycle, and that the same graph and request always yield the same slice.
 	Cycles []Cycle `json:"cycles"`
 }
 
@@ -115,7 +138,8 @@ type CycleReport struct {
 // scheduling livelock the editor refuses). A graph this role calls acyclic can
 // therefore still refuse an edge, and that is not a contradiction: the editor
 // answers "would this be a livelock", this answers "is there a blocking cycle
-// now".
+// now". DetectCyclesRequest.IncludeTracks widens this walk to also follow
+// `tracks`, under the guard documented on that field.
 //
 // BOTH PLANES ARE ONE GRAPH. Durable and ephemeral edges are merged before the
 // walk, so a cycle that runs issue → wisp → issue is found; it is the reason

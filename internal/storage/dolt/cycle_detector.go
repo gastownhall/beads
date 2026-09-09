@@ -30,11 +30,11 @@ type cycleDetector struct{ store *DoltStore }
 
 var _ issueops.CycleDetector = (*cycleDetector)(nil)
 
-func (c *cycleDetector) DetectCycles(ctx context.Context, _ issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
+func (c *cycleDetector) DetectCycles(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
 	var report issueops.CycleReport
 	err := c.store.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
-		report, err = storeops.DetectCycleReportInTx(ctx, tx)
+		report, err = storeops.DetectCycleReportInTx(ctx, tx, req)
 		return err
 	})
 	if err != nil {
