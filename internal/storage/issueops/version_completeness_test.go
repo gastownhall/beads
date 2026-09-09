@@ -215,6 +215,15 @@ var versionExemptions = map[string]string{
 	// the seam itself: its UPDATE issues SET current_revision is the
 	// bookkeeping half of the mint, not a mutation that needs its own.
 	"RecordVersionInTx": "the seam itself; advances current_revision to match the row it just inserted",
+
+	// RecordVersionAtInTx (R7.1 as-of read, gastownhall/beads#5898 rev 9,
+	// gastownhall/beads#6136, be-x5jqd.5) shares RecordVersionInTx's body
+	// (recordVersionAtInTx) but deliberately does not call RecordVersionInTx
+	// itself — it exists precisely to bypass RecordVersionInTx's
+	// versionedHistoryEnabled gate, so an as-of-read conformance fixture can
+	// mint a version dated in the past. It is the seam too, by the same
+	// reasoning as RecordVersionInTx's own entry above.
+	"RecordVersionAtInTx": "test-support twin of RecordVersionInTx, sharing its body; the seam itself, not a caller of it — advances current_revision to match the row it just inserted",
 }
 
 // versionNeverMints pins the deliberate NOT-versioned rulings from the other

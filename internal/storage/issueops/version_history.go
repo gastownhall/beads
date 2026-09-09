@@ -295,7 +295,28 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 	if !versionedHistoryEnabled(tx) {
 		return nil
 	}
+	return recordVersionAtInTx(ctx, tx, issueID, actor, time.Now().UTC())
+}
 
+// RecordVersionAtInTx is RecordVersionInTx's test-support twin: it mints a
+// version row at a caller-chosen change_at instead of time.Now(), and --
+// deliberately -- does not gate on versionedHistoryEnabled at all, since its
+// whole purpose is controlled-timestamp minting for conformance fixtures
+// (R7.1's AsOfReadFixture.MintAt, backend/conformance/versioned_read_contract.go)
+// regardless of a store's activation state. Production code never calls
+// this; only per-leg as-of-read fixtures do, so their bare issue-create step
+// can stay history-off (no unwanted real-time row) while still minting the
+// exact versions a test needs at the instants it needs them.
+func RecordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at time.Time) error {
+	return recordVersionAtInTx(ctx, tx, issueID, actor, at)
+}
+
+// recordVersionAtInTx is RecordVersionInTx and RecordVersionAtInTx's shared
+// body, taking at where the two callers differ: time.Now().UTC() for the
+// production gate-checked path, a caller-chosen instant for test minting.
+// The no-op rules documented on RecordVersionInTx above (wisps) apply here
+// too, since this is that function's entire mechanism minus the gate.
+func recordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at time.Time) error {
 	issue, err := GetIssueInTx(ctx, tx, issueID)
 	if err != nil {
 		return fmt.Errorf("versioned history: snapshot %s: %w", issueID, err)
@@ -364,7 +385,7 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		`INSERT INTO issue_versions
 			(issue_id, revision, epoch, durable_state, change_actor, change_agent, change_message, change_at, attribution_status)
 		VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-		issueID, newRevision, epoch, durableState, actor, time.Now().UTC(), attributionStatusForActor(actor),
+		issueID, newRevision, epoch, durableState, actor, at, attributionStatusForActor(actor),
 	); err != nil {
 		return fmt.Errorf("versioned history: insert version row for %s: %w", issueID, err)
 	}

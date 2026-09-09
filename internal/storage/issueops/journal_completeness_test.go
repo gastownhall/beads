@@ -197,6 +197,20 @@ var beadDMLExemptions = map[string]string{
 	// its own) — bookkeeping for an already-journaled mutation, not a second
 	// mutation that needs its own emit.
 	"RecordVersionInTx": "advances the denormalized current_revision pointer to match a snapshot just inserted into issue_versions (not a bead table); called from the same entry points that already journal the mutation via RecordEventInTx, so this is bookkeeping for an already-journaled mutation, not a second one",
+
+	// RecordVersionAtInTx (R7.1 as-of read, gastownhall/beads#5898 rev 9,
+	// gastownhall/beads#6136, be-x5jqd.5) is RecordVersionInTx's test-support
+	// twin: it shares RecordVersionInTx's body (recordVersionAtInTx) but skips
+	// the versionedHistoryEnabled gate and takes an explicit historical
+	// timestamp, so an as-of-read conformance fixture can mint a version row
+	// dated in the past. It has no production caller and is not part of any
+	// mutationEntryPoints flow — only per-leg AsOfReadFixture.MintAt
+	// implementations call it, always directly, never from inside a journaled
+	// mutation. There is no separate bead mutation here for it to double-journal:
+	// the same "UPDATE issues SET current_revision only advances a pointer to
+	// a issue_versions snapshot, not a bead table" reasoning as RecordVersionInTx
+	// applies verbatim.
+	"RecordVersionAtInTx": "test-support twin of RecordVersionInTx (R7.1 as-of read); mints a historical-timestamped snapshot directly for conformance fixtures, with no production caller and no mutation of its own to journal — its UPDATE issues SET current_revision only advances a pointer to the issue_versions row it just inserted (not a bead table)",
 }
 
 // journalExemptMutations are mutation paths that deliberately do NOT journal

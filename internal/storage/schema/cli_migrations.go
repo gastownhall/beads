@@ -148,6 +148,15 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// yet, and still has durable_state as the JSON type 0067 gave it, so
 		// both of 0068's steps always fire on a fresh bundle.
 		return cliMigration0068AddAttributionStatus
+	case "0069_add_removed_restriction.up.sql":
+		// Direct DDL for the same reason as 0067/0068: the source migration's
+		// PREPARE guard (an INFORMATION_SCHEMA probe) is what makes the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. issue_versions is
+		// always present here -- 0067 runs earlier in the same fresh-bundle
+		// series -- and never carries removed_restriction yet, so the column
+		// always needs adding on a fresh bundle.
+		return cliMigration0069AddRemovedRestriction
 	default:
 		return sqlText
 	}
@@ -270,6 +279,12 @@ ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;`
 // the retype always fires here; no wisps twin exists for this table.
 const cliMigration0068AddAttributionStatus = `ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;
 ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;`
+
+// cliMigration0069AddRemovedRestriction is 0069 with its one guarded PREPARE
+// block replaced by the direct ALTER it would run on a fresh database.
+// issue_versions is created earlier in the same series by 0067 and never
+// carries removed_restriction yet, so the column always needs adding here.
+const cliMigration0069AddRemovedRestriction = `ALTER TABLE issue_versions ADD COLUMN removed_restriction VARCHAR(30);`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');
