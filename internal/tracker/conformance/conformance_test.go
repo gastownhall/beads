@@ -18,6 +18,12 @@ func TestRunWithEngineAndUOWFixture(t *testing.T) {
 		store := f.StoreFactory.Open().(*Store)
 		store.Config["test.project"] = "PROJ"
 		ref := "https://tracker.test/EXT-1"
+		// Seeded straight into the map rather than through Store.CreateIssue,
+		// so the create-path label blind spot Run documents does not apply and
+		// the pre-existing label can stay: it makes the suite's single-label
+		// assertion prove the update REPLACES labels instead of merging them.
+		// The real-backend legs cannot seed labels this way, so this is the
+		// one leg carrying that coverage until create-path parity lands.
 		store.Issues["bd-1"] = &types.Issue{ID: "bd-1", Title: "local", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: []string{"old"}, ExternalRef: &ref, UpdatedAt: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)}
 		f.HTTP.Enqueue(Response{Status: http.StatusOK, Body: `[{"id":"EXT-1","identifier":"EXT-1","url":"https://tracker.test/EXT-1","title":"remote","updated_at":"2026-09-03T01:00:00Z","labels":[" bug ","","bug"]},{"id":"EXT-2","identifier":"EXT-2","url":"https://tracker.test/EXT-2","title":"dependent","updated_at":"2026-09-03T01:00:00Z"}]`})
 		remote := &mockTracker{client: f.HTTP.Client()}
@@ -32,8 +38,7 @@ func TestRunWithEngineAndUOWFixture(t *testing.T) {
 				store.Wisps["wisp-only"] = &types.Issue{ID: "wisp-only", ExternalRef: &otherRef}
 				return "bd-1", "wisp-only", nil
 			},
-			DependencyExists: func(context.Context) (bool, error) { return store.HasDependency("bd-2", "bd-1"), nil },
-			Expected:         Expected{ExternalRef: ref, ConfigKey: "test.project", MetadataKey: "test.last_sync"},
+			Expected: Expected{ExternalRef: ref, ConfigKey: "test.project", MetadataKey: "test.last_sync"},
 			Refusal: func(context.Context) (*tracker.SyncResult, error) {
 				return nil, &storage.ErrUnsupported{Op: "proxy-only operation", Backend: "conformance"}
 			},

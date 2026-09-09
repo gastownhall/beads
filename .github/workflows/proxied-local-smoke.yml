@@ -27,11 +27,14 @@ on:
       - 'cmd/bd/proxied_integration_helpers_test.go'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
       - 'internal/configfile/**'
       - 'internal/doltserver/**'
       - 'internal/storage/dbproxy/**'
       - 'internal/storage/uow/**'
+      - 'internal/tracker/conformance/**'
+      - 'internal/tracker/uow_store.go'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
@@ -45,11 +48,14 @@ on:
       - 'cmd/bd/proxied_integration_helpers_test.go'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
       - 'internal/configfile/**'
       - 'internal/doltserver/**'
       - 'internal/storage/dbproxy/**'
       - 'internal/storage/uow/**'
+      - 'internal/tracker/conformance/**'
+      - 'internal/tracker/uow_store.go'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
@@ -102,7 +108,8 @@ jobs:
             TestManagedLocalProxiedLegacyRecordFailClosed \
             TestManagedLocalProxiedOrphanBackendReaped \
             TestManagedLocalProxiedNProcessColdStartConvergence \
-            TestManagedLocalProxiedStopStartInterleave
+            TestManagedLocalProxiedStopStartInterleave \
+            TestManagedLocalProxiedTrackerUOWConformance
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2
