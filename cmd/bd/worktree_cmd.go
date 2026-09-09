@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/worktreeremove"
@@ -2085,15 +2086,22 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 	}
 	defer f.Close()
 
+	lineEnding := gitignore.AppendLineEnding(content)
+
 	// Add newline if file doesn't end with one
 	if len(content) > 0 && content[len(content)-1] != '\n' {
-		if _, err := f.WriteString("\n"); err != nil {
+		separator := lineEnding
+		// Only CRLF needs this guard: the LF separator already completes a trailing CR.
+		if lineEnding == "\r\n" && content[len(content)-1] == '\r' {
+			separator = "\n" // Complete the existing CR without rewriting it.
+		}
+		if _, err := f.WriteString(separator); err != nil {
 			return err
 		}
 	}
 
 	// Add comment and entry
-	if _, err := f.WriteString(fmt.Sprintf("# bd worktree\n%s/\n", entry)); err != nil {
+	if _, err := fmt.Fprintf(f, "# bd worktree%s%s/%s", lineEnding, entry, lineEnding); err != nil {
 		return err
 	}
 
