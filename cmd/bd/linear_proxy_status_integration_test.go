@@ -3,11 +3,56 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestLinearStatusSQLServerFrontdoor covers the direct SQL-server leg. The
+// managed-local test server is intentionally not started when the proxied lane
+// is selected, so this is a separate CI-selected process-level scenario.
+func TestLinearStatusSQLServerFrontdoor(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt SQL test server not available")
+	}
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, ".beads", "issues.db")
+	// A dedicated database is required here: the shared test-store helper uses
+	// a connection-scoped Dolt branch that a child bd process cannot inherit.
+	store := newTestStoreIsolatedDB(t, dbPath, "linstatus")
+	ctx := context.Background()
+	if err := store.SetConfig(ctx, "linear.last_sync", "2026-09-09T01:02:03Z"); err != nil {
+		t.Fatal(err)
+	}
+	ref := "https://linear.app/team/issue/ENG-1"
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "test-1", Title: "linked", Status: types.StatusOpen, IssueType: types.TypeTask, ExternalRef: &ref}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "test-2", Title: "local", Status: types.StatusOpen, IssueType: types.TypeTask}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bd, "--json", "linear", "status")
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), "BEADS_DIR="+filepath.Join(dir, ".beads"), "BEADS_TEST_SERVER=1", "LINEAR_API_KEY=test-key", "LINEAR_TEAM_ID=12345678-1234-1234-1234-123456789abc")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("direct SQL linear status: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
+	}
+	var status map[string]any
+	if err := json.Unmarshal(out, &status); err != nil {
+		t.Fatalf("decode direct SQL status: %v", err)
+	}
+	assertLinearStatus(t, status)
+}
 
 // TestManagedLocalProxiedLinearStatusParity drives the public status command
 // against fresh direct and managed-local workspaces. It keeps config, issue
@@ -30,6 +75,14 @@ func TestManagedLocalProxiedLinearStatusParity(t *testing.T) {
 		if got, want := proxied[key], direct[key]; !jsonEqual(got, want) {
 			t.Fatalf("status[%s]: proxied=%#v direct=%#v", key, got, want)
 		}
+	}
+	assertLinearStatus(t, proxied)
+}
+
+func assertLinearStatus(t *testing.T, status map[string]any) {
+	t.Helper()
+	if status["last_sync"] != "2026-09-09T01:02:03Z" || status["auth_mode"] != "api_key" || status["total_issues"] != float64(2) || status["with_linear_ref"] != float64(1) || status["pending_push"] != float64(1) {
+		t.Fatalf("unexpected linear status: %#v", status)
 	}
 }
 
