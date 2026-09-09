@@ -246,7 +246,7 @@ func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in
 		return err
 	}
 	if len(treeIssues) == 0 {
-		fmt.Printf("Issue '%s' has no children\n", in.ParentID)
+		fmt.Printf("Issue '%s' has no children\n", in.ParentID) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 		return nil
 	}
 

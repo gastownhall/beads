@@ -182,7 +182,7 @@ func (dr *depRender) annotationsFor(nodeID, childPrefix string) {
 	})
 	for _, r := range inView {
 		tag := ui.RenderMuted(fmt.Sprintf("%s %-20s", depGlyph, "["+r.label+"]"))
-		fmt.Println(childPrefix + tag + " " + r.target + " " + r.title)
+		fmt.Println(childPrefix + tag + " " + r.target + " " + r.title) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 	}
 
 	// Out-of-view edges: collapse to a single summary line so a filtered view
@@ -198,6 +198,6 @@ func (dr *depRender) annotationsFor(nodeID, childPrefix string) {
 		}
 		summary := fmt.Sprintf("%s ↗ %d outside this view: %s%s",
 			depGlyph, len(outView), strings.Join(named, ", "), suffix)
-		fmt.Println(childPrefix + ui.RenderMuted(summary))
+		fmt.Println(childPrefix + ui.RenderMuted(summary)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 	}
 }

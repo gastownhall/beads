@@ -117,7 +117,7 @@ func printSkipLabelsFooter(skipLabels bool) {
 	if !skipLabels || isQuiet() {
 		return
 	}
-	fmt.Print(skipLabelsFooterText())
+	fmt.Print(skipLabelsFooterText()) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 }
 
 // formatSkipLabelsConflictError builds the user-facing error message for AD-02
@@ -306,7 +306,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			}
 
 			if len(treeIssues) == 0 {
-				fmt.Printf("Issue '%s' has no children\n", in.ParentID)
+				fmt.Printf("Issue '%s' has no children\n", in.ParentID) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 				return nil
 			}
 
@@ -362,7 +362,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		for _, issue := range issues {
 			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
 		}
-		fmt.Print(buf.String())
+		fmt.Print(buf.String()) //nolint:forbidigo // Agent output is outside the --format contract.
 		printTruncationHint(truncated, in.effectiveLimit)
 		return nil
 	} else if in.longFormat {
@@ -383,7 +383,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
-		if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil {
+		if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil { //nolint:forbidigo // Pager fallback is outside the --format contract.
 			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", writeErr)
 		}
 	}
