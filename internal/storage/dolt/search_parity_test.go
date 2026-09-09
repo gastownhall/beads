@@ -96,6 +96,25 @@ func TestSearchIssuesAndSearchIssueSummaries_Parity(t *testing.T) {
 		{name: "ephemeral only", filter: types.IssueFilter{Ephemeral: ptr(true)}},
 		{name: "non-ephemeral only", filter: types.IssueFilter{Ephemeral: ptr(false)}},
 		{name: "limit applied", filter: types.IssueFilter{Limit: 2}},
+		// SortBy-varying rows. Without these the SQL ORDER BY that
+		// sqlbuild.LessSummary mirrors is only ever exercised at its default
+		// (priority ASC), so LessSummary-vs-SQL agreement on every other key
+		// is proven by unit test alone (TestLessSummaryMatchesLessAcrossSortKeys)
+		// and never against a real database. Each key is covered in both
+		// directions, and each is paired with a Limit so the merge's
+		// sort-before-trim actually decides which rows survive.
+		{name: "sort created asc + limit", filter: types.IssueFilter{SortBy: "created", Limit: 3}},
+		{name: "sort created desc + limit", filter: types.IssueFilter{SortBy: "created", SortDesc: true, Limit: 3}},
+		{name: "sort title asc + limit", filter: types.IssueFilter{SortBy: "title", Limit: 3}},
+		{name: "sort title desc + limit", filter: types.IssueFilter{SortBy: "title", SortDesc: true, Limit: 3}},
+		{name: "sort status asc + limit", filter: types.IssueFilter{SortBy: "status", Limit: 3}},
+		{name: "sort updated desc + limit", filter: types.IssueFilter{SortBy: "updated", SortDesc: true, Limit: 3}},
+		{name: "sort assignee asc + limit", filter: types.IssueFilter{SortBy: "assignee", Limit: 3}},
+		// "id" is the one Go-side key (sqlbuild.IsGoSideSort): SQL emits no
+		// ORDER BY for it, so this row pins that both paths still agree on the
+		// order the merge comparator produces.
+		{name: "sort id asc + limit", filter: types.IssueFilter{SortBy: "id", Limit: 3}},
+		{name: "sort id desc + limit", filter: types.IssueFilter{SortBy: "id", SortDesc: true, Limit: 3}},
 	}
 
 	for _, tc := range cases {
