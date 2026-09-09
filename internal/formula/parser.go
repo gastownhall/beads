@@ -474,7 +474,13 @@ func ValidateProvidedVars(formula *Formula, values map[string]string) error {
 
 	for name, def := range formula.Vars {
 		val, provided := values[name]
-		if !provided {
+		// An absent var with no default is left to the caller's missing-var
+		// path (that is the point of ValidateProvidedVars). But an absent var
+		// with a declared default is applied silently, so its default must be
+		// validated against enum/pattern here — exactly as ValidateVars does —
+		// or an authoring typo (e.g. a default not in the enum) slips through
+		// pour/wisp/mol bond while cook rejects it (#5695).
+		if !provided && def.Default == nil {
 			continue
 		}
 
