@@ -3,6 +3,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/linear"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -30,7 +32,7 @@ func TestLinearPullPushSQLServerFrontdoor(t *testing.T) {
 	bd := buildBDForInitTests(t)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, ".beads", "issues.db")
-	_ = newTestStoreIsolatedDB(t, dbPath, "linpullpush")
+	raw := newTestStoreIsolatedDB(t, dbPath, "linpullpush")
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("# Beads Config\n"), 0o600); err != nil {
 		t.Fatalf("create direct SQL config.yaml: %v", err)
 	}
@@ -38,7 +40,7 @@ func TestLinearPullPushSQLServerFrontdoor(t *testing.T) {
 		"BEADS_DIR="+filepath.Join(dir, ".beads"),
 		"BEADS_TEST_SERVER=1",
 		"LINEAR_API_KEY=test-api-key",
-	))
+	), tracker.NewStore(raw), func(id string) { linearSetIssueUpdatedAt(t, raw.DB(), id) })
 	assertLinearPullPushSemantics(t, result)
 }
 
@@ -49,19 +51,24 @@ func TestManagedLocalProxiedLinearPullPushParity(t *testing.T) {
 	requireManagedLocalProxiedEnv(t)
 	bd := buildBDForInitTests(t)
 	project := bdManagedLocalInit(t, bd, "linpullpush", 5*time.Minute)
-	result := runLinearPullPushFixture(t, bd, project.dir, append(bdProxiedEnv(project.dir), "LINEAR_API_KEY=test-api-key"))
+	provider, err := newProxiedServerUOWProvider(t.Context(), project.beadsDir, "")
+	if err != nil {
+		t.Fatalf("open managed-local proxy UOW provider: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Close(t.Context()) })
+	proxyDB := openProxiedDB(t, project)
+	result := runLinearPullPushFixture(t, bd, project.dir, append(bdProxiedEnv(project.dir), "LINEAR_API_KEY=test-api-key"), tracker.NewUOWStore(provider), func(id string) { linearSetIssueUpdatedAt(t, proxyDB, id) })
 	assertLinearPullPushSemantics(t, result)
 }
 
 type linearPullPushResult struct {
 	issues             []*types.Issue
-	lastSync           string
 	remoteUpdatedTitle string
 	remoteIssueCount   int
 	childDependencies  string
 }
 
-func runLinearPullPushFixture(t *testing.T, bd, dir string, env []string) linearPullPushResult {
+func runLinearPullPushFixture(t *testing.T, bd, dir string, env []string, store tracker.Store, setUpdatedAt func(string)) linearPullPushResult {
 	t.Helper()
 	mock := newMockLinearServer(linearProxyTestTeamID, "MOCK")
 	server := httptest.NewServer(mock)
@@ -93,8 +100,13 @@ func runLinearPullPushFixture(t *testing.T, bd, dir string, env []string) linear
 	stale := parseIssueJSON(t, run("create", "--json", "stale local child", "--external-ref", childURL))
 	// The local issue predates the recorded sync point while the remote closed
 	// issue is newer, so pull must update rather than report a conflict.
-	run("config", "set", "linear.last_sync", "2030-01-01T00:00:00Z")
-	run("--json", "linear", "sync", "--pull", "--relations")
+	const previousSync = "2020-01-01T00:00:00Z"
+	setUpdatedAt(stale.ID)
+	if err := store.SetLocalMetadata(t.Context(), "linear.last_sync", previousSync); err != nil {
+		t.Fatalf("seed linear.last_sync local metadata: %v", err)
+	}
+	pull := parseLinearSyncResult(t, run("--json", "linear", "sync", "--pull", "--relations"))
+	assertLinearPullMetadata(t, store, previousSync, pull)
 
 	issues := linearListIssues(t, run("list", "--all", "--json"))
 	child := findLinearIssue(t, issues, childURL)
@@ -107,13 +119,18 @@ func runLinearPullPushFixture(t *testing.T, bd, dir string, env []string) linear
 	run("linear", "push", created.ID)
 
 	issues = linearListIssues(t, run("list", "--all", "--json"))
-	lastSync := strings.TrimSpace(string(run("config", "get", "linear.last_sync")))
 	return linearPullPushResult{
 		issues:             issues,
-		lastSync:           lastSync,
 		remoteUpdatedTitle: linearMockIssueTitle(t, mock, "MOCK-2"),
 		remoteIssueCount:   mock.issueCount(),
 		childDependencies:  string(run("dep", "list", child.ID)),
+	}
+}
+
+func linearSetIssueUpdatedAt(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	if _, err := db.ExecContext(t.Context(), "UPDATE issues SET updated_at = ? WHERE id = ?", time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), id); err != nil {
+		t.Fatalf("seed local issue %s updated_at before last_sync: %v", id, err)
 	}
 }
 
@@ -124,13 +141,13 @@ func seedLinearPullGraph(mock *mockLinearServer) {
 		ID: "remote-parent", Identifier: "MOCK-1", Title: "remote parent", Description: "parent from Linear",
 		URL: "https://linear.app/mock/issue/MOCK-1", Priority: 2,
 		State:     &linear.State{ID: "state-unstarted", Name: "Todo", Type: "unstarted"},
-		CreatedAt: "2029-12-31T00:00:00Z", UpdatedAt: "2031-01-02T00:00:00Z",
+		CreatedAt: "2024-12-31T00:00:00Z", UpdatedAt: "2025-01-02T00:00:00Z",
 	}
 	blocker := &linear.Issue{
 		ID: "remote-blocker", Identifier: "MOCK-3", Title: "remote blocker", Description: "blocks the remote child",
 		URL: "https://linear.app/mock/issue/MOCK-3", Priority: 3,
 		State:     &linear.State{ID: "state-unstarted", Name: "Todo", Type: "unstarted"},
-		CreatedAt: "2029-12-31T00:00:00Z", UpdatedAt: "2031-01-02T00:00:00Z",
+		CreatedAt: "2024-12-31T00:00:00Z", UpdatedAt: "2025-01-02T00:00:00Z",
 	}
 	relation := linear.Relation{ID: "blocked-by-blocker", Type: "blockedBy"}
 	relation.RelatedIssue.ID = blocker.ID
@@ -139,10 +156,10 @@ func seedLinearPullGraph(mock *mockLinearServer) {
 		ID: "remote-child", Identifier: "MOCK-2", Title: "remote closed child", Description: "closed remotely",
 		URL: "https://linear.app/mock/issue/MOCK-2", Priority: 1,
 		State:     &linear.State{ID: "state-completed", Name: "Done", Type: "completed"},
-		Labels:    &linear.Labels{Nodes: []linear.Label{{ID: "label-remote", Name: "remote-label"}}},
+		Labels:    &linear.Labels{Nodes: []linear.Label{{ID: "label-remote-a", Name: " remote-label "}, {ID: "label-remote-b", Name: "remote-label"}, {ID: "label-remote-empty", Name: ""}}},
 		Parent:    &linear.Parent{ID: parent.ID, Identifier: parent.Identifier},
 		Relations: &linear.Relations{Nodes: []linear.Relation{relation}},
-		CreatedAt: "2029-12-31T00:00:00Z", UpdatedAt: "2031-01-02T00:00:00Z", CompletedAt: "2031-01-02T00:00:00Z",
+		CreatedAt: "2024-12-31T00:00:00Z", UpdatedAt: "2025-01-02T00:00:00Z", CompletedAt: "2025-01-02T00:00:00Z",
 	}
 	mock.issues[parent.ID] = parent
 	mock.issues[child.ID] = child
@@ -161,6 +178,41 @@ func linearListIssues(t *testing.T, out []byte) []*types.Issue {
 		t.Fatalf("decode bd list --json: %v\n%s", err, out)
 	}
 	return issues
+}
+
+func parseLinearSyncResult(t *testing.T, out []byte) tracker.SyncResult {
+	t.Helper()
+	start := strings.Index(string(out), "{")
+	if start < 0 {
+		t.Fatalf("bd linear sync --json emitted no object:\n%s", out)
+	}
+	var result tracker.SyncResult
+	if err := json.Unmarshal(out[start:], &result); err != nil {
+		t.Fatalf("decode bd linear sync --json: %v\n%s", err, out)
+	}
+	return result
+}
+
+func assertLinearPullMetadata(t *testing.T, store tracker.Store, previousSync string, result tracker.SyncResult) {
+	t.Helper()
+	previous, err := time.Parse(time.RFC3339, previousSync)
+	if err != nil {
+		t.Fatalf("parse previous last_sync: %v", err)
+	}
+	actual, err := time.Parse(time.RFC3339Nano, result.LastSync)
+	if err != nil {
+		t.Fatalf("parse pull result last_sync %q: %v", result.LastSync, err)
+	}
+	if !actual.After(previous) {
+		t.Fatalf("pull last_sync = %s, want after %s", actual, previous)
+	}
+	persisted, err := store.GetLocalMetadata(t.Context(), "linear.last_sync")
+	if err != nil {
+		t.Fatalf("read persisted linear.last_sync local metadata: %v", err)
+	}
+	if persisted != result.LastSync {
+		t.Fatalf("persisted linear.last_sync = %q, want sync result %q", persisted, result.LastSync)
+	}
 }
 
 func findLinearIssue(t *testing.T, issues []*types.Issue, externalRef string) *types.Issue {
@@ -200,9 +252,6 @@ func assertLinearPullPushSemantics(t *testing.T, result linearPullPushResult) {
 	blocker := findLinearIssue(t, result.issues, "https://linear.app/mock/issue/MOCK-3")
 	if !strings.Contains(result.childDependencies, parent.ID) || !strings.Contains(result.childDependencies, "parent-child") || !strings.Contains(result.childDependencies, blocker.ID) || !strings.Contains(result.childDependencies, "blocks") {
 		t.Fatalf("child dependencies = %q; expected parent and blocks edges for %s and %s", result.childDependencies, parent.ID, blocker.ID)
-	}
-	if result.lastSync != "2030-01-01T00:00:00Z" {
-		t.Fatalf("last_sync changed during pull: %q", result.lastSync)
 	}
 	if result.remoteUpdatedTitle != "local title pushed through Linear" {
 		t.Fatalf("remote update title = %q", result.remoteUpdatedTitle)

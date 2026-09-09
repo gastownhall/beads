@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -28,7 +29,7 @@ func TestLinearStatusSQLServerFrontdoor(t *testing.T) {
 	// a connection-scoped Dolt branch that a child bd process cannot inherit.
 	store := newTestStoreIsolatedDB(t, dbPath, "linstatus")
 	ctx := context.Background()
-	if err := store.SetConfig(ctx, "linear.last_sync", "2026-09-09T01:02:03Z"); err != nil {
+	if err := tracker.NewStore(store).SetLocalMetadata(ctx, "linear.last_sync", "2026-09-09T01:02:03Z"); err != nil {
 		t.Fatal(err)
 	}
 	ref := "https://linear.app/team/issue/ENG-1"
@@ -65,11 +66,21 @@ func TestManagedLocalProxiedLinearStatusParity(t *testing.T) {
 	lastSync := "2026-09-09T01:02:03Z"
 	env := []string{"LINEAR_API_KEY=test-key", "LINEAR_TEAM_ID=" + team}
 
-	directDir, _, _ := bdInit(t, bd, "--prefix", "linstatus", "--non-interactive", "--skip-hooks", "--skip-agents")
-	direct := linearStatusFixture(t, bd, directDir, bdEnv(directDir), env, lastSync)
+	directDir, directBeadsDir, _ := bdInit(t, bd, "--prefix", "linstatus", "--non-interactive", "--skip-hooks", "--skip-agents")
+	directRaw, err := newDoltStoreFromConfig(t.Context(), directBeadsDir)
+	if err != nil {
+		t.Fatalf("open direct tracker store: %v", err)
+	}
+	t.Cleanup(func() { _ = directRaw.Close() })
+	direct := linearStatusFixture(t, bd, directDir, bdEnv(directDir), env, tracker.NewStore(directRaw), lastSync)
 
 	proxy := bdManagedLocalInit(t, bd, "linstatus", 5*time.Minute)
-	proxied := linearStatusFixture(t, bd, proxy.dir, bdProxiedEnv(proxy.dir), env, lastSync)
+	provider, err := newProxiedServerUOWProvider(t.Context(), proxy.beadsDir, "")
+	if err != nil {
+		t.Fatalf("open managed-local proxy UOW provider: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Close(t.Context()) })
+	proxied := linearStatusFixture(t, bd, proxy.dir, bdProxiedEnv(proxy.dir), env, tracker.NewUOWStore(provider), lastSync)
 
 	for _, key := range []string{"configured", "has_api_key", "has_oauth", "auth_mode", "team_id", "team_ids", "last_sync", "total_issues", "with_linear_ref", "pending_push"} {
 		if got, want := proxied[key], direct[key]; !jsonEqual(got, want) {
@@ -86,7 +97,7 @@ func assertLinearStatus(t *testing.T, status map[string]any) {
 	}
 }
 
-func linearStatusFixture(t *testing.T, bd, dir string, baseEnv, extraEnv []string, lastSync string) map[string]any {
+func linearStatusFixture(t *testing.T, bd, dir string, baseEnv, extraEnv []string, store tracker.Store, lastSync string) map[string]any {
 	t.Helper()
 	run := func(args ...string) []byte {
 		cmd := exec.Command(bd, args...)
@@ -98,9 +109,11 @@ func linearStatusFixture(t *testing.T, bd, dir string, baseEnv, extraEnv []strin
 		}
 		return out
 	}
-	run("config", "set", "linear.last_sync", lastSync)
 	run("create", "linked", "--external-ref", "https://linear.app/team/issue/ENG-1")
 	run("create", "local")
+	if err := store.SetLocalMetadata(t.Context(), "linear.last_sync", lastSync); err != nil {
+		t.Fatalf("seed local last_sync metadata: %v", err)
+	}
 	var status map[string]any
 	if err := json.Unmarshal(run("--json", "linear", "status"), &status); err != nil {
 		t.Fatalf("decode linear status: %v", err)
