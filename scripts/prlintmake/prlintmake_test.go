@@ -11,22 +11,23 @@ import (
 )
 
 func TestFmtCheckClean(t *testing.T) {
-	output, err := runFmtCheck(t, "exit 0\n")
+	gofmt, output, err := runFmtCheck(t, "exit 0\n")
 	if err != nil {
 		t.Fatalf("fmt-check failed: %v\n%s", err, output)
 	}
-	want := "Checking Go formatting...\nAll Go files are properly formatted\n"
+	want := "Checking Go formatting...\nUsing gofmt " + gofmt + "\nAll Go files are properly formatted\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
 }
 
 func TestFmtCheckReportsUnformattedFiles(t *testing.T) {
-	output, err := runFmtCheck(t, "printf '%s\\n' cmd/bd/main.go internal/config/config.go\n")
+	gofmt, output, err := runFmtCheck(t, "printf '%s\\n' cmd/bd/main.go internal/config/config.go\n")
 	if got := processExitCode(err); got != 1 {
 		t.Fatalf("exit = %d, want 1; error=%v\n%s", got, err, output)
 	}
 	want := "Checking Go formatting...\n" +
+		"Using gofmt " + gofmt + "\n" +
 		"The following files are not properly formatted:\n" +
 		"cmd/bd/main.go\n" +
 		"internal/config/config.go\n\n" +
@@ -37,7 +38,7 @@ func TestFmtCheckReportsUnformattedFiles(t *testing.T) {
 }
 
 func TestFmtCheckPreservesGofmtFailure(t *testing.T) {
-	output, err := runFmtCheck(t, "printf 'synthetic gofmt failure\\n' >&2\nexit 42\n")
+	_, output, err := runFmtCheck(t, "printf 'synthetic gofmt failure\\n' >&2\nexit 42\n")
 	if got := processExitCode(err); got != 42 {
 		t.Fatalf("exit = %d, want 42; error=%v\n%s", got, err, output)
 	}
@@ -52,7 +53,14 @@ func TestFmtCheckPreservesGofmtFailure(t *testing.T) {
 	}
 }
 
-func runFmtCheck(t *testing.T, gofmtBody string) (string, error) {
+// runFmtCheck runs scripts/ci/fmt-check.sh against a gofmt shim with the given
+// body, and returns the shim path fmt-check.sh is expected to report.
+//
+// The shim is injected through GOFMT rather than PATH. fmt-check.sh deliberately
+// ignores a PATH gofmt -- that is the whole of be-gx8 -- so a PATH shim would be
+// silently bypassed and these tests would grade the real toolchain instead of
+// the case they name. TestGofmtBinIgnoresPathGofmt covers the resolution itself.
+func runFmtCheck(t *testing.T, gofmtBody string) (string, string, error) {
 	t.Helper()
 	bash := testBash(t)
 	testRoot := t.TempDir()
@@ -60,12 +68,10 @@ func runFmtCheck(t *testing.T, gofmtBody string) (string, error) {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeShellExecutable(t, bash, filepath.Join(shimDir, "gofmt"), "#!/usr/bin/env bash\nset -euo pipefail\n"+gofmtBody)
+	shim := filepath.Join(shimDir, "gofmt")
+	writeShellExecutable(t, bash, shim, "#!/usr/bin/env bash\nset -euo pipefail\n"+gofmtBody)
+	gofmt := shellVisiblePath(shim)
 
-	path := shimDir + string(os.PathListSeparator) + os.Getenv("PATH")
-	if runtime.GOOS == "windows" {
-		path = msysPath(shimDir) + ":/usr/bin:/bin"
-	}
 	cmd := exec.Command(
 		bash,
 		"--noprofile",
@@ -78,13 +84,13 @@ func runFmtCheck(t *testing.T, gofmtBody string) (string, error) {
 		"BASH_ENV":  "",
 		"BASHOPTS":  "",
 		"ENV":       "",
+		"GOFMT":     gofmt,
 		"LANG":      "C",
 		"LC_ALL":    "C",
-		"PATH":      path,
 		"SHELLOPTS": "",
 	})
 	output, err := cmd.CombinedOutput()
-	return normalizeNewlines(string(output)), err
+	return gofmt, normalizeNewlines(string(output)), err
 }
 
 func writeShellExecutable(t *testing.T, bash, path, body string) {

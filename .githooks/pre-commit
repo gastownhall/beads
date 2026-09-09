@@ -27,8 +27,12 @@ if [ -n "$staged_go_files" ]; then
         exit 1
     fi
 
-    # Auto-format and re-stage
-    echo "$staged_go_files" | xargs gofmt -w
+    # Auto-format and re-stage, through the go.mod-pinned gofmt. A bare PATH
+    # gofmt belongs to the host toolchain, and on a host newer than the go
+    # directive it rewrites and re-stages files into a form CI's gofmt rejects
+    # -- silently, on every Go commit. See scripts/ci/gofmt-bin.sh.
+    gofmt_bin="$(./scripts/ci/gofmt-bin.sh)"
+    echo "$staged_go_files" | xargs "$gofmt_bin" -w
     echo "$staged_go_files" | xargs git add
 
     # Lint changed code with auto-fix; block on remaining issues.

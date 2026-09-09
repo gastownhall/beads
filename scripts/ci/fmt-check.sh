@@ -8,8 +8,27 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 cd "$REPO_ROOT"
 
+# Which gofmt runs decides the verdict, so resolve it from go.mod instead of
+# PATH and report it. Naming the binary here is what makes a toolchain skew
+# legible as a skew, rather than as unformatted files in code no branch
+# touched. See scripts/ci/gofmt-bin.sh.
+GOFMT_BIN="$("$SCRIPT_DIR/gofmt-bin.sh")"
+
+describe_gofmt() {
+    local bin="$1" version=""
+    if command -v go >/dev/null 2>&1; then
+        version="$(go version "$bin" 2>/dev/null | awk '{ print $NF }')"
+    fi
+    if [[ -n "$version" ]]; then
+        printf '%s (%s)' "$version" "$bin"
+    else
+        printf '%s' "$bin"
+    fi
+}
+
 printf 'Checking Go formatting...\n'
-if UNFORMATTED="$(gofmt -l .)"; then
+printf 'Using gofmt %s\n' "$(describe_gofmt "$GOFMT_BIN")"
+if UNFORMATTED="$("$GOFMT_BIN" -l .)"; then
     :
 else
     status=$?
