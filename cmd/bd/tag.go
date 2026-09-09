@@ -37,6 +37,9 @@ Examples:
 		if err != nil {
 			return HandleErrorRespectJSON("tag %s: %v", args[0], err)
 		}
+		if err := checkLabelVocabulary(rootCtx, []string{label}); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		if usesProxiedServer() {
 			return runTagProxiedServer(rootCtx, args[0], label)

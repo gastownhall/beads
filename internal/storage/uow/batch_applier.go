@@ -175,6 +175,13 @@ func (r *uowApplyRun) applyCreate(ctx context.Context, index int, item *publicop
 	if !prepared.Issue.Ephemeral && !prepared.Issue.NoHistory && prepared.Issue.WispType != "" {
 		prepared.Issue.Ephemeral = true
 	}
+	// Vocabulary enforcement (bda-yxac): same caller-named-labels check as the
+	// single guarded create, attributed to the item that carried them.
+	if prepared.Issue != nil {
+		if err := checkLabelVocabularyForGuardedWrite(ctx, r.uw, prepared.Issue.Labels); err != nil {
+			return itemErr(err)
+		}
+	}
 	params, useWisp, err := createParams(prepared)
 	if err != nil {
 		return itemErr(validationError(err))
@@ -283,6 +290,13 @@ func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateReq
 		if err := authorizeAssigneeTransfer(ctx, r.uw, before, request); err != nil {
 			return publicops.UpdateResult{}, err
 		}
+	}
+	// Vocabulary enforcement (bda-yxac): the batch-apply update item runs the
+	// same guarded-verb check as issueOperations.Update.
+	if err := checkLabelVocabularyForGuardedWrite(ctx, r.uw, storageissueops.GuardedLabelPatchCandidates(
+		request.Patch.Labels.Replace.Set, request.Patch.Labels.Replace.Value,
+		request.Patch.Labels.Add, request.Patch.Labels.Remove)); err != nil {
+		return publicops.UpdateResult{}, err
 	}
 	// ActorMatches (not a verbatim compare, ga-v2k49): see the identical
 	// comment on issueOperations.Update's claimChanged in issue_operations.go

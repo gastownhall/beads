@@ -162,9 +162,27 @@ func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *te
 		CreateIssue: te.store.CreateIssue,
 		SetConfig:   te.store.SetConfig,
 		UpdateRaw:   te.store.UpdateIssue,
+		Exec: func(ctx context.Context, query string, args ...any) error {
+			te.exec(t, ctx, query, args...)
+			return nil
+		},
 		QueryScalar: func(ctx context.Context, query string, args []any, dest ...any) error {
 			te.queryScalar(t, ctx, query, args, dest...)
 			return nil
 		},
 	}
+}
+
+func TestEmbeddedIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "labelvocab")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "labelvocab"))
+}
+
+func TestEmbeddedIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "labelvocabcreate")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "labelvocabcreate"))
 }

@@ -384,6 +384,84 @@ bd list --status closed --label urgent --json | jq -r '.[].id' | while read id; 
 done
 ```
 
+### Vocabulary Registry
+
+Labels are free-form by default: any team member (or agent) can write any
+label on any issue. For a project that wants a curated set instead, bd has an
+opt-in vocabulary registry -- a list of labels the project has declared,
+with an optional description each.
+
+```bash
+# Declare a label
+bd label define backend --description "Server-side work"
+bd label define frontend --description "Client-side work"
+
+# List the registry, with descriptions and in-use counts
+bd label defined
+
+# Remove a label from the registry (does not touch issues that carry it)
+bd label undefine frontend
+```
+
+Declaring a label changes nothing about what you can write by itself. What
+happens when someone writes a label that is *not* in the registry is
+controlled by a separate config knob:
+
+```bash
+bd config set labels.vocabulary open      # default -- no behavior change
+bd config set labels.vocabulary warn      # write proceeds, warns on stderr
+bd config set labels.vocabulary enforce   # write is refused
+```
+
+- **`open`** (the default): identical to a project with no registry at all.
+- **`warn`**: the write goes through, but bd prints a warning naming the
+  undefined label, and suggests the registered spelling when the only
+  difference is case (writing `Backend` when `backend` is registered).
+- **`enforce`**: the write is refused, naming `bd label define` as the
+  remedy.
+
+The check only runs on interactive label writes -- `bd create -l`,
+`bd update --add-label`/`--set-labels`, `bd label add`, `bd label propagate`,
+`bd tag`, and `bd q --labels`. It judges the labels the write would actually
+LAND: removal wins, so `--add-label X --remove-label X` passes even when `X`
+is undefined, because `X` never reaches the issue.
+
+**This edge check is advisory, and it is not the only place `enforce` is
+checked -- but it is the only place for every writer.** `bd create`,
+`bd update --add-label`/`--set-labels`, and `bd label add` (which applies as
+an update patch) all land through the same guarded mutation transaction on
+every backend, direct or proxied, and that transaction re-verifies
+`enforce` on its own before committing -- the edge check above is early,
+named feedback for those three, not the only thing standing between an
+undefined label and the database. `bd label propagate` and `bd tag` write
+labels through a lower-level path that never enters that guarded
+transaction, so for those two the edge check above *is* the only
+enforcement: a write that reached the same underlying label write without
+going through this CLI would not be refused. `bd cook --persist` goes
+further -- it does not call the edge check either, so a cooked formula's
+labels are written exactly as given, in every mode, including `enforce`.
+This is the current, deliberate scope of the guard, not an oversight still
+to be found; `bd doctor` reports the resulting drift (undefined labels in
+use, case-variant clusters) no matter which of these paths wrote it.
+
+Two failure modes deliberately fail OPEN (the write proceeds as if the mode
+were `open`): a config read error, and a vocabulary registry read error. We
+chose availability over enforcement on storage faults -- a broken registry
+must not lock every label write in the workspace. **It never runs on
+import** (`bd import`, JSONL replay):
+an imported issue keeps every label it arrives with, defined or not,
+regardless of the configured mode. This keeps `enforce` mode safe to turn on
+for a team's day-to-day writes without it ever blocking a migration or a
+restore from a backup.
+
+`bd label define` also adds a light spelling discipline to the registry
+itself: defining a label that collides with an already-defined one only by
+case (defining `Backend` when `backend` is already registered) is rejected,
+naming the existing spelling. This does not rewrite any label already
+written on an issue in a different case -- `bd doctor` reports those
+case-variant clusters (e.g. `Backend`/`backend` both in use) as an advisory
+finding, since only a human can decide which spelling should win.
+
 ## Integration with Git Workflow
 
 Labels are stored in the Dolt database and synced automatically with all issue data:
