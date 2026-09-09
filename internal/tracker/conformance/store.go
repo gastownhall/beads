@@ -25,6 +25,7 @@ type Store struct {
 	// search silently gets wrong. Empty unless a test seeds it, so every
 	// other assertion is unaffected.
 	Wisps map[string]*types.Issue
+	Deps  map[string]map[string]struct{}
 
 	LastSync  string
 	Mutations int
@@ -54,14 +55,31 @@ func (s *Store) ApplyIssueUpdate(ctx context.Context, id string, updates map[str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if issue := s.Issues[id]; issue != nil && labels != nil {
-		issue.Labels = append([]string(nil), labels...)
+		issue.Labels = normalizedLabels(labels)
 	}
 	return nil
 }
 
+func normalizedLabels(labels []string) []string {
+	seen := make(map[string]struct{}, len(labels))
+	result := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		result = append(result, label)
+	}
+	return result
+}
+
 // NewStore returns an empty fake tracker store.
 func NewStore() *Store {
-	return &Store{Issues: map[string]*types.Issue{}, Wisps: map[string]*types.Issue{}, Config: map[string]string{}, Metadata: map[string]string{}}
+	return &Store{Issues: map[string]*types.Issue{}, Wisps: map[string]*types.Issue{}, Deps: map[string]map[string]struct{}{}, Config: map[string]string{}, Metadata: map[string]string{}}
 }
 
 // Open returns the store as a unit-of-work target. The call is intentionally
@@ -184,12 +202,23 @@ func (s *Store) UpdateIssue(_ context.Context, id string, updates map[string]int
 	return nil
 }
 
-// AddDependency is a no-op in the minimal fixture.
-func (s *Store) AddDependency(context.Context, *types.Dependency, string) error {
+// AddDependency stores the dependency relation in the minimal fixture.
+func (s *Store) AddDependency(_ context.Context, dep *types.Dependency, _ string) error {
 	s.mu.Lock()
+	if s.Deps[dep.IssueID] == nil {
+		s.Deps[dep.IssueID] = map[string]struct{}{}
+	}
+	s.Deps[dep.IssueID][dep.DependsOnID] = struct{}{}
 	s.Mutations++
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *Store) HasDependency(issueID, dependsOnID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.Deps[issueID][dependsOnID]
+	return ok
 }
 
 func cloneMap(in map[string]string) map[string]string {
