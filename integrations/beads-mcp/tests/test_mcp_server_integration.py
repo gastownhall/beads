@@ -145,30 +145,69 @@ async def test_show_issue_tool(mcp_client):
     created = json.loads(create_result.content[0].text)
     issue_id = created["id"]
 
+    await mcp_client.call_tool(
+        "comment",
+        {"issue_id": issue_id, "text": "Verified chronology"},
+    )
+    comments_result = await mcp_client.call_tool("comments", {"issue_id": issue_id})
+    expected_comments = json.loads(comments_result.content[0].text)
+
     # Show the issue
     show_result = await mcp_client.call_tool("show", {"issue_id": issue_id})
 
     issue = json.loads(show_result.content[0].text)
     assert issue["id"] == issue_id
     assert issue["title"] == "Issue to show"
+    assert issue["comment_count"] == len(expected_comments) == 1
+    assert issue["comments_omitted"] is False
+    assert [comment["id"] for comment in issue["comments"]] == [comment["id"] for comment in expected_comments]
+
+    fields_result = await mcp_client.call_tool(
+        "show",
+        {"issue_id": issue_id, "fields": ["comment_count", "comments_omitted", "comments"]},
+    )
+    projected = json.loads(fields_result.content[0].text)
+    assert projected["comment_count"] == 1
+    assert projected["comments_omitted"] is False
+    assert [comment["id"] for comment in projected["comments"]] == [expected_comments[0]["id"]]
 
 
 @pytest.mark.asyncio
 async def test_list_issues_tool(mcp_client):
     """Test list_issues tool."""
+    import json
+
     # Create some issues first
-    await mcp_client.call_tool("create", {"title": "Issue 1", "priority": 0, "issue_type": "bug", "brief": False})
+    first_result = await mcp_client.call_tool(
+        "create", {"title": "Issue 1", "priority": 0, "issue_type": "bug", "brief": False}
+    )
+    first_issue = json.loads(first_result.content[0].text)
     await mcp_client.call_tool(
         "create", {"title": "Issue 2", "priority": 1, "issue_type": "feature", "brief": False}
+    )
+    await mcp_client.call_tool(
+        "comment",
+        {"issue_id": first_issue["id"], "text": "List chronology"},
     )
 
     # List all issues
     result = await mcp_client.call_tool("list", {})
 
-    import json
-
     issues = json.loads(result.content[0].text)
     assert len(issues) >= 2
+    listed = next(issue for issue in issues if issue["id"] == first_issue["id"])
+    assert listed["comment_count"] == 1
+    assert listed["comments_omitted"] is True
+
+    comments_result = await mcp_client.call_tool(
+        "list",
+        {"fields": ["id", "comment_count", "comments_omitted", "comments"]},
+    )
+    projected_issues = json.loads(comments_result.content[0].text)
+    projected = next(issue for issue in projected_issues if issue["id"] == first_issue["id"])
+    assert projected["comment_count"] == 1
+    assert projected["comments_omitted"] is False
+    assert [comment["text"] for comment in projected["comments"]] == ["List chronology"]
 
     # List with status filter
     result = await mcp_client.call_tool("list", {"status": "open"})
@@ -367,6 +406,10 @@ async def test_ready_work_tool(mcp_client):
             "dep_type": "blocks",
         },
     )
+    await mcp_client.call_tool(
+        "comment",
+        {"issue_id": ready_issue["id"], "text": "Ready chronology"},
+    )
 
     # Get ready work
     result = await mcp_client.call_tool("ready", {"limit": 100})
@@ -375,6 +418,9 @@ async def test_ready_work_tool(mcp_client):
     ready_ids = [issue["id"] for issue in ready_issues]
     assert ready_issue["id"] in ready_ids
     assert blocked_issue["id"] not in ready_ids
+    our_ready = next(issue for issue in ready_issues if issue["id"] == ready_issue["id"])
+    assert our_ready["comment_count"] == 1
+    assert our_ready["comments_omitted"] is True
 
 
 @pytest.mark.asyncio
@@ -626,6 +672,10 @@ async def test_blocked_tool(mcp_client):
             "dep_type": "blocks",
         },
     )
+    await mcp_client.call_tool(
+        "comment",
+        {"issue_id": blocked_issue["id"], "text": "Blocked chronology"},
+    )
 
     # Get blocked issues
     result = await mcp_client.call_tool("blocked", {})
@@ -639,6 +689,8 @@ async def test_blocked_tool(mcp_client):
     our_blocked = next(issue for issue in blocked_issues if issue["id"] == blocked_issue["id"])
     assert our_blocked["blocked_by_count"] >= 1
     assert blocking_issue["id"] in our_blocked["blocked_by"]
+    assert our_blocked["comment_count"] == 1
+    assert our_blocked["comments_omitted"] is True
 
 
 @pytest.mark.asyncio
@@ -910,11 +962,13 @@ async def test_show_brief(mcp_client):
     show_result = await mcp_client.call_tool("show", {"issue_id": issue_id, "brief": True})
 
     data = json.loads(show_result.content[0].text)
-    # BriefIssue has only: id, title, status, priority
+    # BriefIssue keeps identification plus comment completeness metadata.
     assert data["id"] == issue_id
     assert data["title"] == "Show brief test"
     assert data["status"] == "open"
     assert "priority" in data
+    assert data["comment_count"] == 0
+    assert data["comments_omitted"] is False
     # Should NOT have full Issue fields
     assert "description" not in data
     assert "dependencies" not in data
@@ -1009,11 +1063,13 @@ async def test_list_brief(mcp_client):
 
     assert len(issues) >= 2
     for issue in issues:
-        # BriefIssue has only: id, title, status, priority
+        # BriefIssue keeps identification plus comment completeness metadata.
         assert "id" in issue
         assert "title" in issue
         assert "status" in issue
         assert "priority" in issue
+        assert "comment_count" in issue
+        assert "comments_omitted" in issue
         # Should NOT have full Issue fields
         assert "description" not in issue
         assert "issue_type" not in issue
@@ -1033,11 +1089,13 @@ async def test_ready_brief(mcp_client):
 
     assert len(issues) >= 1
     for issue in issues:
-        # BriefIssue has only: id, title, status, priority
+        # BriefIssue keeps identification plus comment completeness metadata.
         assert "id" in issue
         assert "title" in issue
         assert "status" in issue
         assert "priority" in issue
+        assert "comment_count" in issue
+        assert "comments_omitted" in issue
         # Should NOT have full Issue fields
         assert "description" not in issue
 
