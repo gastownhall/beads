@@ -44,6 +44,82 @@ func TestSchemaAfterInit(t *testing.T) {
 		}
 	}
 
+	// Additional column/index spot-checks (be-jxsqm): broader coverage than
+	// the D4v2-specific block above, across the tables this migration set
+	// touches most.
+	spotChecks := map[string][]string{
+		"issues": {
+			"due_at", "rig", "role_type", "agent_state",
+			"hook_bead", "role_bead", "await_type", "event_kind",
+			"idx_issues_status_updated_at", "idx_issues_defer_until",
+			"idx_issues_external_ref",
+		},
+		"dependencies": {
+			"thread_id", "metadata", "idx_dependencies_thread",
+			"idx_dep_type_issue", "fk_dep_issue",
+		},
+		"wisps": {
+			"defer_until", "due_at", "rig", "idx_wisps_status",
+		},
+		"wisp_dependencies": {
+			"thread_id", "metadata", "fk_wisp_dep_issue_target",
+			"idx_wisp_dep_type", "idx_wisp_dep_type_issue",
+		},
+	}
+
+	for table, checks := range spotChecks {
+		var stmt, name string
+		row := db.QueryRowContext(ctx, "SHOW CREATE TABLE `"+table+"`")
+		if err := row.Scan(&name, &stmt); err != nil {
+			t.Errorf("SHOW CREATE TABLE %s: %v", table, err)
+			continue
+		}
+		for _, check := range checks {
+			if !strings.Contains(stmt, check) {
+				t.Errorf("table %s: expected %q in CREATE statement, not found", table, check)
+			}
+		}
+	}
+
+	// issues.defer_until: checked against INFORMATION_SCHEMA.COLUMNS directly
+	// rather than by substring on SHOW CREATE TABLE. "idx_issues_defer_until"
+	// (checked above) contains "defer_until" as a substring, so a bare
+	// substring check for the column name would be trivially satisfied by the
+	// index name alone and never independently prove the column exists.
+	var deferUntilType sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'issues' AND COLUMN_NAME = 'defer_until'
+	`).Scan(&deferUntilType); err != nil {
+		t.Fatalf("reading issues.defer_until column: %v", err)
+	}
+	if !deferUntilType.Valid {
+		t.Errorf("issues table missing column defer_until")
+	}
+
+	// --- Verify views ---
+
+	for _, view := range []string{"ready_issues", "blocked_issues"} {
+		if _, err := db.ExecContext(ctx, "SELECT 1 FROM `"+view+"` LIMIT 0"); err != nil {
+			t.Errorf("view %s not queryable: %v", view, err)
+		}
+	}
+
+	// --- Verify default config ---
+
+	// Migration 0016 (0016_default_config.up.sql) INSERT IGNOREs exactly 9
+	// keys; no later up-migration touches rows matching those keys (0030
+	// only removes keys matching '%.last_sync'). A drift here means some
+	// migration added or removed a default config key without updating this
+	// pin.
+	var configCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM config").Scan(&configCount); err != nil {
+		t.Fatalf("counting config rows: %v", err)
+	}
+	if configCount != 9 {
+		t.Errorf("config rows: got %d, want 9", configCount)
+	}
+
 	var maxVersion int
 	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
 		t.Fatalf("reading max schema_migrations version: %v", err)

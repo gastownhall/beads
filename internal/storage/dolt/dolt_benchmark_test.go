@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -2138,6 +2139,202 @@ func BenchmarkContentHashColumnProbe(b *testing.B) {
 		}
 	})
 }
+
+// =============================================================================
+// Date-index benchmarks (be-eei / D4v2)
+// =============================================================================
+
+// seedForSummaryBench populates the store with N issues: roughly equal splits
+// across priority/status/type and 25% wisp share, so the benchmark exercises
+// both the issues and wisps tables plus label hydration.
+//
+// Labels and UpdatedAt are assigned from each row's zero-based, batch-global
+// index (benchLabelForIndex / benchUpdatedAtForIndex below) rather than a
+// per-row derived value, and UpdatedAt is spread across the last 90 days
+// rather than left at "now" for every row — see be-jxsqm finding #3: the read
+// benchmarks this seeds for need a query result that is a real minority of
+// the seeded set, not 0% or 100%.
+//
+// Accepts testing.TB (not *testing.B) so both the *testing.B benchmarks below
+// and TestSeedForSummaryBench_LabelsAndDatesAreWired (a *testing.T
+// correctness check) can share this one implementation.
+func seedForSummaryBench(tb testing.TB, store *DoltStore, totalN int) {
+	tb.Helper()
+	ctx := context.Background()
+	numWisps := totalN / 4
+	numPerms := totalN - numWisps
+	now := time.Now().UTC()
+	const maxDays = 90
+
+	// Batch creates to keep setup fast.
+	const batch = 500
+	statuses := []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusClosed}
+	types_ := []types.IssueType{types.TypeTask, types.TypeBug, types.TypeFeature, types.TypeEpic}
+
+	for start := 0; start < numPerms; start += batch {
+		end := start + batch
+		if end > numPerms {
+			end = numPerms
+		}
+		chunk := make([]*types.Issue, 0, end-start)
+		for i := start; i < end; i++ {
+			iss := &types.Issue{
+				ID:        fmt.Sprintf("sum-perm-%d", i),
+				Title:     fmt.Sprintf("summary perm %d", i),
+				Status:    statuses[i%len(statuses)],
+				Priority:  i % 5,
+				IssueType: types_[i%len(types_)],
+				Assignee:  fmt.Sprintf("user-%d", i%7),
+				UpdatedAt: benchUpdatedAtForIndex(now, i, totalN, maxDays),
+			}
+			chunk = append(chunk, iss)
+		}
+		if err := store.CreateIssuesWithFullOptions(ctx, chunk, "bench", storage.BatchCreateOptions{
+			SkipPrefixValidation: true,
+		}); err != nil {
+			tb.Fatalf("create perms batch %d: %v", start, err)
+		}
+		// Tag a subset of perms with labels so label hydration has work to do.
+		for j, iss := range chunk {
+			if benchLabelForIndex(start + j) {
+				if err := store.AddLabel(ctx, iss.ID, "perf", "bench"); err != nil {
+					tb.Fatalf("add label: %v", err)
+				}
+			}
+		}
+	}
+
+	// Wisps must be created individually (CreateIssues path routes them based on Ephemeral).
+	for i := 0; i < numWisps; i++ {
+		iss := &types.Issue{
+			Title:     fmt.Sprintf("summary wisp %d", i),
+			Status:    types.StatusOpen,
+			Priority:  i % 5,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+			UpdatedAt: benchUpdatedAtForIndex(now, numPerms+i, totalN, maxDays),
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			tb.Fatalf("create wisp %d: %v", i, err)
+		}
+	}
+}
+
+// FR-5 read benchmarks. bd stale → GetStaleIssues ultimately runs
+// `WHERE status IN (...) AND updated_at < ?` on issues (issueops/stale.go);
+// migration 0052 adds composite idx_issues_status_updated_at so the planner
+// should take an index range scan instead of the pre-D4v2 full scan.
+func benchmarkGetStaleIssues(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	filter := types.StaleFilter{Days: 30, Limit: 50}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetStaleIssues(ctx, filter); err != nil {
+			b.Fatalf("GetStaleIssues: %v", err)
+		}
+	}
+}
+
+func BenchmarkGetStaleIssues_1K(b *testing.B)  { benchmarkGetStaleIssues(b, 1000) }
+func BenchmarkGetStaleIssues_10K(b *testing.B) { benchmarkGetStaleIssues(b, 10000) }
+func BenchmarkGetStaleIssues_50K(b *testing.B) { benchmarkGetStaleIssues(b, 50000) }
+
+// bd query updated>7d style shapes. Baseline measurement for bare date
+// predicates — D4v2 (be-eei) does not serve bare updated_at without a
+// status filter (composite is status-leading prefix only), so this query
+// is expected to full-scan. The benchmark is kept to document the gap and
+// to detect unintended regressions from the composite change.
+func benchmarkSearchIssuesDateRange(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	// "Updated in the last 7 days" — typical bd query date predicate.
+	cutoff := time.Now().AddDate(0, 0, -7)
+	filter := types.IssueFilter{UpdatedAfter: &cutoff}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.SearchIssues(ctx, "", filter); err != nil {
+			b.Fatalf("SearchIssues date range: %v", err)
+		}
+	}
+}
+
+func BenchmarkSearchIssues_UpdatedAfter_1K(b *testing.B) {
+	benchmarkSearchIssuesDateRange(b, 1000)
+}
+func BenchmarkSearchIssues_UpdatedAfter_10K(b *testing.B) {
+	benchmarkSearchIssuesDateRange(b, 10000)
+}
+func BenchmarkSearchIssues_UpdatedAfter_50K(b *testing.B) {
+	benchmarkSearchIssuesDateRange(b, 50000)
+}
+
+// Write-regression gate. be-eei §8 guardrail 5: <= 10% regression in
+// CreateIssue / UpdateIssue at 10K existing rows vs pre-D4v2 HEAD, measured
+// at -count>=5 with benchstat -geomean. The variants below seed N rows then
+// measure a single write so each operation pays the full per-row
+// index-maintenance cost. D4v2 swaps one single-column status index for a
+// composite and adds one standalone defer_until index — net +1 index
+// relative to pre-D4v2 HEAD, projected ~+4.4% CreateIssue regression.
+
+func benchmarkCreateIssueWithExisting(b *testing.B, existingN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, existingN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		issue := &types.Issue{
+			Title:       fmt.Sprintf("Write regression %d-%d", existingN, i),
+			Description: "Write regression probe",
+			Status:      types.StatusOpen,
+			Priority:    (i % 4) + 1,
+			IssueType:   types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "bench"); err != nil {
+			b.Fatalf("CreateIssue: %v", err)
+		}
+	}
+}
+
+func BenchmarkCreateIssue_Existing1K(b *testing.B)  { benchmarkCreateIssueWithExisting(b, 1000) }
+func BenchmarkCreateIssue_Existing10K(b *testing.B) { benchmarkCreateIssueWithExisting(b, 10000) }
+
+func benchmarkUpdateIssueWithExisting(b *testing.B, existingN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, existingN)
+
+	ctx := context.Background()
+	// Target a stable seeded row — seedForSummaryBench creates permanent
+	// issues with IDs shaped "sum-perm-<n>".
+	targetID := "sum-perm-0"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		updates := map[string]interface{}{
+			"description": fmt.Sprintf("Update %d", i),
+		}
+		if err := store.UpdateIssue(ctx, targetID, updates, "bench"); err != nil {
+			b.Fatalf("UpdateIssue: %v", err)
+		}
+	}
+}
+
+func BenchmarkUpdateIssue_Existing1K(b *testing.B)  { benchmarkUpdateIssueWithExisting(b, 1000) }
+func BenchmarkUpdateIssue_Existing10K(b *testing.B) { benchmarkUpdateIssueWithExisting(b, 10000) }
 
 // =============================================================================
 // Summary/date-index bench seeding (be-jxsqm)
