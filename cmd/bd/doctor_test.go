@@ -148,9 +148,7 @@ func TestRunDiagnostics_JSONSkipsNetworkUpdateChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prevJSON := jsonOutput
-	jsonOutput = true
-	t.Cleanup(func() { jsonOutput = prevJSON })
+	pinJSONOutput(t, true)
 
 	result := runDiagnostics(tmpDir)
 

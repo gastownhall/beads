@@ -21,11 +21,11 @@ func TestWhereCommand_ReadsPrefixFromEmbeddedStore(t *testing.T) {
 	initConfigForTest(t)
 
 	originalCmdCtx := cmdCtx
-	originalJSONOutput := jsonOutput
+	// Pin the current value so t.Cleanup owns its restoration.
+	pinJSONOutput(t, jsonOutput)
 	originalRootCtx := rootCtx
 	defer func() {
 		cmdCtx = originalCmdCtx
-		jsonOutput = originalJSONOutput
 		rootCtx = originalRootCtx
 	}()
 
@@ -78,7 +78,7 @@ func TestWhereCommand_ReadsPrefixFromEmbeddedStore(t *testing.T) {
 		dbFlag.Changed = originalFlagChanged
 	})
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	rootCtx = context.Background()
 
 	if err := withStorage(rootCtx, nil, dbDir, func(currentStore storage.DoltStorage) error {

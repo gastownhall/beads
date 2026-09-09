@@ -113,23 +113,6 @@ func runGatherReadyInput(t *testing.T, cmd *cobra.Command, resolveCap func(*cobr
 	return out
 }
 
-// pinJSONOutput fixes the package-level --json state for the duration of a
-// test and puts it back afterwards.
-//
-// gatherReadyInput reports its usage errors through HandleErrorRespectJSON, so
-// this global alone decides whether they land as text on stderr or as a JSON
-// object on stdout. jsonOutput is not per-test state: several cmd/bd tests set
-// it and never restore it (saveAndRestoreGlobals, which a number of them use,
-// does not cover it), so a test that reads it instead of setting it passes
-// under a narrow -run and fails in a full-package run depending on what ran
-// first. Every test below that asserts on where a message went pins it.
-func pinJSONOutput(t *testing.T, on bool) {
-	t.Helper()
-	restore := jsonOutput
-	jsonOutput = on
-	t.Cleanup(func() { jsonOutput = restore })
-}
-
 // configureDirectoryLabel points directory.labels at the test's own working
 // directory: GetDirectoryLabels resolves against the cwd, so the test has to
 // own both ends.
