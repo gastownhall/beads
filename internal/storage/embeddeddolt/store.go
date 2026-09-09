@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -178,8 +179,16 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 		return nil, fmt.Errorf("embeddeddolt: resolving beads dir: %w", err)
 	}
 	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
-	if _, err := os.Stat(dataDir); err != nil {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		// A dangling symlink is unreadable storage, not proof of absence.
+		if _, linkErr := os.Lstat(dataDir); os.IsNotExist(err) && os.IsNotExist(linkErr) {
+			return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w: %w", dataDir, dberrors.ErrDatabaseNotFound, err)
+		}
 		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, err)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, dberrors.ErrDatabaseNotFound)
 	}
 
 	s := &EmbeddedDoltStore{

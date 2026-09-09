@@ -175,6 +175,21 @@ its own — `--discard-remote` is not required to trigger it.
 A plain `bd init` over an initialized workspace does not reach either code:
 the local-safety guard refuses it with an ordinary error before this point.
 
+The preflight inspects existing issues and wisps without running schema
+migrations. It can count older schemas without upgrading them. Metadata left
+by an interrupted first initialization does not require destruction confirmation
+when the configured database is confirmed absent.
+
+If the database can be inspected but has tables without an `issues` table,
+preflight lists those tables and reports the issue count as unknown. Replacing
+this unrecognized schema requires typing `destroy unknown issues` interactively
+or supplying the correct destroy token non-interactively.
+
+If the store cannot be inspected (for example, invalid metadata, a permission
+error, or a connection failure), initialization refuses with `cannot verify
+existing issues`. A destroy token does not bypass this refusal; restore access
+to the configured database before retrying.
+
 **Recovery paths**
 
 ### 1. Export first, then proceed
