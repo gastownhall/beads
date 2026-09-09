@@ -339,7 +339,12 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 	}
 
 	engine := tracker.NewEngine(lt, trackerStore, actor)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	// JSON output is a single machine-readable document. Dry-run plans and
+	// conflict messages are normally routed through OnMessage, so suppress
+	// their text rendering here and retain the structured result below.
+	if !jsonOutput {
+		engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	}
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	engine.PullHooks = buildLinearPullHooksForStore(ctx, trackerStore, linearPullHookOptions{
