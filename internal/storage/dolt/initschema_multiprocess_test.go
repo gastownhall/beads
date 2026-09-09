@@ -75,7 +75,7 @@ func TestHelperSchemaInit(t *testing.T) {
 	// with N processes on one fresh database, N-1 of them are supposed to lose
 	// the lock and come back. #5880 made the same change in this file's
 	// TestMultiProcessSchemaInit_DoltVerify and missed this subprocess helper.
-	_, err = initSchemaOnDBWithRetry(ctx, db)
+	_, err = initSchemaOnDBWithRetry(ctx, db, defaultPoolReadTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: initSchemaOnDBWithRetry: %v\n", err)
 		os.Exit(1)
@@ -301,7 +301,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 			// retry wrapper (store.go's initSchema), which exists precisely so
 			// contended GET_LOCK attempts converge instead of one unlucky
 			// waiter failing outright.
-			_, err = initSchemaOnDBWithRetry(egCtx, db)
+			_, err = initSchemaOnDBWithRetry(egCtx, db, defaultPoolReadTimeout)
 			return err
 		})
 	}
