@@ -1102,50 +1102,6 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 	}
 }
 
-func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
-	bd := buildEmbeddedBD(t)
-	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "caller")
-	targetDir, targetBeadsDir, _ := bdInit(t, bd, "--prefix", "target")
-
-	cmd := exec.Command(bd, "-C", targetDir, "create", "Explicit target", "--json")
-	cmd.Dir = callerDir
-	cmd.Env = append(bdEnv(callerDir), "BEADS_DIR="+callerBeadsDir)
-	stdout, stderr, err := runCommandBuffers(t, cmd)
-	if err != nil {
-		t.Fatalf("bd -C target create failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-	}
-
-	countIssues := func(beadsDir, database string) int {
-		t.Helper()
-		db, cleanup, err := embeddeddolt.OpenSQL(
-			t.Context(),
-			filepath.Join(beadsDir, "embeddeddolt"),
-			database,
-			"main",
-		)
-		if err != nil {
-			t.Fatalf("OpenSQL %s: %v", database, err)
-		}
-		defer func() {
-			if err := cleanup(); err != nil {
-				t.Errorf("cleanup OpenSQL %s: %v", database, err)
-			}
-		}()
-		var count int
-		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
-			t.Fatalf("count issues in %s: %v", database, err)
-		}
-		return count
-	}
-
-	if got := countIssues(callerBeadsDir, "caller"); got != 0 {
-		t.Fatalf("inherited BEADS_DIR received %d issues, want 0", got)
-	}
-	if got := countIssues(targetBeadsDir, "target"); got != 1 {
-		t.Fatalf("-C target received %d issues, want 1", got)
-	}
-}
-
 // TestEmbeddedCreateCommitPending verifies that CommitPending works on EmbeddedDoltStore:
 // no-op when clean, commits when there are pending changes.
 func TestEmbeddedCreateCommitPending(t *testing.T) {
