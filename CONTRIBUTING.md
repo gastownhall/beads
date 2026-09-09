@@ -315,6 +315,14 @@ dlv debug ./cmd/bd -- create "Test issue"
 4. Push tag: `git push origin v0.x.0`
 5. GitHub Actions will build and publish
 
+The pre-push version gate requires Go and validates each `v*` release tag
+against the checkout's canonical version. A batch containing different release
+versions is refused; push only the tag matching this checkout.
+
+`bd preflight` finds the nearest Beads source module by walking ancestor
+directories, checking both source markers and the module identity. Its version
+check runs directly in Go; `scripts/check-versions.sh` remains a Bash entrypoint.
+
 ## Questions?
 
 - Check existing [issues](https://github.com/gastownhall/beads/issues)

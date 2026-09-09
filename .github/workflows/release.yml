@@ -35,18 +35,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify tag matches version.go
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          code_version="$(grep 'Version = ' cmd/bd/version.go | sed 's/.*"\(.*\)".*/\1/')"
-          if [ "$tag_version" != "$code_version" ]; then
-            echo "ERROR: tag v$tag_version does not match cmd/bd/version.go ($code_version)" >&2
-            exit 1
-          fi
-          echo "OK: tag and version.go agree on $code_version"
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
 
-      - name: Check version consistency
-        run: ./scripts/check-versions.sh
+      - name: Verify tag and released versions
+        run: ./scripts/check-versions.sh --expect "${GITHUB_REF_NAME#v}"
 
   release-package-mcp:
     name: Release Package Gate (MCP)
