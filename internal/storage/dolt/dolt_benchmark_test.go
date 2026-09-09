@@ -2194,28 +2194,51 @@ func seedForSummaryBench(tb testing.TB, store *DoltStore, totalN int) {
 		}); err != nil {
 			tb.Fatalf("create perms batch %d: %v", start, err)
 		}
-		// Tag a subset of perms with labels so label hydration has work to do.
-		for j, iss := range chunk {
-			if benchLabelForIndex(start + j) {
-				if err := store.AddLabel(ctx, iss.ID, "perf", "bench"); err != nil {
-					tb.Fatalf("add label: %v", err)
+		// Tag the labelled subset of this chunk in one transaction (one
+		// DOLT_COMMIT) instead of one AddLabel call per label: at 50K rows,
+		// ~50% labelled, that was ~25K individual transactions and the
+		// dominant cost of seeding (be-jxsqm review round 2, non-blocking #3).
+		if err := store.RunInTransaction(ctx, "bd: bench label seed", func(tx storage.Transaction) error {
+			for j, iss := range chunk {
+				if benchLabelForIndex(start + j) {
+					if err := tx.AddLabel(ctx, iss.ID, "perf", "bench"); err != nil {
+						return err
+					}
 				}
 			}
+			return nil
+		}); err != nil {
+			tb.Fatalf("add labels batch %d: %v", start, err)
 		}
 	}
 
-	// Wisps must be created individually (CreateIssues path routes them based on Ephemeral).
-	for i := 0; i < numWisps; i++ {
-		iss := &types.Issue{
-			Title:     fmt.Sprintf("summary wisp %d", i),
-			Status:    types.StatusOpen,
-			Priority:  i % 5,
-			IssueType: types.TypeTask,
-			Ephemeral: true,
-			UpdatedAt: benchUpdatedAtForIndex(now, numPerms+i, totalN, maxDays),
+	// Wisps are Ephemeral, so CreateIssuesWithFullOptions takes the all-wisps
+	// fast path (one SQL transaction, no DOLT_COMMIT) for each chunk instead
+	// of one CreateIssue call — and thus one transaction — per wisp. ID
+	// minting is identical to the single-issue path either way:
+	// CreateIssuesInTxWithContext calls CreateIssueInTxWithResult per issue
+	// inside the shared transaction, it does not mint IDs differently in
+	// bulk (be-jxsqm review round 2, non-blocking #3).
+	for start := 0; start < numWisps; start += batch {
+		end := start + batch
+		if end > numWisps {
+			end = numWisps
 		}
-		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
-			tb.Fatalf("create wisp %d: %v", i, err)
+		chunk := make([]*types.Issue, 0, end-start)
+		for i := start; i < end; i++ {
+			chunk = append(chunk, &types.Issue{
+				Title:     fmt.Sprintf("summary wisp %d", i),
+				Status:    types.StatusOpen,
+				Priority:  i % 5,
+				IssueType: types.TypeTask,
+				Ephemeral: true,
+				UpdatedAt: benchUpdatedAtForIndex(now, numPerms+i, totalN, maxDays),
+			})
+		}
+		if err := store.CreateIssuesWithFullOptions(ctx, chunk, "bench", storage.BatchCreateOptions{
+			SkipPrefixValidation: true,
+		}); err != nil {
+			tb.Fatalf("create wisps batch %d: %v", start, err)
 		}
 	}
 }
@@ -2285,6 +2308,15 @@ func BenchmarkSearchIssues_UpdatedAfter_50K(b *testing.B) {
 // index-maintenance cost. D4v2 swaps one single-column status index for a
 // composite and adds one standalone defer_until index — net +1 index
 // relative to pre-D4v2 HEAD, projected ~+4.4% CreateIssue regression.
+//
+// Both benchmarks drift off their own "at existingN rows" premise as b.N
+// rises within a single run: CreateIssue adds a row per iteration (so the
+// table is existingN+b.N-1 rows by the last one) and UpdateIssue appends an
+// event row per iteration to the same target ("sum-perm-0"). Immaterial at
+// the -benchtime/-count this gate actually runs with, but a benchstat reader
+// comparing a much higher -benchtime across HEADs should account for it
+// rather than treat "_Existing10K" as a fixed-size measurement throughout
+// (be-jxsqm review round 2, non-blocking #6).
 
 func benchmarkCreateIssueWithExisting(b *testing.B, existingN int) {
 	store, cleanup := setupBenchStore(b)
@@ -2357,14 +2389,37 @@ func benchLabelForIndex(index int) bool {
 // seedForSummaryBench left every row at "now": a Days:30 stale query
 // (cutoff = now-30d, see GetStaleIssuesInTx) matched zero rows at every
 // scale, and an UpdatedAfter:now-7d range query matched all of them.
+//
+// The spread is whole days, so at maxDays=90 there are only 91 distinct
+// updated_at values regardless of scale (~550 rows/value at 50K) — plenty
+// for a non-degenerate range scan, but coarser cardinality than the
+// composite index would see in practice; a sub-day spread would be a truer
+// read if that ever matters for a specific measurement (be-jxsqm review
+// round 2, non-blocking #5).
 func benchUpdatedAtForIndex(base time.Time, index, total, maxDays int) time.Time {
-	if total <= 1 {
-		return base
-	}
-	dayOffset := index * maxDays / (total - 1)
-	return base.AddDate(0, 0, -dayOffset)
+	return base.AddDate(0, 0, -benchDayOffsetForIndex(index, total, maxDays))
 }
 
+// benchDayOffsetForIndex is the integer day spread benchUpdatedAtForIndex
+// applies, factored out so a caller that needs the row/cutoff relationship
+// exactly (e.g. predicting which rows a Days:N or UpdatedAfter:now-Nd query
+// will match) can compare offsets directly instead of reconstructing it from
+// two independently-captured time.Time values, whose sub-second gap flips a
+// naive Before/After check right at the N-day boundary.
+func benchDayOffsetForIndex(index, total, maxDays int) int {
+	if total <= 1 {
+		return 0
+	}
+	return index * maxDays / (total - 1)
+}
+
+// TestBenchLabelForIndex_SplitsEvenlyAcrossScale pins benchLabelForIndex's
+// exact 50% split at three scales, so an edit that changes the fraction (or
+// makes it scale-dependent) fails loudly instead of silently changing every
+// consumer's label density. index%2==0 splitting evenly is arithmetically
+// guaranteed given the current implementation — this is a contract pin, not
+// a regression guard against skew the test could actually detect (be-jxsqm
+// review round 2, non-blocking #7).
 func TestBenchLabelForIndex_SplitsEvenlyAcrossScale(t *testing.T) {
 	for _, n := range []int{1000, 7500, 50000} {
 		labelled := 0
@@ -2374,7 +2429,7 @@ func TestBenchLabelForIndex_SplitsEvenlyAcrossScale(t *testing.T) {
 			}
 		}
 		if want := n / 2; labelled != want {
-			t.Errorf("n=%d: got %d labelled, want exactly %d (50%%) — label must split on position, not on a per-row derived value that skews with N", n, labelled, want)
+			t.Errorf("n=%d: got %d labelled, want exactly %d (50%%)", n, labelled, want)
 		}
 	}
 }
@@ -2426,24 +2481,71 @@ func TestSeedForSummaryBench_LabelsAndDatesAreWired(t *testing.T) {
 	defer cleanup()
 
 	const totalN = 200
+	const maxDays = 90
 	seedForSummaryBench(t, store, totalN)
 
 	ctx := context.Background()
 
-	stale, err := store.GetStaleIssues(ctx, types.StaleFilter{Days: 30, Limit: totalN})
+	// numPerms/numWisps mirror seedForSummaryBench's own split.
+	numWisps := totalN / 4
+	numPerms := totalN - numWisps
+	statuses := []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusClosed}
+
+	const staleDays = 30
+	stale, err := store.GetStaleIssues(ctx, types.StaleFilter{Days: staleDays, Limit: totalN})
 	if err != nil {
 		t.Fatalf("GetStaleIssues: %v", err)
 	}
-	if len(stale) == 0 || len(stale) == totalN {
-		t.Errorf("GetStaleIssues(Days:30) matched %d/%d seeded rows — want a non-trivial minority, not 0 or all", len(stale), totalN)
+	// GetStaleIssuesInTx excludes wisps (ephemeral) and, with no Status
+	// filter, defaults to open/in_progress only — so this must walk perms
+	// alone and skip the closed third, not just repeat the date predicate,
+	// or it overcounts (be-jxsqm review round 2, non-blocking #2).
+	wantStale := 0
+	for i := 0; i < numPerms; i++ {
+		if statuses[i%len(statuses)] == types.StatusClosed {
+			continue
+		}
+		if benchDayOffsetForIndex(i, totalN, maxDays) >= staleDays {
+			wantStale++
+		}
+	}
+	if len(stale) != wantStale {
+		t.Errorf("GetStaleIssues(Days:%d) matched %d/%d seeded rows, want exactly %d (open/in_progress perms whose seeded date predates the cutoff)", staleDays, len(stale), totalN, wantStale)
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -7)
+	const rangeDays = 7
+	cutoff := time.Now().AddDate(0, 0, -rangeDays)
 	inRange, err := store.SearchIssues(ctx, "", types.IssueFilter{UpdatedAfter: &cutoff})
 	if err != nil {
-		t.Fatalf("SearchIssues(UpdatedAfter: now-7d): %v", err)
+		t.Fatalf("SearchIssues(UpdatedAfter: now-%dd): %v", rangeDays, err)
 	}
-	if len(inRange) == 0 || len(inRange) >= totalN {
-		t.Errorf("SearchIssues(UpdatedAfter: now-7d) matched %d/%d seeded rows — want well under 100%%, not 0 or (near-)all", len(inRange), totalN)
+	// Unlike GetStaleIssues, SearchIssues applies no default status filter
+	// and does return wisps (verified separately: an unfiltered call returns
+	// all totalN rows), so every seeded index is in scope here.
+	wantInRange := 0
+	for g := 0; g < totalN; g++ {
+		if benchDayOffsetForIndex(g, totalN, maxDays) < rangeDays {
+			wantInRange++
+		}
+	}
+	if len(inRange) != wantInRange {
+		t.Errorf("SearchIssues(UpdatedAfter: now-%dd) matched %d/%d seeded rows, want exactly %d", rangeDays, len(inRange), totalN, wantInRange)
+	}
+
+	// Only perms are ever labelled, and benchLabelForIndex picks the same
+	// subset here as it does in seedForSummaryBench (be-jxsqm review round
+	// 2, non-blocking #2).
+	wantLabeled := 0
+	for i := 0; i < numPerms; i++ {
+		if benchLabelForIndex(i) {
+			wantLabeled++
+		}
+	}
+	labeled, err := store.GetIssuesByLabel(ctx, "perf")
+	if err != nil {
+		t.Fatalf("GetIssuesByLabel(perf): %v", err)
+	}
+	if len(labeled) != wantLabeled {
+		t.Errorf("GetIssuesByLabel(perf) returned %d issues, want %d (benchLabelForIndex-selected subset of %d perms)", len(labeled), wantLabeled, numPerms)
 	}
 }

@@ -44,30 +44,84 @@ func TestSchemaAfterInit(t *testing.T) {
 		}
 	}
 
-	// Additional column/index spot-checks (be-jxsqm): broader coverage than
-	// the D4v2-specific block above, across the tables this migration set
-	// touches most.
-	spotChecks := map[string][]string{
+	// Additional column/index/FK spot-checks (be-jxsqm): broader coverage
+	// than the D4v2-specific block above, across the tables this migration
+	// set touches most.
+	//
+	// Columns are checked by exact name via INFORMATION_SCHEMA.COLUMNS, one
+	// query per table, not by substring on SHOW CREATE TABLE: a substring
+	// check is satisfied by any superstring in the same CREATE statement —
+	// "rig" by the pre-existing column "original_size"
+	// (0001_create_issues.up.sql / 0020_create_wisps.up.sql), "defer_until"
+	// by the index name "idx_issues_defer_until" — and would stay green
+	// even if the named column were dropped entirely (round 1 #7 fixed the
+	// defer_until instance alone with a one-off query; round 2 non-blocking
+	// #4 found "rig" was still open the same way, so this folds every
+	// column check into the same exact-match mechanism instead of leaving
+	// a second special case). Index and FK names are left on the
+	// substring/SHOW CREATE TABLE check: every name below is long and
+	// specific enough that no table's other identifiers accidentally
+	// contain it.
+	columnChecks := map[string][]string{
 		"issues": {
 			"due_at", "rig", "role_type", "agent_state",
 			"hook_bead", "role_bead", "await_type", "event_kind",
+			"defer_until",
+		},
+		"dependencies": {
+			"thread_id", "metadata",
+		},
+		"wisps": {
+			"defer_until", "due_at", "rig",
+		},
+		"wisp_dependencies": {
+			"thread_id", "metadata",
+		},
+	}
+	indexChecks := map[string][]string{
+		"issues": {
 			"idx_issues_status_updated_at", "idx_issues_defer_until",
 			"idx_issues_external_ref",
 		},
 		"dependencies": {
-			"thread_id", "metadata", "idx_dependencies_thread",
-			"idx_dep_type_issue", "fk_dep_issue",
+			"idx_dependencies_thread", "idx_dep_type_issue", "fk_dep_issue",
 		},
 		"wisps": {
-			"defer_until", "due_at", "rig", "idx_wisps_status",
+			"idx_wisps_status",
 		},
 		"wisp_dependencies": {
-			"thread_id", "metadata", "fk_wisp_dep_issue_target",
-			"idx_wisp_dep_type", "idx_wisp_dep_type_issue",
+			"fk_wisp_dep_issue_target", "idx_wisp_dep_type",
+			"idx_wisp_dep_type_issue",
 		},
 	}
 
-	for table, checks := range spotChecks {
+	for table, cols := range columnChecks {
+		rows, err := db.QueryContext(ctx, `
+			SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+		`, table)
+		if err != nil {
+			t.Errorf("reading %s columns: %v", table, err)
+			continue
+		}
+		got := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				t.Fatalf("scanning %s column name: %v", table, err)
+			}
+			got[name] = true
+		}
+		rows.Close()
+		for _, col := range cols {
+			if !got[col] {
+				t.Errorf("table %s: missing column %q", table, col)
+			}
+		}
+	}
+
+	for table, checks := range indexChecks {
 		var stmt, name string
 		row := db.QueryRowContext(ctx, "SHOW CREATE TABLE `"+table+"`")
 		if err := row.Scan(&name, &stmt); err != nil {
@@ -79,22 +133,6 @@ func TestSchemaAfterInit(t *testing.T) {
 				t.Errorf("table %s: expected %q in CREATE statement, not found", table, check)
 			}
 		}
-	}
-
-	// issues.defer_until: checked against INFORMATION_SCHEMA.COLUMNS directly
-	// rather than by substring on SHOW CREATE TABLE. "idx_issues_defer_until"
-	// (checked above) contains "defer_until" as a substring, so a bare
-	// substring check for the column name would be trivially satisfied by the
-	// index name alone and never independently prove the column exists.
-	var deferUntilType sql.NullString
-	if err := db.QueryRowContext(ctx, `
-		SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'issues' AND COLUMN_NAME = 'defer_until'
-	`).Scan(&deferUntilType); err != nil {
-		t.Fatalf("reading issues.defer_until column: %v", err)
-	}
-	if !deferUntilType.Valid {
-		t.Errorf("issues table missing column defer_until")
 	}
 
 	// --- Verify views ---
