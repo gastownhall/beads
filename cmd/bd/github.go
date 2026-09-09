@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -12,8 +14,10 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/github"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // GitHubConfig holds GitHub connection configuration.
@@ -456,6 +460,28 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		return HandleError("%v", err)
 	}
 
+	// Relationship push pass: converge beads parent/child links and "blocks"
+	// dependencies into GitHub sub-issues and issue dependencies. Runs after
+	// the content sync so relationships stay correct even when issue content
+	// itself was unchanged and the main push loop skipped the issue.
+	//
+	// This pass deliberately leaves github.last_sync alone. That cursor is the
+	// engine's record of when local rows were last reconciled, and
+	// DetectConflicts treats every issue updated after it as a local edit;
+	// advancing it here would hide edits made since the engine set it from the
+	// next sync's conflict detection. The engine owns the cursor
+	// (internal/tracker/engine.go), and this pass writes no local rows.
+	var linksPushed int
+	if push {
+		var linkWarnings []string
+		warnLink := func(msg string) {
+			linkWarnings = append(linkWarnings, msg)
+			_, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+		}
+		linksPushed = pushGitHubDependencyLinks(ctx, gt, store, opts, githubSyncDryRun, out, warnLink)
+		result.Warnings = append(result.Warnings, linkWarnings...)
+	}
+
 	// Output results
 	if !githubSyncDryRun {
 		if result.Stats.Pulled > 0 {
@@ -464,6 +490,9 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		}
 		if result.Stats.Pushed > 0 {
 			_, _ = fmt.Fprintf(out, "✓ Pushed %d issues\n", result.Stats.Pushed)
+		}
+		if linksPushed > 0 {
+			_, _ = fmt.Fprintf(out, "✓ Synced %d relationship links\n", linksPushed)
 		}
 		if result.Stats.Conflicts > 0 {
 			_, _ = fmt.Fprintf(out, "→ Resolved %d conflicts\n", result.Stats.Conflicts)
@@ -476,6 +505,184 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// githubLinkSyncData holds the desired GitHub relationship links collected
+// from beads dependency state for the issues in scope of a sync/push pass.
+type githubLinkSyncData struct {
+	DesiredLinks []github.DependencyLink
+}
+
+// collectGitHubLinkSyncData walks the beads issues in scope of opts and
+// derives the GitHub relationship links (sub-issue for epic/child,
+// blocked_by for beads "blocks" dependencies) that should exist remotely.
+// Only issues already linked to GitHub (an ExternalRef that scope resolves to
+// an issue number in the configured repository) can contribute or receive a
+// link; refs pointing at another repository or host are skipped, since the
+// relationship endpoints take bare issue numbers scoped to one repo.
+//
+// The workspace read is issueops.Reader's, reached through the store's own
+// accessor so it carries whatever layers that store carries; the request it
+// takes is githubLinkSyncListRequest below.
+func collectGitHubLinkSyncData(ctx context.Context, st storage.Storage, scope github.RefScope, opts tracker.SyncOptions) (githubLinkSyncData, []string) {
+	if st == nil {
+		return githubLinkSyncData{}, []string{"GitHub relationship sync skipped: database not available"}
+	}
+
+	reader, err := st.IssueReader()
+	if err != nil {
+		return githubLinkSyncData{}, []string{fmt.Sprintf("GitHub relationship sync skipped: %v", err)}
+	}
+	page, err := reader.List(ctx, githubLinkSyncListRequest())
+	if err != nil {
+		return githubLinkSyncData{}, []string{fmt.Sprintf("GitHub relationship sync skipped: %v", err)}
+	}
+	allIssues := make([]*types.Issue, 0, len(page.Items))
+	for _, item := range page.Items {
+		if item == nil || item.Issue == nil {
+			continue
+		}
+		allIssues = append(allIssues, item.Issue)
+	}
+
+	scopedIssues := filterGitHubLinkScopedIssues(allIssues, opts)
+	scopedIssueIDs := make(map[string]bool, len(scopedIssues))
+	for _, issue := range scopedIssues {
+		if issue != nil && issue.ID != "" {
+			scopedIssueIDs[issue.ID] = true
+		}
+	}
+
+	var warnings []string
+	var desired []github.DependencyLink
+	for _, issue := range scopedIssues {
+		if issue.ExternalRef == nil {
+			continue
+		}
+		deps, err := st.GetDependenciesWithMetadata(ctx, issue.ID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("GitHub relationship sync skipped dependencies for %s: %v", issue.ID, err))
+			continue
+		}
+		for _, dep := range deps {
+			if !scopedIssueIDs[dep.ID] {
+				continue
+			}
+			switch dep.DependencyType {
+			case types.DepParentChild:
+				if link, ok := scope.SubIssueLinkFromParentChild(issue, dep); ok {
+					desired = append(desired, link)
+				}
+			case types.DepBlocks:
+				if link, ok := scope.BlockedByLinkFromBeadsDependency(issue, dep); ok {
+					desired = append(desired, link)
+				}
+			}
+		}
+	}
+
+	return githubLinkSyncData{DesiredLinks: desired}, warnings
+}
+
+// githubLinkSyncListRequest is the whole-workspace read the relationship pass
+// runs: every bead in both planes, at any status, of any type, unpaged.
+//
+// SCOPE IS NOT THIS REQUEST'S JOB. filterGitHubLinkScopedIssues narrows to the
+// tracker.SyncOptions the caller was given, the same way the engine's push loop
+// narrows the same unfiltered read with shouldPushIssue
+// (internal/tracker/engine.go). Expressing half that selection here in a second
+// vocabulary is how the two would drift, so this lifts every default a listing
+// applies rather than reproducing the engine's choices:
+//
+//	AllFlag         drops the default status exclusions, and with them the
+//	                pinned predicate. A relationship is still true for a closed
+//	                bead, and the engine pushes closed issues too.
+//	IncludeAllTypes drops the template, gate and infra type exclusions AND the
+//	                plane decision, so the wisps table is read. opts.
+//	                ExcludeEphemeral is what drops that plane, downstream, when
+//	                the caller asked for it.
+//	Limit           zero, not nil: nil takes the shared list default, which
+//	                would silently cap relationship sync at one page.
+//
+// SkipLabels and SkipCounts choose what is HYDRATED, never which rows match.
+// This pass reads ID, ExternalRef, IssueType and Ephemeral and nothing else,
+// and the counts are per-row aggregate joins the scan has no use for.
+func githubLinkSyncListRequest() issueops.ListRequest {
+	unlimited := 0
+	return issueops.ListRequest{
+		AllFlag:         true,
+		IncludeAllTypes: true,
+		Limit:           &unlimited,
+		SkipLabels:      true,
+		SkipCounts:      true,
+	}
+}
+
+func filterGitHubLinkScopedIssues(issues []*types.Issue, opts tracker.SyncOptions) []*types.Issue {
+	var issueIDSet map[string]bool
+	if len(opts.IssueIDs) > 0 {
+		issueIDSet = make(map[string]bool, len(opts.IssueIDs))
+		for _, id := range opts.IssueIDs {
+			issueIDSet[id] = true
+		}
+	}
+
+	result := make([]*types.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issueIDSet != nil && !issueIDSet[issue.ID] {
+			continue
+		}
+		if opts.ExcludeEphemeral && issue.Ephemeral {
+			continue
+		}
+		if len(opts.TypeFilter) > 0 && !slices.Contains(opts.TypeFilter, issue.IssueType) {
+			continue
+		}
+		if slices.Contains(opts.ExcludeTypes, issue.IssueType) {
+			continue
+		}
+		result = append(result, issue)
+	}
+	return result
+}
+
+// pushGitHubDependencyLinks runs the relationship push pass: it converts
+// beads epic/child links and "blocks" dependencies among the scoped issues
+// (per opts) into GitHub sub-issues and issue dependencies. Additive — stale
+// remote relationships are left untouched. Shared by `bd github sync` and
+// `bd github push` so both reach the same relationship parity. Dry-run plan
+// lines are written to out (unless --json); warnings are delivered via warn.
+// Returns the number of relationships created.
+func pushGitHubDependencyLinks(ctx context.Context, gt *github.Tracker, st storage.Storage, opts tracker.SyncOptions, dryRun bool, out io.Writer, warn func(string)) int {
+	if gt == nil {
+		return 0
+	}
+	linkData, collectWarnings := collectGitHubLinkSyncData(ctx, st, gt.RefScope(), opts)
+	for _, warning := range collectWarnings {
+		warn(warning)
+	}
+
+	resolver := gt.LinkResolver()
+	if resolver == nil || len(linkData.DesiredLinks) == 0 {
+		return 0
+	}
+
+	res := resolver.PushLinks(ctx, linkData.DesiredLinks, github.PushLinkOptions{
+		DryRun: dryRun,
+		OnPlan: func(link github.DependencyLink) {
+			if !jsonOutput {
+				_, _ = fmt.Fprintf(out, "  [dry-run] Would create GitHub %s relationship: #%d -> #%d\n",
+					link.LinkType, link.FromNumber, link.ToNumber)
+			}
+		},
+	})
+	for _, err := range res.Errors {
+		warn(fmt.Sprintf("GitHub relationship sync: %v", err))
+	}
+	return res.Created
 }
 
 // buildGitHubPushHooks creates PushHooks for GitHub-specific push behavior.
