@@ -247,6 +247,45 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	}
 }
 
+// TestPRCoreWrapperUsesNestedTimeoutBudgets pins the PR Core lane's two-level
+// budget: scripts/ci/pr-core.sh passes an explicit per-package -timeout
+// (TEST_TIMEOUT, the same knob scripts/test.sh reads; Go's 10m default is what
+// cmd/bd under -race was overrunning with zero failing tests), and both
+// pr-core-wrapper jobs carry a finite timeout-minutes above it so a genuine
+// hang still reports instead of riding the 360m runner default.
+func TestPRCoreWrapperUsesNestedTimeoutBudgets(t *testing.T) {
+	const (
+		goTimeoutMinutes  = 25
+		jobTimeoutMinutes = 45
+	)
+
+	script, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), "scripts", "ci", "pr-core.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTimeout := captureOne(t, `(?m)^TIMEOUT="\$\{TEST_TIMEOUT:-([0-9]+m)\}"$`, string(script), "scripts/ci/pr-core.sh")
+	if want := fmt.Sprintf("%dm", goTimeoutMinutes); gotTimeout != want {
+		t.Errorf("scripts/ci/pr-core.sh TEST_TIMEOUT default = %q, want %q", gotTimeout, want)
+	}
+	if !strings.Contains(string(script), `-timeout "$TIMEOUT" -race -short -skip '^TestEmbedded' ./...`) {
+		t.Errorf("scripts/ci/pr-core.sh go test walk does not pass -timeout \"$TIMEOUT\"")
+	}
+
+	for _, workflowName := range []string{"pr.yml", "main.yml"} {
+		t.Run(workflowName, func(t *testing.T) {
+			job := readCIWorkflow(t, workflowName).job(t, "pr-core-wrapper")
+			if job.TimeoutMinutes != jobTimeoutMinutes {
+				t.Errorf("pr-core-wrapper timeout = %d minutes, want %d", job.TimeoutMinutes, jobTimeoutMinutes)
+			}
+			if job.TimeoutMinutes <= goTimeoutMinutes {
+				t.Errorf("pr-core-wrapper timeout = %d minutes, want more than the %dm per-package go timeout",
+					job.TimeoutMinutes, goTimeoutMinutes)
+			}
+			assertStepRunsExactly(t, job, "Run PR core wrapper", "make ci-pr-core")
+		})
+	}
+}
+
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 	const (
 		storageTimeoutMinutes     = 15
