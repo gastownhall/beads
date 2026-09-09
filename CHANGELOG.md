@@ -185,6 +185,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd restore --json`, `bd admin compact --json`, `bd repo <add|remove|list|sync>
+  --json` and `bd migrate [sync|hooks|schema] --json` honor the flag again.**
+  Each of those commands registered its own local `--json` bound to the same
+  variable as the root persistent flag. pflag keeps the local flag and drops
+  the inherited one, so the root flag never read as "changed" and the pre-run
+  reset the output mode from config — the commands printed text unless
+  `json: true` was configured. The local registrations are gone (`bd preflight`
+  drops its unbound local copy too, so it now follows the configured default
+  like every other command), `--json` moves to the Global Flags section of
+  those commands' `--help`, and a guard test fails the build if a command
+  shadows the root flag again.
+
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
   unreachable store made prime omit the memory section entirely, so a session

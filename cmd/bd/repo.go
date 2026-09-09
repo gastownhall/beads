@@ -476,10 +476,6 @@ func init() {
 	repoCmd.AddCommand(repoListCmd)
 	repoCmd.AddCommand(repoSyncCmd)
 
-	repoAddCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON")
-	repoRemoveCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON")
-	repoListCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON")
-	repoSyncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON")
 	repoSyncCmd.Flags().Bool("verbose", false, "Show detailed sync progress")
 
 	rootCmd.AddCommand(repoCmd)
