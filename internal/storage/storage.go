@@ -394,6 +394,16 @@ type Storage interface {
 	// and intentionally different from the lexicographic storage comparator, so
 	// a storage-side id sorter here would diverge from SearchIssues rather than
 	// complete it.
+	//
+	// Two filter fields behave differently here than on SearchIssues, both
+	// because types.IssueSummary has no Dependencies field to populate:
+	// IncludeDependencies is a silent no-op (SearchIssues hydrates dependency
+	// records; this path has nowhere to put them, so a caller that needs them
+	// must use SearchIssues), while SkipLabels is honored exactly as it is
+	// there. Wisps are NOT excluded: the issues+wisps merge runs for any filter
+	// that does not set SkipWisps, and types.IssueSummary carries the four
+	// wisp-plane markers so a merged wisp row serializes identically to the one
+	// SearchIssues would return.
 	SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)
 
 	// Dependencies
