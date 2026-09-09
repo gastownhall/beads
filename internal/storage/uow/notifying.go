@@ -1279,6 +1279,23 @@ func (u *recordingLabelUC) RemoveLabel(ctx context.Context, issueID, label, acto
 	return nil
 }
 
+// RenameLabel records one update per touched issue/wisp, mirroring
+// HookFiringStore.RenameLabel on the DoltStorage plumbing (both fire on_update
+// per id). THE SNAPSHOT IS anyPlane, because RenameLabel sweeps both the
+// labels and wisp_labels tables together and the returned ids do not say
+// which plane each one belongs to - the same reason CompareAndSetMetadataKey
+// and ReleaseIssue above use it.
+func (u *recordingLabelUC) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	renamed, merged, ids, err = u.LabelUseCase.RenameLabel(ctx, oldLabel, newLabel, actor)
+	if err != nil {
+		return renamed, merged, ids, err
+	}
+	for _, id := range ids {
+		u.rec.record(opUpdate, u.snap.anyPlane(ctx, id))
+	}
+	return renamed, merged, ids, nil
+}
+
 func (u *recordingLabelUC) AddLabels(ctx context.Context, issueID string, labels []string, actor string) error {
 	if err := u.LabelUseCase.AddLabels(ctx, issueID, labels, actor); err != nil {
 		return err

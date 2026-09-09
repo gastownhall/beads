@@ -350,6 +350,71 @@ func TestEmbeddedLabel(t *testing.T) {
 		}
 	})
 
+	// ===== Label Rename =====
+
+	t.Run("label_rename_basic", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Rename basic", "--type", "task", "--label", "backend")
+		out := bdLabel(t, bd, dir, "rename", "backend", "server")
+		if !strings.Contains(out, "Renamed") {
+			t.Errorf("expected 'Renamed' in output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		if len(labels) != 1 || labels[0] != "server" {
+			t.Errorf("expected labels [server], got %v", labels)
+		}
+	})
+
+	t.Run("label_rename_merge", func(t *testing.T) {
+		onlyOld := bdCreate(t, bd, dir, "Rename merge only-old", "--type", "task", "--label", "wip-r")
+		both := bdCreate(t, bd, dir, "Rename merge both", "--type", "task",
+			"--label", "wip-r", "--label", "in-progress-r")
+
+		out := bdLabel(t, bd, dir, "rename", "wip-r", "in-progress-r")
+		if !strings.Contains(out, "Renamed") {
+			t.Errorf("expected 'Renamed' in output: %s", out)
+		}
+
+		labels := bdLabelListJSON(t, bd, dir, onlyOld.ID)
+		if len(labels) != 1 || labels[0] != "in-progress-r" {
+			t.Errorf("only-old: expected [in-progress-r], got %v", labels)
+		}
+		labels = bdLabelListJSON(t, bd, dir, both.ID)
+		if len(labels) != 1 || labels[0] != "in-progress-r" {
+			t.Errorf("both: expected exactly [in-progress-r] (no duplicate), got %v", labels)
+		}
+	})
+
+	t.Run("label_rename_dry_run_writes_nothing", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Rename dry run", "--type", "task", "--label", "dry-old")
+		out := bdLabel(t, bd, dir, "rename", "dry-old", "dry-new", "--dry-run")
+		if !strings.Contains(out, "Would rename") {
+			t.Errorf("expected 'Would rename' in dry-run output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		if len(labels) != 1 || labels[0] != "dry-old" {
+			t.Errorf("dry-run must not write: expected [dry-old] unchanged, got %v", labels)
+		}
+	})
+
+	t.Run("label_rename_zero_carrier_is_honest_noop", func(t *testing.T) {
+		out := bdLabel(t, bd, dir, "rename", "no-such-label-anywhere", "irrelevant")
+		if !strings.Contains(out, "No issues found") {
+			t.Errorf("expected 'No issues found' for a zero-carrier rename: %s", out)
+		}
+	})
+
+	t.Run("label_rename_identical_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "rename", "same-label", "same-label")
+	})
+
+	t.Run("label_rename_empty_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "rename", "", "new-name")
+	})
+
+	t.Run("label_rename_reserved_provides_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "rename", "plain-label", "provides:auth")
+	})
+
 	// ===== Error Cases =====
 
 	t.Run("label_add_empty_label", func(t *testing.T) {
