@@ -24,6 +24,39 @@ const (
 type doltSQLProvider struct {
 	defaultBranch string
 	db            *sql.DB
+	// preview: the command that opened this provider is an explicitly
+	// non-mutating preview (--dry-run, --inspect). The open creates no
+	// database and applies no migration.
+	preview bool
+}
+
+// ProviderOption tunes how a SQL-server unit-of-work provider opens. Options
+// are variadic so existing constructor call sites — every one of which wants
+// the ordinary mutating open — stay unchanged.
+type ProviderOption func(*providerOptions)
+
+type providerOptions struct {
+	// preview opens for a command that promised not to mutate anything
+	// (--dry-run, --inspect). Such a command must reach its own RunE before
+	// anything writes, so the open may neither CREATE DATABASE nor run
+	// MigrateUpWithLock: both happen during root pre-run, before the flag the
+	// user passed has had any effect.
+	preview bool
+}
+
+// WithPreview opens the provider for a non-mutating preview command.
+func WithPreview() ProviderOption {
+	return func(o *providerOptions) { o.preview = true }
+}
+
+func applyProviderOptions(opts []ProviderOption) providerOptions {
+	var resolved providerOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&resolved)
+		}
+	}
+	return resolved
 }
 
 var (
@@ -88,6 +121,21 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 		defer conn.Close()
 
 		ddl := db.NewDDLSQLRepository(conn)
+		if p.preview {
+			// Preview open: attach to the database that is already there and
+			// stop. No CreateDatabase, no MigrateUpWithLock — a --dry-run or
+			// --inspect that migrated the workspace before rendering its plan
+			// would be the exact side effect the flag exists to prevent.
+			if err := ddl.UseDatabase(ctx, database); err != nil {
+				if isSerializationError(err) {
+					return fmt.Errorf("uow: switching to database: %w", err)
+				}
+				return backoff.Permanent(fmt.Errorf(
+					"uow: database %q not found — preview commands (--dry-run, --inspect) never create or migrate a database; run the command without the preview flag first: %w",
+					database, err))
+			}
+			return nil
+		}
 		if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
 			return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
 		}
@@ -126,7 +174,7 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	return conn, nil
 }
 
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword string) (UnitOfWorkProvider, error) {
+func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword string, opts providerOptions) (UnitOfWorkProvider, error) {
 	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword))
 	if err != nil {
 		return nil, err
@@ -135,6 +183,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	initProvider := &doltSQLProvider{
 		defaultBranch: defaultBranch,
 		db:            initDB,
+		preview:       opts.preview,
 	}
 
 	if err := initProvider.initSchema(ctx, database); err != nil {
@@ -154,5 +203,6 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	return &doltSQLProvider{
 		defaultBranch: defaultBranch,
 		db:            dbConn,
+		preview:       opts.preview,
 	}, nil
 }

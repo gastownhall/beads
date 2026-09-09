@@ -22,6 +22,7 @@ func NewDoltServerUOWProvider(
 	rootUser string,
 	rootPassword string,
 	doltBinExec string,
+	opts ...ProviderOption,
 ) (UnitOfWorkProvider, error) {
 	if database == "" {
 		return nil, fmt.Errorf("uow: database name must not be empty (caller should default to %q)", "beads")
@@ -60,5 +61,5 @@ func NewDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword)
+	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, applyProviderOptions(opts))
 }

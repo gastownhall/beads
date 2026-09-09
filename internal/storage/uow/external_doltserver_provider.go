@@ -21,6 +21,7 @@ func NewExternalDoltServerUOWProvider(
 	external configfile.ExternalDoltConfig,
 	rootUser string,
 	rootPassword string,
+	opts ...ProviderOption,
 ) (UnitOfWorkProvider, error) {
 	if database == "" {
 		return nil, fmt.Errorf("uow: database name must not be empty (caller should default to %q)", "beads")
@@ -51,5 +52,5 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword)
+	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, applyProviderOptions(opts))
 }

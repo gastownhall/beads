@@ -24,6 +24,28 @@ const localVersionFile = ".local_version"
 // This function is best-effort - failures are silent to avoid disrupting commands.
 // Sets global variables versionUpgradeDetected and previousVersion if upgrade detected.
 func trackBdVersion() {
+	trackBdVersionFile(true)
+}
+
+// trackBdVersionPreview does the same detection but leaves .local_version
+// alone.
+//
+// The file is a ONE-SHOT signal: the version-bump reconciliation
+// (autoMigrateOnVersionBump, including the pre-0.56 recovery path) fires only
+// while the recorded version differs from this binary's. A preview command
+// correctly skips that reconciliation — but if it had also rewritten the file,
+// it would have consumed the signal on the way past, and the next ordinary
+// command would see a matching version and never reconcile at all. Whichever
+// command happened to be first after an upgrade would silently decide whether
+// the upgrade was ever finished.
+//
+// Not writing is safe in the other direction too: the marker is advisory and
+// the very next non-preview command writes it.
+func trackBdVersionPreview() {
+	trackBdVersionFile(false)
+}
+
+func trackBdVersionFile(persist bool) {
 	// Find the beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -46,7 +68,7 @@ func trackBdVersion() {
 
 	// Update local version file (best effort)
 	// Only write if version actually changed to minimize I/O
-	if lastVersion != Version {
+	if persist && lastVersion != Version {
 		_ = writeLocalVersion(localVersionPath, Version) // Best effort: version tracking is advisory
 	}
 
