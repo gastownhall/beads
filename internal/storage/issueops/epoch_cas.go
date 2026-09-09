@@ -187,12 +187,33 @@ func MintUnderEpochInTx(ctx context.Context, tx DBTX, storeID, id string) (strin
 	return address, nil
 }
 
+// mintedIDHasAddressAtEpochInTx reports whether mintedID has an address
+// minted under storeID at epoch — R20-n's retained-mapping exception: a
+// version that survives an epoch transition keeps its prior-epoch address
+// resolving once CurrentAddressForInTx (or a fresh MintUnderEpochInTx) has
+// carried its id forward into the current epoch. mintedID is never
+// recomputed from a bumped store_epoch (see the package doc above), so this
+// is a lookup for a second, later row sharing the same id, not a
+// derivation.
+func mintedIDHasAddressAtEpochInTx(ctx context.Context, tx DBTX, storeID, mintedID string, epoch int) (bool, error) {
+	var count int
+	err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM epoch_minted_addresses WHERE store_id = ? AND minted_id = ? AND minted_epoch = ?`,
+		storeID, mintedID, epoch,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("epoch CAS: check retained mapping for %s at epoch %d: %w", mintedID, epoch, err)
+	}
+	return count > 0, nil
+}
+
 // StillServesInTx reports whether address is still served under storeID's
 // CURRENT epoch: an address minted under an earlier epoch is no longer
-// served the moment the epoch has moved past it (R20-n), even though the
-// row itself is never deleted (ResolveEpochInTx must still be able to
-// answer for it). An address from a different store, or one never minted,
-// is not served either.
+// served once the epoch has moved past it, UNLESS its underlying id was
+// carried forward into the current epoch by a retained mapping (R20-n),
+// even though the row itself is never deleted (ResolveEpochInTx must still
+// be able to answer for it). An address from a different store, or one
+// never minted, is not served either.
 func StillServesInTx(ctx context.Context, tx DBTX, storeID, address string) (bool, error) {
 	row, found, err := readEpochMintedAddressInTx(ctx, tx, address)
 	if err != nil {
@@ -205,16 +226,25 @@ func StillServesInTx(ctx context.Context, tx DBTX, storeID, address string) (boo
 	if err != nil {
 		return false, fmt.Errorf("epoch CAS: still serves %s for %s: %w", address, storeID, err)
 	}
-	return row.mintedEpoch == epoch, nil
+	if row.mintedEpoch == epoch {
+		return true, nil
+	}
+	retained, err := mintedIDHasAddressAtEpochInTx(ctx, tx, storeID, row.mintedID, epoch)
+	if err != nil {
+		return false, fmt.Errorf("epoch CAS: still serves %s for %s: %w", address, storeID, err)
+	}
+	return retained, nil
 }
 
 // ResolveEpochInTx answers R20's epoch-only restriction for address: Live
-// while its minting epoch is still current, GoneReorganization once the
-// epoch has moved past it (R20-n — a reorganization, not a retention or
-// erasure outcome; RetentionFixture/R17 states are out of scope here), and
-// Unknown for an address this store never minted. ProducingStore is always
-// storeID: this file has no lineage/replica model to attribute a foreign
-// store to (unlike RetentionFixture's cross-store answers).
+// while its minting epoch is still current OR its id was carried forward
+// into the current epoch by a retained mapping (R20-n), GoneReorganization
+// once the epoch has moved past it with no such mapping (a reorganization,
+// not a retention or erasure outcome; RetentionFixture/R17 states are out
+// of scope here), and Unknown for an address this store never minted.
+// ProducingStore is always storeID: this file has no lineage/replica model
+// to attribute a foreign store to (unlike RetentionFixture's cross-store
+// answers).
 func ResolveEpochInTx(ctx context.Context, tx DBTX, storeID, address string) (EpochResolveResult, error) {
 	row, found, err := readEpochMintedAddressInTx(ctx, tx, address)
 	if err != nil {
@@ -228,6 +258,13 @@ func ResolveEpochInTx(ctx context.Context, tx DBTX, storeID, address string) (Ep
 		return EpochResolveResult{}, fmt.Errorf("epoch CAS: resolve %s for %s: %w", address, storeID, err)
 	}
 	if row.mintedEpoch == epoch {
+		return EpochResolveResult{Restriction: EpochRestrictionLive, ProducingStore: storeID, Epoch: &epoch}, nil
+	}
+	retained, err := mintedIDHasAddressAtEpochInTx(ctx, tx, storeID, row.mintedID, epoch)
+	if err != nil {
+		return EpochResolveResult{}, fmt.Errorf("epoch CAS: resolve %s for %s: %w", address, storeID, err)
+	}
+	if retained {
 		return EpochResolveResult{Restriction: EpochRestrictionLive, ProducingStore: storeID, Epoch: &epoch}, nil
 	}
 	return EpochResolveResult{Restriction: EpochRestrictionGoneReorganization, ProducingStore: storeID, Epoch: &epoch}, nil
