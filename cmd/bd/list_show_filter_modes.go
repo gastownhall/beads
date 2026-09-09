@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
@@ -47,6 +49,16 @@ import (
 // getHierarchicalChildren handles the --tree --parent combination logic.
 // baseFilter carries CLI filters (--type, --status, etc.) through the recursive walk.
 func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter) ([]*types.Issue, error) {
+	// Accept a short/partial parent ID the same way `bd history <id>` does
+	// (GH#4868's mechanism, not applied here before). Not-found IDs fall
+	// through unchanged so the existing "parent issue '%s' not found" path
+	// below still fires with the id the user actually typed.
+	if resolved, err := utils.ResolvePartialID(ctx, store, parentID); err == nil {
+		parentID = resolved
+	} else if errors.Is(err, utils.ErrAmbiguousID) {
+		return nil, err
+	}
+
 	// First verify that the parent issue exists
 	var parentIssue *types.Issue
 	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
