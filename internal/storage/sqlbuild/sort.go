@@ -164,7 +164,8 @@ func summarySortFields(s *types.IssueSummary) sortFields {
 // otherwise a post-merge limit cut keeps a different row set than SQL
 // selected.
 func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {
-	return lessFields(issueSortFields(a), issueSortFields(b), sortBy, sortDesc)
+	af, bf := issueSortFields(a), issueSortFields(b)
+	return lessFields(&af, &bf, sortBy, sortDesc)
 }
 
 // LessSummary is Less's sibling for types.IssueSummary, used by the
@@ -172,10 +173,18 @@ func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {
 // shares lessFields with Less so the two can never drift on the NULL/tie-break
 // rules that make a post-merge limit cut safe.
 func LessSummary(a, b *types.IssueSummary, sortBy string, sortDesc bool) bool {
-	return lessFields(summarySortFields(a), summarySortFields(b), sortBy, sortDesc)
+	af, bf := summarySortFields(a), summarySortFields(b)
+	return lessFields(&af, &bf, sortBy, sortDesc)
 }
 
-func lessFields(a, b sortFields, sortBy string, sortDesc bool) bool {
+// lessFields takes its operands by pointer, not by value. sortFields is a
+// ~150-byte struct and this runs O(n log n) times inside the issues+wisps
+// merge sort, so passing it by value copied it twice here and twice more into
+// sortKeyCompareFields on every comparison. The adapters above still build one
+// value per row — that normalization is what buys Less and LessSummary a
+// single shared body — but nothing copies it again after that. The locals do
+// not escape, so they stay on the stack and this adds no allocation.
+func lessFields(a, b *sortFields, sortBy string, sortDesc bool) bool {
 	if sortBy == "id" {
 		// This key used to ignore sortDesc, so a reversed id merge kept the
 		// byte-FIRST rows (the sibling bug idSrcPage.sortGoSide's doc named).
@@ -206,7 +215,7 @@ func lessFields(a, b sortFields, sortBy string, sortDesc bool) bool {
 
 // sortKeyCompareFields three-way compares the primary sort column in
 // ascending order, with MySQL NULL-first semantics for nullable columns.
-func sortKeyCompareFields(a, b sortFields, sortBy string) int {
+func sortKeyCompareFields(a, b *sortFields, sortBy string) int {
 	switch sortBy {
 	case "created":
 		return compareTimesAsc(a.createdAt, b.createdAt)
