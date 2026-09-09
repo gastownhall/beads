@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve existing `.gitignore` line endings when removing a managed Beads
+  section whose final line has no terminator ([#6205](https://github.com/gastownhall/beads/issues/6205)).
+
 ### Added
 
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
