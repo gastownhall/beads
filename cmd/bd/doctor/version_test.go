@@ -53,7 +53,9 @@ func TestIsValidSemver(t *testing.T) {
 		{"valid large numbers", "100.200.300", true},
 		{"empty string", "", false},
 		{"invalid letters", "1.2.a", false},
-		{"invalid format", "v1.2.3", false},
+		// A leading "v" is the Go module spelling bd itself may stamp and
+		// write (GH#6152); it used to be rejected here.
+		{"leading v (Go module form)", "v1.2.3", true},
 		{"trailing dot", "1.2.", false},
 		{"leading dot", ".1.2", false},
 		{"double dots", "1..2", false},
@@ -334,5 +336,39 @@ func TestCheckMetadataVersionTracking_SinglePartVersion(t *testing.T) {
 				t.Errorf("Name = %q, want %q", check.Name, "Version Tracking")
 			}
 		})
+	}
+}
+
+// A leading "v" is the canonical spelling of a Go module version, and a build
+// stamped from a Go pseudo-version reports it — bd writes that string into
+// .local_version itself. The version helpers used to parse digits first, so
+// "v1" read as invalid (and as 0 in comparisons) while a prerelease suffix
+// passed by accident (gastownhall/beads#6152).
+func TestVersionHelpersAcceptALeadingV(t *testing.T) {
+	for _, v := range []string{"v1.2.3", "1.2.3", "v1.1.1-0.20260805093327-bf97b73749ac", "1.3.0-rc.1", "v0.30.0"} {
+		if !IsValidSemver(v) {
+			t.Errorf("IsValidSemver(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "v", "abc", "1.2.x", "v.1.2"} {
+		if IsValidSemver(v) {
+			t.Errorf("IsValidSemver(%q) = true, want false", v)
+		}
+	}
+	for _, tt := range []struct {
+		v1, v2 string
+		want   int
+	}{
+		{"v1.2.3", "1.2.3", 0},
+		{"v2.0.0", "1.9.9", 1},
+		{"1.0.0", "v1.0.1", -1},
+		{"v1.1.1-0.20260805093327-bf97b73749ac", "1.1.1-0.20260805093327-bf97b73749ac", 0},
+	} {
+		if got := CompareVersions(tt.v1, tt.v2); got != tt.want {
+			t.Errorf("CompareVersions(%q, %q) = %d, want %d", tt.v1, tt.v2, got, tt.want)
+		}
+	}
+	if got := ParseVersionParts("v1.2.3"); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("ParseVersionParts(%q) = %v, want [1 2 3]", "v1.2.3", got)
 	}
 }
