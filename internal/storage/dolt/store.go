@@ -4539,6 +4539,28 @@ func (s *DoltStore) recomputeBlockedAfterPullUnchecked(ctx context.Context, from
 	return nil
 }
 
+// CountIsBlockedInconsistencies reports how many issue and wisp rows carry a
+// stale is_blocked flag — the read-only detection behind the bd doctor
+// "Blocked State" check (bd-6dnrw.37); the repair is RecomputeAllBlocked.
+//
+// Uses withReadTxLongTimeout rather than withReadTx: the count runs a
+// correlated-EXISTS scan over every issue and wisp, a known-long read on
+// large or busy stores, and the shared pool's ReadTimeout (see buildServerDSN)
+// otherwise kills it with an intermittent "invalid connection" / i/o timeout —
+// blinding exactly the check that detects stale flags, on precisely the loaded
+// shared servers where a stale is_blocked row is most likely to hide ready
+// work. The full-pass repair takes the same route for the same reason
+// (see recomputeAllBlocked).
+func (s *DoltStore) CountIsBlockedInconsistencies(ctx context.Context) (int64, error) {
+	var stale int64
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
+		var err error
+		stale, err = issueops.CountIsBlockedInconsistenciesInTx(ctx, tx)
+		return err
+	})
+	return stale, err
+}
+
 // RecomputeAllBlocked recomputes is_blocked for every issue and wisp in one full
 // pass and returns the number of rows it corrected. It is the mode-independent
 // repair behind 'bd recompute-blocked' and 'bd doctor --fix' (bd-6dnrw.37): the
