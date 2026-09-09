@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// TestMoleculeFrontDoorManagedLocalPositive exercises the production
+// TestManagedLocalProxiedMoleculeFrontDoorPositive exercises the production
 // fresh-project topology: bd owns a loopback proxy and a local Dolt child.
 // The external-TCP parity test covers the shared server lane; this test keeps
 // the managed-local path honest without introducing a second storage API.
-func TestMoleculeFrontDoorManagedLocalPositive(t *testing.T) {
+func TestManagedLocalProxiedMoleculeFrontDoorPositive(t *testing.T) {
 	requireManagedLocalProxiedEnv(t)
 	bd := buildEmbeddedBD(t)
 	p := bdManagedLocalInit(t, bd, "mf", 5*time.Minute)

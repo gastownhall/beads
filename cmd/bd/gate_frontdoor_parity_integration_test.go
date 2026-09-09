@@ -34,10 +34,10 @@ func (r gateFrontDoorRunner) mustRun(t *testing.T, bd string, args ...string) st
 	return stdout
 }
 
-// TestGateFrontDoorDirectServerProxyParity keeps gate lifecycle writes on the
+// TestProxiedServerGateFrontDoorDirectServerProxyParity keeps gate lifecycle writes on the
 // same UOW front in direct SQL and proxied-server modes. Gate IDs are generated
 // independently, so assertions compare stable lifecycle and blocking facts.
-func TestGateFrontDoorDirectServerProxyParity(t *testing.T) {
+func TestProxiedServerGateFrontDoorDirectServerProxyParity(t *testing.T) {
 	requireSharedProxiedServer(t)
 	bd := buildEmbeddedBD(t)
 	directProject := newServerModeProject(t, bd, "mg")
@@ -102,12 +102,9 @@ func TestGateFrontDoorDirectServerProxyParity(t *testing.T) {
 		// `gate check` is the watcher-facing read/transaction boundary. A
 		// resolved human gate is a clean no-op and must still exit successfully.
 		checked := r.mustRun(t, bd, "gate", "check", "--type", "human")
-		// A closed gate is not an error; the watcher reports the explicit
-		// no-open-gates result (or, on older clients, a resolved count).
-		lowerChecked := strings.ToLower(strings.TrimSpace(checked))
-		if !strings.Contains(lowerChecked, "no open gates") &&
-			!strings.Contains(lowerChecked, "resolved") {
-			t.Errorf("[%s] gate check output lacks a clean result:\n%s", r.name, checked)
+		const wantGateCheck = "No open gates of type 'human' found."
+		if strings.TrimSpace(checked) != wantGateCheck {
+			t.Errorf("[%s] gate check output = %q, want %q", r.name, checked, wantGateCheck)
 		}
 
 		// A bead gate exercises the transactional watcher path: once the

@@ -163,7 +163,7 @@ func TestNormalizeMoleculeMetadataPreservesNonEmpty(t *testing.T) {
 	}
 }
 
-func TestMoleculeFrontDoorDirectServerProxyParity(t *testing.T) {
+func TestProxiedServerMoleculeFrontDoorDirectServerProxyParity(t *testing.T) {
 	requireSharedProxiedServer(t)
 	bd := buildEmbeddedBD(t)
 
@@ -358,7 +358,7 @@ func writeMoleculeFormulaFixture(t *testing.T, r moleculeFrontDoorRunner, f *for
 	}
 }
 
-func TestMoleculeFrontDoorWriteParity(t *testing.T) {
+func TestProxiedServerMoleculeFrontDoorWriteParity(t *testing.T) {
 	requireSharedProxiedServer(t)
 	bd := buildEmbeddedBD(t)
 	directProject := newServerModeProject(t, bd, "mw")
@@ -385,6 +385,7 @@ func TestMoleculeFrontDoorWriteParity(t *testing.T) {
 			t.Errorf("[%s] mol bond result = %+v, want mw-a/compound_molecule", r.name, got)
 		}
 	}
+	var bondedMolecules []any
 	for _, r := range modes {
 		show := normalizedMoleculeJSON(t, r.mustRun(t, bd, "mol", "show", "mw-a", "--json"))
 		if !strings.Contains(strings.TrimSpace(r.mustRun(t, bd, "dep", "list", "mw-b", "--json")), "mw-a") {
@@ -393,6 +394,10 @@ func TestMoleculeFrontDoorWriteParity(t *testing.T) {
 		if show == nil {
 			t.Errorf("[%s] bonded molecule show returned nil", r.name)
 		}
+		bondedMolecules = append(bondedMolecules, show)
+	}
+	if len(bondedMolecules) == 2 && !reflect.DeepEqual(bondedMolecules[0], bondedMolecules[1]) {
+		t.Errorf("mol bond direct/proxy state diverged: direct=%#v proxy=%#v", bondedMolecules[0], bondedMolecules[1])
 	}
 
 	// Formula instantiation is a second positive write family. Compare the
@@ -402,7 +407,6 @@ func TestMoleculeFrontDoorWriteParity(t *testing.T) {
 	for _, r := range modes {
 		writeMoleculeFormulaFixture(t, r, f)
 	}
-	var pourCreated, wispCreated int
 	for _, r := range modes {
 		var pour struct {
 			Created int    `json:"created"`
@@ -414,12 +418,6 @@ func TestMoleculeFrontDoorWriteParity(t *testing.T) {
 		if pour.Created != 2 || pour.Phase != "liquid" {
 			t.Errorf("[%s] mol pour = %+v, want created=2 phase=liquid", r.name, pour)
 		}
-		if pourCreated == 0 {
-			pourCreated = pour.Created
-		} else if pour.Created != pourCreated {
-			t.Errorf("[%s] mol pour created=%d, want %d", r.name, pour.Created, pourCreated)
-		}
-
 		var wisp struct {
 			Created int    `json:"created"`
 			Phase   string `json:"phase"`
@@ -429,11 +427,6 @@ func TestMoleculeFrontDoorWriteParity(t *testing.T) {
 		}
 		if wisp.Created != 2 || wisp.Phase != "vapor" {
 			t.Errorf("[%s] mol wisp create = %+v, want created=2 phase=vapor", r.name, wisp)
-		}
-		if wispCreated == 0 {
-			wispCreated = wisp.Created
-		} else if wisp.Created != wispCreated {
-			t.Errorf("[%s] mol wisp created=%d, want %d", r.name, wisp.Created, wispCreated)
 		}
 	}
 
@@ -474,13 +467,16 @@ func TestMoleculeFrontDoorWriteParity(t *testing.T) {
 			t.Fatalf("[%s] parse mol burn: %v", r.name, err)
 		}
 		deleted := burn.TotalDeleted
-		if deleted == 0 {
-			// Direct mode emits the single-molecule result shape while the
-			// proxied route wraps it in BatchBurnResult.
+		if r.name == "direct-sql" {
+			// The direct one-ID route deliberately returns BurnResult while the
+			// proxied route returns BatchBurnResult. Assert each wire shape and
+			// compare their shared deletion semantics below.
+			if burn.TotalDeleted != 0 || burn.DeletedCount != 2 {
+				t.Errorf("[%s] mol burn = %+v, want deleted_count=2 single-result shape", r.name, burn)
+			}
 			deleted = burn.DeletedCount
-		}
-		if deleted != 2 {
-			t.Errorf("[%s] mol burn deleted=%d, want 2", r.name, deleted)
+		} else if burn.TotalDeleted != 2 || burn.DeletedCount != 0 {
+			t.Errorf("[%s] mol burn = %+v, want total_deleted=2 batch-result shape", r.name, burn)
 		}
 		burnResults = append(burnResults, deleted)
 	}
