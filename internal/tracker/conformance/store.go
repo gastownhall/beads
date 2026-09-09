@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 
@@ -35,9 +36,15 @@ type Store struct {
 func (s *Store) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Snapshot{Issues: make(map[string]types.Issue, len(s.Issues)), Config: cloneMap(s.Config), Metadata: cloneMap(s.Metadata), LastSync: s.LastSync}
+	out := Snapshot{Issues: make(map[string]types.Issue, len(s.Issues)), Dependencies: make(map[string][]string, len(s.Deps)), Config: cloneMap(s.Config), Metadata: cloneMap(s.Metadata), LastSync: s.LastSync}
 	for id, issue := range s.Issues {
 		out.Issues[id] = *cloneIssue(issue)
+	}
+	for id, targets := range s.Deps {
+		for target := range targets {
+			out.Dependencies[id] = append(out.Dependencies[id], target)
+		}
+		sort.Strings(out.Dependencies[id])
 	}
 	return out
 }
@@ -197,6 +204,9 @@ func (s *Store) UpdateIssue(_ context.Context, id string, updates map[string]int
 	}
 	if v, ok := updates["external_ref"].(string); ok {
 		issue.ExternalRef = &v
+	}
+	if v, ok := updates["status"].(string); ok {
+		issue.Status = types.Status(v)
 	}
 	s.Mutations++
 	return nil

@@ -13,10 +13,11 @@ import (
 
 // Snapshot is the normalized local state inspected by the shared suite.
 type Snapshot struct {
-	Issues   map[string]types.Issue
-	Config   map[string]string
-	Metadata map[string]string
-	LastSync string
+	Issues       map[string]types.Issue
+	Dependencies map[string][]string
+	Config       map[string]string
+	Metadata     map[string]string
+	LastSync     string
 }
 
 // Fixture contains deterministic HTTP and local-store dependencies for one
@@ -60,7 +61,7 @@ type Setup struct {
 	Snapshot func(context.Context) (Snapshot, error)
 	// SeedExternalRefPlanes prepares the durable/wisp collision that proves
 	// durable issues win external-ref lookup. It returns the durable issue ID.
-	SeedExternalRefPlanes func(context.Context) (string, error)
+	SeedExternalRefPlanes func(context.Context) (string, string, error)
 	DependencyExists      func(context.Context) (bool, error)
 	Expected              Expected
 	Refusal               func(context.Context) (*tracker.SyncResult, error)
@@ -112,7 +113,7 @@ func Run(t *testing.T, build func(*testing.T, *Fixture) Setup) {
 				break
 			}
 		}
-		if pulled == nil || len(pulled.Labels) != 1 || pulled.Labels[0] != "bug" || pulled.Status != types.StatusOpen {
+		if pulled == nil || len(pulled.Labels) != 1 || pulled.Labels[0] != "bug" || pulled.Status != types.StatusClosed {
 			t.Fatalf("pull lost normalized fields: %+v", pulled)
 		}
 		dependencyExists, err := s.DependencyExists(ctx)
@@ -194,7 +195,7 @@ func Run(t *testing.T, build func(*testing.T, *Fixture) Setup) {
 
 	t.Run("external_ref_resolution_prefers_issue_plane", func(t *testing.T) {
 		s := newSetup(t)
-		want, err := s.SeedExternalRefPlanes(ctx)
+		want, onlyID, err := s.SeedExternalRefPlanes(ctx)
 		if err != nil {
 			t.Fatalf("seed external-ref planes: %v", err)
 		}
@@ -207,6 +208,10 @@ func Run(t *testing.T, build func(*testing.T, *Fixture) Setup) {
 		// row instead of the durable bead — a silent write to the wrong issue.
 		if got == nil || got.ID != want {
 			t.Fatalf("external_ref %q resolved to %v, want issues-plane %q: the issues plane must win over the wisp plane", s.Expected.ExternalRef, got, want)
+		}
+		got, err = s.Store.GetIssueByExternalRef(ctx, s.Expected.ExternalRef+"-wisp-only")
+		if err != nil || got == nil || got.ID != onlyID {
+			t.Fatalf("wisp-only external_ref resolved to (%v, %v), want %q", got, err, onlyID)
 		}
 	})
 
