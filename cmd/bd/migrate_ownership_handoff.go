@@ -44,8 +44,8 @@ var ownershipHandoffCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Annotations: map[string]string{
-		skipStoreAnnotation:    "1",
-		"bd:skip_legacy_guard": "1",
+		skipStoreAnnotation:       "1",
+		skipLegacyGuardAnnotation: "1",
 	},
 	RunE: runOwnershipHandoffCommand,
 }
@@ -164,7 +164,7 @@ func init() {
 	ownershipHandoffCmd.Flags().String("socket", "", "Unix socket beneath --root (alternative to --host/--port)")
 	ownershipHandoffCmd.Flags().String("journal", "", "Handoff journal path (only canonical <root>/ownership-handoff.json is accepted)")
 	ownershipHandoffCmd.Flags().Bool("dry-run", false, "Validate identity without opening a provider or mutating state")
-	ownershipHandoffCmd.Flags().Bool("resume", false, "Resume a journaled handoff (the default retry behavior)")
-	ownershipHandoffCmd.Flags().Bool("retry", false, "Retry a journaled handoff (alias for --resume)")
+	ownershipHandoffCmd.Flags().Bool("resume", false, "Accepted for automation readability; never changes behavior (a handoff always resumes from its journal)")
+	ownershipHandoffCmd.Flags().Bool("retry", false, "Alias for --resume; never changes behavior")
 	migrateCmd.AddCommand(ownershipHandoffCmd)
 }

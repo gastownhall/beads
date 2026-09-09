@@ -100,7 +100,12 @@ type Result struct {
 
 // Hooks are provider-owned operations. StopLegacy must refuse unless it can
 // positively identify the process as the legacy owner; it must never kill an
-// unknown process.
+// unknown process. It must, however, report an identity-matching process that
+// is already gone as a successful stop, so a retry whose predecessor lost its
+// checkpoint converges instead of wedging. Configure must be non-mutating:
+// only a StopLegacy failure can report a partial mutation, so a Configure that
+// mutates the target and then fails is reported as mutates=false. See
+// engdocs/design/ownership-handoff-contract.md for the full obligation list.
 type Hooks struct {
 	Snapshot   func(context.Context, Request) (Snapshot, error)
 	Configure  func(context.Context, Request, Snapshot) error
@@ -387,6 +392,25 @@ func result(j Journal, mutates bool) Result {
 	return Result{Phase: j.Phase, Owner: j.Owner, CityRoot: j.Request.CityRoot, Root: j.Request.Root, Database: j.Request.Database, Workspace: j.Request.Workspace, Endpoint: j.Request.Endpoint, Mutates: mutates, ErrorCode: j.ErrorCode}
 }
 
+// identityConflictError explains a journal/request identity mismatch in
+// operator terms. The refusal is fail-closed and sticky — every later attempt
+// meets the same journal — so the message names the journal it is refusing,
+// both identities, and whether discarding the journal would lose a recorded
+// mutation.
+func identityConflictError(journalPath string, j Journal, r Request) error {
+	remediation := "it records a mutation, so reconcile the scope with the lifecycle owner before removing it"
+	if !mutationOccurred(j) {
+		remediation = "it records no mutation, so removing it while no handoff is running is safe"
+	}
+	return fmt.Errorf("handoff journal identity conflicts with request: %s holds %s at phase %s, request is %s; %s",
+		journalPath, handoffIdentity(j.Request), j.Phase, handoffIdentity(r), remediation)
+}
+
+func handoffIdentity(r Request) string {
+	return fmt.Sprintf("city=%s root=%s database=%s workspace=%s endpoint=%s",
+		r.CityRoot, r.Root, r.Database, r.Workspace, r.Endpoint)
+}
+
 func requestResult(r Request, code string) Result {
 	return Result{Phase: PhasePrepared, Owner: OwnerLegacyGC, CityRoot: r.CityRoot, Root: r.Root, Database: r.Database, Workspace: r.Workspace, Endpoint: r.Endpoint, Mutates: false, ErrorCode: code}
 }
@@ -406,7 +430,10 @@ func Run(ctx context.Context, r Request, journalPath string, provider Provider, 
 	if j, err := Load(journalPath); err == nil {
 		if j.Request != r {
 			j.ErrorCode = "identity_conflict"
-			return result(j, false), errors.New("handoff journal identity conflicts with request")
+			// Report the journaled mutation, exactly as the under-lock arms
+			// do: the refusal keys its deletion-safety guidance on the same
+			// state, and a --json caller sees only this field.
+			return result(j, mutationOccurred(j)), identityConflictError(journalPath, j, r)
 		}
 		existing = &j
 	} else if !os.IsNotExist(err) {
@@ -438,7 +465,7 @@ func Run(ctx context.Context, r Request, journalPath string, provider Provider, 
 	if j, err := Load(journalPath); err == nil {
 		if j.Request != r {
 			j.ErrorCode = "identity_conflict"
-			return result(j, mutationOccurred(j)), errors.New("handoff journal identity conflicts with request")
+			return result(j, mutationOccurred(j)), identityConflictError(journalPath, j, r)
 		}
 		if j.Phase == PhaseCommitted {
 			return result(j, false), nil
@@ -550,13 +577,17 @@ func executeLocked(ctx context.Context, r Request, journalPath string, h Hooks) 
 	if old, err := Load(journalPath); err == nil {
 		if old.Request != r {
 			old.ErrorCode = "identity_conflict"
-			return result(old, mutationOccurred(old)), errors.New("handoff journal identity conflicts with request")
+			return result(old, mutationOccurred(old)), identityConflictError(journalPath, old, r)
 		}
 		if old.Phase == PhaseCommitted {
 			return result(old, false), nil
 		}
 		j = old
 	} else if !os.IsNotExist(err) {
+		// Mirror Run's code for the same failure: the front door promises a
+		// stable error_code on every failure, so this residual read cannot exit
+		// with an empty one.
+		j.ErrorCode = "journal_unreadable"
 		return result(j, false), err
 	}
 	fail := func(code string, err error) (Result, error) {

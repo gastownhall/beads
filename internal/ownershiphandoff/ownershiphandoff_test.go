@@ -491,6 +491,73 @@ func TestJournalIdentityConflictIsTyped(t *testing.T) {
 	}
 }
 
+// TestPreflightIdentityConflictReportsJournaledMutation pins the preflight
+// identity-conflict arm to the same mutation reporting as its under-lock twins.
+// The refusal keys its deletion-safety guidance on the journaled mutation, and
+// a --json caller sees only Mutates, so reporting mutates=false for a
+// mutation-recording journal would tell tooling the opposite of the message.
+// Any existing journal is refused before the lock is taken, so the lock is held
+// here to prove the refusal came from that preflight arm: without it the
+// request would be refused as concurrent_handoff instead.
+func TestPreflightIdentityConflictReportsJournaledMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		journal func(Request) Journal
+	}{
+		{
+			name: "durable mutation flag",
+			journal: func(r Request) Journal {
+				other := r
+				other.Database = "other"
+				return Journal{Request: other, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+					MutationOccurred: true, Phase: PhaseTargetConfigured, Owner: OwnerLegacyGC}
+			},
+		},
+		{
+			// A journal written before city_root joined the request decodes
+			// with an empty city root, so it conflicts with every request a
+			// current binary makes. At old_owner_stopped the legacy server is
+			// genuinely stopped, which is exactly when an operator must not be
+			// told the journal records no mutation.
+			name: "pre-release journal at old_owner_stopped",
+			journal: func(Request) Journal {
+				return Journal{Phase: PhaseOldOwnerStopped, Owner: OwnerLegacyGC}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := validRequest(t)
+			path := filepath.Join(r.Root, "handoff.json")
+			b, err := json.Marshal(tc.journal(r))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+				t.Fatal(err)
+			}
+			lock, err := acquireLock(path + ".lock")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = lockfile.FlockUnlock(lock)
+				_ = lock.Close()
+			}()
+			called := false
+			got, err := Run(context.Background(), r, path, ProviderFunc(func(context.Context, Request) (Hooks, error) {
+				called = true
+				return Hooks{}, nil
+			}), false)
+			if err == nil || got.ErrorCode != "identity_conflict" || !got.Mutates || called {
+				t.Fatalf("result=%+v err=%v provider=%v, want a preflight identity conflict reporting the journaled mutation", got, err, called)
+			}
+			if !strings.Contains(err.Error(), "records a mutation") {
+				t.Fatalf("refusal text disagrees with the reported mutation: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsUnknownPhase(t *testing.T) {
 	r := validRequest(t)
 	path := filepath.Join(r.Root, "handoff.json")

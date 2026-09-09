@@ -278,6 +278,107 @@ func TestGCProviderResumeUsesPersistedSnapshotToken(t *testing.T) {
 	}
 }
 
+// stopCrashWindow parks a handoff at target_configured without mutating
+// anything and then makes the legacy owner gone. That is byte-for-byte the
+// state a crash between a successful handoff-stop and its old_owner_stopped
+// checkpoint leaves behind: journal at target_configured with
+// mutation_occurred=false, owner actually released. It returns the request and
+// journal path for the retry that resumes from there.
+func stopCrashWindow(t *testing.T, city, scope, stoppedFile string, provider Provider) (Request, string) {
+	t.Helper()
+	t.Setenv("GC_HANDOFF_STOP_REFUSE", "1")
+	t.Setenv("GC_HANDOFF_STOP_MUTATES", "false")
+	t.Setenv("GC_HANDOFF_STOP_LEAVES_LIVE", "1")
+	request := Request{CityRoot: city, Root: scope, Database: "beads", Workspace: "ws",
+		Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
+	journalPath := filepath.Join(scope, "ownership-handoff.json")
+	first, err := Run(context.Background(), request, journalPath, provider, false)
+	if err == nil || first.Phase != PhaseTargetConfigured || first.Mutates {
+		t.Fatalf("first result=%+v err=%v, want a non-mutating stop refusal", first, err)
+	}
+	if err := os.WriteFile(stoppedFile, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := Load(journalPath)
+	if err != nil || journal.Phase != PhaseTargetConfigured || journal.MutationOccurred {
+		t.Fatalf("journal=%+v err=%v, want an unmutated target_configured resume state", journal, err)
+	}
+	t.Setenv("GC_HANDOFF_STOP_REFUSE", "")
+	t.Setenv("GC_HANDOFF_STOP_LEAVES_LIVE", "")
+	return request, journalPath
+}
+
+// TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped pins the
+// stop-hook obligation stated in engdocs/design/ownership-handoff-contract.md:
+// a provider that answers an already-gone identity-matching process with
+// result=stopped/mutates=true lets the handoff converge out of the stop crash
+// window. The in-tree fake models that provider, so this is what the rest of
+// the suite silently assumes; the companion test below prices the alternative.
+func TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped(t *testing.T) {
+	city := canonicalTestDir(t)
+	scope := filepath.Join(city, "scope")
+	if err := os.Mkdir(scope, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeGCProtocol(t)
+	logPath := filepath.Join(city, "gc.log")
+	stoppedFile := filepath.Join(city, "stopped")
+	t.Setenv("GC_HANDOFF_LOG", logPath)
+	t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(city, "gc.err"))
+	t.Setenv("GC_HANDOFF_STOPPED_FILE", stoppedFile)
+	provider, err := NewGCProvider(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, journalPath := stopCrashWindow(t, city, scope, stoppedFile, provider)
+	second, err := Run(context.Background(), request, journalPath, provider, false)
+	if err != nil || second.Phase != PhaseCommitted || second.Owner != OwnerBD || !second.Mutates {
+		t.Fatalf("second result=%+v err=%v, want a committed resume across the stop crash window", second, err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(log)); got != "handoff-inspect\nhandoff-stop\nhandoff-stop\nhandoff-inspect\nhandoff-inspect" {
+		t.Fatalf("protocol operations=%q, want the retry to re-stop from the persisted snapshot and then verify", got)
+	}
+}
+
+// TestGCProviderResumeWedgesWhenStopRefusesMissingOwner is the counterfactual
+// for the obligation above: a strict provider that refuses to stop a process it
+// can no longer see leaves the handoff wedged at target_configured with the
+// legacy server actually down and mutation_occurred=false. The refusal is
+// fail-closed and journaled, so nothing is silently committed — but the handoff
+// cannot complete, which is why the contract states the obligation the in-tree
+// fake cannot enforce.
+func TestGCProviderResumeWedgesWhenStopRefusesMissingOwner(t *testing.T) {
+	city := canonicalTestDir(t)
+	scope := filepath.Join(city, "scope")
+	if err := os.Mkdir(scope, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeGCProtocol(t)
+	stoppedFile := filepath.Join(city, "stopped")
+	t.Setenv("GC_HANDOFF_LOG", filepath.Join(city, "gc.log"))
+	t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(city, "gc.err"))
+	t.Setenv("GC_HANDOFF_STOPPED_FILE", stoppedFile)
+	t.Setenv("GC_HANDOFF_STOP_STRICT_MISSING", "1")
+	provider, err := NewGCProvider(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, journalPath := stopCrashWindow(t, city, scope, stoppedFile, provider)
+	second, err := Run(context.Background(), request, journalPath, provider, false)
+	if err == nil || second.Phase != PhaseTargetConfigured || second.Owner != OwnerLegacyGC ||
+		second.ErrorCode != "process_missing" || second.Mutates {
+		t.Fatalf("second result=%+v err=%v, want a wedged, fail-closed target_configured refusal", second, err)
+	}
+	journal, err := Load(journalPath)
+	if err != nil || journal.Phase != PhaseTargetConfigured || journal.Owner != OwnerLegacyGC || journal.MutationOccurred {
+		t.Fatalf("journal=%+v err=%v, want the handoff to stay uncommitted and legacy-owned", journal, err)
+	}
+}
+
 func TestGCProviderResumeAfterStoppedOwnerDoesNotReinspectSnapshot(t *testing.T) {
 	city := canonicalTestDir(t)
 	scope := filepath.Join(city, "scope")
@@ -435,6 +536,8 @@ if [ "$GC_HANDOFF_DESCENDANT" = "1" ]; then
   wait
 fi
 stopped_file="${GC_HANDOFF_STOPPED_FILE:-$scope/.gc-handoff-stopped}"
+already_stopped=0
+if [ -f "$stopped_file" ]; then already_stopped=1; fi
 result=eligible
 mutates=false
 error_code=""
@@ -459,6 +562,14 @@ if [ "$operation" = "handoff-stop" ] && [ "$GC_HANDOFF_STOP_REFUSE" = "1" ]; the
   result=refused
   mutates="${GC_HANDOFF_STOP_MUTATES:-false}"
   error_code=process_unowned
+fi
+# Variant provider that violates the stop-hook obligation in
+# engdocs/design/ownership-handoff-contract.md by refusing to "stop" an
+# identity-matching process that is already gone.
+if [ "$operation" = "handoff-stop" ] && [ "$GC_HANDOFF_STOP_STRICT_MISSING" = "1" ] && [ "$already_stopped" = "1" ]; then
+  result=refused
+  mutates=false
+  error_code=process_missing
 fi
 if [ -n "$socket" ]; then
   endpoint=$(printf '{"host":"","port":0,"socket":"%s"}' "$socket")
