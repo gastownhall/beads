@@ -23,10 +23,12 @@ func TestRunWithEngineAndUOWFixture(t *testing.T) {
 			Engine:   tracker.NewEngine(remote, store, "conformance"),
 			Store:    store,
 			Snapshot: func(context.Context) (Snapshot, error) { return store.Snapshot(), nil },
-			SeedExternalRefPlanes: func(context.Context) (string, error) {
+			SeedExternalRefPlanes: func(context.Context) (string, string, error) {
 				ref := "https://tracker.test/EXT-1"
 				store.Wisps["aaa-wisp-bd-1"] = &types.Issue{ID: "aaa-wisp-bd-1", Title: "pushed wisp", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Ephemeral: true, ExternalRef: &ref}
-				return "bd-1", nil
+				otherRef := ref + "-wisp-only"
+				store.Wisps["wisp-only"] = &types.Issue{ID: "wisp-only", ExternalRef: &otherRef}
+				return "bd-1", "wisp-only", nil
 			},
 			DependencyExists: func(context.Context) (bool, error) { return store.HasDependency("bd-2", "bd-1"), nil },
 			Expected:         Expected{ExternalRef: ref, ConfigKey: "test.project", MetadataKey: "test.last_sync"},
@@ -113,7 +115,7 @@ func (mockMapper) IssueToBeads(issue *tracker.TrackerIssue) *tracker.IssueConver
 	if issue.Identifier == "EXT-1" {
 		id = "bd-1"
 	}
-	conversion := &tracker.IssueConversion{Issue: &types.Issue{ID: id, Title: issue.Title, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: issue.Labels}}
+	conversion := &tracker.IssueConversion{Issue: &types.Issue{ID: id, Title: issue.Title, Status: types.StatusClosed, IssueType: types.TypeTask, Priority: 2, Labels: issue.Labels}}
 	if issue.Identifier == "EXT-2" {
 		conversion.Dependencies = []tracker.DependencyInfo{{FromExternalID: "EXT-2", ToExternalID: "EXT-1", Type: "blocks", Source: tracker.DependencySourceRelation}}
 	}
