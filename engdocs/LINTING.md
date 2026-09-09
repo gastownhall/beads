@@ -1,6 +1,6 @@
 # Linting Policy
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-09-03
 
 Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`,
 `.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
@@ -42,7 +42,9 @@ The wrapper runs:
   timeout, the `gms_pure_go` build tag, and `--new-from-merge-base` when
   `BD_LINT_NEW_FROM_MERGE_BASE` names a ref; and
 - a second non-CGO Windows cross-lint pass, on the same scope, when the native
-  host does not already cover that target.
+  host does not already cover that target; and
+- a third non-CGO darwin (arm64) cross-lint pass, on the same scope, under the
+  same rule, so `//go:build darwin` files are linted from the Linux runner.
 
 ## Policy
 
