@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,7 +19,8 @@ func TestRunWithEngineAndUOWFixture(t *testing.T) {
 		store.Config["test.project"] = "PROJ"
 		ref := "https://tracker.test/EXT-1"
 		store.Issues["bd-1"] = &types.Issue{ID: "bd-1", Title: "local", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: []string{"old"}, ExternalRef: &ref, UpdatedAt: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)}
-		remote := &mockTracker{}
+		f.HTTP.Enqueue(Response{Status: http.StatusOK, Body: `[{"id":"EXT-1","identifier":"EXT-1","url":"https://tracker.test/EXT-1","title":"remote","updated_at":"2026-09-03T01:00:00Z","labels":[" bug ","","bug"]},{"id":"EXT-2","identifier":"EXT-2","url":"https://tracker.test/EXT-2","title":"dependent","updated_at":"2026-09-03T01:00:00Z"}]`})
+		remote := &mockTracker{client: f.HTTP.Client()}
 		return Setup{
 			Engine:   tracker.NewEngine(remote, store, "conformance"),
 			Store:    store,
@@ -77,7 +79,7 @@ func TestHTTPDoubleRecordsBodyAndTransportError(t *testing.T) {
 	}
 }
 
-type mockTracker struct{}
+type mockTracker struct{ client *http.Client }
 
 func (*mockTracker) Name() string                              { return "test" }
 func (*mockTracker) DisplayName() string                       { return "Test" }
@@ -85,8 +87,19 @@ func (*mockTracker) ConfigPrefix() string                      { return "test" }
 func (*mockTracker) Init(context.Context, tracker.Store) error { return nil }
 func (*mockTracker) Validate() error                           { return nil }
 func (*mockTracker) Close() error                              { return nil }
-func (*mockTracker) FetchIssues(context.Context, tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
-	return []tracker.TrackerIssue{{ID: "EXT-1", Identifier: "EXT-1", URL: "https://tracker.test/EXT-1", Title: "remote", UpdatedAt: time.Date(2026, 9, 3, 1, 0, 0, 0, time.UTC), Labels: []string{" bug ", "", "bug"}}, {ID: "EXT-2", Identifier: "EXT-2", URL: "https://tracker.test/EXT-2", Title: "dependent", UpdatedAt: time.Date(2026, 9, 3, 1, 0, 0, 0, time.UTC)}}, nil
+func (t *mockTracker) FetchIssues(ctx context.Context, _ tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://tracker.test/issues", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var issues []tracker.TrackerIssue
+	err = json.NewDecoder(resp.Body).Decode(&issues)
+	return issues, err
 }
 func (*mockTracker) FetchIssue(context.Context, string) (*tracker.TrackerIssue, error) {
 	return nil, nil
