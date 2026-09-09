@@ -175,8 +175,10 @@ type DepTargetPrecheck struct {
 // A genuinely new edge is a change to the referencing (source) issue's durable
 // state, so it mints one version row for the source — on EVERY leg that reaches
 // this helper (the dependency editor, the legacy store verbs, batch apply),
-// whether or not an audit event was requested. The idempotent same-type re-add
-// refreshes metadata and mints nothing.
+// whether or not an audit event was requested. A same-type re-add that changes
+// metadata is the same kind of durable-state change and mints on the same
+// terms; only a genuinely change-free re-add (identical type and metadata)
+// mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
 	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
 }
@@ -295,7 +297,15 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay even
 			// though no audit event is written.
-			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+			if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+				return false, err
+			}
+			// The metadata genuinely changed, so — unlike the change-free
+			// branch above — this re-add is a real durable-state mutation of
+			// the source issue and mints on the same terms as a new edge
+			// (#5898 leg 2: "a same-type re-add whose metadata actually
+			// changed mints EXACTLY ONE version carrying the new state").
+			return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 		}
 		return false, &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -387,12 +397,12 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 }
 
 // mintDependencyVersion versions the referencing (source) issue of an edge that
-// was actually inserted or deleted: the version-history seam for every
-// dependency write path, reached from addDependencyInTx and
-// removeDependencyInTx only past their row write — never from the idempotent
-// same-type re-add or the absent-edge return, which mint nothing. mint false
-// defers to a caller that mints once for a multi-edge mutation. A wisp source
-// is excluded by the seam itself.
+// was actually inserted, deleted, or had its metadata refreshed by a same-type
+// re-add: the version-history seam for every dependency write path, reached
+// from addDependencyInTx and removeDependencyInTx only past a real row write —
+// never from a genuinely change-free re-add or the absent-edge return, which
+// mint nothing. mint false defers to a caller that mints once for a
+// multi-edge mutation. A wisp source is excluded by the seam itself.
 func mintDependencyVersion(ctx context.Context, tx DBTX, issueID, actor string, mint bool) error {
 	if !mint {
 		return nil
