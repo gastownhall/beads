@@ -25,6 +25,7 @@ on:
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/linear_proxy_*'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
@@ -46,6 +47,7 @@ on:
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/linear_proxy_*'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
@@ -111,7 +113,8 @@ jobs:
             TestManagedLocalProxiedOrphanBackendReaped \
             TestManagedLocalProxiedNProcessColdStartConvergence \
             TestManagedLocalProxiedStopStartInterleave \
-            TestManagedLocalProxiedTrackerUOWConformance
+            TestManagedLocalProxiedTrackerUOWConformance \
+            TestManagedLocalProxiedLinearStatusParity
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2
