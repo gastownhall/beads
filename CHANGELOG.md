@@ -400,6 +400,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ParentID`. Programmatic callers that set them got unfiltered results back and
   no error — a full list where a scoped one was asked for.
 
+- **`bd ready --parent` computes the parent's descendant set once per call
+  instead of once per plane.** The issues leg and the wisp leg each ran the
+  transitive descendant walk — the dominant cost of a scoped ready call — so
+  every `bd ready --parent` paid it twice (16.0 s for a 483-descendant parent
+  on a 4.6k-edge database, 13.6 s of it in the two walks); the proxied-server
+  stack repeated the deferred-parent probes the same way. Both stacks now
+  compute the shared predicate inputs once and reuse them for every plane
+  ([#6129](https://github.com/gastownhall/beads/issues/6129)).
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now
