@@ -472,8 +472,23 @@ func (w *workspace) showJSONForSnapshot(id string) string {
 	return w.run(args...)
 }
 
-func (w *workspace) supportsStreamedShowPayloads() bool {
+// isCandidate reports whether this workspace runs the candidate binary rather
+// than the pinned baseline. Intent-named feature gates below delegate here so
+// candidate detection lives in one place.
+func (w *workspace) isCandidate() bool {
 	return candidateBin != "" && w.bdPath == candidateBin
+}
+
+func (w *workspace) supportsStreamedShowPayloads() bool {
+	return w.isCandidate()
+}
+
+// requiresNotesOverwriteForce reports whether this binary refuses `update
+// --notes` over existing notes without --force. The pinned baseline predates
+// both the refusal and the flag (its update has no --force at all), so shared
+// scenarios pass --force only to the candidate.
+func (w *workspace) requiresNotesOverwriteForce() bool {
+	return w.isCandidate()
 }
 
 // export returns a JSONL snapshot of the workspace. This replaces the removed

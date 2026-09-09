@@ -437,7 +437,7 @@ func RunLifecycleUpdateAppendsNotesWithoutReplacingThem(t *testing.T, ctx contex
 
 	replaced, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
 		Notes: publicops.Field[string]{Set: true, Value: "replaced"},
-	}})
+	}, ForceNotesOverwrite: true})
 	if err != nil {
 		t.Fatalf("replace notes on %s: %v", id, err)
 	}

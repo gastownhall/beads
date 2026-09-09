@@ -43,8 +43,8 @@ func validateIssueClosable(id string, issue *types.Issue, actor string, force bo
 // newAssignee may be "" (unassign), which is fenced the same way. Do NOT call
 // it when the caller passed an explicit --if-assignee guard: that CAS names
 // the holder, so nothing about it is silent, and it is how sanctioned X→Y
-// transfers (park) work without --force (--force and --if-assignee are
-// mutually exclusive).
+// transfers (park) work without needing the fence bypass (under
+// --if-assignee, --force never arms the assignee half).
 func validateIssueReassignable(id string, issue *types.Issue, actor, newAssignee string, poolAliases func() []string, force bool) error {
 	return validation.AssigneeNotStolen(actor, newAssignee, poolAliases, force)(id, issue)
 }

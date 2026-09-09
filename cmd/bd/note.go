@@ -67,8 +67,8 @@ See: bd note --help`)
 To append a note:
   bd note <issue-id> "text"
 
-To change an issue field:
-  bd update <issue-id> --notes "text"
+To replace existing notes (requires --force once notes are set):
+  bd update <issue-id> --notes "text" --force
 
 See: bd note --help`)
 	case "rm", "remove", "delete":
@@ -77,8 +77,8 @@ See: bd note --help`)
 To append a note:
   bd note <issue-id> "text"
 
-To change or clear notes:
-  bd update <issue-id> --notes "text"
+To change or clear notes (requires --force once notes are set):
+  bd update <issue-id> --notes "text" --force
 
 See: bd note --help`, args[0], args[0])
 	case "update":
@@ -87,9 +87,9 @@ See: bd note --help`, args[0], args[0])
 To append a note:
   bd note <issue-id> "text"
 
-To set or append notes via the long form:
-  bd update <issue-id> --notes "text"
+To append or replace notes via the long form:
   bd update <issue-id> --append-notes "text"
+  bd update <issue-id> --notes "text" --force  (replaces; --force needed once notes are set)
 
 See: bd note --help`)
 	}

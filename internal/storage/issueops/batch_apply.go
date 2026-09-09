@@ -279,6 +279,7 @@ func (r *applyBatchRun) applyUpdate(ctx context.Context, tx *sql.Tx, index int, 
 		ExpectedAssignee:      item.ExpectedAssignee,
 		ForceClosePolicy:      item.ForceClosePolicy,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
+		ForceNotesOverwrite:   item.ForceNotesOverwrite,
 	})
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemUpdate, Key: item.Target.Key, IssueID: id, Err: err}

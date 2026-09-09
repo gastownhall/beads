@@ -123,6 +123,16 @@ const (
 	// fails on state the client cannot see without reading it. That is the
 	// not_claimable situation and it gets the not_claimable answer.
 	CodeNotClosable Code = "not_closable"
+	// CodeNotesOverwrite is a `patch.notes` that would replace existing
+	// non-empty notes with a different value, refused unless
+	// `force_notes_overwrite` is set. It is the notes analog of
+	// CodeAlreadyClaimed: a live-state fence with a force bypass — but unlike
+	// that fence it carries no compare-and-set alternative and no extension
+	// member, because there is no observation to attach: the refusal is
+	// entirely a statement about the request's own two values (the existing
+	// notes and the patched ones), not about a foreign actor's identity a
+	// client might need to display.
+	CodeNotesOverwrite Code = "notes_overwrite_refused"
 	// CodeDependencyCycle covers BOTH never-makes-progress refusals a requested
 	// edge set can earn: a scheduling cycle, and a blocking edge against the
 	// issue's own ancestor or descendant. They are one code because they have
@@ -248,6 +258,7 @@ var codeStatus = map[Code]int{
 	CodeAlreadyClaimed:   http.StatusConflict,
 	CodeNotClaimable:     http.StatusConflict,
 	CodeNotClosable:      http.StatusConflict,
+	CodeNotesOverwrite:   http.StatusConflict,
 	CodeNotReleasable:    http.StatusConflict,
 	CodeDependencyCycle:  http.StatusConflict,
 	CodeDependencyExists: http.StatusConflict,
@@ -842,7 +853,7 @@ var operationCodes = map[string][]Code{
 	// through failUpdate.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
-		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed,
+		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite,
 		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
@@ -904,7 +915,7 @@ var operationCodes = map[string][]Code{
 	// resource this operation was asked to address.
 	OpApplyBatch: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
-		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeAlreadyExists,
+		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite, CodeAlreadyExists,
 		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},

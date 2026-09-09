@@ -39,7 +39,7 @@ NEXT: Need user input on budget constraints before finalizing recommendations"
 3. Work on tasks, mark TodoWrite items completed
 4. At milestone, update bd notes:
    ```bash
-   bd update bd-42 --notes "COMPLETED: Cost-benefit analysis drafted.
+   bd update bd-42 --append-notes "COMPLETED: Cost-benefit analysis drafted.
    KEY DECISION: User confirmed $50k budget cap - ruled out enterprise options.
    IN PROGRESS: Finalizing recommendations (Posthog + custom ETL).
    NEXT: Get user review of draft before closing issue."
@@ -179,14 +179,14 @@ bd update auth-5 --claim
 
 **Hit a blocker**:
 ```bash
-bd update auth-5 --status blocked --notes "BLOCKER: Need OAuth client ID from product team. Emailed Jane on 2025-10-23."
+bd update auth-5 --status blocked --append-notes "BLOCKER: Need OAuth client ID from product team. Emailed Jane on 2025-10-23."
 # Switch to different issue or create new work
 ```
 
 **Unblocking**:
 ```bash
 # Once blocker resolved
-bd update auth-5 --status in_progress --notes "UNBLOCKED: Received OAuth credentials. Resuming implementation."
+bd update auth-5 --status in_progress --append-notes "UNBLOCKED: Received OAuth credentials. Resuming implementation."
 ```
 
 **Completing**:
@@ -286,7 +286,7 @@ bd close task-123 --reason "Implemented feature X"
 **Detailed closure** (complex work):
 ```bash
 # Update notes with final state
-bd update task-123 --notes "COMPLETED: OAuth refresh with 7-day rotation
+bd update task-123 --append-notes "COMPLETED: OAuth refresh with 7-day rotation
 KEY DECISION: RS256 over HS256 per security review
 TESTS: 12 tests passing (auth, rotation, expiry, errors)
 FOLLOW-UP: Filed perf-99 for token cleanup job"
@@ -297,11 +297,11 @@ bd close task-123 --reason "Implemented OAuth refresh token rotation with rate l
 
 ### Documenting Resolution (Outcome vs Design)
 
-For issues where the outcome differed from initial design, use `--notes` to document what actually happened:
+For issues where the outcome differed from initial design, use `--append-notes` to document what actually happened:
 
 ```bash
 # Initial design was hypothesis - document actual outcome in notes
-bd update bug-456 --notes "RESOLUTION: Not a bug - behavior is correct per OAuth spec. Documentation was unclear. Filed docs-789 to clarify auth flow in user guide."
+bd update bug-456 --append-notes "RESOLUTION: Not a bug - behavior is correct per OAuth spec. Documentation was unclear. Filed docs-789 to clarify auth flow in user guide."
 
 bd close bug-456 --reason "Resolved: documentation issue, not bug"
 ```
@@ -331,7 +331,7 @@ bd close auth-5 --reason "OAuth refresh implemented. Discovered perf optimizatio
 
 | Pattern | When to Use | Key Command | Preserves |
 |---------|-------------|-------------|-----------|
-| **Knowledge Work** | Long-running research, writing | `bd update --notes` | Context across sessions |
+| **Knowledge Work** | Long-running research, writing | `bd update --append-notes` | Context across sessions |
 | **Side Quest** | Discovered during other work | `bd dep add --type discovered-from` | Relationship to original |
 | **Multi-Session Resume** | Returning after time away | `bd ready`, `bd show` | Full project state |
 | **Status Transitions** | Tracking work state | `bd update --status` | Current state |

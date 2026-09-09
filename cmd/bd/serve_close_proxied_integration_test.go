@@ -370,7 +370,7 @@ func TestProxiedServerServeClose(t *testing.T) {
 		}
 		first := revisionOf(t, raw)
 
-		status, raw = sp.updateIssueRaw(t, issue.ID, `{"actor":"other-agent","patch":{"notes":"moved"}}`)
+		status, raw = sp.updateIssueRaw(t, issue.ID, `{"actor":"other-agent","patch":{"design":"moved"}}`)
 		if status != http.StatusOK {
 			t.Fatalf("the concurrent write: status = %d, want 200: %s", status, raw)
 		}

@@ -45,7 +45,7 @@ func UpdateFields(patch publicops.IssuePatch) map[string]interface{} {
 		{patch.Design.Set, "design", patch.Design.Value},
 		{patch.AcceptanceCriteria.Set, "acceptance_criteria", patch.AcceptanceCriteria.Value},
 		{patch.Notes.Set, "notes", patch.Notes.Value},
-		{patch.AppendNotes.Set, "append_notes", patch.AppendNotes.Value},
+		{patch.AppendNotes.Set, OpAppendNotes, patch.AppendNotes.Value},
 		{patch.SpecID.Set, "spec_id", patch.SpecID.Value},
 		{patch.AwaitID.Set, "await_id", patch.AwaitID.Value},
 		{patch.Status.Set, "status", patch.Status.Value},
@@ -75,6 +75,18 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	}
 	if request.ForceAssigneeTransfer && (request.Claim || !request.Patch.Assignee.Set || request.ExpectedAssignee != nil) {
 		return fmt.Errorf("%w: invalid forced assignee transfer", storage.ErrValidation)
+	}
+	if request.ForceNotesOverwrite && !request.Patch.Notes.Set {
+		return fmt.Errorf("%w: invalid forced notes overwrite", storage.ErrValidation)
+	}
+	// Checked HERE, ahead of the notes-overwrite fence in ExecuteUpdate: a
+	// patch setting both Notes and AppendNotes is an invalid REQUEST, not a
+	// refused overwrite, and must report ErrValidation even when the notes
+	// fence would independently refuse the same Notes value. The uow backend
+	// reaches this same check through validateUpdateRequest, which both of
+	// its update paths run before their own fence calls, for the same reason.
+	if request.Patch.Notes.Set && request.Patch.AppendNotes.Set {
+		return fmt.Errorf("%w: cannot combine a notes replacement with %s", storage.ErrValidation, OpAppendNotes)
 	}
 	patch := request.Patch
 	if patch.Title.Set {
@@ -183,6 +195,36 @@ func AuthorizeAssigneeTransfer(ctx context.Context, tx DBTX, before *types.Issue
 		return err
 	}
 	return AuthorizeAssigneeTransferWithPools(before, request, pools)
+}
+
+// AuthorizeNotesOverwrite protects existing non-empty notes from an unforced
+// replacement. It refuses when the patch sets Notes to a
+// publicops.NotesReplacement of before.Notes (which exempts an explicit
+// clear) and request.ForceNotesOverwrite is false.
+//
+// It applies REGARDLESS of request.ExpectedAssignee, deliberately: unlike the
+// assignee fence, there is no compare-and-set that authorizes a notes
+// overwrite the way a matching ExpectedAssignee authorizes an assignee
+// transfer, so pairing a notes edit with an assignee guard does not exempt it.
+// A STALE guard still outranks it, though — both backends check the
+// compare-and-set preconditions before calling here, so a mismatch reports as
+// the mismatch, never as this refusal.
+//
+// Enforcement boundary: this fences the issueops-contract surfaces
+// (ExecuteUpdate, the uow update and batch legs). The map-based
+// UpdateIssueInTx funnel does not consult it — its one notes-replacing caller
+// is `bd edit`, which pre-fills the editor with the current notes, so the
+// overwrite there is a sighted edit rather than the blind clobber this fence
+// exists to stop. `bd import` is exempt BY DESIGN (GH#6190), along with every
+// other live-state fence: its contract is row replacement, guarded by its own
+// staleness check (only strictly-newer rows rewrite local state; deliberate
+// overwrites of newer state require --allow-stale) and reported field-by-field
+// in updated_issues — the bulk-path analog of this fence's per-field --force.
+func AuthorizeNotesOverwrite(before *types.Issue, request publicops.UpdateRequest) error {
+	if !request.Patch.Notes.Set || !publicops.NotesReplacement(before.Notes, request.Patch.Notes.Value) || request.ForceNotesOverwrite {
+		return nil
+	}
+	return fmt.Errorf("%w: issue %s", storage.ErrNotesOverwrite, before.ID)
 }
 
 // ApplyMetadataPatch returns the canonical metadata value and whether it changes.

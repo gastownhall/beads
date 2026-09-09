@@ -255,6 +255,12 @@ func proxiedUpdateFailure(id string, err error) *updateIDFailure {
 	case errors.Is(err, storage.ErrCloseBlocked):
 		fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
 		return &updateIDFailure{ID: id, Error: fmt.Sprintf("%v (use --force to override)", err)}
+	case errors.Is(err, storage.ErrNotesOverwrite):
+		// The contract's AuthorizeNotesOverwrite fence refused inside the
+		// mutation transaction. Print the advice, not the raw sentinel.
+		refusal := errNotesOverwriteRefusal(id)
+		fmt.Fprintf(os.Stderr, "%s\n", refusal)
+		return &updateIDFailure{ID: id, Error: refusal.Error()}
 	case uow.IsSerializationError(err):
 		// The contract spent its retry budget losing Dolt's commit-time merge.
 		// The write did NOT land; fail loudly instead of exiting 0.
