@@ -365,9 +365,13 @@ func (s *testSuite) TestBulkReadersBatch() {
 		for _, id := range ids {
 			idSet[id] = struct{}{}
 		}
+		rec.reset()
 		_, err := repo.loadStatusByID(s.Ctx(), idSet)
 		s.Require().Error(err, "an id in both planes is still a conflict after batching")
 		s.Contains(err.Error(), "exists in both issues and wisps")
+		// The conflict aborts mid-run, so consume what it did issue (and
+		// hold it to the cap) rather than leaving it for the next subtest.
+		assertUnderCap("loadStatusByID (duplicate)", rec.reset())
 	})
 
 	s.Run("EmptyInputIssuesNoStatement", func() {
