@@ -31,3 +31,15 @@ func (s *EmbeddedDoltStore) RemoveLabel(ctx context.Context, issueID, label, act
 		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
 	})
 }
+
+// RenameLabel renames a label across every issue and wisp that carries it.
+// The embedded store has no separate dolt-commit step (unlike DoltStore):
+// withConn's own transaction commit is the durable boundary here.
+func (s *EmbeddedDoltStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var innerErr error
+		renamed, merged, ids, innerErr = issueops.RenameLabelInTx(ctx, tx, oldLabel, newLabel, actor)
+		return innerErr
+	})
+	return renamed, merged, ids, err
+}

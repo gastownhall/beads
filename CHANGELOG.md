@@ -56,6 +56,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concept, themes are labels here, and `--label theme:x` is the native way to
   say it.
 
+- **BREAKING (published `backend` package): `RenameLabel` is a new required method on
+  `storage.Storage`** ([#6007](https://github.com/gastownhall/beads/pull/6007)).
+  `RenameLabel` renames a label across every issue and wisp that carries it in
+  one transaction: an issue that already carries the new label is a merge — the
+  stale old-label row is dropped rather than raising a duplicate-key error —
+  and the call reports the count of issues and wisps that carried the old label
+  (`renamed`), the subset of those that already had the new label (`merged`),
+  and every touched id. An old label carried by nothing is an honest no-op
+  (`renamed`/`merged` both 0, `ids` nil); an old label equal to the new one
+  after trimming is refused with `issueops.ErrRenameLabelSameName` instead of
+  silently wiping the label — the merge branch would otherwise treat every
+  carrier of the old label as already having the new one and drop it. The
+  method lands on `storage.Storage`, which composes into `backend.DoltStorage`,
+  the published engine interface an external backend implements: consumers that
+  only call the interface are unaffected, but any external type that
+  *implements* it — a custom store, mock, or proxy — must add `RenameLabel` to
+  compile. The portable conformance suite (`backend/conformance.RunAll`)
+  exercises it alongside `AddLabel`/`RemoveLabel`, proving the merge and
+  same-name-refusal semantics the same way it proves the rest of the label
+  contract.
+
 ### Changed
 
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed

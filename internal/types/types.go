@@ -1619,7 +1619,12 @@ const (
 	EventDependencyRemoved EventType = "dependency_removed"
 	EventLabelAdded        EventType = "label_added"
 	EventLabelRemoved      EventType = "label_removed"
-	EventCompacted         EventType = "compacted"
+	// EventLabelRenamed records a bulk `bd label rename` sweep landing on one
+	// issue or wisp. old_value/new_value hold the old and new label strings.
+	// Unlike EventLabelAdded/EventLabelRemoved, one rename produces exactly
+	// one of these per touched row, never a paired add+remove.
+	EventLabelRenamed EventType = "label_renamed"
+	EventCompacted    EventType = "compacted"
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"
