@@ -32,7 +32,6 @@ func TestLinearConflictResolutionSQLServerFrontdoor(t *testing.T) {
 		dir := t.TempDir()
 		dbPath := filepath.Join(dir, ".beads", "issues.db")
 		raw := newTestStoreIsolatedDB(t, dbPath, "linconflict")
-		t.Cleanup(func() { _ = raw.Close() })
 		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("# Beads Config\n"), 0o600); err != nil {
 			t.Fatalf("create direct SQL config.yaml: %v", err)
 		}
@@ -42,7 +41,7 @@ func TestLinearConflictResolutionSQLServerFrontdoor(t *testing.T) {
 			env:   append(bdEnv(dir), "BEADS_DIR="+filepath.Join(dir, ".beads"), "BEADS_TEST_SERVER=1", "LINEAR_API_KEY=test-api-key"),
 			store: tracker.NewStore(raw),
 			setUpdatedAt: func(id string, at time.Time) {
-				linearSetIssueUpdatedAtAt(t, raw.DB(), id, at)
+				linearSetIssueUpdatedAtTime(t, raw.DB(), id, at)
 			},
 		}
 	})
@@ -68,7 +67,7 @@ func TestManagedLocalProxiedLinearConflictResolutionParity(t *testing.T) {
 			store:   tracker.NewUOWStore(provider),
 			proxied: true,
 			setUpdatedAt: func(id string, at time.Time) {
-				linearSetIssueUpdatedAtAt(t, proxyDB, id, at)
+				linearSetIssueUpdatedAtTime(t, proxyDB, id, at)
 			},
 		}
 	})
@@ -93,7 +92,7 @@ func TestLinearDryRunSQLServerFrontdoor(t *testing.T) {
 		env:   append(bdEnv(dir), "BEADS_DIR="+filepath.Join(dir, ".beads"), "BEADS_TEST_SERVER=1", "LINEAR_API_KEY=test-api-key"),
 		store: tracker.NewStore(raw),
 		setUpdatedAt: func(id string, at time.Time) {
-			linearSetIssueUpdatedAtAt(t, raw.DB(), id, at)
+			linearSetIssueUpdatedAtTime(t, raw.DB(), id, at)
 		},
 	})
 }
@@ -109,6 +108,7 @@ func TestManagedLocalProxiedLinearDryRunParity(t *testing.T) {
 		t.Fatalf("open managed-local proxy UOW provider: %v", err)
 	}
 	t.Cleanup(func() { _ = provider.Close(t.Context()) })
+	proxyDB := openProxiedDB(t, project)
 	runLinearDryRunFixture(t, linearCommandFixture{
 		bd:      bd,
 		dir:     project.dir,
@@ -116,7 +116,7 @@ func TestManagedLocalProxiedLinearDryRunParity(t *testing.T) {
 		store:   tracker.NewUOWStore(provider),
 		proxied: true,
 		setUpdatedAt: func(id string, at time.Time) {
-			linearSetIssueUpdatedAtAt(t, openProxiedDB(t, project), id, at)
+			linearSetIssueUpdatedAtTime(t, proxyDB, id, at)
 		},
 	})
 }
@@ -158,8 +158,8 @@ func (f linearCommandFixture) configure(t *testing.T, endpoint string) {
 func runLinearConflictPolicies(t *testing.T, newFixture func(*testing.T) linearCommandFixture) {
 	t.Helper()
 	const previousSync = "2020-01-01T00:00:00Z"
-	localNewer := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	remoteNewer := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	newerTS := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	olderTS := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
 
 	for _, tc := range []struct {
 		name          string
@@ -169,9 +169,13 @@ func runLinearConflictPolicies(t *testing.T, newFixture func(*testing.T) linearC
 		remoteUpdated time.Time
 		wantLocal     bool
 	}{
-		{name: "timestamp default chooses newer local", identifier: "MOCK-10", localUpdated: localNewer, remoteUpdated: remoteNewer, wantLocal: true},
-		{name: "prefer local overrides newer Linear", identifier: "MOCK-11", args: []string{"--prefer-local"}, localUpdated: remoteNewer, remoteUpdated: localNewer, wantLocal: true},
-		{name: "prefer Linear overrides newer local", identifier: "MOCK-12", args: []string{"--prefer-linear"}, localUpdated: localNewer, remoteUpdated: remoteNewer},
+		{name: "timestamp default chooses newer local", identifier: "MOCK-10", localUpdated: newerTS, remoteUpdated: olderTS, wantLocal: true},
+		// The timestamp default's other arm reaches reimportIssue through
+		// `default:`+`else` rather than the ConflictExternal case below, so its
+		// skip/overwrite bookkeeping can regress independently.
+		{name: "timestamp default imports newer Linear", identifier: "MOCK-13", localUpdated: olderTS, remoteUpdated: newerTS},
+		{name: "prefer local overrides newer Linear", identifier: "MOCK-11", args: []string{"--prefer-local"}, localUpdated: olderTS, remoteUpdated: newerTS, wantLocal: true},
+		{name: "prefer Linear overrides newer local", identifier: "MOCK-12", args: []string{"--prefer-linear"}, localUpdated: newerTS, remoteUpdated: olderTS},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newFixture(t)
@@ -429,7 +433,7 @@ func seedLinearConflictIssue(mock *mockLinearServer, identifier, title string, u
 	mock.nextSeq = 1
 }
 
-func linearSetIssueUpdatedAtAt(t *testing.T, db *sql.DB, id string, at time.Time) {
+func linearSetIssueUpdatedAtTime(t *testing.T, db *sql.DB, id string, at time.Time) {
 	t.Helper()
 	if _, err := db.ExecContext(t.Context(), "UPDATE issues SET updated_at = ? WHERE id = ?", at, id); err != nil {
 		t.Fatalf("seed local issue %s updated_at: %v", id, err)
