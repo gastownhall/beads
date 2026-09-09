@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/linear"
@@ -250,6 +251,23 @@ func (m *mockLinearServer) issueCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.issues)
+}
+
+// snapshotIssues returns a value copy of the remote fixture state so command
+// tests can prove dry-run never reaches a GraphQL mutation.
+func (m *mockLinearServer) snapshotIssues(t testing.TB) map[string]linear.Issue {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	encoded, err := json.Marshal(m.issues)
+	if err != nil {
+		t.Fatalf("marshal mock Linear issues: %v", err)
+	}
+	var snapshot map[string]linear.Issue
+	if err := json.Unmarshal(encoded, &snapshot); err != nil {
+		t.Fatalf("unmarshal mock Linear issues: %v", err)
+	}
+	return snapshot
 }
 
 func strVal(m map[string]interface{}, key string) string {
