@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os/exec"
 	"sort"
@@ -76,10 +77,21 @@ func TestManagedLocalProxiedTrackerUOWConformance(t *testing.T) {
 	})
 }
 
+// seedTrackerConformance plants the shared pre-pull state for both legs.
+//
+// It deliberately seeds NO labels. Store.CreateIssue is not label-faithful
+// across the two backends: the direct store persists issue.Labels through
+// PersistLabels, while the UOW store creates through
+// domain.CreateIssueParams{Issue: issue} with Labels unset and the domain
+// create writes labels only from params.Labels — so a seeded label would
+// survive on the direct leg and vanish on the proxied one. Running the two
+// legs on divergent state would let this suite report parity it never
+// checked. Create-path parity is tracked in bd-p0n1; once the UOW store
+// passes labels through, the seed can carry them again.
 func seedTrackerConformance(t *testing.T, store tracker.Store) {
 	t.Helper()
 	ref := "https://tracker.test/EXT-1"
-	seed := &types.Issue{ID: "trkpx-1", Title: "local", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: []string{"old"}, ExternalRef: &ref, UpdatedAt: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)}
+	seed := &types.Issue{ID: "trkpx-1", Title: "local", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, ExternalRef: &ref, UpdatedAt: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)}
 	if err := store.CreateIssue(context.Background(), seed, "conformance"); err != nil {
 		t.Fatalf("seed tracker issue: %v", err)
 	}
@@ -102,40 +114,44 @@ func trackerConformanceSetup(store tracker.Store, createWisp func(context.Contex
 			only := &types.Issue{ID: "wisp-only", Title: "wisp only", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Ephemeral: true, ExternalRef: &otherRef}
 			return "trkpx-1", "wisp-only", createWisp(ctx, only)
 		},
-		DependencyExists: func(ctx context.Context) (bool, error) {
-			deps, err := store.GetDependenciesWithMetadata(ctx, "trkpx-2")
-			if err != nil {
-				return false, err
-			}
-			for _, dep := range deps {
-				if dep.ID == "trkpx-1" {
-					return true, nil
-				}
-			}
-			return false, nil
-		},
 		Expected: trackerconformance.Expected{ExternalRef: ref, ConfigKey: "test.project", MetadataKey: "test.last_sync"},
 		Refusal: func(context.Context) (*tracker.SyncResult, error) {
 			return nil, &storage.ErrUnsupported{Op: "proxy-only operation", Backend: "conformance"}
 		},
-		APIOnly: func(context.Context, func() tracker.Store) error {
-			f.HTTP.Enqueue(trackerconformance.Response{Status: http.StatusOK, Body: `{"teams":[]}`})
-			_, err := f.HTTP.Client().Get("https://tracker.test/teams")
-			return err
+		APIOnly: func(ctx context.Context, _ func() tracker.Store) error {
+			double := trackerconformance.NewHTTPDouble()
+			double.Enqueue(trackerconformance.Response{Status: http.StatusOK, Body: `{"teams":[]}`})
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://tracker.test/teams", nil)
+			if err != nil {
+				return err
+			}
+			resp, err := double.Client().Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			var body struct{ Teams []json.RawMessage }
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				return err
+			}
+			if body.Teams == nil || len(body.Teams) != 0 {
+				return fmt.Errorf("expected empty teams response, got %+v", body)
+			}
+			return nil
 		},
 	}
 }
 
 type proxyTrackerStoreFactory struct {
 	store tracker.Store
-	opens int
 }
 
-func (f *proxyTrackerStoreFactory) Open() tracker.Store { f.opens++; return f.store }
-func (f *proxyTrackerStoreFactory) OpenCount() int      { return f.opens }
+func (f *proxyTrackerStoreFactory) Open() tracker.Store { return f.store }
 
 func proxyTrackerSnapshot(ctx context.Context, store tracker.Store, lastSyncKey string) (trackerconformance.Snapshot, error) {
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{SkipWisps: true})
+	// The unfiltered search includes durable issues and all wisps, including
+	// NoHistory rows whose Ephemeral flag may be false.
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return trackerconformance.Snapshot{}, err
 	}
@@ -159,6 +175,14 @@ func proxyTrackerSnapshot(ctx context.Context, store tracker.Store, lastSyncKey 
 			copy.ExternalRef = &ref
 		}
 		snapshot.Issues[copy.ID] = copy
+		// Tracker-owned metadata is enumerable from the rows in this snapshot;
+		// tracker.Store deliberately has no general metadata-listing API.
+		pushHashKey := strings.TrimSuffix(lastSyncKey, ".last_sync") + ".pushhash." + copy.ID
+		pushHash, err := store.GetLocalMetadata(ctx, pushHashKey)
+		if err != nil {
+			return trackerconformance.Snapshot{}, err
+		}
+		snapshot.Metadata[pushHashKey] = pushHash
 		deps, err := store.GetDependenciesWithMetadata(ctx, copy.ID)
 		if err != nil {
 			return trackerconformance.Snapshot{}, err

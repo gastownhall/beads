@@ -3,6 +3,7 @@ package conformance
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,29 +19,51 @@ func TestRunWithEngineAndUOWFixture(t *testing.T) {
 		store := f.StoreFactory.Open().(*Store)
 		store.Config["test.project"] = "PROJ"
 		ref := "https://tracker.test/EXT-1"
+		// Seeded straight into the map rather than through Store.CreateIssue,
+		// so the create-path label blind spot Run documents does not apply and
+		// the pre-existing label can stay: it makes the suite's single-label
+		// assertion prove the update REPLACES labels instead of merging them.
+		// The real-backend legs cannot seed labels this way, so this is the
+		// one leg carrying that coverage until create-path parity lands.
 		store.Issues["bd-1"] = &types.Issue{ID: "bd-1", Title: "local", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: []string{"old"}, ExternalRef: &ref, UpdatedAt: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)}
 		f.HTTP.Enqueue(Response{Status: http.StatusOK, Body: `[{"id":"EXT-1","identifier":"EXT-1","url":"https://tracker.test/EXT-1","title":"remote","updated_at":"2026-09-03T01:00:00Z","labels":[" bug ","","bug"]},{"id":"EXT-2","identifier":"EXT-2","url":"https://tracker.test/EXT-2","title":"dependent","updated_at":"2026-09-03T01:00:00Z"}]`})
 		remote := &mockTracker{client: f.HTTP.Client()}
 		return Setup{
-			Engine:   tracker.NewEngine(remote, store, "conformance"),
-			Store:    store,
-			Snapshot: func(context.Context) (Snapshot, error) { return store.Snapshot(), nil },
+			Engine:        tracker.NewEngine(remote, store, "conformance"),
+			Store:         store,
+			Snapshot:      func(context.Context) (Snapshot, error) { return store.Snapshot(), nil },
+			MutationCount: store.MutationCount,
 			SeedExternalRefPlanes: func(context.Context) (string, string, error) {
 				ref := "https://tracker.test/EXT-1"
 				store.Wisps["aaa-wisp-bd-1"] = &types.Issue{ID: "aaa-wisp-bd-1", Title: "pushed wisp", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Ephemeral: true, ExternalRef: &ref}
 				otherRef := ref + "-wisp-only"
-				store.Wisps["wisp-only"] = &types.Issue{ID: "wisp-only", ExternalRef: &otherRef}
+				store.Wisps["wisp-only"] = &types.Issue{ID: "wisp-only", Title: "wisp only", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Ephemeral: true, ExternalRef: &otherRef}
 				return "bd-1", "wisp-only", nil
 			},
-			DependencyExists: func(context.Context) (bool, error) { return store.HasDependency("bd-2", "bd-1"), nil },
-			Expected:         Expected{ExternalRef: ref, ConfigKey: "test.project", MetadataKey: "test.last_sync"},
+			Expected: Expected{ExternalRef: ref, ConfigKey: "test.project", MetadataKey: "test.last_sync"},
 			Refusal: func(context.Context) (*tracker.SyncResult, error) {
 				return nil, &storage.ErrUnsupported{Op: "proxy-only operation", Backend: "conformance"}
 			},
 			APIOnly: func(ctx context.Context, _ func() tracker.Store) error {
-				f.HTTP.Enqueue(Response{Status: http.StatusOK, Body: `{"teams":[]}`})
-				_, err := f.HTTP.Client().Get("https://tracker.test/teams")
-				return err
+				double := NewHTTPDouble()
+				double.Enqueue(Response{Status: http.StatusOK, Body: `{"teams":[]}`})
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://tracker.test/teams", nil)
+				if err != nil {
+					return err
+				}
+				resp, err := double.Client().Do(req)
+				if err != nil {
+					return err
+				}
+				defer resp.Body.Close()
+				var body struct{ Teams []json.RawMessage }
+				if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+					return err
+				}
+				if body.Teams == nil || len(body.Teams) != 0 {
+					return fmt.Errorf("expected empty teams response, got %+v", body)
+				}
+				return nil
 			},
 		}
 	})
