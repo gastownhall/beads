@@ -10,25 +10,38 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// summaryColumnNames mirrors ScanIssueSummaryFrom's dests order exactly
-// (scan.go), which in turn must agree with IssueSummaryColumns. A mismatch
-// here silently misaligns every column this test inspects.
+// summaryColumnNames is derived from IssueSummaryColumns rather than
+// hand-listed beside it. The hand-copied version was one of three lists that
+// had to be edited in lockstep (the const, ScanIssueSummaryFrom's dests, and
+// this fixture); deriving it deletes one of the three outright, and
+// TestIssueSummaryColumnsMatchScanner in scan_test.go pins the remaining pair.
 func summaryColumnNames() []string {
-	return []string{
-		"id", "title", "status", "priority", "issue_type", "assignee",
-		"pinned", "created_at", "updated_at", "closed_at",
-	}
+	return parseSelectColumns(IssueSummaryColumns)
 }
 
 // summaryMergeRow builds one full-width IssueSummaryColumns row with only
-// identity/status/priority/created_at populated; assignee, pinned,
-// updated_at, and closed_at are NULL. Column count and order must track
-// summaryColumnNames/ScanIssueSummaryFrom.
+// identity/status/priority/created_at populated; every other column, including
+// the wisp-plane markers, is NULL — this fixture exercises merge ordering, not
+// hydration.
+//
+// Values are placed by column NAME against summaryColumnNames rather than by
+// literal position, so adding a column to IssueSummaryColumns widens this row
+// automatically instead of silently shifting every value one slot left.
 func summaryMergeRow(id string, createdAt time.Time) []driver.Value {
-	return []driver.Value{
-		id, id, "open", 2, "task", nil, // id, title, status, priority, issue_type, assignee
-		nil, createdAt.Format(time.RFC3339), nil, nil, // pinned, created_at, updated_at, closed_at
+	byName := map[string]driver.Value{
+		"id":         id,
+		"title":      id,
+		"status":     "open",
+		"priority":   2,
+		"issue_type": "task",
+		"created_at": createdAt.Format(time.RFC3339),
 	}
+	cols := summaryColumnNames()
+	row := make([]driver.Value, len(cols))
+	for i, col := range cols {
+		row[i] = byName[col] // absent from the map => nil => SQL NULL
+	}
+	return row
 }
 
 // TestSearchIssueSummariesInTx_MergesAcrossIssuesAndWisps is
