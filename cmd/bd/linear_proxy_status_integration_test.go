@@ -41,18 +41,14 @@ func TestLinearStatusSQLServerFrontdoor(t *testing.T) {
 	}
 	cmd := exec.Command(bd, "--json", "linear", "status")
 	cmd.Dir = dir
-	cmd.Env = append(bdEnv(dir), "BEADS_DIR="+filepath.Join(dir, ".beads"), "BEADS_TEST_SERVER=1", "LINEAR_API_KEY=test-key", "LINEAR_TEAM_ID=12345678-1234-1234-1234-123456789abc")
+	cmd.Env = append(bdEnv(dir), "BEADS_DIR="+filepath.Join(dir, ".beads"), "BEADS_TEST_SERVER=1", "LINEAR_API_KEY=test-key", "LINEAR_TEAM_ID="+linearProxyTestTeamID)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("direct SQL linear status: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
 	}
-	var status map[string]any
-	if err := json.Unmarshal(out, &status); err != nil {
-		t.Fatalf("decode direct SQL status: %v", err)
-	}
-	assertLinearStatus(t, status)
+	assertLinearStatus(t, parseLinearStatus(t, out))
 }
 
 // TestManagedLocalProxiedLinearStatusParity drives the public status command
@@ -62,9 +58,8 @@ func TestLinearStatusSQLServerFrontdoor(t *testing.T) {
 func TestManagedLocalProxiedLinearStatusParity(t *testing.T) {
 	requireManagedLocalProxiedEnv(t)
 	bd := buildBDForInitTests(t)
-	team := "12345678-1234-1234-1234-123456789abc"
 	lastSync := "2026-09-09T01:02:03Z"
-	env := []string{"LINEAR_API_KEY=test-key", "LINEAR_TEAM_ID=" + team}
+	env := []string{"LINEAR_API_KEY=test-key", "LINEAR_TEAM_ID=" + linearProxyTestTeamID}
 
 	directDir, directBeadsDir, _ := bdInit(t, bd, "--prefix", "linstatus", "--non-interactive", "--skip-hooks", "--skip-agents")
 	directRaw, err := newDoltStoreFromConfig(t.Context(), directBeadsDir)
@@ -114,9 +109,21 @@ func linearStatusFixture(t *testing.T, bd, dir string, baseEnv, extraEnv []strin
 	if err := store.SetLocalMetadata(t.Context(), "linear.last_sync", lastSync); err != nil {
 		t.Fatalf("seed local last_sync metadata: %v", err)
 	}
+	return parseLinearStatus(t, run("--json", "linear", "status"))
+}
+
+// parseLinearStatus skips to the first object so stderr chatter from the child
+// bd (a deprecation warning, a proxy notice) cannot break the parse, matching
+// linearListIssues and parseLinearSyncResult in the sibling roundtrip test.
+func parseLinearStatus(t *testing.T, out []byte) map[string]any {
+	t.Helper()
+	start := bytes.IndexByte(out, '{')
+	if start < 0 {
+		t.Fatalf("bd linear status --json emitted no object:\n%s", out)
+	}
 	var status map[string]any
-	if err := json.Unmarshal(run("--json", "linear", "status"), &status); err != nil {
-		t.Fatalf("decode linear status: %v", err)
+	if err := json.Unmarshal(out[start:], &status); err != nil {
+		t.Fatalf("decode linear status: %v\n%s", err, out)
 	}
 	return status
 }
