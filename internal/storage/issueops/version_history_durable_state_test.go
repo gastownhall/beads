@@ -38,22 +38,63 @@ import (
 // be the JCS form or the token would depend on which marshaler ran first.
 // Every case is also checked to be a fixed point of canonicalization, and a
 // duplicate-key input is refused rather than silently resolved.
+//
+// THE OFFICIAL VECTORS RUN BELOW THE ADMISSION GATE, through jcsCanonicalize
+// rather than canonicalDurableState, and this is deliberate, not an
+// inconsistency: testdata/jcs/input/values.json -- from the spec's own
+// reference suite, not a case authored for this repo -- contains 1E30, an
+// integer-valued literal past 2^53-1 that refuseUnrepresentableIntegers now
+// refuses outright (see version_history.go's refuseUnrepresentableIntegers
+// and jcsCanonicalize doc comments). RFC 8785 conformance is a claim about
+// the canonicalizer, not about this store's admission policy, so weakening
+// or dropping that vector to fit the gate would be the wrong trade; the gate
+// refusing the same magnitude is pinned on its own terms in
+// version_history_integer_admission_test.go. The two local cases below carry
+// no such conflict and keep exercising the full gated seam, which is the
+// more faithful check for them since production traffic never bypasses the
+// gate.
 func TestCanonicalDurableStateIsJCS(t *testing.T) {
 	t.Parallel()
 
-	cases := append(jcsTestVectors(t),
-		jcsCase{
+	for _, tc := range jcsTestVectors(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			marshaled, err := json.Marshal(tc.state)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			got, err := jcsCanonicalize(marshaled)
+			if err != nil {
+				t.Fatalf("jcsCanonicalize: %v", err)
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("jcsCanonicalize =\n  %s\nwant\n  %s", got, tc.want)
+			}
+			// canonical(canonical(x)) == canonical(x): the stored bytes are
+			// a fixed point, so re-canonicalizing what was read back can
+			// never change the token.
+			again, err := jcsCanonicalize(got)
+			if err != nil {
+				t.Fatalf("jcsCanonicalize over its own output: %v", err)
+			}
+			if !bytes.Equal(again, got) {
+				t.Fatalf("canonical form is not a fixed point:\n  %s\n  %s", got, again)
+			}
+		})
+	}
+
+	for _, tc := range []jcsCase{
+		{
 			name:  "unicode and astral keys sort by UTF-16 code units",
 			state: json.RawMessage(`{"b":1,"a":2,"é":3,"A":4,"😀":5}`),
 			want:  []byte(`{"A":4,"a":2,"b":1,"é":3,"😀":5}`),
 		},
-		jcsCase{
+		{
 			name:  "html escapes are normalized away",
 			state: map[string]any{"s": `<a>&"'</a>`},
 			want:  []byte(`{"s":"<a>&\"'</a>"}`),
 		},
-	)
-	for _, tc := range cases {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := canonicalDurableState(tc.state)
@@ -118,9 +159,23 @@ func TestCanonicalDurableStateIsJCS(t *testing.T) {
 		"id":       "bd-1",
 		"priority": json.Number("1.0"),
 		"metadata": map[string]any{
-			"weight":  json.Number("1.50"),
-			"huge":    json.Number("1E300"),
-			"ordinal": json.Number("9007199254740993"), // 2^53 + 1
+			"weight": json.Number("1.50"),
+			// 1E-300, not 1E300: this test is about number FORM
+			// canonicalization (ES6 exponential notation), not the admission
+			// gate. 1E300 denotes an INTEGER value (10^300) past what
+			// binary64 holds exactly, so refuseUnrepresentableIntegers now
+			// refuses it -- see version_history_integer_admission_test.go.
+			// 1E-300 exercises the same exponential FORM without being an
+			// integer at all, so it stays in scope for this test.
+			"huge": json.Number("1E-300"),
+			// 2^53-1, the largest integer binary64 holds exactly. This was
+			// 2^53+1 until the admission gate began refusing literals that
+			// binary64 cannot hold: JCS would round such a literal to a
+			// DIFFERENT VALUE, collapsing two distinct states onto one
+			// durable_state. That case now lives in
+			// version_history_integer_admission_test.go, which asserts the
+			// refusal; this test stays about number FORM canonicalization.
+			"ordinal": json.Number("9007199254740991"),
 			"tags":    []any{json.Number("2.0"), "b", nil},
 		},
 		"raw": json.RawMessage(`{ "z" : 10.0e0 , "a" : true }`),
@@ -132,9 +187,10 @@ func TestCanonicalDurableStateIsJCS(t *testing.T) {
 	}
 
 	// RFC 8785: keys sorted, no whitespace, numbers in ES6 Number::toString
-	// form (1.0 -> 1, 1.50 -> 1.5, 1E300 -> 1e+300, 2^53+1 -> the double it
-	// rounds to, 10.0e0 -> 10).
-	want := []byte(`{"id":"bd-1","metadata":{"huge":1e+300,"ordinal":9007199254740992,"tags":[2,"b",null],"weight":1.5},"priority":1,"raw":{"a":true,"z":10}}`)
+	// form (1.0 -> 1, 1.50 -> 1.5, 1E-300 -> 1e-300, 10.0e0 -> 10). An
+	// integer-valued literal past 2^53-1, any spelling, never reaches JCS now
+	// -- the admission gate refuses it first.
+	want := []byte(`{"id":"bd-1","metadata":{"huge":1e-300,"ordinal":9007199254740991,"tags":[2,"b",null],"weight":1.5},"priority":1,"raw":{"a":true,"z":10}}`)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("canonicalDurableState =\n  %s\nwant\n  %s", got, want)
 	}
@@ -148,7 +204,7 @@ func TestCanonicalDurableStateIsJCS(t *testing.T) {
 	if bytes.Equal(plain, got) {
 		t.Fatalf("plain json.Marshal already equals the canonical form (%s); this test no longer proves canonicalization matters", plain)
 	}
-	for _, nonCanonical := range []string{"1.0", "1.50", "1E300", "9007199254740993", "10.0e0"} {
+	for _, nonCanonical := range []string{"1.0", "1.50", "1E-300", "10.0e0"} {
 		if !bytes.Contains(plain, []byte(nonCanonical)) {
 			t.Errorf("plain marshal lost the non-canonical form %q, so the fixture no longer exercises it: %s", nonCanonical, plain)
 		}
