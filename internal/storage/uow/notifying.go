@@ -979,6 +979,23 @@ func (u *recordingIssueUC) CompareAndSetMetadataKey(ctx context.Context, plan st
 	return result, wrote, nil
 }
 
+// CompareAndSetVersion records an update for a write R16 ACCEPTED, and
+// nothing for one it refused — the same line CompareAndSetMetadataKey draws
+// above, drawn on Accepted instead of a wrote bool because R16's own result
+// already names the fact directly.
+//
+// THE SNAPSHOT IS anyPlane for the same reason CompareAndSetMetadataKey's is:
+// this role resolves the id across both planes itself, and a whole-of-state
+// write to a wisp is an update to a wisp.
+func (u *recordingIssueUC) CompareAndSetVersion(ctx context.Context, plan storage.CompareAndSetVersionPlan) (storage.CompareAndSetVersionResult, error) {
+	result, err := u.IssueUseCase.CompareAndSetVersion(ctx, plan)
+	if err != nil || !result.Accepted {
+		return result, err
+	}
+	u.rec.record(opUpdate, u.snap.anyPlane(ctx, plan.ID))
+	return result, nil
+}
+
 // ReleaseIssue records an update for a release that landed.
 //
 // It is DECLARED rather than inherited, which is the whole reason this method

@@ -139,6 +139,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"CountIssuesByGroup":           reads,
 			"CountOpenChildren":            reads,
 			"CountOpenWispChildren":        reads,
+			"CurrentVersion":               reads,
 			"FindWispDependentsRecursive":  reads,
 			"GetBlockedIssues":             reads,
 			"GetDescendants":               reads,

@@ -356,6 +356,18 @@ func (r *issueSQLRepositoryImpl) CompareAndSetMetadataKey(ctx context.Context, p
 	return result, write.Wrote, err
 }
 
+// CompareAndSetVersion runs R16's SHARED whole-of-state per-record CAS body,
+// unwrapped, for the reason CompareAndSetMetadataKey gives.
+func (r *issueSQLRepositoryImpl) CompareAndSetVersion(ctx context.Context, plan storage.CompareAndSetVersionPlan) (storage.CompareAndSetVersionResult, error) {
+	return issueops.CompareAndSetVersionInTx(ctx, r.runner, plan)
+}
+
+// CurrentVersion runs the SHARED current-Address read, unwrapped, for the
+// reason CompareAndSetMetadataKey gives.
+func (r *issueSQLRepositoryImpl) CurrentVersion(ctx context.Context, id string) (string, error) {
+	return issueops.CurrentExpectedRevisionInTx(ctx, r.runner, id)
+}
+
 // ReleaseIssue runs the SHARED claim-release body, unwrapped.
 //
 // It is the whole of this leg's implementation, and that is the point: the two
