@@ -497,26 +497,41 @@ func (r *dependencySQLRepositoryImpl) GetBlockingInfo(ctx context.Context, issue
 	}
 
 	table := pickDepTable(opts.UseWispsTable)
-	idPlaceholders, idArgs := buildInPlaceholders(issueIDs)
 
-	//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-	outQ := fmt.Sprintf(
-		"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE issue_id IN (%s) AND type IN ('blocks', 'parent-child')",
-		depTargetExpr, table, idPlaceholders,
-	)
-	outRows, err := r.scanBlockingRows(ctx, outQ, idArgs)
-	if err != nil {
-		return domain.BlockingInfo{}, fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: outbound: %w", err)
-	}
+	// Both legs are batched at queryBatchSize and their rows concatenated.
+	// Each leg keys its result by a column the IN list constrains — outbound
+	// by issue_id, inbound by the dependency target — and an id lands in
+	// exactly one batch, so every row that shares a key comes from the same
+	// batch and the merge below is unchanged by the split.
+	var outRows, inRows []blockingRow
+	err := forEachIDBatch(issueIDs, func(batch []string) error {
+		idPlaceholders, idArgs := buildInPlaceholders(batch)
 
-	//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-	inQ := fmt.Sprintf(
-		"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE %s IN (%s) AND type = 'blocks'",
-		depTargetExpr, table, depTargetExpr, idPlaceholders,
-	)
-	inRows, err := r.scanBlockingRows(ctx, inQ, idArgs)
+		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
+		outQ := fmt.Sprintf(
+			"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE issue_id IN (%s) AND type IN ('blocks', 'parent-child')",
+			depTargetExpr, table, idPlaceholders,
+		)
+		batchOut, err := r.scanBlockingRows(ctx, outQ, idArgs)
+		if err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: outbound: %w", err)
+		}
+		outRows = append(outRows, batchOut...)
+
+		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
+		inQ := fmt.Sprintf(
+			"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE %s IN (%s) AND type = 'blocks'",
+			depTargetExpr, table, depTargetExpr, idPlaceholders,
+		)
+		batchIn, err := r.scanBlockingRows(ctx, inQ, idArgs)
+		if err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: inbound: %w", err)
+		}
+		inRows = append(inRows, batchIn...)
+		return nil
+	})
 	if err != nil {
-		return domain.BlockingInfo{}, fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: inbound: %w", err)
+		return domain.BlockingInfo{}, err
 	}
 
 	statusIDs := make(map[string]struct{})
@@ -611,12 +626,19 @@ func (r *dependencySQLRepositoryImpl) loadStatusByID(ctx context.Context, idSet 
 	for id := range idSet {
 		ids = append(ids, id)
 	}
-	placeholders, args := buildInPlaceholders(ids)
 	sourceByID := make(map[string]string, len(idSet))
+	// Each table is read in ceil(len(ids)/queryBatchSize) statements. The
+	// cross-table duplicate check is unaffected: an id lands in exactly one
+	// batch per table, so it is still recorded under `issues` before the
+	// `wisps` pass reaches it.
 	for _, table := range []string{"issues", "wisps"} {
-		//nolint:gosec // G201: table is a hardcoded constant
-		q := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, placeholders)
-		if err := r.scanStatusRows(ctx, q, args, table, statusByID, sourceByID); err != nil {
+		err := forEachIDBatch(ids, func(batch []string) error {
+			placeholders, args := buildInPlaceholders(batch)
+			//nolint:gosec // G201: table is a hardcoded constant
+			q := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, placeholders)
+			return r.scanStatusRows(ctx, q, args, table, statusByID, sourceByID)
+		})
+		if err != nil {
 			return nil, err
 		}
 	}

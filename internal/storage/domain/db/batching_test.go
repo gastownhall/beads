@@ -102,6 +102,28 @@ func (s *testSuite) TestBulkReadersBatch() {
 	}
 	assertBatched := func(name string, legs int) { assertBatchedExtra(name, legs, 0) }
 
+	// countMatching reports how many recorded statements contain sub — the
+	// readers below issue more than one KIND of statement per call (two
+	// dependency legs, then a status lookup per plane), so their legs are
+	// counted by shape rather than by a flat statement total.
+	countMatching := func(calls []recordedCall, sub string) int {
+		n := 0
+		for _, c := range calls {
+			if strings.Contains(c.query, sub) {
+				n++
+			}
+		}
+		return n
+	}
+	// assertUnderCap is the half of the theorem that holds for EVERY leg: no
+	// statement carries more than queryBatchSize id placeholders.
+	assertUnderCap := func(name string, calls []recordedCall) {
+		for _, c := range calls {
+			s.LessOrEqual(c.nargs, queryBatchSize, "%s: bound args in one statement", name)
+			s.LessOrEqual(strings.Count(c.query, "?"), queryBatchSize, "%s: placeholders in one statement", name)
+		}
+	}
+
 	s.Run("CommentCounts", func() {
 		out, err := comments.CountsByIssueIDs(s.Ctx(), ids, domain.CommentOpts{})
 		s.Require().NoError(err)
@@ -247,6 +269,107 @@ func (s *testSuite) TestBulkReadersBatch() {
 		}
 	})
 
+	s.Run("FetchIssuesByIDs", func() {
+		// The residual reader behind export's SearchIssues(Limit=0): one
+		// unbounded IN list over every hit id before wy-sm01o2.
+		repo := &issueSQLRepositoryImpl{runner: rec}
+		rec.reset()
+		byID, err := repo.fetchIssuesByIDs(s.Ctx(), ids, issuesFilterTables, types.IssueFilter{SkipLabels: true})
+		s.Require().NoError(err)
+		assertBatched("fetchIssuesByIDs", 1)
+		s.Require().Len(byID, len(seeded), "one row per seeded durable id, merged across all three batches")
+		for _, i := range seeded {
+			s.Require().NotNil(byID[ids[i]], "%s present in the merged map", ids[i])
+		}
+
+		// Hydration runs ONCE over the MERGED rows. Rows were scanned in all
+		// three batches, so a hydration moved inside the batch loop would
+		// issue three label reads here instead of one.
+		rec.reset()
+		byID, err = repo.fetchIssuesByIDs(s.Ctx(), ids, issuesFilterTables, types.IssueFilter{})
+		s.Require().NoError(err)
+		calls := rec.reset()
+		s.Require().Len(calls, wantBatches+1, "%d fetch statements plus exactly one label hydration", wantBatches)
+		assertUnderCap("fetchIssuesByIDs (hydrating)", calls)
+		s.Contains(calls[len(calls)-1].query, "FROM labels", "the trailing statement is the single hydration")
+		for k, i := range seeded {
+			s.Require().NotNil(byID[ids[i]])
+			s.Equal([]string{fmt.Sprintf("l%d", k)}, byID[ids[i]].Labels, "labels hydrated for %s", ids[i])
+		}
+	})
+
+	s.Run("GetBlockingInfoOutbound", func() {
+		rec.reset()
+		info, err := deps.GetBlockingInfo(s.Ctx(), ids, domain.DepListOpts{})
+		s.Require().NoError(err)
+		calls := rec.reset()
+		assertUnderCap("GetBlockingInfo (outbound)", calls)
+		s.Equal(wantBatches, countMatching(calls, "WHERE issue_id IN ("), "outbound leg: one statement per batch")
+		// ids[400] (batch 3) depends on ids[0] (batch 1), and ids[199]
+		// (batch 1) on ids[200] (batch 2): the edge is keyed by the
+		// depender, so both must appear in the merged map.
+		s.Require().Len(info.BlockedBy, 2, "the 'related' edge is not blocking and stays out")
+		s.Equal([]string{ids[0]}, info.BlockedBy[ids[n-1]])
+		s.Equal([]string{ids[queryBatchSize]}, info.BlockedBy[ids[queryBatchSize-1]])
+		s.Empty(info.Parent)
+	})
+
+	s.Run("GetBlockingInfoInbound", func() {
+		rec.reset()
+		info, err := deps.GetBlockingInfo(s.Ctx(), ids, domain.DepListOpts{})
+		s.Require().NoError(err)
+		calls := rec.reset()
+		assertUnderCap("GetBlockingInfo (inbound)", calls)
+		s.Equal(wantBatches, countMatching(calls, "WHERE "+depTargetExpr+" IN ("), "inbound leg: one statement per batch")
+		// The inbound leg keys by the TARGET, which is the id the IN list
+		// constrains: ids[0] in batch 1 is blocked-target for a row whose
+		// other end sits in batch 3.
+		s.Require().Len(info.Blocks, 2)
+		s.Equal([]string{ids[n-1]}, info.Blocks[ids[0]])
+		s.Equal([]string{ids[queryBatchSize-1]}, info.Blocks[ids[queryBatchSize]])
+	})
+
+	s.Run("LoadStatusByID", func() {
+		repo := &dependencySQLRepositoryImpl{runner: rec}
+		idSet := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			idSet[id] = struct{}{}
+		}
+		rec.reset()
+		statusByID, err := repo.loadStatusByID(s.Ctx(), idSet)
+		s.Require().NoError(err)
+		calls := rec.reset()
+		assertUnderCap("loadStatusByID", calls)
+		s.Require().Len(calls, 2*wantBatches, "both planes, one statement per batch each")
+		s.Equal(wantBatches, countMatching(calls, "FROM issues WHERE id IN ("), "issues: one statement per batch")
+		s.Equal(wantBatches, countMatching(calls, "FROM wisps WHERE id IN ("), "wisps: one statement per batch")
+		// Rows from every batch AND from both planes merge into one map.
+		for _, i := range seeded {
+			s.Equal(types.StatusOpen, statusByID[ids[i]], "durable status for %s", ids[i])
+		}
+		wisp := ids[queryBatchSize+50]
+		s.Equal(types.StatusOpen, statusByID[wisp], "the batch-2 wisp is read from the wisps table")
+		s.Len(statusByID, len(seeded)+1)
+	})
+
+	s.Run("LoadStatusByIDDuplicateAcrossTables", func() {
+		// Batching must not lose the cross-plane conflict: the id is in
+		// exactly one batch per table, so it is still recorded under issues
+		// before the wisps pass reaches it, whichever batch that is (the id
+		// set is a map, so its batch assignment is not fixed).
+		repo := &dependencySQLRepositoryImpl{runner: rec}
+		const dup = "bd-batch-dup"
+		s.seedIssueRow(dup)
+		s.seedWispRow(dup)
+		idSet := map[string]struct{}{dup: {}}
+		for _, id := range ids {
+			idSet[id] = struct{}{}
+		}
+		_, err := repo.loadStatusByID(s.Ctx(), idSet)
+		s.Require().Error(err, "an id in both planes is still a conflict after batching")
+		s.Contains(err.Error(), "exists in both issues and wisps")
+	})
+
 	s.Run("EmptyInputIssuesNoStatement", func() {
 		_, err := comments.CountsByIssueIDs(s.Ctx(), nil, domain.CommentOpts{})
 		s.Require().NoError(err)
@@ -255,6 +378,12 @@ func (s *testSuite) TestBulkReadersBatch() {
 		_, err = deps.CountsByIssueIDs(s.Ctx(), nil, domain.DepCountsOpts{})
 		s.Require().NoError(err)
 		_, err = NewIssueSQLRepository(rec).GetByIDs(s.Ctx(), nil, domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		_, err = (&issueSQLRepositoryImpl{runner: rec}).fetchIssuesByIDs(s.Ctx(), nil, issuesFilterTables, types.IssueFilter{})
+		s.Require().NoError(err)
+		_, err = deps.GetBlockingInfo(s.Ctx(), nil, domain.DepListOpts{})
+		s.Require().NoError(err)
+		_, err = (&dependencySQLRepositoryImpl{runner: rec}).loadStatusByID(s.Ctx(), map[string]struct{}{})
 		s.Require().NoError(err)
 		s.Empty(rec.reset())
 	})

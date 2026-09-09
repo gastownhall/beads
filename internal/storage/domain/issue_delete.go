@@ -287,8 +287,12 @@ func (u *issueUseCaseImpl) previewDelete(ctx context.Context, ids []string) (Del
 	for _, iss := range fromIssues {
 		preview.Issues[iss.ID] = iss
 	}
+	// Only the WISPS table is optional here: this read is `FROM wisps LEFT
+	// JOIN leases`, so a blanket table-not-exist check reported a rig missing
+	// `leases` as a rig with no wisp plane and listed live wisps under
+	// NotFound (the WispPlaneIDs lesson, wy-237yfi).
 	fromWisps, err := u.issueRepo.GetByIDs(ctx, ids, IssueTableOpts{UseWispsTable: true})
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !dberrors.IsMissingTable(err, "wisps") {
 		return preview, fmt.Errorf("previewDelete: load wisps: %w", err)
 	}
 	for _, iss := range fromWisps {
@@ -383,8 +387,11 @@ func (u *issueUseCaseImpl) collectConnectedIssues(
 	for _, iss := range fromIssues {
 		out[iss.ID] = iss
 	}
+	// As in previewDelete: the wisp read joins `leases`, and only a missing
+	// `wisps` table means "this rig has no wisp plane". Anything else left
+	// the neighbors unhydrated behind a nil error.
 	fromWisps, err := u.issueRepo.GetByIDs(ctx, ids, IssueTableOpts{UseWispsTable: true})
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !dberrors.IsMissingTable(err, "wisps") {
 		return nil, nil, fmt.Errorf("hydrate neighbors (wisps): %w", err)
 	}
 	for _, iss := range fromWisps {

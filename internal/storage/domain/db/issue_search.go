@@ -182,33 +182,45 @@ func (r *issueSQLRepositoryImpl) fetchIssuesByIDs(ctx context.Context, ids []str
 		return map[string]*types.Issue{}, nil
 	}
 
-	placeholders, args := buildInPlaceholders(ids)
+	out := make(map[string]*types.Issue, len(ids))
+	ordered := make([]*types.Issue, 0, len(ids))
+	// One statement per batch, scan order concatenated across batches: an id
+	// lands in exactly one batch, so the merged map is what a single
+	// statement over all ids would have produced. The fetch itself carries no
+	// ORDER BY (callers order by their own id list, or by src), so the
+	// concatenation is as ordered as the single statement was.
+	err := forEachIDBatch(ids, func(batch []string) error {
+		placeholders, args := buildInPlaceholders(batch)
 
-	//nolint:gosec // G201: tables.Main is "issues" or "wisps"; placeholders are ?.
-	fetchSQL := fmt.Sprintf(`SELECT %s FROM %s %s WHERE id IN (%s)`,
-		issueSelectColumns, tables.Main, sqlbuild.LeaseJoin(tables.Main), placeholders)
-	rows, err := r.runner.QueryContext(ctx, fetchSQL, args...)
+		//nolint:gosec // G201: tables.Main is "issues" or "wisps"; placeholders are ?.
+		fetchSQL := fmt.Sprintf(`SELECT %s FROM %s %s WHERE id IN (%s)`,
+			issueSelectColumns, tables.Main, sqlbuild.LeaseJoin(tables.Main), placeholders)
+		rows, err := r.runner.QueryContext(ctx, fetchSQL, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			issue, scanErr := scanIssue(rows)
+			if scanErr != nil {
+				return fmt.Errorf("scan: %w", scanErr)
+			}
+			out[issue.ID] = issue
+			ordered = append(ordered, issue)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("rows: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	out := make(map[string]*types.Issue, len(ids))
-	ordered := make([]*types.Issue, 0, len(ids))
-	for rows.Next() {
-		issue, scanErr := scanIssue(rows)
-		if scanErr != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("scan: %w", scanErr)
-		}
-		out[issue.ID] = issue
-		ordered = append(ordered, issue)
-	}
-
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows: %w", err)
-	}
-
+	// Hydration runs ONCE over every scanned row: hydrateIssues batches its
+	// own relation reads (wy-237yfi), so per-batch hydration would only add
+	// round trips.
 	if err := r.hydrateIssues(ctx, ordered, tables, filter.IncludeDependencies, filter.SkipLabels); err != nil {
 		return nil, fmt.Errorf("hydrate: %w", err)
 	}
