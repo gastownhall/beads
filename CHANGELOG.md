@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`federation.allowed-remote-patterns` treats `?` as a query delimiter**
+  ([#5951](https://github.com/gastownhall/beads/pull/5951)). A `?` in a
+  pattern now starts its query and is no longer `path.Match`'s
+  single-character wildcard; a remote that carries a query string only
+  matches a pattern that also carries one, with strict query parsing and
+  `endpoint=` validation. Queryless remotes keep the previous glob semantics
+  unchanged. See `docs/reference/configuration.md`, Sync and Federation.
+
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and
