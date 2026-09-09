@@ -652,6 +652,19 @@ func TestValidateYamlConfigValue_SharedServer(t *testing.T) {
 	}
 }
 
+func TestValidateYamlConfigValue_DoltRemotesAPIPort(t *testing.T) {
+	for _, value := range []string{"0", "1", "65535"} {
+		if err := validateYamlConfigValue("dolt.remotesapi-port", value); err != nil {
+			t.Errorf("expected %q to be valid: %v", value, err)
+		}
+	}
+	for _, value := range []string{"-1", "banana", "65536"} {
+		if err := validateYamlConfigValue("dolt.remotesapi-port", value); err == nil {
+			t.Errorf("expected %q to be invalid", value)
+		}
+	}
+}
+
 func TestValidateYamlConfigValue_DoltDebug(t *testing.T) {
 	if err := validateYamlConfigValue("dolt.debug", "true"); err != nil {
 		t.Errorf("expected 'true' to be valid: %v", err)
@@ -1395,4 +1408,10 @@ func TestMetricsNoticeShownResolvesUserGlobalOnly(t *testing.T) {
 			t.Errorf("MetricsNoticeShownByUserConfig() = false; user-global true must win over project false")
 		}
 	})
+}
+
+func TestDoltRemotesAPIPortIsUserGlobal(t *testing.T) {
+	if !IsUserGlobalKey("dolt.remotesapi-port") {
+		t.Fatal("dolt.remotesapi-port must be machine-global; a project config cannot vary one shared server")
+	}
 }

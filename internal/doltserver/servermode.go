@@ -59,15 +59,20 @@ func (m ServerMode) String() string {
 // The function loads metadata.json only if the file exists, to avoid
 // triggering the legacy config.json -> metadata.json migration side effect.
 func ResolveServerMode(beadsDir string) ServerMode {
+	return ResolveServerModeForMode(beadsDir, IsSharedServerMode())
+}
+
+// ResolveServerModeForMode resolves lifecycle ownership for an
+// already-classified target. BEADS_DOLT_SERVER_MODE remains authoritative;
+// shared-server state comes from the caller's target classification rather
+// than the active workspace.
+func ResolveServerModeForMode(beadsDir string, sharedMode bool) ServerMode {
 	// 1. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
 		return ServerModeExternal
 	}
 
-	// 2. Shared server mode (env var or config.yaml) -> external.
-	// Must be checked before metadata.json so that a stale
-	// dolt_mode=embedded cannot override active shared-server intent.
-	if IsSharedServerMode() {
+	if sharedMode {
 		return ServerModeExternal
 	}
 

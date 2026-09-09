@@ -88,7 +88,9 @@ var YamlOnlyKeys = map[string]bool{
 	"import.path": true,
 
 	// Dolt server settings
-	"dolt.shared-server":      true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.shared-server":   true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.remotesapi-port": true, // Machine-global shared-server remotesapi listener (0 disables)
+
 	"dolt.max-conns":          true, // Connection pool size override (default 10, GH#3140)
 	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
 	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
@@ -316,7 +318,10 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // happening while the operator believes they are protected. Routing the write
 // to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
 // file, so config.NodeID() reads it back.
-var userGlobalExactKeys = map[string]bool{"node_id": true}
+var userGlobalExactKeys = map[string]bool{
+	"dolt.remotesapi-port": true,
+	"node_id":              true,
+}
 
 func IsUserGlobalKey(key string) bool {
 	if userGlobalExactKeys[key] {
@@ -404,10 +409,10 @@ func yamlScalarString(v interface{}) (string, bool) {
 // GetUserYamlConfig reads a single dotted key from the user-global config.yaml
 // ONLY, never project/BEADS_DIR config, returning "" if unset. It is the read
 // counterpart of SetUserYamlConfig/UnsetUserYamlConfig and the generic form of
-// the per-key consent helpers below. User-global keys (see IsUserGlobalKey —
-// currently metrics.*) must be read through this so `bd config get` reports the
-// value that actually governs runtime behavior, not the merged value a project's
-// .beads/config.yaml could shadow.
+// per-key consent helpers below. Keys selected by IsUserGlobalKey (for example
+// metrics.*, node_id, and the shared-server remotesapi port) must be read
+// through this so `bd config get` reports the value that actually governs
+// runtime behavior, not a merged project value the machine ignores.
 func GetUserYamlConfig(key string) string {
 	raw, _ := readUserGlobalYamlValue(key)
 	return strings.TrimSpace(raw)
@@ -889,6 +894,11 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
 			return fmt.Errorf("dolt.shared-server must be \"true\" or \"false\", got %q", value)
+		}
+	case "dolt.remotesapi-port":
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || port < 0 || port > 65535 {
+			return fmt.Errorf("dolt.remotesapi-port must be 0 (disabled) or a valid port number (1-65535), got %q", value)
 		}
 	case "dolt.debug":
 		lower := strings.ToLower(value)
