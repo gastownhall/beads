@@ -51,6 +51,7 @@ func (m *mockUnitOfWork) RawSQLUseCase() domain.RawSQLUseCase         { return n
 func (m *mockUnitOfWork) EventsJournalUseCase() domain.EventsJournalUseCase {
 	return nil
 }
+func (m *mockUnitOfWork) LabelVocabularyUseCase() domain.LabelVocabularyUseCase { return nil }
 
 // mockUnitOfWorkProvider implements UnitOfWorkProvider for testing
 type mockUnitOfWorkProvider struct {

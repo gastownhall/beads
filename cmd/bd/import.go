@@ -31,9 +31,19 @@ silently import the default file instead. This is the incremental counterpart to
 'bd export': new issues are created and existing issues are updated (upsert
 semantics).
 
+Lines are dispatched on their "_type" discriminator: "issue" (or absent),
+"memory", and "label-definition".
+
 Memory records (lines with "_type":"memory") are automatically detected and
 imported as persistent memories (equivalent to 'bd remember'). This makes
 'bd export | bd import' a full round-trip for both issues and memories.
+
+Label vocabulary records (lines with "_type":"label-definition") are applied
+to the opt-in curated vocabulary registry ('bd label define'), define-if-
+absent: an existing definition is kept and a case-insensitive collision with
+one warns on stderr without failing the import. Import itself never consults
+the registry, so an issue carrying an undefined label still imports whatever
+labels.vocabulary is set to.
 
 Each JSONL line should map to an issue. The importer accepts every field
 'bd export' emits — see 'bd export' output for the canonical schema. Only
@@ -230,6 +240,7 @@ type importResultJSON struct {
 	Skipped             int            `json:"skipped"`
 	DedupHits           int            `json:"dedup_skipped,omitempty"`
 	Memories            int            `json:"memories,omitempty"`
+	LabelDefinitions    int            `json:"label_definitions,omitempty"`
 	IDs                 []string       `json:"ids,omitempty"`
 	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
 	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
@@ -239,19 +250,19 @@ type importResultJSON struct {
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
-	issues, memories, err := parseImportRecords(r)
+	issues, memories, labelDefs, err := parseImportRecords(r)
 	if err != nil {
 		return err
 	}
 
 	if usesProxiedServer() {
-		return runImportRecordsProxied(ctx, issues, memories, source)
+		return runImportRecordsProxied(ctx, issues, memories, labelDefs, source)
 	}
 
 	if store == nil {
 		return fmt.Errorf("no database — run 'bd init' or 'bd bootstrap' first")
 	}
-	return runImportRecordsClassic(ctx, issues, memories, source)
+	return runImportRecordsClassic(ctx, issues, memories, labelDefs, source)
 }
 
 // parseImportRecords scans one JSONL stream into issue rows and memory
@@ -260,12 +271,13 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 // reader): the optional _schema header and tombstones are skipped, and the
 // "wisp_plane" boolean is honored as the explicit wisps-plane marker (and
 // the legacy "wisp" alias for "ephemeral") via applyImportWispPlane.
-func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
+func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, []labelDefinitionRecord, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 
 	var issues []*types.Issue
 	var memories []memoryRecord
+	var labelDefs []labelDefinitionRecord
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -275,7 +287,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
 		}
 
 		// Skip the optional beads-jsonl header record (§J1.3). A canonical
@@ -295,10 +307,20 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
 				}
 				if mem.Key != "" && mem.Value != "" {
 					memories = append(memories, mem)
+				}
+				continue
+			}
+			if typeStr == "label-definition" {
+				var def labelDefinitionRecord
+				if err := json.Unmarshal([]byte(line), &def); err != nil {
+					return nil, nil, nil, fmt.Errorf("failed to parse label definition record: %w", err)
+				}
+				if def.Label != "" {
+					labelDefs = append(labelDefs, def)
 				}
 				continue
 			}
@@ -306,7 +328,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
 		}
 		if issue.Status == "tombstone" {
 			continue
@@ -316,16 +338,16 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 		issues = append(issues, &issue)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
-	return issues, memories, nil
+	return issues, memories, labelDefs, nil
 }
 
 // runImportRecordsClassic is the classic (embedded/direct store) import
 // pipeline over the parsed records: dedup, dry-run classification, memory
 // writes, the batch issue import, the final commit and the issue_prefix
 // reconciliation.
-func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, labelDefs []labelDefinitionRecord, source string) error {
 	// Dedup: skip issues whose title matches an existing open issue
 	dedupHits := 0
 	if importDedup && len(issues) > 0 {
@@ -340,6 +362,7 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 
 	if importDryRun {
 		result.Memories = len(memories)
+		result.LabelDefinitions = len(labelDefs)
 		result.Skipped = dedupHits
 
 		classification, err := classifyDryRunImport(ctx, store, issues, importAllowStale)
@@ -359,6 +382,13 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 		result.Memories++
 	}
 
+	// Import label vocabulary definitions (define-if-absent; warnings to stderr)
+	defined, err := applyLabelDefinitionsClassic(ctx, store, labelDefs)
+	if err != nil {
+		return err
+	}
+	result.LabelDefinitions = defined
+
 	// Import issues
 	if len(issues) > 0 {
 		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale}
@@ -369,10 +399,13 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 		applyImportOutcome(&result, importResult)
 	}
 
-	if result.Created > 0 || result.Memories > 0 {
+	if result.Created > 0 || result.Memories > 0 || result.LabelDefinitions > 0 {
 		commitMsg := fmt.Sprintf("bd import: %d issues", result.Created)
 		if result.Memories > 0 {
 			commitMsg += fmt.Sprintf(", %d memories", result.Memories)
+		}
+		if result.LabelDefinitions > 0 {
+			commitMsg += fmt.Sprintf(", %d label definitions", result.LabelDefinitions)
 		}
 		commitMsg += fmt.Sprintf(" from %s", filepath.Base(source))
 		if err := store.Commit(ctx, commitMsg); err != nil {
