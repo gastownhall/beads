@@ -1004,13 +1004,114 @@ func TestCommentOutYamlKey(t *testing.T) {
 			key:      "backup.enabled",
 			expected: "  # backup.enabled: true\nother: value",
 		},
+		{
+			name:     "nested key",
+			content:  "backup:\n  enabled: false\nother: value",
+			key:      "backup.enabled",
+			expected: "backup:\n  # enabled: false\nother: value",
+		},
+		{
+			name:     "nested key preserves siblings and comments",
+			content:  "# Backup settings\nbackup:\n  enabled: false\n  interval: 15m\n",
+			key:      "backup.enabled",
+			expected: "# Backup settings\nbackup:\n  # enabled: false\n  interval: 15m\n",
+		},
+		{
+			name:     "nested key three levels deep",
+			content:  "a:\n  b:\n    c: 1\n",
+			key:      "a.b.c",
+			expected: "a:\n  b:\n    # c: 1\n",
+		},
+		{
+			name:     "block opener is left alone rather than orphaning its children",
+			content:  "backup:\n  enabled: false\n  interval: 15m",
+			key:      "backup",
+			expected: "backup:\n  enabled: false\n  interval: 15m",
+		},
+		{
+			name:     "block opener with an interleaved comment is left alone",
+			content:  "backup:\n  # whether to back up\n  enabled: false",
+			key:      "backup",
+			expected: "backup:\n  # whether to back up\n  enabled: false",
+		},
+		{
+			name:     "key with an empty value and no block is still commented",
+			content:  "actor:\nother: value",
+			key:      "actor",
+			expected: "# actor:\nother: value",
+		},
+		{
+			name:     "key with an empty value at end of file is still commented",
+			content:  "other: value\nactor:",
+			key:      "actor",
+			expected: "other: value\n# actor:",
+		},
+		{
+			// Only the flat line is commented; the nested copy survives, so
+			// the key is still SET after the unset. That is deliberate - the
+			// flat and nested forms are two independent config.yaml entries
+			// and commenting both would exceed what the caller asked for -
+			// but it means the honest report for this shape is "commented one
+			// of two", not "the key is gone". `changed` is true either way,
+			// and the caller only claims to have edited config.yaml, not to
+			// have cleared the effective value.
+			name:     "flat form wins when both are present",
+			content:  "backup.enabled: false\nbackup:\n  enabled: true",
+			key:      "backup.enabled",
+			expected: "# backup.enabled: false\nbackup:\n  enabled: true",
+		},
+		{
+			name:     "nested key absent from existing block",
+			content:  "backup:\n  interval: 15m\n",
+			key:      "backup.enabled",
+			expected: "backup:\n  interval: 15m\n",
+		},
+		{
+			// In flow style the leaf's line is also its parent's, so
+			// commenting the whole line to unset one leaf would delete the
+			// entire mapping. Refuse instead - a no-op the caller reports
+			// honestly beats silently dropping a sibling key.
+			name:     "flow mapping is left alone rather than deleting the whole map",
+			content:  "dolt: {mode: server}\n",
+			key:      "dolt.mode",
+			expected: "dolt: {mode: server}\n",
+		},
+		{
+			name:     "flow mapping with several leaves is left alone",
+			content:  "other: value\ndolt: {mode: server, port: 3306}\n",
+			key:      "dolt.port",
+			expected: "other: value\ndolt: {mode: server, port: 3306}\n",
+		},
+		{
+			// A flat key must keep the file's trailing newline. The nested
+			// and no-match paths always did; the flat path used to drop it,
+			// so which path fired decided whether the file kept its final
+			// newline.
+			name:     "flat key preserves the trailing newline",
+			content:  "a: 1\n",
+			key:      "a",
+			expected: "# a: 1\n",
+		},
+		{
+			name:     "flat key without a trailing newline stays without one",
+			content:  "a: 1",
+			key:      "a",
+			expected: "# a: 1",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := commentOutYamlKey(tt.content, tt.key)
+			got, changed := commentOutYamlKey(tt.content, tt.key)
 			if got != tt.expected {
 				t.Errorf("commentOutYamlKey() =\n%q\nwant:\n%q", got, tt.expected)
+			}
+			// The bool must agree with the content: it is what
+			// UnsetYamlConfig reports up to `bd config unset`, so a refusal
+			// that returns the content unchanged must not read as a write.
+			if wantChanged := got != tt.content; changed != wantChanged {
+				t.Errorf("commentOutYamlKey() changed = %v, want %v (content %s)",
+					changed, wantChanged, map[bool]string{true: "was rewritten", false: "came back unchanged"}[got != tt.content])
 			}
 		})
 	}
@@ -1058,8 +1159,12 @@ other-setting: value
 	defer os.Chdir(oldWd)
 
 	// Test UnsetYamlConfig
-	if err := UnsetYamlConfig("backup.enabled"); err != nil {
+	changed, err := UnsetYamlConfig("backup.enabled")
+	if err != nil {
 		t.Fatalf("UnsetYamlConfig() error = %v", err)
+	}
+	if !changed {
+		t.Error("UnsetYamlConfig() changed = false, want true for a key present in config.yaml")
 	}
 
 	// Read back and verify
@@ -1184,8 +1289,12 @@ func TestSetAndUnsetYamlConfig_WithBEADS_DIR_FromOutsideRepo(t *testing.T) {
 		t.Fatalf("expected runtime config to contain no-git-ops: true, got:\n%s", contentStr)
 	}
 
-	if err := UnsetYamlConfig("no-git-ops"); err != nil {
+	changed, err := UnsetYamlConfig("no-git-ops")
+	if err != nil {
 		t.Fatalf("UnsetYamlConfig() error = %v", err)
+	}
+	if !changed {
+		t.Error("UnsetYamlConfig() changed = false, want true for a key present in config.yaml")
 	}
 	content, err = os.ReadFile(configPath)
 	if err != nil {

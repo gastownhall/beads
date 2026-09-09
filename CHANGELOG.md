@@ -154,6 +154,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode still fails closed there — a repo-local auto-start is a different
   database, not a port refresh — but now says so in its own words.
 
+- **`bd config unset` no longer reports success while the key stays set, and
+  now names where the unset actually landed.** Three separate ways the old
+  command lied: a key present in `config.yaml` but not claimed by
+  `IsYamlOnlyKey` was deleted from the database only, so it stayed effective;
+  `commentOutYamlKey` matched only the flat `a.b: v` spelling, so a key written
+  in the nested form `SetYamlConfig` produces was never touched; and commenting
+  a key whose value is the block beneath it orphaned that block, leaving a
+  `config.yaml` that no longer parsed. The nested form is now edited at the
+  YAML node level (source line preserved, so comments and layout survive), a
+  block opener and a leaf that does not own its own line are refused rather
+  than corrupted, and the reported location - `Unset <key> (in database,
+  config.yaml)` - is derived from what the write actually changed rather than
+  from a pre-check of viper's merged value. A key that was never in
+  `config.yaml`, and a workspace with no project `config.yaml` at all, are
+  answers rather than failures: neither claims a file write, and neither leaves
+  the database row deleted behind a non-zero exit.
+
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica
   is by construction never reclaimed here, so the audit was not a one-off: it

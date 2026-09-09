@@ -143,7 +143,7 @@ func TestRelativeUserRootsNeverReachImplicitOrExplicitFilesystemPaths(t *testing
 	if err := SetUserYamlConfig("metrics.disabled", "true"); err == nil {
 		t.Fatal("SetUserYamlConfig returned nil error for unsafe roots")
 	}
-	if err := UnsetUserYamlConfig("metrics.disabled"); err == nil {
+	if _, err := UnsetUserYamlConfig("metrics.disabled"); err == nil {
 		t.Fatal("UnsetUserYamlConfig returned nil error for unsafe roots")
 	}
 

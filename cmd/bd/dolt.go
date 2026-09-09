@@ -1758,7 +1758,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 
 		if name == "origin" {
 			if current := config.GetYamlConfig("sync.remote"); current != "" {
-				if err := config.UnsetYamlConfig("sync.remote"); err != nil {
+				if _, err := config.UnsetYamlConfig("sync.remote"); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to clear sync.remote from config.yaml: %v\n", err)
 				}
 				if isGitRepo() {
