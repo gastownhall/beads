@@ -1151,12 +1151,21 @@ func TestEmbeddedCreateRepoRelativeUninitRefused(t *testing.T) {
 	}
 }
 
-// TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected verifies the
-// bd-8d3f gate only blocks *fabricating* a new workspace: a relative --repo
-// value that already has an initialized workspace at the resolved path must
-// keep working exactly as before, since ensureBeadsDirForPath's existing
-// os.Stat(metadata.json) check returns early before the new gate runs.
-func TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected(t *testing.T) {
+// TestEmbeddedCreateRepoRelativeExistingWorkspaceRefused is the regression
+// test for be-flg / gt-rlwo, and it is the case that was broken: the bd-8d3f
+// gate was computed correctly and then bypassed, because
+// ensureBeadsDirForPath returned early whenever the misresolved target
+// already had a metadata.json. So the guard refused to CREATE a stray
+// workspace and happily USED one that existed — and the first such call, made
+// before the guard shipped, is what fabricates it. Ten real beads were
+// written into two phantom stores that way, four of them lost with nobody
+// noticing, because bd printed "✓ Created issue" and exited 0 every time.
+//
+// A bare/relative --repo must therefore be refused whether or not the
+// resolved path happens to hold a workspace. Contrast with
+// TestEmbeddedCreateCrossRepoUninit (absolute --repo, must still work) and
+// TestEmbeddedCreateRepoTildeExistingWorkspaceAllowed.
+func TestEmbeddedCreateRepoRelativeExistingWorkspaceRefused(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -1179,12 +1188,122 @@ func TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected(t *testing.T) {
 		t.Fatal("expected issue ID for absolute --repo seed create")
 	}
 
-	// A relative --repo pointing at that SAME, now-initialized workspace
-	// must succeed unaffected by the bd-8d3f gate: the gate only blocks
-	// fabricating a workspace that doesn't exist yet.
-	second := bdCreate(t, bd, dir, "Should land in the pre-existing workspace", "--repo", relTarget)
-	if second.ID == "" {
-		t.Fatal("expected issue ID for relative --repo pointing at an existing workspace")
+	out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--json", "Should not land anywhere", "--repo", relTarget)
+	if err == nil {
+		t.Fatalf("expected bd create --repo %q to fail even though a workspace exists at the resolved path, got success: %s", relTarget, out)
+	}
+	if !strings.Contains(string(out), "absolute") {
+		t.Errorf("expected error to explain the absolute/~-prefixed path requirement, got: %s", out)
+	}
+	// The resolved path is what makes the refusal comprehensible: the caller
+	// typed a name and got a directory under their cwd.
+	if !strings.Contains(string(out), absTarget) {
+		t.Errorf("expected error to name the resolved path %s, got: %s", absTarget, out)
+	}
+
+	// The refused create must not have written anything into the target.
+	issues := bdListJSONAllowError(t, bd, absTarget, "--all", "--limit", "0")
+	if issues == nil {
+		t.Fatal("bd list in the target workspace failed")
+	}
+	for _, issue := range issues {
+		if issue.Title == "Should not land anywhere" {
+			t.Fatalf("refused create still landed in the target workspace as %s", issue.ID)
+		}
+	}
+	if len(issues) != 1 {
+		t.Errorf("target workspace has %d issues, want only the seed issue", len(issues))
+	}
+}
+
+// TestEmbeddedCreateRepoTildeExistingWorkspaceAllowed is the negative control
+// for the be-flg refusal: "~/"-prefixed --repo values are unambiguous (they
+// resolve against $HOME, not the cwd), so they must keep working. bdEnv sets
+// HOME to the test dir, and no shell is involved, so "~/..." reaches bd
+// literally and routing.ExpandPath does the expansion.
+func TestEmbeddedCreateRepoTildeExistingWorkspaceAllowed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	name := "tilde-target"
+	absTarget := filepath.Join(dir, name)
+	if err := os.MkdirAll(absTarget, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, absTarget)
+
+	issue := bdCreate(t, bd, dir, "Landed via tilde repo", "--repo", "~/"+name)
+	if issue.ID == "" {
+		t.Fatal("expected issue ID for ~/-prefixed --repo create")
+	}
+
+	issues := bdListJSONAllowError(t, bd, absTarget, "--all", "--limit", "0")
+	if issues == nil {
+		t.Fatal("bd list in the target workspace failed")
+	}
+	var found bool
+	for _, got := range issues {
+		if got.ID == issue.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("issue %s not found in the ~/-resolved target workspace", issue.ID)
+	}
+}
+
+// TestEmbeddedCreateAutoRoutedRelativeStillVivifies guards the other side of
+// the be-flg reorder. The refusal keys on the --repo FLAG, not on the shape
+// of the path, because auto-routed targets (routing.mode / routing.default)
+// come from config rather than caller input and have always been allowed to
+// auto-vivify. routing.default is deliberately set to a bare relative name
+// here — the exact shape that is refused when it arrives via --repo — so a
+// refusal moved up to cover every relative path would fail this test.
+func TestEmbeddedCreateAutoRoutedRelativeStillVivifies(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	name := "auto-routed-target"
+	absTarget := filepath.Join(dir, name)
+
+	cfg := exec.Command(bd, "config", "set", "routing.default", name)
+	cfg.Dir = dir
+	cfg.Env = bdEnv(dir)
+	if out, err := cfg.CombinedOutput(); err != nil {
+		t.Fatalf("bd config set routing.default failed: %v\n%s", err, out)
+	}
+
+	issue := bdCreate(t, bd, dir, "Auto-routed into a fresh workspace")
+	if issue.ID == "" {
+		t.Fatal("expected issue ID for auto-routed create")
+	}
+
+	if _, err := os.Stat(filepath.Join(absTarget, ".beads", "metadata.json")); err != nil {
+		t.Fatalf("auto-routed create did not vivify %s: %v", absTarget, err)
+	}
+
+	issues := bdListJSONAllowError(t, bd, absTarget, "--all", "--limit", "0")
+	if issues == nil {
+		t.Fatal("bd list in the auto-routed workspace failed")
+	}
+	var found bool
+	for _, got := range issues {
+		if got.ID == issue.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("issue %s not found in the auto-routed workspace", issue.ID)
 	}
 }
 
