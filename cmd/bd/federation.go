@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -303,6 +304,10 @@ func runFederationStatus(cmd *cobra.Command, args []string) error {
 		URL        string
 		Reachable  bool
 		ReachError string
+		// localCredentialErr marks a fetch that failed on this machine's
+		// credential key rather than on the network, so the line below does not
+		// blame the peer. Unexported: not part of the --json shape.
+		localCredentialErr bool
 	}
 	var peerStatuses []peerStatus
 
@@ -321,6 +326,7 @@ func runFederationStatus(cmd *cobra.Command, args []string) error {
 			ps.Status = status
 		} else {
 			ps.ReachError = fetchErr.Error()
+			ps.localCredentialErr = errors.Is(fetchErr, storage.ErrCredentialKeyMismatch)
 		}
 
 		peerStatuses = append(peerStatuses, ps)
@@ -343,9 +349,12 @@ func runFederationStatus(cmd *cobra.Command, args []string) error {
 		status := ps.Status
 		fmt.Printf("  %s  %s\n", ui.RenderAccent(status.Peer), ui.RenderMuted(ps.URL))
 
-		if ps.Reachable {
+		switch {
+		case ps.Reachable:
 			fmt.Printf("    %s Reachable\n", ui.RenderPass("✓"))
-		} else {
+		case ps.localCredentialErr:
+			fmt.Printf("    %s Local credential error: %s\n", ui.RenderFail("✗"), ps.ReachError)
+		default:
 			fmt.Printf("    %s Unreachable: %s\n", ui.RenderFail("✗"), ps.ReachError)
 		}
 

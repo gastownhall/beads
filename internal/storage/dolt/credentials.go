@@ -256,9 +256,23 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 	key := s.credentialKey
 	s.mu.RUnlock()
 	if key == nil {
+		// Deliberately not a key mismatch: the key was never initialized on
+		// this store, so the fix is init or file permissions, not re-adding
+		// the peer. Labeling it a mismatch would prescribe the wrong action.
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
-	return decryptWithKey(encrypted, key)
+	plaintext, err := decryptWithKey(encrypted, key)
+	if err != nil {
+		// federation_peers rows travel with the database, the key file does
+		// not, so a database opened on a second machine reaches here with a
+		// key that cannot read the stored password. Enrich at this single
+		// decrypt funnel, as embeddeddolt does, so every reader reports the
+		// credential problem rather than a bare cipher error. decryptWithKey
+		// stays unwrapped for the key-rotation path, which reads old keys on
+		// purpose and must not report a rotation miss as a mismatch.
+		return "", storage.CredentialKeyMismatchError(credentialKeyFile, err)
+	}
+	return plaintext, nil
 }
 
 // AddFederationPeer adds or updates a federation peer with credentials.
@@ -353,7 +367,9 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 		}
 		peer.Password, err = s.decryptPassword(encryptedPwd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt password: %w", err)
+			// decryptPassword already classifies the local-key case; name the
+			// peer and preserve the sentinel for errors.Is/As.
+			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", name, err)
 		}
 	}
 
@@ -396,7 +412,9 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 			}
 			peer.Password, err = s.decryptPassword(encryptedPwd)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt password: %w", err)
+				// Same as GetFederationPeer: the funnel classified it, the
+				// caller only names which peer failed.
+				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", peer.Name, err)
 			}
 		}
 
