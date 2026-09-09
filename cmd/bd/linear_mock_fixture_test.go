@@ -1,3 +1,13 @@
+// Shared mock Linear GraphQL server for cmd/bd front-door tests.
+//
+// The `cgo` build tag is deliberately looser than any single consumer: this
+// file is the union superset of `cgo && integration` (linear_roundtrip_test.go)
+// and `cgo && unix` (the linear_proxy_* parity tests), which is what lets one
+// fixture serve both tag sets. Keep it that way — only add helpers that compile
+// under plain `cgo`. A unix-only or integration-only helper pulled in here
+// breaks windows-cgo builds with no local signal; put it in the consumer file
+// instead.
+
 //go:build cgo
 
 package main

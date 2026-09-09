@@ -272,7 +272,6 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `ado.*` | Azure DevOps integration (org, project(s), state_map, type_map) |
 | `notion.*` | Notion integration |
 | `custom.*` | User-defined / custom integrations |
-| `<tracker>.last_sync` | Updated automatically after each tracker sync; enables incremental sync |
 | `status.custom` | Custom statuses with optional behavior categories (see [below](#custom-statuses-and-types)) |
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to the wisps table instead of the versioned issues table |
@@ -283,6 +282,8 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show) |
 
 Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`.
+
+The sync cursor `<tracker>.last_sync` is **not** project config either. Each clone records it as internal local metadata in a dolt-ignored table, so it is never replicated, and sync reads it only from there — `bd config set <tracker>.last_sync` does not change what the next sync fetches. Inspect it with `bd <tracker> status`.
 
 ### Custom Statuses and Types
 
@@ -376,7 +377,7 @@ federation:
 
 ## Integration Configuration
 
-Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `ado.pat`) are YAML-routed and better supplied as environment variables. Every tracker records `<tracker>.last_sync` automatically after a sync, enabling incremental syncs.
+Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `ado.pat`) are YAML-routed and better supplied as environment variables. Every tracker records its `<tracker>.last_sync` cursor automatically after a sync, enabling incremental syncs — as per-clone local metadata rather than project config (see [above](#project-level-settings-database)).
 
 ### Jira
 
