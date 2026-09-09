@@ -4,10 +4,43 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
 )
+
+// errEpochEnforcementNotImplemented is Phase 3's honest starting point on
+// this leg: nothing implements R20 epoch-transition enforcement yet (that is
+// be-x5jqd.4's job), so every hook below reports exactly that instead of
+// pretending to enforce a concept nothing tracks. Un-skipping these cases
+// with a hook that fails loudly for a documented reason is the point of
+// be-x5jqd.1 — neither is meant to pass.
+var errEpochEnforcementNotImplemented = errors.New("R20 epoch-transition enforcement is not implemented yet on this leg (be-x5jqd.4)")
+
+func epochCurrentEpochNotImplemented(ctx context.Context, storeID string) (int, error) {
+	return 0, errEpochEnforcementNotImplemented
+}
+
+func epochBumpEpochNotImplemented(ctx context.Context, storeID string, trigger conformance.EpochBumpTrigger) (int, error) {
+	return 0, errEpochEnforcementNotImplemented
+}
+
+func epochMintUnderEpochNotImplemented(ctx context.Context, storeID, id string) (conformance.Address, error) {
+	return "", errEpochEnforcementNotImplemented
+}
+
+func epochStillServesNotImplemented(ctx context.Context, storeID string, address conformance.Address) (bool, error) {
+	return false, errEpochEnforcementNotImplemented
+}
+
+func epochResolveNotImplemented(ctx context.Context, storeID string, address conformance.Address) (conformance.RetentionAnswer, error) {
+	return conformance.RetentionAnswer{}, errEpochEnforcementNotImplemented
+}
+
+func epochCurrentAddressForNotImplemented(ctx context.Context, storeID string, oldAddress conformance.Address) (conformance.Address, error) {
+	return "", errEpochEnforcementNotImplemented
+}
 
 // TestRetentionContract wires this leg into the R20 retention contract.
 // Phase 0 leaves every hook nil in every backend's fixture kit (architecture
@@ -63,7 +96,15 @@ func TestRetentionContract(t *testing.T) {
 // all-nil state as TestRetentionContract above.
 func TestEpochContract(t *testing.T) {
 	ctx := context.Background()
-	fixture := conformance.EpochFixture{IssuePrefix: "epch"}
+	fixture := conformance.EpochFixture{
+		IssuePrefix:       "epch",
+		CurrentEpoch:      epochCurrentEpochNotImplemented,
+		BumpEpoch:         epochBumpEpochNotImplemented,
+		MintUnderEpoch:    epochMintUnderEpochNotImplemented,
+		StillServes:       epochStillServesNotImplemented,
+		Resolve:           epochResolveNotImplemented,
+		CurrentAddressFor: epochCurrentAddressForNotImplemented,
+	}
 
 	t.Run("AnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange", func(t *testing.T) {
 		conformance.RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange(t, ctx, fixture)
