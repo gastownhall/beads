@@ -132,7 +132,15 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			}
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay.
-			return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+			if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+				return err
+			}
+			// The metadata genuinely changed, so this re-add is a real
+			// durable-state mutation of the source issue and mints on the
+			// same terms as a new edge (#5898 leg 2: "a same-type re-add
+			// whose metadata actually changed mints EXACTLY ONE version
+			// carrying the new state").
+			return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 		}
 		return &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
