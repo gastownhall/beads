@@ -2138,3 +2138,115 @@ func BenchmarkContentHashColumnProbe(b *testing.B) {
 		}
 	})
 }
+
+// =============================================================================
+// Summary/date-index bench seeding (be-jxsqm)
+// =============================================================================
+
+// benchLabelForIndex reports whether the row at the given zero-based,
+// batch-global index should receive the "perf" label. Splits on position so
+// the labelled fraction stays ~50% at every scale (1K/10K/50K); splitting on
+// a per-row derived value like ID string length skews with N (660/750 at 1K
+// vs. 910/7500 at 10K, measured on the PR under review) and makes the scale
+// series measure different workloads instead of the same query at more rows.
+func benchLabelForIndex(index int) bool {
+	return index%2 == 0
+}
+
+// benchUpdatedAtForIndex spreads seeded rows' UpdatedAt across the
+// [base-maxDays, base] window by position, so a "stale after N days" query
+// and an "updated after cutoff" range query each match a non-trivial,
+// non-total minority of the seeded set instead of 0% or 100%. Before this,
+// seedForSummaryBench left every row at "now": a Days:30 stale query
+// (cutoff = now-30d, see GetStaleIssuesInTx) matched zero rows at every
+// scale, and an UpdatedAfter:now-7d range query matched all of them.
+func benchUpdatedAtForIndex(base time.Time, index, total, maxDays int) time.Time {
+	if total <= 1 {
+		return base
+	}
+	dayOffset := index * maxDays / (total - 1)
+	return base.AddDate(0, 0, -dayOffset)
+}
+
+func TestBenchLabelForIndex_SplitsEvenlyAcrossScale(t *testing.T) {
+	for _, n := range []int{1000, 7500, 50000} {
+		labelled := 0
+		for i := 0; i < n; i++ {
+			if benchLabelForIndex(i) {
+				labelled++
+			}
+		}
+		if want := n / 2; labelled != want {
+			t.Errorf("n=%d: got %d labelled, want exactly %d (50%%) — label must split on position, not on a per-row derived value that skews with N", n, labelled, want)
+		}
+	}
+}
+
+func TestBenchUpdatedAtForIndex_SpreadsNonDegenerately(t *testing.T) {
+	base := time.Now().UTC()
+	const total = 10000
+	const maxDays = 90
+	const staleDays = 30
+
+	staleCutoff := base.AddDate(0, 0, -staleDays)
+	rangeCutoff := base.AddDate(0, 0, -7)
+
+	staleCount := 0   // would match GetStaleIssues(Days: 30): updated_at before staleCutoff
+	inRangeCount := 0 // would match SearchIssues(UpdatedAfter: rangeCutoff): updated_at after rangeCutoff
+	for i := 0; i < total; i++ {
+		ts := benchUpdatedAtForIndex(base, i, total, maxDays)
+		if ts.Before(staleCutoff) {
+			staleCount++
+		}
+		if ts.After(rangeCutoff) {
+			inRangeCount++
+		}
+	}
+
+	if staleCount == 0 || staleCount == total {
+		t.Errorf("stale-after-%dd count = %d/%d seeded rows — want a non-trivial minority, not 0 or all (this is the degenerate case be-jxsqm finding #3 measured on the PR under review)", staleDays, staleCount, total)
+	}
+	if inRangeCount == 0 || inRangeCount == total {
+		t.Errorf("updated-after-7d count = %d/%d seeded rows — want well under 100%%, not 0 or all (this is the degenerate case be-jxsqm finding #3 measured on the PR under review)", inRangeCount, total)
+	}
+}
+
+// TestSeedForSummaryBench_LabelsAndDatesAreWired is a small correctness check
+// (not a benchmark) that seedForSummaryBench actually applies
+// benchLabelForIndex/benchUpdatedAtForIndex end-to-end against a real store —
+// the two tests above only prove the helpers are correct in isolation, not
+// that seedForSummaryBench calls them.
+//
+// Uses setupTestStore (the shared TestMain container), not setupBenchStore:
+// the latter's BEADS_BENCH_DOLT_PORT opt-in deliberately firewalls ambient/
+// production ports (be-cfm3z) and is never set in CI, so a correctness test
+// that must actually run under plain `go test` cannot depend on it — the
+// same reasoning TestBenchDBPurgeDoesNotLeak documents in
+// dolt_benchmark_purge_test.go for why it drives its own container instead of
+// setupBenchStore.
+func TestSeedForSummaryBench_LabelsAndDatesAreWired(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	const totalN = 200
+	seedForSummaryBench(t, store, totalN)
+
+	ctx := context.Background()
+
+	stale, err := store.GetStaleIssues(ctx, types.StaleFilter{Days: 30, Limit: totalN})
+	if err != nil {
+		t.Fatalf("GetStaleIssues: %v", err)
+	}
+	if len(stale) == 0 || len(stale) == totalN {
+		t.Errorf("GetStaleIssues(Days:30) matched %d/%d seeded rows — want a non-trivial minority, not 0 or all", len(stale), totalN)
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -7)
+	inRange, err := store.SearchIssues(ctx, "", types.IssueFilter{UpdatedAfter: &cutoff})
+	if err != nil {
+		t.Fatalf("SearchIssues(UpdatedAfter: now-7d): %v", err)
+	}
+	if len(inRange) == 0 || len(inRange) >= totalN {
+		t.Errorf("SearchIssues(UpdatedAfter: now-7d) matched %d/%d seeded rows — want well under 100%%, not 0 or (near-)all", len(inRange), totalN)
+	}
+}
