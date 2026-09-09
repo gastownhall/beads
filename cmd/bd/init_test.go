@@ -425,6 +425,27 @@ func TestCheckExistingBeadsDataOperationalErrorNotMasked(t *testing.T) {
 		}
 	}
 
+	for _, tt := range []struct {
+		name       string
+		createRoot bool
+	}{
+		{name: "missing embedded root"},
+		{name: "empty embedded root", createRoot: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			saveEmbeddedConfig(t, beadsDir)
+			if tt.createRoot {
+				if err := os.Mkdir(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := checkExistingBeadsDataAt(beadsDir, "mydb"); err != nil {
+				t.Fatalf("fresh embedded workspace must allow init: %v", err)
+			}
+		})
+	}
+
 	t.Run("existing database matches sentinel", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		saveEmbeddedConfig(t, beadsDir)
@@ -444,9 +465,10 @@ func TestCheckExistingBeadsDataOperationalErrorNotMasked(t *testing.T) {
 	t.Run("operational error not masked", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		saveEmbeddedConfig(t, beadsDir)
-		// Make embeddeddolt a regular file so os.ReadDir fails with a
-		// non-IsNotExist (operational) error rather than "already initialized".
-		if err := os.WriteFile(filepath.Join(beadsDir, "embeddeddolt"), []byte("not a dir"), 0o600); err != nil {
+		// A regular file is an operational error, including on Windows where
+		// os.ReadDir reports it as a not-exist error.
+		embeddedRoot := filepath.Join(beadsDir, "embeddeddolt")
+		if err := os.WriteFile(embeddedRoot, []byte("not a dir"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		err := checkExistingBeadsDataAt(beadsDir, "mydb")
@@ -455,6 +477,14 @@ func TestCheckExistingBeadsDataOperationalErrorNotMasked(t *testing.T) {
 		}
 		if errors.Is(err, errWorkspaceAlreadyInitialized) {
 			t.Errorf("operational error must NOT match errWorkspaceAlreadyInitialized (would be masked by --init-if-missing): %v", err)
+		}
+		if !strings.Contains(err.Error(), embeddedRoot) {
+			t.Errorf("operational error must identify the embedded root %q, got: %v", embeddedRoot, err)
+		}
+		if contents, readErr := os.ReadFile(embeddedRoot); readErr != nil {
+			t.Fatalf("embedded root file must be preserved: %v", readErr)
+		} else if string(contents) != "not a dir" {
+			t.Errorf("embedded root file changed: %q", contents)
 		}
 	})
 }

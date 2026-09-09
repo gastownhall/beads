@@ -271,6 +271,32 @@ jobs:
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
 
+      # Reuse this required native cmd/bd job for the Windows ReadDir regression.
+      - name: Run Windows embedded init guard
+        shell: pwsh
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $IsWindows) { throw 'The embedded init regression requires Windows' }
+          $go = (Get-Command go -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          if (((& $go env GOHOSTOS GOOS) -join '/') -ne 'windows/windows') {
+            throw 'The embedded init regression requires native Windows Go'
+          }
+
+          # This singleton owns the embedded-root contract; all child cases run.
+          $testName = 'TestCheckExistingBeadsDataOperationalErrorNotMasked'
+          $testOutput = & $go test -tags gms_pure_go -count=1 -v -run "^${testName}$" ./cmd/bd 2>&1
+          $testExit = $LASTEXITCODE
+          $testOutput | Write-Output
+          if ($testExit -ne 0) { exit $testExit }
+
+          $passPattern = '^--- PASS: ' + [regex]::Escape($testName) + ' \('
+          if (@($testOutput -match $passPattern).Count -ne 1 -or
+              $testOutput -match '^\s*--- (FAIL|SKIP): ') {
+            throw 'Expected the embedded init regression to pass without skipped cases'
+          }
+
   # internal/doltversion carries Windows-specific branches (PATHEXT
   # extension completion in Resolve, ERROR_BAD_EXE_FORMAT detection, the
   # executable-bit carve-out) and its behavioral tests run there via .cmd
