@@ -1291,6 +1291,47 @@ func TestParseJiraCustomFieldValueInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestJiraDependenciesMapsParentAndBlockingLinks(t *testing.T) {
+	issue := &Issue{
+		ID:   "2",
+		Key:  "GC-2",
+		Self: "https://jira.example.test/rest/api/3/issue/2",
+		Fields: IssueFields{
+			Parent: &IssueReference{ID: "1", Key: "GC-1"},
+			IssueLinks: []IssueLink{{
+				Type:        IssueLinkType{Inward: "is blocked by", Outward: "blocks"},
+				InwardIssue: &IssueReference{ID: "3", Key: "GC-3"},
+			}},
+		},
+	}
+	deps := jiraDependencies(issue)
+	if len(deps) != 2 {
+		t.Fatalf("dependencies = %#v", deps)
+	}
+	if deps[0].FromExternalID != "https://jira.example.test/browse/GC-2" || deps[0].ToExternalID != "https://jira.example.test/browse/GC-1" || deps[0].Type != "parent-child" {
+		t.Fatalf("parent dependency = %#v", deps[0])
+	}
+	if deps[1].FromExternalID != "https://jira.example.test/browse/GC-2" || deps[1].ToExternalID != "https://jira.example.test/browse/GC-3" || deps[1].Type != "blocks" {
+		t.Fatalf("blocking dependency = %#v", deps[1])
+	}
+}
+
+func TestJiraDependenciesMapsOutwardBlockingLink(t *testing.T) {
+	issue := &Issue{
+		ID:   "2",
+		Key:  "GC-2",
+		Self: "https://jira.example.test/rest/api/3/issue/2",
+		Fields: IssueFields{IssueLinks: []IssueLink{{
+			Type:         IssueLinkType{Inward: "is blocked by", Outward: "blocks"},
+			OutwardIssue: &IssueReference{ID: "3", Key: "GC-3"},
+		}}},
+	}
+	deps := jiraDependencies(issue)
+	if len(deps) != 1 || deps[0].FromExternalID != "https://jira.example.test/browse/GC-3" || deps[0].ToExternalID != "https://jira.example.test/browse/GC-2" || deps[0].Type != "blocks" {
+		t.Fatalf("outward blocking dependency = %#v", deps)
+	}
+}
+
 func TestPriorityToTrackerUsesCustomMap(t *testing.T) {
 	mapper := &jiraFieldMapper{
 		priorityMap: map[string]string{
