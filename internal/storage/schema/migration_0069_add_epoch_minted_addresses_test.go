@@ -1,0 +1,28 @@
+package schema
+
+import "testing"
+
+// R20's epoch-transition enforcement (gastownhall/beads#5898 revision 9,
+// this slice: be-x5jqd.4 / #6136) adds one brand-new table,
+// epoch_minted_addresses -- see
+// migrations/0069_add_epoch_minted_addresses.up.sql for the full rationale.
+// Like R16's own 0069 (a different, independently-numbered migration on that
+// slice's branch), this migration is a plain, unguarded
+// CREATE TABLE IF NOT EXISTS with no ALTER and no PREPARE, so it needs none
+// of 0067/0068's CLI-hazard-override tests (already covered, for every
+// migration including this one, by TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified
+// and TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities).
+
+// TestLatestVersionIncludesMigration0069 pins the real next free slot this
+// phase claims, superseding 0068's own version of this test (LatestVersion()
+// moved from 68 to 69 the moment this migration file was added). Deliberately
+// a hardcoded literal for the same reason 0068's was: LatestVersion()
+// drifting to 69 for the wrong reason (an unrelated migration landing first)
+// should still be caught by this test failing to explain why 69 is
+// epoch-minted-addresses-shaped.
+func TestLatestVersionIncludesMigration0069(t *testing.T) {
+	const want = 69
+	if got := LatestVersion(); got != want {
+		t.Fatalf("LatestVersion() = %d, want %d (epoch_minted_addresses migration slot claimed by be-x5jqd.4)", got, want)
+	}
+}
