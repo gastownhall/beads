@@ -24,7 +24,7 @@ and interoperability.
 Commands:
   bd backup init <path>    Set up a backup destination (filesystem or DoltHub)
   bd backup sync           Push to configured backup destination
-  bd backup restore [path] Restore from a backup directory
+  bd backup restore [path] Restore from a backup directory or remote URL
   bd backup remove         Remove backup destination
   bd backup status         Show backup status
 
