@@ -291,6 +291,18 @@ var (
 // pollutes dolt_status and feeds the dirty-table migration gates. MigrateUp
 // re-asserts the full set idempotently at the top of every write-mode open.
 var doltIgnorePatterns = []string{
+	// Table-rebuild intermediates: the ignored series stages every rebuild
+	// through a __temp__<table> that is renamed to the final (ignored) name.
+	// Like the journal tables below, __temp__ names never exist on the
+	// versioned plane, so the pattern is safe unconditionally — and it must
+	// be asserted before the ignored series runs: on a
+	// @@dolt_transaction_commit=1 server an unignored CREATE __temp__X
+	// auto-commits a real table at HEAD, and the rename to the ignored final
+	// name then leaves an unstageable "__temp__X -> X" rename half in
+	// dolt_status that wedges the store for every open behind the
+	// dirty-table guard. dolt matches ignore patterns with ? * % only —
+	// underscores are literal — so this covers exactly the __temp__ prefix.
+	"__temp__%",
 	// The events journal tables (bd-opisf) are seeded here rather than
 	// version-gated: they have never existed on the versioned plane, so
 	// asserting the pattern before 0064 runs is what keeps the CREATE from
@@ -453,11 +465,18 @@ func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 // short-circuit nothing downstream would ever commit the seed, and on the
 // migration path the seed must be committed before the first step so an
 // interrupted pass leaves a clean working set (#4566 self-heal contract).
+//
+// --skip-empty because on a @@dolt_transaction_commit=1 server the seed's
+// INSERTs were already dolt-committed at their own transaction boundaries,
+// so there is nothing left to stage: without it the labeled commit dies with
+// "nothing to commit" and takes the whole pass down on exactly the stores an
+// under-seeded heal targets. The seed is durable either way; only the commit
+// label is lost on that path.
 func commitSeededDoltIgnore(ctx context.Context, db DBConn) error {
 	if err := DrainCall(ctx, db, "CALL DOLT_ADD('dolt_ignore')"); err != nil {
 		return fmt.Errorf("staging seeded dolt_ignore patterns: %w", err)
 	}
-	if err := DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')"); err != nil {
+	if err := DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns', '--skip-empty')"); err != nil {
 		return fmt.Errorf("committing seeded dolt_ignore patterns: %w", err)
 	}
 	return nil
