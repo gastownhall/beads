@@ -52,7 +52,7 @@ func newTeamServerHarness(t *testing.T) *teamServerHarness {
 	}
 }
 
-func (h *teamServerHarness) openProvider(ctx context.Context, database string, teamServer bool, expectedProjectID string) (UnitOfWorkProvider, error) {
+func (h *teamServerHarness) openProvider(ctx context.Context, database string, teamServer bool, expectedProjectID string, opts ...ProviderOption) (UnitOfWorkProvider, error) {
 	return NewExternalDoltServerUOWProvider(
 		ctx,
 		h.storeRootDir,
@@ -65,6 +65,7 @@ func (h *teamServerHarness) openProvider(ctx context.Context, database string, t
 		0,
 		teamServer,
 		expectedProjectID,
+		opts...,
 	)
 }
 
@@ -114,7 +115,7 @@ func TestTeamServerMode_Integration(t *testing.T) {
 	})
 
 	// Provision the database the way bts would (a normal, migrating open).
-	provisioner, err := h.openProvider(ctx, database, false, "")
+	provisioner, err := h.openProvider(ctx, database, false, "", WithCreateIfMissing(true))
 	require.NoError(t, err)
 	require.NoError(t, provisioner.Close(ctx))
 

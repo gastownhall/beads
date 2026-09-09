@@ -53,6 +53,7 @@ func newTestUOWProvider(t *testing.T) UnitOfWorkProvider {
 		0,
 		false,
 		"",
+		WithCreateIfMissing(true),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, provider)
