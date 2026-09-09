@@ -286,6 +286,80 @@ func RunSweeperProtectsPinnedRows(t *testing.T, ctx context.Context, fixture Swe
 	sweeperAssertIssueRows(t, ctx, fixture, 1, pinned)
 }
 
+// RunSweeperProtectsLabeledRows pins issueops.SweepRequest.ProtectedLabels on
+// the EPHEMERAL tier, which is where `bd purge` and `bd mol wisp gc` overlap:
+// a closed wisp carrying a protected label is held back, counted in
+// Skipped.Labeled, and STILL THERE afterwards.
+//
+// IT IS A CONTRACT CASE RATHER THAN A UNIT TEST OF THE FILTER because the
+// filter reads issue.Labels, and whether those labels are HYDRATED onto a
+// sweep candidate is a property of each backend's candidate query — not of the
+// pure function. A backend whose ephemeral search returned rows with nil
+// Labels would pass every unit test of the filter and delete every protected
+// wisp in the workspace, silently, with no error to notice. That failure is
+// only visible from here, against a real store, which is why the seeds carry
+// labels through the plane's own create verb.
+//
+// The unlabeled row is the negative control: it is identical to the protected
+// one in every field the sweep reads except the label, so a backend that held
+// back everything fails this rather than passing as a safer version of it.
+func RunSweeperProtectsLabeledRows(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	plain := sweeperSeedClosedIssue(t, ctx, fixture, "label", true)
+	protected := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "label", "keep", true), func(issue *types.Issue) {
+		issue.Labels = []string{"bd:protected"}
+	})
+	// A label the request does NOT name, on a row otherwise identical to the
+	// protected one. It must sweep: this is what separates "honors the
+	// requested set" from "holds back anything labeled".
+	other := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "label", "other", true), func(issue *types.Issue) {
+		issue.Labels = []string{"bd:unrelated"}
+	})
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:            publicops.SweepEphemeral,
+		IDPattern:       sweeperPattern(fixture, "label"),
+		ProtectedLabels: []string{"bd:protected"},
+	})
+
+	if result.Swept != 2 {
+		t.Errorf("Swept = %d, want 2 — the labeled row must not be one of them", result.Swept)
+	}
+	if result.Skipped.Labeled != 1 {
+		t.Errorf("Skipped.Labeled = %d, want 1", result.Skipped.Labeled)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 0, plain, other)
+	sweeperAssertWispRows(t, ctx, fixture, 1, protected)
+}
+
+// RunSweeperWithoutProtectedLabelsSweepsLabeledRows is the other half of the
+// opt-in, and it is the case that keeps the one above honest. The SAME labeled
+// row, swept with no ProtectedLabels on the request, is DELETED and reports
+// Skipped.Labeled 0.
+//
+// Without it, a backend that protected `bd:protected` unconditionally — a
+// hard-coded default rather than a request field — would satisfy the case
+// above completely.
+func RunSweeperWithoutProtectedLabelsSweepsLabeledRows(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	labeled := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "nolabelreq", "keep", true), func(issue *types.Issue) {
+		issue.Labels = []string{"bd:protected"}
+	})
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "nolabelreq"),
+	})
+
+	if result.Swept != 1 {
+		t.Errorf("Swept = %d, want 1 — the protection is a REQUEST FIELD, not a standing rule", result.Swept)
+	}
+	if result.Skipped.Labeled != 0 {
+		t.Errorf("Skipped.Labeled = %d, want 0 when the request named no labels", result.Skipped.Labeled)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 0, labeled)
+}
+
 // RunSweeperHonorsTheCutoffAndThePattern pins the two narrowing fields.
 //
 // The CUTOFF is HALF-OPEN: a row closed exactly at the cutoff is KEPT

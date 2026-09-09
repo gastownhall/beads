@@ -7571,10 +7571,17 @@ components:
       required: [tier]
       description: >-
         Which closed beads to clear. The predicate is FIXED at "closed beads of
-        one tier" and the two narrowing members only narrow it: there is no
-        status, no assignee, no label and no free-text query here, because
-        every one of those would be another way to spell a destructive
-        selection that a caller could get subtly wrong.
+        one tier" and the narrowing members only narrow it: there is no status,
+        no assignee and no free-text query here, because every one of those
+        would be another way to spell a destructive selection that a caller
+        could get subtly wrong.
+
+
+        `protected_labels` is not a counterexample: it can only SUBTRACT beads
+        from the deletion. There is deliberately no label SELECTOR — no way to
+        say "delete the beads carrying this label" — because a member that can
+        only protect fails toward keeping a bead, and one that can select fails
+        toward deleting one.
 
 
         `additionalProperties: false`, so an unknown member is a `400` naming
@@ -7644,6 +7651,32 @@ components:
             `protect_referenced: false` buys the cheaper sweep, and asking for
             it explicitly is the point: that is the request that should be the
             deliberate one.
+        protected_labels:
+          type: array
+          items:
+            type: string
+          description: >-
+            Skip candidates carrying ANY of these labels, matched WHOLE and
+            exactly. Absent or empty protects nothing.
+
+
+            It is the member for records that cannot be regenerated and that no
+            STATUS can protect — a message or an escalation an orchestration
+            layer keeps as an ephemeral bead sits in plain open status for
+            exactly as long as nobody has read it, and closing it is what makes
+            it sweepable. A label is the only handle that survives that.
+
+
+            IT HAS NO DEFAULT HERE, and that is a KNOWN ASYMMETRY with the CLI
+            rather than a considered default. `bd purge` resolves the guard
+            from `wisp.protected_labels` (then config.yaml, then the built-in
+            `bd:protected`) and always sends the result; a remote caller that
+            omits this member gets no label protection at all. Reading that
+            config on this surface is a change to what an omitted member MEANS,
+            which is a decision this operation should not make silently — see
+            `protect_referenced`, which defaults ON for the same class of
+            reason. Until it is made, a deployment that relies on the guard
+            sends the member explicitly.
         dry_run:
           type: boolean
           default: false
@@ -7704,6 +7737,7 @@ components:
       required:
         - pinned
         - referenced
+        - labeled
         - not_closed
         - unknown_closed_at
         - closed_at_or_after_cutoff
@@ -7711,8 +7745,8 @@ components:
       description: >-
         The candidates a sweep declined to delete, bucketed by WHY. They are
         separate counters rather than one number because they mean different
-        things: the first two are PROTECTIONS, and the last four are the sweep
-        declining to trust its own input.
+        things: the first three are PROTECTIONS, and the last four are the
+        sweep declining to trust its own input.
       properties:
         pinned:
           type: integer
@@ -7726,6 +7760,12 @@ components:
             Candidates protected by `protect_referenced`. Always 0 when that
             member is false or absent, so a 0 read without having asked says
             nothing about whether beads are cited.
+        labeled:
+          type: integer
+          description: >-
+            Candidates protected by `protected_labels`. Always 0 when that
+            member is absent or empty, so a 0 read without having sent labels
+            says nothing about whether protected beads exist.
         not_closed:
           type: integer
           description: >-

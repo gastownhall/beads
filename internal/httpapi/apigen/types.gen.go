@@ -1812,7 +1812,9 @@ type StatsResponse struct {
 	Summary Statistics `json:"summary"`
 }
 
-// SweepRequest Which closed beads to clear. The predicate is FIXED at "closed beads of one tier" and the two narrowing members only narrow it: there is no status, no assignee, no label and no free-text query here, because every one of those would be another way to spell a destructive selection that a caller could get subtly wrong.
+// SweepRequest Which closed beads to clear. The predicate is FIXED at "closed beads of one tier" and the narrowing members only narrow it: there is no status, no assignee and no free-text query here, because every one of those would be another way to spell a destructive selection that a caller could get subtly wrong.
+//
+// `protected_labels` is not a counterexample: it can only SUBTRACT beads from the deletion. There is deliberately no label SELECTOR — no way to say "delete the beads carrying this label" — because a member that can only protect fails toward keeping a bead, and one that can select fails toward deleting one.
 //
 // `additionalProperties: false`, so an unknown member is a `400` naming the member — the same posture the query-parameter rule takes, and for the same reason: on this operation a silently ignored narrowing term widens what is erased.
 type SweepRequest struct {
@@ -1834,6 +1836,13 @@ type SweepRequest struct {
 	//
 	// It costs a full scan of the not-done set and its comments. Sending `protect_referenced: false` buys the cheaper sweep, and asking for it explicitly is the point: that is the request that should be the deliberate one.
 	ProtectReferenced *bool `json:"protect_referenced,omitempty"`
+
+	// ProtectedLabels Skip candidates carrying ANY of these labels, matched WHOLE and exactly. Absent or empty protects nothing.
+	//
+	// It is the member for records that cannot be regenerated and that no STATUS can protect — a message or an escalation an orchestration layer keeps as an ephemeral bead sits in plain open status for exactly as long as nobody has read it, and closing it is what makes it sweepable. A label is the only handle that survives that.
+	//
+	// IT HAS NO DEFAULT HERE, and that is a KNOWN ASYMMETRY with the CLI rather than a considered default. `bd purge` resolves the guard from `wisp.protected_labels` (then config.yaml, then the built-in `bd:protected`) and always sends the result; a remote caller that omits this member gets no label protection at all. Reading that config on this surface is a change to what an omitted member MEANS, which is a decision this operation should not make silently — see `protect_referenced`, which defaults ON for the same class of reason. Until it is made, a deployment that relies on the guard sends the member explicitly.
+	ProtectedLabels *[]string `json:"protected_labels,omitempty"`
 
 	// Tier Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and `durable` is the issue tier (`bd prune`). The two are DISJOINT: a sweep of one can never touch a bead of the other. Required, with no default — a caller handed the wrong tier has nothing to notice until the beads are gone.
 	Tier SweepRequestTier `json:"tier"`
@@ -1861,17 +1870,20 @@ type SweepResult struct {
 	// ReferencedIds A BOUNDED SAMPLE of the ids `skipped.referenced` counts — at most 100, in the order the candidate query returned them. It is a sample, not the set: compare its length against 100 to tell a truncated one from a complete one. Absent when nothing was protected.
 	ReferencedIds *[]string `json:"referenced_ids,omitempty"`
 
-	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first two are PROTECTIONS, and the last four are the sweep declining to trust its own input.
+	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first three are PROTECTIONS, and the last four are the sweep declining to trust its own input.
 	Skipped SweepSkips `json:"skipped"`
 
 	// Swept How many beads were deleted, or under `dry_run` would be.
 	Swept int `json:"swept"`
 }
 
-// SweepSkips The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first two are PROTECTIONS, and the last four are the sweep declining to trust its own input.
+// SweepSkips The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first three are PROTECTIONS, and the last four are the sweep declining to trust its own input.
 type SweepSkips struct {
 	// ClosedAtOrAfterCutoff Candidates whose close timestamp did not satisfy `closed_before`. See `not_closed`.
 	ClosedAtOrAfterCutoff int `json:"closed_at_or_after_cutoff"`
+
+	// Labeled Candidates protected by `protected_labels`. Always 0 when that member is absent or empty, so a 0 read without having sent labels says nothing about whether protected beads exist.
+	Labeled int `json:"labeled"`
 
 	// NotClosed Candidates the tier query returned that the recheck found were not closed. A NON-ZERO VALUE HERE IS A DEFENSE FIRING, not a normal outcome: the query asked for exactly the beads this excludes.
 	NotClosed int `json:"not_closed"`

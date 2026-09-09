@@ -156,10 +156,18 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 	if err != nil {
 		return nil, err
 	}
-	if labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
-		for _, issue := range issues {
-			issue.Labels = labelMap[issue.ID]
-		}
+	// A dropped label error is NOT a display defect here. `bd mol wisp gc`
+	// consults Labels to decide what it must not delete (isProtectedWisp), and
+	// a swallowed error leaves every issue looking unlabeled — which reads as
+	// "carries no protected label" and licenses the delete. Silence in a guard
+	// that gates a destructive command is the failure mode, so both label reads
+	// propagate.
+	labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids) //nolint:forbidigo // in-transaction port read; see GetIssue above
+	if err != nil {
+		return nil, fmt.Errorf("loading labels for %d issue(s): %w", len(ids), err)
+	}
+	for _, issue := range issues {
+		issue.Labels = labelMap[issue.ID]
 	}
 
 	wisps, err := r.uw.IssueUseCase().GetWispsByIDs(ctx, ids)
@@ -167,10 +175,15 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 		wisps = nil //nolint:staticcheck // wisps table may not exist; issues result still valid
 	}
 	if len(wisps) > 0 {
-		if labelMap, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
-			for _, wisp := range wisps {
-				wisp.Labels = labelMap[wisp.ID]
-			}
+		// Reached only when the wisps table exists and returned rows, so
+		// wisp_labels exists too: an error here is a real read failure, not the
+		// optional-table case the branch above tolerates.
+		wispLabels, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids) //nolint:forbidigo // in-transaction port read; see GetIssue above
+		if err != nil {
+			return nil, fmt.Errorf("loading labels for %d wisp(s): %w", len(wisps), err)
+		}
+		for _, wisp := range wisps {
+			wisp.Labels = wispLabels[wisp.ID]
 		}
 	}
 
