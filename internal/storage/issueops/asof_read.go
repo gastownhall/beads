@@ -95,18 +95,22 @@ type AsOfReadResult struct {
 	Reason      string
 }
 
-// asOfVersionAddress is the address AsOfReadInTx serves for a resolved
+// AsOfVersionAddress is the address AsOfReadInTx serves for a resolved
 // revision: a deterministic token over (issueID, revision). storeID is not
 // part of the token -- a version address is meaningful only against its own
 // issueID's rows, and Resolve is always called with issueID already known
 // as its own separate parameter (matching the conformance fixture's own hook
 // shape) -- but issueID is embedded anyway for readability/debuggability,
 // per the design's stated rationale.
-func asOfVersionAddress(issueID string, revision int64) string {
+//
+// Exported so each leg's AsOfReadFixture.MintAt can build the exact same
+// token its own RecordVersionAtInTx write will resolve against, without
+// duplicating the "asof:%s:%d" format in three separate packages.
+func AsOfVersionAddress(issueID string, revision int64) string {
 	return fmt.Sprintf("asof:%s:%d", issueID, revision)
 }
 
-// parseAsOfVersionAddress reverses asOfVersionAddress. ok is false for any
+// parseAsOfVersionAddress reverses AsOfVersionAddress. ok is false for any
 // address not shaped like one this file mints, INCLUDING one whose embedded
 // issueID does not match the issueID the caller separately supplied -- a
 // version address for a different issue is never valid in that caller's
@@ -236,7 +240,7 @@ func AsOfReadInTx(ctx context.Context, tx DBTX, storeID, issueID string, selecto
 			return AsOfReadResult{}, fmt.Errorf("as-of read: unmarshal durable state for %s revision %d: %w", issueID, revision, err)
 		}
 	}
-	return AsOfReadResult{Address: asOfVersionAddress(issueID, revision), State: state}, nil
+	return AsOfReadResult{Address: AsOfVersionAddress(issueID, revision), State: state}, nil
 }
 
 // MarkLatestVersionRemovedInTx is a test-support seam for R7.1's

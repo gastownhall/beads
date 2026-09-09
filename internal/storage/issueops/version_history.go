@@ -317,6 +317,23 @@ func RecordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at
 // The no-op rules documented on RecordVersionInTx above (wisps) apply here
 // too, since this is that function's entire mechanism minus the gate.
 func recordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at time.Time) error {
+	// issue_versions.change_at is DATETIME (migration 0067): no fractional-
+	// second precision. Measured on dolt 2.2.3: handing the column a
+	// sub-second value doesn't truncate it, it ROUNDS it -- a change_at of
+	// 13:32:04.77 is stored as 13:32:05, strictly LATER than the instant it
+	// was meant to record. That breaks AsOfReadInTx's "latest version
+	// accepted at or before T" query (resolveAsOfRevisionInTx,
+	// asof_read.go) for any T between the true instant and the rounded-up
+	// one: the row's stored change_at no longer satisfies change_at <= T
+	// even though the version really was accepted at-or-before T. Truncating
+	// here -- floor, not round -- leaves nothing for the column to round:
+	// the stored value is always <= the true instant, so the at-or-before
+	// comparison stays correct for every T at or after it. This is a
+	// production correctness fix, not a test-only concern: RecordVersionInTx
+	// hits the identical rounding hazard on every real time.Now().UTC() call
+	// whose nanosecond component happens to round up.
+	at = at.Truncate(time.Second)
+
 	issue, err := GetIssueInTx(ctx, tx, issueID)
 	if err != nil {
 		return fmt.Errorf("versioned history: snapshot %s: %w", issueID, err)
