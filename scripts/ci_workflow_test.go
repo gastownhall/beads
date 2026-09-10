@@ -260,7 +260,10 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 // still produces a bounded, diagnosable job failure instead of running to
 // GitHub's 360m default.
 func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
-	const minTimeoutMinutes = 20
+	const (
+		minTimeoutMinutes    = 20
+		minJobTimeoutMinutes = 60
+	)
 
 	timeoutPattern := regexp.MustCompile(`-timeout[= ](\d+)m\b`)
 	assertHasTimeoutFloor := func(t *testing.T, label, command string) {
@@ -283,8 +286,8 @@ func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 		const label = "pr.yml test-macos Test step"
 		job := readCIWorkflow(t, "pr.yml").job(t, "test-macos")
 		assertHasTimeoutFloor(t, label, goTestCommandLine(t, label, job.step(t, "Test").Run))
-		if job.TimeoutMinutes < 60 {
-			t.Errorf("pr.yml test-macos job timeout-minutes = %d, want at least 60", job.TimeoutMinutes)
+		if job.TimeoutMinutes < minJobTimeoutMinutes {
+			t.Errorf("pr.yml test-macos job timeout-minutes = %d, want at least %d", job.TimeoutMinutes, minJobTimeoutMinutes)
 		}
 	})
 
@@ -297,8 +300,8 @@ func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 			}
 		}
 		assertHasTimeoutFloor(t, "main.yml test macOS matrix test-flags", macOSFlags)
-		if job.TimeoutMinutes < 60 {
-			t.Errorf("main.yml test job timeout-minutes = %d, want at least 60", job.TimeoutMinutes)
+		if job.TimeoutMinutes < minJobTimeoutMinutes {
+			t.Errorf("main.yml test job timeout-minutes = %d, want at least %d", job.TimeoutMinutes, minJobTimeoutMinutes)
 		}
 	})
 
@@ -306,6 +309,9 @@ func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 		const label = "ci-measurements.yml macos-short Measure commands step"
 		job := readCIWorkflow(t, "ci-measurements.yml").job(t, "macos-short")
 		assertHasTimeoutFloor(t, label, goTestCommandLine(t, label, job.step(t, "Measure commands").Run))
+		if job.TimeoutMinutes < minJobTimeoutMinutes {
+			t.Errorf("ci-measurements.yml macos-short job timeout-minutes = %d, want at least %d", job.TimeoutMinutes, minJobTimeoutMinutes)
+		}
 	})
 }
 
