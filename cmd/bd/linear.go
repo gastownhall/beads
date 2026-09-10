@@ -360,7 +360,7 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 		CreateOnly: createOnly,
 		State:      state,
 	}
-	opts.DependencySources = linearPullDependencySources(relations)
+	opts.DependencySources = pullDependencySources(relations)
 
 	for _, t := range typeFilters {
 		opts.TypeFilter = append(opts.TypeFilter, types.IssueType(strings.ToLower(t)))
@@ -466,13 +466,6 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
-}
-
-func linearPullDependencySources(includeRelations bool) []tracker.DependencySource {
-	if includeRelations {
-		return nil
-	}
-	return []tracker.DependencySource{tracker.DependencySourceParent}
 }
 
 type linearPullHookOptions struct {
