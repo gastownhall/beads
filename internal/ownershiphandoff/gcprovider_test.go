@@ -279,10 +279,12 @@ func TestGCProviderResumeUsesPersistedSnapshotToken(t *testing.T) {
 }
 
 // stopCrashWindow parks a handoff at target_configured without mutating
-// anything and then makes the legacy owner gone. That is byte-for-byte the
+// anything and then makes the legacy owner gone: journal at target_configured
+// with mutation_occurred=false, owner actually released. That is the resume
 // state a crash between a successful handoff-stop and its old_owner_stopped
-// checkpoint leaves behind: journal at target_configured with
-// mutation_occurred=false, owner actually released. It returns the request and
+// checkpoint leaves behind, minus the stop reservation an interrupted stop
+// also leaves set (TestStopRetryAfterUncheckpointedStopSucceeds covers that
+// variant); both resume through the same retry. It returns the request and
 // journal path for the retry that resumes from there.
 func stopCrashWindow(t *testing.T, city, scope, stoppedFile string, provider Provider) (Request, string) {
 	t.Helper()
