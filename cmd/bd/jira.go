@@ -51,6 +51,12 @@ Modes:
   --push         Export issues from beads to Jira
   (no flags)     Bidirectional sync: pull then push, with conflict resolution
 
+Dependency import (--pull):
+  Jira parent links always import as parent-child dependencies.
+  --relations      Also import Jira issue links ("blocks" / "is blocked by")
+                   as blocks dependencies. Off by default: blocks edges make
+                   the dependent issue non-ready until its blocker closes.
+
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
   --prefer-local   Always prefer local beads version
@@ -58,6 +64,7 @@ Conflict Resolution:
 
 Examples:
   bd jira sync --pull                # Import from Jira
+  bd jira sync --pull --relations    # Import Jira blocking links as bd deps
   bd jira sync --push --create-only  # Push new issues only
   bd jira sync --dry-run             # Preview without changes
   bd jira sync --prefer-local        # Bidirectional, local wins`,
@@ -86,6 +93,7 @@ func init() {
 	jiraSyncCmd.Flags().Bool("prefer-local", false, "Prefer local version on conflicts")
 	jiraSyncCmd.Flags().Bool("prefer-jira", false, "Prefer Jira version on conflicts")
 	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
+	jiraSyncCmd.Flags().Bool("relations", false, "Import Jira issue links as bd dependencies when pulling")
 	jiraSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
 	jiraSyncCmd.Flags().StringSlice("project", nil, "Project key(s) to sync (overrides configured project/projects)")
 	registerSelectiveSyncFlags(jiraSyncCmd)
@@ -109,6 +117,7 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	preferLocal, _ := cmd.Flags().GetBool("prefer-local")
 	preferJira, _ := cmd.Flags().GetBool("prefer-jira")
 	createOnly, _ := cmd.Flags().GetBool("create-only")
+	relations, _ := cmd.Flags().GetBool("relations")
 	state, _ := cmd.Flags().GetString("state")
 
 	if !dryRun {
@@ -156,6 +165,7 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		CreateOnly: createOnly,
 		State:      state,
 	}
+	opts.DependencySources = pullDependencySources(relations)
 
 	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
 		return HandleErrorRespectJSON("%v", err)

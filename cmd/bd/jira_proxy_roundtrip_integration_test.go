@@ -95,7 +95,7 @@ func runJiraPullPushFixture(t *testing.T, bd, dir string, env []string, store tr
 		run("config", "set", entry[0], entry[1])
 	}
 	previousSync := "2020-01-01T00:00:00Z"
-	pull := parseJiraSyncResult(t, runJSON("--json", "jira", "sync", "--pull"))
+	pull := parseJiraSyncResult(t, runJSON("--json", "jira", "sync", "--pull", "--relations"))
 	if pull.Stats.Pulled != 3 || pull.LastSync == "" {
 		t.Fatalf("pull result = %+v", pull)
 	}
@@ -121,7 +121,7 @@ func runJiraPullPushFixture(t *testing.T, bd, dir string, env []string, store tr
 	if blocker.Status != types.StatusOpen {
 		t.Fatalf("Jira blocker status = %s, want open", blocker.Status)
 	}
-	selectivePull := parseJiraSyncResult(t, runJSON("--json", "jira", "pull", "GC-2"))
+	selectivePull := parseJiraSyncResult(t, runJSON("--json", "jira", "pull", "GC-2", "--relations"))
 	if !selectivePull.Success {
 		t.Fatalf("selective Jira pull result = %+v", selectivePull)
 	}

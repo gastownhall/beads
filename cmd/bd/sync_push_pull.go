@@ -188,6 +188,7 @@ func init() {
 	// Jira push/pull
 	jiraPushCmd.Flags().Bool("dry-run", false, "Preview push without making changes")
 	jiraPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
+	jiraPullCmd.Flags().Bool("relations", false, "Import Jira issue links as bd dependencies when pulling")
 	jiraCmd.AddCommand(jiraPushCmd)
 	jiraCmd.AddCommand(jiraPullCmd)
 
@@ -215,6 +216,18 @@ func init() {
 	notionPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
 	notionCmd.AddCommand(notionPushCmd)
 	notionCmd.AddCommand(notionPullCmd)
+}
+
+// pullDependencySources is the shared --relations gate for tracker pulls.
+// Relation-derived edges are typed 'blocks', which sets is_blocked on the
+// dependent and silently removes it from `bd ready`, so importing them is
+// opt-in for every tracker family. Parent edges only inherit an already
+// blocked parent's state, so they always import.
+func pullDependencySources(includeRelations bool) []tracker.DependencySource {
+	if includeRelations {
+		return nil
+	}
+	return []tracker.DependencySource{tracker.DependencySourceParent}
 }
 
 // outputSyncResult writes sync results as JSON or human-readable text.
@@ -407,6 +420,7 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("at least one bead ID or external reference is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	relations, _ := cmd.Flags().GetBool("relations")
 	if !dryRun {
 		CheckReadonly("jira pull")
 	}
@@ -432,10 +446,11 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
-		Pull:     true,
-		Push:     false,
-		DryRun:   dryRun,
-		IssueIDs: args,
+		Pull:              true,
+		Push:              false,
+		DryRun:            dryRun,
+		IssueIDs:          args,
+		DependencySources: pullDependencySources(relations),
 	})
 	if err != nil {
 		if jsonOutput {
@@ -581,7 +596,7 @@ func runLinearPull(cmd *cobra.Command, args []string) error {
 		Push:              false,
 		DryRun:            dryRun,
 		IssueIDs:          args,
-		DependencySources: linearPullDependencySources(relations),
+		DependencySources: pullDependencySources(relations),
 	})
 	if err != nil {
 		return HandleError("sync failed: %v", err)
