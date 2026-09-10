@@ -280,8 +280,9 @@ func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 	}
 
 	t.Run("pr.yml test-macos", func(t *testing.T) {
+		const label = "pr.yml test-macos Test step"
 		job := readCIWorkflow(t, "pr.yml").job(t, "test-macos")
-		assertHasTimeoutFloor(t, "pr.yml test-macos Test step", job.step(t, "Test").Run)
+		assertHasTimeoutFloor(t, label, goTestCommandLine(t, label, job.step(t, "Test").Run))
 		if job.TimeoutMinutes < 60 {
 			t.Errorf("pr.yml test-macos job timeout-minutes = %d, want at least 60", job.TimeoutMinutes)
 		}
@@ -302,9 +303,59 @@ func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 	})
 
 	t.Run("ci-measurements.yml macos-short", func(t *testing.T) {
+		const label = "ci-measurements.yml macos-short Measure commands step"
 		job := readCIWorkflow(t, "ci-measurements.yml").job(t, "macos-short")
-		assertHasTimeoutFloor(t, "ci-measurements.yml macos-short Measure commands step", job.step(t, "Measure commands").Run)
+		assertHasTimeoutFloor(t, label, goTestCommandLine(t, label, job.step(t, "Measure commands").Run))
 	})
+}
+
+// goTestCommandLine reduces a step's run block to the single line that invokes
+// `go test`. A YAML block scalar carries its own `#` comments inside step.Run,
+// so applying a flag pattern to the raw block can match the rationale comment
+// instead of the command it describes — which leaves the guard green with the
+// very flag it exists to pin deleted from the command. Comments are stripped,
+// whole-line and trailing, before the search.
+func goTestCommandLine(t *testing.T, label, run string) string {
+	t.Helper()
+
+	var found []string
+	for _, line := range strings.Split(run, "\n") {
+		if line = strings.TrimSpace(stripShellComment(line)); strings.Contains(line, "go test") {
+			found = append(found, line)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0]
+	case 0:
+		t.Fatalf("%s: no `go test` invocation in run block: %q", label, run)
+	default:
+		t.Fatalf("%s: want exactly one `go test` invocation in run block, got %d: %q", label, len(found), found)
+	}
+	return ""
+}
+
+// stripShellComment drops a trailing `#` comment from one shell line, tracking
+// quote state so a `#` inside an argument survives.
+func stripShellComment(line string) string {
+	var inSingle, inDouble bool
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '#':
+			if !inSingle && !inDouble && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+				return line[:i]
+			}
+		}
+	}
+	return line
 }
 
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
