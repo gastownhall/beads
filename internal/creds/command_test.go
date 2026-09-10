@@ -3,8 +3,13 @@ package creds
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 func TestParseCredential(t *testing.T) {
@@ -108,10 +113,10 @@ func TestResolveCredentialTokenPropagatesHelperError(t *testing.T) {
 }
 
 // A real shell command flows end-to-end through CommandSource (no stub), proving the
-// sh -c runner and the bare-token path work together.
+// platform shell runner and the bare-token path work together.
 func TestCommandSourceRealShell(t *testing.T) {
 	resetCache(t)
-	src := CommandSource{Command: "printf s3cr3t", Kind: KindSecret, Label: "TEST_CMD"}
+	src := CommandSource{Command: credentialcmd.Emit(t, "s3cr3t"), Kind: KindSecret, Label: "TEST_CMD"}
 	cred, ok, err := src.Resolve(context.Background())
 	if err != nil || !ok {
 		t.Fatalf("resolve: ok=%v err=%v", ok, err)
@@ -124,5 +129,22 @@ func TestCommandSourceRealShell(t *testing.T) {
 	}
 	if cred.Source != "TEST_CMD" {
 		t.Fatalf("source = %q, want TEST_CMD", cred.Source)
+	}
+}
+
+func TestCredentialCommandFixtureProtocol(t *testing.T) {
+	resetCache(t)
+	marker := filepath.Join(t.TempDir(), "marker path with spaces")
+	src := CommandSource{Command: credentialcmd.Marker(t, marker), Kind: KindSecret, Label: "TEST_MARKER"}
+	_, ok, err := src.Resolve(context.Background())
+	if !ok || err == nil || !strings.Contains(err.Error(), "credential command produced no output") {
+		t.Fatalf("marker resolve: ok=%v err=%v, want configured empty-output error", ok, err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read credential command marker: %v", err)
+	}
+	if string(got) != "invoked" {
+		t.Fatalf("credential command marker = %q, want invoked", got)
 	}
 }
