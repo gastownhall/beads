@@ -777,9 +777,10 @@ func DefaultAIModel() string {
 
 // DefaultAIModelFor returns the model for Anthropic-compatible AI calls,
 // accounting for which provider the resolved key selects: an explicitly
-// configured ai.model always wins; otherwise a MiniMax-selected key gets a
-// MiniMax-served default (MINIMAX_MODEL env > MiniMaxDefaultModel), since
-// MiniMax does not serve the Claude default model.
+// configured ai.model always wins; otherwise a MiniMax- or OrcaRouter-selected
+// key gets a provider-served default (MINIMAX_MODEL / ORCAROUTER_MODEL env >
+// MiniMaxDefaultModel / OrcaRouterDefaultModel), since neither provider serves
+// the Claude default model.
 func DefaultAIModelFor(keySource AIAPIKeySource) string {
 	if GetValueSource("ai.model") != SourceDefault {
 		return GetString("ai.model")
@@ -790,6 +791,12 @@ func DefaultAIModelFor(keySource AIAPIKeySource) string {
 		}
 		return MiniMaxDefaultModel
 	}
+	if keySource == AIAPIKeySourceOrcaRouterEnv {
+		if m := os.Getenv("ORCAROUTER_MODEL"); m != "" {
+			return m
+		}
+		return OrcaRouterDefaultModel
+	}
 	return GetString("ai.model")
 }
 
@@ -797,11 +804,12 @@ func DefaultAIModelFor(keySource AIAPIKeySource) string {
 type AIAPIKeySource string
 
 const (
-	AIAPIKeySourceNone         AIAPIKeySource = ""
-	AIAPIKeySourceAnthropicEnv AIAPIKeySource = "ANTHROPIC_API_KEY" //nolint:gosec // Environment variable name, not a credential.
-	AIAPIKeySourceMiniMaxEnv   AIAPIKeySource = "MINIMAX_API_KEY"   //nolint:gosec // Environment variable name, not a credential.
-	AIAPIKeySourceConfig       AIAPIKeySource = "ai.api_key"
-	AIAPIKeySourceExplicit     AIAPIKeySource = "explicit"
+	AIAPIKeySourceNone          AIAPIKeySource = ""
+	AIAPIKeySourceAnthropicEnv  AIAPIKeySource = "ANTHROPIC_API_KEY"  //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceMiniMaxEnv    AIAPIKeySource = "MINIMAX_API_KEY"    //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceOrcaRouterEnv AIAPIKeySource = "ORCAROUTER_API_KEY" //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceConfig        AIAPIKeySource = "ai.api_key"
+	AIAPIKeySourceExplicit      AIAPIKeySource = "explicit"
 
 	MiniMaxDefaultBaseURL = "https://api.minimax.io/anthropic"
 
@@ -811,14 +819,29 @@ const (
 	// must route to a model MiniMax actually hosts. Override with
 	// MINIMAX_MODEL or ai.model.
 	MiniMaxDefaultModel = "MiniMax-M2"
+
+	// OrcaRouterDefaultBaseURL is the Anthropic-compatible endpoint of
+	// OrcaRouter (https://www.orcarouter.ai). The SDK appends /v1/messages.
+	OrcaRouterDefaultBaseURL = "https://api.orcarouter.ai"
+
+	// OrcaRouterDefaultModel is used when ORCAROUTER_API_KEY selected the key
+	// and the user did not configure ai.model: OrcaRouter's Anthropic-
+	// compatible endpoint requires the anthropic/ namespace prefix and does
+	// not serve the bare Claude default model. Override with
+	// ORCAROUTER_MODEL or ai.model.
+	OrcaRouterDefaultModel = "anthropic/claude-haiku-4.5"
 )
 
 // ResolveAIAPIKey returns the API key for Anthropic-compatible AI calls.
 //
-// Precedence: ANTHROPIC_API_KEY > MINIMAX_API_KEY > ai.api_key > explicit.
+// Precedence: ANTHROPIC_API_KEY > ORCAROUTER_API_KEY > MINIMAX_API_KEY >
+// ai.api_key > explicit.
 func ResolveAIAPIKey(explicit string) (string, AIAPIKeySource) {
 	if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
 		return envKey, AIAPIKeySourceAnthropicEnv
+	}
+	if envKey := os.Getenv("ORCAROUTER_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceOrcaRouterEnv
 	}
 	if envKey := os.Getenv("MINIMAX_API_KEY"); envKey != "" {
 		return envKey, AIAPIKeySourceMiniMaxEnv
@@ -834,8 +857,9 @@ func ResolveAIAPIKey(explicit string) (string, AIAPIKeySource) {
 
 // DefaultAIBaseURL returns the configured base URL for Anthropic-compatible AI calls.
 //
-// Precedence: ai.base_url (or BD_AI_BASE_URL) > MINIMAX_BASE_URL > MiniMax default
-// when MINIMAX_API_KEY selected the key. Empty means use the SDK's Anthropic default.
+// Precedence: ai.base_url (or BD_AI_BASE_URL) > MINIMAX_BASE_URL /
+// ORCAROUTER_API_BASE_URL > MiniMax / OrcaRouter default when the matching key
+// selected. Empty means use the SDK's Anthropic default.
 func DefaultAIBaseURL(keySource AIAPIKeySource) string {
 	if baseURL := GetString("ai.base_url"); baseURL != "" {
 		return baseURL
@@ -845,6 +869,12 @@ func DefaultAIBaseURL(keySource AIAPIKeySource) string {
 			return baseURL
 		}
 		return MiniMaxDefaultBaseURL
+	}
+	if keySource == AIAPIKeySourceOrcaRouterEnv {
+		if baseURL := os.Getenv("ORCAROUTER_API_BASE_URL"); baseURL != "" {
+			return baseURL
+		}
+		return OrcaRouterDefaultBaseURL
 	}
 	return ""
 }

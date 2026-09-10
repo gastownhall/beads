@@ -87,6 +87,7 @@ func TestResolveAIAPIKeyPrecedence(t *testing.T) {
 
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("MINIMAX_API_KEY", "")
+	t.Setenv("ORCAROUTER_API_KEY", "")
 	if err := Initialize(); err != nil {
 		t.Fatalf("Initialize() returned error: %v", err)
 	}
@@ -109,6 +110,12 @@ func TestResolveAIAPIKeyPrecedence(t *testing.T) {
 		t.Fatalf("MiniMax env = (%q, %q), want minimax-key/%s", key, source, AIAPIKeySourceMiniMaxEnv)
 	}
 
+	t.Setenv("ORCAROUTER_API_KEY", "orcarouter-key")
+	key, source = ResolveAIAPIKey("explicit-key")
+	if key != "orcarouter-key" || source != AIAPIKeySourceOrcaRouterEnv {
+		t.Fatalf("OrcaRouter env = (%q, %q), want orcarouter-key/%s", key, source, AIAPIKeySourceOrcaRouterEnv)
+	}
+
 	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
 	key, source = ResolveAIAPIKey("explicit-key")
 	if key != "anthropic-key" || source != AIAPIKeySourceAnthropicEnv {
@@ -121,6 +128,7 @@ func TestDefaultAIBaseURLPrecedence(t *testing.T) {
 	defer restore()
 
 	t.Setenv("MINIMAX_BASE_URL", "")
+	t.Setenv("ORCAROUTER_API_BASE_URL", "")
 	if err := Initialize(); err != nil {
 		t.Fatalf("Initialize() returned error: %v", err)
 	}
@@ -132,10 +140,18 @@ func TestDefaultAIBaseURLPrecedence(t *testing.T) {
 	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != MiniMaxDefaultBaseURL {
 		t.Fatalf("MiniMax default base URL = %q, want %q", got, MiniMaxDefaultBaseURL)
 	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceOrcaRouterEnv); got != OrcaRouterDefaultBaseURL {
+		t.Fatalf("OrcaRouter default base URL = %q, want %q", got, OrcaRouterDefaultBaseURL)
+	}
 
 	t.Setenv("MINIMAX_BASE_URL", "https://minimax.example/anthropic")
 	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != "https://minimax.example/anthropic" {
 		t.Fatalf("MINIMAX_BASE_URL = %q, want custom MiniMax URL", got)
+	}
+
+	t.Setenv("ORCAROUTER_API_BASE_URL", "https://orcarouter.example/v1")
+	if got := DefaultAIBaseURL(AIAPIKeySourceOrcaRouterEnv); got != "https://orcarouter.example/v1" {
+		t.Fatalf("ORCAROUTER_API_BASE_URL = %q, want custom OrcaRouter URL", got)
 	}
 
 	t.Setenv("BD_AI_BASE_URL", "https://proxy.example/anthropic")
@@ -147,6 +163,9 @@ func TestDefaultAIBaseURLPrecedence(t *testing.T) {
 	}
 	if got := DefaultAIBaseURL(AIAPIKeySourceAnthropicEnv); got != "https://proxy.example/anthropic" {
 		t.Fatalf("BD_AI_BASE_URL Anthropic override = %q, want proxy URL", got)
+	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceOrcaRouterEnv); got != "https://proxy.example/anthropic" {
+		t.Fatalf("BD_AI_BASE_URL OrcaRouter override = %q, want proxy URL", got)
 	}
 }
 

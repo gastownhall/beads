@@ -37,7 +37,7 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, ORCAROUTER_API_KEY, or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
@@ -103,7 +103,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 
 	if method == "ai" {
 		if apiKey, _ := config.ResolveAIAPIKey(""); apiKey == "" {
-			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
+			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, ORCAROUTER_API_KEY, or ai.api_key in config")
 		}
 	}
 
