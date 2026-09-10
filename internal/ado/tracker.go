@@ -111,12 +111,13 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 		}
 	}
 
-	// Read custom state/type mappings from config.
+	// Read custom state/type/severity mappings from config.
 	// Uses prefix-scan to support custom types (e.g., ado.type_map.story).
 	stateMap := t.readMappingConfigByPrefix(ctx, "ado.state_map.")
 	typeMap := t.readMappingConfigByPrefix(ctx, "ado.type_map.")
+	severityMap := t.readMappingConfigByPrefix(ctx, "ado.severity_map.")
 
-	t.mapper = NewFieldMapper(stateMap, typeMap)
+	t.mapper = NewFieldMapper(stateMap, typeMap, severityMap)
 
 	// Create client with primary project for API URL construction.
 	t.client = NewClient(NewSecretString(pat), t.org, t.PrimaryProject())
