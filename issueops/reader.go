@@ -340,7 +340,9 @@ type ListRequest struct {
 	// narrower filter vocabulary than this request can describe, and only part
 	// of the request reaches it.
 	//
-	// WHAT IT CARRIES: IssueType, all five label forms, Assignee, NoAssignee,
+	// WHAT IT CARRIES: Status/Statuses (an explicit --status is the
+	// intersection; AllFlag and `--status all` still take the open default),
+	// IssueType, all five label forms, Assignee, NoAssignee,
 	// the exact Priority, ParentID, MolType, WispType, MetadataFields,
 	// HasMetadataKey, the type exclusions (ExcludeTypes, and with them
 	// IncludeGates and IncludeInfra), IncludeEphemeral — the ready query has an
@@ -348,8 +350,7 @@ type ListRequest struct {
 	// IncludeInfra's plane half crosses with it — Limit, Offset and the MaxRows
 	// cap with its attribution. SortBy and Reverse
 	// still apply, because the display order is applied to the page after the
-	// query rather than inside it. Status and AllFlag are resolved to "open"
-	// and have no further effect: ready work is open work.
+	// query rather than inside it.
 	//
 	// WHAT IT REFUSES: every other filter here is one the ready query cannot
 	// carry, so combining it with ReadyFlag returns ErrValidation naming the
@@ -398,8 +399,24 @@ type ListRequest struct {
 	// AfterCreatedAt and AfterID carry a decoded keyset position in the
 	// (created_at DESC, id ASC) order. The opaque token that encodes them is a
 	// transport concern and never reaches this contract.
+	//
+	// AfterPriority EXTENDS that position to the (priority ASC, created_at
+	// DESC, id ASC) order — the order SortBy="priority" and the empty default
+	// render — and is honored by every implementation, on BOTH tier legs, the
+	// same way the pair above is. It is the same position and not a second
+	// one: AfterCreatedAt alone decides whether one was supplied, so a
+	// priority with no instant is ignored exactly as an AfterID with no instant
+	// is.
+	//
+	// SET IT ONLY UNDER THE ORDER IT NAMES. A priority position under
+	// SortBy="created" positions in an order the ORDER BY does not render, and
+	// the page that comes back is a walk through rows neither side agrees on.
+	// The order the request asks for and the order the position was minted in
+	// are one decision; the transport above this contract is what keeps them
+	// from drifting.
 	AfterCreatedAt *time.Time
 	AfterID        string
+	AfterPriority  *int
 
 	// MaxRows is a DEFENSIVE CAP rather than a page. It bounds how many rows
 	// the query may match before the whole answer is refused; 0 disables it.

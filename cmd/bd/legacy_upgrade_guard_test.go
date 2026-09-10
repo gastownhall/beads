@@ -203,7 +203,8 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 		}
 	})
 
-	t.Run("explicit server metadata with malformed version witness and local Dolt root is refused", func(t *testing.T) {
+	t.Run("explicit server metadata with malformed version witness and local Dolt root is admitted with a warning", func(t *testing.T) {
+		warnings := captureLegacyUpgradeWarnings(t)
 		beadsDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
 			t.Fatal(err)
@@ -214,8 +215,11 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
-			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+		if warnings.Len() == 0 {
+			t.Fatal("guard admitted an unreadable witness without warning")
 		}
 	})
 
@@ -250,12 +254,15 @@ func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testin
 	}{
 		{name: "historical witness", version: "0.62.0", wantRefusal: true},
 		{name: "missing witness", wantRefusal: true},
-		{name: "malformed witness", version: "not-a-version", wantRefusal: true},
+		{name: "malformed witness opens as unknown era", version: "not-a-version"},
 		{name: "current witness", version: "1.1.2"},
+		{name: "pseudo-version witness", version: "v1.1.1-0.20260805093327-bf97b73749ac"},
+		{name: "release candidate witness", version: "1.1.0-rc.1"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			captureLegacyUpgradeWarnings(t)
 			beadsDir := t.TempDir()
 			metadata := []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"selected_server_db"}`)
 			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o600); err != nil {

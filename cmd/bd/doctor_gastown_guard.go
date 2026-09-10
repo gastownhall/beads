@@ -31,3 +31,43 @@ func isOrchestratorRoot(path string) bool {
 
 	return true
 }
+
+// findTownRoot walks up from the current working directory looking for
+// mayor/town.json — the same primary marker gt's own workspace package uses
+// (see gastownhall/gastown internal/cmd/handoff.go's detectTownRootFromCwd).
+// Falls back to GT_TOWN_ROOT then GT_ROOT (gt's env-var fallback chain,
+// already how the rest of this codebase detects an orchestrator — see
+// formula.go, molecules.go, doltserver.go) when cwd detection fails, e.g. a
+// detached worktree or a cwd outside the town tree entirely.
+//
+// Used by CheckMigrationFreeze (dc-6jaq) to find the MIGRATION-FREEZE
+// sentinel; unlike isOrchestratorRoot above this only needs the mayor/
+// marker, not also .beads/routes.jsonl, since a rig-level bd invocation's
+// cwd is never itself the orchestrator root.
+func findTownRoot() string {
+	if cwd, err := os.Getwd(); err == nil {
+		path := cwd
+		for {
+			if _, statErr := os.Stat(filepath.Join(path, "mayor", "town.json")); statErr == nil {
+				return path
+			}
+			parent := filepath.Dir(path)
+			if parent == path {
+				break
+			}
+			path = parent
+		}
+	}
+
+	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
+		envRoot := os.Getenv(envName)
+		if envRoot == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(envRoot, "mayor", "town.json")); err == nil {
+			return envRoot
+		}
+	}
+
+	return ""
+}

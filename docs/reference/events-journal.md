@@ -69,7 +69,7 @@ bd events export                        # the whole journal from seq 1 — same 
 Output is JSON Lines, one record per line, in sequence order:
 
 ```json
-{"seq":1,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
+{"seq":1,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","actor":"worker-1","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
 {"seq":4,"ts":"2026-01-02T03:04:05Z","op":"update","issue_id":"bd-100","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","is_blocked":true,"created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
 {"seq":11,"ts":"2026-01-02T03:04:05Z","op":"delete","issue_id":"bd-100","issue":null}
 ```
@@ -89,7 +89,7 @@ curl 'http://127.0.0.1:8080/v0/beads/events?since=4211&limit=500'
 ```json
 {
   "records": [
-    {"seq":4212,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
+    {"seq":4212,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","actor":"worker-1","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
   ],
   "head": 4980
 }
@@ -157,7 +157,7 @@ curl -N 'http://127.0.0.1:8080/v0/beads/events:watch?since=4211'
 retry: 3000
 
 id: 4212
-data: {"seq":4212,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
+data: {"seq":4212,"ts":"2026-01-02T03:04:05Z","op":"create","issue_id":"bd-100","actor":"worker-1","issue":{"id":"bd-100","title":"wire the seam","status":"open","priority":1,"issue_type":"task","created_at":"2026-01-02T03:00:00Z","updated_at":"2026-01-02T03:04:05Z"}}
 
 : heartbeat
 ```
@@ -234,6 +234,7 @@ build, and says nothing about whether this workspace has a journal.
 | `ts` | string | UTC insert time, stamped inside the committing transaction. |
 | `op` | string | One of the seven operations below. |
 | `issue_id` | string | The mutated issue. |
+| `actor` | string | The acting identity that performed the mutation, as resolved for the audit-events table; on a `comment` row, the comment's author. Absent when the path has no actor — derived maintenance (`is_blocked` recomputes), deletes (other than a rename's synthetic `delete` row), and rows written before the journal recorded actors. An absent `actor` is never user attribution: read it as "system/unknown", not as a conflicting writer. |
 | `issue` | object or null | The issue's full state *after* the mutation; `null` on a delete. |
 | `dep` | object | `{"kind","target","metadata"}` on `dep_add` and `dep_remove`; absent otherwise. |
 | `comment` | object | `{"id","author","text","created_at","source"}` on `comment`; absent otherwise. |

@@ -103,7 +103,7 @@ func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, quer
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts (hydrate issues): %w", err)
 	}
 	wispsByID, err := r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, hydrationFor(filter))
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !missingOptionalWispTable(err) {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts (hydrate wisps): %w", err)
 	}
 
@@ -231,8 +231,12 @@ func scanReadyWorkRowWithCounts(rows *sql.Rows, hyd sqlbuild.CountsHydration) (*
 
 // finishSearchCountsPage closes the window runFilterSearchQuery opened. It
 // rebuilds it from the same filter rather than being handed it, so the two
-// halves cannot be given different numbers.
+// halves cannot be given different numbers. Like the plain per-table seam, it
+// establishes a Go-side sort's order before the trim (sortRowsGoSide) — the
+// counts query renders no ORDER BY for such keys, so its rows arrive
+// engine-ordered.
 func finishSearchCountsPage(items []*types.IssueWithCounts, filter types.IssueFilter) (domain.SearchCountsPage, error) {
+	sortRowsGoSide(items, func(iwc *types.IssueWithCounts) string { return iwc.Issue.ID }, filter.SortBy, filter.SortDesc)
 	trimmed, hasMore, err := finishWindow(items, searchWindowForFilter(filter))
 	if err != nil {
 		return domain.SearchCountsPage{}, err

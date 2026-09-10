@@ -384,7 +384,7 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// recordEvent gates the human audit event, never the journal.
-	if err := RecordEventInTx(ctx, tx, EventClose, id); err != nil {
+	if err := RecordEventInTx(ctx, tx, EventClose, id, actor); err != nil {
 		return nil, err
 	}
 
