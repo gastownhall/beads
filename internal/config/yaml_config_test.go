@@ -35,6 +35,12 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"hierarchy.max-depth", true},
 		{"hierarchy.custom_setting", true}, // prefix match
 
+		// Lease settings (PR #5470 review R2, gastownhall/gascity ga-7uoua):
+		// EffectiveDefaultLeaseTTL reads lease.ttl through viper directly, so
+		// a DB-backed `bd config set` would be silently unread.
+		{"lease.ttl", true},
+		{"lease.other", false}, // exact match only, "lease." is not a registered prefix
+
 		// Backup settings (GH#2358)
 		{"backup.enabled", true},
 		{"backup.interval", true},
@@ -765,6 +771,40 @@ func TestValidateYamlConfigValue_PrimeMaxMemoryChars(t *testing.T) {
 				if err != nil {
 					t.Errorf("unexpected error for value %q: %v", tt.value, err)
 				}
+			}
+		})
+	}
+}
+
+// TestValidateYamlConfigValue_LeaseTTL guards `bd config set lease.ttl ...`
+// against the silent-misconfiguration hole flagged in PR #5470 review R1
+// (gastownhall/gascity ga-7uoua): time.ParseDuration rejects a bad value
+// here, at write time, instead of it being accepted and only later silently
+// parsing to zero and falling back to the compiled default.
+func TestValidateYamlConfigValue_LeaseTTL(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		expectErr bool
+	}{
+		{"valid minutes", "5m", false},
+		{"valid hours", "4h", false},
+		{"valid combined units", "1h30m", false},
+		{"invalid unit typo", "4hrs", true},
+		{"invalid non-duration", "banana", true},
+		{"invalid empty", "", true},
+		{"invalid zero", "0s", true},
+		{"invalid negative", "-5m", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateYamlConfigValue("lease.ttl", tt.value)
+			if tt.expectErr && err == nil {
+				t.Errorf("expected error for value %q, got nil", tt.value)
+			}
+			if !tt.expectErr && err != nil {
+				t.Errorf("unexpected error for value %q: %v", tt.value, err)
 			}
 		})
 	}

@@ -87,6 +87,13 @@ func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 #   git-push: false    # Disable git push (backup locally only)
 #   git-repo: ""       # Separate git repo for backups (default: project repo)
 
+# Claim lease TTL: how long a claimed issue stays in_progress without a
+# heartbeat before 'bd reclaim' reverts it to ready (dead-worker recovery).
+# Widen this if your workers' heartbeat cadence is slower than the 5m
+# default (also settable via the BD_LEASE_TTL env var).
+# lease:
+#   ttl: 5m
+
 # Optional JSONL auto-export for viewers, interchange, and issue-level migration.
 # Disabled by default; enable only when an integration needs fresh .beads/issues.jsonl.
 # Use relative paths under .beads/ for JSONL import/export filenames.
