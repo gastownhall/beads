@@ -50,12 +50,12 @@ verify_dolt_runtime() {
     local resolved output bare
     resolved=$(command -v "$DOLT_BIN") ||
         die "pinned external Dolt runtime ${DOLT_TEST_RUNTIME_VERSION} is unavailable: $DOLT_BIN"
-    resolved=$(realpath -e -- "$resolved") || die "cannot resolve Dolt runtime: $DOLT_BIN"
+    resolved=$(resolve_existing_path "$resolved") || die "cannot resolve Dolt runtime: $DOLT_BIN"
     output=$("$resolved" version 2>&1) ||
         die "pinned external Dolt runtime does not run: $resolved"
     bare="${DOLT_TEST_RUNTIME_VERSION#v}"
     if ! grep -Eq "(^|[^0-9])${bare//./\\.}([^0-9]|$)" <<< "$output"; then
-        die "unpinned external Dolt runtime: $resolved reports '$output'; require ${DOLT_TEST_RUNTIME_VERSION} linux/amd64 (archive SHA-256 ${DOLT_TEST_RUNTIME_SHA256})"
+        die "unpinned external Dolt runtime: $resolved reports '$output'; require ${DOLT_TEST_RUNTIME_VERSION} (CI pins the linux/amd64 archive, SHA-256 ${DOLT_TEST_RUNTIME_SHA256}; any native build reporting this version is accepted)"
     fi
     DOLT_BIN="$resolved"
 }
@@ -87,8 +87,10 @@ require_command git
 require_command timeout
 require_command sha256sum
 require_command python3
-[ "$(uname -s)" = Linux ] || die 'the pinned authentic-binary corpus supports Linux only'
-[ "$(uname -m)" = x86_64 ] || die 'the pinned authentic-binary corpus supports linux/amd64 only'
+case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64|Darwin-arm64) ;;
+    *) die 'the pinned authentic-binary corpus supports linux/amd64 or darwin/arm64 only' ;;
+esac
 [[ "$OP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 'HISTORICAL_DOLT_E2E_TIMEOUT must be a positive number of seconds'
 for version in "${SELECTED_VERSIONS[@]}"; do
     case " ${HISTORICAL_DOLT_VERSIONS[*]} " in
@@ -98,7 +100,7 @@ done
 
 candidate="${CANDIDATE_BIN:-}"
 if [ -z "$candidate" ]; then candidate=$(build_candidate); fi
-candidate=$(realpath -e -- "$candidate") || die 'candidate binary cannot be resolved'
+candidate=$(resolve_existing_path "$candidate") || die 'candidate binary cannot be resolved'
 [ -x "$candidate" ] || die "candidate binary is not executable: $candidate"
 
 cleanup() {
@@ -364,12 +366,44 @@ PY
     stop_sqlite_writer
 }
 
+# GNU find's `-printf '%p\0%y\0%l\0'` (path, type letter, symlink target) has
+# no BSD find equivalent — BSD find has no -printf action at all. This
+# reproduces its exact three NUL-terminated fields for one already-found
+# entry, checking -L before -f/-d so a symlink is classified 'l' rather than
+# by whatever it points to (matching find's own unfollowed-by-default %y).
+describe_entry_portable() {
+    local entry="$1" type target=''
+    if [ -L "$entry" ]; then
+        type=l
+        target=$(readlink -- "$entry" 2>/dev/null) || target=''
+    elif [ -d "$entry" ]; then
+        type=d
+    elif [ -f "$entry" ]; then
+        type=f
+    elif [ -p "$entry" ]; then
+        type=p
+    elif [ -S "$entry" ]; then
+        type=s
+    elif [ -b "$entry" ]; then
+        type=b
+    elif [ -c "$entry" ]; then
+        type=c
+    else
+        type='?'
+    fi
+    printf '%s\0%s\0%s\0' "$entry" "$type" "$target"
+}
+
 beads_dir_fingerprint() {
     local beads_dir="$1"
     (
         cd "$beads_dir" || return 1
         while IFS= read -r -d '' entry; do
-            find "$entry" -maxdepth 0 -printf '%p\0%y\0%l\0'
+            if [ "$OS" = linux ]; then
+                find "$entry" -maxdepth 0 -printf '%p\0%y\0%l\0'
+            else
+                describe_entry_portable "$entry"
+            fi
             if [ -f "$entry" ] && [ ! -L "$entry" ]; then
                 sha256sum -- "$entry"
             fi
@@ -831,7 +865,7 @@ run_v091_upgrade() {
     source=$(build_verified_v091_source_binary) || die "$version: verified source build is unavailable"
     run_v091_source "$source" init --prefix vc || die "$version: source init failed"
     create_v091_fixture "$source"
-    [ "$(find "$workspace/.beads" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" = vc.db ] ||
+    [ "$(find "$workspace/.beads" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)" = vc.db ] ||
         die "$version: source did not produce sole .beads/vc.db"
     [ ! -e "$workspace/.beads/issues.jsonl" ] && [ ! -L "$workspace/.beads/issues.jsonl" ] ||
         die "$version: source unexpectedly auto-flushed .beads/issues.jsonl"
@@ -1097,6 +1131,18 @@ prepare_workspace() {
 }
 
 for version in "${SELECTED_VERSIONS[@]}"; do
+    # v0.63.3's published darwin/arm64 release binary was built without CGO
+    # and can't open an embedded-Dolt store at all ("embedded Dolt requires
+    # CGO") — a limitation of that specific historical release artifact, not
+    # of this host or this corpus's code, and not something a local fix can
+    # change (the whole point is testing the authentic pinned binary).
+    # Skipping just this one version keeps ./run.sh from being permanently
+    # red on macOS; linux/amd64 and every other embedded-Dolt version
+    # (v1.0.0, v1.0.1, v1.1.0, v1.1.2) are unaffected and still run.
+    if [ "$version" = v0.63.3 ] && [ "$OS" = darwin ] && [ "$ARCH" = arm64 ]; then
+        printf '\n● Historical embedded Dolt upgrade: %s\n  ⚠ skipped on darwin/arm64: the published release binary for %s requires CGO to open an embedded-Dolt store, and its darwin/arm64 build has none — upstream release limitation, covered on linux/amd64\n' "$version" "$version"
+        continue
+    fi
     prepare_workspace
     case "$version" in
         "$SOURCE_TAG_SQLITE_VERSION") run_v091_upgrade ;;

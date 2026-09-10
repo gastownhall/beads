@@ -30,7 +30,7 @@ func TestEmbeddedMoveIssuePersistenceEphemeralNoHistorySmoke(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx.tx, current, types.PersistenceModeNoHistory)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx.tx, current, types.PersistenceModeNoHistory, "test-actor")
 		return err
 	}); err != nil {
 		t.Fatal(err)

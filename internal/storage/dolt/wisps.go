@@ -363,8 +363,9 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	if rows == 0 {
 		return fmt.Errorf("wisp not found: %s", id)
 	}
-	// The rows==0 return above keeps this actually-deleted-only.
-	if err := issueops.RecordDeleteInTx(ctx, tx, id); err != nil {
+	// The rows==0 return above keeps this actually-deleted-only. The wisp
+	// delete surface carries no actor, so the row records none.
+	if err := issueops.RecordDeleteInTx(ctx, tx, id, ""); err != nil {
 		return err
 	}
 
@@ -461,8 +462,9 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	}
 	rowsAffected, _ := result.RowsAffected()
 
+	// The batched wisp delete surface carries no actor, so the rows record none.
 	for _, id := range deletedIDs {
-		if err := issueops.RecordDeleteInTx(ctx, tx, id); err != nil {
+		if err := issueops.RecordDeleteInTx(ctx, tx, id, ""); err != nil {
 			return 0, err
 		}
 	}

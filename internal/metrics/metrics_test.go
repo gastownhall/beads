@@ -286,3 +286,45 @@ func envContains(env []string, want string) bool {
 	}
 	return false
 }
+
+// TestRunSendMetricsPrunesUnderFlushDeadline is the GH#5871 ordering
+// regression. RunSendMetrics advertises a flushTimeout budget for the detached
+// child, but built the context only after the prune, so the prune — the
+// expensive half on a backed-up spool — ran with no deadline at all and the
+// advertised budget bounded nothing.
+func TestRunSendMetricsPrunesUnderFlushDeadline(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".beads", "eventsData"), 0o750); err != nil {
+		t.Fatalf("mkdir eventsData: %v", err)
+	}
+
+	var called, hasDeadline bool
+	var budget time.Duration
+	orig := pruneQueueFn
+	t.Cleanup(func() { pruneQueueFn = orig })
+	pruneQueueFn = func(ctx context.Context, dir string, now time.Time) (int, int64) {
+		called = true
+		if dl, ok := ctx.Deadline(); ok {
+			hasDeadline = true
+			budget = time.Until(dl)
+		}
+		return 0, 0
+	}
+
+	if _, err := Init("0.0.0-test", false, ""); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if code := RunSendMetrics(); code != 0 {
+		t.Fatalf("RunSendMetrics() = %d, want 0", code)
+	}
+	if !called {
+		t.Fatal("RunSendMetrics did not prune")
+	}
+	if !hasDeadline {
+		t.Fatal("RunSendMetrics ran the prune with a deadline-free context: the advertised flushTimeout budget does not bound the child's expensive half")
+	}
+	if budget <= 0 || budget > flushTimeout {
+		t.Errorf("prune context budget = %v, want (0, %v]", budget, flushTimeout)
+	}
+}

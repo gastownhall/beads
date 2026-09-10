@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,6 +112,95 @@ func TestAcquireCommandWorkspaceGatesBlockedByExclusiveHolder(t *testing.T) {
 	}
 	if workspaceGateHandle != nil {
 		t.Error("failed acquisition must leave no gate handle")
+	}
+}
+
+func TestAcquireInitMutationGateKeepsReplacementExclusiveDuringPreflight(t *testing.T) {
+	resetGateTestEnv(t)
+	beadsDir := newGateTestWorkspace(t)
+	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+
+	oldOnWait := exclusiveGateOnWait
+	secondWaited := make(chan struct{}, 1)
+	exclusiveGateOnWait = func(string) {
+		select {
+		case secondWaited <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { exclusiveGateOnWait = oldOnWait })
+
+	firstPreflightEntered := make(chan struct{})
+	allowFirstPreflight := make(chan struct{})
+	type result struct {
+		h   *workspacegate.MultiHandle
+		err error
+	}
+	firstResult := make(chan result, 1)
+	go func() {
+		h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+			close(firstPreflightEntered)
+			<-allowFirstPreflight
+			return nil
+		})
+		firstResult <- result{h: h, err: err}
+	}()
+	<-firstPreflightEntered
+
+	secondPreflightEntered := make(chan struct{})
+	secondResult := make(chan result, 1)
+	go func() {
+		h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+			close(secondPreflightEntered)
+			return nil
+		})
+		secondResult <- result{h: h, err: err}
+	}()
+
+	select {
+	case <-secondWaited:
+	case <-secondPreflightEntered:
+		t.Fatal("second replacement entered preflight while first held the mutation gates")
+	}
+
+	close(allowFirstPreflight)
+	first := <-firstResult
+	if first.err != nil {
+		t.Fatalf("first init mutation gate: %v", first.err)
+	}
+	if err := first.h.Release(); err != nil {
+		t.Fatalf("release first init mutation gate: %v", err)
+	}
+
+	<-secondPreflightEntered
+	second := <-secondResult
+	if second.err != nil {
+		t.Fatalf("second init mutation gate: %v", second.err)
+	}
+	if err := second.h.Release(); err != nil {
+		t.Fatalf("release second init mutation gate: %v", err)
+	}
+}
+
+func TestAcquireInitMutationGateReleasesOnPreflightError(t *testing.T) {
+	resetGateTestEnv(t)
+	beadsDir := newGateTestWorkspace(t)
+	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+	refusal := errors.New("destroy token rejected")
+
+	_, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+		return refusal
+	})
+	if !errors.Is(err, refusal) {
+		t.Fatalf("init mutation gate error = %v, want preflight refusal", err)
+	}
+
+	h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, nil)
+	if err != nil {
+		t.Fatalf("init mutation gate remained held after refusal: %v", err)
+	}
+	if err := h.Release(); err != nil {
+		t.Fatalf("release init mutation gate: %v", err)
 	}
 }
 

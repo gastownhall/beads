@@ -332,6 +332,44 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
 
+  # internal/storage/dbproxy/server carries the platform-portable path
+  # handling that #5820 introduced (testPlatformPath, external dolt config
+  # validation, DSN shaping), and until now no PR-triggered job executed the
+  # package on Windows - the platform those paths target - so a path-shaped
+  # regression stayed invisible until someone ran it by hand (the #5820
+  # review merged on a contributor's windows/amd64 attestation for exactly
+  # that reason). Same pattern as the focused jobs above: run exactly this
+  # package on windows-latest. Tests that need a dolt binary Skipf loudly
+  # (dolt is not installed on the Windows runners), and the unix-socket
+  # cases skip on Windows by design - the portability class this job guards
+  # runs without either.
+  #
+  # Deliberately NOT added to ci-gate's `needs`/`CI_GATE_REQUIRED`/env map,
+  # following the `test-macos` precedent above: promoting a new job to
+  # required-for-merge is a maintainer call once it has run clean for a while.
+  # Until then it runs on every PR and surfaces red on the PR page without
+  # blocking the merge lane. Say the word and I will wire it into the gate in
+  # the same PR - the three edits are `ci-gate.needs`, `CI_GATE_REQUIRED`, and
+  # `TEST_WINDOWS_DBPROXY_SERVER: ${{ needs.test-windows-dbproxy-server.result }}`.
+  test-windows-dbproxy-server:
+    name: Test (Windows) dbproxy server package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run dbproxy server package tests on Windows
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
+
   # Fast check to ensure all version files are in sync
   check-version-consistency:
     name: Check version consistency
@@ -717,6 +755,65 @@ jobs:
         env:
           BD_LINT_NEW_FROM_MERGE_BASE: origin/main
         run: make ci-pr-lint
+
+  # Advisory architecture signal. This deliberately does not participate in
+  # ci-gate while maintainers evaluate the baseline and refactoring payoff.
+  complexity-report:
+    name: Complexity report (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Install gocyclo
+        timeout-minutes: 5
+        continue-on-error: true
+        run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+
+      - name: Generate complexity report
+        id: generate-complexity
+        if: always()
+        timeout-minutes: 8
+        continue-on-error: true
+        run: |
+          set +e
+          COMPLEXITY_BASE_REF=origin/main ./scripts/ci/complexity.sh diff > complexity-report.txt 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "complexity report unavailable (exit $status); see log above" >> complexity-report.txt
+          fi
+          exit 0
+
+      - name: Annotate unavailable complexity report
+        if: always()
+        timeout-minutes: 1
+        continue-on-error: true
+        run: |
+          if [ ! -s complexity-report.txt ] || grep -q 'complexity report unavailable' complexity-report.txt; then
+            echo "::warning title=Complexity report unavailable::Advisory complexity analysis did not complete; inspect the artifact or job log."
+          fi
+
+      - name: Upload complexity report
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: complexity-report
+          path: complexity-report.txt
+          retention-days: 7
+          if-no-files-found: error
 
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
   # internal/storage/uow). These packages back the proxied-server init path and

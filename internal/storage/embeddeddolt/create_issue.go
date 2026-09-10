@@ -20,6 +20,12 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 	if s.IsInfraTypeCtx(ctx, issue.IssueType) {
 		issue.Ephemeral = true
 	}
+	// A wisp_type is a claim of ephemerality, same as every other create path:
+	// minted without the flag it would land in the issues plane where no TTL,
+	// GC, or purge tier owns it. NoHistory keeps its own retention mode.
+	if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
+		issue.Ephemeral = true
+	}
 
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches DoltStore.CreateIssue, which does not
