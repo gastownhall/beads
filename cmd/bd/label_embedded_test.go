@@ -226,6 +226,63 @@ func TestEmbeddedLabel(t *testing.T) {
 		}
 	})
 
+	t.Run("label_remove_prefix", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove", "--type", "task",
+			"--label", "pool:refused:reason-a", "--label", "pool:refused:reason-b", "--label", "needs-human")
+		bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "pool:refused:")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		for _, l := range labels {
+			if strings.HasPrefix(l, "pool:refused:") {
+				t.Errorf("label %q should have been removed by prefix: %v", l, labels)
+			}
+		}
+		found := false
+		for _, l := range labels {
+			if l == "needs-human" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected 'needs-human' to survive: %v", labels)
+		}
+	})
+
+	t.Run("label_remove_prefix_no_match_is_noop", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove no match", "--type", "task", "--label", "keep-me")
+		bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "does-not-exist:")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		if len(labels) != 1 || labels[0] != "keep-me" {
+			t.Errorf("expected only 'keep-me' to survive a no-match prefix removal: %v", labels)
+		}
+	})
+
+	// --prefix takes no trailing label argument (every positional is an issue
+	// ID), so a caller who reflexively keeps the plain-remove habit of ending
+	// with a label — `bd label remove <id> stale-label --prefix x` — must get
+	// an explicit, unambiguous rejection rather than a confusing "could not
+	// resolve issue ID" error that then recommends the very label-argument
+	// syntax --prefix does not accept.
+	t.Run("label_remove_prefix_rejects_label_shaped_positional", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove mixed args", "--type", "task",
+			"--label", "pool:refused:reason-a")
+		out := bdLabelFail(t, bd, dir, "remove", issue.ID, "definitely-not-an-issue-id", "--prefix", "pool:refused:")
+		if !strings.Contains(out, "cannot combine --prefix with label arguments") {
+			t.Errorf("expected the --prefix + label-argument rejection message, got: %s", out)
+		}
+		// Resolution must fail before any mutation — the valid issue's labels
+		// must be untouched by the rejected call, not partially applied.
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		found := false
+		for _, l := range labels {
+			if l == "pool:refused:reason-a" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("rejected --prefix call must not remove labels from the valid issue id first: %v", labels)
+		}
+	})
+
 	t.Run("label_remove_json", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "JSON rm label", "--type", "task", "--label", "jsonrm")
 		cmd := exec.Command(bd, "label", "remove", issue.ID, "jsonrm", "--json")
