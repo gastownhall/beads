@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,6 +246,65 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 		t.Errorf("ci-gate does not require the three-host generated-hook lane: needs=%v %s=%q required=%q",
 			gate.Needs, gateKey, gateEnv[gateKey], gateEnv["CI_GATE_REQUIRED"])
 	}
+}
+
+// TestMacOSCITestLegsHaveExplicitTimeout is the regression test for be-xagyw:
+// go test's 10m per-package default applied to three macOS -race legs that
+// run whole-module ./... (pr.yml test-macos, main.yml test's macOS matrix
+// entry, ci-measurements.yml macos-short), and -race on macOS is slow enough
+// that cmd/bd alone can approach or exceed 10m, killing the run mid-package
+// rather than reporting a real pass/fail (be-dvbq9's investigation). This is
+// a floor check, not an exact-match one: it fails if -timeout is missing or
+// parses below 20m, but tolerates the deadline moving up over time. Each
+// leg's enclosing job also needs a timeout-minutes backstop so a real hang
+// still produces a bounded, diagnosable job failure instead of running to
+// GitHub's 360m default.
+func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
+	const minTimeoutMinutes = 20
+
+	timeoutPattern := regexp.MustCompile(`-timeout[= ](\d+)m\b`)
+	assertHasTimeoutFloor := func(t *testing.T, label, command string) {
+		t.Helper()
+		matches := timeoutPattern.FindStringSubmatch(command)
+		if matches == nil {
+			t.Errorf("%s command has no -timeout flag: %q", label, command)
+			return
+		}
+		minutes, err := strconv.Atoi(matches[1])
+		if err != nil {
+			t.Fatalf("%s -timeout value %q not numeric: %v", label, matches[1], err)
+		}
+		if minutes < minTimeoutMinutes {
+			t.Errorf("%s -timeout = %dm, want at least %dm", label, minutes, minTimeoutMinutes)
+		}
+	}
+
+	t.Run("pr.yml test-macos", func(t *testing.T) {
+		job := readCIWorkflow(t, "pr.yml").job(t, "test-macos")
+		assertHasTimeoutFloor(t, "pr.yml test-macos Test step", job.step(t, "Test").Run)
+		if job.TimeoutMinutes < 60 {
+			t.Errorf("pr.yml test-macos job timeout-minutes = %d, want at least 60", job.TimeoutMinutes)
+		}
+	})
+
+	t.Run("main.yml test macOS leg", func(t *testing.T) {
+		job := readCIWorkflow(t, "main.yml").job(t, "test")
+		var macOSFlags string
+		for _, include := range job.Strategy.Matrix.Include {
+			if include.OS == macOSRunner {
+				macOSFlags = include.TestFlags
+			}
+		}
+		assertHasTimeoutFloor(t, "main.yml test macOS matrix test-flags", macOSFlags)
+		if job.TimeoutMinutes < 60 {
+			t.Errorf("main.yml test job timeout-minutes = %d, want at least 60", job.TimeoutMinutes)
+		}
+	})
+
+	t.Run("ci-measurements.yml macos-short", func(t *testing.T) {
+		job := readCIWorkflow(t, "ci-measurements.yml").job(t, "macos-short")
+		assertHasTimeoutFloor(t, "ci-measurements.yml macos-short Measure commands step", job.step(t, "Measure commands").Run)
+	})
 }
 
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
