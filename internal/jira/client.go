@@ -35,6 +35,9 @@ type IssueFields struct {
 	Project     *ProjectField    `json:"project"`
 	Assignee    *UserField       `json:"assignee"`
 	Labels      []string         `json:"labels"`
+	Parent      *IssueRef        `json:"parent"`
+	Subtasks    []IssueRef       `json:"subtasks"`
+	IssueLinks  []IssueLinkField `json:"issuelinks"`
 	Created     string           `json:"created"`
 	Updated     string           `json:"updated"`
 	Resolution  *ResolutionField `json:"resolution"`
@@ -75,6 +78,30 @@ type UserField struct {
 type ResolutionField struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// IssueRef is the compact issue shape Jira embeds for parent, subtasks, and links.
+type IssueRef struct {
+	ID   string `json:"id"`
+	Key  string `json:"key"`
+	Self string `json:"self"`
+}
+
+// IssueLinkType describes the direction labels Jira stores for issue links.
+type IssueLinkType struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Inward  string `json:"inward"`
+	Outward string `json:"outward"`
+}
+
+// IssueLinkField represents a Jira issue link. Exactly one of InwardIssue or
+// OutwardIssue is normally present from the perspective of the current issue.
+type IssueLinkField struct {
+	ID           string         `json:"id"`
+	Type         *IssueLinkType `json:"type"`
+	InwardIssue  *IssueRef      `json:"inwardIssue"`
+	OutwardIssue *IssueRef      `json:"outwardIssue"`
 }
 
 // Transition represents a Jira workflow transition.
@@ -160,7 +187,7 @@ func (c *Client) FetchIssueTimestamp(ctx context.Context, jiraKey string) (time.
 }
 
 // searchFields is the default set of fields to request in search/get queries.
-const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution"
+const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,parent,subtasks,issuelinks,created,updated,resolution"
 
 // SearchIssues queries Jira using JQL and returns all matching issues, handling pagination.
 func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) {
