@@ -1096,6 +1096,35 @@ func TestIsRemoteNotFoundErr(t *testing.T) {
 	}
 }
 
+func TestIsAuthFailureErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"remote not found is not auth", fmt.Errorf("remote 'origin' not found"), false},
+		{"diverged history is not auth", fmt.Errorf("no common ancestor"), false},
+		{"github ssh permission denied", fmt.Errorf("git@ssh.github.com: Permission denied (publickey)."), true},
+		{"publickey only", fmt.Errorf("publickey"), true},
+		{"authentication failed", fmt.Errorf("authentication failed for 'origin'"), true},
+		{"could not read repo", fmt.Errorf("could not read from remote repository"), true},
+		{"401 unauthorized", fmt.Errorf("401 Unauthorized"), true},
+		{"403 forbidden", fmt.Errorf("403 Forbidden"), true},
+		{"wrapped auth error", fmt.Errorf("push to origin: %w", fmt.Errorf("Permission denied (publickey)")), true},
+		{"mixed case", fmt.Errorf("PERMISSION DENIED (publickey)"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAuthFailureErr(tt.err)
+			if got != tt.want {
+				t.Errorf("isAuthFailureErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 type fakeRemoteLister struct {
 	remotes []storage.RemoteInfo
 	err     error
@@ -1367,6 +1396,35 @@ func TestPrintNoRemoteGuidance(t *testing.T) {
 	}
 	if !strings.Contains(output, "bd dolt remote add") {
 		t.Error("expected guidance to mention how to add a remote")
+	}
+}
+
+func TestPrintAuthFailureGuidance(t *testing.T) {
+	// Capture stderr output
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	printAuthFailureGuidance("push")
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Authentication failed") {
+		t.Error("expected guidance to mention 'Authentication failed'")
+	}
+	if !strings.Contains(output, "ssh-agent") {
+		t.Error("expected guidance to mention ssh-agent recovery")
+	}
+	if !strings.Contains(output, "DOLT_REMOTE_USER") {
+		t.Error("expected guidance to mention Hosted Dolt / DoltHub credentials")
+	}
+	if !strings.Contains(output, "bd dolt push") {
+		t.Error("expected guidance to mention retrying the operation")
 	}
 }
 
