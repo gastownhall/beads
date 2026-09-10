@@ -93,9 +93,9 @@ jobs:
           source ./.buildflags
           go_version="$(go version)"
           commit="$(git rev-parse HEAD)"
-          go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd-linux-gms-pure ./cmd/bd
+          go build -tags gms_pure_go -o artifacts/bd-linux-gms-pure ./cmd/bd
           chmod +x artifacts/bd-linux-gms-pure
-          go test -tags "$BEADS_BUILD_TAGS" -c -o artifacts/bd-cmd-test ./cmd/bd
+          go test -tags gms_pure_go -c -o artifacts/bd-cmd-test ./cmd/bd
           chmod +x artifacts/bd-cmd-test
           (
             cd artifacts
@@ -130,9 +130,8 @@ jobs:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
 
-  # Fast check: every `go build|test|run|generate|install` invocation in
-  # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
-  # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
+  # Fast shell/Make guard for direct source-time build-tag declarations.
+  # Workflow `run` steps are checked structurally in the required policy wrapper.
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest

@@ -103,6 +103,8 @@ build_docs_binary() {
 }
 
 ci_time "check build-tag policy" -- ./scripts/check-build-tags.sh
+ci_time "check workflow build-tag declarations" -- \
+    go run -tags=gms_pure_go ./scripts/checkworkflowtags
 ci_time "check go install guidance" -- ./scripts/check-go-install-guidance.sh
 ci_time "check version consistency" -- ./scripts/check-versions.sh
 ci_time "build bd for docs checks" -- build_docs_binary
