@@ -41,6 +41,21 @@ type TemplateSubgraph struct {
 	VarDefs      map[string]formula.VarDef // Variable definitions from formula (for defaults)
 	Phase        string                    // Recommended phase: "liquid" (pour) or "vapor" (wisp)
 	Pour         bool                      // If true, steps should be materialized as sub-issues (from formula pour=true)
+
+	// ConditionVars names the variables referenced by step conditions in the
+	// formula this subgraph was cooked from.
+	//
+	// Conditions are consumed by formula.FilterStepsByCondition BEFORE the
+	// cook, and the step it drops takes its condition with it - so by the time
+	// a subgraph exists, a var that decided which steps are in it leaves no
+	// trace in any issue field and no entry in VarDefs (nothing requires a
+	// condition var to be declared in [vars]). Recording the names here keeps
+	// them consumable: a var that changes which steps get poured must not be
+	// reported as one the proto cannot consume.
+	//
+	// Empty for a persisted proto loaded from the database, which has no
+	// formula behind it - its conditions were already resolved at cook time.
+	ConditionVars []string
 }
 
 // InstantiateResult holds the result of template instantiation

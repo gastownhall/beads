@@ -269,7 +269,10 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
+		if hint := firstMissingVar(subgraph, vars); hint != "" {
+			return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", hint))
+		}
+		return HandleError("%v", err)
 	}
 
 	if dryRun {
@@ -301,7 +304,7 @@ func checkRequiredVars(subgraph *TemplateSubgraph, vars map[string]string) error
 	if len(missingVars) > 0 {
 		return fmt.Errorf("missing required variables: %s", strings.Join(missingVars, ", "))
 	}
-	return nil
+	return checkUnknownVars(subgraph, nil, vars)
 }
 
 func firstMissingVar(subgraph *TemplateSubgraph, vars map[string]string) string {
@@ -997,12 +1000,12 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 
 func init() {
 	// Wisp command flags (for direct create: bd mol wisp <proto>)
-	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
 	// Wisp create command flags (kept for backwards compat: bd mol wisp create <proto>)
-	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
