@@ -331,8 +331,11 @@ func commitAllowEmpty(ctx context.Context, db doltBranchSQL, message string) err
 	return nil
 }
 
-// waitForDatabaseVisible polls USE <dbName> with exponential backoff until the
-// Dolt server reports the database as available. Bounded to ~10s — far longer
+// waitForDatabaseVisible polls USE <dbName> on db with exponential backoff
+// until the query succeeds. Success means the connection that ran it has
+// observed the server's catalog refresh for dbName — not a guarantee for
+// every connection in db's pool, and USE also mutates that connection's
+// session default database as a side effect. Bounded to ~10s — far longer
 // than any catalog-refresh window observed in practice — so a real failure
 // surfaces a clear error instead of hanging the test binary.
 func waitForDatabaseVisible(ctx context.Context, db *sql.DB, dbName string) error {
@@ -361,6 +364,9 @@ func waitForDatabaseVisible(ctx context.Context, db *sql.DB, dbName string) erro
 			return ctx.Err()
 		case <-time.After(delay):
 		}
+		// Cap is checked before doubling, so delay can reach ~1.6s (not 1s)
+		// on the iteration that crosses the threshold; harmless within the
+		// 10s bound above.
 		if delay < time.Second {
 			delay *= 2
 		}
