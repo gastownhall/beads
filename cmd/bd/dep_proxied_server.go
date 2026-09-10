@@ -244,6 +244,9 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
 
+	explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
+	warnImplicitBlocksDefault(dt, explicit)
+
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{
 			"status":        "added",
@@ -299,6 +302,15 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
 
+	if !cmd.Flags().Changed("type") {
+		for _, edge := range edges {
+			if edge.Defaulted && edge.Type == types.DepBlocks {
+				warnImplicitBlocksDefault(edge.Type, false)
+				break
+			}
+		}
+	}
+
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(depEdges))
 		for _, edge := range depEdges {
@@ -333,24 +345,33 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	// The role's Removed verdict is not printed. `bd dep remove` has always
-	// confirmed the same way whether or not an edge was there, and reporting
-	// the difference now would change what every existing script reads.
-	if _, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
+	result, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
 		Actor:       actor,
 		IssueID:     fromID,
 		DependsOnID: toID,
-	}); err != nil {
+	})
+	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 	res := depEdgeFeedback(ctx, fromID, toID, false)
 
 	if jsonOutput {
+		status := "removed"
+		if !result.Removed {
+			status = "not_found"
+		}
 		_ = outputJSON(map[string]interface{}{
-			"status":        "removed",
+			"status":        status,
+			"removed":       result.Removed,
 			"issue_id":      fromID,
 			"depends_on_id": toID,
 		})
+		return nil
+	}
+	if !result.Removed {
+		fmt.Printf("No dependency found: %s → %s\n",
+			formatFeedbackIDParen(fromID, res.fromTitle),
+			formatFeedbackIDParen(toID, res.toTitle))
 		return nil
 	}
 
@@ -398,6 +419,19 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			return HandleErrorRespectJSON("%v", err)
 		}
 		allIssues = append(allIssues, issues...)
+	}
+
+	// Same gap as the embedded RunE for this command (cmd/bd/dep.go): Relations
+	// drops "down" edges whose target has no row in this database, and the
+	// `len(args) > 1 && direction == "down"` branch above already uses the
+	// (non-dropping) EdgeReader role for batch mode — so this loop only runs
+	// for "down" with exactly one arg. Warn on stderr so a cross-database
+	// `bd link` isn't indistinguishable from no link at all (bd-mtla); never
+	// touches stdout/--json.
+	if direction == "down" && len(args) == 1 {
+		if reader, err := proxiedEdgeReader(); err == nil {
+			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
+		}
 	}
 
 	if jsonOutput {

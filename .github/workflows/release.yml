@@ -123,9 +123,37 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install cross-compilation toolchains and signing tools
+        # Backstop for a hang that escapes the inner `timeout` calls, so it has
+        # to sit ABOVE what those calls can legitimately consume: 3 update
+        # attempts x 120s + 2 backoffs x 10s + 300s install = 680s worst case.
+        # 13m leaves ~100s of headroom. This job sets no job-level
+        # timeout-minutes, so this cap is the only bound on a stuck apt.
+        timeout-minutes: 13
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
+          updated=""
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get \
+                 -o Acquire::Retries=3 \
+                 -o Acquire::http::Timeout=30 \
+                 -o Acquire::https::Timeout=30 \
+                 update; then
+              updated=yes
+              break
+            fi
+            echo "::warning::apt-get update attempt $attempt failed or timed out"
+            # No backoff after the final attempt - there is nothing left to wait for.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Deliberate best-effort: a stale index still installs these packages
+          # from the runner image cache far more often than not, and failing the
+          # job here would turn a transient mirror outage into a red build. The
+          # warning is what makes the degraded path visible in the job log.
+          if [ -z "$updated" ]; then
+            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
+          fi
+          sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
 
       - name: Install go-winres for Windows PE resource embedding
         run: go install github.com/tc-hib/go-winres@latest

@@ -23,11 +23,11 @@ func TestHandleRemoteMigrateGateJSON_Shape(t *testing.T) {
 		t.Fatal(pipeErr)
 	}
 	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
 
 	handleRemoteMigrateGateJSON(gate)
 
 	_ = w.Close()
-	os.Stderr = origStderr
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
@@ -120,9 +120,9 @@ func TestHandleRemoteMigrateGateJSON_FallbackReason(t *testing.T) {
 			t.Fatal(pipeErr)
 		}
 		os.Stderr = w
+		defer func() { os.Stderr = origStderr }()
 		handleRemoteMigrateGateJSON(gate)
 		_ = w.Close()
-		os.Stderr = origStderr
 
 		var buf bytes.Buffer
 		if _, err := io.Copy(&buf, r); err != nil {

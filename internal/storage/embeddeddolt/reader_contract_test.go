@@ -217,6 +217,12 @@ func TestEmbeddedReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsN
 	conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

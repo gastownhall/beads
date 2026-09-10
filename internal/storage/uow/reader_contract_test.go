@@ -144,6 +144,14 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing", func(t *testing.T) {
 		conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, fixture)
 	})
+	// The second served order's walk. This seam ORDERs a SQL union, so the
+	// priority-equal arm of the predicate and the union's ORDER BY have to agree
+	// about what "after" means across both legs — a place the created-order walk
+	// never exercises, because there the tie-break is reached by a shared second
+	// alone.
+	t.Run("ListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing", func(t *testing.T) {
+		conformance.RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t, ctx, fixture)
+	})
 	t.Run("ListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates", func(t *testing.T) {
 		conformance.RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t, ctx, fixture)
 	})

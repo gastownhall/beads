@@ -93,7 +93,7 @@ var eventsTailCmd = &cobra.Command{
 
 Each line is a JSON record:
   {"seq":N,"ts":"...","op":"create|update|close|delete|dep_add|dep_remove|comment",
-   "issue_id":"...","issue":{...|null},"dep":{"kind":..,"target":..,"metadata":..},"comment":{...}}
+   "issue_id":"...","actor":"...","issue":{...|null},"dep":{"kind":..,"target":..,"metadata":..},"comment":{...}}
 
 Record contract (stable for external consumers):
   seq       int64   counter-assigned inside the mutation's transaction; gapless,
@@ -101,6 +101,12 @@ Record contract (stable for external consumers):
   ts        string  UTC insert time, stamped inside the committing transaction
   op        string  one of the seven ops above
   issue_id  string  the mutated issue's id
+  actor     string  the acting identity that performed the mutation, as resolved
+                    for the audit-events table (on a comment row: the comment's
+                    author); empty (omitted) when the mutation path has no
+                    actor — derived maintenance, deletes (other than a rename's
+                    synthetic delete), and rows older than the column. Never
+                    user attribution when empty.
   issue     object  full issue state AFTER the mutation; null on delete
   dep       object  {"kind","target","metadata"} for dep_add / dep_remove; omitted otherwise
   comment   object  {"id","author","text","created_at","source"} for comment; omitted otherwise

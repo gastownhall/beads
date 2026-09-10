@@ -469,6 +469,33 @@ func TestGatherReadyInputIgnoresNegativeOffset(t *testing.T) {
 	}
 }
 
+// TestGatherReadyInputFlatAliasesPlain pins the flag-name parity with
+// `bd list --flat`. Both spellings have to land on plainFormat, because that
+// one field is where the direct route and the proxied route each build their
+// usePlain choice.
+func TestGatherReadyInputFlatAliasesPlain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "neither", args: nil, want: false},
+		{name: "plain", args: []string{"--plain"}, want: true},
+		{name: "flat", args: []string{"--flat"}, want: true},
+		{name: "both", args: []string{"--plain", "--flat"}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runGatherReadyInput(t, newReadyFlagsCommand(t, tc.args...), nil)
+			if got.err != nil {
+				t.Fatalf("gatherReadyInput(%v) = %v, want no error", tc.args, got.err)
+			}
+			if got.in.plainFormat != tc.want {
+				t.Errorf("plainFormat = %v, want %v", got.in.plainFormat, tc.want)
+			}
+		})
+	}
+}
+
 // TestGatherReadyInputKeepsDirectoryLabelVerbatim pins GH#541's label against
 // the collapse into workapi. The configured label is not user input: `bd ready`
 // has always put it on the filter exactly as configured, so it must not be

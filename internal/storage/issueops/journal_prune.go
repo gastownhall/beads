@@ -253,7 +253,7 @@ func readEventsHeadInTx(ctx context.Context, tx DBTX) (int64, error) {
 
 func readEventsRowsInTx(ctx context.Context, tx DBTX, since int64, limit int) ([]storage.EventsJournalRow, error) {
 	// CAST(ts AS CHAR) normalizes the DATETIME to a stable string across drivers.
-	q := `SELECT seq, CAST(ts AS CHAR), op, issue_id, issue_json, dep_json, comment_json
+	q := `SELECT seq, CAST(ts AS CHAR), op, issue_id, actor, issue_json, dep_json, comment_json
 	      FROM bd_events_journal WHERE seq > ? ORDER BY seq ASC`
 	if limit > 0 {
 		q += " LIMIT " + strconv.Itoa(limit)
@@ -272,7 +272,7 @@ func readEventsRowsInTx(ctx context.Context, tx DBTX, since int64, limit int) ([
 			depJS     sql.NullString
 			commentJS sql.NullString
 		)
-		if err := rows.Scan(&r.Seq, &r.TS, &r.Op, &r.IssueID, &issueJS, &depJS, &commentJS); err != nil {
+		if err := rows.Scan(&r.Seq, &r.TS, &r.Op, &r.IssueID, &r.Actor, &issueJS, &depJS, &commentJS); err != nil {
 			return nil, fmt.Errorf("journal: scan row: %w", err)
 		}
 		r.TS = normalizeEventsTimestamp(r.TS)

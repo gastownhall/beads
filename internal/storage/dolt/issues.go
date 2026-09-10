@@ -31,10 +31,12 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		return fmt.Errorf("issue must not be nil")
 	}
 
-	// Route to wisps table if ephemeral, no-history, or infra type.
-	useWispsTable := issue.Ephemeral || issue.NoHistory || s.IsInfraTypeCtx(ctx, issue.IssueType)
+	// Route to wisps table if ephemeral, no-history, wisp-typed, or infra type.
+	// A wisp_type is a claim of ephemerality: minted without the flag it lands
+	// in the issues plane where no TTL, GC, or purge tier owns it.
+	useWispsTable := issue.Ephemeral || issue.NoHistory || issue.WispType != "" || s.IsInfraTypeCtx(ctx, issue.IssueType)
 	if useWispsTable && !issue.NoHistory {
-		issue.Ephemeral = true // infra types get marked ephemeral (legacy behavior)
+		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
 	var result issueops.CreateIssueResult
