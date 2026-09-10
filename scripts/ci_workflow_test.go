@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -255,17 +255,21 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 // that cmd/bd alone can approach or exceed 10m, killing the run mid-package
 // rather than reporting a real pass/fail (be-dvbq9's investigation). This is
 // a floor check, not an exact-match one: it fails if -timeout is missing or
-// parses below 20m, but tolerates the deadline moving up over time. Each
-// leg's enclosing job also needs a timeout-minutes backstop so a real hang
-// still produces a bounded, diagnosable job failure instead of running to
-// GitHub's 360m default.
+// parses below 20m, but tolerates the deadline moving up over time in any
+// duration form go test accepts. Each leg's enclosing job also needs a
+// timeout-minutes backstop so a real hang still produces a bounded,
+// diagnosable job failure instead of running to GitHub's 360m default.
 func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 	const (
-		minTimeoutMinutes    = 20
+		minTimeout           = 20 * time.Minute
 		minJobTimeoutMinutes = 60
 	)
 
-	timeoutPattern := regexp.MustCompile(`-timeout[= ](\d+)m\b`)
+	// Capture the whole flag value and let time.ParseDuration judge it, rather
+	// than pattern-matching bare integer minutes: go test accepts any Go
+	// duration, so 1h, 1h30m and 25m0s are all legitimate ways to raise this
+	// deadline and none of them are Nm.
+	timeoutPattern := regexp.MustCompile(`-timeout[= ](\S+)`)
 	assertHasTimeoutFloor := func(t *testing.T, label, command string) {
 		t.Helper()
 		matches := timeoutPattern.FindStringSubmatch(command)
@@ -273,12 +277,13 @@ func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 			t.Errorf("%s command has no -timeout flag: %q", label, command)
 			return
 		}
-		minutes, err := strconv.Atoi(matches[1])
+		timeout, err := time.ParseDuration(matches[1])
 		if err != nil {
-			t.Fatalf("%s -timeout value %q not numeric: %v", label, matches[1], err)
+			t.Errorf("%s -timeout value %q is not a Go duration: %v", label, matches[1], err)
+			return
 		}
-		if minutes < minTimeoutMinutes {
-			t.Errorf("%s -timeout = %dm, want at least %dm", label, minutes, minTimeoutMinutes)
+		if timeout < minTimeout {
+			t.Errorf("%s -timeout = %s, want at least %s", label, timeout, minTimeout)
 		}
 	}
 
