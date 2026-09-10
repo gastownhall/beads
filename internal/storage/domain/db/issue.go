@@ -754,6 +754,14 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	if err := types.CheckFieldLen("owner", issue.Owner); err != nil {
 		return err
 	}
+	// The column list must stay in step with the classic writer
+	// (issueops.insertIssueIntoTable) — the shared scanner hydrates whatever
+	// either writer stored, so a column present there and missing here is not
+	// a harmless omission but a silent, writer-dependent data loss. That is
+	// what closed_by_session was: the schema defaults it to '', so a proxied
+	// create/import read back an empty closing session while the same issue
+	// created through the classic path kept it (GH#4662).
+	//
 	// Stamp a fresh non-zero row_lock at create, exactly like the classic
 	// insertIssueIntoTable (issueops/helpers.go). Without it a proxied-server
 	// (uow) create leaves row_lock at the schema DEFAULT 0, so the row's
@@ -767,7 +775,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
 			compaction_level, compacted_at, compacted_at_commit, original_size,
 			sender, ephemeral, no_history, wisp_type, pinned, is_template,
-			mol_type, work_type, source_system, source_repo, close_reason,
+			mol_type, work_type, source_system, source_repo, close_reason, closed_by_session,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
@@ -778,7 +786,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
@@ -802,6 +810,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			external_ref = VALUES(external_ref),
 			source_repo = VALUES(source_repo),
 			close_reason = VALUES(close_reason),
+			closed_by_session = VALUES(closed_by_session),
 			metadata = VALUES(metadata),
 			row_lock = VALUES(row_lock)
 	`, table),
@@ -810,7 +819,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, nullStringPtr(issue.ExternalRef), issue.SpecID,
 		issue.CompactionLevel, issue.CompactedAt, nullStringPtr(issue.CompactedAtCommit), nullIntVal(issue.OriginalSize),
 		issue.Sender, issue.Ephemeral, issue.NoHistory, string(issue.WispType), issue.Pinned, issue.IsTemplate,
-		string(issue.MolType), string(issue.WorkType), issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
+		string(issue.MolType), string(issue.WorkType), issue.SourceSystem, issue.SourceRepo, issue.CloseReason, issue.ClosedBySession,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
