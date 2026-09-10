@@ -154,3 +154,19 @@ func TestMigration0068AddsAttributionStatusThroughDoltCLI(t *testing.T) {
 		t.Fatalf("durable_state round-trip changed the bytes post-migration: got %v, want %q", rows, verbatim)
 	}
 }
+
+// TestLatestVersionIncludesMigration0068 restores the pin 0069 superseded:
+// be-80f4a.1 tears down R16's per-record CAS (migration
+// 0069_add_expected_revision_records — architect ruling on be-80f4a found it
+// departs from gastownhall/beads#5898 design) as a design-departure rework,
+// dropping the migration file entirely rather than adding a reversal
+// migration, since it never shipped past this unmerged branch lineage
+// (origin/main has no 0069 file at the point this branch forked). 0068 is
+// the real latest slot again until Part B (be-80f4a.2, blocked on
+// gastownhall/beads#6358) claims a new one.
+func TestLatestVersionIncludesMigration0068(t *testing.T) {
+	const want = 68
+	if got := LatestVersion(); got != want {
+		t.Fatalf("LatestVersion() = %d, want %d (expected_revision_records migration removed by be-80f4a.1)", got, want)
+	}
+}
