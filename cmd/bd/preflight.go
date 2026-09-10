@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,6 +61,8 @@ Examples:
 	RunE:          runPreflight,
 }
 
+const beadsPRLintDriverCommand = "go run -mod=readonly -tags=gms_pure_go ./scripts/pr-lint"
+
 func init() {
 	preflightCmd.Flags().Bool("check", false, "Run checks automatically")
 	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (vendorHash, version sync)")
@@ -92,12 +95,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	// Static checklist mode — tailor the checklist to the detected project
 	// stack so non-Go projects don't get a misleading Go/Nix checklist (GH#4364).
-	root := git.GetRepoRoot()
-	if root == "" {
-		if wd, err := os.Getwd(); err == nil {
-			root = wd
-		}
-	}
+	root := preflightProjectRoot()
 
 	fmt.Println("PR Readiness Checklist:")
 	fmt.Println()
@@ -131,7 +129,7 @@ func buildPreflightChecklist(dir string) []string {
 	if isBeadsRepo(dir) {
 		return []string{
 			"Tests pass: go test -tags gms_pure_go -short ./...",
-			"Lint passes: golangci-lint run --build-tags=gms_pure_go ./...",
+			"Lint passes: make ci-pr-lint",
 			"Formatting: gofmt -l .",
 			"No beads pollution: check .beads/issues.jsonl diff",
 			"Nix hash current: go.sum unchanged or vendorHash updated",
@@ -311,9 +309,22 @@ func runTestCheck() CheckResult {
 	}
 }
 
-// runLintCheck runs golangci-lint and returns the result.
+type lintInvocation struct {
+	display    string
+	executable string
+	args       []string
+	dir        string
+	timeout    time.Duration
+}
+
+// runLintCheck runs the checkout-owned Beads lint driver in the Beads source
+// tree and retains a direct, generic golangci-lint check elsewhere.
 func runLintCheck(skipLint bool) CheckResult {
-	command := "golangci-lint run --build-tags=gms_pure_go ./..."
+	return runLintCheckAt(preflightProjectRoot(), skipLint)
+}
+
+func runLintCheckAt(root string, skipLint bool) CheckResult {
+	invocation := lintInvocationForRoot(root)
 	if skipLint {
 		return CheckResult{
 			Name:    "Lint passes",
@@ -321,33 +332,72 @@ func runLintCheck(skipLint bool) CheckResult {
 			Skipped: true,
 			Warning: true,
 			Output:  "lint check explicitly skipped by --skip-lint",
-			Command: command,
+			Command: invocation.display,
 		}
 	}
 
-	// Check if golangci-lint is available
-	if _, err := exec.LookPath("golangci-lint"); err != nil {
+	if _, err := exec.LookPath(invocation.executable); err != nil {
 		return CheckResult{
 			Name:    "Lint passes",
 			Passed:  false,
-			Output:  "golangci-lint not found in PATH (install it or rerun with --skip-lint)",
-			Command: command,
+			Output:  fmt.Sprintf("%s not found in PATH (install it or rerun with --skip-lint)", invocation.executable),
+			Command: invocation.display,
 		}
 	}
 
-	cmd := exec.Command("golangci-lint", "run", "--build-tags=gms_pure_go", "./...")
+	ctx, cancel := context.WithTimeout(context.Background(), invocation.timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, invocation.executable, invocation.args...)
+	cmd.Dir = invocation.dir
 	output, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		output = append(output, []byte(fmt.Sprintf("\nlint check exceeded %s", invocation.timeout))...)
+	}
 
 	return CheckResult{
 		Name:    "Lint passes",
 		Passed:  err == nil,
 		Output:  string(output),
-		Command: command,
+		Command: invocation.display,
 	}
+}
+
+func lintInvocationForRoot(root string) lintInvocation {
+	if isBeadsRepo(root) {
+		return lintInvocation{
+			display:    beadsPRLintDriverCommand,
+			executable: "go",
+			args:       []string{"run", "-mod=readonly", "-tags=gms_pure_go", "./scripts/pr-lint"},
+			dir:        root,
+			timeout:    13 * time.Minute,
+		}
+	}
+	return lintInvocation{
+		display:    "golangci-lint run ./...",
+		executable: "golangci-lint",
+		args:       []string{"run", "./..."},
+		dir:        root,
+		timeout:    6 * time.Minute,
+	}
+}
+
+func preflightProjectRoot() string {
+	if root := git.GetRepoRoot(); root != "" {
+		return root
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
 }
 
 // runFmtCheck runs gofmt -l and fails if any files need formatting.
 func runFmtCheck() CheckResult {
+	return runFmtCheckAt(preflightProjectRoot())
+}
+
+func runFmtCheckAt(root string) CheckResult {
 	command := "gofmt -l ."
 
 	// Check if gofmt is available
@@ -361,6 +411,7 @@ func runFmtCheck() CheckResult {
 	}
 
 	cmd := exec.Command("gofmt", "-l", ".")
+	cmd.Dir = root
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
