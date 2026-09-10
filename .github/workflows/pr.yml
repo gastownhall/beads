@@ -250,11 +250,8 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
 
-  # The lingering-handle liveness regression test is //go:build windows: the
-  # Ubuntu job above selects it by name but compiles it out, and main.yml's
-  # Windows job runs only on pushes to main (build/smoke, no go test). Run
-  # exactly the liveness pair on windows-latest so the regression guard
-  # actually executes at PR time.
+  # Native Windows liveness behavior needs execution on Windows, beyond the
+  # build/smoke matrix. Init credential shells run in pr-preflight-platforms.
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
     runs-on: windows-latest
@@ -511,6 +508,10 @@ jobs:
       - name: Exercise generated Git hook timeout process boundary
         shell: bash
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
+
+      - name: Exercise native init gateway credential shell
+        shell: bash
+        run: bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"
 
       - name: Check benchmark environment scrubbing
         if: matrix.os == 'windows-latest'
