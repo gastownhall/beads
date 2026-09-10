@@ -232,6 +232,16 @@ var versionChanges = []VersionChange{
 		},
 	},
 	{
+		// Keyed so an rc.1 tester upgrading to rc.2 gets the rc.2 digest
+		// above instead of the whole release history: getVersionsSince
+		// returns every entry when it cannot find the previous version.
+		Version: "1.3.0-rc.1",
+		Date:    "2026-08-31",
+		Changes: []string{
+			"RC: first candidate for the 1.3.0 line. Everything a 1.2.2 user meets on the way here — the in-place schema migration, the shared-server consent gate, the backup ordering, and the breaking changes — is described in the [1.3.0] entry below; read it first.",
+		},
+	},
+	{
 		Version: "1.3.0",
 		Date:    "2026-08-28",
 		Changes: []string{

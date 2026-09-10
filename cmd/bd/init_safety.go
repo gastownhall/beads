@@ -38,6 +38,10 @@ const (
 	// in non-interactive mode without a valid `--destroy-token`: either
 	// `--discard-remote`, or `--reinit-local` over existing local issues.
 	// The caller must look up the token format via `bd help init-safety`.
+	// It is also returned when the interactive `--discard-remote` typed-token
+	// confirmation is declined at the prompt, so a 12 does not on its own
+	// prove the caller was non-interactive. Supplying the token is the
+	// correct remedy for all three sources.
 	ExitDestroyTokenMissing = 12
 )
 
