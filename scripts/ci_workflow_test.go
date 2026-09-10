@@ -258,7 +258,9 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 // parses below 20m, but tolerates the deadline moving up over time in any
 // duration form go test accepts. Each leg's enclosing job also needs a
 // timeout-minutes backstop so a real hang still produces a bounded,
-// diagnosable job failure instead of running to GitHub's 360m default.
+// diagnosable job failure instead of running to GitHub's 360m default. On
+// main.yml that backstop is job-level over the whole two-entry matrix, so
+// despite this subtest's name the assertion covers the ubuntu leg too.
 func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
 	const (
 		minTimeout           = 20 * time.Minute
