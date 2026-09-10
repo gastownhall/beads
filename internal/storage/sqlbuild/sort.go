@@ -44,6 +44,21 @@ func IsGoSideSort(sortBy string) bool {
 	return sortBy == "id"
 }
 
+// LessID orders two ids for the Go-side "id" sort key: byte order — the order
+// SQL would apply — flipped by desc. This is THE membership comparator for a
+// Go-side id sort; every seam (Less, the union page's sortGoSide, the
+// per-table sortRowsGoSide, the store-backed goSideSortAndTrim) calls it
+// rather than restating the comparison, because the sortDesc bug it fixes
+// came from exactly such a restated copy drifting from its siblings. The
+// natural-numeric order a human reads (bd-9 before bd-10) is display-layer
+// (workapi.CompareIssuesBy), applied to the delivered page — never here.
+func LessID(a, b string, desc bool) bool {
+	if desc {
+		return a > b
+	}
+	return a < b
+}
+
 func flipDir(dir string) string {
 	if dir == "ASC" {
 		return "DESC"
@@ -105,7 +120,9 @@ func OrderBy(sortBy string, sortDesc bool, table string) string {
 // selected.
 func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {
 	if sortBy == "id" {
-		return a.ID < b.ID
+		// This key used to ignore sortDesc, so a reversed id merge kept the
+		// byte-FIRST rows (the sibling bug idSrcPage.sortGoSide's doc named).
+		return LessID(a.ID, b.ID, sortDesc)
 	}
 	def, ok := SortDefs[sortBy]
 	if !ok {

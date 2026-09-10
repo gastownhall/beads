@@ -159,6 +159,7 @@ func proxiedGetComments(ctx context.Context, uw uow.UnitOfWork, id string, isWis
 func reportIssueLookupFailure(verb, id string, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Error %s %s: %v\n", verb, id, err)
@@ -468,7 +469,8 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 		if len(allDetails) > 0 {
 			_ = outputJSON(allDetails)
 		} else {
-			return HandleErrorRespectJSON("no issues found matching the provided IDs")
+			return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+				"some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check")
 		}
 	} else if foundCount == 0 {
 		return SilentExit()
