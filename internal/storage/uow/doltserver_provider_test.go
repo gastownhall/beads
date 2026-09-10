@@ -240,6 +240,7 @@ func buildBDBinary(t *testing.T) string {
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if bdBinaryDir != "" {
+		os.RemoveAll(bdBinaryDir)
 		if _, err := os.Stat(bdBinaryDir); !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "FAIL: %s (buildBDBinary's scratch dir) was not cleaned up after the test run\n", bdBinaryDir)
 			os.Exit(1)
