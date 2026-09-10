@@ -907,6 +907,8 @@ jobs:
   test-macos:
     name: Test (macos-latest)
     runs-on: macos-latest
+    # Backstop for a real hang: without this the job falls back to GitHub's 360m default (be-xagyw).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -960,7 +962,9 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
           GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
+        # -timeout=25m: without it, go test's 10m per-package default can kill this
+        # -race run mid-package on macOS before it reports a real pass/fail (be-xagyw).
+        run: go test -tags gms_pure_go -v -race -short -timeout=25m -skip '^TestEmbedded' ./...
 
   # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
   # cmd/bd/protocol package: the golden corpus (regenerated from this branch's

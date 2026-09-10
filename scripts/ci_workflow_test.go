@@ -358,7 +358,7 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
 		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
-		prTestCommand     = "go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./..."
+		prTestCommand     = "go test -tags gms_pure_go -v -race -short -timeout=25m -skip '^TestEmbedded' ./..."
 		mainTestCommand   = "go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./..."
 		// The macOS leg is the only consumer of main.yml's matrix test-flags (the
 		// ubuntu leg's coverage step hardcodes its own), and it carries an explicit

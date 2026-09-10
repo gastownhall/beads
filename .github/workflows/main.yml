@@ -470,7 +470,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     needs: build-artifacts
-    timeout-minutes: 45
+    # 60m: covers the macOS -race leg's 25m go test deadline with headroom for
+    # setup/build steps in the same job (be-xagyw).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
