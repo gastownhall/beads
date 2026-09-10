@@ -253,8 +253,8 @@ jobs:
   # The lingering-handle liveness regression test is //go:build windows: the
   # Ubuntu job above selects it by name but compiles it out, and main.yml's
   # Windows job runs only on pushes to main (build/smoke, no go test). Run
-  # exactly the liveness pair on windows-latest so the regression guard
-  # actually executes at PR time.
+  # the liveness pair and native config fixture on Windows so their platform
+  # regressions actually execute at PR time.
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
     runs-on: windows-latest
@@ -267,6 +267,30 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      - name: Run native Windows global Prime override
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go_path=$(command -v go)
+          [[ "$("$go_path" env GOHOSTOS GOOS)" == $'windows\nwindows' ]]
+          test_status=0
+          test_output=$(./scripts/test.sh -v -timeout 5m -run '^TestPrimeBinaryPortfolio$/^TestPrime_HookJSON_GlobalPrimeOverride$' -count=1 ./cmd/bd) || test_status=$?
+          printf '%s\n' "$test_output"
+          ((test_status == 0))
+          pass_pattern='^[[:space:]]*--- PASS: TestPrimeBinaryPortfolio/TestPrime_HookJSON_GlobalPrimeOverride \('
+          nonpass_pattern='^[[:space:]]*--- (FAIL|SKIP): '
+          pass_count=0
+          while IFS= read -r line; do
+            if [[ "$line" =~ $pass_pattern ]]; then
+              ((pass_count += 1))
+            fi
+            if [[ "$line" =~ $nonpass_pattern ]]; then
+              exit 1
+            fi
+          done <<<"$test_output"
+          ((pass_count == 1))
 
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
