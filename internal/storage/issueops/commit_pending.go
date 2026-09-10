@@ -30,6 +30,29 @@ func HasPendingChanges(ctx context.Context, db SQLQuerier) (bool, error) {
 	return count > 0, nil
 }
 
+// HasStagedChanges reports whether the Dolt working set has any STAGED changes,
+// i.e. rows that a subsequent DOLT_COMMIT('-m', …) would actually commit.
+//
+// This is the correct pre-commit check for selective-staging commit helpers
+// (StageAndCommit, doltAddAndCommit, doltAddAndCommitInTx) that DOLT_ADD only a
+// fixed/dirty-tracked set of tables. A global HasPendingChanges check is NOT
+// sufficient for them: a table can be marked dirty by a write statement yet have
+// no real row change (idempotent INSERT IGNORE / ON DUPLICATE KEY no-op, or an
+// UPDATE matching nothing). When some OTHER table is concurrently dirty in the
+// working set, HasPendingChanges is true, but staging only the (clean) target
+// tables stages nothing — and DOLT_COMMIT('-m') then fails server-side with a
+// "nothing to commit" warning that floods the Dolt log at reconcile cadence.
+// Checking the staged set AFTER DOLT_ADD captures exactly what '-m' will commit.
+func HasStagedChanges(ctx context.Context, db SQLQuerier) (bool, error) {
+	var count int
+	err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE staged = 1").Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to check staged status: %w", err)
+	}
+	return count > 0, nil
+}
+
 // BuildBatchCommitMessage generates a descriptive commit message summarizing
 // what changed since the last commit by querying dolt_diff against HEAD.
 // It reports issue-level create/update/delete counts and lists any other

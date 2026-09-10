@@ -164,8 +164,10 @@ only if you are maintaining a SQLite-backed extension.
 ## Audit Data
 
 Beads records issue lifecycle events in the database for audit and recovery
-workflows. There is no standalone `bd events` command; inspect current issue
-state through JSON output, or query the audit tables directly when needed:
+workflows. This is the human-facing history — for the machine-facing feed of
+committed mutations, see the [Events Journal](/reference/events-journal).
+Inspect current issue state through JSON output, or query the audit tables
+directly when needed:
 
 ```bash
 # Current issue state

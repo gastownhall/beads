@@ -12,7 +12,9 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // localVersionFile is the gitignored file that stores the last bd version used locally.
@@ -86,6 +88,9 @@ func readLocalVersion(path string) string {
 }
 
 // writeLocalVersion writes the current version to the local version file.
+// The value is main.Version verbatim, which release tooling sets by ldflags and
+// may be a release candidate, a build carrying metadata, or a Go pseudo-version.
+// Readers must accept every shape this can write; see classifyVersionWitness.
 func writeLocalVersion(path, version string) error {
 	return os.WriteFile(path, []byte(version+"\n"), 0600)
 }
@@ -229,10 +234,13 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	// not a `dolt remote -v` subprocess — so this doesn't save a 12s hang;
 	// it saves an unnecessary initSchema round-trip when no migration is
 	// needed. (be-1he)
+	//
+	// The probe asks the ROLE for the marker rather than reading the metadata
+	// key itself: a store opened read-only can answer it.
 	if roStore, roErr := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true}); roErr == nil {
-		dbVersion, _ := roStore.GetLocalMetadata(ctx, "bd_version")
+		recorded, probeErr := recordedWorkspaceVersion(ctx, roStore)
 		_ = roStore.Close()
-		if dbVersion == Version {
+		if probeErr == nil && recorded == Version {
 			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
 			return
 		}
@@ -244,60 +252,51 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		debug.Logf("auto-migrate: failed to open database: %v", err)
 		return
 	}
-
-	// Get current database version (clone-local, dolt-ignored)
-	dbVersion, err := store.GetLocalMetadata(ctx, "bd_version")
-	if err != nil {
-		// Failed to read version - skip migration
-		debug.Logf("auto-migrate: failed to read database version: %v", err)
-		_ = store.Close() // Best effort cleanup on error path
-		return
-	}
-
-	// Check if migration is needed
-	if dbVersion == Version {
-		// Database is already at current version
-		debug.Logf("auto-migrate: database already at version %s", Version)
-		_ = store.Close() // Best effort cleanup on error path
-		return
-	}
-
-	// Check for downgrade: refuse to overwrite a newer version with an older one (gt-e3uiy)
-	maxVersion, _ := store.GetLocalMetadata(ctx, "bd_version_max")
-	if dbVersion != "" && doctor.CompareVersions(Version, dbVersion) < 0 {
-		debug.Logf("auto-migrate: refusing downgrade from %s to %s", dbVersion, Version)
-		_ = store.Close() // Best effort cleanup on error path
-		return
-	}
-	if maxVersion != "" && doctor.CompareVersions(Version, maxVersion) < 0 {
-		debug.Logf("auto-migrate: refusing downgrade (max version %s > current %s)", maxVersion, Version)
-		_ = store.Close() // Best effort cleanup on error path
-		return
-	}
-
-	// Perform migration: update database version
-	debug.Logf("auto-migrate: migrating database from %s to %s", dbVersion, Version)
-	if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
-		// Migration failed - log and continue
-		debug.Logf("auto-migrate: failed to update database version: %v", err)
-		_ = store.Close() // Best effort cleanup on error path
-		return
-	}
-
-	// Update max version tracking
-	if maxVersion == "" || doctor.CompareVersions(Version, maxVersion) > 0 {
-		if err := store.SetLocalMetadata(ctx, "bd_version_max", Version); err != nil {
-			debug.Logf("auto-migrate: failed to update max version: %v", err)
+	defer func() {
+		if err := store.Close(); err != nil {
+			debug.Logf("auto-migrate: warning: failed to close database: %v", err)
 		}
+	}()
+
+	// Everything the version markers mean — is this an upgrade, is it a
+	// downgrade to refuse, does the high-water mark move — is the role's. This
+	// front door reads the outcome and logs it.
+	//
+	// No Dolt commit is needed after it: local_metadata is dolt-ignored and
+	// persists in the working set for the lifetime of the server session.
+	reconciler, err := store.VersionReconciler()
+	if err != nil {
+		debug.Logf("auto-migrate: version markers unavailable: %v", err)
+		return
+	}
+	result, err := reconciler.ReconcileVersion(ctx, issueops.VersionReconcileRequest{CLIVersion: Version})
+	if err != nil {
+		debug.Logf("auto-migrate: failed to reconcile database version: %v", err)
+		return
 	}
 
-	// No Dolt commit needed — local_metadata is dolt-ignored and persists
-	// in the working set for the lifetime of the server session.
-
-	// Close database
-	if err := store.Close(); err != nil {
-		debug.Logf("auto-migrate: warning: failed to close database: %v", err)
+	switch {
+	case result.Downgrade:
+		debug.Logf("auto-migrate: refusing downgrade from %s to %s", result.Previous, Version)
+	case result.Migrated:
+		debug.Logf("auto-migrate: successfully migrated database from %s to version %s", result.Previous, result.Current)
+	default:
+		debug.Logf("auto-migrate: database already at version %s", Version)
 	}
+}
 
-	debug.Logf("auto-migrate: successfully migrated database to version %s", Version)
+// recordedWorkspaceVersion reads the marker through the role's accessor on a
+// store the caller owns and closes. It takes the storage interface rather than
+// the concrete store so the probe above cannot drift into using a seam the role
+// hides.
+func recordedWorkspaceVersion(ctx context.Context, store storage.Storage) (string, error) {
+	reconciler, err := store.VersionReconciler()
+	if err != nil {
+		return "", err
+	}
+	recorded, err := reconciler.RecordedVersion(ctx, issueops.RecordedVersionRequest{})
+	if err != nil {
+		return "", err
+	}
+	return recorded.Recorded, nil
 }

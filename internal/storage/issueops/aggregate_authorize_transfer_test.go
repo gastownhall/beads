@@ -74,6 +74,31 @@ func TestAuthorizeAssigneeTransferWithPools(t *testing.T) {
 			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "holder" }),
 		},
 		{
+			// ga-5ksp5: the same Gas Town identity spelled two different
+			// ways (dot vs underscore separator) must still count as
+			// "actor already holds it", not a foreign transfer.
+			name:    "actor already holds it under a different spelling",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "gastown.mayor"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "gastown_mayor" }),
+		},
+		{
+			// ga-5ksp5: reasserting the current holder under a different
+			// (and doubled-separator) spelling is still the same
+			// idempotent no-op as reasserting it verbatim.
+			name:    "reasserts the current assignee under a different spelling",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "gastown.mayor"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Patch.Assignee.Value = "gastown__mayor" }),
+		},
+		{
+			// ga-5ksp5: canonicalization must not over-match — an actor
+			// whose identity genuinely differs from the holder (not just
+			// a respelling of it) stays refused.
+			name:    "foreign actor with an unrelated identity is still refused",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "gastown.mayor"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "gastown_dog-1" }),
+			refuse:  true,
+		},
+		{
 			name:    "holder is a configured pool alias",
 			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "crew"},
 			request: transfer(nil),

@@ -113,6 +113,7 @@ func TestTruncate(t *testing.T) {
 		{"truncate needed", "long string here", 10, "long st..."},
 		{"very short max", "hello world", 5, "he..."},
 		{"empty string", "", 5, ""},
+		{"utf8 mid rune", "reestruturacao \u2014 continua", 19, "reestruturacao ..."},
 	}
 
 	for _, tt := range tests {

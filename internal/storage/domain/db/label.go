@@ -74,12 +74,17 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		}
 		return nil
 	}
-	return r.events.Record(ctx, domain.Event{
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
 		Actor:    actor,
 		NewValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	// A label is part of the bead snapshot; the idempotent no-op path above
+	// returns without writing and journals nothing.
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
@@ -105,12 +110,15 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	if rows == 0 {
 		return nil
 	}
-	return r.events.Record(ctx, domain.Event{
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelRemoved,
 		Actor:    actor,
 		OldValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts domain.LabelOpts) ([]string, error) {

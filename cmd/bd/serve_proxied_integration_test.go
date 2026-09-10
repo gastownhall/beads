@@ -10,12 +10,14 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
-	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/httpapi"
 )
 
 // End-to-end lifecycle for `bd serve`, driven as a subprocess exactly as an
@@ -125,6 +127,59 @@ func (sp *serveProcess) wait() error {
 
 func (sp *serveProcess) url(path string) string { return "http://" + sp.addr + path }
 
+// assertServedCapabilities checks a decoded context body against the capability
+// set this build's route table implies. Every topology asserts the same thing,
+// because a mode changes where the data lives and never what the handshake
+// advertises.
+//
+// THE EXPECTATION IS DERIVED, and it used to be a literal spelled out here for
+// a reason that did not survive contact with the third operation to be added.
+// That reason was: "comparing the server against its own derivation would pass
+// for any surface at all, and the point of this list is that adding an
+// operation costs a line here."
+//
+// The first half is true and is answered elsewhere. The capability CONTENT is
+// pinned by TestSpecCapabilityVocabularyMatchesTheRouteTable, which compares
+// the derived set against the `capabilities` prose in openapi.v0.yaml in both
+// directions — a paragraph a human writes for the operation being added, which
+// is an independent source in a way a second test literal never was.
+//
+// The second half is the part that inverted. The line this list cost was paid
+// in the WRONG package: an operation is added in internal/httpapi, its own
+// gates go green, and the copy that fails is out here in a proxied shard the
+// author's pre-merge checks do not run. That is precisely what happened to the
+// slice that added `issues.count` — this file went red on a list nothing about
+// counting had changed. And the failure mode the old comment itself describes,
+// a copy silently stuck at four entries while the surface grew, is not a bug
+// derivation makes harder to catch: it is a bug derivation makes impossible to
+// write.
+//
+// What the assertion still buys, and what no in-package test can see: each
+// TOPOLOGY's subprocess really binds, really answers /v0/beads/context, and
+// really publishes the whole set rather than a truncated one.
+func assertServedCapabilities(t *testing.T, body map[string]any) {
+	t.Helper()
+	caps, ok := body["capabilities"].([]any)
+	if !ok {
+		t.Fatalf("capabilities = %#v, want an array", body["capabilities"])
+	}
+	got := make([]string, 0, len(caps))
+	for i, c := range caps {
+		token, ok := c.(string)
+		if !ok {
+			t.Fatalf("capabilities[%d] = %#v, want a string", i, c)
+		}
+		got = append(got, token)
+	}
+	want := httpapi.Capabilities()
+	if len(want) == 0 {
+		t.Fatal("this build derives no capabilities; the assertion below would pass against a server that advertises nothing")
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("capabilities = %v, want %v", got, want)
+	}
+}
+
 func (sp *serveProcess) get(t *testing.T, path string) (int, map[string]any, http.Header) {
 	t.Helper()
 	resp, err := sp.client.Get(sp.url(path))
@@ -219,19 +274,7 @@ func TestProxiedServerServeLifecycle(t *testing.T) {
 		if body["bd_version"] == "" || body["bd_version"] == nil {
 			t.Error("bd_version is empty")
 		}
-		// The handshake advertises exactly what this build implements. A client
-		// that gates on capabilities is then correct without knowing which
-		// release it hit. With the read endpoints landed that is the whole v0
-		// vocabulary; the assertion is on the derived list, not on a count, so
-		// the next operation to arrive stubbed still fails here.
-		caps, ok := body["capabilities"].([]any)
-		if !ok {
-			t.Fatalf("capabilities = %#v, want an array", body["capabilities"])
-		}
-		want := []any{"issues.claim", "issues.get", "issues.list", "ready.list"}
-		if !reflect.DeepEqual(caps, want) {
-			t.Errorf("capabilities = %v, want %v", caps, want)
-		}
+		assertServedCapabilities(t, body)
 		// The allowlist is enforced in internal/httpapi; this is the end-to-end
 		// half — a real workspace's real config, over a real socket.
 		for _, forbidden := range []string{"sync_remote", "server_host", "server_port", "data_dir", "proxied_dir", "role"} {

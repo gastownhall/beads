@@ -37,7 +37,12 @@
 #      EXECUTE reports success (dolthub/dolt#11345, mybd-p8i3). Prepared
 #      ALTER TABLE is the same underlying limitation but a separate, accepted
 #      idiom for idempotent DDL re-runs (see cli_migrations.go), so it is not
-#      flagged. Neither is a prepared `INSERT INTO __<standin>`: that IS the
+#      flagged HERE — it has its own guard,
+#      TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified in
+#      internal/storage/schema/cli_prepared_ddl.go, which reads the generated
+#      bundle rather than the diff and so also covers migrations this
+#      new-files-only check never sees. Neither is a prepared
+#      `INSERT INTO __<standin>`: that IS the
 #      recommended pattern (0059, gastownhall/beads#4877), where a silent
 #      no-op degrades gracefully instead of corrupting state. The exemption
 #      stops there on purpose -- a prepared UPDATE or DELETE is never
@@ -225,7 +230,7 @@ fi
 if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
   echo "WARN (ignored twins) no usable base ref; skipping check D." >&2
 else
-  ignored_tables='wisps|wisp_[a-z_]+|repo_mtimes|local_metadata|leases|events|ignored_schema_migrations'
+  ignored_tables='wisps|wisp_[a-z_]+|repo_mtimes|local_metadata|leases|events|bd_events_journal|bd_events_seq|ignored_schema_migrations'
   ddl_re="(alter|create|rename|drop)[[:space:]]+table([[:space:]]+if[[:space:]]+(not[[:space:]]+)?exists)?[[:space:]]+[\`']?(${ignored_tables})\b"
   # Untracked files count as added too (mirrors check C's working-tree scope:
   # in CI the tree is clean so this equals the PR diff).

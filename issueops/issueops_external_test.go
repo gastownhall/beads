@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -210,6 +211,70 @@ func TestPublicDependencyConflictTypesRemainCanonical(t *testing.T) {
 	}
 	if reflect.TypeFor[*issueops.DependencyHierarchyConflictError]() != reflect.TypeFor[*beads.DependencyHierarchyConflictError]() {
 		t.Error("DependencyHierarchyConflictError lost canonical type identity")
+	}
+	if reflect.TypeFor[*issueops.DependencyEndpointNotFoundError]() != reflect.TypeFor[*beads.DependencyEndpointNotFoundError]() {
+		t.Error("DependencyEndpointNotFoundError lost canonical type identity")
+	}
+}
+
+// TestDependencyEndpointNotFoundCarriesTheAbsentEndpoint pins the value's own
+// promises: the sentinel a caller branches on, the edge and the endpoint it
+// names, and the message — which the two write plumbings render identically
+// only because both build it from here.
+func TestDependencyEndpointNotFoundCarriesTheAbsentEndpoint(t *testing.T) {
+	ghostSource := &issueops.DependencyEndpointNotFoundError{
+		IssueID: "bd-ghost", DependsOnID: "bd-real", MissingID: "bd-ghost",
+		Err: issueops.ErrDependencySourceNotFound,
+	}
+	if !errors.Is(ghostSource, issueops.ErrDependencySourceNotFound) {
+		t.Fatalf("ghost source does not match ErrDependencySourceNotFound: %v", ghostSource)
+	}
+	if errors.Is(ghostSource, issueops.ErrDependencyTargetNotFound) {
+		t.Error("ghost source also matches ErrDependencyTargetNotFound: the two refusals are not interchangeable")
+	}
+	if got := ghostSource.Error(); got != "issue bd-ghost not found" {
+		t.Errorf("ghost source message = %q, want the endpoint named once", got)
+	}
+
+	missingTarget := &issueops.DependencyEndpointNotFoundError{
+		IssueID: "bd-real", DependsOnID: "bd-ghost", MissingID: "bd-ghost",
+		Err: issueops.ErrDependencyTargetNotFound,
+	}
+	var recovered *issueops.DependencyEndpointNotFoundError
+	if !errors.As(fmt.Errorf("add deps[1]: %w", missingTarget), &recovered) {
+		t.Fatal("DependencyEndpointNotFoundError is not recoverable through a wrap")
+	}
+	if recovered.IssueID != "bd-real" || recovered.DependsOnID != "bd-ghost" || recovered.MissingID != "bd-ghost" {
+		t.Errorf("recovered = %+v, want the refused edge and the absent endpoint", recovered)
+	}
+}
+
+// TestClaimConflictCarriesTheStateThatBeatIt pins the whole point of the typed
+// conflict: a caller reports who won by reading FIELDS, and still classifies
+// the refusal by sentinel.
+func TestClaimConflictCarriesTheStateThatBeatIt(t *testing.T) {
+	conflict := &issueops.ClaimConflictError{
+		IssueID:  "bd-1",
+		Assignee: "bob",
+		Status:   issueops.StatusInProgress,
+		Err:      issueops.ErrAlreadyClaimed,
+	}
+	if !errors.Is(conflict, issueops.ErrAlreadyClaimed) {
+		t.Fatalf("ClaimConflictError does not match ErrAlreadyClaimed: %v", conflict)
+	}
+	var recovered *issueops.ClaimConflictError
+	if !errors.As(fmt.Errorf("claim bd-1: %w", conflict), &recovered) {
+		t.Fatal("ClaimConflictError is not recoverable through a wrap")
+	}
+	if recovered.Assignee != "bob" || recovered.Status != issueops.StatusInProgress {
+		t.Errorf("recovered = %+v, want the observed assignee and status", recovered)
+	}
+
+	// The zero observation is a documented state, not a panic: the refusal
+	// stands, it just carries nothing.
+	bare := &issueops.ClaimConflictError{IssueID: "bd-1", Err: issueops.ErrNotClaimable}
+	if !errors.Is(bare, issueops.ErrNotClaimable) || bare.Error() != issueops.ErrNotClaimable.Error() {
+		t.Errorf("unobserved conflict = %q, want the bare sentinel", bare.Error())
 	}
 }
 

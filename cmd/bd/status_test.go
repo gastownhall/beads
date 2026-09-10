@@ -8,50 +8,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func TestBuildAssignedStats(t *testing.T) {
-	tests := []struct {
-		name       string
-		issues     []*types.Issue
-		ready      int
-		total      int
-		open       int
-		inProgress int
-		blocked    int
-		deferred   int
-		closed     int
-	}{
-		{
-			name: "counts every status and ready work",
-			issues: []*types.Issue{
-				{Status: types.StatusOpen},
-				{Status: types.StatusInProgress},
-				{Status: types.StatusBlocked},
-				{Status: types.StatusDeferred},
-				{Status: types.StatusClosed},
-			},
-			ready: 2, total: 5, open: 1, inProgress: 1, blocked: 1, deferred: 1, closed: 1,
-		},
-		{
-			name:  "empty input retains explicit zero counts",
-			ready: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := buildAssignedStats(tt.issues, tt.ready)
-			if got.TotalIssues != tt.total || got.OpenIssues != tt.open || got.InProgressIssues != tt.inProgress || got.DeferredIssues != tt.deferred || got.ClosedIssues != tt.closed {
-				t.Errorf("buildAssignedStats() = %+v, want total=%d open=%d in_progress=%d deferred=%d closed=%d", got, tt.total, tt.open, tt.inProgress, tt.deferred, tt.closed)
-			}
-			if got.BlockedIssues == nil || *got.BlockedIssues != tt.blocked {
-				t.Errorf("blocked issues = %v, want %d", got.BlockedIssues, tt.blocked)
-			}
-			if got.ReadyIssues == nil || *got.ReadyIssues != tt.ready {
-				t.Errorf("ready issues = %v, want %d", got.ReadyIssues, tt.ready)
-			}
-		})
-	}
-}
+// The assignee fold this command used to own moved to
+// internal/workapi.FoldStatsAssigneeSummary when `bd status` went behind
+// issueops.StatsReporter, and its test moved with it
+// (internal/workapi/stats_test.go). It is the definition of what
+// `bd status --assigned` means and both routes now read it from there, so a
+// copy of the test here would pin a function this package no longer has.
 
 func TestRenderStatusJSON(t *testing.T) {
 	t.Setenv("BD_JSON_ENVELOPE", "0")

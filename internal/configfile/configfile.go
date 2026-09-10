@@ -122,6 +122,35 @@ func Load(beadsDir string) (*Config, error) {
 	return &cfg, nil
 }
 
+// LoadForDiscovery reads workspace metadata without migrating or rewriting it.
+//
+// Store admission uses this only to classify a workspace before a command can
+// open storage. In particular, legacy config.json remains in place so a failed
+// admission cannot turn a recoverable old workspace into a partially migrated
+// one. Unknown JSON fields remain tolerated here because callers use the
+// result only to decide whether to issue a conservative refusal; normal store
+// selection keeps its existing validation.
+func LoadForDiscovery(beadsDir string) (*Config, error) {
+	data, err := os.ReadFile(ConfigPath(beadsDir)) // #nosec G304 -- beadsDir is caller-selected workspace state
+	if os.IsNotExist(err) {
+		data, err = os.ReadFile(filepath.Join(beadsDir, "config.json")) // #nosec G304 -- legacy workspace state
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading legacy config: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("reading config: %w", err)
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	return &cfg, nil
+}
+
 func (c *Config) Save(beadsDir string) error {
 	configPath := ConfigPath(beadsDir)
 

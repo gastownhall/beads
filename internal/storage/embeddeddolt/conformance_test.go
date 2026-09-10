@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/steveyegge/beads/backend/conformance"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/conformance"
 )
 
 func requireEmbeddedDolt(t *testing.T) {
@@ -18,7 +18,7 @@ func requireEmbeddedDolt(t *testing.T) {
 }
 
 // TestConformance runs the backend-agnostic storage conformance suite
-// (internal/storage/conformance) against the embedded Dolt backend, so the
+// (backend/conformance) against the embedded Dolt backend, so the
 // storage contract is enforced against a real implementation rather than only
 // asserted. The factory returns a fresh, empty in-process store per sub-test.
 func TestConformance(t *testing.T) {

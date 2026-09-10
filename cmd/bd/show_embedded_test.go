@@ -129,6 +129,9 @@ func TestEmbeddedShow(t *testing.T) {
 		if m["description"] != "A description" {
 			t.Errorf("expected description, got %v", m["description"])
 		}
+		if revision, ok := m["revision"].(float64); !ok || revision == 0 {
+			t.Errorf("expected non-zero revision, got %v", m["revision"])
+		}
 	})
 
 	t.Run("show_json_includes_labels", func(t *testing.T) {

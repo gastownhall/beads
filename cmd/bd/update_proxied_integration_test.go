@@ -537,14 +537,15 @@ func TestProxiedServerUpdate2(t *testing.T) {
 		db := openProxiedDB(t, p)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--no-history")
 
-		var noHistory int
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT no_history FROM issues WHERE id = ?", issue.ID).Scan(&noHistory); err != nil {
-			t.Fatalf("read no_history: %v", err)
+		// --no-history selects a WISP RETENTION MODE, so the aggregate moves to
+		// the ephemeral plane rather than flipping a column on the durable row
+		// (issueops.IssuePatch.Persistence). The proxied route flipped the
+		// column in place until it joined the contract, which left a durable
+		// row that the wisp-plane reads could not see (bd-xt6de).
+		if got := readPersistenceFlag(t, db, "wisps", "no_history", issue.ID); got != 1 {
+			t.Errorf("wisps.no_history: got %d, want 1 after --no-history", got)
 		}
-		if noHistory != 1 {
-			t.Errorf("no_history: got %d, want 1 after --no-history", noHistory)
-		}
+		assertRowAbsent(t, db, "issues", issue.ID)
 	})
 
 	t.Run("update_persistent", func(t *testing.T) {
@@ -574,14 +575,12 @@ func TestProxiedServerUpdate2(t *testing.T) {
 		db := openProxiedDB(t, p)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--ephemeral")
 
-		var ephemeral int
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT ephemeral FROM issues WHERE id = ?", issue.ID).Scan(&ephemeral); err != nil {
-			t.Fatalf("read ephemeral: %v", err)
+		// The demotion moves the aggregate to the wisp plane; see
+		// update_no_history above for the clause and the history.
+		if got := readPersistenceFlag(t, db, "wisps", "ephemeral", issue.ID); got != 1 {
+			t.Errorf("wisps.ephemeral: got %d, want 1 after --ephemeral", got)
 		}
-		if ephemeral != 1 {
-			t.Errorf("ephemeral: got %d, want 1 after --ephemeral", ephemeral)
-		}
+		assertRowAbsent(t, db, "issues", issue.ID)
 	})
 
 	t.Run("reopen_reblocks_dependents", func(t *testing.T) {
@@ -1034,26 +1033,40 @@ func TestProxiedServerUpdateHooks(t *testing.T) {
 		}
 	})
 
-	t.Run("on_close_fires_when_status_transitions_to_closed", func(t *testing.T) {
+	// An update that CROSSES to closed fires on_update and nothing else, which
+	// is what `bd update -s closed` has always done on the embedded plumbing
+	// (HookFiringStore.UpdateIssue fires on_update; hookIssueOperations.Update
+	// fires the update hook). Proxied mode used to fire on_close as well, from
+	// a hook call wired into the update COMMAND rather than into the write
+	// plumbing. That call is gone: one firing site per plumbing, and the same
+	// events from both. `bd close` is what fires on_close.
+	t.Run("status_crossing_update_fires_on_update_only", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		markerPath := filepath.Join(dir, "on_close_marker")
-		hookBody := "#!/bin/sh\necho \"$1\" > " + markerPath + "\n"
+		updateMarker := filepath.Join(dir, "on_update_marker")
+		closeMarker := filepath.Join(dir, "on_close_marker")
 
 		p := newSharedProxiedProjectWithHooks(t, bd, "uphc", map[string]string{
-			"on_close": hookBody,
+			"on_update": "#!/bin/sh\necho \"$1\" > " + updateMarker + "\n",
+			"on_close":  "#!/bin/sh\necho \"$1\" > " + closeMarker + "\n",
 		})
 		issue := bdProxiedCreate(t, bd, p.dir, "Hook close test")
 
-		_ = os.Remove(markerPath)
+		_ = os.Remove(updateMarker)
+		_ = os.Remove(closeMarker)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "-s", "closed")
 
-		gotID, err := waitForMarker(markerPath, 5*time.Second)
+		gotID, err := waitForMarker(updateMarker, 5*time.Second)
 		if err != nil {
-			t.Fatalf("on_close hook did not fire within timeout: %v", err)
+			t.Fatalf("on_update hook did not fire within timeout: %v", err)
 		}
 		if strings.TrimSpace(gotID) != issue.ID {
-			t.Errorf("on_close marker: got %q, want issue ID %q", strings.TrimSpace(gotID), issue.ID)
+			t.Errorf("on_update marker: got %q, want issue ID %q", strings.TrimSpace(gotID), issue.ID)
+		}
+		// The update hook has landed, so anything the same command was going to
+		// fire has had its chance.
+		if data, err := os.ReadFile(closeMarker); err == nil {
+			t.Errorf("on_close fired for an update that crossed to closed: %q", string(data))
 		}
 	})
 }
@@ -1236,6 +1249,19 @@ func TestProxiedServerUpdateWisp(t *testing.T) {
 	})
 }
 
+// readPersistenceFlag reads one persistence column off whichever plane the row
+// lives on. A persistence change is an aggregate MOVE, so the column and the
+// table it is read from are one assertion, not two.
+func readPersistenceFlag(t *testing.T, db *sql.DB, table, column, id string) int {
+	t.Helper()
+	var got int
+	q := "SELECT " + column + " FROM " + table + " WHERE id = ?"
+	if err := db.QueryRowContext(context.Background(), q, id).Scan(&got); err != nil {
+		t.Fatalf("read %s.%s for %s: %v", table, column, id, err)
+	}
+	return got
+}
+
 func assertRowExists(t *testing.T, db *sql.DB, table, id string) {
 	t.Helper()
 	var count int
@@ -1363,12 +1389,13 @@ func TestProxiedServerUpdateConcurrentClaim(t *testing.T) {
 // the SAME issue. Every writer that exits 0 must have its key in the final
 // metadata, and the seed key must survive.
 //
-// Before the fix this route lost writes two ways: buildUpdateSpecForIssue
+// Before the fix this route lost writes two ways: the spec it built by hand
 // merged metadata from the unit of work's MVCC snapshot (erasing keys a
 // concurrent writer committed after the snapshot), and when Dolt's commit-time
 // merge rolled the loser back, uow.CommitWithRetries re-committed the
 // now-empty session — Dolt said "nothing to commit", the handler swallowed it,
-// printed "✓ Updated", and exited 0 with the write gone.
+// printed "✓ Updated", and exited 0 with the write gone. Both fixes now belong
+// to issueops.Lifecycle, which is what this route calls.
 func TestProxiedServerUpdateConcurrentMetadata(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)

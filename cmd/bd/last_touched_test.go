@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/term"
 )
 
 func TestLastTouchedBasic(t *testing.T) {
@@ -107,6 +109,53 @@ func TestSetLastTouchedIDAdvancesMtime(t *testing.T) {
 	if !info2.ModTime().After(info1.ModTime()) {
 		t.Errorf("mtime should advance on rewrite of same ID: first=%v second=%v",
 			info1.ModTime(), info2.ModTime())
+	}
+}
+
+// TestAllowLastTouchedFallback_EnvPrecedence covers the env-driven branches
+// of the guard (bd-m00pb). The trailing stdin-TTY branch is exercised by the
+// default-deny case below and end-to-end in last_touched_guard_test.go.
+func TestAllowLastTouchedFallback_EnvPrecedence(t *testing.T) {
+	cases := []struct {
+		name           string
+		fallbackEnv    string
+		nonInteractive string
+		ci             string
+		want           bool
+	}{
+		{"explicit 1 wins over non-interactive", "1", "1", "true", true},
+		{"explicit true wins over CI", "true", "", "true", true},
+		{"explicit 0 denies", "0", "", "", false},
+		{"explicit false denies", "false", "", "", false},
+		{"garbage value denies", "yes", "", "", false},
+		{"BD_NON_INTERACTIVE=1 denies", "", "1", "", false},
+		{"BD_NON_INTERACTIVE=true denies", "", "true", "", false},
+		{"CI=true denies", "", "", "true", false},
+		{"CI=1 denies", "", "", "1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(lastTouchedFallbackEnv, tc.fallbackEnv)
+			t.Setenv("BD_NON_INTERACTIVE", tc.nonInteractive)
+			t.Setenv("CI", tc.ci)
+			if got := AllowLastTouchedFallback(); got != tc.want {
+				t.Errorf("AllowLastTouchedFallback() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAllowLastTouchedFallback_DefaultDeniesNonTTY verifies the default
+// path denies when stdin is not a terminal and no env override is set.
+func TestAllowLastTouchedFallback_DefaultDeniesNonTTY(t *testing.T) {
+	t.Setenv(lastTouchedFallbackEnv, "")
+	t.Setenv("BD_NON_INTERACTIVE", "")
+	t.Setenv("CI", "")
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		t.Skip("stdin is a terminal; default-deny branch not observable")
+	}
+	if AllowLastTouchedFallback() {
+		t.Error("AllowLastTouchedFallback() = true with non-TTY stdin and no override, want false")
 	}
 }
 

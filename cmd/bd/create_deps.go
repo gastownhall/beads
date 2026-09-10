@@ -182,8 +182,8 @@ func canonicalDependencyType(t types.DependencyType) types.DependencyType {
 // commands stay in lockstep.
 func validateDependencyType(t types.DependencyType) error {
 	if !t.IsValid() {
-		return fmt.Errorf("invalid dependency type %q (must be non-empty, max 50 chars); valid types: %s",
-			t, createDepsAcceptedTypeList())
+		return fmt.Errorf("invalid dependency type %q (must be non-empty, max %d chars); valid types: %s",
+			t, types.MaxDependencyTypeLen, createDepsAcceptedTypeList())
 	}
 	if !t.IsWellKnown() {
 		return fmt.Errorf("unknown dependency type %q; valid types: %s",

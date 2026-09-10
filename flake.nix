@@ -59,7 +59,6 @@
               gopls
               gotools
               golangci-lint
-              sqlite # sqlite3 CLI for the legacy pre-Dolt migration scripts (scripts/migrate-sqlite-to-current.sh, scripts/migration-test/)
             ];
             shellHook = ''
               echo "beads development shell"

@@ -139,11 +139,14 @@ var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 //  2. Absolute formats (date-only, RFC3339) - checked before NLP to avoid misinterpretation
 //  3. Natural language (tomorrow, next monday)
 //
-// Returns the parsed time or an error if no layer could parse the input.
+// Timezone-less inputs are interpreted in now's location. Returns the parsed
+// time in UTC or an error if no layer could parse the input.
 func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
+	location := now.Location()
+
 	// Layer 1: Compact duration
 	if t, err := ParseCompactDuration(s, now); err == nil {
-		return t, nil
+		return t.UTC(), nil
 	}
 
 	// Layer 2: Absolute formats (must be checked before NLP to avoid misinterpretation)
@@ -151,29 +154,29 @@ func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 
 	// Try date-only format (YYYY-MM-DD)
 	if dateOnlyRe.MatchString(s) {
-		if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
-			return t, nil
+		if t, err := time.ParseInLocation("2006-01-02", s, location); err == nil {
+			return t.UTC(), nil
 		}
 	}
 
 	// Try RFC3339 format (2025-01-15T10:00:00Z)
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
+		return t.UTC(), nil
 	}
 
 	// Try ISO 8601 datetime without timezone (2025-01-15T10:00:00)
-	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, time.Local); err == nil {
-		return t, nil
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, location); err == nil {
+		return t.UTC(), nil
 	}
 
 	// Try datetime with space (2025-01-15 10:00:00)
-	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local); err == nil {
-		return t, nil
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, location); err == nil {
+		return t.UTC(), nil
 	}
 
 	// Layer 3: Natural language (after absolute formats to avoid misinterpretation)
 	if t, err := parseNaturalLanguage(s, now); err == nil {
-		return t, nil
+		return t.UTC(), nil
 	}
 
 	return time.Time{}, fmt.Errorf("cannot parse time expression: %q (examples: +6h, tomorrow, 2025-01-15)", s)

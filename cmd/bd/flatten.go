@@ -79,15 +79,16 @@ Examples:
 		if flattenDryRun {
 			remoteRefs, tags := listRemoteRefsAndTags(ctx)
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
-					"dry_run":           true,
-					"commit_count":      commitCount,
-					"initial_hash":      initialHash,
-					"would_flatten":     commitCount > 1,
-					"remote_refs":       remoteRefs,
-					"tags":              tags,
-					"size_before_bytes": storeSizeBytes(),
-				})
+				result := map[string]interface{}{
+					"dry_run":       true,
+					"commit_count":  commitCount,
+					"initial_hash":  initialHash,
+					"would_flatten": commitCount > 1,
+					"remote_refs":   remoteRefs,
+					"tags":          tags,
+				}
+				addGCSizeJSON(result, storeSizeBytes(ctx), -1)
+				return outputJSON(result)
 			}
 			fmt.Printf("DRY RUN — Flatten preview\n\n")
 			fmt.Printf("  Commits:        %d\n", commitCount)
@@ -136,7 +137,7 @@ Examples:
 		// Prune remote-tracking refs before GC: they still anchor the entire
 		// pre-flatten chain, and with them in place GC reclaims nothing on any
 		// workspace that has ever pushed or fetched (bd-agctw).
-		sizeBefore := storeSizeBytes()
+		sizeBefore := storeSizeBytes(ctx)
 		pruned, tags := pruneRemoteRefsForGC(ctx)
 		if !jsonOutput {
 			printPruneReport(pruned, tags)
@@ -147,7 +148,7 @@ Examples:
 				WarnError("dolt gc after flatten failed: %v", err)
 			}
 		}
-		sizeAfter := storeSizeBytes()
+		sizeAfter := storeSizeBytes(ctx)
 
 		elapsed := time.Since(start)
 

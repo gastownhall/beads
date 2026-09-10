@@ -36,7 +36,7 @@ func TestMoveIssuePersistenceInTxMovesAggregateAndReportsTables(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		moved, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		moved, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestMoveIssuePersistenceInTxSameModeIsNoop(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		result, err := issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent)
+		result, err := issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent, "test-actor")
 		if err != nil {
 			return err
 		}
@@ -139,7 +139,7 @@ func TestMoveIssuePersistenceInTxTransitions(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, transition.to)
+				_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, transition.to, "test-actor")
 				return err
 			}); err != nil {
 				t.Fatal(err)
@@ -172,7 +172,7 @@ func TestMoveIssuePersistenceInTxRefusesUnversionedDemotion(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	})
 	if err == nil {
@@ -204,7 +204,7 @@ func TestMoveIssuePersistenceInTxDeletesLeaseOnDemotion(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestMoveIssuePersistenceInTxTargetCollisionRollsBackSource(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	})
 	if err == nil {
@@ -277,7 +277,7 @@ func TestMoveIssuePersistenceInTxLateCounterConflictRollsBack(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	})
 	if err == nil {
@@ -299,5 +299,61 @@ func TestMoveIssuePersistenceInTxLateCounterConflictRollsBack(t *testing.T) {
 	}
 	if sourceIssue != 1 || targetIssue != 0 || sourceLabels != 1 || sourceComments != 1 || targetLabels != 0 || targetComments != 0 || sourceCounter != 1 || targetCounter != 1 {
 		t.Fatalf("rollback state issues(%d,%d) labels(%d,%d) comments(%d,%d) counters(%d,%d)", sourceIssue, targetIssue, sourceLabels, targetLabels, sourceComments, targetComments, sourceCounter, targetCounter)
+	}
+}
+
+// TestMoveIssuePersistenceInTxRepairsFlagsInTheIssuesPlane pins the same-plane
+// branch against the row shape that actually reaches it.
+//
+// That branch runs when no MOVE is needed but the stored flags still disagree
+// with the plane the row is in, and the reachable instance is a DURABLE row
+// carrying ephemeral = 1 — what the pre-role proxied update produced. It used
+// to issue `UPDATE wisps` unconditionally, so the repair matched no row in the
+// issues plane and still reported Changed: true: `bd update <id> --persistent`
+// printed success and left the flag set.
+//
+// The assertion is on the STORED ROW rather than on the result, because
+// reporting the change is exactly what the bug did correctly.
+func TestMoveIssuePersistenceInTxRepairsFlagsInTheIssuesPlane(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	issue := &types.Issue{ID: "persist-repair", Title: "repair", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	// The corruption the changelog certifies exists: durable row, wisp flag.
+	if _, err := store.db.ExecContext(ctx, `UPDATE issues SET ephemeral = 1 WHERE id = ?`, issue.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var moved issueops.PersistenceMoveResult
+	if err := store.withRetryTx(ctx, func(tx *sql.Tx) error {
+		current, err := issueops.GetIssueInTx(ctx, tx, issue.ID)
+		if err != nil {
+			return err
+		}
+		moved, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent, "test-actor")
+		return err
+	}); err != nil {
+		t.Fatalf("repairing a durable row with the wisp flag set: %v", err)
+	}
+	if !moved.Changed || !moved.ChangedTables["issues"] {
+		t.Errorf("move result = %#v, want the issues table reported changed", moved)
+	}
+
+	var ephemeral bool
+	if err := store.db.QueryRowContext(ctx, `SELECT ephemeral FROM issues WHERE id = ?`, issue.ID).Scan(&ephemeral); err != nil {
+		t.Fatal(err)
+	}
+	if ephemeral {
+		t.Error("issues.ephemeral is still 1: --persistent reported success and repaired nothing")
+	}
+	var wisps int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisps WHERE id = ?`, issue.ID).Scan(&wisps); err != nil {
+		t.Fatal(err)
+	}
+	if wisps != 0 {
+		t.Errorf("wisps rows = %d, want 0: a same-plane repair must not move the row", wisps)
 	}
 }

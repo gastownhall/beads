@@ -81,19 +81,44 @@ func TestEmbeddedDelete(t *testing.T) {
 	})
 
 	t.Run("delete_without_force_shows_preview", func(t *testing.T) {
+		target := bdCreate(t, bd, dir, "Lonely", "--type", "task")
+
+		// Without --force, bd delete shows a preview (exits 0) but does not delete.
+		out := bdDelete(t, bd, dir, target.ID)
+		if !strings.Contains(out, "PREVIEW") && !strings.Contains(out, "preview") {
+			t.Logf("expected preview output: %s", out)
+		}
+		got := bdShow(t, bd, dir, target.ID)
+		if got.ID != target.ID {
+			t.Errorf("expected the target to still exist after preview")
+		}
+	})
+
+	// The one-id preview over a bead with an OUTSIDE dependent now refuses
+	// rather than exiting 0, which is a change and is the direct route
+	// converging with itself: the batch path and `--dry-run` have always
+	// refused here (see TestEmbeddedDeleteJSONDependencyErrorContract, which
+	// runs both), and only the unconfirmed single-id preview did not. The
+	// refusal is the role's, so both routes and all three of this command's
+	// paths now give the same answer to the same question.
+	t.Run("delete_without_force_refuses_over_an_outside_dependent", func(t *testing.T) {
 		parent := bdCreate(t, bd, dir, "Parent strict", "--type", "task")
 		child := bdCreate(t, bd, dir, "Child strict", "--type", "task")
 		bdDepAdd(t, bd, dir, child.ID, parent.ID)
 
-		// Without --force, bd delete shows a preview (exits 0) but does not delete.
-		out := bdDelete(t, bd, dir, parent.ID)
-		if !strings.Contains(out, "PREVIEW") && !strings.Contains(out, "preview") {
-			t.Logf("expected preview output: %s", out)
+		out := bdDeleteFail(t, bd, dir, parent.ID)
+		if !strings.Contains(out, "dependents not in deletion set") {
+			t.Errorf("refusal did not name the guard: %s", out)
 		}
-		// Parent should still exist.
-		got := bdShow(t, bd, dir, parent.ID)
-		if got.ID != parent.ID {
-			t.Errorf("expected parent to still exist after preview")
+		if !strings.Contains(out, "--cascade") || !strings.Contains(out, "--force") {
+			t.Errorf("refusal did not say what to send instead: %s", out)
+		}
+		// Nothing was deleted, on either end of the edge.
+		if got := bdShow(t, bd, dir, parent.ID); got.ID != parent.ID {
+			t.Errorf("expected the parent to survive a refused delete")
+		}
+		if got := bdShow(t, bd, dir, child.ID); got.ID != child.ID {
+			t.Errorf("expected the dependent to survive a refused delete")
 		}
 	})
 

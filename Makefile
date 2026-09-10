@@ -44,7 +44,7 @@ endif
 endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 
 # Default target
@@ -190,6 +190,17 @@ ci-pr-policy:
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
 
+# Opt-in architecture experiment. Install gocyclo v0.6.0 first;
+# report is advisory while check exercises the local baseline guard.
+ci-complexity:
+	@./scripts/ci/complexity.sh report
+
+ci-complexity-diff:
+	@./scripts/ci/complexity.sh diff
+
+ci-complexity-check:
+	@./scripts/ci/complexity.sh check
+
 # The generated half of the wire contract. The document is hand-written and is
 # the source of truth; this file is its output.
 API_GEN_FILE := internal/httpapi/apigen/types.gen.go
@@ -255,10 +266,9 @@ test-cross-version: build
 	@echo "Running cross-version smoke tests..."
 	@CANDIDATE_BIN=./bd ./scripts/cross-version-smoke-test.sh
 
-# Run migration test harness (rich dataset, fidelity checks, recipe discovery).
-# Tests direct and stepping-stone upgrade paths from all storage eras.
-# Direct only: ./scripts/migration-test/run.sh --direct-only
-# Single version: ./scripts/migration-test/run.sh v0.49.6
+# Run the authenticated historical upgrade corpus with strict fidelity checks.
+# All qualified versions: ./scripts/migration-test/run.sh
+# Single version: ./scripts/migration-test/run.sh --version v0.49.6
 test-migration: build
 	@echo "Running migration test harness..."
 	@CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh
@@ -303,21 +313,32 @@ ifndef SKIP_UPDATE_CHECK
 	fi
 endif
 
-# Install bd to ~/.local/bin (builds, signs on macOS, and copies)
+# Install bd to ~/.local/bin (builds, signs on macOS, then renames into place)
 # Also creates 'beads' symlink as an alias for bd
 # Use install-force to skip the origin/main update check
+#
+# The install stages to a temp name inside INSTALL_DIR and rename(2)s over the
+# final path: the live path must never hold a partial binary. A plain cp onto
+# bd leaves a truncated (on macOS: signature-invalid) binary for the whole
+# ~200MB copy, and any bd exec'd in that window dies at exec with rc 137 and
+# zero bytes of output — indistinguishable from an empty result set to callers.
+# The old rm-first shape added an ENOENT window on top. Same treatment for the
+# beads symlink.
+#
+# EXCEPTION — native Windows keeps the rm-first + cp shape: under Git for
+# Windows' bash the staged tmp+rename leaves no bd.exe at the destination even
+# though cp && mv exit 0 (caught by pr.yml's spaced-USERPROFILE install proof;
+# root cause untraced). Restore Windows atomicity only with that proof green.
 install install-force: build
-	@mkdir -p $(INSTALL_DIR)
+	@mkdir -p "$(INSTALL_DIR)"
 ifeq ($(OS),Windows_NT)
-	@rm -f $(INSTALL_DIR)/bd $(INSTALL_DIR)/bd.exe
-	@cp $(BUILD_DIR)/bd.exe $(INSTALL_DIR)/bd.exe
+	@rm -f "$(INSTALL_DIR)/bd" "$(INSTALL_DIR)/bd.exe"
+	@cp "$(BUILD_DIR)/bd.exe" "$(INSTALL_DIR)/bd.exe"
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
-	@rm -f $(INSTALL_DIR)/bd
-	@cp $(BUILD_DIR)/bd $(INSTALL_DIR)/bd
+	@cp "$(BUILD_DIR)/bd" "$(INSTALL_DIR)/.bd.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.install.tmp.$$$$" "$(INSTALL_DIR)/bd"
 	@echo "Installed bd to $(INSTALL_DIR)/bd"
-	@rm -f $(INSTALL_DIR)/beads
-	@ln -s bd $(INSTALL_DIR)/beads
+	@ln -sfn bd "$(INSTALL_DIR)/.beads.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.beads.install.tmp.$$$$" "$(INSTALL_DIR)/beads"
 	@echo "Created 'beads' alias -> bd"
 endif
 	@git config core.hooksPath .githooks 2>/dev/null && echo "Configured git hooks (.githooks/)" || true
@@ -332,21 +353,7 @@ fmt:
 
 # Check that all Go files are properly formatted (for CI)
 fmt-check:
-	@echo "Checking Go formatting..."
-	@UNFORMATTED=$$(gofmt -l .); \
-	status=$$?; \
-	if [ "$$status" -ne 0 ]; then \
-		echo "gofmt failed while checking formatting" >&2; \
-		exit "$$status"; \
-	fi; \
-	if [ -n "$$UNFORMATTED" ]; then \
-		echo "The following files are not properly formatted:"; \
-		echo "$$UNFORMATTED"; \
-		echo ""; \
-		echo "Run 'make fmt' to fix formatting"; \
-		exit 1; \
-	fi
-	@echo "All Go files are properly formatted"
+	@./scripts/ci/fmt-check.sh
 
 # Validate documentation references against actual CLI flags
 check-docs:
@@ -414,12 +421,15 @@ help:
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
 	@echo "  make ci-pr-policy - Run required PR policy wrapper"
 	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make ci-complexity - Report production cyclomatic complexity (advisory)"
+	@echo "  make ci-complexity-diff - Compare complexity with COMPLEXITY_BASE_REF"
+	@echo "  make ci-complexity-check - Check complexity against the local baseline"
 	@echo "  make ci-package-mcp - Run MCP Python package gate"
 	@echo "  make ci-package-npm - Run npm package gate"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make test-cross-version - Run cross-version smoke tests (last 30 tags)"
-	@echo "  make test-migration - Run migration test harness (fidelity checks, recipes)"
+	@echo "  make test-migration - Run authenticated historical upgrade tests"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"
 	@echo "  make bench-quick  - Run quick benchmarks (shorter benchtime)"
 	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS, includes 'beads' alias)"

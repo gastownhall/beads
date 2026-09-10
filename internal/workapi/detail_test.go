@@ -565,6 +565,96 @@ func TestBuildIssueDetailsShallowDependents(t *testing.T) {
 	}
 }
 
+// TestBuildIssueDetailsBriefDeps covers the dependency side of be-4d36f2. The
+// shared fixture gives dependency rows no free-form text, so no existing case
+// could observe them carrying it; this one plants the heavy fields first.
+func TestBuildIssueDetailsBriefDeps(t *testing.T) {
+	ctx := context.Background()
+	heavy := strings.Repeat("x", 1024)
+
+	newFixture := func() *detailFixture {
+		fx := newDetailFixture()
+		fx.deps["bd-1"] = []*types.IssueWithDependencyMetadata{{
+			Issue: types.Issue{
+				ID: "bd-blocker", Title: "Blocker", Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				Description: heavy, Design: heavy, Notes: heavy, AcceptanceCriteria: heavy,
+			},
+			DependencyType: types.DepBlocks,
+		}}
+		return fx
+	}
+
+	findDep := func(t *testing.T, details *types.IssueDetails) *types.IssueWithDependencyMetadata {
+		t.Helper()
+		for _, dep := range details.Dependencies {
+			if dep.ID == "bd-blocker" {
+				return dep
+			}
+		}
+		t.Fatalf("dependency bd-blocker missing from %d rows", len(details.Dependencies))
+		return nil
+	}
+
+	t.Run("default keeps the full body", func(t *testing.T) {
+		fx := newFixture()
+		store, _ := fixtureSources(fx)
+		details, err := BuildIssueDetails(ctx, store, fx.issues["bd-1"], false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if got := findDep(t, details); got.Description != heavy || got.Notes != heavy {
+			t.Errorf("default must not drop dependency text: description=%d notes=%d",
+				len(got.Description), len(got.Notes))
+		}
+	})
+
+	t.Run("BriefDeps strips text and keeps identity", func(t *testing.T) {
+		fx := newFixture()
+		store, _ := fixtureSources(fx)
+		details, err := BuildIssueDetails(ctx, store, fx.issues["bd-1"], false, DetailOptions{BriefDeps: true})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		got := findDep(t, details)
+		if got.Title != "Blocker" || got.Status != types.StatusOpen ||
+			got.IssueType != types.TypeTask || got.Priority != 2 || got.DependencyType != types.DepBlocks {
+			t.Errorf("identity fields not preserved: %+v", got)
+		}
+		if got.Description != "" || got.Design != "" || got.Notes != "" || got.AcceptanceCriteria != "" {
+			t.Errorf("heavy fields not stripped: %+v", got)
+		}
+	})
+
+	t.Run("BriefDeps does not mutate the source rows", func(t *testing.T) {
+		fx := newFixture()
+		store, _ := fixtureSources(fx)
+		if _, err := BuildIssueDetails(ctx, store, fx.issues["bd-1"], false, DetailOptions{BriefDeps: true}); err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if got := fx.deps["bd-1"][0]; got.Notes != heavy || got.Description != heavy {
+			t.Errorf("source row was shallowed in place: notes=%d description=%d",
+				len(got.Notes), len(got.Description))
+		}
+	})
+
+	t.Run("BriefDeps still resolves Parent", func(t *testing.T) {
+		fx := newFixture()
+		fx.deps["bd-1"] = append(fx.deps["bd-1"], &types.IssueWithDependencyMetadata{
+			Issue:          types.Issue{ID: "bd-parent", Title: "Parent", Notes: heavy},
+			DependencyType: types.DepParentChild,
+		})
+		store, _ := fixtureSources(fx)
+		details, err := BuildIssueDetails(ctx, store, fx.issues["bd-1"], false, DetailOptions{BriefDeps: true})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.Parent == nil || *details.Parent != "bd-parent" {
+			t.Errorf("parent = %v, want bd-parent", details.Parent)
+		}
+	})
+}
+
 func TestBuildIssueDetailsEpicProgress(t *testing.T) {
 	ctx := context.Background()
 	fx := newDetailFixture()
@@ -635,6 +725,44 @@ func TestBuildIssueDetailsRowStreamErrors(t *testing.T) {
 			t.Errorf("err = %q, want the id and the operation", err)
 		}
 	})
+}
+
+// TestBuildIssueDetailsProjectsTheRevisionToken pins the SEAM, which is the
+// half types.NewIssueDetails cannot pin for itself.
+//
+// Both front doors read their detail view from here, so this is where the
+// published token is either projected off the row or silently 0. It is
+// asserted on BOTH seams because the store and the use case assemble the same
+// view through different readers, and a leg that reached the constructor and a
+// leg that went back to a struct literal look identical from the outside: 0 is
+// a legal token, so a caller cannot tell an unset one from a legacy row.
+func TestBuildIssueDetailsProjectsTheRevisionToken(t *testing.T) {
+	ctx := context.Background()
+	fx := newDetailFixture()
+	fx.issues["bd-1"].RowVersion = 987654321
+	store, useCase := fixtureSources(fx)
+
+	for _, tc := range []struct {
+		name string
+		src  DetailSource
+	}{
+		{"store seam", store},
+		{"use case seam", useCase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details, err := BuildIssueDetails(ctx, tc.src, fx.issues["bd-1"], false, DetailOptions{})
+			if err != nil {
+				t.Fatalf("BuildIssueDetails: %v", err)
+			}
+			if details.Revision != 987654321 {
+				t.Errorf("Revision = %d, want the row's token 987654321", details.Revision)
+			}
+			if details.Revision != details.RowVersion {
+				t.Errorf("Revision = %d but RowVersion = %d; the published token must be the row's",
+					details.Revision, details.RowVersion)
+			}
+		})
+	}
 }
 
 func TestBuildIssueDetailsRejectsNilIssue(t *testing.T) {

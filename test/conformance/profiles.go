@@ -1,5 +1,5 @@
 // Package conformance is the end-to-end (real `bd` binary) conformance harness. It
-// complements the in-process store suite (internal/storage/conformance): that one
+// complements the in-process store suite (backend/conformance): that one
 // exercises a store object; this one exercises the whole CLI path — `bd init`, the
 // factory, metadata.json, and output formatting — differentially against the Dolt
 // reference.

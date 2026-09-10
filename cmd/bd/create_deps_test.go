@@ -13,10 +13,11 @@ import (
 
 func TestParseDepSpecs(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      []string
-		want    []domain.DependencySpec
-		wantErr bool
+		name              string
+		in                []string
+		want              []domain.DependencySpec
+		wantErr           bool
+		wantErrSubstrings []string
 	}{
 		{
 			name: "empty input",
@@ -80,9 +81,10 @@ func TestParseDepSpecs(t *testing.T) {
 			},
 		},
 		{
-			name:    "unknown type rejected",
-			in:      []string{"nonsense:bd-1"},
-			wantErr: true,
+			name:              "unknown type rejected",
+			in:                []string{"nonsense:bd-1"},
+			wantErr:           true,
+			wantErrSubstrings: []string{"unknown dependency type", "blocked-by", "depends-on"},
 		},
 		{
 			name:    "empty type rejected",
@@ -125,6 +127,11 @@ func TestParseDepSpecs(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseDepSpecs(%v) = %v, want error", tt.in, got)
+				}
+				for _, want := range tt.wantErrSubstrings {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("parseDepSpecs(%v) error = %q, want to contain %q", tt.in, err, want)
+					}
 				}
 				return
 			}

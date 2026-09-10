@@ -64,6 +64,7 @@ func TestContextUseCase_Embedded(t *testing.T) {
 		role:   "contributor",
 		roleOK: true,
 		backend: BackendConfig{
+			Backend:   configfile.BackendDolt,
 			DoltMode:  configfile.DoltModeEmbedded,
 			Database:  "beads",
 			ProjectID: "proj-1",
@@ -109,9 +110,81 @@ func TestContextUseCase_Embedded(t *testing.T) {
 	}
 }
 
+// TestSetBackendIdentityIsTotal. The method decides all three members every
+// time it is called rather than only the ones it has a value for, so a snapshot
+// that already carried a Dolt mode cannot come out of it describing two
+// backends at once. Both routes to a snapshot call it, and only this makes the
+// result independent of what either had already filled in.
+func TestSetBackendIdentityIsTotal(t *testing.T) {
+	info := ContextInfo{
+		Backend:  configfile.BackendDolt,
+		DoltMode: configfile.DoltModeServer,
+		Database: "left_over",
+	}
+
+	info.SetBackendIdentity("acme", configfile.DoltModeEmbedded, configfile.DefaultDoltDatabase)
+
+	if info.Backend != "acme" || info.DoltMode != "" || info.Database != "" {
+		t.Errorf("Backend/DoltMode/Database = %q/%q/%q, want acme//: a non-Dolt backend kept a Dolt identity",
+			info.Backend, info.DoltMode, info.Database)
+	}
+
+	info.SetBackendIdentity(configfile.BackendDolt, configfile.DoltModeServer, "beads")
+	if info.DoltMode != configfile.DoltModeServer || info.Database != "beads" {
+		t.Errorf("DoltMode/Database = %q/%q, want server/beads", info.DoltMode, info.Database)
+	}
+}
+
+// TestContextUseCase_RegisteredBackendGetsNoDoltIdentity.
+//
+// Every context surface answers from this projection — `bd context`, `bd
+// context --json`, and GET /v0/beads/context — so a workspace on a registered
+// backend that is described here as embedded Dolt is described that way on all
+// three. It is not a cosmetic mislabel: the HTTP handshake is the one endpoint
+// automation is told to trust for a server's identity, and it was reporting the
+// exact topology `bd serve` refuses to serve.
+//
+// The three Dolt-derived values all default rather than fail — an absent
+// dolt_mode reads "embedded", an absent dolt_database reads "beads" — so a
+// registered workspace that configures none of them was described in full
+// detail, entirely wrongly.
+func TestContextUseCase_RegisteredBackendGetsNoDoltIdentity(t *testing.T) {
+	repo := &fakeContextRepo{
+		backend: BackendConfig{
+			// What configfile.Load defaults to for a workspace that
+			// configures no Dolt anything. The whole point is that these
+			// values describe Dolt and this workspace is not on it.
+			Backend:   "acme",
+			DoltMode:  configfile.DoltModeEmbedded,
+			Database:  configfile.DefaultDoltDatabase,
+			ProjectID: "proj-1",
+		},
+	}
+
+	info, err := NewContextUseCase(repo, "v0").GetContextInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetContextInfo: %v", err)
+	}
+	if info.Backend != "acme" {
+		t.Errorf("Backend = %q, want acme: the projection named a backend this workspace is not on", info.Backend)
+	}
+	if info.DoltMode != "" {
+		t.Errorf("DoltMode = %q, want empty: a registered backend has no Dolt mode, and bd cannot invent one", info.DoltMode)
+	}
+	if info.Database != "" {
+		t.Errorf("Database = %q, want empty: %q is the Dolt default, not a name this backend answers from",
+			info.Database, configfile.DefaultDoltDatabase)
+	}
+	// Everything that is not Dolt-derived still describes the workspace.
+	if info.ProjectID != "proj-1" {
+		t.Errorf("ProjectID = %q, want proj-1", info.ProjectID)
+	}
+}
+
 func TestContextUseCase_ServerMode(t *testing.T) {
 	repo := &fakeContextRepo{
 		backend: BackendConfig{
+			Backend:      configfile.BackendDolt,
 			DoltMode:     configfile.DoltModeServer,
 			ServerHost:   "db.example.com",
 			IsServerMode: true,
@@ -140,6 +213,7 @@ func TestContextUseCase_ServerMode(t *testing.T) {
 func TestContextUseCase_ProxiedServerMode(t *testing.T) {
 	repo := &fakeContextRepo{
 		backend: BackendConfig{
+			Backend:             configfile.BackendDolt,
 			DoltMode:            configfile.DoltModeProxiedServer,
 			IsProxiedServerMode: true,
 		},

@@ -9,7 +9,7 @@ Thank you for your interest in contributing to bd! This document provides guidel
 - Go (see `go.mod` for the required version; currently 1.26+)
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
-- (Optional) golangci-lint for local linting
+- golangci-lint v2.10.1 for the required local lint gate
 - ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
 
 ### Getting Started
@@ -61,21 +61,23 @@ We follow standard Go conventions:
 
 ### Linting
 
-We use golangci-lint for code quality checks:
+Use the same pinned golangci-lint version and repository-owned wrapper as CI:
 
 ```bash
-# Install golangci-lint
-brew install golangci-lint  # macOS
-# or
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+# Install the version pinned by CI
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
-# Run linter
-golangci-lint run ./...
+# Run the required formatting and lint contract
+make ci-pr-lint
 ```
 
-**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [engdocs/LINTING.md](engdocs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
+`make ci-pr-lint` must pass with zero issues. It checks formatting, lints the
+repository's normal `gms_pure_go` build, and cross-lints Windows-only non-CGO
+code. Accepted intentional patterns are encoded narrowly in `.golangci.yml`;
+do not ignore a failing baseline. See [engdocs/LINTING.md](engdocs/LINTING.md)
+for the full policy.
 
-CI will automatically run linting on all pull requests.
+CI runs the same required wrapper on all pull requests.
 
 ## Making Changes
 

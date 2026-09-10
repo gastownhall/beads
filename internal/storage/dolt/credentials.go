@@ -264,6 +264,12 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 // AddFederationPeer adds or updates a federation peer with credentials.
 // This stores credentials in the database and also adds the Dolt remote.
 func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.addFederationPeer(ctx, peer)
+	})
+}
+
+func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
 	// Validate peer name
 	if err := validatePeerName(peer.Name); err != nil {
 		return fmt.Errorf("invalid peer name: %w", err)
@@ -510,12 +516,32 @@ func applyNoGitHooksToCmd(cmd *exec.Cmd) {
 		githooksenv.AppendParameter(githooksenv.Extract(base), githooksenv.NoHooksParam))
 }
 
+// saveEnv captures the current state of key and returns a function that puts
+// it back: a value that was set is restored, one that was unset is unset
+// again. Callers mutate key between the capture and the restore, so the pair
+// must bracket a single operation.
+func saveEnv(key string) func() {
+	prev, had := os.LookupEnv(key)
+	return func() {
+		if had {
+			_ = os.Setenv(key, prev) // Best effort: Setenv failure is extremely rare in practice
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	}
+}
+
 // setFederationCredentials sets DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD env vars.
-// Returns a cleanup function that must be called (typically via defer) to unset them.
+// Returns a cleanup function that must be called (typically via defer) to put the
+// prior environment back. Unsetting unconditionally would destroy an ambient
+// credential pair the caller never owned, so the prior state is captured first
+// and restored in reverse order; nothing the operation set survives cleanup.
 // The caller must hold federationEnvMutex.
 // Only used for SQL-path operations where the in-process Dolt server reads from
 // the process environment. CLI operations should use remoteCredentials.applyToCmd instead.
 func setFederationCredentials(username, password string) func() {
+	restoreUser := saveEnv("DOLT_REMOTE_USER")
+	restorePassword := saveEnv("DOLT_REMOTE_PASSWORD")
 	if username != "" {
 		_ = os.Setenv("DOLT_REMOTE_USER", username) // Best effort: Setenv failure is extremely rare in practice
 	}
@@ -523,27 +549,23 @@ func setFederationCredentials(username, password string) func() {
 		_ = os.Setenv("DOLT_REMOTE_PASSWORD", password) // Best effort: Setenv failure is extremely rare in practice
 	}
 	return func() {
-		_ = os.Unsetenv("DOLT_REMOTE_USER")     // Best effort cleanup of auth env vars
-		_ = os.Unsetenv("DOLT_REMOTE_PASSWORD") // Best effort cleanup of auth env vars
+		restorePassword()
+		restoreUser()
 	}
 }
 
 func setS3ChecksumEnv() func() {
-	prev, hadPrev := os.LookupEnv(awsResponseChecksumValidationEnv)
+	restore := saveEnv(awsResponseChecksumValidationEnv)
 	_ = os.Setenv(awsResponseChecksumValidationEnv, "when_required")
-	return func() {
-		if hadPrev {
-			_ = os.Setenv(awsResponseChecksumValidationEnv, prev)
-		} else {
-			_ = os.Unsetenv(awsResponseChecksumValidationEnv)
-		}
-	}
+	return restore
 }
 
 func withRemoteOperationEnv(creds *remoteCredentials, s3Checksum bool, fn func() error) error {
 	if creds.empty() && !s3Checksum {
 		return fn()
 	}
+	// The cleanup defer below must stay registered after this Unlock defer, so
+	// the env restores run before the mutex is released.
 	federationEnvMutex.Lock()
 	defer federationEnvMutex.Unlock()
 
@@ -554,6 +576,11 @@ func withRemoteOperationEnv(creds *remoteCredentials, s3Checksum bool, fn func()
 	if s3Checksum {
 		cleanups = append(cleanups, setS3ChecksumEnv())
 	}
+	// Registered after the Unlock defer, so the restores complete before the
+	// mutex is released and no other operation that takes federationEnvMutex
+	// observes a half-restored env. Ambient readers that take no lock (the
+	// config load in store.go, bootstrap.go, internal/remotecache) are outside
+	// that guarantee.
 	defer func() {
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			cleanups[i]()

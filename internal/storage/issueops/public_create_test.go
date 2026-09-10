@@ -60,6 +60,14 @@ func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 		"ContentHash": true, "LeaseExpiresAt": true, "HeartbeatAt": true, "LeaseGrantedNode": true, "RowVersion": true,
 		"CompactionLevel": true, "CompactedAt": true, "CompactedAtCommit": true, "OriginalSize": true,
 		"IDPrefix": true, "PrefixOverride": true, "IsLitePartial": true,
+		// IsBlocked is the persisted readiness projection, computed from the
+		// dependency graph. A caller cannot declare it; it is populated only
+		// where it is read back (journal snapshots).
+		"IsBlocked": true,
+		// WispPlaneOverride is import-plumbing (the export stream's explicit
+		// plane marker, bd-r9uce); a public create routes by the flags it
+		// accepts (Ephemeral/NoHistory), so the override is dropped here.
+		"WispPlaneOverride": true,
 	}
 	rejected := map[string]bool{"Dependencies": true, "Comments": true}
 	issueType := reflect.TypeFor[types.Issue]()
@@ -149,6 +157,51 @@ func TestValidatePublicCreateRequestAllowsEmptyWaitsForGate(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("ValidatePublicCreateRequest() error = %v, want nil", err)
+	}
+}
+
+// TestValidatePublicCreateRequestRejectsUnknownWaitsForGate is the other half
+// of the clause above: the leaf says an empty Gate defaults to
+// WaitsForAllChildren and that "otherwise only the exported waits-for gate
+// constants are valid" (issueops/issueops.go:149-152). Only the permissive
+// half was pinned, so an unknown gate could have started defaulting silently —
+// which is a readiness primitive quietly answering the wrong question rather
+// than refusing.
+//
+// This lives at the shared validator rather than in the conformance contract
+// because all three Lifecycle backends reach it: the two stores through
+// ExecuteCreate and the unit-of-work one through its own Create
+// (internal/storage/uow/issue_operations.go:64).
+func TestValidatePublicCreateRequestRejectsUnknownWaitsForGate(t *testing.T) {
+	for _, gate := range []string{"bogus", "ALL_CHILDREN", " all_children"} {
+		t.Run(gate, func(t *testing.T) {
+			err := ValidatePublicCreateRequest(publicops.CreateRequest{
+				Actor:    "a",
+				Issue:    &publicops.Issue{Title: "x"},
+				WaitsFor: &publicops.WaitsFor{SpawnerID: "bd-spawner", Gate: gate},
+			})
+			if !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("ValidatePublicCreateRequest() with gate %q error = %v, want ErrValidation", gate, err)
+			}
+		})
+	}
+}
+
+// TestValidatePublicCreateRequestAcceptsTheExportedWaitsForGates keeps the
+// refusal above honest: the two exported constants must still pass, so the
+// check cannot be tightened into rejecting everything.
+func TestValidatePublicCreateRequestAcceptsTheExportedWaitsForGates(t *testing.T) {
+	for _, gate := range []string{string(publicops.WaitsForAllChildren), string(publicops.WaitsForAnyChildren)} {
+		t.Run(gate, func(t *testing.T) {
+			err := ValidatePublicCreateRequest(publicops.CreateRequest{
+				Actor:    "a",
+				Issue:    &publicops.Issue{Title: "x"},
+				WaitsFor: &publicops.WaitsFor{SpawnerID: "bd-spawner", Gate: gate},
+			})
+			if err != nil {
+				t.Fatalf("ValidatePublicCreateRequest() with gate %q error = %v, want nil", gate, err)
+			}
+		})
 	}
 }
 
@@ -265,5 +318,49 @@ func TestClassifyPublicCreateErrorPreservesDeterministicIdentities(t *testing.T)
 	classified := ClassifyPublicCreateError(sqlStateError("23505"))
 	if !errors.Is(classified, storage.ErrAlreadyExists) || !errors.Is(classified, sqlStateError("23505")) {
 		t.Fatalf("ClassifyPublicCreateError(23505) = %v, want ErrAlreadyExists and SQLSTATE", classified)
+	}
+}
+
+// TestPreparePublicCreateRequestHonorsTheCallerSuppliedIDPrefix pins
+// CreateRequest.IDPrefix: the caller's prefix overrides the substrate's, and an
+// empty one leaves the substrate's in force.
+//
+// The override exists because config.yaml's `issue-prefix` beats the
+// database's and no implementation can see config.yaml. Without it the two
+// `bd create` routes disagreed about which ids a workspace may mint: the
+// direct route refused `bd-123` in a workspace configured for `app`, while the
+// proxied route checked only the server database's prefix and created it.
+func TestPreparePublicCreateRequestHonorsTheCallerSuppliedIDPrefix(t *testing.T) {
+	newRequest := func(id, prefix string) publicops.CreateRequest {
+		return publicops.CreateRequest{
+			Actor:    "actor",
+			Issue:    &publicops.Issue{ID: id, Title: "title", Priority: 2, IssueType: "task"},
+			IDPrefix: prefix,
+		}
+	}
+	// The substrate says "bd"; the caller says the workspace is "app".
+	context := PublicCreateContext{IssuePrefix: "bd"}
+
+	if _, err := PreparePublicCreateRequest(newRequest("app-1", "app"), context); err != nil {
+		t.Errorf("an id matching the CALLER's prefix was refused: %v", err)
+	}
+	if _, err := PreparePublicCreateRequest(newRequest("bd-1", "app"), context); err == nil {
+		t.Error("an id matching only the SUBSTRATE's prefix was accepted; the caller's prefix must win")
+	}
+
+	// Empty override: the substrate's prefix is the whole rule, which is the
+	// ordinary case and must not regress.
+	if _, err := PreparePublicCreateRequest(newRequest("bd-1", ""), context); err != nil {
+		t.Errorf("an id matching the substrate's prefix was refused with no override: %v", err)
+	}
+	if _, err := PreparePublicCreateRequest(newRequest("app-1", ""), context); err == nil {
+		t.Error("an id outside the substrate's prefix was accepted with no override")
+	}
+
+	// ForceIDPrefix still outranks both, which is what --force means.
+	forced := newRequest("zz-1", "app")
+	forced.ForceIDPrefix = true
+	if _, err := PreparePublicCreateRequest(forced, context); err != nil {
+		t.Errorf("ForceIDPrefix did not bypass the caller-supplied prefix: %v", err)
 	}
 }

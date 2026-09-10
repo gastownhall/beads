@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"testing"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -44,6 +44,38 @@ func TestInitSchemaOnDBWithRetryAndGate_GateErrorClassification(t *testing.T) {
 		}
 	})
 
+	for _, tc := range []struct {
+		name string
+		err  *mysql.MySQLError
+	}{
+		{
+			name: "typed unknown database",
+			err:  &mysql.MySQLError{Number: 1049, Message: "Unknown database 'beads_test'"},
+		},
+		{
+			name: "typed missing session root",
+			err:  &mysql.MySQLError{Number: 1105, Message: "no root value found in session"},
+		},
+	} {
+		t.Run(tc.name+" is retried during setup", func(t *testing.T) {
+			calls := 0
+			gate := func(context.Context, *sql.DB) error {
+				calls++
+				if calls < 3 {
+					return fmt.Errorf("remote-migrate gate: probe schema: %w", tc.err)
+				}
+				return &schema.RemoteMigrateGateError{CurrentVersion: 1, LatestVersion: 2, Pending: 1}
+			}
+			_, err := initSchemaOnDBWithRetryAndGate(ctx, db, gate)
+			if !schema.IsRemoteMigrateGateError(err) {
+				t.Fatalf("err = %T (%v), want *schema.RemoteMigrateGateError after retries", err, err)
+			}
+			if calls != 3 {
+				t.Fatalf("gate calls = %d, want 3", calls)
+			}
+		})
+	}
+
 	t.Run("gate refusal is permanent, not retried", func(t *testing.T) {
 		calls := 0
 		gate := func(context.Context, *sql.DB) error {
@@ -71,6 +103,22 @@ func TestInitSchemaOnDBWithRetryAndGate_GateErrorClassification(t *testing.T) {
 		}
 		if calls != 1 {
 			t.Fatalf("gate calls = %d, want 1 (non-retryable must not be retried)", calls)
+		}
+	})
+
+	t.Run("unrelated typed MySQL error is permanent", func(t *testing.T) {
+		calls := 0
+		gate := func(context.Context, *sql.DB) error {
+			calls++
+			return fmt.Errorf("remote-migrate gate: probe schema: %w",
+				&mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"})
+		}
+		_, err := initSchemaOnDBWithRetryAndGate(ctx, db, gate)
+		if err == nil || schema.IsRemoteMigrateGateError(err) {
+			t.Fatalf("err = %v, want plain permanent error", err)
+		}
+		if calls != 1 {
+			t.Fatalf("gate calls = %d, want 1", calls)
 		}
 	})
 }

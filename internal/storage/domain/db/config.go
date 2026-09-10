@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -81,6 +80,20 @@ func (r *configSQLRepositoryImpl) SetConfig(ctx context.Context, key, value stri
 		value = strings.TrimSuffix(value, "-")
 	}
 	if _, err := r.runner.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES (?, ?)", key, value); err != nil {
+		return fmt.Errorf("db: SetConfig %s: %w", key, err)
+	}
+	// Re-sync the normalized lookup table a value backs, mirroring
+	// DoltStore.SetConfig. Reads are TABLE-FIRST — GetCustomTypes above
+	// consults custom_types and falls back to the string only when the table is
+	// empty, and GetCustomStatuses reads custom_statuses outright — so a write
+	// that updated only the string left the table holding the previous set,
+	// forever: `bd config set types.custom` on a proxied deployment reported
+	// success and `bd create -t <the new type>` kept answering "invalid issue
+	// type", with doctor re-verifying against the string and reporting all-OK.
+	//
+	// The caller supplies a transactional runner, so the row and its projection
+	// commit together or neither does.
+	if _, err := issueops.SyncConfigTables(ctx, r.runner, key, value); err != nil {
 		return fmt.Errorf("db: SetConfig %s: %w", key, err)
 	}
 	return nil
@@ -161,15 +174,7 @@ func (r *configSQLRepositoryImpl) readCustomTypesConfig(ctx context.Context) ([]
 	if err != nil {
 		return nil, fmt.Errorf("db: GetCustomTypes: %w", err)
 	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	var jsonTypes []string
-	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-		return parseCustomTypesList(jsonTypes), nil
-	}
-	return parseCustomTypesList(strings.Split(value, ",")), nil
+	return issueops.ParseTypesConfigValue(value), nil
 }
 
 func unionWithYAMLCustomTypes(dbTypes, yamlTypes []string) []string {
@@ -188,20 +193,6 @@ func unionWithYAMLCustomTypes(dbTypes, yamlTypes []string) []string {
 				continue
 			}
 			seen[t] = struct{}{}
-			out = append(out, t)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func parseCustomTypesList(in []string) []string {
-	out := make([]string, 0, len(in))
-	for _, t := range in {
-		t = strings.TrimSpace(t)
-		if t != "" {
 			out = append(out, t)
 		}
 	}

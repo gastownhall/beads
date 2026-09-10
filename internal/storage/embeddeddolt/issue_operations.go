@@ -51,7 +51,7 @@ func (o *issueOperations) Update(ctx context.Context, request issueops.UpdateReq
 	var result issueops.UpdateResult
 	// Same ID-bearing commit message as the server-backed store, so `bd dolt
 	// log` reads the same on both backends.
-	err := o.store.runIssueOperationTx(ctx, updateCommitMessage(snapshot.IssueID), func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
+	err := o.store.runIssueOperationTx(ctx, storageissueops.HistoryEntry(snapshot.Provenance, updateCommitMessage(snapshot.IssueID)), func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
 		var err error
 		var tables storageissueops.ChangedTables
 		result, tables, err = storageissueops.ExecuteUpdate(ctx, tx, snapshot)
@@ -75,7 +75,7 @@ func (o *issueOperations) Close(ctx context.Context, request issueops.CloseReque
 func (o *issueOperations) Reopen(ctx context.Context, request issueops.ReopenRequest) (issueops.ReopenResult, error) {
 	snapshot := storageissueops.CloneReopenRequest(request)
 	var result issueops.ReopenResult
-	err := o.store.runIssueOperationTx(ctx, "bd: reopen issue", func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
+	err := o.store.runIssueOperationTx(ctx, storageissueops.HistoryEntry(snapshot.Provenance, "bd: reopen issue"), func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
 		var err error
 		var tables storageissueops.ChangedTables
 		result, tables, err = storageissueops.ExecuteReopen(ctx, tx, snapshot)

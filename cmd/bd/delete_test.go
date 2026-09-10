@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestDeletePreviewJSONIsPayloadBlind(t *testing.T) {
@@ -26,7 +27,7 @@ func TestDeletePreviewJSONIsPayloadBlind(t *testing.T) {
 			Description: "sensitive payload must not appear",
 		},
 	}
-	result := &types.DeleteIssuesResult{DeletedCount: 1, DependenciesCount: 2}
+	result := &issueops.DeleteResult{Deleted: 1, Dependencies: 2}
 
 	out := captureStdout(t, func() error {
 		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, true)

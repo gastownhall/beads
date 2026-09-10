@@ -135,6 +135,7 @@ func runConcludeCommand(t *testing.T, commandStore storage.DoltStorage, asJSON b
 		t.Fatal(err)
 	}
 	os.Stdout, os.Stderr = wOut, wErr
+	defer func() { os.Stdout, os.Stderr = oldStdout, oldStderr }()
 	store, rootCtx, jsonOutput = commandStore, context.Background(), asJSON
 	conflictsConclude = true
 
@@ -142,7 +143,6 @@ func runConcludeCommand(t *testing.T, commandStore storage.DoltStorage, asJSON b
 
 	_ = wOut.Close()
 	_ = wErr.Close()
-	os.Stdout, os.Stderr = oldStdout, oldStderr
 	store, rootCtx, jsonOutput = oldStore, oldRootCtx, oldJSON
 	conflictsConclude = oldConclude
 

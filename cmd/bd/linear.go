@@ -1217,13 +1217,6 @@ func getLinearIDMode(ctx context.Context) string {
 	return mode
 }
 
-// linearConfigReader is the minimal slice of storage.Storage that the
-// linear-config helpers depend on. Lets tests inject a fake without
-// spinning up a Dolt server.
-type linearConfigReader interface {
-	GetConfig(ctx context.Context, key string) (string, error)
-}
-
 // applyLinearExcludeIDConfig reads linear.exclude_id_prefix and
 // linear.exclude_id_patterns from the given config reader and applies them
 // to opts. Both keys are push-direction-only filters; see the help text on
@@ -1231,7 +1224,7 @@ type linearConfigReader interface {
 //
 // Empty values are no-ops. Patterns are comma-split, trimmed, with empty
 // entries dropped. If reader is nil (no store configured), this is a no-op.
-func applyLinearExcludeIDConfig(ctx context.Context, reader linearConfigReader, opts *tracker.SyncOptions) {
+func applyLinearExcludeIDConfig(ctx context.Context, reader configReader, opts *tracker.SyncOptions) {
 	if reader == nil || opts == nil {
 		return
 	}

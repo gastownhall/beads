@@ -470,6 +470,16 @@ func TestProxiedServerList(t *testing.T) {
 		}
 	})
 
+	t.Run("format_digraph_output_error", func(t *testing.T) {
+		stderr, err := runWithReadOnlyStdout(t, bd, p.dir, bdProxiedEnv(p.dir), "list", "--format", "digraph", "--all", "--no-pager")
+		if err == nil {
+			t.Fatalf("proxied list --format digraph succeeded with read-only stdout; stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "writing formatted list output") {
+			t.Fatalf("proxied list --format digraph stderr = %q, want writer diagnostic", stderr)
+		}
+	})
+
 	t.Run("compact_default", func(t *testing.T) {
 		out := bdProxiedList(t, bd, p, "--flat", "--no-pager")
 		if !strings.Contains(out, seed.openBug) {
@@ -728,26 +738,34 @@ func TestProxiedServerList(t *testing.T) {
 		}
 	})
 
-	// The proxied repository path (internal/storage/domain/db) doesn't
-	// thread MaxRows through the UOW pipeline, so an explicit cap must be
-	// rejected rather than silently going unenforced (be-x42v.4 follow-up).
-	t.Run("reject_max_rows_flag", func(t *testing.T) {
+	// The cap is HONORED on this route now. It used to be rejected outright,
+	// because the proxied repository path (internal/storage/domain/db) read no
+	// MaxRows at all and honoring it would have meant silence (be-x42v.4). The
+	// answer is the cap firing, with the same text and the same exit code the
+	// direct route prints.
+	t.Run("max_rows_flag_fires", func(t *testing.T) {
 		out := bdProxiedListFail(t, bd, p, "--max-rows", "1")
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected --max-rows proxied-server rejection, got: %s", out)
+		if strings.Contains(out, "not supported in proxied-server mode") {
+			t.Fatalf("--max-rows is refused under --proxied-server; the cap threads this route now: %s", out)
+		}
+		if !strings.Contains(out, "too many rows") || !strings.Contains(out, "--max-rows=1") {
+			t.Errorf("expected the cap to fire naming its source, got: %s", out)
 		}
 	})
 
-	t.Run("reject_max_rows_env", func(t *testing.T) {
+	t.Run("max_rows_env_fires", func(t *testing.T) {
 		fullArgs := []string{"list"}
 		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
 			[]string{"BEADS_MAX_ROWS=1"}, fullArgs...)
 		if err == nil {
-			t.Fatalf("expected BEADS_MAX_ROWS under proxied-server to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			t.Fatalf("expected BEADS_MAX_ROWS under proxied-server to trip the cap, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
 		out := stdout + stderr
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection, got: %s", out)
+		if strings.Contains(out, "not supported in proxied-server mode") {
+			t.Fatalf("BEADS_MAX_ROWS is refused under --proxied-server; the cap threads this route now: %s", out)
+		}
+		if !strings.Contains(out, "too many rows") || !strings.Contains(out, "BEADS_MAX_ROWS=1") {
+			t.Errorf("expected the cap to fire naming its source, got: %s", out)
 		}
 	})
 

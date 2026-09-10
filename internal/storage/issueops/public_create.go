@@ -62,7 +62,14 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 		issue.Status = types.StatusOpen
 	}
 	if issue.ID != "" && !request.ForceIDPrefix {
-		if err := ValidateIssueIDPrefix(issue.ID, strings.TrimSuffix(context.IssuePrefix, "-"), context.AllowedPrefixes); err != nil {
+		// The caller's prefix wins when it supplied one; see
+		// CreateRequest.IDPrefix for why a front door may know better than the
+		// substrate does.
+		prefix := context.IssuePrefix
+		if request.IDPrefix != "" {
+			prefix = request.IDPrefix
+		}
+		if err := ValidateIssueIDPrefix(issue.ID, strings.TrimSuffix(prefix, "-"), context.AllowedPrefixes); err != nil {
 			return publicops.CreateRequest{}, publicCreateValidationError(err)
 		}
 	}
@@ -95,13 +102,16 @@ func ClassifyPublicCreateError(err error) error {
 	if errors.Is(err, storage.ErrPrefixMismatch) || errors.Is(err, domain.ErrSelfDependency) || errors.Is(err, types.ErrFieldTooLong) || errors.Is(err, domain.ErrDependencyCycle) || errors.As(err, &conflict) || errors.As(err, &hierarchyConflict) {
 		return publicCreateValidationError(err)
 	}
-	// A create whose requested relationship names a row that does not exist
-	// fails the dependency table's target foreign key. The caller asked for an
-	// edge to something absent, so this is a deterministic refusal rather than
-	// an infrastructure error: classify it the same way ExecuteCreate refuses a
-	// skipped dependency, so every backend reports a missing dependency,
-	// parent, or waits-for target as ErrValidation wrapping ErrNotFound.
-	if dberrors.IsMissingForeignKeyTarget(err) {
+	// A create whose requested relationship names a row that does not exist is
+	// refused by the dependency write: as the typed endpoint refusal where the
+	// write could name the absent endpoint, and as the target foreign key where
+	// it could not. The caller asked for an edge to something absent, so this
+	// is a deterministic refusal rather than an infrastructure error: classify
+	// it the same way ExecuteCreate refuses a skipped dependency, so every
+	// backend reports a missing dependency, parent, or waits-for target as
+	// ErrValidation wrapping ErrNotFound.
+	var missingEndpoint *domain.DependencyEndpointNotFoundError
+	if errors.As(err, &missingEndpoint) || dberrors.IsMissingForeignKeyTarget(err) {
 		return publicCreateValidationError(fmt.Errorf("create: dependency target does not exist: %w: %w", err, storage.ErrNotFound))
 	}
 	return err

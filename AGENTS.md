@@ -50,9 +50,9 @@ and credit their design/tests.
 
 **NEVER use emoji-style icons** (🔴🟠🟡🔵⚪) in CLI output. They cause cognitive overload.
 
-**ALWAYS use small Unicode symbols** with semantic colors:
+**ALWAYS use small Unicode symbols** with semantic colors (status uses symbols; priority uses labels):
 - Status: `○ ◐ ● ✓ ❄`
-- Priority: `● P0` (filled circle with color)
+- Priority: `P0`–`P4` label with color (no status glyph)
 
 See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelines.
 
@@ -127,7 +127,7 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed):
-   - `golangci-lint run ./...` (or `pre-commit run --all-files` if pre-commit is installed)
+   - `make ci-pr-lint` (required zero-finding formatting and lint wrapper)
    - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
    - File a P0 issue if quality gates are broken
 3. **Update issue status** - Close finished work, update in-progress items

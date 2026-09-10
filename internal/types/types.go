@@ -33,6 +33,11 @@ type Issue struct {
 	Status    Status    `json:"status,omitempty"`
 	Priority  int       `json:"priority"` // No omitempty: 0 is valid (P0/critical)
 	IssueType IssueType `json:"issue_type,omitempty"`
+	// IsBlocked is the persisted readiness projection. It is included in journal
+	// snapshots so graph deltas can be replayed without recomputing readiness.
+	// omitempty keeps it out of every other serialization (export JSONL, --json
+	// output): only journal snapshots, which set it explicitly, carry it.
+	IsBlocked bool `json:"is_blocked,omitempty"`
 
 	// ===== Assignment =====
 	Assignee         string `json:"assignee,omitempty"`
@@ -66,15 +71,17 @@ type Issue struct {
 	// granting replica.
 	LeaseGrantedNode string `json:"lease_granted_node,omitempty"`
 
-	// ===== Concurrency (Go-only; never serialized) =====
+	// ===== Concurrency (generic Issue JSON/JSONL omits this field) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
 	// Go call sites: the issues/wisps row_lock cell, a random non-zero value the
 	// engine rewrites on every status/ownership-mutating write. It is
 	// EQUALITY-ONLY — compare it, never order or interpret it — and a change
 	// signals the row was mutated since you read it. It is json:"-" on purpose:
-	// row_lock is random per write, so serializing it would break stable bd
-	// --json goldens and bd export round-trips; a Go consumer reads
-	// issue.RowVersion directly instead.
+	// row_lock is random per write, so generic Issue serialization would break
+	// stable list/export round-trips. The detail-view DTO projects it explicitly
+	// as `revision` for guarded clients (IssueDetails.Revision, set by
+	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}); Go
+	// consumers read RowVersion directly.
 	//
 	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
 	// generic update path, but NOT on direct-UPDATE paths that rewrite text
@@ -111,6 +118,17 @@ type Issue struct {
 	SourceRepo     string `json:"-"` // Which repo owns this issue (multi-repo support)
 	IDPrefix       string `json:"-"` // Override prefix for ID generation (appends to config prefix)
 	PrefixOverride string `json:"-"` // Completely replace config prefix (for cross-rig creation)
+
+	// WispPlaneOverride, when non-nil, pins which storage plane this in-memory
+	// record routes to (true = wisps table, false = issues table), overriding
+	// the Ephemeral/NoHistory flag inference in issueops.IsWisp. Import sets it
+	// from the export stream's explicit "wisp" plane marker so a promoted
+	// no-history wisp — a durable issues-table row that (pre-fix, or in wild
+	// data) still carries no_history=true — is never re-planed into the wisps
+	// table, after which default export would treat it as wisp-plane state
+	// (bd-r9uce). Never serialized, never persisted; nil means "infer from
+	// flags", which is the behavior everywhere outside import.
+	WispPlaneOverride *bool `json:"-"`
 
 	// ===== Relational Data (populated for export/import) =====
 	Labels       []string      `json:"labels,omitempty"`
@@ -280,6 +298,36 @@ var ErrFieldTooLong = errors.New("field exceeds maximum length")
 func CheckFieldLen(name, val string) error {
 	if n := utf8.RuneCountInString(val); n > MaxFieldLen {
 		return fmt.Errorf("%w: %s is %d characters (max %d)", ErrFieldTooLong, name, n, MaxFieldLen)
+	}
+	return nil
+}
+
+// MaxTextBytes is the maximum size, in BYTES, of a `TEXT` column — the storage
+// ceiling for the values this schema keeps in one rather than in a LONGTEXT.
+//
+// BYTES, NOT CHARACTERS, which is the one place this differs from MaxFieldLen
+// beside it and the reason CheckTextLen does not simply call CheckFieldLen with
+// a bigger number: MySQL and Dolt bound a TEXT column by its encoded length, so
+// a value of 40000 multi-byte characters overflows it while a value of 65000
+// ASCII characters does not.
+//
+// The large-content columns are deliberately NOT bounded by this — issue
+// descriptions and comment bodies are LONGTEXT precisely so an embedded image or
+// a captured transcript fits (migrations 0049 and 0065). This is for the columns
+// that hold a VALUE rather than a document, `config.value` being the one a front
+// door can reach with an arbitrary payload.
+const MaxTextBytes = 65535
+
+// CheckTextLen returns ErrFieldTooLong (wrapped with context) when val exceeds
+// MaxTextBytes bytes. name is the field label used in the message.
+//
+// It exists so a front door can refuse an oversized value with a 400 that names
+// the member, instead of letting the column refuse it — which arrives as a
+// driver error, is classified as a generic 500, and tells the caller nothing it
+// could act on.
+func CheckTextLen(name, val string) error {
+	if n := len(val); n > MaxTextBytes {
+		return fmt.Errorf("%w: %s is %d bytes (max %d)", ErrFieldTooLong, name, n, MaxTextBytes)
 	}
 	return nil
 }
@@ -1122,6 +1170,39 @@ type IssueDetails struct {
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
 	EpicCloseable      *bool `json:"epic_closeable,omitempty"`
+
+	// Revision is the detail view's projection of the embedded Issue's
+	// RowVersion under a storage-neutral wire name, and it is the ONE place
+	// the token is published to a client. Read RowVersion's doc for what the
+	// token means: it is EQUALITY-ONLY, its coverage is deliberately PARTIAL,
+	// and 0 is a real value rather than an absence.
+	//
+	// It exists as a projected field rather than a re-tagged RowVersion
+	// because RowVersion is json:"-" for a reason that still holds — row_lock
+	// is random per write, so serializing it generically would break stable
+	// list and export round-trips — and the detail view is the one shape that
+	// neither lists nor interchanges. NewIssueDetails is the only door: a
+	// literal with an unset Revision serializes a 0 that is indistinguishable
+	// from a legacy migration-0054 row, so the projection lives beside the
+	// field and not at each caller.
+	//
+	// NO omitempty. A guarded write that expects 0 matches an un-mutated
+	// legacy row and misses any current one, which is correct CAS; omitting
+	// the member would leave that client unable to read the value it must
+	// send, and would make an absent field mean either "legacy-zero" or "this
+	// producer has no token".
+	Revision int64 `json:"revision"`
+}
+
+// NewIssueDetails starts a detail view of issue with the wire-visible revision
+// token projected off the row.
+//
+// It is the only constructor: the token is a projection, not an independent
+// field, and 0 is a legal token value, so a detail view assembled by struct
+// literal would publish a silently wrong token that nothing can distinguish
+// from a right one. The caller fills in labels, edges and counts afterwards.
+func NewIssueDetails(issue Issue) *IssueDetails {
+	return &IssueDetails{Issue: issue, Revision: issue.RowVersion}
 }
 
 // DependencyType categorizes the relationship
@@ -1176,11 +1257,20 @@ var AllDependencyTypes = []DependencyType{
 	DepDelegatedFrom,
 }
 
+// MaxDependencyTypeLen is the widest dependency type either dependency plane
+// can store: dependencies.type and wisp_dependencies.type are both VARCHAR(32)
+// (migrations 0002_create_dependencies and 0021_create_wisp_auxiliary), and no
+// later migration widens either. Validators bound the type here rather than at
+// some looser number of their own, so a type that passes validation is a type
+// an edge can actually carry — a longer one is refused up front instead of
+// becoming a filter that silently matches nothing.
+const MaxDependencyTypeLen = 32
+
 // IsValid checks if the dependency type value is valid.
-// Accepts any non-empty string up to 50 characters.
+// Accepts any non-empty string that fits the type column (MaxDependencyTypeLen).
 // Use IsWellKnown() to check if it's a built-in type.
 func (d DependencyType) IsValid() bool {
-	return len(d) > 0 && len(d) <= 50
+	return len(d) > 0 && len(d) <= MaxDependencyTypeLen
 }
 
 // WellKnownDependencyTypes returns the built-in dependency types accepted by
@@ -1243,6 +1333,32 @@ const (
 	WaitsForAllChildren = "all-children" // Wait for all dynamic children to complete
 	WaitsForAnyChildren = "any-children" // Proceed when first child completes (future)
 )
+
+// IsSchedulingEdge reports whether a dependency type belongs to the static
+// COMBINED-CYCLE SET: blocks, conditional-blocks and parent-child. It is the
+// set every cycle probe and every whole-graph gate walks, and parent-child is
+// in it because a blocked parent propagates its blocked state to its children
+// in the ready-work computation — so a chain mixing blocks and parent-child
+// edges can form a livelock that leaves nothing ready.
+//
+// WAITS-FOR IS DELIBERATELY OUTSIDE IT. That edge also affects readiness, but
+// its gate clears on the spawner's CHILDREN rather than on the spawner, so a
+// waits-for edge cannot close a cycle the way a blocking one does.
+//
+// IT LIVES HERE, next to the Dep* constants themselves, because four packages
+// walk this set and no two of them can import each other: internal/storage/
+// issueops imports internal/storage/domain, so domain cannot import back, and
+// internal/storage/domain/db and internal/storage/uow are third and fourth. Each
+// had its own spelling of the same three types, so ADDING a fifth scheduling
+// type was four edits with nothing to catch a missed one. It is one edit now.
+func IsSchedulingEdge(t DependencyType) bool {
+	switch t {
+	case DepBlocks, DepConditionalBlocks, DepParentChild:
+		return true
+	default:
+		return false
+	}
+}
 
 // IsValidWaitsForGate reports whether gate names a known waits-for fanout gate.
 func IsValidWaitsForGate(gate string) bool {
@@ -1509,6 +1625,47 @@ const (
 	EventLeaseReclaimed EventType = "lease_reclaimed"
 )
 
+// ProvenanceEvent is one entry in the append-only provenance log: a typed
+// binding from an issue to a structured external artifact (a git SHA, PR,
+// work-id, transcript, or branch).
+//
+// Unlike Event (a field-mutation audit record), a ProvenanceEvent records that
+// something happened in the world — a commit landed, a claim was made, work was
+// handed off — and ties it to an opaque external Ref. bd never interprets Actor
+// or Ref; only Kind and RefKind are structurally validated. This keeps the log
+// a primitive usable by any runtime without baking in orchestrator semantics.
+//
+// OccurredAt (event-time) is distinct from CreatedAt (ingest-time): a producer
+// may record a fact after it happened.
+type ProvenanceEvent struct {
+	ID         string     `json:"id"`
+	IssueID    string     `json:"issue_id"`
+	Kind       ProvKind   `json:"kind"`
+	Actor      *string    `json:"actor,omitempty"`
+	Ref        *string    `json:"ref,omitempty"`
+	RefKind    *string    `json:"ref_kind,omitempty"`
+	Payload    *string    `json:"payload,omitempty"`
+	Source     string     `json:"source"`
+	OccurredAt *time.Time `json:"occurred_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// ProvKind categorizes a provenance event.
+type ProvKind string
+
+// Provenance event kind constants. These are the only structurally-valid kinds;
+// the record path rejects anything outside this set.
+const (
+	ProvCut     ProvKind = "cut"
+	ProvClaim   ProvKind = "claim"
+	ProvSuspend ProvKind = "suspend"
+	ProvResume  ProvKind = "resume"
+	ProvHandoff ProvKind = "handoff"
+	ProvCommit  ProvKind = "commit"
+	ProvLand    ProvKind = "land"
+	ProvUsed    ProvKind = "used"
+)
+
 // BlockedIssue extends Issue with blocking information
 type BlockedIssue struct {
 	Issue
@@ -1744,6 +1901,33 @@ type IssueFilter struct {
 	AfterCreatedAt *time.Time
 	AfterID        string
 
+	// AfterPriority EXTENDS the position above to the (priority ASC,
+	// created_at DESC, id ASC) order — the order SortBy="priority" (and the
+	// empty default) renders. When it is set the restriction becomes
+	// (priority > AfterPriority)
+	//   OR (priority = AfterPriority AND created_at < AfterCreatedAt)
+	//   OR (priority = AfterPriority AND created_at = AfterCreatedAt AND id > AfterID),
+	// which is total for the same reason the pair above is: priority and
+	// created_at are NOT NULL and id is the primary key, so a page boundary
+	// inside a run of equal (priority, created_at) resolves on id with no
+	// dropped and no duplicated row.
+	//
+	// IT IS THE SAME POSITION, NOT A SECOND ONE. AfterCreatedAt still decides
+	// whether a position was supplied at all; a priority with no instant is
+	// half a position and is ignored, exactly as AfterID alone is. Set it only
+	// under the priority order — pairing it with SortBy="created" positions in
+	// an order the ORDER BY does not render, which pages a walk through rows
+	// in an order neither side agrees on.
+	//
+	// THE KEY IS MUTABLE, which created_at is not, and that changes what a
+	// walk can promise. `bd update --priority` moves a row between pages
+	// mid-walk, so a row can be seen twice or missed — the already-documented
+	// consequence of pinning a position rather than a snapshot, reached here
+	// by updates as well as by creations. What totality buys is that
+	// UNCHANGED data never skips or duplicates, which is what welding the
+	// listing to the created order originally bought.
+	AfterPriority *int
+
 	// Empty/null checks
 	EmptyDescription bool
 	NoAssignee       bool
@@ -1758,6 +1942,17 @@ type IssueFilter struct {
 
 	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
+
+	// EphemeralTier selects a SWEEP TIER rather than the raw ephemeral flag:
+	// a row is ephemeral-tier when ephemeral=1 OR it carries a wisp_type.
+	// The distinction exists because the flag alone misses typed wisps minted
+	// without it (older creators set wisp_type but not ephemeral), and those
+	// rows must fall to `bd purge`, not accumulate forever — while NoHistory
+	// beads (wisps plane, ephemeral=0, no wisp_type) stay durable-tier.
+	// Unlike Ephemeral=true this field does NOT route the search to the wisps
+	// plane alone; a tier query must merge both planes, because legacy typed
+	// wisps can live in the issues table. nil = no tier constraint.
+	EphemeralTier *bool
 
 	// Pinned filtering
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
@@ -1808,6 +2003,15 @@ type IssueFilter struct {
 	// Opt-in performance flag for the bd list --skip-labels code path.
 	SkipLabels bool
 
+	// SkipCounts suppresses cardinality hydration on the counts mega-query.
+	// When true the three aggregate joins behind DependencyCount,
+	// DependentCount and CommentCount are dropped and all three come back 0,
+	// which callers MUST read as unknown rather than as none. The rows, their
+	// order, Parent and Dependencies are unaffected. It is the counts-side
+	// twin of SkipLabels and is ignored by the paths that project no counts
+	// (SearchIssues, GetReadyWork).
+	SkipCounts bool
+
 	// Performance escape hatches
 	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
 	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0
@@ -1839,11 +2043,19 @@ type IssueFilter struct {
 	// reference columns in WHERE regardless of SELECT shape. Default false preserves
 	// today's behavior at every call site.
 	//
-	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
-	// Dolt). The proxied-server (domain/db) path does not check this field yet
-	// and always returns fully-hydrated issues with IsLitePartial=false —
-	// correct results, no lite optimization. Wiring Lite through domain/db is
-	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	// Backend coverage: honored on BOTH stacks for the COUNTED page, which is
+	// every read that returns IssueWithCounts — issueops.Reader.List on either
+	// implementation, and so `bd list --json` on both routes and
+	// GET /v0/beads/issues. It rides the counts mega-query as
+	// sqlbuild.CountsHydration.Lite, which both seams derive from this field
+	// through their hydrationFor helper.
+	//
+	// The UNCOUNTED search is store-backed only: SearchIssuesInTx selects
+	// issueLiteProjection from this field, and the domain/db SearchIssues has
+	// no equivalent, so a caller on that path gets correct rows fully hydrated
+	// rather than an error. That path serves the text renderings, which print
+	// no body, so the gap costs bytes off the wire and no correctness.
+	// See engdocs/EXTENDING.md.
 	Lite bool
 }
 
@@ -1966,6 +2178,11 @@ type WorkFilter struct {
 	// When Type is set, ExcludeTypes is ignored (explicit type inclusion wins).
 	ExcludeTypes []IssueType
 
+	// ID exclusion: omit these issues before ordering, pagination, or atomic
+	// ready-claim selection. Storage policy decorators use this to inject
+	// query-time blockers that cannot be represented by local is_blocked state.
+	ExcludeIDs []string
+
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
@@ -1980,6 +2197,19 @@ type WorkFilter struct {
 	// MaxRowsSource attributes which knob set MaxRows. Expected values:
 	// "--max-rows", "BEADS_MAX_ROWS", or "" (library users with no source).
 	MaxRowsSource string
+
+	// Lite mirrors IssueFilter.Lite for ready work: the heavy TEXT columns
+	// (description, design, acceptance_criteria, notes, payload, waiters) are
+	// not selected, and the returned issues carry IsLitePartial=true with those
+	// fields zero-valued. It bounds the SIZE of a row, never which rows match:
+	// a predicate that reads a heavy column keeps working, because WHERE is
+	// independent of the SELECT shape.
+	//
+	// Unlike IssueFilter.Lite it is honored on BOTH backends, through the
+	// counts mega-query's CountsHydration. The two knobs beside it there
+	// (SkipLabels, SkipCounts) have no WorkFilter counterpart on purpose; see
+	// issueops.readyHydrationFor.
+	Lite bool
 }
 
 // StaleFilter is used to filter stale issue queries
@@ -1987,6 +2217,10 @@ type StaleFilter struct {
 	Days   int    // Issues not updated in this many days
 	Status string // Filter by status (open|in_progress|blocked), empty = all non-closed
 	Limit  int    // Maximum issues to return
+
+	Labels        []string // AND semantics: issue must have ALL these labels
+	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
+	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
 }
 
 // WispFilter is used to filter ListWisps queries.

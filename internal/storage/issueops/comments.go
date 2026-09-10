@@ -275,13 +275,19 @@ func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text 
 		return nil, fmt.Errorf("add comment to %s: %w", commentTable, err)
 	}
 
-	return &types.Comment{
+	comment := &types.Comment{
 		ID:        id,
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,
 		CreatedAt: stored,
-	}, nil
+	}
+	if err := RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+		ID: id, Author: author, Text: text, CreatedAt: stored, Source: CommentSourceStructured,
+	}); err != nil {
+		return nil, err
+	}
+	return comment, nil
 }
 
 // AddCommentEventInTx adds a comment as an event to an issue within a transaction.
@@ -292,13 +298,25 @@ func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment s
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, _ := WispTableRouting(isWisp)
 
-	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
+	createdAt := NowAuxTime()
+	id, err := InsertDerivedEventReturningID(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
 		EventType: types.EventCommented,
 		Actor:     actor,
 		Comment:   str(comment),
-	}); err != nil {
+		CreatedAt: createdAt,
+	})
+	if err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
-	return nil
+	stored, err := ParseAuxTime(createdAt)
+	if err != nil {
+		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
+	}
+	// An audit-trail comment is replayable text a consumer must be able to
+	// reproduce, so it carries the same payload as a structured comment,
+	// distinguished by Source.
+	return RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+		ID: id, Author: actor, Text: comment, CreatedAt: stored, Source: CommentSourceAudit,
+	})
 }

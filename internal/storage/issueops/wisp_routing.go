@@ -240,6 +240,7 @@ func DeleteCascadeTables(isWisp bool) []string {
 		"labels",
 		"comments",
 		"events",
+		"provenance_events",
 		"child_counters",
 		"issue_snapshots",
 		"compaction_snapshots",

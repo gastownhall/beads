@@ -78,6 +78,7 @@ func clonePublicIssue(issue *publicops.Issue) *publicops.Issue {
 	clone.Comments = cloneComments(issue.Comments)
 	clone.BondedFrom = append([]types.BondRef(nil), issue.BondedFrom...)
 	clone.Waiters = append([]string(nil), issue.Waiters...)
+	clone.WispPlaneOverride = cloneBool(issue.WispPlaneOverride)
 	return &clone
 }
 
@@ -121,6 +122,14 @@ func cloneRawMessageMap(values map[string]json.RawMessage) map[string]json.RawMe
 }
 
 func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func cloneBool(value *bool) *bool {
 	if value == nil {
 		return nil
 	}

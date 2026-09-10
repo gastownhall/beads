@@ -9,10 +9,10 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// countAttemptRefusals counts the refusals printed by one read-merge-write
-// ATTEMPT, not the run's failure summary. applyUpdateProxiedAttempt prints the
-// policy error flush left; reportUpdateFailures reprints the same text indented
-// behind the issue ID, so "unindented" separates the two.
+// countAttemptRefusals counts the refusals printed for one issue, not the run's
+// failure summary. proxiedUpdateFailure prints the policy error flush left;
+// reportUpdateFailures reprints the same text indented behind the issue ID, so
+// "unindented" separates the two.
 func countAttemptRefusals(out string) int {
 	n := 0
 	for _, line := range strings.Split(out, "\n") {
@@ -28,22 +28,22 @@ func countAttemptRefusals(out string) int {
 //
 // It exists because the two halves of this behavior were written against each
 // other's stale shape. #5206 added the policy and its two proxied refusal arms
-// while applyUpdateProxiedAttempt still ran a bespoke backoff loop and returned
-// four values; bd-m2u had meanwhile collapsed that function onto
-// uow.RunTxResultWithin, whose attempt returns three. Git merged the two
-// cleanly, and the only proxied coverage #5206 shipped was a unit test on
-// buildUpdateSpecForIssue — which passes whether or not the refusal ever
-// reaches a user.
+// while this path still ran a bespoke read-merge-write of its own, and the only
+// proxied coverage it shipped was a unit test on the spec that path built —
+// which passes whether or not the refusal ever reaches a user. These assertions
+// are the only proxied close-policy coverage that watches a user-visible
+// boundary rather than an internal request.
 //
 // So the assertions here are end-to-end and deliberately narrow:
 //
-//   - the sentinels still match through ApplyUpdate's wrapping, so the boundary
-//     prints the close-path copy rather than the generic "Error updating" arm;
+//   - the sentinels still match through the contract's wrapping, so the
+//     boundary prints the close-path copy rather than the generic
+//     "Error updating" arm;
 //   - the refusal is TERMINAL, printed exactly once. A policy error is not a
-//     serialization failure, so failedUpdateAttempt hands the retry loop a nil
-//     error and an empty commit message: no commit, no retry. If a later change
-//     let it propagate as a retryable error instead, the backoff would redo the
-//     attempt for its whole budget and this count would climb;
+//     serialization failure, so the contract's retry loop wraps it Permanent:
+//     no commit, no retry. If a later change let it propagate as a retryable
+//     error instead, the backoff would redo the attempt for its whole budget
+//     and this count would climb;
 //   - it exits 1, never ExitGuardMismatch/13, which is reserved for a stale
 //     --if-assignee/--if-status precondition;
 //   - nothing is written; and --force overrides, on the same path.

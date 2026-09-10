@@ -33,17 +33,10 @@ const IssueSelectColumns = sqlbuild.IssueSelectColumns
 // IssueSelectColumnsLite must include sqlbuild.LeaseJoin(table) in its FROM
 // clause, exactly as full hydration does (see issueLiteProjection in
 // search.go, joinLeases: true).
-const IssueSelectColumnsLite = `id, content_hash, title,
-	       status, priority, issue_type, assignee, estimated_minutes,
-	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
-	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason, closed_by_session,
-	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
-	       await_type, await_id, timeout_ns,
-	       mol_type,
-	       event_kind, actor, target,
-	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock, storage_class,
-	       leases.lease_expires_at, leases.heartbeat_at, leases.granted_node`
+// The list itself lives in internal/storage/sqlbuild beside IssueSelectColumns,
+// shared with the domain/db stack and with the counts mega-query, which renders
+// a qualified variant of it.
+const IssueSelectColumnsLite = sqlbuild.IssueSelectColumnsLite
 
 // HeavyDropList enumerates the columns omitted from IssueSelectColumnsLite.
 // Test-only: the schema-parity test asserts

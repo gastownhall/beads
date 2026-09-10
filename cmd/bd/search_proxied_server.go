@@ -65,9 +65,8 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		Limit: limit,
 	}
 
-	if status == "" {
-		filter.ExcludeStatus = []types.Status{types.StatusClosed}
-	}
+	// Default (no --status) searches all statuses including closed
+	// (bd-t5yex) — keep in lockstep with the embedded path in search.go.
 
 	if assignee != "" {
 		filter.Assignee = &assignee
