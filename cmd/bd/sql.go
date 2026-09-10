@@ -264,7 +264,15 @@ func isReadOnlySQLQuery(query string) bool {
 	if strings.Contains(query, `\`) {
 		return false
 	}
-	trimmed := strings.TrimSpace(strings.ToUpper(query))
+	upper := strings.ToUpper(query)
+	// Dolt exposes mutating procedures such as DOLT_COMMIT and DOLT_RESET
+	// as SELECT-callable functions. ReadOnly only suppresses schema setup; it
+	// is not a write barrier, so keep any DOLT_ query on a writable open and
+	// preserve the post-run export, push, and journal-prune gates.
+	if strings.Contains(upper, "DOLT_") {
+		return false
+	}
+	trimmed := strings.TrimSpace(upper)
 	if rest, ok := strings.CutPrefix(trimmed, "EXPLAIN"); ok {
 		if rest != "" && rest[0] != ' ' && rest[0] != '\t' && rest[0] != '\n' && rest[0] != '\r' {
 			return false // some other word that merely starts with EXPLAIN

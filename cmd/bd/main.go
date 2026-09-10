@@ -2023,7 +2023,7 @@ func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
 // read-only set only when its statement was classified read-only at
 // store-open time (GH#4121).
 func commandIsEffectivelyReadOnly(cmdName string) bool {
-	return isReadOnlyCommand(cmdName) || sqlOpenedReadOnly.Load()
+	return isReadOnlyCommand(cmdName) || (cmdName == "sql" && sqlOpenedReadOnly.Load())
 }
 
 func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useReadOnly, globalFlag, serverMode bool) bool {

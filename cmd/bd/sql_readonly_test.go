@@ -43,6 +43,13 @@ func TestIsReadOnlySQLQuery(t *testing.T) {
 		{"create_table", "CREATE TABLE t (id INT)", false},
 		{"drop_table", "DROP TABLE issues", false},
 		{"with_delete", "WITH t AS (SELECT id FROM issues) DELETE FROM issues WHERE id IN (SELECT id FROM t)", false},
+		// Dolt exposes mutating procedures as SELECT-callable functions. Keep
+		// these on a writable open so post-run export, push, and prune gates run.
+		{"dolt_commit", "SELECT DOLT_COMMIT('-am', 'message')", false},
+		{"dolt_commit_lowercase", "select dolt_commit('-am', 'message')", false},
+		{"dolt_reset", "SELECT DOLT_RESET('soft')", false},
+		{"dolt_checkout", "SELECT DOLT_CHECKOUT('feature')", false},
+		{"dolt_merge_qualified", "SELECT dolt.DOLT_MERGE('feature')", false},
 		// MySQL string escapes must not desync the CTE scanner (gate review P1):
 		// a backslash-escaped quote inside the CTE body previously lost the
 		// parenthesis depth and let a trailing DELETE classify read-only.
@@ -86,6 +93,29 @@ func TestIsReadOnlySQLQuery(t *testing.T) {
 				t.Errorf("isReadOnlySQLQuery(%q) = %v, want %v", tc.query, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSQLQueryIsReadRejectsEscapedQuoteCTEWrite pins the proxied SQL
+// classifier directly. The pre-open classifier rejects all backslashes before
+// reaching this scanner, so testing only isReadOnlySQLQuery would not catch a
+// regression in withOuterStatementIsRead.
+func TestSQLQueryIsReadRejectsEscapedQuoteCTEWrite(t *testing.T) {
+	query := `WITH t AS (SELECT 'a\'(' AS x) DELETE FROM issues WHERE id = 'victim'`
+	if sqlQueryIsRead(query) {
+		t.Fatalf("sqlQueryIsRead(%q) = true, want false", query)
+	}
+}
+
+func TestCommandIsEffectivelyReadOnlyScopesDynamicSQLFlag(t *testing.T) {
+	sqlOpenedReadOnly.Store(true)
+	t.Cleanup(func() { sqlOpenedReadOnly.Store(false) })
+
+	if !commandIsEffectivelyReadOnly("sql") {
+		t.Fatal("dynamically classified read-only sql must be effectively read-only")
+	}
+	if commandIsEffectivelyReadOnly("create") {
+		t.Fatal("dynamic sql state must not classify another command as read-only")
 	}
 }
 
