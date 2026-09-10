@@ -51,14 +51,6 @@ type IssueSQLRepository interface {
 	// needs and the result does not carry — a swap can hold its precondition
 	// and write nothing (see issueops.MetadataCAS.CompareAndSetKey).
 	CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error)
-	// CompareAndSetVersion runs R16's SHARED whole-of-state per-record CAS
-	// body on this repository's transaction, which is how the unit-of-work
-	// provider reaches the same function the two Dolt-backed stores wrap.
-	// See issueops.CompareAndSetVersionInTx.
-	CompareAndSetVersion(ctx context.Context, plan storage.CompareAndSetVersionPlan) (storage.CompareAndSetVersionResult, error)
-	// CurrentVersion reports the Address currently current for id. See
-	// issueops.CurrentExpectedRevisionInTx.
-	CurrentVersion(ctx context.Context, id string) (string, error)
 	// ReleaseIssue runs the SHARED claim-release body on this repository's
 	// transaction, which is how the unit-of-work provider reaches the same
 	// function the two store backends wrap. It takes no table option: the body
@@ -340,12 +332,6 @@ type IssueUseCase interface {
 	// CompareAndSetMetadataKey is the shape issueops.MetadataCAS publishes; see
 	// IssueSQLRepository.CompareAndSetMetadataKey for what the bool carries.
 	CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error)
-	// CompareAndSetVersion is R16's whole-of-state per-record CAS write; see
-	// IssueSQLRepository.CompareAndSetVersion.
-	CompareAndSetVersion(ctx context.Context, plan storage.CompareAndSetVersionPlan) (storage.CompareAndSetVersionResult, error)
-	// CurrentVersion reports the Address currently current for id; see
-	// IssueSQLRepository.CurrentVersion.
-	CurrentVersion(ctx context.Context, id string) (string, error)
 	// ReleaseIssue is the shape issueops.Releaser publishes; see
 	// IssueSQLRepository.ReleaseIssue for what the bool carries.
 	ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error)
@@ -510,18 +496,6 @@ func (u *issueUseCaseImpl) UpdateWisp(ctx context.Context, id string, updates ma
 // plane — are typed sentinels both front doors classify.
 func (u *issueUseCaseImpl) CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error) {
 	return u.issueRepo.CompareAndSetMetadataKey(ctx, plan)
-}
-
-// CompareAndSetVersion passes the plan straight through, for the reason
-// CompareAndSetMetadataKey gives.
-func (u *issueUseCaseImpl) CompareAndSetVersion(ctx context.Context, plan storage.CompareAndSetVersionPlan) (storage.CompareAndSetVersionResult, error) {
-	return u.issueRepo.CompareAndSetVersion(ctx, plan)
-}
-
-// CurrentVersion passes id straight through, for the reason
-// CompareAndSetMetadataKey gives.
-func (u *issueUseCaseImpl) CurrentVersion(ctx context.Context, id string) (string, error) {
-	return u.issueRepo.CurrentVersion(ctx, id)
 }
 
 // ReleaseIssue passes the request straight through.
