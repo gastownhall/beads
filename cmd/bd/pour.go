@@ -123,9 +123,10 @@ func runPour(cmd *cobra.Command, args []string) error {
 		if sg.Phase == "vapor" {
 			warnPourVaporFormula(in.protoArg, in.varFlags)
 		}
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// in.protoArg IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// in.protoArg IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the proto-ID lookup below, which
 		// would otherwise mask this as "not found as formula or proto ID".
 		return HandleError("%v", err)
