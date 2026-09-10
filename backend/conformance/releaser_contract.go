@@ -214,6 +214,11 @@ func RunReleaserRefusesAForeignClaimUntilForced(t *testing.T, ctx context.Contex
 // SEPARATOR-INSENSITIVE AND NOTHING ELSE (canonicalActor, ga-5ksp5): a run of
 // ".", "_" or "-" matches any other such run, so an expectation spelled under
 // one layer's separator convention releases a claim stored under another's.
+// The one exception is an exact "--" run: it is gascity's encoding of a
+// rig-qualified agent's "/" and decodes to "/", so "a--b" matches "a/b" and
+// not "a__b" (ga-2vy9p2). This tier does not pin that limb — the respelling
+// exercised below is "-" -> "_", which is unaffected — but the contract text
+// must not claim a rule the implementation no longer has.
 // NOTHING ELSE IS FORGIVEN, and the padded limb is the half that says so: an
 // implementation that reached for strings.TrimSpace to make the respelled limb
 // pass would release on an expectation the caller never actually held.

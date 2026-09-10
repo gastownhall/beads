@@ -14,11 +14,17 @@ import "context"
 // clock steps back — can commit seq N with a later TS than seq N+1. Seq is the
 // order; TS is a label. The retention floors resolve the same way, to a seq
 // bound rather than a per-row age test, for exactly this reason.
+//
+// Actor is the acting identity that performed the mutation, as resolved for
+// the audit-events table; empty when the mutation path has no actor (derived
+// maintenance, actorless delete plumbing, and rows written before the column
+// existed).
 type Row struct {
 	Seq         int64
 	TS          string
 	Op          string
 	IssueID     string
+	Actor       string
 	IssueJSON   string
 	DepJSON     string
 	CommentJSON string

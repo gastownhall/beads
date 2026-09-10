@@ -176,6 +176,8 @@ func BeadsIssueToGitHubFields(issue *types.Issue, config *MappingConfig) map[str
 	// Append the metadata block unless the description already ends with a
 	// well-formed one (the engine's FormatDescription hook has already
 	// rendered it). Marker text merely quoted in user prose does not count.
+	// Without graph inputs, the fallback emits only the ID and Source footer:
+	// nil lists omit both tasklist sections. Preserve pre-rendered lists above.
 	body := issue.Description
 	if StripGitHubSyncBlock(body) == body {
 		body = RenderGitHubIssueBody(issue, nil, nil, "")

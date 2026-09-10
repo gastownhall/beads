@@ -226,6 +226,15 @@ Yes — `bd github sync --pull-only` imports issues in bulk (`bd github pull <re
 
 ## Migration
 
+### What changes when GitHub sync adds metadata footers?
+
+The first push after upgrading to GitHub metadata footers updates the bodies of
+linked issues in the selected sync set, even when their other fields are
+unchanged. A full sync can therefore issue a body PATCH for every linked issue
+and trigger GitHub notifications. Pulling strips the generated footer from the
+local description while preserving user text. Bare or malformed marker examples
+remain user text; they do not establish a link to a bead.
+
 ### How do I migrate from GitHub Issues, Jira, or Linear?
 
 Beads has built-in bidirectional sync for all three — `bd github`, `bd jira`, and `bd linear` each provide `sync` for bulk moves, plus `pull`/`push` for specific issues by ID (GitLab, Azure DevOps, and Notion are covered by `bd gitlab`, `bd ado`, and `bd notion`). Configure credentials with `bd config set` per the [CLI reference](/cli-reference/index), then run the sync in the pull direction: `bd github sync --pull-only`, `bd jira sync --pull`, or `bd linear sync --pull`.
@@ -278,6 +287,8 @@ Yes, three ways: `bd query` for the built-in query language (compound filters, b
 ### Does beads support Windows?
 
 Yes — native Windows support, no MSYS or MinGW required. A PowerShell script installs prebuilt releases, and everything works with Windows paths. See [Installation](/getting-started/installation#windows-11).
+
+Because `bd.exe` is a native binary, two integration details catch people out: Node programs cannot spawn the npm `bd.cmd` shim without a shell, and `/tmp` paths that reach `bd` unconverted — from Node, scripts, or config values — resolve to the drive root, not Git Bash's `/tmp`. Both are covered under [Platform-Specific Issues](/reference/troubleshooting#platform-specific-issues).
 
 ### Can I use beads with git worktrees?
 

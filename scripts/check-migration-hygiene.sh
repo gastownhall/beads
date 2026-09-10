@@ -37,7 +37,12 @@
 #      EXECUTE reports success (dolthub/dolt#11345, mybd-p8i3). Prepared
 #      ALTER TABLE is the same underlying limitation but a separate, accepted
 #      idiom for idempotent DDL re-runs (see cli_migrations.go), so it is not
-#      flagged. Neither is a prepared `INSERT INTO __<standin>`: that IS the
+#      flagged HERE — it has its own guard,
+#      TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified in
+#      internal/storage/schema/cli_prepared_ddl.go, which reads the generated
+#      bundle rather than the diff and so also covers migrations this
+#      new-files-only check never sees. Neither is a prepared
+#      `INSERT INTO __<standin>`: that IS the
 #      recommended pattern (0059, gastownhall/beads#4877), where a silent
 #      no-op degrades gracefully instead of corrupting state. The exemption
 #      stops there on purpose -- a prepared UPDATE or DELETE is never

@@ -39,7 +39,7 @@ type ClaimRowResult struct {
 type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
-	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (changed bool, err error)
+	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (changed bool, err error)
 	PromoteFromEphemeral(ctx context.Context, id, actor string) error
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
 	// CompareAndSetMetadataKey runs the SHARED compare-and-set body on this
@@ -787,7 +787,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	if spec.Persistence != nil {
-		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence); err != nil {
+		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence, actor); err != nil {
 			return nil, fmt.Errorf("ApplyUpdate: move persistence for %s: %w", id, err)
 		}
 		useWisp, err = u.isWispID(ctx, id)

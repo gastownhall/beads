@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -41,8 +42,10 @@ func TestResolveWhereBeadsDir_FallsBackToFindBeadsDir(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir(%q): %v", repoDir, err)
 	}
+	git.ResetCaches()
 	t.Cleanup(func() {
 		_ = os.Chdir(originalWD)
+		git.ResetCaches()
 	})
 
 	t.Setenv("BEADS_DIR", "")
@@ -79,6 +82,7 @@ func TestResolveWhereBeadsDir_ReturnsEmptyWithoutWorkspace(t *testing.T) {
 	resetCommandContext()
 
 	workspace := t.TempDir()
+	initGitRepoAt(t, workspace)
 	originalWD, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -86,8 +90,10 @@ func TestResolveWhereBeadsDir_ReturnsEmptyWithoutWorkspace(t *testing.T) {
 	if err := os.Chdir(workspace); err != nil {
 		t.Fatalf("chdir(%q): %v", workspace, err)
 	}
+	git.ResetCaches()
 	t.Cleanup(func() {
 		_ = os.Chdir(originalWD)
+		git.ResetCaches()
 	})
 
 	t.Setenv("BEADS_DIR", "")
@@ -146,8 +152,10 @@ func TestResolveWhereBeadsDir_UsesInitializedDBPath(t *testing.T) {
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
+	git.ResetCaches()
 	t.Cleanup(func() {
 		_ = os.Chdir(originalWD)
+		git.ResetCaches()
 	})
 
 	t.Setenv("BEADS_DIR", "")

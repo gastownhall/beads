@@ -89,6 +89,12 @@ func (o *issueOperations) Create(ctx context.Context, request publicops.CreateRe
 		if attempt.Issue != nil && !attempt.Issue.Ephemeral && !attempt.Issue.NoHistory && createContext.InfraTypes[string(attempt.Issue.IssueType)] {
 			attempt.Issue.Ephemeral = true
 		}
+		// A wisp_type is a claim of ephemerality, same as every other create
+		// path: minted without the flag it would land in the issues plane
+		// where no TTL, GC, or purge tier owns it.
+		if attempt.Issue != nil && !attempt.Issue.Ephemeral && !attempt.Issue.NoHistory && attempt.Issue.WispType != "" {
+			attempt.Issue.Ephemeral = true
+		}
 		params, useWisp, err := createParams(attempt)
 		if err != nil {
 			return publicops.CreateResult{}, "", validationError(err)

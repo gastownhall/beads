@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -88,6 +90,7 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 	noAssignee, _ := cmd.Flags().GetBool("no-assignee")
 	noLabels, _ := cmd.Flags().GetBool("no-labels")
 	includeInfra, _ := cmd.Flags().GetBool("include-infra")
+	metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
 
 	request := issueops.CountRequest{
 		Status:        status,
@@ -104,6 +107,19 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 		NoAssignee:    noAssignee,
 		NoLabels:      noLabels,
 		IncludeInfra:  includeInfra,
+	}
+	if len(metadataFieldFlags) > 0 {
+		request.MetadataFields = make(map[string]string, len(metadataFieldFlags))
+		for _, mf := range metadataFieldFlags {
+			k, v, ok := strings.Cut(mf, "=")
+			if !ok || k == "" {
+				return issueops.CountRequest{}, "", HandleErrorRespectJSON("invalid --metadata-field: expected key=value, got %q", mf)
+			}
+			if err := storage.ValidateMetadataKey(k); err != nil {
+				return issueops.CountRequest{}, "", HandleErrorRespectJSON("invalid --metadata-field key: %v", err)
+			}
+			request.MetadataFields[k] = v
+		}
 	}
 
 	if cmd.Flags().Changed("priority") {
@@ -262,6 +278,7 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("empty-description", false, "Filter issues with empty description")
 	cmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
 	cmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
+	cmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 
 	// Priority ranges
 	cmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")

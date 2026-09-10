@@ -355,6 +355,14 @@ func TestBeadsIssueToGitHubFields(t *testing.T) {
 	if !strings.Contains(body, "<!-- bd: bd-abc123 sync=github-v1 -->") {
 		t.Errorf("body = %q, want hidden bd ID marker", body)
 	}
+	// The mapper has no dependency graph. Its fallback may identify the bead,
+	// but must not invent dependency or dependent tasklist sections.
+	if !strings.Contains(body, "Source: `bd-abc123`") {
+		t.Errorf("body = %q, want source footer", body)
+	}
+	if strings.Contains(body, "### Dependencies") || strings.Contains(body, "### Dependents") {
+		t.Errorf("body = %q, want metadata-only fallback without tasklists", body)
+	}
 
 	// Verify labels include type, priority, and status
 	labels, ok := fields["labels"].([]string)
