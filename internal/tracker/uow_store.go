@@ -157,7 +157,7 @@ func (s *uowStore) ApplyIssueUpdate(ctx context.Context, id string, updates map[
 	}
 	var setLabels *[]string
 	if labels != nil {
-		copy := append([]string(nil), labels...)
+		copy := normalizedStringSlice(labels)
 		setLabels = &copy
 	}
 	return uow.RunTx(ctx, s.provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
