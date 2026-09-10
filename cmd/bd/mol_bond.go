@@ -39,6 +39,13 @@ Bond types:
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
 
+  With --ref, B is nested inside A rather than ordered against it, so a
+  sequential --ref arm carries no ordering: it is ready as soon as it is
+  spawned. Ordering a nested arm against its own container is unsatisfiable
+  in both directions (the arm waits for A to close; A cannot close while it
+  holds an open arm). --ref is refused with --type conditional, which has no
+  safe degradation - omit --ref to bond a conditional arm as a sibling.
+
 Phase control:
   By default, spawned protos follow the target's phase:
   - Attaching to mol (Ephemeral=false) → spawns as persistent (Ephemeral=false)
@@ -188,6 +195,9 @@ func gatherMolBondInput(cmd *cobra.Command, args []string) (molBondInput, error)
 	}
 	if in.bondType != types.BondTypeSequential && in.bondType != types.BondTypeParallel && in.bondType != types.BondTypeConditional {
 		return in, fmt.Errorf("invalid bond type '%s', must be: sequential, parallel, or conditional", in.bondType)
+	}
+	if err := refuseConditionalRefArm(in.bondType, in.childRef); err != nil {
+		return in, err
 	}
 
 	varFlags, _ := cmd.Flags().GetStringArray("var")
@@ -446,7 +456,31 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 	}, nil
 }
 
+// refuseConditionalRefArm rejects --ref combined with --type conditional.
+//
+// A --ref arm is nested inside its target, so an ordering edge onto that
+// target can never be satisfied (see buildAttachCloneOpts). A sequential bond
+// degrades gracefully: the edge is dropped and the arm carries no ordering. A
+// conditional edge means "run only if the target fails", so dropping it would
+// turn an arm that should almost never run into one that always runs - a
+// silent false dispatch, which is worse than the deadlock it replaced. There
+// is no reading of the two flags together that is both safe and useful, so
+// refuse rather than guess.
+//
+// Both gatherMolBondInput (which also covers --dry-run and the proxied route)
+// and buildAttachCloneOpts consult this, so a caller that skips flag
+// validation cannot construct the arm either.
+func refuseConditionalRefArm(bondType, childRef string) error {
+	if childRef == "" || bondType != types.BondTypeConditional {
+		return nil
+	}
+	return fmt.Errorf("--ref cannot be combined with --type conditional: a nested arm cannot be ordered against the molecule that contains it, and a conditional edge has no safe degradation - dropping it would run the arm unconditionally. Omit --ref to bond a conditional arm as a sibling, or use --type sequential or --type parallel with --ref")
+}
+
 func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (CloneOptions, error) {
+	if err := refuseConditionalRefArm(bondType, childRef); err != nil {
+		return CloneOptions{}, err
+	}
 	requiredVars := extractAllVariables(subgraph)
 	var missingVars []string
 	for _, v := range requiredVars {
@@ -485,6 +519,32 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 	if childRef != "" {
 		opts.ParentID = mol.ID
 		opts.ChildRef = childRef
+
+		// A --ref arm is nested INSIDE mol, and its ID already records that.
+		// Blocking it on mol as well is unsatisfiable in both directions: the
+		// arm waits for mol to close, and mol cannot close while it holds an
+		// open arm. Nesting carries the attachment, so the blocking edge is
+		// dropped rather than deadlocking the molecule it was bonded into.
+		//
+		// The arm therefore carries NO ordering relative to mol - it is ready
+		// as soon as it is spawned. That is a real loss of the "B runs after A
+		// completes" promise, documented at the two places that make it (this
+		// command's long help and docs/cli-reference/mol.md), and it is the
+		// deliberate trade: a nested arm's only satisfiable relationship to its
+		// container is containment.
+		//
+		// Only DepBlocks is dropped. DepConditionalBlocks never arrives here -
+		// refuseConditionalRefArm above rejects it - and keeping the check
+		// narrow means a future bond type that does reach this point is not
+		// silently stripped of its edge as well.
+		if depType == types.DepBlocks {
+			opts.AttachToID = ""
+			opts.AttachDepType = ""
+		}
+		// A parallel arm keeps its DepParentChild edge on top of the ParentID
+		// nesting. The two say the same thing, so the edge is redundant rather
+		// than wrong - but it is what `bd dep list` reports for every parallel
+		// arm bonded so far, and it is satisfiable, so it stays.
 	}
 	return opts, nil
 }
@@ -683,14 +743,21 @@ func resolveOrCookToSubgraph(ctx context.Context, s molReader, operand string, v
 	return subgraph, true, nil
 }
 
+// registerMolBondFlags declares bond's flags on cmd. It exists so a test can
+// build an isolated command with the real flag set rather than mutating the
+// package-level molBondCmd, whose flag values would then leak between tests.
+func registerMolBondFlags(cmd *cobra.Command) {
+	cmd.Flags().String("type", types.BondTypeSequential, "Bond type: sequential, parallel, or conditional")
+	cmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
+	cmd.Flags().Bool("dry-run", false, "Preview what would be created")
+	cmd.Flags().StringArray("var", []string{}, "Variable substitution for spawned protos (key=value)")
+	cmd.Flags().Bool("ephemeral", false, "Force spawn as vapor (ephemeral, Ephemeral=true)")
+	cmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent, Ephemeral=false)")
+	cmd.Flags().String("ref", "", "Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})")
+}
+
 func init() {
-	molBondCmd.Flags().String("type", types.BondTypeSequential, "Bond type: sequential, parallel, or conditional")
-	molBondCmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
-	molBondCmd.Flags().Bool("dry-run", false, "Preview what would be created")
-	molBondCmd.Flags().StringArray("var", []string{}, "Variable substitution for spawned protos (key=value)")
-	molBondCmd.Flags().Bool("ephemeral", false, "Force spawn as vapor (ephemeral, Ephemeral=true)")
-	molBondCmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent, Ephemeral=false)")
-	molBondCmd.Flags().String("ref", "", "Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})")
+	registerMolBondFlags(molBondCmd)
 
 	molCmd.AddCommand(molBondCmd)
 }
