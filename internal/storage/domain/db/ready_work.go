@@ -103,7 +103,13 @@ func (r *issueSQLRepositoryImpl) descendantsOfFutureDeferredParents(ctx context.
 		`, e.depTable, e.issueTable, e.targetCol)
 		rows, err := r.runner.QueryContext(ctx, q)
 		if err != nil {
-			if dberrors.IsTableNotExist(err) {
+			// Each edge joins a dependency table to an issue table. Only one of
+			// the four pairs is entirely durable, but three of them name at
+			// least one required table. Classified by error class alone this
+			// swallowed the edges naming a missing dependencies or issues and
+			// let the rest answer, returning an incomplete set of deferred
+			// children with a nil error.
+			if missingOptionalWispTable(err) {
 				continue
 			}
 			return nil, fmt.Errorf("deferred parents: %s/%s: %w", e.depTable, e.issueTable, err)

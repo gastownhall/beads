@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -49,6 +50,8 @@ Example:
 		priorityStr, _ := cmd.Flags().GetString("priority")
 		issueType, _ := cmd.Flags().GetString("type")
 		labels, _ := cmd.Flags().GetStringSlice("labels")
+		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 		parentID, _ := cmd.Flags().GetString("parent")
 
 		priority, err := validation.ValidatePriority(priorityStr)

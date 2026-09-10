@@ -361,7 +361,7 @@ func assessDoltPerformance(metrics *DoltPerfMetrics) {
 
 	// Check database size
 	if metrics.TotalIssues > 5000 && metrics.ClosedIssues > 4000 {
-		recommendations = append(recommendations, "Many closed issues. Consider 'bd cleanup' to prune old issues.")
+		recommendations = append(recommendations, "Many closed issues. Consider 'bd prune --older-than 90d' to prune old issues.")
 	}
 
 	if len(warnings) == 0 {

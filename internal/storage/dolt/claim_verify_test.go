@@ -256,3 +256,36 @@ func TestClaimUnclaimVerifiedEndToEnd(t *testing.T) {
 		t.Fatalf("post-unclaim state: assignee=%q status=%q", assignee, status)
 	}
 }
+
+// TestClaimVerifyAcceptsRespelledReclaim proves the claim CAS's
+// idempotent-reclaim branch (issueops.ClaimIssueInTx: same actor,
+// already in_progress, succeeds without rewriting the stored spelling) does
+// not then fail its own verify-after-write re-read when the reclaim names the
+// held identity under a different spelling (be-vc51, ga-2vy9p2). Without the
+// fix, claimedAs's postcondition compares the re-read assignee to the
+// requested spelling byte-for-byte, so a CAS-authorized respelled reclaim
+// fails loudly with "did not land" even though it holds the issue.
+func TestClaimVerifyAcceptsRespelledReclaim(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	s.serverMode = true
+
+	id := claimVerifyTestIssue(t, s)
+	if err := rawClaim(t, s, id, "gastown__mayor"); err != nil {
+		t.Fatalf("seed claim under one spelling: %v", err)
+	}
+
+	if err := s.ClaimIssue(ctx, id, "gastown.mayor"); err != nil {
+		t.Fatalf("respelled reclaim: %v", err)
+	}
+
+	assignee, status, err := s.readClaimState(ctx, id)
+	if err != nil {
+		t.Fatalf("read claim state: %v", err)
+	}
+	if assignee != "gastown__mayor" || status != types.StatusInProgress {
+		t.Fatalf("respelled reclaim must keep the stored spelling: assignee=%q status=%q", assignee, status)
+	}
+}

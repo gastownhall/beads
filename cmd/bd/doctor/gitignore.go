@@ -66,6 +66,7 @@ dolt-server.log
 dolt-server.lock
 dolt-server.port
 dolt-server.activity
+dolt-server-config.yaml
 
 # Debug-mode pprof artifacts (written when dolt.debug: true in config.yaml)
 dolt-pprof/
@@ -130,6 +131,7 @@ var requiredPatterns = []string{
 	"dolt-server.lock",
 	"dolt-server.port",
 	"dolt-server.activity",
+	"dolt-server-config.yaml",
 	"daemon.*",
 	"*.lock",
 	"*.corrupt.backup/",

@@ -203,6 +203,77 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 	})
 
+	// ===== Label Any =====
+
+	readyIDs := func(t *testing.T, args ...string) ([]string, string) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+				strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		var issues []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &issues); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		ids := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			ids = append(ids, issue.ID)
+		}
+		return ids, stdout.String()
+	}
+
+	t.Run("ready_label_any", func(t *testing.T) {
+		laneA := bdCreate(t, bd, dir, "Lane A work", "--type", "task", "--label", "lany:lane-a")
+		bdCreate(t, bd, dir, "Lane B work", "--type", "task", "--label", "lany:lane-b")
+		laneC := bdCreate(t, bd, dir, "Lane C work", "--type", "task", "--label", "lany:lane-c")
+
+		ids, raw := readyIDs(t, "ready", "--json", "--label-any", "lany:lane-a,lany:lane-c")
+
+		want := map[string]bool{laneA.ID: true, laneC.ID: true}
+		if len(ids) != len(want) {
+			t.Fatalf("--label-any returned %d issues, want %d — an unfiltered ready set means the OR-set clause was dropped: %s",
+				len(ids), len(want), raw)
+		}
+		for _, id := range ids {
+			if !want[id] {
+				t.Fatalf("--label-any returned %s, which carries neither requested label: %s", id, raw)
+			}
+		}
+	})
+
+	t.Run("ready_label_any_intersects_with_label", func(t *testing.T) {
+		both := bdCreate(t, bd, dir, "Tiered lane A work", "--type", "task",
+			"--label", "lmix:tier", "--label", "lmix:lane-a")
+		bdCreate(t, bd, dir, "Untiered lane A work", "--type", "task", "--label", "lmix:lane-a")
+		bdCreate(t, bd, dir, "Tiered lane B work", "--type", "task",
+			"--label", "lmix:tier", "--label", "lmix:lane-b")
+
+		ids, raw := readyIDs(t, "ready", "--json",
+			"--label", "lmix:tier", "--label-any", "lmix:lane-a,lmix:lane-c")
+
+		if len(ids) != 1 || ids[0] != both.ID {
+			t.Fatalf("--label with --label-any returned %v, want only %s (AND-set and OR-set must both apply): %s",
+				ids, both.ID, raw)
+		}
+	})
+
+	t.Run("ready_claim_label_any_fences_to_its_lane", func(t *testing.T) {
+		// An exhausted lane must claim nothing. If --label-any is dropped here
+		// the claim silently takes unfenced work while the caller believes it
+		// is fenced to its own lane.
+		bdCreate(t, bd, dir, "Fence lane B work", "--type", "task", "--label", "lfence:lane-b")
+
+		ids, raw := readyIDs(t, "ready", "--claim", "--json", "--label-any", "lfence:lane-a")
+
+		if len(ids) != 0 {
+			t.Fatalf("--claim --label-any on an empty lane claimed %v, want nothing: %s", ids, raw)
+		}
+	})
+
 	// ===== -C flag =====
 
 	t.Run("ready_with_C_flag", func(t *testing.T) {

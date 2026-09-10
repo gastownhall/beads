@@ -42,7 +42,9 @@ func RecordDependencyRemovalsForTableInTx(ctx context.Context, tx DBTX, table st
 
 func recordDependencyRemovalsInTx(ctx context.Context, tx DBTX, edges []journalDependencyEdge) error {
 	for _, edge := range edges {
-		if err := RecordDepEventInTx(ctx, tx, EventDepRemove, edge.source, edge.kind, edge.target, edge.metadata); err != nil {
+		// Every caller is bulk/cascade delete plumbing (node deletes, source-repo
+		// wipes, the UOW bulk edge DELETE), none of which carries an actor.
+		if err := RecordDepEventInTx(ctx, tx, EventDepRemove, edge.source, edge.kind, edge.target, edge.metadata, ""); err != nil {
 			return err
 		}
 	}

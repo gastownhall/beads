@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,22 +155,49 @@ func TestForceStopUnverifiedRejectsVerifiableV2Record(t *testing.T) {
 	assert.FileExists(t, pidfile.Path(root, PIDFileName))
 }
 
+// forceStopHelperEnv gates TestForceStopHelperProcess so a normal test run
+// skips the helper body.
+const forceStopHelperEnv = "BEADS_FORCE_STOP_HELPER"
+
+// TestForceStopHelperProcess is the body of the helper processes
+// startNamedForceStopHelper spawns: a re-exec of this test binary that idles
+// until the test (or its Cleanup) kills it.
+func TestForceStopHelperProcess(t *testing.T) {
+	if os.Getenv(forceStopHelperEnv) != "1" {
+		t.Skip("helper-process body; only meaningful under startNamedForceStopHelper")
+	}
+	time.Sleep(30 * time.Second)
+}
+
 // startNamedForceStopHelper starts a long-sleeping process whose executable
 // basename is name and whose command line references dir (the binary lives
 // inside it), matching how a workspace's own bd/dolt processes reference
-// their root path.
+// their root path. The body is this test binary re-executed in helper mode,
+// not a renamed copy of the system sleep: on busybox/uutils-coreutils
+// systems (Ubuntu 25.10+) sleep is a multicall binary dispatching on
+// argv[0], so a renamed copy exits instantly and the fixture silently loses
+// its live process.
 func startNamedForceStopHelper(t *testing.T, dir, name string) helperProcess {
 	t.Helper()
-	sleepPath, err := exec.LookPath("sleep")
+	self, err := os.Executable()
 	require.NoError(t, err)
-	sleepPath, err = filepath.EvalSymlinks(sleepPath)
-	require.NoError(t, err)
-	data, err := os.ReadFile(sleepPath)
+	self, err = filepath.EvalSymlinks(self)
 	require.NoError(t, err)
 	executable := filepath.Join(dir, name)
-	require.NoError(t, os.WriteFile(executable, data, 0o700))
+	// Hard link when dir is on the same filesystem; stream a copy otherwise.
+	if os.Link(self, executable) != nil {
+		src, err := os.Open(self)
+		require.NoError(t, err)
+		dst, err := os.OpenFile(executable, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o700)
+		require.NoError(t, err)
+		_, cpErr := io.Copy(dst, src)
+		require.NoError(t, src.Close())
+		require.NoError(t, dst.Close())
+		require.NoError(t, cpErr)
+	}
 
-	cmd := exec.Command(executable, "30")
+	cmd := exec.Command(executable, "-test.run=^TestForceStopHelperProcess$")
+	cmd.Env = append(os.Environ(), forceStopHelperEnv+"=1")
 	require.NoError(t, cmd.Start())
 	token, err := procid.Capture(cmd.Process.Pid)
 	require.NoError(t, err)

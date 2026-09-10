@@ -118,7 +118,7 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// A reopen is a status change, so it journals as an update.
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
 		return nil, err
 	}
 

@@ -63,6 +63,7 @@ const (
 const (
 	syncTransientPushRace   = "push-race"
 	syncTransientDirtyGraph = "dirty-graph"
+	syncTransientPullBehind = "pull-behind"
 )
 
 // syncOutcome is one run of the sync loop.
@@ -298,6 +299,22 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 			return out, nil
 		}
 		if pullErr != nil {
+			// A pull that merged nothing only because the branch is a strict
+			// ancestor of a remote tip that moved after our fetch is the pull-side
+			// twin of a push race: a peer advanced the remote, and the next pull
+			// fast-forwards it. Re-enter the loop instead of hard-failing the tick;
+			// if the budget runs out, the retries-exhausted exit tells the timer to
+			// try again next tick (same as a push race or a dirty working set). It
+			// is classified from the typed sentinel, never the message, so a
+			// genuine divergence — which verifyPullLanded leaves unwrapped — falls
+			// through to the hard error below.
+			if isPullBehindFastForwardableErr(pullErr) {
+				out.Transients = append(out.Transients, syncTransient{
+					Attempt: attempt, Kind: syncTransientPullBehind, Error: pullErr.Error(),
+				})
+				ops.report("pull behind a fast-forwardable remote tip (peer pushed after our fetch) — re-pulling and retrying")
+				continue
+			}
 			return out, fmt.Errorf("pull: %w", pullErr)
 		}
 		if conflictErr != nil {
@@ -497,6 +514,21 @@ func isPushRaceErr(err error) bool {
 // push rather than publishing a stale is_blocked.
 func isRecomputeDirtyGraphErr(err error) bool {
 	return err != nil && errors.Is(err, issueops.ErrBlockedRecomputeDirtyGraph)
+}
+
+// isPullBehindFastForwardableErr reports whether a pull's post-condition refused
+// to call the pull a success only because the branch this database reads is a
+// strict ancestor of a remote tip that moved after this pull's fetch — the
+// benign race a plain re-pull fast-forwards, and the one merged-nothing failure
+// retrying can fix.
+//
+// Classified from the typed sentinel, never the message
+// (versioncontrolops.ErrPullBehindFastForwardable), for the same reason
+// isRecomputeDirtyGraphErr is: a reworded diagnostic must not silently demote a
+// genuine divergence into this retryable class. Only verifyPullLanded's
+// merge-base test wraps the sentinel, and only for the ancestor case.
+func isPullBehindFastForwardableErr(err error) bool {
+	return err != nil && errors.Is(err, versioncontrolops.ErrPullBehindFastForwardable)
 }
 
 // graphConstraintViolations reports the constraint violations, if any,

@@ -48,6 +48,13 @@ func TestServeActivatesTheEventsJournal(t *testing.T) {
 	if !hasEventOp(records, "create") {
 		t.Errorf("journal has no create record for the served mutation: %+v", records)
 	}
+	// The exported record attributes the mutation to the acting identity the
+	// request resolved — the same actor the audit-events table records.
+	for _, rec := range records {
+		if rec.Op == "create" && rec.Actor != "tester" {
+			t.Errorf("create record actor = %q, want %q", rec.Actor, "tester")
+		}
+	}
 }
 
 // TestRoutedCreateJournalsIntoTheTargetWorkspace covers the cross-workspace
