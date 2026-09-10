@@ -23,7 +23,7 @@ DOCS=(
     "docs/getting-started/ide-setup.md|cmd/bd/setup*.go;internal/recipes/"
     "docs/integrations/azure-devops.md|cmd/bd/ado*.go;internal/ado/"
     "docs/reference/json-schema.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
-    "docs/recovery/init-safety.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
+    "docs/recovery/init-safety.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go;cmd/bd/dolt.go"
     "engdocs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
     "engdocs/SERVE_RUNBOOK.md|internal/httpapi/server.go;internal/httpapi/events_watch.go;cmd/bd/serve.go;internal/httpapi/auth.go"
     "engdocs/LINTING.md|.golangci.yml;scripts/ci/pr-lint.sh;Makefile;.github/workflows/pr.yml;.github/workflows/main.yml"
