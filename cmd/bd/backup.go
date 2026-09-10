@@ -81,8 +81,9 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 
 			if jsonOutput {
 				result := map[string]interface{}{
-					"backup": state,
-					"dolt":   showDoltBackupStatusJSON(),
+					"backup":   state,
+					"dolt":     showDoltBackupStatusJSON(),
+					"size_cap": showSizeCapStatusJSON(dir),
 				}
 				if sizeAvailable {
 					result["database_size"] = showDBSizeJSON(databaseSize)
@@ -135,6 +136,7 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			}
 			fmt.Printf("\nConfig: enabled=%v%s interval=%s\n",
 				enabled, enabledNote, interval)
+			showSizeCapStatus(dir)
 
 			// Show Dolt backup info
 			showDoltBackupStatus()

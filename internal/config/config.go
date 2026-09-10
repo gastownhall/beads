@@ -321,6 +321,17 @@ func Initialize() error {
 	// Backup configuration defaults (JSONL export to .beads/backup/)
 	v.SetDefault("backup.enabled", false)
 	v.SetDefault("backup.interval", "15m")
+	// size-cap-mb pauses auto-backup once the destination exceeds this size
+	// (ga-y6gjv). BackupSync only ever transfers new chunks — it never
+	// prunes ones that became unreachable on the source DB — and Dolt
+	// exposes no way to GC a backup destination in place (it is a bare
+	// chunk-store directory with no .dolt repo-root marker, so neither the
+	// standalone dolt CLI nor CALL DOLT_GC can operate on it directly), so
+	// without a hard cap the directory can only grow forever. Default
+	// 2048MB; size-warn-interval throttles how often the pause is
+	// re-announced once the cap is hit, so it doesn't spam every command.
+	v.SetDefault("backup.size-cap-mb", 2048)
+	v.SetDefault("backup.size-warn-interval", "24h")
 	v.SetDefault("backup.git-push", false)
 	v.SetDefault("backup.git-repo", "")
 
