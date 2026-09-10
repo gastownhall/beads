@@ -26,10 +26,20 @@ var (
 	wispsFilterTables  = sqlbuild.WispsFilterTables
 )
 
+// missingOptionalWispTable reports whether err is the absence of a wisp-plane
+// table a database may legitimately not have. A wisp search touches more than
+// that: its FROM clause carries sqlbuild.LeaseJoin and its hydration reads
+// wisp_labels, so a blanket table-not-exist check reports a broken database as
+// an empty wisp plane and silently drops live rows from the result.
+func missingOptionalWispTable(err error) bool {
+	name, ok := dberrors.MissingTableName(err)
+	return ok && sqlbuild.OptionalWispTable(name)
+}
+
 func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (domain.SearchPage, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		page, err := r.searchTable(ctx, query, filter, wispsFilterTables)
-		if err != nil && !dberrors.IsTableNotExist(err) {
+		if err != nil && !missingOptionalWispTable(err) {
 			return domain.SearchPage{}, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(page.Items) > 0 {
@@ -105,7 +115,7 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 		return domain.SearchPage{}, fmt.Errorf("search union (hydrate issues): %w", err)
 	}
 	wispsByID, err := r.fetchIssuesByIDs(ctx, page.wispIDs, wispsFilterTables, filter)
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !missingOptionalWispTable(err) {
 		return domain.SearchPage{}, fmt.Errorf("search union (hydrate wisps): %w", err)
 	}
 
@@ -269,6 +279,7 @@ func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, 
 		return domain.SearchPage{}, fmt.Errorf("search %s: rows: %w", tables.Main, err)
 	}
 
+	sortRowsGoSide(issues, func(i *types.Issue) string { return i.ID }, filter.SortBy, filter.SortDesc)
 	items, hasMore, err := finishWindow(issues, window)
 	if err != nil {
 		return domain.SearchPage{}, err
@@ -306,6 +317,7 @@ func (r *issueSQLRepositoryImpl) scanFilterIDs(ctx context.Context, selectKw, fr
 		return nil, false, fmt.Errorf("search %s (id scan): rows: %w", tables.Main, err)
 	}
 
+	sortRowsGoSide(ids, func(id string) string { return id }, filter.SortBy, filter.SortDesc)
 	return finishWindow(ids, window)
 }
 
@@ -587,18 +599,15 @@ func reassembleBySrc[T comparable](ordered []idSrcRef, issues, wisps map[string]
 // page, by workapi.CompareIssuesBy. This decides MEMBERSHIP; that decides
 // DISPLAY.
 //
-// It honors sortDesc, which sqlbuild.Less does not for this key — the per-table
-// seam therefore answers a reversed id page with the byte-FIRST rows. That is a
-// live sibling bug, named here rather than mirrored.
+// It honors sortDesc, as sqlbuild.Less and the per-table seam's
+// sortRowsGoSide now also do for this key (both were once live sibling bugs
+// this comment named; bd-jao3t/bd-69c1a closed them).
 func (p *idSrcPage) sortGoSide(sortBy string, sortDesc bool) {
 	if !sqlbuild.IsGoSideSort(sortBy) || len(p.ordered) <= 1 {
 		return
 	}
 	sort.SliceStable(p.ordered, func(i, j int) bool {
-		if sortDesc {
-			return p.ordered[i].id > p.ordered[j].id
-		}
-		return p.ordered[i].id < p.ordered[j].id
+		return sqlbuild.LessID(p.ordered[i].id, p.ordered[j].id, sortDesc)
 	})
 	p.issueIDs = p.issueIDs[:0]
 	p.wispIDs = p.wispIDs[:0]
@@ -638,6 +647,26 @@ func (p *idSrcPage) finishWindow(w searchWindow) (bool, error) {
 }
 
 type idSrcRef struct{ id, src string }
+
+// sortRowsGoSide is the per-table seam's copy of idSrcPage.sortGoSide: it
+// establishes the order for a sort key SQL renders no ORDER BY for, BEFORE
+// finishWindow's trim decides which rows the page keeps. searchWindowFor
+// pushes no page bound under a Go-side sort precisely so the whole matching
+// set arrives here — this is where the requested order first exists; without
+// it the trim keeps an arbitrary engine-ordered subset (order-right,
+// membership-wrong once sorted downstream). The comparison is byte order,
+// matching sqlbuild.Less and idSrcPage.sortGoSide; the natural-numeric
+// display order is applied later, on the delivered page (see sortGoSide's
+// doc for the membership/display split). No-op for SQL-rendered sort keys,
+// whose ORDER BY already ran.
+func sortRowsGoSide[T any](rows []T, id func(T) string, sortBy string, sortDesc bool) {
+	if !sqlbuild.IsGoSideSort(sortBy) || len(rows) <= 1 {
+		return
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		return sqlbuild.LessID(id(rows[i]), id(rows[j]), sortDesc)
+	})
+}
 
 const unionSortColumnsSQL = sqlbuild.UnionSortColumnsSQL
 

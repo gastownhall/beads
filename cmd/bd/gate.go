@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -33,9 +34,9 @@ Gate types:
   gh:pr   - Waits for PR merge (Phase 3)
   bead    - Waits for another bead to close (Phase 4)
 
-For bead gates, await_id is a bead ID in this rig's database (e.g., "bd-abc123").
-The historical cross-rig form <rig>:<bead-id> can no longer be evaluated
-(multi-rig routing removed) and stays pending until resolved manually.
+For bead gates, await_id may be a bead ID in this rig's database (e.g.,
+"bd-abc123") or the historical cross-rig form <rig>:<bead-id>. Cross-rig
+targets resolve through the bead ID's prefix route in routes.jsonl.
 
 Examples:
   bd gate list           # Show all open gates
@@ -669,7 +670,7 @@ Examples:
 			}
 		}
 
-		results := evaluateGates(ctx, filteredGates, time.Now(), store, persistAwaitID)
+		results := evaluateGates(ctx, filteredGates, time.Now(), routedBeadGateGetter{localStore: store}, persistAwaitID)
 
 		resolvedCount, escalatedCount, errorCount := applyGateCheckResults(
 			results, dryRun, escalateFlag,
@@ -1182,27 +1183,48 @@ type issueGetter interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 }
 
+// routedBeadGateGetter gives direct-mode gate checks the same local -> prefix
+// route -> contributor fallback used by other read commands. Routed stores are
+// opened read-only and closed before the result is returned.
+type routedBeadGateGetter struct {
+	localStore storage.DoltStorage
+}
+
+func (g routedBeadGateGetter) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	if g.localStore == nil {
+		return nil, fmt.Errorf("no local store available")
+	}
+	result, err := getIssueWithRouting(ctx, g.localStore, id)
+	if err != nil {
+		return nil, err
+	}
+	defer result.Close()
+	return result.Issue, nil
+}
+
 // checkBeadGate checks if a bead gate is satisfied.
 // Returns (satisfied, reason).
 //
-// A plain await_id (no colon) names a bead in THIS rig's database: the gate
-// resolves once that bead closes — the common case, an agent idle-waiting on
-// local work (wy-hgms2; the old unconditional cross-rig refusal left every
-// local bead gate permanently pending and its waiters asleep).
-//
-// The historical cross-rig form <rig>:<bead-id> cannot be evaluated since
-// multi-rig routing was removed; it stays pending with a descriptive message.
+// A plain await_id names a bead in this rig. The historical
+// <rig>:<bead-id> form uses the bead ID as the routed lookup key; the rig
+// component is retained for compatibility while routes.jsonl remains keyed by
+// bead prefix. The supplied getter owns local-versus-routed lookup policy.
 func checkBeadGate(ctx context.Context, st issueGetter, awaitID string) (bool, string) {
 	if awaitID == "" {
 		return false, "bead gate has no await_id"
 	}
+	targetID := awaitID
 	if strings.Contains(awaitID, ":") {
-		return false, fmt.Sprintf("cross-rig bead gate %q cannot be checked (multi-rig routing removed)", awaitID)
+		parts := strings.SplitN(awaitID, ":", 2)
+		if parts[0] == "" || parts[1] == "" {
+			return false, fmt.Sprintf("invalid cross-rig bead gate %q: expected <rig>:<bead-id>", awaitID)
+		}
+		targetID = parts[1]
 	}
 	if st == nil {
 		return false, fmt.Sprintf("bead gate %q: no local store available", awaitID)
 	}
-	issue, err := st.GetIssue(ctx, awaitID)
+	issue, err := st.GetIssue(ctx, targetID)
 	if err != nil {
 		return false, fmt.Sprintf("bead gate %q: %v", awaitID, err)
 	}
@@ -1210,9 +1232,9 @@ func checkBeadGate(ctx context.Context, st issueGetter, awaitID string) (bool, s
 		return false, fmt.Sprintf("bead gate %q: bead not found", awaitID)
 	}
 	if issue.Status == types.StatusClosed {
-		return true, fmt.Sprintf("bead %s closed", awaitID)
+		return true, fmt.Sprintf("bead %s closed", targetID)
 	}
-	return false, fmt.Sprintf("bead %s is %s", awaitID, issue.Status)
+	return false, fmt.Sprintf("bead %s is %s", targetID, issue.Status)
 }
 
 // closeGate closes a gate issue with the given reason

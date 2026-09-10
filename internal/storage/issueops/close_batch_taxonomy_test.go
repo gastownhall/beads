@@ -1,6 +1,7 @@
 package issueops
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -10,6 +11,14 @@ import (
 )
 
 func TestCloseRefusalStaysPerItemPhaseOutranksSentinel(t *testing.T) {
+	for _, err := range []error{sql.ErrNoRows, fmt.Errorf("resolve x: %w", sql.ErrNoRows)} {
+		if !CloseRefusalStaysPerItem(err) {
+			t.Errorf("lookup miss %v must stay per-item", err)
+		}
+		if CloseRefusalStaysPerItem(publicops.MarkPostWrite(err)) {
+			t.Errorf("post-write miss %v must fail the request", err)
+		}
+	}
 	if !CloseRefusalStaysPerItem(storage.ErrNotFound) {
 		t.Fatal("plain ErrNotFound must stay per-item")
 	}
@@ -30,5 +39,20 @@ func TestCloseRefusalStaysPerItemPhaseOutranksSentinel(t *testing.T) {
 	}
 	if CloseRefusalStaysPerItem(errors.New("driver: bad conn")) {
 		t.Fatal("infra error must fail the request")
+	}
+}
+
+func TestBatchCloseHydrationDisarmPreservesNewerArm(t *testing.T) {
+	firstDisarm := FailBatchCloseHydrationOf("first")
+	defer firstDisarm()
+	secondDisarm := FailBatchCloseHydrationOf("second")
+	defer secondDisarm()
+	firstDisarm()
+	if InducedBatchCloseHydrationFailure("second") == nil {
+		t.Fatal("disarming an older probe must not clear a newer probe")
+	}
+	secondDisarm()
+	if err := InducedBatchCloseHydrationFailure("second"); err != nil {
+		t.Fatalf("probe still armed after its own disarm: %v", err)
 	}
 }

@@ -82,7 +82,7 @@ func TestProxiedServerPrime(t *testing.T) {
 		}
 	})
 
-	t.Run("degrades_silently_when_plane_unavailable", func(t *testing.T) {
+	t.Run("reports_when_plane_unavailable", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "ppr4")
 		content := "this memory must not surface when the plane is down"
@@ -90,8 +90,10 @@ func TestProxiedServerPrime(t *testing.T) {
 
 		// Corrupt the proxied-server sidecar: provider open now fails before
 		// touching any server, the deterministic stand-in for an unreachable
-		// plane. Prime must still exit 0 (silent-skip contract) with no
-		// memories and no direct-store fallback.
+		// plane. Prime must still exit 0 and must not fall back to a direct
+		// store — but it says so rather than rendering as an empty memory set
+		// (gh#5877), which is what made a downed plane indistinguishable from
+		// a workspace that simply has no memories.
 		sidecar := configfile.ProxiedServerClientInfoPath(p.beadsDir)
 		if err := os.WriteFile(sidecar, []byte("not json{"), 0o644); err != nil {
 			t.Fatalf("corrupting sidecar %s: %v", sidecar, err)
@@ -101,8 +103,11 @@ func TestProxiedServerPrime(t *testing.T) {
 		if strings.Contains(out, content) || strings.Contains(out, "plane-down") {
 			t.Errorf("expected memory to be skipped when the proxied plane is unavailable, got: %s", out)
 		}
-		if !strings.Contains(out, "No memories stored") {
-			t.Errorf("expected the empty-memories fallback on silent skip, got: %s", out)
+		if !strings.Contains(out, "beads storage unavailable") || !strings.Contains(out, "were NOT injected this session") {
+			t.Errorf("expected the storage-unavailable banner when the proxied plane is down, got: %s", out)
+		}
+		if strings.Contains(out, "No memories stored") {
+			t.Errorf("an unreachable plane must not render as an empty memory set, got: %s", out)
 		}
 		assertNoEmbeddedStore(t, p)
 	})

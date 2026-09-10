@@ -174,9 +174,13 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+		// Cascade must stay OFF: findAbandonedWisps already expanded dependents
+		// and kept only unprotected ones; a cascade here re-expands to ALL
+		// transitive dependents, bypassing that protection (GH#4394).
+		// Mirrors runWispGC in wisp.go.
 		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 			IDs:                  ids,
-			Cascade:              true,
+			Cascade:              false,
 			UpdateTextReferences: true,
 		}, actor)
 		if err != nil {
@@ -301,9 +305,13 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+		// Cascade must stay OFF: the closed set above is already the complete
+		// purge candidate list, so cascade can only add NON-closed dependents
+		// (live molecule steps) to the batch — the patrol self-destruct bug.
+		// Mirrors runWispPurgeClosed in wisp.go.
 		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 			IDs:                  ids,
-			Cascade:              true,
+			Cascade:              false,
 			UpdateTextReferences: true,
 		}, actor)
 		if err != nil {

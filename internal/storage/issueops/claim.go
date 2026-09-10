@@ -219,7 +219,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	// A claim changes assignee and status, so it journals as an update. The
 	// idempotent re-claim path returns above without writing and journals
 	// nothing.
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
 		return nil, err
 	}
 

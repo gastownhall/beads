@@ -25,7 +25,7 @@ Labels provide flexible, multi-dimensional categorization for issues beyond the 
 ## Quick Start
 
 ```bash
-# Add labels when creating issues
+# Add labels when creating issues (comma-separated)
 bd create "Fix auth bug" -t bug -p 1 -l auth,backend,urgent
 
 # Add labels to existing issues
@@ -56,6 +56,53 @@ bd list --label-any frontend,backend
 # Combine filters
 bd list --status open --priority 1 --label security
 ```
+
+## Separating labels, and labels with spaces
+
+Labels are separated by **commas**, or by repeating the flag:
+
+```bash
+bd create "Fix auth bug" -l auth,backend
+bd create "Fix auth bug" -l auth -l backend
+```
+
+A space does **not** separate labels. bd honours the word boundaries your shell
+already decided, exactly as it does for a filename containing a space — so all
+three of these create the single label `good first issue`:
+
+```bash
+bd create "Starter task" -l 'good first issue'
+bd create "Starter task" -l "good first issue"
+bd create "Starter task" -l good\ first\ issue
+```
+
+Because that is also what a missed comma looks like, bd warns when it stores a
+label containing a space:
+
+```
+⚠ Stored "auth backend" as ONE label — it contains a space.
+  If you meant several labels, separate them with commas (a,b) or repeat the flag.
+```
+
+The warning is advice, not an error — the label is stored as asked. Silence it
+with `--quiet`.
+
+To find labels already stored this way in an existing database, run `bd doctor`
+and look at the `Label Whitespace` check. It reports and never fails the run, so
+a database with legacy damage still exits 0. Note that `bd doctor` is not yet
+supported in embedded mode (GH#3794 enables embedded checks one at a time), so
+this check currently reaches classic and server-mode databases only.
+
+**Import and batch ingest are deliberately left alone.** They do not normalize,
+do not warn, and this is intended rather than an oversight: an import must round
+trip — what was exported is what is restored — and quietly rewriting a label on
+the way in would make a JSONL file and the database it came from disagree.
+Repair is a separate, deliberate act, which is what the `bd doctor` check above
+is for.
+
+Note that an *unquoted* space is not a label separator either — it ends the
+flag's value, so `-l auth backend` leaves `backend` as a stray positional
+argument and the command fails.
 
 ## Common Label Patterns
 

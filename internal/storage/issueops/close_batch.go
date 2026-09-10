@@ -68,6 +68,7 @@ func CloseRefusalStaysPerItem(err error) bool {
 		return false
 	}
 	return errors.Is(err, storage.ErrNotFound) ||
+		errors.Is(err, sql.ErrNoRows) ||
 		errors.Is(err, storage.ErrCloseBlocked) ||
 		errors.Is(err, storage.ErrCloseOpenChildren)
 }
@@ -87,7 +88,7 @@ var batchCloseHydrationFailureID atomic.Pointer[string]
 // (through BatchCloserFixture.FailHydrationOf), never by production code.
 func FailBatchCloseHydrationOf(issueID string) (disarm func()) {
 	batchCloseHydrationFailureID.Store(&issueID)
-	return func() { batchCloseHydrationFailureID.Store(nil) }
+	return func() { batchCloseHydrationFailureID.CompareAndSwap(&issueID, nil) }
 }
 
 // InducedBatchCloseHydrationFailure reports the armed seam's failure for

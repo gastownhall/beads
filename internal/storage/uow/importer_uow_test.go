@@ -118,6 +118,57 @@ func TestImporterUOW(t *testing.T) {
 		}
 	})
 
+	t.Run("CrossPlaneInBatchEdgesAreWiredInTheOneCommit", func(t *testing.T) {
+		// wy-a648lq: a regular<->wisp edge whose BOTH ends are rows of this
+		// batch used to be skip-reported by the engine's per-batch plane filter,
+		// and since a re-import upserts the rows unchanged it could never be
+		// backfilled. Both directions are asserted because they land in
+		// different tables and columns.
+		before := countHistory(t)
+		when := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+		result, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor: "importer-test",
+			Issues: []*types.Issue{
+				{
+					ID: "imp-plane-d", Title: "Durable end", Status: types.StatusOpen,
+					IssueType: types.TypeTask, Priority: 2,
+					CreatedAt: when, UpdatedAt: when,
+				},
+				{
+					ID: "imp-plane-w", Title: "Ephemeral end", Status: types.StatusOpen,
+					IssueType: types.TypeTask, Priority: 2, Ephemeral: true,
+					Dependencies: []*types.Dependency{{IssueID: "imp-plane-w", DependsOnID: "imp-plane-d", Type: types.DepBlocks}},
+					CreatedAt:    when, UpdatedAt: when,
+				},
+				{
+					ID: "imp-plane-d2", Title: "Durable row blocked by the wisp", Status: types.StatusOpen,
+					IssueType: types.TypeTask, Priority: 2,
+					Dependencies: []*types.Dependency{{IssueID: "imp-plane-d2", DependsOnID: "imp-plane-w", Type: types.DepBlocks}},
+					CreatedAt:    when, UpdatedAt: when,
+				},
+			},
+			Source: "planes.jsonl",
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch: %v", err)
+		}
+		if result.Created != 3 {
+			t.Errorf("Created = %d, want 3", result.Created)
+		}
+		if len(result.SkippedDependencies) != 0 {
+			t.Errorf("SkippedDependencies = %+v, want none: both ends of each edge are rows of this batch", result.SkippedDependencies)
+		}
+		if after := countHistory(t); after != before+1 {
+			t.Errorf("history entries = %d, want %d (the edges ride the batch's ONE commit)", after, before+1)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = 'imp-plane-w' AND depends_on_issue_id = 'imp-plane-d' AND type = 'blocks'"); got != 1 {
+			t.Errorf("wisp -> durable blocks edge = %d, want 1", got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'imp-plane-d2' AND depends_on_wisp_id = 'imp-plane-w' AND type = 'blocks'"); got != 1 {
+			t.Errorf("durable -> wisp blocks edge = %d, want 1", got)
+		}
+	})
+
 	t.Run("ReimportConvergesWithoutDuplicatingAuxData", func(t *testing.T) {
 		when := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 		row := func() *types.Issue {
