@@ -1,0 +1,73 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests from both humans and agent-supervised workflows are welcome.
+        If you're proposing something that improves the agent development experience, we're especially interested.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or motivation
+      description: What problem does this solve? What workflow does it improve?
+      placeholder: "When working with multiple agents on the same repo, I need..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should this work? Be as specific as you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you think about? Why is the proposed solution better?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - CLI command / flag
+        - Agent integration (MCP, hooks, AGENTS.md)
+        - Multi-agent coordination
+        - Storage / Dolt
+        - Import / Export / Sync
+        - Documentation
+        - Developer experience
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contributor-context
+    attributes:
+      label: Contributor context
+      description: How are you using bd? Helps us prioritize.
+      options:
+        - Human developer using bd directly
+        - Human developer working through AI agents
+        - Building agent tooling / integrations
+        - Evaluating bd for a team
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Examples, mockups, links to related issues, or anything else relevant.
+    validations:
+      required: false
