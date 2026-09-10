@@ -18,6 +18,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
@@ -500,7 +501,17 @@ func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout ti
 		if err != nil {
 			return err
 		}
-		_ = conn.Close()
+		if !doltserver.DrainAndCloseProbe(conn) {
+			return errors.New("listener accepted the connection but sent no MySQL greeting")
+		}
+		// Draining may block briefly. Do not let a probe that started before
+		// cancellation or a backend exit publish a stale ready result.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !s.Running(ctx) {
+			return errors.New("database server not running")
+		}
 		return nil
 	}, backoff.WithContext(bo, ctx))
 }

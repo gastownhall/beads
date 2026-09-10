@@ -38,6 +38,10 @@ type TestDatabaseServerImpl struct {
 	StopErr  error                  // if non-nil, Stop returns it after closing conns
 	DialErr  error                  // if non-nil, Dial returns it
 	Handler  func(backend net.Conn) // runs once per Dial; default EchoHandler
+	// FirstDialGreeting is written before Handler on the first successful Dial,
+	// then cleared. It models a server's MySQL handshake for readiness tests;
+	// the greeting is not included in payload counters.
+	FirstDialGreeting []byte
 
 	mu        sync.Mutex
 	counters  Counters
@@ -73,6 +77,15 @@ func DiscardHandler(c net.Conn) {
 func (s *TestDatabaseServerImpl) SetDialErr(err error) {
 	s.mu.Lock()
 	s.DialErr = err
+	s.mu.Unlock()
+}
+
+// SetFirstDialGreeting configures a one-shot greeting for the next successful
+// Dial. Copying keeps a caller from changing the test server while it is
+// running.
+func (s *TestDatabaseServerImpl) SetFirstDialGreeting(greeting []byte) {
+	s.mu.Lock()
+	s.FirstDialGreeting = append([]byte(nil), greeting...)
 	s.mu.Unlock()
 }
 
@@ -137,6 +150,8 @@ func (s *TestDatabaseServerImpl) Dial(_ context.Context) (net.Conn, error) {
 		s.mu.Unlock()
 		return nil, err
 	}
+	greeting := append([]byte(nil), s.FirstDialGreeting...)
+	s.FirstDialGreeting = nil
 	s.mu.Unlock()
 
 	proxySide, backendSide := net.Pipe()
@@ -150,6 +165,11 @@ func (s *TestDatabaseServerImpl) Dial(_ context.Context) (net.Conn, error) {
 
 	go func() {
 		defer s.untrackConn(wrapped)
+		// Write through the raw pipe so a protocol bootstrap does not alter
+		// the counters that describe payload handled by Handler.
+		if len(greeting) > 0 {
+			_, _ = backendSide.Write(greeting)
+		}
 		s.Handler(wrapped)
 	}()
 
