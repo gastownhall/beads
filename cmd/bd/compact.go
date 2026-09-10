@@ -108,7 +108,7 @@ Examples:
 
 		// Handle dolt GC mode
 		if compactDolt {
-			return runCompactDolt()
+			return runCompactDolt(ctx)
 		}
 
 		// Count active modes
@@ -741,7 +741,7 @@ func runCompactApply(ctx context.Context, store storage.DoltStorage) error {
 }
 
 // runCompactDolt runs Dolt garbage collection on the .beads/dolt directory
-func runCompactDolt() error {
+func runCompactDolt(ctx context.Context) error {
 	start := time.Now()
 
 	// Find beads directory
@@ -773,20 +773,19 @@ func runCompactDolt() error {
 		return HandleErrorWithHint(fmt.Sprintf("Dolt directory not found at %s", doltPath), "--dolt flag is only for repositories using the Dolt backend")
 	}
 
-	// Get size before GC
-	sizeBefore, err := getDirSize(doltPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not calculate directory size: %v\n", err)
-		sizeBefore = 0
-	}
+	// Measure only the active database. The shared .beads/dolt root may contain
+	// sibling databases unrelated to this GC operation.
+	sizeBefore := storeSizeBytes(ctx)
 
 	if compactDryRun {
 		if jsonOutput {
 			output := map[string]interface{}{
-				"dry_run":      true,
-				"dolt_path":    doltPath,
-				"size_before":  sizeBefore,
-				"size_display": formatBytes(sizeBefore),
+				"dry_run":   true,
+				"dolt_path": doltPath,
+			}
+			if sizeBefore >= 0 {
+				output["size_before"] = sizeBefore
+				output["size_display"] = formatBytes(sizeBefore)
 			}
 			if err := outputJSON(output); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -795,7 +794,9 @@ func runCompactDolt() error {
 		}
 		fmt.Printf("DRY RUN - Dolt garbage collection\n\n")
 		fmt.Printf("Dolt directory: %s\n", doltPath)
-		fmt.Printf("Current size: %s\n", formatBytes(sizeBefore))
+		if sizeBefore >= 0 {
+			fmt.Printf("Current size: %s\n", formatBytes(sizeBefore))
+		}
 		fmt.Printf("\nRun without --dry-run to perform garbage collection.\n")
 		return nil
 	}
@@ -836,28 +837,32 @@ func runCompactDolt() error {
 		return SilentExit()
 	}
 
-	// Get size after GC
-	sizeAfter, err := getDirSize(doltPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not calculate directory size after GC: %v\n", err)
-		sizeAfter = 0
-	}
+	// Measure the same active-database scope after GC.
+	sizeAfter := storeSizeBytes(ctx)
 
 	elapsed := time.Since(start)
-	freed := sizeBefore - sizeAfter
-	if freed < 0 {
-		freed = 0 // GC may not always reduce size
-	}
 
 	if jsonOutput {
+		// Preserve compact's legacy size_before/size_after field names;
+		// addGCSizeJSON uses a different schema and is not interchangeable.
 		result := map[string]interface{}{
-			"success":       true,
-			"dolt_path":     doltPath,
-			"size_before":   sizeBefore,
-			"size_after":    sizeAfter,
-			"freed_bytes":   freed,
-			"freed_display": formatBytes(freed),
-			"elapsed_ms":    elapsed.Milliseconds(),
+			"success":    true,
+			"dolt_path":  doltPath,
+			"elapsed_ms": elapsed.Milliseconds(),
+		}
+		if sizeBefore >= 0 {
+			result["size_before"] = sizeBefore
+		}
+		if sizeAfter >= 0 {
+			result["size_after"] = sizeAfter
+		}
+		if sizeBefore >= 0 && sizeAfter >= 0 {
+			freed := sizeBefore - sizeAfter
+			if freed < 0 {
+				freed = 0 // GC may not always reduce size
+			}
+			result["freed_bytes"] = freed
+			result["freed_display"] = formatBytes(freed)
 		}
 		if err := outputJSON(result); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -866,7 +871,9 @@ func runCompactDolt() error {
 	}
 
 	fmt.Printf("✓ Dolt garbage collection complete\n")
-	fmt.Printf("  %s → %s (freed %s)\n", formatBytes(sizeBefore), formatBytes(sizeAfter), formatBytes(freed))
+	if line := gcSizeLine(sizeBefore, sizeAfter); line != "" {
+		fmt.Printf("  %s\n", line)
+	}
 	fmt.Printf("  Time: %v\n", elapsed)
 	return nil
 }
@@ -892,21 +899,6 @@ func isUnknownArchiveLevelFlagError(output string) bool {
 	return strings.Contains(lower, "unknown option") ||
 		strings.Contains(lower, "unknown flag") ||
 		strings.Contains(lower, "flag provided but not defined")
-}
-
-// getDirSize calculates the total size of a directory recursively
-func getDirSize(path string) (int64, error) {
-	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			size += info.Size()
-		}
-		return nil
-	})
-	return size, err
 }
 
 // formatBytes formats a byte count as a human-readable string
