@@ -1,0 +1,28 @@
+{
+  "name": "beads",
+  "version": "1.1.0",
+  "description": "AI-supervised issue tracking skills for coding agents",
+  "type": "module",
+  "private": true,
+  "homepage": "https://github.com/gastownhall/beads",
+  "repository": "https://github.com/gastownhall/beads",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "issue-tracker",
+    "task-management",
+    "ai-workflow",
+    "agent-memory"
+  ],
+  "pi": {
+    "extensions": [
+      "./.pi/extensions/beads.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --test .pi/extensions/beads.test.mjs"
+  }
+}
