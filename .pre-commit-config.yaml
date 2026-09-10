@@ -3,8 +3,9 @@ repos:
     rev: v2.10.1
     hooks:
       - id: golangci-lint
-        # Mirror the ci-pr-lint gate (scripts/pr-lint.sh) so pre-commit and CI
-        # apply the same lint shape.
+        # Mirror the ci-pr-lint gate's config and build tags
+        # (scripts/ci/pr-lint.sh). Scope and the gate's Windows cross-lint
+        # pass still differ.
         args:
           - --config=.golangci.yml
           - --modules-download-mode=readonly
