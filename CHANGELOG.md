@@ -229,9 +229,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actionable half of [#5102](https://github.com/gastownhall/beads/issues/5102)).
   The stderr truncation hint was gated on stderr being a terminal, so pipes and
   `--json` callers - exactly the consumers that cannot tell a partial page is
-  partial - got a silently capped list. The hint now always fires when a
-  caller-set limit cut the page (since #4094 piped stdout never applies the
-  default limit), and under `BD_JSON_ENVELOPE=1` both commands carry the same
+  partial - got a silently capped list. The hint now always fires when the
+  effective limit cut the page. Piped `bd list` does not apply its default
+  limit (since #4094), while `bd query` still has an effective default of 50
+  even when piped. Under `BD_JSON_ENVELOPE=1` both commands carry the same
   `pagination {returned, truncated}` key `bd ready` gained in #4892. Stdout is
   untouched on every route.
 

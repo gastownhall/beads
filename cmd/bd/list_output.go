@@ -19,9 +19,9 @@ import (
 // The notice is deliberately NOT gated on stderr being a terminal, matching
 // bd ready's unconditional hint (GH#4892): piped consumers are exactly the
 // ones that cannot see a partial page is partial (GH#5102). Since GH#4094
-// piped stdout never applies the default limit, so this fires for a piped
-// caller only when a --limit they set themselves (flag, config, or
-// BD_LIST_LIMIT) cut the page — stdout stays clean either way.
+// piped `bd list` stdout never applies its default limit. This fires whenever
+// the effective limit cut the page; `bd query` has an effective default of 50
+// even when piped. Stdout stays clean either way.
 func printTruncationHint(truncated bool, effectiveLimit int) {
 	if !truncated || effectiveLimit <= 0 {
 		return
