@@ -26,14 +26,18 @@ const (
 	// `--discard-remote`. Ambiguous identity source.
 	ExitRemoteDivergenceRefused = 10
 
-	// ExitLocalExistsRefused signals `bd init` was called against a
-	// directory that already has beads data, without `--force` or
-	// `--reinit-local`. The existing local-safety refusal.
+	// ExitLocalExistsRefused signals the interactive typed-confirmation
+	// for a destructive re-init over existing local data was declined at
+	// the prompt. That TTY-only path is its sole source: the same guard's
+	// non-interactive branch returns ExitDestroyTokenMissing instead, and
+	// a plain `bd init` over an initialized workspace is refused by the
+	// local-safety guard with an ordinary error, not this code.
 	ExitLocalExistsRefused = 11
 
-	// ExitDestroyTokenMissing signals `--discard-remote` was passed in
-	// non-interactive mode without a valid `--destroy-token`. The caller
-	// must look up the token format via `bd help init-safety`.
+	// ExitDestroyTokenMissing signals a destructive re-init was requested
+	// in non-interactive mode without a valid `--destroy-token`: either
+	// `--discard-remote`, or `--reinit-local` over existing local issues.
+	// The caller must look up the token format via `bd help init-safety`.
 	ExitDestroyTokenMissing = 12
 )
 

@@ -136,6 +136,24 @@ func (e CountDependencyEdgesParamsDirection) Valid() bool {
 	}
 }
 
+// Defines values for ListIssuesParamsSort.
+const (
+	ListIssuesParamsSortCreated  ListIssuesParamsSort = "created"
+	ListIssuesParamsSortPriority ListIssuesParamsSort = "priority"
+)
+
+// Valid indicates whether the value is a known member of the ListIssuesParamsSort enum.
+func (e ListIssuesParamsSort) Valid() bool {
+	switch e {
+	case ListIssuesParamsSortCreated:
+		return true
+	case ListIssuesParamsSortPriority:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListRelatedIssuesParamsDirection.
 const (
 	ListRelatedIssuesParamsDirectionIn  ListRelatedIssuesParamsDirection = "in"
@@ -957,6 +975,8 @@ type CompareAndSetMetadataResponse struct {
 }
 
 // ContextResponse The server's identity handshake. Every member is a deliberate, permanent choice; the field set is an allowlist frozen by a test that checks it against BOTH this document and the generated Go struct, so a field cannot arrive here as a side effect of the server's configuration growing one. In particular the workspace's sync remote is EXCLUDED, in this and every future version, because remote URLs routinely embed credentials — as are the database bind host/port (advertising them invites clients to bypass this API and dial the database directly) and the loopback/non-loopback bind mode.
+//
+// TWO MEMBERS ARE OPTIONAL, and they are the only two that describe the SERVER's filesystem rather than the workspace's logical identity: `beads_dir` and `repo_root`. A client must be able to read them as absent. Everything a remote caller identifies a workspace by is elsewhere and stays required — `project_id`, `database`, `backend`, `dolt_mode` — and an absolute host path is not something a remote caller can act on in any case: it cannot open it. `bd serve` publishes both, so a client reading a `bd serve` today sees no change; what the relaxation buys is that a deployment which does not want to disclose its filesystem layout can withhold them and still serve a body that conforms to this document.
 type ContextResponse struct {
 	// ApiVersion The path major this server serves. `v0` for this document.
 	ApiVersion string `json:"api_version"`
@@ -967,8 +987,10 @@ type ContextResponse struct {
 	// BdVersion The release version of the serving binary. The only field a client may compare as a version, and only for behavioral changes tied to a release.
 	BdVersion string `json:"bd_version"`
 
-	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
-	BeadsDir string `json:"beads_dir"`
+	// BeadsDir Absolute path of the served workspace's `.beads` directory, when the server discloses it. A host path: `bd serve` publishes it because it is a single-workspace server's most legible workspace-identity handshake for the operator reading it, and disclosing it to network peers is part of what that operator accepts when binding beyond loopback.
+	//
+	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
+	BeadsDir *string `json:"beads_dir,omitempty"`
 
 	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the one behavior token is `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
@@ -984,8 +1006,8 @@ type ContextResponse struct {
 	// ProjectId Logical project identifier.
 	ProjectId string `json:"project_id"`
 
-	// RepoRoot Absolute path of the served repository root. See `beads_dir`.
-	RepoRoot string `json:"repo_root"`
+	// RepoRoot Absolute path of the served repository root, when the server discloses it. OPTIONAL on the same terms as `beads_dir`; see it.
+	RepoRoot *string `json:"repo_root,omitempty"`
 
 	// SchemaVersion The shared JSON schema version — the same constant the CLI's stdout JSON envelope reports. Diagnostic only: it can move for CLI-only reasons with no HTTP wire change, so clients MUST NOT branch on it.
 	SchemaVersion int `json:"schema_version"`
@@ -1610,7 +1632,7 @@ type ReleaseIssueRequest struct {
 	//
 	// A MATCH REPLACES THE OWNERSHIP FENCE, so `actor` need not be the holder. Sending it beside `force` is a 400: the two are answers to the same question and they disagree.
 	//
-	// THE COMPARISON IS SEPARATOR-INSENSITIVE AND NOTHING ELSE. A run of `.`, `_` or `-` matches any other such run, so `agent-a`, `agent_a` and `agent.a` are one holder — that is deliberate, so a caller naming the holder under a different layer's spelling is a match rather than a mismatch. NOTHING ELSE IS FORGIVEN: the value is not trimmed and not case-folded, so `" agent-a"` and `Agent-a` are both refusals. The server trims only far enough to tell a blank expectation from a real one and never sends the trimmed form on, so a caller that pads its expectation loses EVERY time rather than intermittently. Compose it from a holder a read gave you.
+	// THE COMPARISON IS SEPARATOR-INSENSITIVE AND NOTHING ELSE. A run of `.`, `_` or `-` matches any other such run, so `agent-a`, `agent_a` and `agent.a` are one holder — that is deliberate, so a caller naming the holder under a different layer's spelling is a match rather than a mismatch. THE ONE EXCEPTION IS AN EXACT `--` RUN: that is gascity's session-name encoding of a rig-qualified agent's `/`, so it decodes to `/` instead of collapsing. `a--b` matches `a/b`, and no longer matches `a__b` or `a-b`. Those name different identities — `a--b` is the agent `b` on rig `a`, `a__b` is the dotted alias `a.b` — so treating them as one holder was a widening, and removing it is the point of the exception. Longer or mixed runs, `__` included, still collapse. NOTHING ELSE IS FORGIVEN: the value is not trimmed and not case-folded, so `" agent-a"` and `Agent-a` are both refusals. The server trims only far enough to tell a blank expectation from a real one and never sends the trimmed form on, so a caller that pads its expectation loses EVERY time rather than intermittently. Compose it from a holder a read gave you.
 	//
 	// THE EMPTY STRING IS A 400, and this is the one place this member disagrees with `UpdateIssueRequest.expected_assignee`, where an empty string is a real guard meaning "expected unassigned". Here "release a row nobody holds" describes no release at all; a caller that wants to assert a row is unheld is asking a READER a question, not asking this operation to do nothing. Absent, and only absent, selects the unconditional path.
 	//
@@ -2108,7 +2130,7 @@ type ListIssuesParams struct {
 	// IncludeInfra Include the workspace's configured infrastructure issue types. This also admits the ephemeral plane those types live in, so it is strictly wider than `include_ephemeral`.
 	IncludeInfra *bool `form:"include_infra,omitempty" json:"include_infra,omitempty"`
 
-	// IncludeEphemeral Include the ephemeral tier — ephemeral rows and the non-synced rows stored beside them — merged into the same `(created_at DESC, id ASC)` order as the durable ones.
+	// IncludeEphemeral Include the ephemeral tier — ephemeral rows and the non-synced rows stored beside them — merged into the same order as the durable ones, whichever order `sort` named.
 	//
 	// It admits a TIER and takes no TYPE exclusion off, so a row whose type this operation already hides stays hidden. That includes the configured infrastructure types: ephemeral `agent`, `role` and `message` rows need `include_infra` as well as, or instead of, this one. What `include_ephemeral` alone reaches is the ephemeral rows of the types a listing already shows.
 	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
@@ -2125,11 +2147,22 @@ type ListIssuesParams struct {
 	// HasMetadataKey Only issues carrying this top-level metadata key.
 	HasMetadataKey *string `form:"has_metadata_key,omitempty" json:"has_metadata_key,omitempty"`
 
+	// Sort Which of the two served total orders this page is in. `created` is `(created_at DESC, id ASC)`; `priority` is `(priority ASC, created_at DESC, id ASC)` — `bd list`'s flagless ordering, and the order `bd list --sort priority` produces.
+	//
+	// THE DEFAULT IS `created` AND WILL NOT CHANGE. It is what this operation served before this parameter existed, so moving it would alter which rows a truncated page contains for every client written against that behavior, with no error to notice it by.
+	//
+	// THE VOCABULARY IS CLOSED, and deliberately smaller than the nine values `bd list --sort` and `GET /v0/beads/issues:query` take. Each value here is a cursor contract, not a display preference: it needs a keyset predicate and a key proven total. See the operation description for why the other seven have neither.
+	//
+	// A value outside the enum is a 400 `invalid_argument` with `param: "sort"` and `reason: "invalid_value"`. A server that predates this parameter answers `param: "sort"` with `reason: "unknown_parameter"` instead, which is the per-parameter capability probe a client can dispatch on to fall back to paging in `created` order and sorting client-side.
+	Sort *ListIssuesParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
+
 	// Cursor Opaque keyset position, taken verbatim from a previous response's `next_cursor`. Clients MUST NOT construct, parse or mutate it: its encoding is server-private and versioned, and an undecodable or unknown-version value is refused with 400 `invalid_cursor`. The recovery for that refusal is normative: restart paging with no `cursor` at all — the position cannot be salvaged, and re-sending the same value cannot succeed.
 	//
-	// LIFETIME: a cursor holds a position and a private encoding version, and nothing else. The server keeps no state for it, so it does not expire, does not become invalid when the server restarts, and is not tied to the connection that issued it; the only thing that invalidates one is a change to the encoding, which surfaces as `invalid_cursor`.
+	// LIFETIME: a cursor holds a position, the ORDER that position is in, and a private encoding version — and nothing else. The server keeps no state for it, so it does not expire, does not become invalid when the server restarts, and is not tied to the connection that issued it; the only thing that invalidates one is a change to the encoding, which surfaces as `invalid_cursor`. A token minted before `sort` existed is still accepted, as the `created`-order position it is, so no traversal in flight across a server upgrade has to be restarted.
 	//
-	// MISUSE IS NOT DETECTABLE, which is why repeating the filters matters. Because the token carries no filters, a page fetched with a cursor minted under DIFFERENT filters is not refused: the server applies the filters of the current request from the position of the old one, silently skipping every row the new filter set would have placed before that position. Repeat every filter verbatim for the whole traversal, and start a new traversal when they change.
+	// THE ORDER MUST MATCH, AND THAT MISMATCH IS DETECTED. A cursor minted under one `sort` and re-sent under another is refused with 400 `invalid_cursor`; the same instant and id name a different row in a different order, so resuming from it would skip and duplicate rows silently. Send the same `sort` for the whole traversal.
+	//
+	// FILTER MISUSE IS *NOT* DETECTABLE, which is the difference, and why repeating the filters matters. Because the token carries no filters, a page fetched with a cursor minted under DIFFERENT filters is not refused: the server applies the filters of the current request from the position of the old one, silently skipping every row the new filter set would have placed before that position. Repeat every filter verbatim for the whole traversal, and start a new traversal when they change.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
 	// Limit Maximum number of items to return. `0` means unlimited, exactly as `bd list --limit 0` does — the two surfaces read the same shared default and the same zero semantics, so they cannot diverge. An unlimited page reports `has_more: false` and carries no `next_cursor`. A negative value is a 400.
@@ -2144,6 +2177,9 @@ type ListIssuesParams struct {
 	// The response carries no marker for the omission, so an omitted field is indistinguishable from a genuinely empty one: only the client that sent this parameter knows the rows are partial. Fetch a whole issue with `GET /v0/beads/issues/{id}`.
 	Brief *bool `form:"brief,omitempty" json:"brief,omitempty"`
 }
+
+// ListIssuesParamsSort defines parameters for ListIssues.
+type ListIssuesParamsSort string
 
 // GetIssueParams defines parameters for GetIssue.
 type GetIssueParams struct {
@@ -2310,6 +2346,9 @@ type CountIssuesParams struct {
 
 	// NoLabels Only issues carrying no label.
 	NoLabels *bool `form:"no_labels,omitempty" json:"no_labels,omitempty"`
+
+	// MetadataField Top-level metadata equality filter as `key=value`, split on the first `=`. Repeatable. An invalid key is a 400.
+	MetadataField *[]string `form:"metadata_field,omitempty" json:"metadata_field,omitempty"`
 
 	// IncludeInfra Count the cardinality of `bd list --include-infra --all` instead of the durable plane. IT CHANGES FOUR THINGS AT ONCE, and they are listed rather than summarized because a caller reading "include infra" would expect one:
 	//

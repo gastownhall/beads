@@ -269,6 +269,7 @@
         "group": "Recovery",
         "pages": [
           "recovery/index",
+          "recovery/accidental-1-2-1-release",
           "recovery/init-safety",
           "recovery/database-corruption",
           "recovery/merge-conflicts",
@@ -285,6 +286,7 @@
           "multi-agent/routing",
           "multi-agent/coordination",
           "multi-agent/federation",
+          "multi-agent/bucket-federation",
           "multi-agent/multi-repo-migration"
         ]
       },

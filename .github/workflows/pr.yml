@@ -74,6 +74,83 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # examples/ holds separate Go modules that reach the parent through a
+  # `replace` directive, so their go.mod/go.sum record the parent's whole
+  # dependency graph and go stale whenever the root module's does. Nothing in
+  # CI compiled them, so that drift was invisible: on 2026-08-01 BOTH example
+  # modules failed a plain `go build` on main with "updates to go.mod needed".
+  # Examples are the first code a new user copies; this keeps them buildable.
+  #
+  # Advisory on purpose, and NOT in ci-gate's required list.
+  #
+  # Because of the `replace` directive, any root go.mod change that is not
+  # mirrored into the examples fails this job. Whether that should block a merge
+  # is a maintainer call about contributor friction, so this PR does not make it
+  # one. Advisory has to be implemented at the STEP level: a job-level
+  # continue-on-error job still reports its check run as FAILURE in the PR
+  # rollup (only the workflow-run conclusion turns success), and pr-preflight
+  # and the pr-babysit merge patrol gate on per-check-run conclusions — so a
+  # job-level red here would stall the merge lane repo-wide while claiming to
+  # be optional. Step-level continue-on-error (the cygwin-leg precedent below)
+  # keeps the check run green and surfaces failures as warning annotations.
+  #
+  # To promote it to a real gate: drop the step's continue-on-error and the
+  # warning step, then add `build-examples` to ci-gate's `needs`,
+  # `CI_GATE_REQUIRED`, and its env map.
+  build-examples:
+    name: Build example modules
+    runs-on: ubuntu-latest
+    # No job-level timeout on purpose: a job-level timeout CANCELS the job,
+    # and a cancelled advisory job is a red check run — blocking again by a
+    # different door. Instead every step below carries its own
+    # timeout-minutes AND continue-on-error, so a hang or failure anywhere
+    # (setup download stall, cache stall, build hang) degrades to a warning
+    # annotation while the job itself always concludes green.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        id: checkout
+        continue-on-error: true
+        timeout-minutes: 5
+
+      - name: Set up Go
+        id: setup-go
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      # The examples' dependency graph is the parent module's (via the
+      # `replace` directive), so the repo-wide module cache key is a
+      # near-perfect hit; without it this job cold-downloads the whole
+      # dolt-sized graph on every PR.
+      - name: Restore Go module cache
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Type-check every module under examples/
+        id: build-examples
+        if: steps.checkout.outcome == 'success' && steps.setup-go.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/build-examples.sh
+
+      - name: Warn when example modules are stale or fail to build
+        if: steps.build-examples.outcome == 'failure'
+        run: |
+          echo "::warning title=Example modules out of date::examples/ failed to type-check against this tree. Run 'go mod tidy' in each module under examples/ (see scripts/build-examples.sh output above). Advisory only; this does not block the merge."
+
+      - name: Warn when the advisory job could not run at all
+        if: steps.checkout.outcome != 'success' || steps.setup-go.outcome != 'success'
+        run: |
+          echo "::warning title=Example build check skipped::checkout or Go setup failed, so examples/ could not be checked this run (checkout: ${{ steps.checkout.outcome }}, setup-go: ${{ steps.setup-go.outcome }}). Advisory only; this does not block the merge."
+
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
   # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
@@ -194,6 +271,30 @@ jobs:
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
 
+  # internal/doltversion carries Windows-specific branches (PATHEXT
+  # extension completion in Resolve, ERROR_BAD_EXE_FORMAT detection, the
+  # executable-bit carve-out) and its behavioral tests run there via .cmd
+  # stubs — but the Ubuntu test jobs compile those branches without ever
+  # executing them. Same pattern as the liveness job above: run exactly
+  # this package on windows-latest so the platform it targets actually
+  # exercises it at PR time. Small on purpose (~1 min).
+  test-windows-doltversion:
+    name: Test (Windows) doltversion package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run doltversion package tests on Windows
+        run: go test -tags gms_pure_go -count=1 ./internal/doltversion/
+
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
   # and fails (rather than skips) when the runner cannot provide it.
@@ -230,6 +331,44 @@ jobs:
           CGO_ENABLED: "0"
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
+
+  # internal/storage/dbproxy/server carries the platform-portable path
+  # handling that #5820 introduced (testPlatformPath, external dolt config
+  # validation, DSN shaping), and until now no PR-triggered job executed the
+  # package on Windows - the platform those paths target - so a path-shaped
+  # regression stayed invisible until someone ran it by hand (the #5820
+  # review merged on a contributor's windows/amd64 attestation for exactly
+  # that reason). Same pattern as the focused jobs above: run exactly this
+  # package on windows-latest. Tests that need a dolt binary Skipf loudly
+  # (dolt is not installed on the Windows runners), and the unix-socket
+  # cases skip on Windows by design - the portability class this job guards
+  # runs without either.
+  #
+  # Deliberately NOT added to ci-gate's `needs`/`CI_GATE_REQUIRED`/env map,
+  # following the `test-macos` precedent above: promoting a new job to
+  # required-for-merge is a maintainer call once it has run clean for a while.
+  # Until then it runs on every PR and surfaces red on the PR page without
+  # blocking the merge lane. Say the word and I will wire it into the gate in
+  # the same PR - the three edits are `ci-gate.needs`, `CI_GATE_REQUIRED`, and
+  # `TEST_WINDOWS_DBPROXY_SERVER: ${{ needs.test-windows-dbproxy-server.result }}`.
+  test-windows-dbproxy-server:
+    name: Test (Windows) dbproxy server package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run dbproxy server package tests on Windows
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
 
   # Fast check to ensure all version files are in sync
   check-version-consistency:
@@ -372,6 +511,11 @@ jobs:
       - name: Exercise generated Git hook timeout process boundary
         shell: bash
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
+
+      - name: Check benchmark environment scrubbing
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: go test -tags gms_pure_go -count=1 -run '^(TestCleanEnvUsesHostKeySemantics|TestBenchmarkCommandBuildersStripDoltEnvOverrides)$' ./scripts/repro-dolt-prod-timeouts
 
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
@@ -557,7 +701,7 @@ jobs:
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -612,6 +756,65 @@ jobs:
           BD_LINT_NEW_FROM_MERGE_BASE: origin/main
         run: make ci-pr-lint
 
+  # Advisory architecture signal. This deliberately does not participate in
+  # ci-gate while maintainers evaluate the baseline and refactoring payoff.
+  complexity-report:
+    name: Complexity report (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Install gocyclo
+        timeout-minutes: 5
+        continue-on-error: true
+        run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+
+      - name: Generate complexity report
+        id: generate-complexity
+        if: always()
+        timeout-minutes: 8
+        continue-on-error: true
+        run: |
+          set +e
+          COMPLEXITY_BASE_REF=origin/main ./scripts/ci/complexity.sh diff > complexity-report.txt 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "complexity report unavailable (exit $status); see log above" >> complexity-report.txt
+          fi
+          exit 0
+
+      - name: Annotate unavailable complexity report
+        if: always()
+        timeout-minutes: 1
+        continue-on-error: true
+        run: |
+          if [ ! -s complexity-report.txt ] || grep -q 'complexity report unavailable' complexity-report.txt; then
+            echo "::warning title=Complexity report unavailable::Advisory complexity analysis did not complete; inspect the artifact or job log."
+          fi
+
+      - name: Upload complexity report
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: complexity-report
+          path: complexity-report.txt
+          retention-days: 7
+          if-no-files-found: error
+
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
   # internal/storage/uow). These packages back the proxied-server init path and
   # also live behind the existing ./... matrix, but TestDomainDB requires the
@@ -635,7 +838,7 @@ jobs:
           cache: false
 
       - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
@@ -736,7 +939,7 @@ jobs:
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt (Linux/macOS)
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
@@ -789,7 +992,7 @@ jobs:
           cache: false
 
       - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -967,6 +1170,82 @@ jobs:
           '@ | & $make --no-print-directory -f - windows-make-shell-smoke
           if ($LASTEXITCODE -ne 0) {
             throw 'Native Make shell smoke failed'
+          }
+
+          function Get-TreeManifest {
+            param([Parameter(Mandatory)][string]$Root)
+
+            @(
+              Get-ChildItem -LiteralPath $Root -Recurse -Force | ForEach-Object {
+                $relative = [IO.Path]::GetRelativePath($Root, $_.FullName).Replace('\', '/')
+                if ($_.PSIsContainer) {
+                  "D $relative"
+                } else {
+                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                  "F $relative $hash"
+                }
+              }
+            ) | Sort-Object
+          }
+
+          $proofRoot = Join-Path $env:RUNNER_TEMP ("make install proof " + [guid]::NewGuid().ToString('N'))
+          $fixtureRepo = Join-Path $proofRoot 'fixture repo'
+          $buildDir = Join-Path $fixtureRepo 'build output'
+          $installRoot = Join-Path $proofRoot 'install sandbox'
+          $installProfile = Join-Path $installRoot 'profile with spaces'
+          New-Item -ItemType Directory -Force -Path $buildDir, $installProfile | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'Makefile') -Destination $fixtureRepo
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'go.mod') -Destination $fixtureRepo
+
+          $sentinel = Join-Path $buildDir 'bd.exe'
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel'
+          $sentinelHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+
+          & $git -C $fixtureRepo init --quiet
+          & $git -C $fixtureRepo config core.hooksPath .githooks
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not initialize the isolated install fixture repository'
+          }
+          & $git -C $fixtureRepo -c user.name=install-proof -c user.email=install-proof@example.invalid `
+            -c commit.gpgsign=false commit --allow-empty --quiet -m 'Initialize install proof'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not commit the isolated install fixture repository'
+          }
+          $fixtureBefore = @(Get-TreeManifest -Root $fixtureRepo)
+
+          $env:USERPROFILE = $installProfile
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make install-force failed for a spaced USERPROFILE'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $installed = Join-Path $installProfile '.local\bin\bd.exe'
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw "Native Make did not install bd.exe at the exact destination '$installed'"
+          }
+          if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $sentinelHash) {
+            throw 'Native Make installed bd.exe with unexpected contents'
+          }
+
+          $expectedInstall = @(
+            'D profile with spaces'
+            'D profile with spaces/.local'
+            'D profile with spaces/.local/bin'
+            "F profile with spaces/.local/bin/bd.exe $sentinelHash"
+          ) | Sort-Object
+          $actualInstall = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedInstall -DifferenceObject $actualInstall) {
+            throw "Native Make changed paths outside the exact install destination:`n$($actualInstall -join "`n")"
+          }
+
+          $fixtureAfter = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBefore -DifferenceObject $fixtureAfter) {
+            throw 'Native Make split the spaced install path or otherwise mutated the fixture repository'
           }
 
       - name: Exercise MSYS2-hosted Make

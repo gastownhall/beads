@@ -49,7 +49,7 @@ func TestBeginTxScopesJournalActivationToThePinnedConn(t *testing.T) {
 	tx, err := p.BeginTx(ctx)
 	require.NoError(t, err)
 
-	require.NoError(t, issueops.RecordDeleteInTx(ctx, tx.Runner(), "bd-1"))
+	require.NoError(t, issueops.RecordDeleteInTx(ctx, tx.Runner(), "bd-1", "test-actor"))
 	require.NoError(t, mock.ExpectationsWereMet(),
 		"an enabled provider must journal on the transaction BeginTx pinned")
 }
@@ -67,7 +67,7 @@ func TestBeginTxLeavesJournalOffWhenDisabled(t *testing.T) {
 	require.NoError(t, err)
 
 	// Any journal statement here would be an unexpected call and fail the mock.
-	require.NoError(t, issueops.RecordDeleteInTx(ctx, tx.Runner(), "bd-1"))
+	require.NoError(t, issueops.RecordDeleteInTx(ctx, tx.Runner(), "bd-1", "test-actor"))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -115,7 +115,7 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 			// activation entry survived, the emit would still consider itself
 			// enabled and run SQL on a connection that is back in the pool —
 			// which errors here and would be a cross-transaction write there.
-			require.NoError(t, issueops.RecordDeleteInTx(context.Background(), conn, "bd-1"),
+			require.NoError(t, issueops.RecordDeleteInTx(context.Background(), conn, "bd-1", "test-actor"),
 				"a leaked activation entry makes a released connection journal")
 		})
 	}

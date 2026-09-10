@@ -541,7 +541,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// so the journal row carries the settled bead. recordEvent controls the
 	// human-facing audit event only: the journal is a machine replay feed and
 	// must never have a hole punched in it by an audit-suppressing caller.
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
 		return nil, err
 	}
 	return updateResult, nil

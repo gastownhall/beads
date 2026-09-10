@@ -90,3 +90,100 @@ func TestKeysetComposesWithCreatedBefore(t *testing.T) {
 		t.Fatalf("arg count = %d, want 4 (1 CreatedBefore + 3 keyset)", len(args))
 	}
 }
+
+// TestPriorityKeysetPredicateEmission pins the (priority ASC, created_at DESC,
+// id ASC) keyset predicate BuildIssueFilterClauses emits when the position
+// carries a priority: the exact sargable fragment (single-sourced from
+// KeysetPriorityCreatedAtIDPredicate) and its five bound args in order
+// (priority, priority, created_at, created_at, id).
+//
+// The created-order predicate must NOT also be emitted as a standalone clause:
+// the two are alternatives, and ANDing them would exclude every row of a
+// higher-numbered priority whose created_at is newer than the cursor's — the
+// exact rows a priority walk exists to reach.
+func TestPriorityKeysetPredicateEmission(t *testing.T) {
+	t.Parallel()
+
+	cur := time.Date(2024, 3, 2, 1, 0, 0, 0, time.UTC)
+	p := 2
+
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{
+		AfterPriority:  &p,
+		AfterCreatedAt: &cur,
+		AfterID:        "bd-42",
+	}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("BuildIssueFilterClauses (priority keyset): %v", err)
+	}
+	found, plain := 0, 0
+	for _, c := range clauses {
+		switch c {
+		case KeysetPriorityCreatedAtIDPredicate:
+			found++
+		case KeysetCreatedAtIDPredicate:
+			plain++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("priority keyset predicate clause count = %d, want 1; clauses=%v", found, clauses)
+	}
+	if plain != 0 {
+		t.Fatalf("the created-order predicate was ALSO emitted (%d times); the two orders are alternatives, not conjuncts: %v", plain, clauses)
+	}
+	want := []any{p, p, cur, cur, "bd-42"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("arg[%d] = %v (%T), want %v (%T)", i, args[i], args[i], want[i], want[i])
+		}
+	}
+}
+
+// TestPriorityKeysetNeedsBothHalvesOfThePosition pins that AfterPriority alone
+// is not a position. The timestamp half is what decides whether a position was
+// supplied — the same rule AfterID already follows — so a request carrying a
+// priority and no instant emits no keyset predicate at all rather than a
+// half-built one that would silently drop every row of the cursor's own
+// priority.
+func TestPriorityKeysetNeedsBothHalvesOfThePosition(t *testing.T) {
+	t.Parallel()
+
+	p := 2
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{AfterPriority: &p}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("BuildIssueFilterClauses (priority only): %v", err)
+	}
+	joined := strings.Join(clauses, " AND ")
+	if strings.Contains(joined, "priority >= ?") {
+		t.Fatalf("a priority with no instant emitted a keyset predicate: %v", clauses)
+	}
+	if len(args) != 0 {
+		t.Fatalf("args = %v, want none", args)
+	}
+}
+
+// TestPriorityKeysetPredicateNestsTheCreatedOne pins the SHAPE that makes the
+// predicate correct, not merely its text. Under (priority ASC, created_at DESC,
+// id ASC) the created/id comparison is only reachable for rows of the cursor's
+// OWN priority, so it must sit inside the priority-equal arm. A flattened
+// `(priority > ?) OR (created_at < ?) OR (id > ?)` — the shape the created-only
+// predicate's own leading-bound trick invites — admits a row at the cursor's
+// priority created AFTER the cursor whenever its id sorts later, which is a
+// duplicate on the next page.
+func TestPriorityKeysetPredicateNestsTheCreatedOne(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(KeysetPriorityCreatedAtIDPredicate, KeysetCreatedAtIDPredicate) {
+		t.Fatalf("the priority predicate does not contain the created one verbatim, so the two can drift:\n priority: %s\n created:  %s",
+			KeysetPriorityCreatedAtIDPredicate, KeysetCreatedAtIDPredicate)
+	}
+	if !strings.HasPrefix(KeysetPriorityCreatedAtIDPredicate, "(priority >= ?") {
+		t.Fatalf("the priority predicate lost its sargable leading bound: %s", KeysetPriorityCreatedAtIDPredicate)
+	}
+	if strings.Count(KeysetPriorityCreatedAtIDPredicate, "?") != 5 {
+		t.Fatalf("the priority predicate binds %d placeholders, want 5 (priority, priority, created_at, created_at, id): %s",
+			strings.Count(KeysetPriorityCreatedAtIDPredicate, "?"), KeysetPriorityCreatedAtIDPredicate)
+	}
+}

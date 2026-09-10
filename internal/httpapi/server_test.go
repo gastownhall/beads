@@ -758,9 +758,16 @@ func TestSemaphoreShedsLoadInsteadOfQueueingForever(t *testing.T) {
 		t.Error("a saturation 503 must carry Retry-After")
 	}
 
-	// A wait that eventually succeeds is still a saturation datapoint.
+	// A wait that eventually succeeds is still a saturation datapoint. This
+	// section widens the timeout so the assertion is about a release that
+	// beats a generous window, not a race against the tight one the shed
+	// check above needs to stay fast (be-qczn): a loaded CI runner can
+	// overshoot a 5ms sleep by more than the ~15ms margin a shared 20ms
+	// timeout left, which produced ErrBusy instead of a recorded saturation
+	// event.
+	s.semTimeout = 2 * time.Second
 	go func() {
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 		held()
 	}()
 	slow := &reqInfo{id: "slow"}
