@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-06-03 — session 9eea745c
+
+Files: internal/types/types_test.go, internal/types/types.go
+
+> AI summary pending — check ProjectDocs Handover in next session.
 All notable changes to the beads project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
