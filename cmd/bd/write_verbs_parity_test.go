@@ -47,6 +47,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1854,6 +1855,140 @@ func TestParityReopenNonDoneStatusReportsNothingToDo(t *testing.T) {
 	// The status is still what it was.
 	if got := env.get("test-rop6").Status; got != types.StatusInProgress {
 		t.Errorf("status = %q, want in_progress (the engine no-ops)", got)
+	}
+}
+
+// ===== bd update crossing into closed vs bd close =====
+
+// closeRowParityExclusions lists the types.Issue fields a row-for-row
+// comparison of `bd update -s closed` against `bd close` must skip, and why.
+// Everything else has to match: the two verbs reach the same done state, so any
+// other divergence is the update funnel failing to close the way close closes.
+var closeRowParityExclusions = map[string]string{
+	"ID":          "the two verbs act on two different issues",
+	"Title":       "the two verbs act on two different issues",
+	"ContentHash": "derives from ID and Title",
+	"CreatedAt":   "wall-clock stamp from two different seeds",
+	"UpdatedAt":   "wall-clock stamp from two different writes",
+	"ClosedAt":    "wall-clock stamp; asserted non-nil on both instead",
+	"RowVersion":  "freshRowLock() is regenerated per write by design",
+	"CloseReason": "cmd/bd/close.go resolveCloseReasons defaults `bd close`'s " +
+		"reason to \"Closed\" at the CLI layer, and `bd update` has no reason " +
+		"flag; the funnel-level default is asserted separately below",
+	// ga-ktn9pe.4.14 owns pin behavior in the update funnels — issueops
+	// auto-clears `pinned` on a status change and domain/db does not. Comparing
+	// it here would either bless that divergence or drag its fix into ga-kjkv1.
+	"Pinned": "ga-ktn9pe.4.14 owns pin behavior in the update funnels",
+}
+
+// TestParityUpdateToClosedMatchesCloseRow pins ga-kjkv1's shape: a generic
+// update whose status crosses into closed must land the same row `bd close`
+// lands. close writes close_reason and closed_by_session on every close
+// (issueops/close.go closeIssueInTx), including the empty values a caller that
+// named neither produces; the funnels used to write them only when the caller
+// passed the key, so the columns kept whatever the last close left.
+func TestParityUpdateToClosedMatchesCloseRow(t *testing.T) {
+	env := newParityEnv(t)
+	env.seed("test-updcls1", "Update into closed", nil)
+	env.seed("test-updcls2", "Close verb", nil)
+
+	env.setFlags(updateCmd, map[string]string{"status": "closed"})
+	if res := env.run(updateCmd, "test-updcls1"); res.exitCode != 0 {
+		t.Fatalf("update into closed: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+	}
+	env.setFlags(closeCmd, nil)
+	if res := env.run(closeCmd, "test-updcls2"); res.exitCode != 0 {
+		t.Fatalf("close: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+	}
+
+	updated, closed := env.get("test-updcls1"), env.get("test-updcls2")
+	if updated.ClosedAt == nil || closed.ClosedAt == nil {
+		t.Fatalf("closed_at: update = %v, close = %v; both verbs must stamp it", updated.ClosedAt, closed.ClosedAt)
+	}
+
+	updatedValue, closedValue := reflect.ValueOf(*updated), reflect.ValueOf(*closed)
+	for i := 0; i < updatedValue.NumField(); i++ {
+		field := updatedValue.Type().Field(i)
+		if why, skip := closeRowParityExclusions[field.Name]; skip {
+			t.Logf("skipping %s: %s", field.Name, why)
+			continue
+		}
+		got, want := updatedValue.Field(i).Interface(), closedValue.Field(i).Interface()
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s after `bd update -s closed` = %#v, want %#v (the value `bd close` writes)", field.Name, got, want)
+		}
+	}
+
+	// And the funnel default itself: no session flag, no session recorded.
+	if updated.ClosedBySession != "" {
+		t.Errorf("closed_by_session after a sessionless `bd update -s closed` = %q, want empty", updated.ClosedBySession)
+	}
+	if updated.CloseReason != "" {
+		t.Errorf("close_reason after a reasonless `bd update -s closed` = %q, want empty", updated.CloseReason)
+	}
+}
+
+// TestParityUpdateToClosedClearsPriorCloseAttribution pins the misattribution
+// ga-kjkv1 fixes. The generic reopen branch never cleared closed_by_session, so
+// a re-close through the funnel inherited the PREVIOUS close's session and
+// `bd show` rendered the new close as that old session's work.
+func TestParityUpdateToClosedClearsPriorCloseAttribution(t *testing.T) {
+	env := newParityEnv(t)
+	env.seed("test-updcls3", "Reclose attribution", nil)
+
+	env.setFlags(closeCmd, map[string]string{"reason": "first pass", "session": "session-one"})
+	if res := env.run(closeCmd, "test-updcls3"); res.exitCode != 0 {
+		t.Fatalf("first close: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+	}
+	if got := env.get("test-updcls3"); got.ClosedBySession != "session-one" || got.CloseReason != "first pass" {
+		t.Fatalf("first close recorded reason=%q session=%q, want %q/%q", got.CloseReason, got.ClosedBySession, "first pass", "session-one")
+	}
+
+	// Reopen through the generic funnel, not the reopen verb — this is the path
+	// that used to leave the close attribution behind.
+	env.setFlags(updateCmd, map[string]string{"status": "open"})
+	if res := env.run(updateCmd, "test-updcls3"); res.exitCode != 0 {
+		t.Fatalf("generic reopen: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+	}
+	reopened := env.get("test-updcls3")
+	if reopened.ClosedBySession != "" {
+		t.Errorf("closed_by_session after a generic reopen = %q, want empty", reopened.ClosedBySession)
+	}
+	if reopened.CloseReason != "" {
+		t.Errorf("close_reason after a generic reopen = %q, want empty", reopened.CloseReason)
+	}
+	if reopened.ClosedAt != nil {
+		t.Errorf("closed_at after a generic reopen = %v, want nil", reopened.ClosedAt)
+	}
+
+	// The re-close must attribute itself, not the first close.
+	env.setFlags(updateCmd, map[string]string{"status": "closed"})
+	if res := env.run(updateCmd, "test-updcls3"); res.exitCode != 0 {
+		t.Fatalf("generic re-close: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+	}
+	reclosed := env.get("test-updcls3")
+	if reclosed.ClosedBySession != "" {
+		t.Errorf("closed_by_session after a sessionless generic re-close = %q, want empty (not the first close's session)", reclosed.ClosedBySession)
+	}
+	if reclosed.CloseReason != "" {
+		t.Errorf("close_reason after a reasonless generic re-close = %q, want empty (not the first close's reason)", reclosed.CloseReason)
+	}
+}
+
+// TestParityUpdateToClosedKeepsExplicitSession pins that the defaults above
+// yield to an explicit key: `bd update -s closed --session` still attributes the
+// close, so the CLI's own closed_by_session pass-through (cmd/bd/update.go:133,
+// cmd/bd/update_input.go:58) keeps working and must stay in place.
+func TestParityUpdateToClosedKeepsExplicitSession(t *testing.T) {
+	env := newParityEnv(t)
+	env.seed("test-updcls4", "Explicit session", nil)
+
+	env.setFlags(updateCmd, map[string]string{"status": "closed", "session": "session-two"})
+	if res := env.run(updateCmd, "test-updcls4"); res.exitCode != 0 {
+		t.Fatalf("update into closed with a session: exit=%d err=%v stderr=%s", res.exitCode, res.err, res.stderr)
+	}
+	if got := env.get("test-updcls4").ClosedBySession; got != "session-two" {
+		t.Errorf("closed_by_session = %q, want %q (the explicit key beats the default)", got, "session-two")
 	}
 }
 

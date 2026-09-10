@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -163,6 +164,46 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
 	return &githubFieldMapper{config: t.config}
+}
+
+// MappingConfig exposes the tracker's field-mapping configuration so callers
+// (e.g. push-hook content comparison) can mirror push field semantics.
+func (t *Tracker) MappingConfig() *MappingConfig {
+	return t.config
+}
+
+// PushTargetScope returns the canonical repository endpoint under which issue
+// identifiers are resolved. It lets the sync engine distinguish repo-less refs
+// such as github:42 when the configured host, owner, or repository changes.
+func (t *Tracker) PushTargetScope() string {
+	if t.client == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s/repos/%s/%s",
+		canonicalGitHubBaseURL(t.client.BaseURL),
+		strings.ToLower(strings.TrimSpace(t.client.Owner)),
+		strings.ToLower(strings.TrimSpace(t.client.Repo)),
+	)
+}
+
+// canonicalGitHubBaseURL normalizes the URL components that are
+// case-insensitive while preserving case-sensitive path semantics. Malformed
+// and relative custom values fall back to deterministic whitespace/slash
+// trimming instead of being rejected here (Tracker.Init/client validation owns
+// their usability).
+func canonicalGitHubBaseURL(raw string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return trimmed
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	if u.RawPath != "" {
+		u.RawPath = strings.TrimRight(u.RawPath, "/")
+	}
+	return u.String()
 }
 
 // IsExternalRef checks if a ref belongs to this GitHub tracker.

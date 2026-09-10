@@ -15,13 +15,13 @@ type UnitOfWork interface {
 
 	ConfigUseCase() domain.ConfigUseCase
 	DoltRemoteUseCase() domain.DoltRemoteUseCase
-	BootstrapUseCase() domain.BootstrapUseCase
 
 	IssueUseCase() domain.IssueUseCase
 	DependencyUseCase() domain.DependencyUseCase
 	LabelUseCase() domain.LabelUseCase
 	CommentUseCase() domain.CommentUseCase
 	RawSQLUseCase() domain.RawSQLUseCase
+	EventsJournalUseCase() domain.EventsJournalUseCase
 }
 
 type UnitOfWorkProvider interface {
@@ -40,15 +40,15 @@ func NewUOW(ctx context.Context, p TxProvider) (UnitOfWork, error) {
 type baseUOW struct {
 	tx Tx
 
-	configUseCase    domain.ConfigUseCase
-	remoteUseCase    domain.DoltRemoteUseCase
-	bootstrapUseCase domain.BootstrapUseCase
+	configUseCase domain.ConfigUseCase
+	remoteUseCase domain.DoltRemoteUseCase
 
-	issueUseCase      domain.IssueUseCase
-	dependencyUseCase domain.DependencyUseCase
-	labelUseCase      domain.LabelUseCase
-	commentUseCase    domain.CommentUseCase
-	rawSQLUseCase     domain.RawSQLUseCase
+	issueUseCase         domain.IssueUseCase
+	dependencyUseCase    domain.DependencyUseCase
+	labelUseCase         domain.LabelUseCase
+	commentUseCase       domain.CommentUseCase
+	rawSQLUseCase        domain.RawSQLUseCase
+	eventsJournalUseCase domain.EventsJournalUseCase
 }
 
 func (u *baseUOW) Commit(ctx context.Context, message string) error {
@@ -75,16 +75,6 @@ func (u *baseUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase {
 		u.remoteUseCase = domain.NewDoltRemoteUseCase(db.NewRemoteSQLRepository(u.tx.Runner()))
 	}
 	return u.remoteUseCase
-}
-
-func (u *baseUOW) BootstrapUseCase() domain.BootstrapUseCase {
-	if u.bootstrapUseCase == nil {
-		u.bootstrapUseCase = domain.NewBootstrapUseCase(
-			db.NewConfigSQLRepository(u.tx.Runner()),
-			u.DoltRemoteUseCase(),
-		)
-	}
-	return u.bootstrapUseCase
 }
 
 func (u *baseUOW) IssueUseCase() domain.IssueUseCase {
@@ -131,4 +121,14 @@ func (u *baseUOW) RawSQLUseCase() domain.RawSQLUseCase {
 		u.rawSQLUseCase = domain.NewRawSQLUseCase(db.NewRawSQLRepository(u.tx.Runner()))
 	}
 	return u.rawSQLUseCase
+}
+
+// EventsJournalUseCase serves `bd events` in proxied-server mode. The journal
+// is clone-local operational state reached through the same pinned transaction
+// as every other repository, so a caller needs no raw SQL connection for it.
+func (u *baseUOW) EventsJournalUseCase() domain.EventsJournalUseCase {
+	if u.eventsJournalUseCase == nil {
+		u.eventsJournalUseCase = domain.NewEventsJournalUseCase(db.NewEventsJournalSQLRepository(u.tx.Runner()))
+	}
+	return u.eventsJournalUseCase
 }

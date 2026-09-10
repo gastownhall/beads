@@ -266,6 +266,13 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		if !cfg.IsDoltServerMode() {
 			return HandleError("repo is not in server mode (dolt_mode=%q); this command only migrates server-mode repos", cfg.GetDoltMode())
 		}
+		// This migration only re-points the proxy at the LOCAL Dolt root;
+		// it does not copy data. A workspace whose server mode comes from a
+		// remote host (GH#3545 inference or explicit config) would silently
+		// switch from the remote data to an empty/stale local database.
+		if host := cfg.GetDoltServerHost(); !configfile.IsLocalHostString(host) {
+			return HandleError("the configured Dolt server host is remote (%s); this migration only re-points the proxy at the local Dolt root and would abandon the remote data.\nMigrate on the server host itself, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
+		}
 		if doltserver.IsSharedServerMode() {
 			return HandleErrorWithHint("repo is in shared-server mode", "use 'bd migrate from-shared-server-to-proxied-server'")
 		}

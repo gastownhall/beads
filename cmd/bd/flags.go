@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -206,6 +207,126 @@ func readBodyFile(filePath string) (string, error) {
 	}
 
 	return string(content), nil
+}
+
+// textSources names the places a command can take body text from: stdin, a
+// file path, an explicit text flag, then positional args. A non-nil stdin
+// means --stdin was given. flagName names the text flag (e.g. "--response")
+// in conflict errors and always accompanies flagText. flagSet marks the text
+// flag as explicitly passed (cobra's Changed), so an empty flag value still
+// counts as a source — like a blank positional — rather than as absent.
+type textSources struct {
+	stdin      io.Reader
+	filePath   string
+	flagText   string
+	flagName   string
+	flagSet    bool
+	positional []string
+}
+
+// textFromSources resolves body text from the single provided source: stdin,
+// file path, flag value, or positional args joined with spaces. Combining any
+// two sources is an error rather than a silent drop of one of them — commands
+// normally reject flag combinations earlier via registerTextSourceFlags'
+// mutual exclusion, and the error here keeps a command that forgets that
+// registration from silently ignoring a source. Blank positional tokens and
+// an explicitly-set-but-empty text flag never resolve to text, but still
+// count as provided — the user attempted to pass text (e.g. an empty "$VAR"),
+// so an empty result is "cannot be empty" rather than "no source provided".
+// Trailing newlines (including CRLF) are trimmed from stdin — shells append
+// one (echo, heredocs) — while file content is passed through verbatim like
+// every other file-input flag. Returns "" with provided=false when no source
+// is given at all.
+func textFromSources(src textSources) (text string, provided bool, err error) {
+	type source struct {
+		name    string
+		resolve func() (string, error)
+	}
+	var sources []source
+	if positional := strings.Join(src.positional, " "); strings.TrimSpace(positional) != "" {
+		sources = append(sources, source{fmt.Sprintf("positional text %q", positional), func() (string, error) {
+			return positional, nil
+		}})
+	}
+	if src.stdin != nil {
+		sources = append(sources, source{"--stdin", func() (string, error) {
+			content, err := io.ReadAll(src.stdin)
+			if err != nil {
+				return "", fmt.Errorf("reading from stdin: %w", err)
+			}
+			return strings.TrimRight(string(content), "\r\n"), nil
+		}})
+	}
+	if src.filePath != "" {
+		sources = append(sources, source{"--file", func() (string, error) {
+			// Verbatim, like every other file-input flag (--body-file,
+			// --design-file, --reason-file): a file is a deliberate payload,
+			// so its trailing newlines are preserved.
+			return readBodyFile(src.filePath)
+		}})
+	}
+	if src.flagSet || src.flagText != "" {
+		sources = append(sources, source{src.flagName, func() (string, error) {
+			return src.flagText, nil
+		}})
+	}
+
+	provided = len(sources) > 0 || len(src.positional) > 0
+	switch len(sources) {
+	case 0:
+		return "", provided, nil
+	case 1:
+		text, err = sources[0].resolve()
+		return text, provided, err
+	default:
+		names := make([]string, len(sources))
+		for i, s := range sources {
+			names[i] = s.name
+		}
+		return "", provided, fmt.Errorf("cannot combine %s", strings.Join(names, " with "))
+	}
+}
+
+// cmdTextSources builds textSources from a command's --stdin and --file
+// flags (either may be unregistered) plus its positional text args. Callers
+// with a command-specific text flag fill in flagText/flagName themselves.
+func cmdTextSources(cmd *cobra.Command, positional []string) textSources {
+	src := textSources{positional: positional}
+	if stdinFlag, _ := cmd.Flags().GetBool("stdin"); stdinFlag {
+		src.stdin = os.Stdin
+	}
+	src.filePath, _ = cmd.Flags().GetString("file")
+	return src
+}
+
+// registerTextSourceFlags registers the shared text-source flags — --stdin
+// and --file, read back by name in cmdTextSources — and marks them mutually
+// exclusive with each other and with any command-specific text flags (e.g.
+// "response", registered by the caller beforehand). noun names the text in
+// the flag help (e.g. "comment text").
+func registerTextSourceFlags(cmd *cobra.Command, noun string, textFlags ...string) {
+	cmd.Flags().Bool("stdin", false, "Read "+noun+" from stdin")
+	cmd.Flags().String("file", "", "Read "+noun+" from file")
+	cmd.MarkFlagsMutuallyExclusive(append([]string{"stdin", "file"}, textFlags...)...)
+}
+
+// requireTextFromSources resolves body text like textFromSources and owns the
+// shared empty-text policy: text from an explicit source must be non-blank
+// ("<noun> cannot be empty"), and with no source at all the error lists the
+// command's accepted sources via hint (e.g. "use positional args, --stdin, or
+// --file").
+func requireTextFromSources(noun, hint string, src textSources) (string, error) {
+	text, provided, err := textFromSources(src)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(text) != "" {
+		return text, nil
+	}
+	if provided {
+		return "", fmt.Errorf("%s cannot be empty", noun)
+	}
+	return "", fmt.Errorf("no %s provided (%s)", noun, hint)
 }
 
 // registerPriorityFlag registers the priority flag with a specific default value.

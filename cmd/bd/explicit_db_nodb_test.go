@@ -138,6 +138,12 @@ func writeServerRepoWithDataDir(t *testing.T, repoDir, database, host, syncRemot
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("save metadata: %v", err)
 	}
+	// A server-mode workspace with a local Dolt root is current only when it
+	// carries a valid post-1.0 witness; otherwise the upgrade guard correctly
+	// treats the shape as an ambiguous historical workspace.
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+		t.Fatalf("write local version: %v", err)
+	}
 	writeFile(t, filepath.Join(beadsDir, "dolt-server.port"), []byte(strconv.Itoa(port)))
 	writeFile(t, filepath.Join(beadsDir, "config.yaml"), []byte("sync:\n  git-remote: "+syncRemote+"\n"))
 	writeFile(t, filepath.Join(beadsDir, ".env"), []byte("BEADS_DOLT_SERVER_HOST="+host+"\n"))

@@ -114,6 +114,26 @@ func (q *query) integer(name string) *int {
 	return &v
 }
 
+// integer64 reads an optional 64-bit integer, returning nil when absent.
+//
+// It is separate from integer above because `int` is 32 bits on a 32-bit build,
+// and the one parameter that needs this — a journal sequence number — is
+// declared int64 in the document and int64 in storage. Parsing it through Atoi
+// would make a checkpoint past 2^31 unreadable on some builds and readable on
+// others, which is the kind of divergence a consumer discovers years later.
+func (q *query) integer64(name string) *int64 {
+	raw := q.str(name)
+	if raw == "" {
+		return nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		q.invalid(name, fmt.Sprintf("%q is not a 64-bit integer", raw))
+		return nil
+	}
+	return &v
+}
+
 // limit reads the page limit: absent stays nil (the shared default), and a
 // negative value is refused. 0 is legal and means unlimited, so it is not
 // bounded here — the loopback-only refusal of an unlimited read is a bind-mode
@@ -125,6 +145,31 @@ func (q *query) limit() *int {
 		return nil
 	}
 	return v
+}
+
+// boundedLimit reads a page limit that has a hard ceiling and no unlimited
+// spelling, substituting fallback when it is absent.
+//
+// It is a SECOND limit decoder rather than a mode of limit() above, because the
+// two operations mean different things by the same parameter name and a shared
+// one would have to hide that behind a flag. On the issue listings `0` means
+// unlimited and the only refusal is a bind-mode one; on a journal read there is
+// no unlimited — a caller with an old checkpoint would ask one process to
+// buffer the entire retained window, which under the shipped floors is a
+// hundred thousand records — so the ceiling is unconditional and `0` is refused
+// by name instead of being reinterpreted as "the default". A parameter that
+// means unlimited on one operation and something else on another is exactly the
+// silent divergence this decoder exists to prevent.
+func (q *query) boundedLimit(fallback, ceiling int) int {
+	v := q.integer("limit")
+	if v == nil {
+		return fallback
+	}
+	if *v < 1 || *v > ceiling {
+		q.invalid("limit", fmt.Sprintf("limit must be between 1 and %d (default %d); this operation has no unlimited read", ceiling, fallback))
+		return fallback
+	}
+	return *v
 }
 
 // timestamp reads an optional RFC 3339 instant.

@@ -7,9 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/uimd"
 )
 
 // formatShortIssue returns a compact one-line representation of an issue
@@ -32,7 +34,7 @@ func formatShortIssue(issue *types.Issue) string {
 		return fmt.Sprintf("%s %s %s %s%s",
 			statusIcon,
 			ui.RenderMuted(issue.ID),
-			ui.RenderMuted(fmt.Sprintf("● P%d", issue.Priority)),
+			ui.RenderMuted(fmt.Sprintf("P%d", issue.Priority)),
 			ui.RenderMuted(string(issue.IssueType)),
 			ui.RenderMuted(" "+issue.Title))
 	}
@@ -49,7 +51,7 @@ func formatIssueHeader(issue *types.Issue) string {
 	statusStyle := ui.GetStatusStyle(string(issue.Status))
 	statusStr := statusStyle.Render(strings.ToUpper(string(issue.Status)))
 
-	// Priority with semantic color (includes ● icon)
+	// Priority with semantic color (P-label only)
 	priorityTag := ui.RenderPriority(issue.Priority)
 
 	// Type badge for notable types
@@ -77,16 +79,16 @@ func formatIssueHeader(issue *types.Issue) string {
 }
 
 // formatIssueMetadata returns the metadata line(s) with grouped info
-// Format: Owner: user · Type: task
+// Format: Created by: user · Type: task
 //
 //	Created: 2026-01-06 · Updated: 2026-01-08
 func formatIssueMetadata(issue *types.Issue) string {
 	var lines []string
 
-	// Line 1: Owner/Assignee · Type
+	// Line 1: Created by/Assignee · Type
 	metaParts := []string{}
 	if issue.CreatedBy != "" {
-		metaParts = append(metaParts, fmt.Sprintf("Owner: %s", issue.CreatedBy))
+		metaParts = append(metaParts, fmt.Sprintf("Created by: %s", issue.CreatedBy))
 	}
 	if issue.Assignee != "" {
 		metaParts = append(metaParts, fmt.Sprintf("Assignee: %s", issue.Assignee))
@@ -115,10 +117,10 @@ func formatIssueMetadata(issue *types.Issue) string {
 	timeParts = append(timeParts, fmt.Sprintf("Updated: %s", issue.UpdatedAt.Format("2006-01-02")))
 
 	if issue.DueAt != nil {
-		timeParts = append(timeParts, fmt.Sprintf("Due: %s", issue.DueAt.Format("2006-01-02")))
+		timeParts = append(timeParts, fmt.Sprintf("Due: %s", issue.DueAt.Local().Format("2006-01-02")))
 	}
 	if issue.DeferUntil != nil {
-		timeParts = append(timeParts, fmt.Sprintf("Deferred: %s", issue.DeferUntil.Format("2006-01-02")))
+		timeParts = append(timeParts, fmt.Sprintf("Deferred: %s", issue.DeferUntil.Local().Format("2006-01-02")))
 	}
 	if len(timeParts) > 0 {
 		lines = append(lines, strings.Join(timeParts, " · "))
@@ -146,9 +148,25 @@ func formatIssueMetadata(issue *types.Issue) string {
 		lines = append(lines, ui.RenderMuted(leaseLine))
 	}
 
-	// Line 3: Close reason (if closed)
-	if issue.Status == types.StatusClosed && issue.CloseReason != "" {
-		lines = append(lines, ui.RenderMuted(fmt.Sprintf("Close reason: %s", issue.CloseReason)))
+	// Line 3: Close reason (if closed). A reason too long or too structured to
+	// sit on a metadata line is body text, not metadata, so it gets the same
+	// markdown section treatment as DESCRIPTION — `bd close --reason-file`
+	// exists to write exactly that. Emitted after the remaining metadata lines
+	// so a multi-line reason cannot split the block it is part of.
+	//
+	// Trimmed first: --reason-file and heredoc content virtually always ends
+	// in a newline, and without this a genuine one-liner would be promoted to
+	// a section on that byte alone.
+	closeReasonSection := ""
+	if issue.Status == types.StatusClosed {
+		if reason := strings.TrimSpace(issue.CloseReason); reason != "" {
+			if line := "Close reason: " + reason; fitsMetadataLine(line) {
+				lines = append(lines, ui.RenderMuted(line))
+			} else {
+				closeReasonSection = fmt.Sprintf("\n\n%s\n%s", ui.RenderBold("CLOSE REASON"),
+					strings.TrimRight(uimd.RenderMarkdown(reason), "\n"))
+			}
+		}
 	}
 
 	// Line 4: External ref (if exists)
@@ -164,7 +182,41 @@ func formatIssueMetadata(issue *types.Issue) string {
 		lines = append(lines, fmt.Sprintf("Wisp type: %s", ui.RenderMuted(string(issue.WispType))))
 	}
 
-	return strings.Join(lines, "\n")
+	// Line 6: Compaction savings. A metadata line rather than a callout the
+	// callers print after the block, so a promoted close reason cannot strand
+	// it below the body text, and so all five show paths report it alike.
+	if line := compactionSavingsLine(issue); line != "" {
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n") + closeReasonSection
+}
+
+// compactionSavingsLine reports how much a compacted issue's stored body shrank.
+// Returns "" when the issue was never compacted, or when compaction recorded no
+// saving worth reporting.
+func compactionSavingsLine(issue *types.Issue) string {
+	if issue.CompactionLevel == 0 || issue.OriginalSize <= 0 {
+		return ""
+	}
+	currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+	saved := issue.OriginalSize - currentSize
+	if saved <= 0 {
+		return ""
+	}
+	reduction := float64(saved) / float64(issue.OriginalSize) * 100
+	return fmt.Sprintf("📊 %d → %d bytes (%.0f%% reduction)", issue.OriginalSize, currentSize, reduction)
+}
+
+// fitsMetadataLine reports whether a value can occupy one metadata line without
+// the terminal breaking it for us. Anything that cannot belongs in a rendered
+// section, where it gets the wrapping and indentation body text gets.
+func fitsMetadataLine(s string) bool {
+	if strings.ContainsAny(s, "\n\r") {
+		return false
+	}
+	width := uimd.WrapWidth()
+	return width == 0 || ansi.StringWidth(s) <= width
 }
 
 // formatDependencyLine formats a single dependency with semantic colors
@@ -179,7 +231,7 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("● P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
 	}
 
 	// Active items: ID with status color, priority with semantic color
@@ -198,6 +250,52 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
 }
 
+// printDepSection prints one dependency section: bold heading, then a line per
+// edge marked with the section's direction glyph.
+func printDepSection(sec depSection) {
+	fmt.Printf("\n%s\n", ui.RenderBold(sec.Heading))
+	for _, dep := range sec.Deps {
+		fmt.Println(formatDependencyLine(sec.Glyph, dep))
+	}
+}
+
+// printRelatedSection prints the deduplicated RELATED section that both
+// directions of the symmetric related/relates-to edges collapse into.
+func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata) {
+	if len(relatedSeen) == 0 {
+		return
+	}
+	fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
+	ids := make([]string, 0, len(relatedSeen))
+	for id := range relatedSeen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		fmt.Println(formatDependencyLine("↔", relatedSeen[id]))
+	}
+}
+
+// printEpicChildProgress summarizes how much of an epic its children have
+// finished, printed under the CHILDREN section.
+func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
+	if len(children) == 0 {
+		return
+	}
+	closed := 0
+	for _, dep := range children {
+		if dep.Status == types.StatusClosed {
+			closed++
+		}
+	}
+	pct := closed * 100 / len(children)
+	if closed == len(children) {
+		fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closed, len(children), pct)
+	} else {
+		fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closed, len(children), pct)
+	}
+}
+
 // formatSimpleDependencyLine formats a dependency without metadata (fallback)
 // Closed items get entire row muted - the work is done, no need for attention
 func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {
@@ -209,7 +307,7 @@ func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("● P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
 	}
 
 	// Active items: use semantic colors

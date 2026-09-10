@@ -69,6 +69,11 @@ func (c *reopenPromotionConn) QueryContext(_ context.Context, query string, args
 			values:  [][]driver.Value{{string("closed")}},
 		}, nil
 	}
+	if strings.Contains(query, "FROM dolt_status") {
+		// Empty-commit guard (GH#4288 re-port): report one staged row so the
+		// commit path under test still reaches DOLT_COMMIT.
+		return &reopenPromotionRows{columns: []string{"count"}, values: [][]driver.Value{{int64(1)}}}, nil
+	}
 	if strings.Contains(query, "CALL DOLT_ADD") && len(args) == 1 {
 		if table, ok := args[0].Value.(string); ok {
 			c.driver.doltAddTables = append(c.driver.doltAddTables, table)

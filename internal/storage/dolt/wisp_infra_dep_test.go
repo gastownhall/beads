@@ -253,6 +253,22 @@ func TestDemoteToWisp_InfraDepToExternalUsesExternalColumn(t *testing.T) {
 	}
 }
 
+// The typed-target-column RULE the two AddWispDep tests below pin — a wisp
+// target lands in depends_on_wisp_id, an issue target in depends_on_issue_id —
+// now runs at all three backends as
+// conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn, which also
+// covers the external and foreign-repository classes. That case exists because
+// every other contract assertion reads the target through
+// COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) and so
+// cannot see which column holds it.
+//
+// These stay for the route: they drive DoltStore.AddDependency, whose own
+// routing computation no contract case exercises, and they drive it with INFRA
+// issue types, whose automatic wisp routing (IsInfraTypeCtx over the
+// types.infra / types.custom config) is a classification step ahead of the one
+// the contract pins. The contract's fixture seeds the two planes explicitly and
+// never goes through that config.
+
 // TestAddWispDep_InfraWispToInfraWisp verifies that when an infra-type wisp
 // depends on another infra-type wisp, the dependency row in wisp_dependencies
 // uses depends_on_wisp_id (not depends_on_issue_id or a physical depends_on_id).

@@ -55,6 +55,7 @@ func (r *contextRepositoryImpl) BackendConfig(ctx context.Context) (domain.Backe
 		cfg = configfile.DefaultConfig()
 	}
 	return domain.BackendConfig{
+		Backend:             cfg.GetBackend(),
 		DoltMode:            cfg.GetDoltMode(),
 		Database:            cfg.GetDoltDatabase(),
 		ProjectID:           cfg.ProjectID,

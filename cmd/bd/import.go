@@ -9,12 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -116,10 +117,35 @@ func init() {
 	rootCmd.AddCommand(importCmd)
 }
 
-func runImport(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("import is not supported in proxied-server mode")
+// importPoolReadTimeout is the per-I/O read deadline a `bd import` gets on
+// its shared-pool connections when neither the caller, BEADS_DOLT_POOL_READ_TIMEOUT
+// nor dolt.pool-read-timeout set one. The pool default (10s) is a fast-fail
+// tuned for interactive commands; an import's chunk COMMIT of 250 rows with
+// their aux tables legitimately outlives it whenever the server pauses — a
+// stock dolt sql-server's auto_gc took 16.5s mid-import in the wy-9we0jf
+// rollback drill, and every such pause surfaced as "i/o timeout" followed by
+// "write commit result indeterminate" (wy-sbgucn). 5m matches the repo's
+// other known-long operations (execWithLongTimeout, withReadTxLongTimeout).
+const importPoolReadTimeout = 5 * time.Minute
+
+// bulkLoadPoolReadTimeout returns the pool read-timeout fallback for cmd: the
+// bulk-load deadline for `bd import`, zero (keep the pool default) otherwise.
+// It is a FALLBACK, not an override — an operator's explicit setting still wins
+// (see dolt.Config.PoolReadTimeoutFallback).
+func bulkLoadPoolReadTimeout(cmd *cobra.Command) time.Duration {
+	if cmd != nil && cmd.Name() == "import" {
+		return importPoolReadTimeout
 	}
+	return 0
+}
+
+func runImport(cmd *cobra.Command, args []string) error {
+	// Explicit call, not inherited from CheckReadonly: runImport doesn't call
+	// CheckReadonly at all (a separate, pre-existing gap — readonlyMode
+	// doesn't gate bd import either), so it can't pick up the freeze check
+	// folded into CheckReadonly the way create/update/close/remember do.
+	CheckMigrationFreeze("import")
+
 	evt := metrics.NewCommandEvent("import")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -213,10 +239,28 @@ type importResultJSON struct {
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
+	issues, memories, err := parseImportRecords(r)
+	if err != nil {
+		return err
+	}
+
+	if usesProxiedServer() {
+		return runImportRecordsProxied(ctx, issues, memories, source)
+	}
+
 	if store == nil {
 		return fmt.Errorf("no database — run 'bd init' or 'bd bootstrap' first")
 	}
+	return runImportRecordsClassic(ctx, issues, memories, source)
+}
 
+// parseImportRecords scans one JSONL stream into issue rows and memory
+// records — the `bd import` / `bd import -` parse loop, shared by the classic
+// and proxied modes. Same record vocabulary as parseJSONLFile (the bootstrap
+// reader): the optional _schema header and tombstones are skipped, and the
+// "wisp_plane" boolean is honored as the explicit wisps-plane marker (and
+// the legacy "wisp" alias for "ephemeral") via applyImportWispPlane.
+func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 
@@ -231,7 +275,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
 		}
 
 		// Skip the optional beads-jsonl header record (§J1.3). A canonical
@@ -251,7 +295,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
 				}
 				if mem.Key != "" && mem.Value != "" {
 					memories = append(memories, mem)
@@ -262,24 +306,26 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
 		}
 		if issue.Status == "tombstone" {
 			continue
 		}
-		if _, hasWisp := peek["wisp"]; hasWisp && !issue.Ephemeral {
-			var wisp bool
-			if err := json.Unmarshal(peek["wisp"], &wisp); err == nil && wisp {
-				issue.Ephemeral = true
-			}
-		}
+		applyImportWispPlane(peek, &issue)
 		issue.SetDefaults()
 		issues = append(issues, &issue)
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
+	return issues, memories, nil
+}
 
+// runImportRecordsClassic is the classic (embedded/direct store) import
+// pipeline over the parsed records: dedup, dry-run classification, memory
+// writes, the batch issue import, the final commit and the issue_prefix
+// reconciliation.
+func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
 	// Dedup: skip issues whose title matches an existing open issue
 	dedupHits := 0
 	if importDedup && len(issues) > 0 {
@@ -300,33 +346,8 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		if err != nil {
 			return fmt.Errorf("dry-run: %w", err)
 		}
-		result.Created = classification.Created
-		result.Updated = classification.Updated
-		result.Unchanged = classification.Unchanged
-		result.Skipped += classification.Skipped
-		result.IDs = append(result.IDs, classification.ImportedIDs...)
-		result.StaleSkippedIDs = classification.StaleSkippedIDs
-		result.UpdatedIssues = classification.UpdatedIssues
-		result.TieKeptLocalIDs = classification.TieKeptLocalIDs
-
-		if jsonOutput {
-			return outputJSON(result)
-		}
-		// The leading count is the sum of the breakdown that follows it
-		// (not len(issues)), which can be larger when rows were stale
-		// skipped — those are reported separately below instead of being
-		// folded into a total the breakdown then wouldn't add up to.
-		considered := result.Created + result.Updated + result.Unchanged
-		fmt.Fprintf(os.Stderr, "Would import %d issues (%d new, %d updated, %d unchanged) and %d memories from %s",
-			considered, result.Created, result.Updated, result.Unchanged, len(memories), source)
-		if dedupHits > 0 {
-			fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits)
-		}
-		if len(result.StaleSkippedIDs) > 0 {
-			fmt.Fprintf(os.Stderr, " (%d stale skipped)", len(result.StaleSkippedIDs))
-		}
-		fmt.Fprintln(os.Stderr)
-		return nil
+		applyImportDryRunClassification(&result, classification)
+		return renderImportDryRun(result, len(memories), source, dedupHits)
 	}
 
 	// Import memories
@@ -345,14 +366,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		if err != nil {
 			return fmt.Errorf("import failed: %w", err)
 		}
-		result.Created = importResult.Created
-		result.Updated = importResult.Updated
-		result.Skipped += importResult.Skipped
-		result.SkippedDependencies = append(result.SkippedDependencies, importResult.SkippedDependencies...)
-		result.IDs = append(result.IDs, importResult.ImportedIDs...)
-		result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
-		result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
-		result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
+		applyImportOutcome(&result, importResult)
 	}
 
 	if result.Created > 0 || result.Memories > 0 {
@@ -385,6 +399,63 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		}
 	}
 
+	return renderImportOutcome(result, source, dedupHits)
+}
+
+// applyImportDryRunClassification folds a dry-run classification into the
+// command's JSON result, identically in both modes.
+func applyImportDryRunClassification(result *importResultJSON, classification *ImportResult) {
+	result.Created = classification.Created
+	result.Updated = classification.Updated
+	result.Unchanged = classification.Unchanged
+	result.Skipped += classification.Skipped
+	result.IDs = append(result.IDs, classification.ImportedIDs...)
+	result.StaleSkippedIDs = classification.StaleSkippedIDs
+	result.UpdatedIssues = classification.UpdatedIssues
+	result.TieKeptLocalIDs = classification.TieKeptLocalIDs
+}
+
+// applyImportOutcome folds a real import's outcome into the command's JSON
+// result, identically in both modes.
+func applyImportOutcome(result *importResultJSON, importResult *ImportResult) {
+	result.Created = importResult.Created
+	result.Updated = importResult.Updated
+	result.Unchanged = importResult.Unchanged
+	result.Skipped += importResult.Skipped
+	result.SkippedDependencies = append(result.SkippedDependencies, importResult.SkippedDependencies...)
+	result.IDs = append(result.IDs, importResult.ImportedIDs...)
+	result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
+	result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
+	result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
+}
+
+// renderImportDryRun reports a dry run (JSON or stderr), identically in both
+// modes.
+func renderImportDryRun(result importResultJSON, memoriesCount int, source string, dedupHits int) error {
+	if jsonOutput {
+		return outputJSON(result)
+	}
+	// The leading count is the sum of the breakdown that follows it
+	// (not len(issues)), which can be larger when rows were stale
+	// skipped — those are reported separately below instead of being
+	// folded into a total the breakdown then wouldn't add up to.
+	considered := result.Created + result.Updated + result.Unchanged
+	//nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintf(os.Stderr, "Would import %d issues (%d new, %d updated, %d unchanged) and %d memories from %s",
+		considered, result.Created, result.Updated, result.Unchanged, memoriesCount, source)
+	if dedupHits > 0 {
+		fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits) //nolint:gosec // G705: stderr, not a browser context
+	}
+	if len(result.StaleSkippedIDs) > 0 {
+		fmt.Fprintf(os.Stderr, " (%d stale skipped)", len(result.StaleSkippedIDs))
+	}
+	fmt.Fprintln(os.Stderr)
+	return nil
+}
+
+// renderImportOutcome reports a completed import (JSON or stderr),
+// identically in both modes.
+func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
 	if jsonOutput {
 		return outputJSON(result)
 	}
@@ -395,10 +466,13 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	}
 	fmt.Fprintf(os.Stderr, " from %s", source)
 	if dedupHits > 0 {
-		fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits)
+		fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits) //nolint:gosec // G705: stderr, not a browser context
 	}
 	if staleSkipped := result.Skipped - dedupHits; staleSkipped > 0 {
-		fmt.Fprintf(os.Stderr, " (%d stale skipped; use --allow-stale to restore older rows)", staleSkipped)
+		fmt.Fprintf(os.Stderr, " (%d stale skipped; use --allow-stale to restore older rows)", staleSkipped) //nolint:gosec // G705: stderr, not a browser context
+	}
+	if result.Unchanged > 0 {
+		fmt.Fprintf(os.Stderr, " (%d already present, unchanged)", result.Unchanged) //nolint:gosec // G705: stderr, not a browser context
 	}
 	fmt.Fprintln(os.Stderr)
 	if len(result.UpdatedIssues) > 0 {
@@ -417,8 +491,33 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	return nil
 }
 
+// importTitleSearcher is the read seam the --dedup filter needs. It lives in
+// THIS file because naming types.IssueFilter is denied by default under
+// cmd/bd and import.go is the named exception for the bulk-movement family
+// (.golangci.yml, forbidigo): the classic storage.DoltStorage satisfies it
+// directly, and uowImportTitleSearcher adapts the proxied unit of work.
+type importTitleSearcher interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+}
+
+// uowImportTitleSearcher adapts a unit of work's issue use case to the
+// classic []*types.Issue search shape filterDuplicatesByTitle consumes. Both
+// stacks run the same issueops search underneath (issues merged with wisps),
+// so --dedup sees the same title universe in both modes.
+type uowImportTitleSearcher struct {
+	uw uow.UnitOfWork
+}
+
+func (s uowImportTitleSearcher) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	page, err := s.uw.IssueUseCase().SearchIssues(ctx, query, filter)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
 // filterDuplicatesByTitle removes issues whose title matches an existing open issue.
-func filterDuplicatesByTitle(ctx context.Context, st storage.DoltStorage, issues []*types.Issue) ([]*types.Issue, int) {
+func filterDuplicatesByTitle(ctx context.Context, st importTitleSearcher, issues []*types.Issue) ([]*types.Issue, int) {
 	existing, err := st.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return issues, 0

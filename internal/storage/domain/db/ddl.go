@@ -76,9 +76,18 @@ func (r *ddlSQLRepository) UseDatabase(ctx context.Context, database string) err
 	return nil
 }
 
-func quoteIdentifier(name string) (string, error) {
+// QuoteIdentifier validates name and returns it back-quoted, ready to embed in
+// a statement. It is the one place this repository's identifiers are quoted;
+// callers outside the package that must build a schema-qualified name (see
+// uow's convergence-probe database selector) go through it rather than
+// re-deriving the rule.
+func QuoteIdentifier(name string) (string, error) {
 	if err := ValidateIdentifier(name); err != nil {
 		return "", err
 	}
 	return "`" + name + "`", nil
+}
+
+func quoteIdentifier(name string) (string, error) {
+	return QuoteIdentifier(name)
 }

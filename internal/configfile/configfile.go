@@ -122,6 +122,35 @@ func Load(beadsDir string) (*Config, error) {
 	return &cfg, nil
 }
 
+// LoadForDiscovery reads workspace metadata without migrating or rewriting it.
+//
+// Store admission uses this only to classify a workspace before a command can
+// open storage. In particular, legacy config.json remains in place so a failed
+// admission cannot turn a recoverable old workspace into a partially migrated
+// one. Unknown JSON fields remain tolerated here because callers use the
+// result only to decide whether to issue a conservative refusal; normal store
+// selection keeps its existing validation.
+func LoadForDiscovery(beadsDir string) (*Config, error) {
+	data, err := os.ReadFile(ConfigPath(beadsDir)) // #nosec G304 -- beadsDir is caller-selected workspace state
+	if os.IsNotExist(err) {
+		data, err = os.ReadFile(filepath.Join(beadsDir, "config.json")) // #nosec G304 -- legacy workspace state
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading legacy config: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("reading config: %w", err)
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	return &cfg, nil
+}
+
 func (c *Config) Save(beadsDir string) error {
 	configPath := ConfigPath(beadsDir)
 
@@ -313,8 +342,22 @@ const (
 // Checks (in priority order):
 //  1. BEADS_DOLT_SERVER_MODE=1 env var
 //  2. BEADS_DOLT_SHARED_SERVER env var (shared-server implies server mode)
-//  3. dolt_mode field in metadata.json (project-local, explicit)
-//  4. dolt.mode in config.yaml (user-global fallback, only when metadata.json has no mode)
+//  3. BEADS_DOLT_SERVER_HOST env var set to a non-localhost value (GH#3545):
+//     an operator who configures a remote host but forgets the mode flag
+//     would otherwise silently fall through to embedded storage. Setting
+//     the env var to an explicit localhost value (or empty string) is
+//     treated as a deliberate suppression of host-based inference, not
+//     merely "no signal" — it also suppresses the struct/config.yaml host
+//     inference below.
+//  4. dolt_mode field in metadata.json (project-local, explicit) — always
+//     wins over any persisted or configured host, since it is the
+//     operator's explicit statement of intent.
+//  5. Non-localhost DoltServerHost persisted in metadata.json (GH#3545),
+//     when no explicit dolt_mode is set and env didn't suppress inference.
+//  6. dolt.mode in config.yaml (user-global fallback, only when
+//     metadata.json has no mode)
+//  7. Non-localhost dolt.host in config.yaml (GH#3545), gated the same way
+//     as (5) — a configured host must mean server mode.
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -330,12 +373,77 @@ func (c *Config) IsDoltServerMode() bool {
 	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
 		return true
 	}
+	// Host-based inference (GH#3545): a configured non-localhost host
+	// implies server mode. Centralized in HostImpliesServerMode so the
+	// storage-mode resolver (here) and the lifecycle resolver
+	// (doltserver.ResolveServerMode) cannot disagree.
+	if c.HostImpliesServerMode() {
+		return true
+	}
 	if c.DoltMode != "" {
-		// metadata.json has an explicit mode — respect it over config.yaml
+		// metadata.json has an explicit mode — respect it over any
+		// persisted host and over config.yaml.
 		return strings.ToLower(c.DoltMode) == DoltModeServer
 	}
 	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
-	if mode := config.GetYamlConfig("dolt.mode"); strings.EqualFold(mode, "server") {
+	return strings.EqualFold(config.GetYamlConfig("dolt.mode"), "server")
+}
+
+// HostImpliesServerMode evaluates host-based server-mode inference
+// (GH#3545) against the EFFECTIVE host precedence chain (env >
+// metadata.json > config.yaml, mirroring GetDoltServerHost), so that a
+// lower-priority host that GetDoltServerHost would ignore can never
+// drive the inference. Rules, in order:
+//
+//   - Proxied-server workspaces are exempt: IsDoltServerMode and
+//     IsDoltProxiedServerMode are mutually exclusive (the
+//     proxied-to-server migration depends on it).
+//   - A non-empty BEADS_DOLT_SERVER_HOST decides alone: a non-localhost
+//     value implies server mode even over explicit dolt_mode=embedded
+//     (runtime env beats stale metadata, GH#2949); an explicit
+//     localhost value suppresses inference from lower-priority hosts —
+//     matching GetDoltServerHost, which then dials locally. An EMPTY
+//     env value is ignored (behaves as unset), again matching
+//     GetDoltServerHost: treating empty as suppression would select
+//     embedded storage while the effective dial host stays remote —
+//     exactly the split-storage failure this inference fixes.
+//   - An explicit metadata.json dolt_mode disables inference from
+//     persisted/configured hosts.
+//   - A metadata.json dolt_server_host, when set, decides alone (a
+//     lower-priority config.yaml dolt.host is not consulted, matching
+//     GetDoltServerHost precedence).
+//   - An explicit config.yaml dolt.mode disables inference from the
+//     config.yaml dolt.host.
+func (c *Config) HostImpliesServerMode() bool {
+	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
+		return false
+	}
+	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
+		return !IsLocalHostString(h)
+	}
+	if c.DoltMode != "" {
+		return false
+	}
+	if c.DoltServerHost != "" {
+		return !IsLocalHostString(c.DoltServerHost)
+	}
+	if config.GetYamlConfig("dolt.mode") != "" {
+		return false
+	}
+	if h := config.GetYamlConfig("dolt.host"); h != "" {
+		return !IsLocalHostString(h)
+	}
+	return false
+}
+
+// IsLocalHostString reports whether host refers to the local machine, for
+// the purposes of mode inference. Mirrors the helpers in cmd/bd/dolt.go
+// and internal/storage/dolt/store.go; kept private to this package to
+// limit the blast radius of GH#3545's fix — consolidating the (now four)
+// definitions is a separate cleanup.
+func IsLocalHostString(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
 		return true
 	}
 	return false
@@ -355,8 +463,16 @@ func (c *Config) IsTeamServerManaged() bool {
 }
 
 // GetDoltMode returns the Dolt connection mode, defaulting to server.
+// GetDoltMode returns the EFFECTIVE mode: when no mode is persisted but
+// host-based inference (GH#3545) selects server mode, it reports
+// "server" so effective-context consumers (bd context, integrations)
+// agree with IsDoltServerMode instead of advertising an embedded mode
+// next to a remote server endpoint.
 func (c *Config) GetDoltMode() string {
 	if c.DoltMode == "" {
+		if c.HostImpliesServerMode() {
+			return DoltModeServer
+		}
 		return DoltModeEmbedded
 	}
 	return c.DoltMode

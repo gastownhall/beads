@@ -283,6 +283,70 @@ func shellPath(t *testing.T, path string) string {
 	return msysPath(path)
 }
 
+func shellPathUnderEnv(t *testing.T, bash, path string, env []string) string {
+	t.Helper()
+	clean := filepath.Clean(path)
+	dir := clean
+	base := ""
+	if info, err := os.Stat(clean); err == nil && !info.IsDir() {
+		dir = filepath.Dir(clean)
+		base = filepath.Base(clean)
+	}
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", "pwd")
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve shell path for %s under script environment: %v\n%s", path, err, out)
+	}
+	converted := strings.TrimSpace(string(out))
+	if converted == "" {
+		t.Fatalf("resolve shell path for %s under script environment: empty output", path)
+	}
+	if base != "" {
+		return converted + "/" + filepath.ToSlash(base)
+	}
+	return converted
+}
+
+// shellPathEnv keeps minimal-environment path conversion independent of
+// inherited temporary-path mounts. Git for Windows can map /tmp differently
+// when TEMP/TMP are omitted, so helpers that replace the child environment
+// must resolve paths under that same authority.
+func shellPathEnv() []string {
+	path := os.Getenv("PATH")
+	if runtime.GOOS == "windows" {
+		path = "/usr/bin:/bin"
+	}
+	return []string{
+		"PATH=" + path,
+		"LC_ALL=C",
+		"LANG=C",
+		"BASH_ENV=",
+		"ENV=",
+	}
+}
+
+func requireShellCommandPath(t *testing.T, bash, dir string, env []string, name, want string) {
+	t.Helper()
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", `PATH="$BEADS_TEST_COMMAND_PATH"; export PATH; printf '%s\n' "$PATH"; command -v -- "$1"`, "shim-path-check", name)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve injected %s under script environment: %v\n%s", name, err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	got := lines[len(lines)-1]
+	if got != want {
+		t.Fatalf("injected %s resolved to %q, want %q; PATH=%q", name, got, want, lines[0])
+	}
+}
+
+func bashScriptCommand(bash, script string) *exec.Cmd {
+	return exec.Command(bash, "--noprofile", "--norc", "-c", `PATH="$BEADS_TEST_COMMAND_PATH"; export PATH; exec "$BASH" --noprofile --norc "$1"`, "script-test", script)
+}
+
 // bashPathList converts a host-style PATH value (entries separated by
 // os.PathListSeparator) into a Bash-visible, colon-separated PATH so the
 // caller's PATH is preserved (not just /usr/bin:/bin) when it is prepended

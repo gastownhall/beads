@@ -1,31 +1,48 @@
 # Linting Policy
 
-Last reviewed: 2026-05-29
+Last reviewed: 2026-08-10
 
-Freshness source: `.golangci.yml`, `.github/workflows/pr.yml`,
-`.github/workflows/main.yml`, and
-`golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...` returning zero
-issues.
+Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`,
+`.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
 
 This document explains the required Go lint gate for this codebase.
 
 ## Current Status
 
-Lint is a required CI gate. The PR and main workflows run `golangci-lint` with
-the repository configuration and `--build-tags=gms_pure_go`; it is expected to
-pass with zero issues.
+Lint is a required CI gate, and it runs in TWO LANES over the same pinned
+golangci-lint v2.10.1 release and the same `.golangci.yml`. Each must pass with
+zero issues in its own scope.
 
-Run the same check locally with:
+- **The PR lane reports only what the PR introduces.** Both of its jobs are
+  scoped to the diff against the merge base with `main`: the `lint` job passes
+  `only-new-issues`, and `pr-lint-wrapper` runs the repository-owned
+  `ci-pr-lint` wrapper with `BD_LINT_NEW_FROM_MERGE_BASE`. A finding in code the
+  PR did not touch does not block it.
+- **The main lane sweeps the whole tree.** Both jobs run unscoped on every push
+  to `main`, so a finding that lands there reds main's own run rather than every
+  open PR.
+
+Run the wrapper locally with:
 
 ```bash
-golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...
+make ci-pr-lint
 ```
 
-Formatting is a separate required gate:
+That is the MAIN lane's contract, not the PR lane's: with
+`BD_LINT_NEW_FROM_MERGE_BASE` unset it sweeps the whole tree, so it is
+deliberately STRICTER than the gate your PR has to clear and may report findings
+you are not required to fix. Fix the ones that are yours; the PR gate is the
+authority on what blocks a merge, and main's own run is where the rest is
+answered.
 
-```bash
-make fmt-check
-```
+The wrapper runs:
+
+- `make fmt-check`;
+- golangci-lint with `.golangci.yml`, readonly module downloads, a five-minute
+  timeout, the `gms_pure_go` build tag, and `--new-from-merge-base` when
+  `BD_LINT_NEW_FROM_MERGE_BASE` names a ref; and
+- a second non-CGO Windows cross-lint pass, on the same scope, when the native
+  host does not already cover that target.
 
 ## Policy
 
@@ -45,18 +62,13 @@ test-fixture file reads, and documented security false positives.
 
 ## CI Cleanup Decision
 
-`pr-lint` should stay separate from `pr-policy` and `pr-core` so failures are
-easy to identify and rerun. It should include:
-
-- `make fmt-check`
-- `golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...`
+`pr-lint` stays separate from `pr-policy` and `pr-core` so failures are easy to
+identify and rerun. Its repository-owned wrapper is
+`scripts/ci/pr-lint.sh`, exposed as `make ci-pr-lint`.
 
 See [`CI_CLEANUP_PLAN.md`](CI_CLEANUP_PLAN.md) for the full CI tier policy.
 
 ## Future Work
 
-- Pin the `golangci-lint` version in CI instead of using `version: latest`.
-- Move the final CI shape behind a repository-owned `scripts/ci/pr-lint.sh`
-  wrapper.
 - Periodically audit `.golangci.yml` exclusions and remove entries that are no
   longer needed.

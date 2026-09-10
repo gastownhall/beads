@@ -7,6 +7,11 @@ import "fmt"
 // leases. qualifier (the mega-query FROM includes LeaseJoin("i")).
 var ReadyWorkIssueColumns = QualifyColumns(IssueBaseColumns, "i.") + ", " + LeaseSelectColumns
 
+// ReadyWorkIssueColumnsLite is the lite counterpart of ReadyWorkIssueColumns,
+// selected by CountsHydration.Lite. The scan side is
+// issueops.ScanIssueLiteFrom, reached through ScanReadyWorkRowWithCounts.
+var ReadyWorkIssueColumnsLite = QualifyColumns(IssueBaseColumnsLite, "i.") + ", " + LeaseSelectColumns
+
 // DepJSONObject renders one dependency row as JSON for JSON_ARRAYAGG
 // aggregation in the counts mega-query. Field names must match the JSON tags
 // of types.Dependency.
@@ -20,11 +25,51 @@ const DepJSONObject = `JSON_OBJECT(
 	'thread_id', thread_id
 )`
 
-// SearchCountsSQL renders the counts mega-query: full issue rows aliased "i"
-// plus labels JSON, dep/rdep/comment counts, parent ID, and dependency JSON,
-// for one table family. The scan side is issueops.ScanReadyWorkRowWithCounts,
-// which scans IssueSelectColumns positionally followed by the six extra
-// columns in the order projected here.
+// CountsHydration selects what the counts mega-query materializes per row.
+// Every member is an opt-OUT: the zero value hydrates everything.
+//
+// None of them changes WHICH ROWS come back or in what order. The aggregates
+// hang off LEFT JOINs that preserve every driver row, so dropping one drops a
+// column's value and nothing else; Lite changes only the driver's own SELECT
+// list, and no filter predicate is expressed in the SELECT.
+//
+// SkipLabels leaves labels_json NULL, which the scan turns into no labels.
+// SkipCounts leaves the three cardinalities 0, which a caller must read as
+// unknown rather than as none — the promise issueops.ListRequest.SkipCounts
+// makes above storage. Both keep the projection's SHAPE: the scan side reads
+// the six extra columns positionally, so a suppressed aggregate is projected
+// as a constant in place rather than removed.
+//
+// LITE IS THE ONE THAT CHANGES THE SHAPE, which is why it is not merely a
+// third constant substitution. It swaps ReadyWorkIssueColumns for
+// ReadyWorkIssueColumnsLite, so the driver projects six fewer columns and the
+// scan must read the matching dest list — ScanReadyWorkRowWithCounts takes the
+// whole struct for that reason and dispatches on this field. Substituting
+// empty strings in place would have kept one scan path, and was rejected: the
+// row would come back with blank free-form text and IsLitePartial=false, which
+// is indistinguishable from a genuinely textless row (the ambiguity ga-clgh
+// and CommentsOmitted already record). ScanIssueLiteFrom sets the flag.
+type CountsHydration struct {
+	SkipLabels bool
+	SkipCounts bool
+	Lite       bool
+}
+
+// IssueColumns returns the driver's SELECT list for this hydration.
+func (h CountsHydration) IssueColumns() string {
+	if h.Lite {
+		return ReadyWorkIssueColumnsLite
+	}
+	return ReadyWorkIssueColumns
+}
+
+// SearchCountsSQL renders the counts mega-query: issue rows aliased "i" plus
+// labels JSON, dep/rdep/comment counts, parent ID, and dependency JSON, for one
+// table family. The scan side is issueops.ScanReadyWorkRowWithCounts, which
+// scans hyd.IssueColumns() positionally followed by the six extra columns in
+// the order projected here — so the SAME hydration value has to reach both, and
+// is the reason the scan takes the struct rather than being told the shape
+// separately.
 //
 // There are two forms of the same projection, selected by ids:
 //
@@ -82,7 +127,9 @@ const DepJSONObject = `JSON_OBJECT(
 //
 // The reverse-blocker rc subquery unions wisp_dependencies only when the caller
 // has probed that the table exists (includeWispReverseDeps).
-func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, limitSQL string, includeWispReverseDeps, skipLabels bool) (string, []any) {
+//
+// hyd selects which aggregates are computed at all; see CountsHydration.
+func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, limitSQL string, includeWispReverseDeps bool, hyd CountsHydration) (string, []any) {
 	byIDs := len(ids) > 0
 	inSQL, idArgs := InPlaceholders(ids)
 
@@ -120,9 +167,43 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 			%s
 			GROUP BY issue_id
 		) l ON l.issue_id = i.id`, tables.Labels, labelWhere)
-	if skipLabels {
+	if hyd.SkipLabels {
 		labelsSelect = "NULL AS labels_json"
 		labelsJoin = ""
+	}
+
+	countsSelect := `COALESCE(dc.cnt, 0) AS dep_count,
+			COALESCE(rc.cnt, 0) AS rdep_count,
+			COALESCE(cc.cnt, 0) AS comment_count`
+	countsJoins := fmt.Sprintf(`
+		LEFT JOIN (
+			SELECT issue_id, COUNT(*) AS cnt
+			FROM %s
+			WHERE type = 'blocks'%s
+			GROUP BY issue_id
+		) dc ON dc.issue_id = i.id
+		LEFT JOIN (
+			SELECT dep_id, COUNT(*) AS cnt FROM (
+				%s
+			) all_blockers GROUP BY dep_id
+		) rc ON rc.dep_id = i.id
+		LEFT JOIN (
+			SELECT issue_id, COUNT(*) AS cnt
+			FROM %s
+			%s
+			GROUP BY issue_id
+		) cc ON cc.issue_id = i.id`,
+		tables.Dependencies, depBlocksExtra,
+		reverseBlockerSelect,
+		tables.Comments, ccWhere)
+	if hyd.SkipCounts {
+		// Constants in the same three positions: the scan reads these columns
+		// by index, and the rc join above is the one the embedded engine
+		// cannot index (see the by-IDs rationale above).
+		countsSelect = `0 AS dep_count,
+			0 AS rdep_count,
+			0 AS comment_count`
+		countsJoins = ""
 	}
 
 	// Predicate form with a filter: whereSQL filters the main table inside a
@@ -146,31 +227,13 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	sqlText := fmt.Sprintf(`
 		SELECT %s,
 			%s,
-			COALESCE(dc.cnt, 0) AS dep_count,
-			COALESCE(rc.cnt, 0) AS rdep_count,
-			COALESCE(cc.cnt, 0) AS comment_count,
+			%s,
 			pc.parent_id     AS parent_id,
 			d.deps_json      AS deps_json
 		FROM %s
 		%s
 		%s
-		LEFT JOIN (
-			SELECT issue_id, COUNT(*) AS cnt
-			FROM %s
-			WHERE type = 'blocks'%s
-			GROUP BY issue_id
-		) dc ON dc.issue_id = i.id
-		LEFT JOIN (
-			SELECT dep_id, COUNT(*) AS cnt FROM (
-				%s
-			) all_blockers GROUP BY dep_id
-		) rc ON rc.dep_id = i.id
-		LEFT JOIN (
-			SELECT issue_id, COUNT(*) AS cnt
-			FROM %s
-			%s
-			GROUP BY issue_id
-		) cc ON cc.issue_id = i.id
+		%s
 		LEFT JOIN (
 			SELECT issue_id,
 			       MIN(%s) AS parent_id
@@ -186,14 +249,13 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		) d ON d.issue_id = i.id
 		%s
 	`,
-		ReadyWorkIssueColumns,
+		hyd.IssueColumns(),
 		labelsSelect,
+		countsSelect,
 		driverSQL,
 		LeaseJoin("i"),
 		labelsJoin,
-		tables.Dependencies, depBlocksExtra,
-		reverseBlockerSelect,
-		tables.Comments, ccWhere,
+		countsJoins,
 		DepTargetExpr, tables.Dependencies, pcExtra,
 		DepJSONObject, tables.Dependencies, depWhere,
 		outerClause,
@@ -204,18 +266,20 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	}
 
 	// args follow the placeholder order in sqlText: labels join (unless
-	// skipped), dc, rc dependencies branch, rc wisp branch (if any), cc, pc, d,
-	// then the driver.
+	// skipped), dc, rc dependencies branch, rc wisp branch (if any), cc (all
+	// four unless the counts are skipped), pc, d, then the driver.
 	args := make([]any, 0, len(idArgs)*8)
-	if !skipLabels {
+	if !hyd.SkipLabels {
 		args = append(args, idArgs...)
 	}
-	args = append(args, idArgs...) // dc
-	args = append(args, idArgs...) // rc dependencies
-	if includeWispReverseDeps {
-		args = append(args, idArgs...) // rc wisp_dependencies
+	if !hyd.SkipCounts {
+		args = append(args, idArgs...) // dc
+		args = append(args, idArgs...) // rc dependencies
+		if includeWispReverseDeps {
+			args = append(args, idArgs...) // rc wisp_dependencies
+		}
+		args = append(args, idArgs...) // cc
 	}
-	args = append(args, idArgs...) // cc
 	args = append(args, idArgs...) // pc
 	args = append(args, idArgs...) // d
 	args = append(args, idArgs...) // driver

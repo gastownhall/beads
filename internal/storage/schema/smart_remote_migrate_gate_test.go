@@ -30,8 +30,8 @@ func hashRows(hashes map[int]string) *sqlmock.Rows {
 	return rows
 }
 
-// expectSmartRemoteRead mocks the three reads the smart router issues: local
-// content hashes (HEAD), active_branch(), and remote content hashes (AS OF).
+// expectSmartRemoteRead mocks the smart router's local hash and branch reads,
+// historical shape probes, and remote content hash read.
 func expectSmartRemoteReadForRemote(mock sqlmock.Sqlmock, remoteName string, local, remote map[int]string) {
 	if remoteName == "" {
 		remoteName = smartGateDefaultRemote
@@ -40,6 +40,11 @@ func expectSmartRemoteReadForRemote(mock sqlmock.Sqlmock, remoteName string, loc
 		WillReturnRows(hashRows(local))
 	mock.ExpectQuery(`SELECT active_branch\(\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"active_branch()"}).AddRow("main"))
+	ref := "remotes/" + remoteName + "/main"
+	mock.ExpectQuery(`SHOW TABLES AS OF '` + ref + `' LIKE 'schema_migrations'`).
+		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("schema_migrations"))
+	mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations AS OF '` + ref + `' LIKE 'content_hash'`).
+		WillReturnRows(sqlmock.NewRows([]string{"Field"}).AddRow("content_hash"))
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations AS OF 'remotes/` + remoteName + `/main'`).
 		WillReturnRows(hashRows(remote))
 }
@@ -61,6 +66,13 @@ func expectRemoteMaxReread(mock sqlmock.Sqlmock, remoteName string, remote map[i
 	if remoteName == "" {
 		remoteName = smartGateDefaultRemote
 	}
+	// The TOCTOU re-check reaches the ref through ReadMigrationContentHashes,
+	// same as the first read, so it issues the historical shape probes too.
+	ref := "remotes/" + remoteName + "/main"
+	mock.ExpectQuery(`SHOW TABLES AS OF '` + ref + `' LIKE 'schema_migrations'`).
+		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("schema_migrations"))
+	mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations AS OF '` + ref + `' LIKE 'content_hash'`).
+		WillReturnRows(sqlmock.NewRows([]string{"Field"}).AddRow("content_hash"))
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations AS OF 'remotes/` + remoteName + `/main'`).
 		WillReturnRows(hashRows(remote))
 }
@@ -235,7 +247,7 @@ func TestSmartGateRouting(t *testing.T) {
 			WillReturnRows(hashRows(map[int]string{floor: "h"}))
 		mock.ExpectQuery(`SELECT active_branch\(\)`).
 			WillReturnRows(sqlmock.NewRows([]string{"active_branch()"}).AddRow("main"))
-		mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations AS OF 'remotes/origin/main'`).
+		mock.ExpectQuery(`SHOW TABLES AS OF 'remotes/origin/main'`).
 			WillReturnError(errors.New("branch not found: remotes/origin/main"))
 
 		err := CheckRemoteMigrateGate(context.Background(), db)

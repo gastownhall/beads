@@ -22,6 +22,14 @@ type notionConfig struct {
 	ViewURL      string
 }
 
+type notionConfigSetter interface {
+	SetConfig(ctx context.Context, key, value string) error
+}
+
+type notionConfigDeleter interface {
+	DeleteConfig(ctx context.Context, key string) error
+}
+
 type notionUnsupportedPushStats struct {
 	counts map[types.IssueType]int
 }
@@ -145,26 +153,31 @@ func init() {
 
 func getNotionConfig() notionConfig {
 	ctx := context.Background()
-	return notionConfig{
-		DataSourceID: getNotionConfigValue(ctx, "notion.data_source_id", "NOTION_DATA_SOURCE_ID"),
-		ViewURL:      getNotionConfigValue(ctx, "notion.view_url", "NOTION_VIEW_URL"),
-	}
-}
-
-func getNotionConfigValue(ctx context.Context, key, envVar string) string {
 	if store != nil {
-		value, _ := store.GetConfig(ctx, key)
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	} else if dbPath != "" {
+		return getNotionConfigWithReader(ctx, store)
+	}
+	if dbPath != "" {
 		tempStore, err := openReadOnlyStoreForDBPath(ctx, dbPath)
 		if err == nil {
 			defer func() { _ = tempStore.Close() }()
-			value, _ := tempStore.GetConfig(ctx, key)
-			if strings.TrimSpace(value) != "" {
-				return strings.TrimSpace(value)
-			}
+			return getNotionConfigWithReader(ctx, tempStore)
+		}
+	}
+	return getNotionConfigWithReader(ctx, nil)
+}
+
+func getNotionConfigWithReader(ctx context.Context, reader notion.ConfigReader) notionConfig {
+	return notionConfig{
+		DataSourceID: getNotionConfigValue(ctx, reader, "notion.data_source_id", "NOTION_DATA_SOURCE_ID"),
+		ViewURL:      getNotionConfigValue(ctx, reader, "notion.view_url", "NOTION_VIEW_URL"),
+	}
+}
+
+func getNotionConfigValue(ctx context.Context, reader notion.ConfigReader, key, envVar string) string {
+	if reader != nil {
+		value, _ := reader.GetConfig(ctx, key)
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
 	if envVar != "" {
@@ -315,22 +328,8 @@ func runNotionInit(cmd *cobra.Command, _ []string) error {
 		return HandleError("%v", err)
 	}
 
-	client := newNotionSetupClient(auth.Token)
-	db, err := client.CreateDatabase(cmd.Context(), notionInitParent, notionInitTitle)
+	result, err := runNotionInitAfterValidation(cmd.Context(), newNotionSetupClient(auth.Token), notionInitParent, notionInitTitle, store, notionConfigDeleteTarget())
 	if err != nil {
-		return HandleError("%v", err)
-	}
-	if len(db.DataSources) == 0 || strings.TrimSpace(db.DataSources[0].ID) == "" {
-		return HandleError("Notion create database response did not include a child data source")
-	}
-	result := notionSetupResult{
-		Action:       "init",
-		DatabaseID:   strings.TrimSpace(db.ID),
-		DataSourceID: strings.TrimSpace(db.DataSources[0].ID),
-		ViewURL:      strings.TrimSpace(db.URL),
-		Message:      "Notion target initialized",
-	}
-	if err := saveNotionTargetConfig(cmd.Context(), result.DataSourceID, result.ViewURL); err != nil {
 		return HandleError("%v", err)
 	}
 	if jsonOutput {
@@ -368,26 +367,8 @@ func runNotionConnect(cmd *cobra.Command, _ []string) error {
 		return HandleError("%v", err)
 	}
 
-	client := newNotionSetupClient(auth.Token)
-	resolved, err := notion.ResolveDataSourceReference(cmd.Context(), client, notionConnectURL)
+	result, err := runNotionConnectAfterValidation(cmd.Context(), newNotionSetupClient(auth.Token), notionConnectURL, store, notionConfigDeleteTarget())
 	if err != nil {
-		return HandleError("%v", err)
-	}
-	schema := notion.ValidateDataSourceSchema(resolved.DataSource)
-	if len(schema.Missing) > 0 {
-		return HandleError("target is missing required Notion properties: %s", strings.Join(schema.Missing, ", "))
-	}
-	result := notionSetupResult{
-		Action:       "connect",
-		DatabaseID:   "",
-		DataSourceID: resolved.DataSourceID,
-		ViewURL:      strings.TrimSpace(notionConnectURL),
-		Message:      "Notion target connected",
-	}
-	if resolved.Database != nil {
-		result.DatabaseID = strings.TrimSpace(resolved.Database.ID)
-	}
-	if err := saveNotionTargetConfig(cmd.Context(), result.DataSourceID, result.ViewURL); err != nil {
 		return HandleError("%v", err)
 	}
 	if jsonOutput {
@@ -670,17 +651,69 @@ func matchesNotionPushLabel(issue *types.Issue, pushLabel string) bool {
 	return false
 }
 
-func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) error {
+func runNotionInitAfterValidation(ctx context.Context, client *notion.Client, parent, title string, setter notionConfigSetter, deleter notionConfigDeleter) (notionSetupResult, error) {
+	db, err := client.CreateDatabase(ctx, parent, title)
+	if err != nil {
+		return notionSetupResult{}, err
+	}
+	if len(db.DataSources) == 0 || strings.TrimSpace(db.DataSources[0].ID) == "" {
+		return notionSetupResult{}, fmt.Errorf("Notion create database response did not include a child data source")
+	}
+	result := notionSetupResult{
+		Action:       "init",
+		DatabaseID:   strings.TrimSpace(db.ID),
+		DataSourceID: strings.TrimSpace(db.DataSources[0].ID),
+		ViewURL:      strings.TrimSpace(db.URL),
+		Message:      "Notion target initialized",
+	}
+	if err := saveNotionTargetConfigWithWriter(ctx, setter, deleter, result.DataSourceID, result.ViewURL); err != nil {
+		return notionSetupResult{}, err
+	}
+	return result, nil
+}
+
+func runNotionConnectAfterValidation(ctx context.Context, client *notion.Client, url string, setter notionConfigSetter, deleter notionConfigDeleter) (notionSetupResult, error) {
+	resolved, err := notion.ResolveDataSourceReference(ctx, client, url)
+	if err != nil {
+		return notionSetupResult{}, err
+	}
+	schema := notion.ValidateDataSourceSchema(resolved.DataSource)
+	if len(schema.Missing) > 0 {
+		return notionSetupResult{}, fmt.Errorf("target is missing required Notion properties: %s", strings.Join(schema.Missing, ", "))
+	}
+	result := notionSetupResult{
+		Action:       "connect",
+		DataSourceID: resolved.DataSourceID,
+		ViewURL:      strings.TrimSpace(url),
+		Message:      "Notion target connected",
+	}
+	if resolved.Database != nil {
+		result.DatabaseID = strings.TrimSpace(resolved.Database.ID)
+	}
+	if err := saveNotionTargetConfigWithWriter(ctx, setter, deleter, result.DataSourceID, result.ViewURL); err != nil {
+		return notionSetupResult{}, err
+	}
+	return result, nil
+}
+
+func notionConfigDeleteTarget() notionConfigDeleter {
 	if store == nil {
+		return nil
+	}
+	deleter, _ := storage.UnwrapStore(store).(notionConfigDeleter)
+	return deleter
+}
+
+func saveNotionTargetConfigWithWriter(ctx context.Context, setter notionConfigSetter, deleter notionConfigDeleter, dataSourceID, viewURL string) error {
+	if setter == nil {
 		return fmt.Errorf("database not available")
 	}
-	if err := store.SetConfig(ctx, "notion.data_source_id", strings.TrimSpace(dataSourceID)); err != nil {
+	if err := setter.SetConfig(ctx, "notion.data_source_id", strings.TrimSpace(dataSourceID)); err != nil {
 		return fmt.Errorf("save notion.data_source_id: %w", err)
 	}
 	viewURL = strings.TrimSpace(viewURL)
 	if viewURL == "" {
-		deleter, ok := storage.UnwrapStore(store).(storage.ConfigMetadataStore)
-		if !ok {
+		if deleter == nil {
 			return fmt.Errorf("store does not support config deletion")
 		}
 		if err := deleter.DeleteConfig(ctx, "notion.view_url"); err != nil {
@@ -688,7 +721,7 @@ func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) e
 		}
 		return nil
 	}
-	if err := store.SetConfig(ctx, "notion.view_url", viewURL); err != nil {
+	if err := setter.SetConfig(ctx, "notion.view_url", viewURL); err != nil {
 		return fmt.Errorf("save notion.view_url: %w", err)
 	}
 	return nil

@@ -38,18 +38,16 @@ type molReader interface {
 
 var _ molReader = storage.DoltStorage(nil)
 
-type molConfigWriter interface {
-	molReader
-	SetConfig(ctx context.Context, key, value string) error
-}
-
-var _ molConfigWriter = storage.DoltStorage(nil)
-
 type molWriter interface {
 	molReader
+	// CreateIssue carries the issue's Labels. There is deliberately no AddLabel
+	// verb beside it: a label written separately makes the plane decision a
+	// second time, and the two implementations of this interface did not make
+	// it the same way — one asked the storage layer's isActiveWisp, the other a
+	// cache filled from a wisp probe. A caller that wants an issue labeled
+	// says so on the issue it creates.
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
-	AddLabel(ctx context.Context, issueID, label, actor string) error
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
 	CloseIssue(ctx context.Context, id, reason, actor string) error
 	DeleteIssue(ctx context.Context, id, actor string) error
@@ -70,10 +68,6 @@ func (w storeMolWriter) AddDependency(ctx context.Context, dep *types.Dependency
 	return w.tx.AddDependency(ctx, dep, actor)
 }
 
-func (w storeMolWriter) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	return w.tx.AddLabel(ctx, issueID, label, actor)
-}
-
 func (w storeMolWriter) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	return w.tx.UpdateIssue(ctx, id, updates, actor)
 }
@@ -88,6 +82,19 @@ func (w storeMolWriter) DeleteIssue(ctx context.Context, id, _ string) error {
 
 func (w storeMolWriter) SetConfig(ctx context.Context, key, value string) error {
 	return w.tx.SetConfig(ctx, key, value)
+}
+
+// GetConfig reads through the transaction when one is bound. Without this,
+// config readers (flattenUnregisteredIssueTypes) would go to the embedded
+// store, which opens a second pool connection — a deadlock when
+// MaxOpenConns=1 and the transaction already holds the only one. It also
+// keeps the read consistent with any config written earlier in the same
+// transaction rather than seeing the last committed value.
+func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, error) {
+	if w.tx != nil {
+		return w.tx.GetConfig(ctx, key)
+	}
+	return w.DoltStorage.GetConfig(ctx, key)
 }
 
 func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
@@ -122,12 +129,21 @@ func (r uowMolReader) GetIssue(ctx context.Context, id string) (*types.Issue, er
 	if rerr != nil {
 		return nil, fmt.Errorf("resolving %s: %w", id, rerr)
 	}
+	// READS, ALL OF THEM, and they stay for the reason the writes did not.
+	// uowMolReader is a PORT: it adapts a caller's open unit of work to the
+	// molecule commands' reader interface, and every method here must answer
+	// from inside that transaction. issueops.Reader opens one of its own, so a
+	// role-routed port would show the molecule the last committed state while
+	// the command that owns the transaction is midway through changing it.
+	// A reader role bound to a caller's transaction is the follow-up
+	// (ga-2ltro.12). The wisp branch here is a read that follows the row
+	// GetIssueOrWisp already found, not a front door choosing where to write.
 	var labels []string
 	var err error
 	if isWisp {
-		labels, err = r.uw.LabelUseCase().GetWispLabels(ctx, id)
+		labels, err = r.uw.LabelUseCase().GetWispLabels(ctx, id) //nolint:forbidigo // in-transaction port read; issueops.Reader would open its own
 	} else {
-		labels, err = r.uw.LabelUseCase().GetLabels(ctx, id)
+		labels, err = r.uw.LabelUseCase().GetLabels(ctx, id) //nolint:forbidigo // in-transaction port read; issueops.Reader would open its own
 	}
 	if err == nil {
 		issue.Labels = labels
@@ -140,7 +156,7 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 	if err != nil {
 		return nil, err
 	}
-	if labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids); err == nil {
+	if labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
 		for _, issue := range issues {
 			issue.Labels = labelMap[issue.ID]
 		}
@@ -151,7 +167,7 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 		wisps = nil //nolint:staticcheck // wisps table may not exist; issues result still valid
 	}
 	if len(wisps) > 0 {
-		if labelMap, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids); err == nil {
+		if labelMap, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
 			for _, wisp := range wisps {
 				wisp.Labels = labelMap[wisp.ID]
 			}
@@ -228,7 +244,7 @@ func (r uowMolReader) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.
 }
 
 func (r uowMolReader) GetLabels(ctx context.Context, issueID string) ([]string, error) {
-	return r.uw.LabelUseCase().GetLabels(ctx, issueID)
+	return r.uw.LabelUseCase().GetLabels(ctx, issueID) //nolint:forbidigo // in-transaction port read; see GetIssue above
 }
 
 func (r uowMolReader) GetConfig(ctx context.Context, key string) (string, error) {
@@ -399,17 +415,6 @@ func (w *uowMolWriter) AddDependency(ctx context.Context, dep *types.Dependency,
 		return w.uw.DependencyUseCase().AddWispDependency(ctx, dep, actor)
 	}
 	return w.uw.DependencyUseCase().AddDependency(ctx, dep, actor)
-}
-
-func (w *uowMolWriter) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	isWisp, err := w.isWisp(ctx, issueID)
-	if err != nil {
-		return err
-	}
-	if isWisp {
-		return w.uw.LabelUseCase().AddWispLabel(ctx, issueID, label, actor)
-	}
-	return w.uw.LabelUseCase().AddLabel(ctx, issueID, label, actor)
 }
 
 func (w *uowMolWriter) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {

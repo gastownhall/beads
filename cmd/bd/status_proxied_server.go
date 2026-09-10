@@ -1,51 +1,28 @@
 package main
 
 import (
-	"context"
+	"errors"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
-func runStatusProxiedServer(ctx context.Context, showAssigned, noActivity bool) error {
-	uw, err := openProxiedListUOW(ctx)
-	if err != nil {
-		return HandleError("%v", err)
+// proxiedStatsReporter hands back the guarded summary-statistics surface for
+// the proxied-server provider, through the provider's OWN capability accessor —
+// the same two-step proxiedCounter performs, and for the same reason: the
+// accessor is where each layer is added.
+//
+// The role is asked for at the TOP of the command, before any work: this
+// command resolves no ids, so there is nothing to look up first and no
+// lookup-only provider to trip over.
+func proxiedStatsReporter() (issueops.StatsReporter, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
 	}
-	defer uw.Close(ctx)
-
-	stats, err := uw.IssueUseCase().GetStatistics(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+	src, ok := uowProvider.(uow.StatsReporterSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the summary-statistics surface", uowProvider)
 	}
-
-	if showAssigned {
-		stats, err = proxiedAssignedStatistics(ctx, uw, actor)
-		if err != nil {
-			return HandleErrorRespectJSON("failed to get assigned statistics: %v", err)
-		}
-	}
-
-	var recentActivity *RecentActivitySummary
-	if !noActivity {
-		recentActivity = getGitActivity(24)
-	}
-
-	return renderStatus(stats, recentActivity)
-}
-
-func proxiedAssignedStatistics(ctx context.Context, uw uow.UnitOfWork, assignee string) (*types.Statistics, error) {
-	assigneePtr := assignee
-	page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Assignee: &assigneePtr})
-	if err != nil {
-		return nil, err
-	}
-
-	readyCount := 0
-	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, types.WorkFilter{Assignee: &assigneePtr})
-	if err == nil {
-		readyCount = len(readyPage.Items)
-	}
-
-	return buildAssignedStats(page.Items, readyCount), nil
+	return src.StatsReporter()
 }

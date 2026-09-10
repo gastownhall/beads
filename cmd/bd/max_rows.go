@@ -32,6 +32,25 @@ func addMaxRowsFlag(cmd *cobra.Command) {
 			"rather than silently going unenforced.")
 }
 
+// addRoutedMaxRowsFlag registers --max-rows on a command whose cap is HONORED on
+// both routes, so the help text must not repeat the proxied-server refusal above.
+//
+// It exists because that refusal is a fact about a command's implementation
+// rather than about the flag: a command whose cap reaches a query path that
+// threads one is honored on both routes. `bd dep tree` was the first and `bd
+// list` the second — its cap used to be rejected under --proxied-server because
+// the unit-of-work query path read no MaxRows at all. The next command to move
+// onto a role that threads it calls this instead of the function above and
+// deletes its rejectMaxRowsUnderProxiedServer call in the same edit.
+func addRoutedMaxRowsFlag(cmd *cobra.Command) {
+	cmd.Flags().Int(maxRowsFlagName, 0,
+		"Hard upper bound on rows returned. Returns a non-zero exit (code 2) "+
+			"and an error to stderr if exceeded. 0 disables (the default). Overrides "+
+			"BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a "+
+			"circuit breaker against pathological queries. Honored on both the direct "+
+			"and the --proxied-server route.")
+}
+
 // rejectMaxRowsUnderProxiedServer errors out when an explicit --max-rows
 // flag or BEADS_MAX_ROWS env cap resolves to a nonzero cap but the command
 // is about to divert to proxied-server mode. The proxied repository path

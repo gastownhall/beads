@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -16,6 +18,7 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("ParentChildTouchesCoordinationOnlyForNewEdge", s.depInsertParentChildTouchesCoordinationOnlyForNewEdge)
 		s.Run("DifferentTypeIsRejected", s.depInsertConflictingType)
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
+		s.Run("ForeignRepoTargetGoesToExternalColumn", s.depInsertForeignRepoTarget)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
 		s.Run("EmitsDependencyAddedEventWhenEmitEventSet", s.depInsertEmitsAddedEvent)
 		s.Run("RecordsNoEventWithoutEmitEvent", s.depInsertWithoutEmitEventRecordsNoEvent)
@@ -199,6 +202,26 @@ func (s *testSuite) depInsertFKViolation() {
 	s.seedIssueRow("bd-dep-src")
 	err := s.depRepo().Insert(s.Ctx(), newDep("bd-dep-src", "bd-dep-no-such-target", types.DepBlocks), "tester", domain.DepInsertOpts{})
 	s.Require().Error(err, "missing target should fail fk_dep_issue_target")
+}
+
+// depInsertForeignRepoTarget is the other half of depInsertFKViolation: a target
+// this database is not expected to hold is not a missing local issue. An id whose
+// prefix names another repository is classified external, like an "external:"
+// reference, and lands in depends_on_external — the one target column with no
+// foreign key — so fk_dep_issue_target never sees it (bd-ocrn7).
+func (s *testSuite) depInsertForeignRepoTarget() {
+	s.seedIssueRow("bd-dep-foreign-src")
+	const target = "otherrig-9001"
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-dep-foreign-src", target, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	var external, issueTarget, wispTarget sql.NullString
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT depends_on_external, depends_on_issue_id, depends_on_wisp_id FROM dependencies WHERE issue_id = ?",
+		"bd-dep-foreign-src").Scan(&external, &issueTarget, &wispTarget))
+	s.Equal(target, external.String, "foreign-repo target belongs in depends_on_external")
+	s.Empty(issueTarget.String, "foreign-repo target must not be written to depends_on_issue_id")
+	s.Empty(wispTarget.String)
 }
 
 func (s *testSuite) depInsertThreadID() {

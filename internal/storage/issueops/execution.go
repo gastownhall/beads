@@ -11,13 +11,35 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
+// HistoryEntry names the version-control entry a guarded mutation records: the
+// caller's own provenance label when it supplied one, otherwise the
+// implementation's default. It decides how the entry READS, never whether one
+// is recorded — that stays a question about what the mutation wrote.
+//
+// Every guarded mutation whose request carries a label calls this. Create is
+// the one that does not, and the reason is NOT that no surface names the
+// created issue — several do (internal/storage/dolt/issues.go writes
+// "bd: create <id>", reached from cmd/bd/create_atomic.go). It is that
+// CreateRequest has no Provenance field for a caller to set, so there is no
+// label for this function to prefer. That is a gap rather than a principle:
+// the proxied route's create message changed from "bd: create <id>" to
+// "create issue" for exactly this reason, and closing it means either giving
+// CreateRequest the field or having the role compose an id-bearing default the
+// way BatchCloser and ClaimNext do. Tracked as its own decision.
+func HistoryEntry(provenance, fallback string) string {
+	if provenance != "" {
+		return provenance
+	}
+	return fallback
+}
+
 // ExecuteCreate applies a guarded create in tx and reports durable tables changed.
 func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
 	attempt := CloneCreateRequest(request)
 	if err := ValidatePublicCreateRequest(attempt); err != nil {
 		return publicops.CreateResult{}, nil, err
 	}
-	batch, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{CreateOnly: true, OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: attempt.ForceIDPrefix})
+	batch, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix})
 	if err != nil {
 		return publicops.CreateResult{}, nil, err
 	}
@@ -35,6 +57,13 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	// guard, and table routing all agree on the destination. A no-history
 	// create keeps its own retention mode.
 	if !issue.Ephemeral && !issue.NoHistory && ResolveInfraTypesInTx(ctx, tx)[string(issue.IssueType)] {
+		issue.Ephemeral = true
+	}
+	// A wisp_type IS a claim of ephemerality: a typed wisp minted without the
+	// flag lands in the issues plane where no TTL, GC, or purge tier owns it
+	// (858 such rows / 7.3 MB survived every sweep in one production DB before
+	// this line). NoHistory keeps its own retention mode, same as above.
+	if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
 		issue.Ephemeral = true
 	}
 	if attempt.InheritLabelsFromParent && attempt.ParentID != "" {
@@ -59,7 +88,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)
 	var skipped []skippedDependency
 	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{
-		CreateOnly: true, OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: attempt.ForceIDPrefix,
+		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
 		},
@@ -111,6 +140,12 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	if err := ValidateMetadataPatch(attempt.Patch.Metadata); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
+	// The plane restriction is resolved HERE, inside the update's own
+	// transaction, so a caller that serves durable issues only cannot be handed
+	// a wisp by a resolve that ran earlier.
+	if attempt.IssuePlaneOnly && IsActiveWispInTx(ctx, tx, attempt.IssueID) {
+		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, attempt.IssueID)
+	}
 	tables := ChangedTables{}
 	before, err := GetIssueInTx(ctx, tx, attempt.IssueID)
 	if err != nil {
@@ -139,7 +174,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
-		if claimed.OldIssue.Status != types.StatusInProgress || claimed.OldIssue.Assignee != attempt.Actor {
+		if claimAdvancedTheRow(claimed, attempt.Actor) {
 			changedAny = true
 			issueTable, _, eventTable, _ := WispTableRouting(claimed.IsWisp)
 			tables.Add(issueTable, eventTable)
@@ -212,7 +247,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
-		moved, err := MoveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value)
+		moved, err := MoveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value, attempt.Actor)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -226,6 +261,19 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		return publicops.UpdateResult{}, nil, err
 	}
 	return publicops.UpdateResult{Issue: hydrated, Changed: changedAny}, tables, nil
+}
+
+// claimAdvancedTheRow reports whether ClaimIssueInTx's CAS represents a real
+// mutation from the pre-image it read, as opposed to an idempotent re-claim
+// that matched the CAS but changed nothing worth staging. Comparing the
+// pre-image assignee to actor verbatim (ga-v2k49, steveyegge's #5479
+// re-review) mistook a holder re-claiming under a respelled identity — a
+// dotted alias vs. its sanitized form, ga-wzl83's repro shape — for a fresh
+// mutation: ClaimIssueInTx's own CAS already treats the two spellings as the
+// same holder and writes nothing, but this check disagreed and staged a
+// phantom issues+events mutation for a request that changed no bytes.
+func claimAdvancedTheRow(claimed *ClaimResult, actor string) bool {
+	return claimed.OldIssue.Status != types.StatusInProgress || !actorMatches(claimed.OldIssue.Assignee, actor)
 }
 
 // ExecuteClose applies a guarded close in tx and reports durable tables changed.

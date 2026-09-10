@@ -4,10 +4,27 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// DeleteBlockedError is the refusal returned by deleteMany when
+// EnforceCascadePolicy is on, Cascade and Force are both off, and an issue in
+// the deletion set has dependents outside it. The message mirrors classic
+// (embedded) delete's refusal so both planes speak the same language.
+type DeleteBlockedError struct {
+	// IssueID is the first issue in the requested deletion set (request order)
+	// found to have external dependents.
+	IssueID string
+	// Dependents are that issue's dependents outside the deletion set, sorted.
+	Dependents []string
+}
+
+func (e *DeleteBlockedError) Error() string {
+	return fmt.Sprintf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", e.IssueID)
+}
 
 func (u *issueUseCaseImpl) DeleteIssue(ctx context.Context, id, actor string) (DeleteIssuesResult, error) {
 	if id == "" {
@@ -52,13 +69,41 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return DeleteIssuesResult{}, nil
 	}
 
+	result := DeleteIssuesResult{}
+
 	allIDs := params.IDs
-	if params.Cascade {
+	switch {
+	case params.Cascade:
 		expanded, err := u.issueRepo.FindAllDependents(ctx, params.IDs)
 		if err != nil {
 			return DeleteIssuesResult{}, fmt.Errorf("delete: cascade expansion: %w", err)
 		}
 		allIDs = expanded
+	case params.EnforceCascadePolicy:
+		// Embedded-parity dependent handling (see DeleteIssuesParams): without
+		// Cascade, an external dependent either blocks the delete (no Force) or
+		// is orphaned (Force), never silently swept.
+		externalBySource, err := u.externalDependents(ctx, params.IDs)
+		if err != nil {
+			return DeleteIssuesResult{}, err
+		}
+		if params.Force {
+			orphanSet := map[string]bool{}
+			for _, deps := range externalBySource {
+				for _, dep := range deps {
+					orphanSet[dep] = true
+				}
+			}
+			result.OrphanedIssues = sortedStringSet(orphanSet)
+		} else {
+			for _, id := range params.IDs {
+				if deps := externalBySource[id]; len(deps) > 0 {
+					sort.Strings(deps)
+					result.OrphanedIssues = deps
+					return result, &DeleteBlockedError{IssueID: id, Dependents: deps}
+				}
+			}
+		}
 	}
 	if len(allIDs) == 0 {
 		return DeleteIssuesResult{}, nil
@@ -69,17 +114,11 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return DeleteIssuesResult{}, fmt.Errorf("delete: partition: %w", err)
 	}
 
-	result := DeleteIssuesResult{}
-
-	depIssue, err := u.depRepo.CountAllForIDs(ctx, regularIDs, DepCountsOpts{})
+	depCount, err := u.countDeletedDependencies(ctx, allIDs)
 	if err != nil {
-		return DeleteIssuesResult{}, fmt.Errorf("delete: count deps: %w", err)
+		return DeleteIssuesResult{}, err
 	}
-	depWisp, err := u.depRepo.CountAllForIDs(ctx, wispIDs, DepCountsOpts{UseWispsTable: true})
-	if err != nil {
-		return DeleteIssuesResult{}, fmt.Errorf("delete: count wisp deps: %w", err)
-	}
-	result.DependenciesCount = depIssue + depWisp
+	result.DependenciesCount = depCount
 
 	labelIssue, err := u.labelRepo.CountAllForIDs(ctx, regularIDs, LabelOpts{})
 	if err != nil {
@@ -102,6 +141,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	result.EventsCount = evIssue + evWisp
 
 	if params.DryRun {
+		result.DeletedCount = len(regularIDs) + len(wispIDs)
 		return result, nil
 	}
 
@@ -128,6 +168,17 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	}
 	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{UseWispsTable: true}); err != nil {
 		return result, fmt.Errorf("delete: drop wisp deps: %w", err)
+	}
+	// The SYNC-PLANE edges pointing at a deleted wisp, which are not the same
+	// rows as the line above and are not reached by a foreign key: there is no
+	// FK from dependencies to wisps, so `dependencies.depends_on_wisp_id` rows
+	// survive their target unless they are deleted explicitly. Without this a
+	// forced delete of a wisp left its durable dependent holding an edge into
+	// a row that no longer exists — dangling, not orphaned, which is not what
+	// issueops.DeleteRequest.Force promises. The store body has always done
+	// this (issueops.deleteIssueRowInTx -> DeleteWispFromDependenciesInTx).
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{}); err != nil {
+		return result, fmt.Errorf("delete: drop sync-plane edges into deleted wisps: %w", err)
 	}
 	if _, err := u.labelRepo.DeleteAllForIDs(ctx, regularIDs, LabelOpts{}); err != nil {
 		return result, fmt.Errorf("delete: drop labels: %w", err)
@@ -165,6 +216,58 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	}
 
 	return result, nil
+}
+
+// externalDependents finds the direct dependents of each id in ids that are
+// not themselves in ids, across both the issue and wisp dependency tables.
+// The result maps deletion-set id -> external dependent ids (unsorted).
+func (u *issueUseCaseImpl) externalDependents(ctx context.Context, ids []string) (map[string][]string, error) {
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+
+	issueRes, err := u.depRepo.ListByIssueIDs(ctx, ids, DepListOpts{Direction: DepDirectionIn})
+	if err != nil {
+		return nil, fmt.Errorf("delete: list dependents: %w", err)
+	}
+	wispRes, err := u.depRepo.ListByIssueIDs(ctx, ids, DepListOpts{Direction: DepDirectionIn, UseWispsTable: true})
+	if err != nil && !dberrors.IsTableNotExist(err) {
+		return nil, fmt.Errorf("delete: list wisp dependents: %w", err)
+	}
+
+	out := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	for _, res := range []DepBulkResult{issueRes, wispRes} {
+		for target, deps := range res.Incoming {
+			for _, d := range deps {
+				if d.IssueID == "" || idSet[d.IssueID] {
+					continue
+				}
+				if seen[target] == nil {
+					seen[target] = map[string]bool{}
+				}
+				if seen[target][d.IssueID] {
+					continue
+				}
+				seen[target][d.IssueID] = true
+				out[target] = append(out[target], d.IssueID)
+			}
+		}
+	}
+	return out, nil
+}
+
+func sortedStringSet(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (u *issueUseCaseImpl) previewDelete(ctx context.Context, ids []string) (DeletePreview, error) {
@@ -337,4 +440,57 @@ func (u *issueUseCaseImpl) rewriteTextReferences(
 		}
 	}
 	return len(touched), nil
+}
+
+// countDeletedDependencies counts every dependency row this deletion removes,
+// exactly once, across BOTH planes and BOTH ends of each edge.
+//
+// It replaces a pair of CountAllForIDs calls that paired each plane's ids with
+// that plane's table only. Two shapes escaped them:
+//
+//   - a durable row depending on a deleted WISP lives in `dependencies` with
+//     the wisp as the target, and the wisp was only ever checked against
+//     wisp_dependencies;
+//   - a surviving wisp depending on a deleted DURABLE row is the mirror.
+//
+// Both edges really are removed — one by the explicit cross-plane delete
+// below, the other by an ON DELETE CASCADE — so the count under-reported real
+// removals, and the two CLI routes printed different numbers for the same
+// delete.
+//
+// The old predicate also DOUBLE-counted: `issue_id IN (batch) OR target IN
+// (batch)` was run per 50-id batch, so an edge whose two ends fell in
+// different batches matched twice. Keying by the edge itself removes that
+// hazard rather than trading it for another: a row is counted once whether it
+// is reached as somebody's outbound edge, somebody's inbound edge, or both.
+func (u *issueUseCaseImpl) countDeletedDependencies(ctx context.Context, allIDs []string) (int, error) {
+	if len(allIDs) == 0 {
+		return 0, nil
+	}
+	seen := make(map[string]bool)
+	for _, useWisps := range []bool{false, true} {
+		edges, err := u.depRepo.ListByIssueIDs(ctx, allIDs, DepListOpts{
+			Direction:     DepDirectionBoth,
+			UseWispsTable: useWisps,
+		})
+		if err != nil {
+			if useWisps && dberrors.IsTableNotExist(err) {
+				continue
+			}
+			return 0, fmt.Errorf("delete: count deps: %w", err)
+		}
+		for _, side := range []map[string][]*types.Dependency{edges.Outgoing, edges.Incoming} {
+			for _, list := range side {
+				for _, dep := range list {
+					if dep == nil {
+						continue
+					}
+					// (source, target) is unique per table: the writer refuses a
+					// second edge for a pair, retyping included.
+					seen[fmt.Sprintf("%t\x00%s\x00%s", useWisps, dep.IssueID, dep.DependsOnID)] = true
+				}
+			}
+		}
+	}
+	return len(seen), nil
 }

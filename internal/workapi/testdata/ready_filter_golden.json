@@ -32,7 +32,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -61,7 +62,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -102,7 +104,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -131,7 +134,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -172,7 +176,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -201,7 +206,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -242,7 +248,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -271,7 +278,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -320,7 +328,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -352,7 +361,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -399,7 +409,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -431,7 +442,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -482,7 +494,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -513,7 +526,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -561,7 +575,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -592,7 +607,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -636,7 +652,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -665,7 +682,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -705,7 +723,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -734,7 +753,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -774,7 +794,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -803,7 +824,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -844,7 +866,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -873,7 +896,8 @@
         "HasMetadataKey": "",
         "Offset": 3,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -913,7 +937,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -942,7 +967,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -982,7 +1008,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1027,7 +1054,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1056,7 +1084,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1096,7 +1125,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1125,7 +1155,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1168,7 +1199,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1197,7 +1229,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1238,7 +1271,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1267,7 +1301,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1308,7 +1343,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1337,7 +1373,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1377,7 +1414,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1406,7 +1444,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1446,7 +1485,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1475,7 +1515,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1535,7 +1576,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1564,7 +1606,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1605,7 +1648,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1634,7 +1678,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1693,7 +1738,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1722,7 +1768,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1762,7 +1809,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1791,7 +1839,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1842,7 +1891,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1875,7 +1925,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -1924,7 +1975,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -1956,7 +2008,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -2005,7 +2058,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -2037,7 +2091,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -2116,7 +2171,8 @@
         "HasMetadataKey": "team",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -2145,7 +2201,8 @@
         "HasMetadataKey": "team",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -2233,7 +2290,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -2277,7 +2335,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   },
@@ -2338,7 +2397,8 @@
         "HasMetadataKey": "",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -2452,7 +2512,8 @@
         "HasMetadataKey": "env",
         "Offset": 0,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     },
     "gather": {
@@ -2492,7 +2553,8 @@
         "HasMetadataKey": "env",
         "Offset": 2,
         "MaxRows": 0,
-        "MaxRowsSource": ""
+        "MaxRowsSource": "",
+        "Lite": false
       }
     }
   }

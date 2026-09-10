@@ -127,6 +127,58 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 	return result, err
 }
 
+// RunTxEphemeral is RunTxResult for work whose writes touch ONLY ephemeral
+// (dolt_ignored) state — today the leases table, whose writes must mint no
+// Dolt commit and no history (bd-lrgn1; ported to proxied mode by bd-aq0ql).
+// On success the attempt is committed with the SQL-only form (Tx.Commit with
+// an empty message ⇒ plain COMMIT, no DOLT_COMMIT), which persists the
+// working set but records nothing in dolt_log — the proxied analog of the
+// classic DoltStore.withRetryTx commit discipline that HeartbeatIssue relies
+// on. A serialization loser (heartbeat and reclaim/close contend on the same
+// lease row by design) is replayed against a fresh unit of work, exactly like
+// RunTxResult.
+//
+// Do NOT use this for work that writes versioned tables: those writes would
+// persist while silently bypassing Dolt history. Every versioned write goes
+// through RunTx/RunTxResult with a real commit message.
+func RunTxEphemeral[T any](ctx context.Context, p UnitOfWorkProvider, work TxReadFunc[T]) (T, error) {
+	var result T
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = txRetryInitialInterval
+	bo.MaxElapsedTime = DefaultTxRetryMaxElapsed
+
+	err := backoff.Retry(func() error {
+		uw, err := p.NewUOW(ctx)
+		if err != nil {
+			if isSerializationError(err) {
+				return err
+			}
+			return backoff.Permanent(err)
+		}
+		defer closeAttempt(ctx, uw)
+
+		r, err := work(ctx, uw)
+		if err != nil {
+			if isSerializationError(err) {
+				return err
+			}
+			return backoff.Permanent(err)
+		}
+
+		if err := uw.Commit(ctx, ""); err != nil {
+			if isSerializationError(err) {
+				return err
+			}
+			return backoff.Permanent(err)
+		}
+
+		result = r
+		return nil
+	}, backoff.WithContext(bo, ctx))
+
+	return result, err
+}
+
 func RunTxRead[T any](ctx context.Context, p UnitOfWorkProvider, work TxReadFunc[T]) (T, error) {
 	var zero T
 	uw, err := p.NewUOW(ctx)

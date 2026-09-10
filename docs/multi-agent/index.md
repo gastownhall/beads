@@ -69,5 +69,7 @@ bd dep add bd-42 external:other-repo:api-ready
   patterns between agents.
 - [Federation](/multi-agent/federation) — peer-to-peer sharing of beads
   across repos and organizations.
+- [Bucket Federation Quickstart](/multi-agent/bucket-federation) — federate
+  two machines through a GCS or S3 bucket, with no server to run.
 - [Multi-Repo Migration](/multi-agent/multi-repo-migration) — moving an
   existing single-repo setup to multi-repo routing.

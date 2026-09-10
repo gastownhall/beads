@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -52,21 +55,32 @@ func isBackupAutoEnabled() bool {
 // works cross-filesystem (s3://, gs://, etc.) — auto-backup's
 // hardcoded file:// path can't help them.
 //
-// Detection bypasses Config.IsDoltServerMode() so it works correctly
-// regardless of whether GH#3545's host-mode-inference fix is in
-// place — the operator's intent is unambiguous from the host value
-// alone.
+// Detection follows the same effective-host precedence as
+// configfile.GetDoltServerHost / HostImpliesServerMode (env >
+// metadata.json > config.yaml, GH#3545), so a workspace whose remote
+// host lives only in metadata.json is classified the same way here as
+// by mode inference — the operator's intent is unambiguous from the
+// effective host value alone.
 func clientServerShareFilesystem() bool {
 	host := os.Getenv("BEADS_DOLT_SERVER_HOST")
+	if host == "" {
+		if bd := beads.FindBeadsDir(); bd != "" {
+			if cfg, err := configfile.Load(bd); err == nil && cfg != nil {
+				// An explicit dolt_mode=embedded pins local storage;
+				// a leftover dolt_server_host is inert then (same
+				// gate as HostImpliesServerMode), so local
+				// auto-backup stays available.
+				if !strings.EqualFold(cfg.DoltMode, configfile.DoltModeEmbedded) {
+					host = cfg.DoltServerHost
+				}
+			}
+		}
+	}
 	if host == "" {
 		// Fall back to in-struct config (config.yaml dolt.host etc.).
 		host = config.GetString("dolt.host")
 	}
-	switch host {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
-		return true
-	}
-	return false
+	return configfile.IsLocalHostString(host)
 }
 
 // autoBackupSkipNoticeOnce ensures the "auto-backup skipped" INFO

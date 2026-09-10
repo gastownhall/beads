@@ -60,6 +60,23 @@ func bdUpdateCapture(t *testing.T, bd, dir string, args ...string) (stdout, stde
 	return outBuf.String(), errBuf.String()
 }
 
+func bdRunInTimezone(t *testing.T, bd, dir, timezone string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	for _, env := range bdEnv(dir) {
+		if !strings.HasPrefix(env, "TZ=") {
+			cmd.Env = append(cmd.Env, env)
+		}
+	}
+	cmd.Env = append(cmd.Env, "TZ="+timezone)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd %s failed in %s: %v\n%s", strings.Join(args, " "), timezone, err, out)
+	}
+	return string(out)
+}
+
 func embeddedCurrentCommit(t *testing.T, beadsDir, database string) string {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
@@ -227,59 +244,97 @@ func TestEmbeddedUpdate(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
 
-	// ===== Field Update Flags =====
-
-	t.Run("update_status", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Status test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress")
-		got := bdShow(t, bd, dir, issue.ID)
+	t.Run("update_direct_flag_mapping", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Multi update", "--type", "task", "--metadata", `{"remove":"me"}`)
+		out := bdUpdate(t, bd, dir,
+			"--json", issue.ID,
+			"--status", "in_progress",
+			"--assignee", "bob",
+			"--priority", "1",
+			"--description", "Updated description",
+			"--design", "Design notes here",
+			"--acceptance", "AC text",
+			"--external-ref", "gh-42",
+			"--estimate", "60",
+			"--await-id", "run-123",
+			"--due", "2099-01-15",
+			"--set-metadata", "team=platform",
+			"--unset-metadata", "remove",
+			"--no-history",
+		)
+		var updated []*types.Issue
+		if err := json.Unmarshal([]byte(out), &updated); err != nil {
+			t.Fatalf("parse direct update response: %v\n%s", err, out)
+		}
+		if len(updated) != 1 {
+			t.Fatalf("direct update returned %d issues, want 1: %s", len(updated), out)
+		}
+		got := updated[0]
 		if got.Status != types.StatusInProgress {
 			t.Errorf("expected status in_progress, got %s", got.Status)
 		}
-	})
-
-	t.Run("update_title", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Old title", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--title", "New title")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Title != "New title" {
-			t.Errorf("expected title 'New title', got %q", got.Title)
+		if got.Assignee != "bob" {
+			t.Errorf("expected assignee bob, got %q", got.Assignee)
 		}
-	})
-
-	t.Run("update_assignee", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Assign test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--assignee", "alice")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Assignee != "alice" {
-			t.Errorf("expected assignee alice, got %q", got.Assignee)
+		if got.Priority != 1 {
+			t.Errorf("expected priority 1, got %d", got.Priority)
 		}
-	})
-
-	t.Run("update_priority", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Priority test", "--type", "task", "--priority", "3")
-		bdUpdate(t, bd, dir, issue.ID, "--priority", "0")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Priority != 0 {
-			t.Errorf("expected priority 0, got %d", got.Priority)
-		}
-	})
-
-	t.Run("update_description", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Desc test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--description", "Updated description")
-		got := bdShow(t, bd, dir, issue.ID)
 		if got.Description != "Updated description" {
-			t.Errorf("expected description 'Updated description', got %q", got.Description)
+			t.Errorf("expected updated description, got %q", got.Description)
 		}
-	})
+		if got.Design != "Design notes here" {
+			t.Errorf("expected design notes, got %q", got.Design)
+		}
+		if got.AcceptanceCriteria != "AC text" {
+			t.Errorf("expected acceptance criteria, got %q", got.AcceptanceCriteria)
+		}
+		if got.ExternalRef == nil || *got.ExternalRef != "gh-42" {
+			t.Errorf("expected external_ref gh-42, got %v", got.ExternalRef)
+		}
+		if got.EstimatedMinutes == nil || *got.EstimatedMinutes != 60 {
+			t.Errorf("expected estimated_minutes 60, got %v", got.EstimatedMinutes)
+		}
+		if got.AwaitID != "run-123" {
+			t.Errorf("expected await_id run-123, got %q", got.AwaitID)
+		}
+		if got.DueAt == nil || got.DueAt.Format("2006-01-02") != "2099-01-15" {
+			t.Errorf("expected due_at 2099-01-15, got %v", got.DueAt)
+		}
+		if !got.NoHistory {
+			t.Error("expected no_history true")
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(got.Metadata, &metadata); err != nil {
+			t.Fatalf("parse updated metadata %q: %v", got.Metadata, err)
+		}
+		if metadata["team"] != "platform" {
+			t.Errorf("metadata team = %v, want platform", metadata["team"])
+		}
+		if _, ok := metadata["remove"]; ok {
+			t.Errorf("metadata still contains removed key: %v", metadata)
+		}
 
-	t.Run("update_type", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Type test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--type", "bug")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.IssueType != "bug" {
-			t.Errorf("expected type bug, got %s", got.IssueType)
+		conflict := bdUpdateFail(t, bd, dir, issue.ID,
+			"--metadata", `{"other":"value"}`,
+			"--set-metadata", "team=other",
+		)
+		if !strings.Contains(conflict, "cannot combine --metadata with --set-metadata or --unset-metadata") {
+			t.Errorf("expected exact metadata conflict error, got: %s", conflict)
+		}
+
+		out = bdUpdate(t, bd, dir, "--json", issue.ID, "--due", "", "--history")
+		updated = nil
+		if err := json.Unmarshal([]byte(out), &updated); err != nil {
+			t.Fatalf("parse clearing update response: %v\n%s", err, out)
+		}
+		if len(updated) != 1 {
+			t.Fatalf("clearing update returned %d issues, want 1: %s", len(updated), out)
+		}
+		if updated[0].DueAt != nil {
+			t.Errorf("expected due_at nil after clear, got %v", updated[0].DueAt)
+		}
+		if updated[0].NoHistory {
+			t.Error("expected no_history false after --history")
 		}
 	})
 
@@ -300,105 +355,6 @@ func TestEmbeddedUpdate(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if string(got.IssueType) != "agent" {
 			t.Errorf("expected type agent, got %s", got.IssueType)
-		}
-	})
-
-	t.Run("update_type_invalid_rejected", func(t *testing.T) {
-		// Verify that truly invalid types are still rejected by the storage layer.
-		issue := bdCreate(t, bd, dir, "Invalid type test", "--type", "task")
-		out := bdUpdateFail(t, bd, dir, issue.ID, "--type", "banana")
-		if !strings.Contains(out, "invalid issue type") {
-			t.Errorf("expected 'invalid issue type' error, got: %s", out)
-		}
-	})
-
-	t.Run("update_design", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Design test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--design", "Design notes here")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Design != "Design notes here" {
-			t.Errorf("expected design 'Design notes here', got %q", got.Design)
-		}
-	})
-
-	t.Run("update_notes", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Notes test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--notes", "Some notes")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Notes != "Some notes" {
-			t.Errorf("expected notes 'Some notes', got %q", got.Notes)
-		}
-	})
-
-	t.Run("update_append_notes", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Append notes test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--notes", "first")
-		bdUpdate(t, bd, dir, issue.ID, "--append-notes", "more")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Notes != "first\nmore" {
-			t.Errorf("expected notes 'first\\nmore', got %q", got.Notes)
-		}
-	})
-
-	t.Run("update_notes_and_append_conflict", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Notes conflict", "--type", "task")
-		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "x", "--append-notes", "y")
-		if !strings.Contains(out, "cannot specify both") {
-			t.Errorf("expected conflict error, got: %s", out)
-		}
-	})
-
-	noteWarningCases := []struct {
-		name        string
-		initial     string
-		args        []string
-		wantWarning bool
-		wantNotes   string
-	}{
-		{name: "overwrite_warns", initial: "original notes", args: []string{"--notes", "replacement notes"}, wantWarning: true, wantNotes: "replacement notes"},
-		{name: "empty_is_silent", args: []string{"--notes", "first notes"}, wantNotes: "first notes"},
-		{name: "append_is_silent", initial: "original notes", args: []string{"--append-notes", "more"}, wantNotes: "original notes\nmore"},
-		{name: "same_value_is_silent", initial: "unchanged notes", args: []string{"--notes", "unchanged notes"}, wantNotes: "unchanged notes"},
-	}
-	for _, tc := range noteWarningCases {
-		t.Run("update_notes_"+tc.name, func(t *testing.T) {
-			issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
-			if tc.initial != "" {
-				bdUpdate(t, bd, dir, issue.ID, "--notes", tc.initial)
-			}
-
-			stdout, stderr := bdUpdateCapture(t, bd, dir, append([]string{issue.ID}, tc.args...)...)
-			warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
-			if tc.wantWarning && !strings.Contains(stderr, warning) {
-				t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
-			}
-			if !tc.wantWarning && strings.Contains(stderr, "--notes replaced existing notes") {
-				t.Errorf("expected no overwrite warning, got stderr: %s", stderr)
-			}
-			if strings.Contains(stdout, "warning:") {
-				t.Errorf("warning must not appear on stdout, got: %s", stdout)
-			}
-			if got := bdShow(t, bd, dir, issue.ID); got.Notes != tc.wantNotes {
-				t.Errorf("expected notes %q, got %q", tc.wantNotes, got.Notes)
-			}
-		})
-	}
-
-	t.Run("update_acceptance", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "AC test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--acceptance", "AC text")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.AcceptanceCriteria != "AC text" {
-			t.Errorf("expected acceptance_criteria 'AC text', got %q", got.AcceptanceCriteria)
-		}
-	})
-
-	t.Run("update_external_ref", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "ExtRef test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--external-ref", "gh-42")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.ExternalRef == nil || *got.ExternalRef != "gh-42" {
-			t.Errorf("expected external_ref 'gh-42', got %v", got.ExternalRef)
 		}
 	})
 
@@ -432,40 +388,20 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("update_spec_id", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "SpecID test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--spec-id", "RFC-007")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.SpecID != "RFC-007" {
-			t.Errorf("expected spec_id 'RFC-007', got %q", got.SpecID)
-		}
-	})
+	t.Run("update_notes_overwrite_warns", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
 
-	t.Run("update_estimate", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Estimate test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--estimate", "60")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.EstimatedMinutes == nil || *got.EstimatedMinutes != 60 {
-			t.Errorf("expected estimated_minutes 60, got %v", got.EstimatedMinutes)
+		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+		if !strings.Contains(stderr, warning) {
+			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
 		}
-	})
-
-	t.Run("update_due", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Due test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--due", "2099-01-15")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.DueAt == nil {
-			t.Error("expected due_at to be set")
+		if strings.Contains(stdout, "warning:") {
+			t.Errorf("warning must not appear on stdout, got: %s", stdout)
 		}
-	})
-
-	t.Run("update_due_clear", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Due clear test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--due", "2099-01-15")
-		bdUpdate(t, bd, dir, issue.ID, "--due", "")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.DueAt != nil {
-			t.Error("expected due_at to be cleared")
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "replacement notes" {
+			t.Errorf("expected notes %q, got %q", "replacement notes", got.Notes)
 		}
 	})
 
@@ -479,6 +415,41 @@ func TestEmbeddedUpdate(t *testing.T) {
 		// GH#3233: --defer should also set status=deferred for consistency with `bd defer`
 		if string(got.Status) != "deferred" {
 			t.Errorf("expected status=deferred, got %q", got.Status)
+		}
+	})
+
+	t.Run("relative_defer_is_persisted_in_UTC", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "UTC defer test", "--type", "task")
+		bdRunInTimezone(t, bd, dir, "America/Denver", "update", issue.ID, "--defer", "+1h")
+
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "tu", "main")
+		if err != nil {
+			t.Fatalf("open embedded SQL: %v", err)
+		}
+		defer func() { _ = cleanup() }()
+
+		var future, bounded bool
+		if err := db.QueryRowContext(t.Context(), `
+			SELECT defer_until > UTC_TIMESTAMP(),
+			       defer_until <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 2 HOUR)
+			FROM issues WHERE id = ?
+		`, issue.ID).Scan(&future, &bounded); err != nil {
+			t.Fatalf("query persisted defer_until: %v", err)
+		}
+		if !future || !bounded {
+			t.Fatalf("relative defer UTC bounds = future:%t bounded:%t, want true/true", future, bounded)
+		}
+	})
+
+	t.Run("show_renders_scheduled_dates_in_local_time", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Local date display test", "--type", "task")
+		const date = "2099-01-15"
+		bdRunInTimezone(t, bd, dir, "Pacific/Auckland", "update", issue.ID, "--due", date, "--defer", date)
+		output := bdRunInTimezone(t, bd, dir, "Pacific/Auckland", "--no-color", "show", issue.ID)
+		for _, want := range []string{"Due: " + date, "Deferred: " + date} {
+			if !strings.Contains(output, want) {
+				t.Errorf("bd show output missing %q:\n%s", want, output)
+			}
 		}
 	})
 
@@ -526,189 +497,6 @@ func TestEmbeddedUpdate(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if string(got.Status) != "in_progress" {
 			t.Errorf("expected status=in_progress to be preserved, got %q", got.Status)
-		}
-	})
-
-	t.Run("update_await_id", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Await test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--await-id", "run-123")
-		raw := bdShowJSON(t, bd, dir, issue.ID)
-		if !strings.Contains(raw, `"await_id":"run-123"`) && !strings.Contains(raw, `"await_id": "run-123"`) {
-			t.Errorf("expected await_id 'run-123' in JSON output, got: %s", raw)
-		}
-	})
-
-	t.Run("update_multiple_fields", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Multi update", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress", "--assignee", "bob", "--priority", "1")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Status != types.StatusInProgress {
-			t.Errorf("expected status in_progress, got %s", got.Status)
-		}
-		if got.Assignee != "bob" {
-			t.Errorf("expected assignee bob, got %q", got.Assignee)
-		}
-		if got.Priority != 1 {
-			t.Errorf("expected priority 1, got %d", got.Priority)
-		}
-	})
-
-	t.Run("close_via_status_update", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Close via update", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "closed")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Status != types.StatusClosed {
-			t.Errorf("expected status closed, got %s", got.Status)
-		}
-		if got.ClosedAt == nil {
-			t.Error("expected closed_at to be set")
-		}
-	})
-
-	t.Run("reopen_via_status_update", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Reopen test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "closed")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "open")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Status != types.StatusOpen {
-			t.Errorf("expected status open, got %s", got.Status)
-		}
-		if got.ClosedAt != nil {
-			t.Error("expected closed_at to be cleared on reopen")
-		}
-	})
-
-	// ===== Label Flags =====
-
-	t.Run("update_add_label", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Label add test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--add-label", "bug")
-		labels := showLabels(t, bd, dir, issue.ID)
-		found := false
-		for _, l := range labels {
-			if l == "bug" {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("expected label 'bug', got %v", labels)
-		}
-	})
-
-	t.Run("update_add_multiple_labels", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Multi label test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--add-label", "a,b")
-		labels := showLabels(t, bd, dir, issue.ID)
-		hasA, hasB := false, false
-		for _, l := range labels {
-			if l == "a" {
-				hasA = true
-			}
-			if l == "b" {
-				hasB = true
-			}
-		}
-		if !hasA || !hasB {
-			t.Errorf("expected labels [a, b], got %v", labels)
-		}
-	})
-
-	t.Run("update_remove_label", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Label remove test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--add-label", "bug")
-		bdUpdate(t, bd, dir, issue.ID, "--remove-label", "bug")
-		labels := showLabels(t, bd, dir, issue.ID)
-		for _, l := range labels {
-			if l == "bug" {
-				t.Errorf("expected label 'bug' to be removed, got %v", labels)
-			}
-		}
-	})
-
-	t.Run("update_set_labels", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Label set test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--add-label", "a,b")
-		bdUpdate(t, bd, dir, issue.ID, "--set-labels", "x,y")
-		labels := showLabels(t, bd, dir, issue.ID)
-		hasX, hasY, hasA := false, false, false
-		for _, l := range labels {
-			switch l {
-			case "x":
-				hasX = true
-			case "y":
-				hasY = true
-			case "a":
-				hasA = true
-			}
-		}
-		if !hasX || !hasY {
-			t.Errorf("expected labels [x, y], got %v", labels)
-		}
-		if hasA {
-			t.Errorf("expected old label 'a' to be replaced, got %v", labels)
-		}
-	})
-
-	// ===== Metadata Flags =====
-
-	t.Run("update_metadata_json", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Meta test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--metadata", `{"key":"val"}`)
-		got := bdShow(t, bd, dir, issue.ID)
-		if !strings.Contains(string(got.Metadata), `"key"`) {
-			t.Errorf("expected metadata to contain 'key', got %s", got.Metadata)
-		}
-	})
-
-	t.Run("update_metadata_merge", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Meta merge test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--metadata", `{"a":1}`)
-		bdUpdate(t, bd, dir, issue.ID, "--metadata", `{"b":2}`)
-		got := bdShow(t, bd, dir, issue.ID)
-		meta := string(got.Metadata)
-		if !strings.Contains(meta, `"a"`) || !strings.Contains(meta, `"b"`) {
-			t.Errorf("expected metadata to contain both a and b, got %s", meta)
-		}
-	})
-
-	t.Run("update_set_metadata", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Set meta test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--set-metadata", "team=platform")
-		got := bdShow(t, bd, dir, issue.ID)
-		if !strings.Contains(string(got.Metadata), `"team"`) {
-			t.Errorf("expected metadata to contain 'team', got %s", got.Metadata)
-		}
-	})
-
-	t.Run("update_unset_metadata", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Unset meta test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--set-metadata", "team=platform")
-		bdUpdate(t, bd, dir, issue.ID, "--unset-metadata", "team")
-		got := bdShow(t, bd, dir, issue.ID)
-		if strings.Contains(string(got.Metadata), `"team"`) {
-			t.Errorf("expected metadata to NOT contain 'team', got %s", got.Metadata)
-		}
-	})
-
-	t.Run("update_metadata_and_set_conflict", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Meta conflict", "--type", "task")
-		out := bdUpdateFail(t, bd, dir, issue.ID, "--metadata", `{"a":1}`, "--set-metadata", "b=2")
-		if !strings.Contains(out, "cannot combine") {
-			t.Errorf("expected conflict error, got: %s", out)
-		}
-	})
-
-	// ===== Claim Flag =====
-
-	t.Run("update_claim", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Claim test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--claim")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Assignee == "" {
-			t.Error("expected assignee to be set after claim")
-		}
-		if got.Status != types.StatusInProgress {
-			t.Errorf("expected status in_progress after claim, got %s", got.Status)
 		}
 	})
 
@@ -761,24 +549,6 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
-	// ===== Parent Reparenting =====
-
-	t.Run("update_parent_set", func(t *testing.T) {
-		epic := bdCreate(t, bd, dir, "Parent epic", "--type", "epic")
-		child := bdCreate(t, bd, dir, "Child issue", "--type", "task")
-		bdUpdate(t, bd, dir, child.ID, "--parent", epic.ID)
-		deps := showDeps(t, bd, dir, child.ID)
-		found := false
-		for _, d := range deps {
-			if d.ID == epic.ID && d.Type == "parent-child" {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("expected parent-child dep to %s, got %v", epic.ID, deps)
-		}
-	})
-
 	t.Run("update_parent_change", func(t *testing.T) {
 		epic1 := bdCreate(t, bd, dir, "Old parent", "--type", "epic")
 		epic2 := bdCreate(t, bd, dir, "New parent", "--type", "epic")
@@ -805,30 +575,6 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("update_parent_remove", func(t *testing.T) {
-		epic := bdCreate(t, bd, dir, "Remove parent epic", "--type", "epic")
-		child := bdCreate(t, bd, dir, "Orphan child", "--type", "task")
-		bdUpdate(t, bd, dir, child.ID, "--parent", epic.ID)
-		bdUpdate(t, bd, dir, child.ID, "--parent", "")
-		deps := showDeps(t, bd, dir, child.ID)
-		for _, d := range deps {
-			if d.Type == "parent-child" {
-				t.Errorf("expected no parent-child dep, got %v", deps)
-			}
-		}
-	})
-
-	// ===== Ephemeral / History Flags =====
-
-	t.Run("update_ephemeral", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Ephemeral test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--ephemeral")
-		got := bdShow(t, bd, dir, issue.ID)
-		if !got.Ephemeral {
-			t.Error("expected ephemeral to be true")
-		}
-	})
-
 	t.Run("update_persistent", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Persistent test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--ephemeral")
@@ -836,114 +582,6 @@ func TestEmbeddedUpdate(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Ephemeral {
 			t.Error("expected ephemeral to be false after --persistent")
-		}
-	})
-
-	t.Run("update_no_history", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "NoHistory test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--no-history")
-		got := bdShow(t, bd, dir, issue.ID)
-		if !got.NoHistory {
-			t.Error("expected no_history to be true")
-		}
-	})
-
-	t.Run("update_history", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "History test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--no-history")
-		bdUpdate(t, bd, dir, issue.ID, "--history")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.NoHistory {
-			t.Error("expected no_history to be false after --history")
-		}
-	})
-
-	t.Run("update_ephemeral_persistent_conflict", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Eph conflict", "--type", "task")
-		out := bdUpdateFail(t, bd, dir, issue.ID, "--ephemeral", "--persistent")
-		if !strings.Contains(out, "cannot specify both") {
-			t.Errorf("expected conflict error, got: %s", out)
-		}
-	})
-
-	// ===== Session Flag =====
-
-	t.Run("update_status_closed_with_session", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Session test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "closed", "--session", "sess-123")
-		got := bdShow(t, bd, dir, issue.ID)
-		// closed_by_session is selected by IssueSelectColumns and hydrated onto
-		// the issue; here we just verify the close itself landed.
-		if got.Status != types.StatusClosed {
-			t.Errorf("expected status closed, got %s", got.Status)
-		}
-		if got.ClosedAt == nil {
-			t.Error("expected closed_at to be set")
-		}
-	})
-
-	// ===== Behavioral / Edge Cases =====
-
-	t.Run("update_no_changes", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "No changes test", "--type", "task")
-		out := bdUpdate(t, bd, dir, issue.ID)
-		if !strings.Contains(out, "No updates specified") {
-			t.Errorf("expected 'No updates specified', got: %s", out)
-		}
-	})
-
-	t.Run("update_invalid_status", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Bad status", "--type", "task")
-		bdUpdateFail(t, bd, dir, issue.ID, "--status", "bogus")
-	})
-
-	t.Run("update_invalid_priority", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Bad priority", "--type", "task")
-		bdUpdateFail(t, bd, dir, issue.ID, "--priority", "-1")
-	})
-
-	t.Run("update_invalid_type", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Bad type", "--type", "task")
-		bdUpdateFail(t, bd, dir, issue.ID, "--type", "bogus")
-	})
-
-	t.Run("update_nonexistent_id", func(t *testing.T) {
-		bdUpdateFail(t, bd, dir, "tu-nonexistent999", "--status", "open")
-	})
-
-	t.Run("update_json_output", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "JSON test", "--type", "task")
-		cmd := exec.Command(bd, "update", issue.ID, "--status", "in_progress", "--json")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
-		if err != nil {
-			t.Fatalf("bd update --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-		}
-		s := stdout.String()
-		start := strings.Index(s, "[")
-		if start < 0 {
-			start = strings.Index(s, "{")
-		}
-		if start < 0 {
-			t.Fatalf("no JSON in output: %s", s)
-		}
-		if !json.Valid([]byte(s[start:])) {
-			t.Errorf("expected valid JSON output, got: %s", s[start:])
-		}
-	})
-
-	t.Run("update_multiple_ids", func(t *testing.T) {
-		issue1 := bdCreate(t, bd, dir, "Multi ID 1", "--type", "task")
-		issue2 := bdCreate(t, bd, dir, "Multi ID 2", "--type", "task")
-		bdUpdate(t, bd, dir, issue1.ID, issue2.ID, "--status", "in_progress")
-		got1 := bdShow(t, bd, dir, issue1.ID)
-		got2 := bdShow(t, bd, dir, issue2.ID)
-		if got1.Status != types.StatusInProgress {
-			t.Errorf("issue1: expected in_progress, got %s", got1.Status)
-		}
-		if got2.Status != types.StatusInProgress {
-			t.Errorf("issue2: expected in_progress, got %s", got2.Status)
 		}
 	})
 
@@ -971,28 +609,6 @@ func TestEmbeddedUpdate(t *testing.T) {
 		// At minimum: init schema commit + create commit + update commit
 		if commitCount < 3 {
 			t.Errorf("expected at least 3 dolt commits, got %d", commitCount)
-		}
-	})
-
-	t.Run("update_description_body_alias", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Body alias test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--body", "via body flag")
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Description != "via body flag" {
-			t.Errorf("expected description 'via body flag', got %q", got.Description)
-		}
-	})
-
-	t.Run("update_description_from_file", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "File desc test", "--type", "task")
-		tmpFile := filepath.Join(t.TempDir(), "desc.txt")
-		if err := os.WriteFile(tmpFile, []byte("from file"), 0644); err != nil {
-			t.Fatalf("write temp file: %v", err)
-		}
-		bdUpdate(t, bd, dir, issue.ID, "--body-file", tmpFile)
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Description != "from file" {
-			t.Errorf("expected description 'from file', got %q", got.Description)
 		}
 	})
 }

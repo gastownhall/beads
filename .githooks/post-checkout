@@ -1,33 +1,59 @@
 #!/usr/bin/env sh
-# --- BEGIN BEADS INTEGRATION v1.1.0 ---
+# --- BEGIN BEADS INTEGRATION v1.2.2 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
   _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
-  _bd_used_perl=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$_bd_timeout" bd hooks run post-checkout "$@"
-    _bd_exit=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$_bd_timeout" bd hooks run post-checkout "$@"
-    _bd_exit=$?
+  case "$_bd_timeout" in
+    *[!0-9]*|'') _bd_timeout_invalid=1 ;;
+    *[1-9]*) _bd_timeout_invalid=0 ;;
+    *) _bd_timeout_invalid=1 ;;
+  esac
+  if [ "$_bd_timeout_invalid" -eq 1 ]; then
+    echo >&2 "beads: invalid BEADS_HOOK_TIMEOUT; using 300 seconds"
+    _bd_timeout=300
+  fi
+  _bd_timeout_backend=none
+  _bd_timeout_command=
+  for _bd_timeout_candidate in timeout gtimeout; do
+    if command -v "$_bd_timeout_candidate" >/dev/null 2>&1; then
+      if _bd_timeout_version="$("$_bd_timeout_candidate" --version 2>/dev/null)"; then
+        case "$_bd_timeout_version" in
+          "timeout (GNU coreutils) "*) _bd_timeout_command=$_bd_timeout_candidate; break ;;
+        esac
+      fi
+    fi
+  done
+  if [ -n "$_bd_timeout_command" ]; then
+    _bd_timeout_backend=coreutils
+    if "$_bd_timeout_command" -- "$_bd_timeout" bd hooks run post-checkout "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   elif command -v perl >/dev/null 2>&1; then
-    _bd_used_perl=1
-    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run post-checkout "$@"
-    _bd_exit=$?
+    _bd_timeout_backend=perl
+    if perl -e 'alarm shift; exec @ARGV' -- "$_bd_timeout" bd hooks run post-checkout "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   else
     echo >&2 "beads: hook 'post-checkout' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
-    bd hooks run post-checkout "$@"
-    _bd_exit=$?
+    if bd hooks run post-checkout "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   fi
-  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+  if { [ "$_bd_timeout_backend" = coreutils ] && [ "$_bd_exit" -eq 124 ]; } || { [ "$_bd_timeout_backend" = perl ] && [ "$_bd_exit" -eq 142 ]; }; then
     echo >&2 "beads: hook 'post-checkout' timed out after ${_bd_timeout}s — continuing without beads"
     _bd_exit=0
   fi
-  if [ $_bd_exit -eq 3 ]; then
+  if [ "$_bd_exit" -eq 3 ]; then
     echo >&2 "beads: database not initialized — skipping hook 'post-checkout'"
     _bd_exit=0
   fi
-  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+  if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi
-# --- END BEADS INTEGRATION v1.1.0 ---
+# --- END BEADS INTEGRATION v1.2.2 ---

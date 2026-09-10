@@ -418,10 +418,68 @@ func isIgnoredTable(tableName string) bool {
 	return strings.HasPrefix(tableName, "wisp_")
 }
 
-// isWispTable returns true if the table name refers to a wisp (ephemeral) table.
-// Deprecated: use isIgnoredTable for broader coverage.
-func isWispTable(tableName string) bool {
-	return tableName == "wisps" || strings.HasPrefix(tableName, "wisp_")
+// doltStatusRow is one row of the dolt_status system table.
+type doltStatusRow struct {
+	table  string
+	staged bool
+	status string
+}
+
+// scanDoltStatus reads a `SELECT table_name, staged, status FROM dolt_status`
+// result set. Rows that fail to scan are skipped rather than aborting the
+// health check: a doctor check reporting what it could read beats one that
+// reports nothing.
+func scanDoltStatus(rows *sql.Rows) ([]doltStatusRow, error) {
+	var out []doltStatusRow
+	for rows.Next() {
+		var r doltStatusRow
+		if err := rows.Scan(&r.table, &r.staged, &r.status); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// describeUncommittedTables drops dolt_ignore'd tables from a dolt_status scan
+// and renders the rest as human-readable "table: status (staged)" strings.
+//
+// Every uncommitted-changes check in doctor must funnel through this function.
+// Two of them previously kept private skip-lists that drifted apart — "Dolt
+// Locks" excluded only wisp tables while "Dolt Status" excluded the full
+// ignored set — so the same clean store was clean by one check and dirty by
+// the other, permanently. One filter, one source of truth.
+//
+// The filter is a static name list rather than a read of the store's own
+// dolt_ignore rows, which is worth explaining because the reverse looks
+// obvious. dolt_ignore does not mean "do not report changes to this table".
+// Per doltdb.ShouldIgnoreDelta, "only newly added or dropped tables are
+// matched against the patterns. Changes to already tracked tables are always
+// included." Every table listed here is tracked, so Dolt reports it dirty
+// forever by design and dolt_ignore has no say in it. Deriving the skip-set
+// from that table would therefore borrow a mechanism that answers a different
+// question, and would additionally require reimplementing Dolt's pattern
+// syntax — doltdb.compilePattern treats '*' and '?' and '%' as wildcards, '_'
+// as a literal, and matches case-sensitively, none of which is SQL LIKE.
+//
+// Silencing these tables is a beads decision about which tables are
+// bookkeeping, so it belongs in beads code. See isIgnoredTable.
+func describeUncommittedTables(rows []doltStatusRow) []string {
+	var changes []string
+	for _, r := range rows {
+		if isIgnoredTable(r.table) {
+			continue
+		}
+		mark := ""
+		if r.staged {
+			mark = " (staged)"
+		}
+		changes = append(changes, fmt.Sprintf("%s: %s%s", r.table, r.status, mark))
+	}
+	return changes
 }
 
 // checkStatusWithDB reports uncommitted changes in Dolt using an existing connection.
@@ -442,26 +500,8 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 	}
 	defer rows.Close()
 
-	var changes []string
-	for rows.Next() {
-		var tableName string
-		var staged bool
-		var status string
-		if err := rows.Scan(&tableName, &staged, &status); err != nil {
-			continue
-		}
-		// Skip dolt_ignore'd tables — they are ephemeral and expected to have
-		// uncommitted changes.
-		if isIgnoredTable(tableName) {
-			continue
-		}
-		stageMark := ""
-		if staged {
-			stageMark = "(staged)"
-		}
-		changes = append(changes, fmt.Sprintf("%s: %s %s", tableName, status, stageMark))
-	}
-	if err := rows.Err(); err != nil {
+	scanned, err := scanDoltStatus(rows)
+	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Status",
 			Status:   StatusWarning,
@@ -470,6 +510,7 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 			Category: CategoryData,
 		}
 	}
+	changes := describeUncommittedTables(scanned)
 
 	if len(changes) > 0 {
 		return DoctorCheck{

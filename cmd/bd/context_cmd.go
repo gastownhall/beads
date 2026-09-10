@@ -66,11 +66,10 @@ Examples:
 		// proxied route gets from the provider, and hands it to the same
 		// view. That is what keeps `bd context` one answer across two routes,
 		// and what puts both of them on the projection GET /v0/beads/context
-		// serves.
-		snapshot := domain.ContextInfo{
-			Backend:   configfile.BackendDolt,
-			BdVersion: Version,
-		}
+		// serves. TestContextRoutesNameOneWorkspaceTheSameWay holds them to it;
+		// until it existed both routes carried their own `Backend: dolt` and
+		// agreed by telling the same lie.
+		snapshot := domain.ContextInfo{BdVersion: Version}
 
 		if selected := selectedNoDBBeadsDir(cmd); selected != "" {
 			prepareSelectedNoDBContext(selected)
@@ -97,7 +96,7 @@ Examples:
 			snapshot.Role = string(role)
 		}
 
-		cfg, err := configfile.Load(rc.BeadsDir)
+		cfg, err := configfile.LoadForDiscovery(rc.BeadsDir)
 		if err != nil {
 			cfg = configfile.DefaultConfig()
 		}
@@ -105,25 +104,8 @@ Examples:
 			cfg = configfile.DefaultConfig()
 		}
 
-		snapshot.DoltMode = cfg.GetDoltMode()
-		snapshot.Database = cfg.GetDoltDatabase()
-		snapshot.ProjectID = cfg.ProjectID
-
-		if cfg.IsDoltServerMode() {
-			snapshot.ServerHost = cfg.GetDoltServerHost()
-			dsCfg := doltserver.DefaultConfig(rc.BeadsDir)
-			snapshot.ServerPort = dsCfg.Port
-		}
-		if cfg.IsDoltProxiedServerMode() {
-			p, err := resolveProxiedServerRootPath(rc.BeadsDir)
-			if err != nil {
-				return HandleError("resolve proxied server root: %v", err)
-			}
-			snapshot.ProxiedDir = p
-		}
-
-		if dataDir := cfg.GetDoltDataDir(); dataDir != "" {
-			snapshot.DataDir = dataDir
+		if err := applyContextBackend(&snapshot, rc.BeadsDir, cfg); err != nil {
+			return HandleError("%v", err)
 		}
 
 		snapshot.SyncRemote = resolveSyncRemoteFromDir(rc.BeadsDir)
@@ -135,6 +117,41 @@ Examples:
 		printContextText(info)
 		return nil
 	},
+}
+
+// applyContextBackend records the backend half of the direct route's snapshot,
+// off the config files it just read.
+//
+// It is a named function rather than a run of assignments inside the command so
+// that the claim above it — that both `bd context` routes assemble the SAME
+// snapshot — is something a test can drive rather than something a reader has
+// to check by eye. TestContextRoutesNameOneWorkspaceTheSameWay does exactly
+// that, comparing this against the contextinfo provider the proxied route and
+// GET /v0/beads/context both go through.
+//
+// The identity itself goes through domain.SetBackendIdentity, which is the one
+// policy both routes share: it is what stops a non-Dolt workspace from being
+// described as embedded Dolt on database "beads", which is what both routes did
+// while each held its own copy of `Backend: configfile.BackendDolt`.
+func applyContextBackend(snapshot *domain.ContextInfo, beadsDir string, cfg *configfile.Config) error {
+	snapshot.SetBackendIdentity(cfg.GetBackend(), cfg.GetDoltMode(), cfg.GetDoltDatabase())
+	snapshot.ProjectID = cfg.ProjectID
+
+	if cfg.IsDoltServerMode() {
+		snapshot.ServerHost = cfg.GetDoltServerHost()
+		snapshot.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+	}
+	if cfg.IsDoltProxiedServerMode() {
+		p, err := resolveProxiedServerRootPath(beadsDir)
+		if err != nil {
+			return fmt.Errorf("resolve proxied server root: %w", err)
+		}
+		snapshot.ProxiedDir = p
+	}
+	if dataDir := cfg.GetDoltDataDir(); dataDir != "" {
+		snapshot.DataDir = dataDir
+	}
+	return nil
 }
 
 func printContextText(info ContextInfo) {
@@ -162,8 +179,15 @@ func printContextText(info ContextInfo) {
 	// Backend
 	fmt.Println("Backend:")
 	fmt.Printf("  type:         %s\n", info.Backend)
-	fmt.Printf("  mode:         %s\n", info.DoltMode)
-	fmt.Printf("  database:     %s\n", info.Database)
+	// Dolt-only identity. A registered backend reports neither, and a bare
+	// "mode:" with nothing after it reads as a failure to determine rather than
+	// as not-applicable — so omit them, like every other optional field here.
+	if info.DoltMode != "" {
+		fmt.Printf("  mode:         %s\n", info.DoltMode)
+	}
+	if info.Database != "" {
+		fmt.Printf("  database:     %s\n", info.Database)
+	}
 	if info.ServerHost != "" {
 		fmt.Printf("  server:       %s:%d\n", info.ServerHost, info.ServerPort)
 	}

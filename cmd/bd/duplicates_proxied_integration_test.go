@@ -321,6 +321,9 @@ func TestProxiedServerFindDuplicates(t *testing.T) {
 		if os.Getenv("ANTHROPIC_API_KEY") != "" {
 			t.Skip("ANTHROPIC_API_KEY set; skipping missing-key assertion to avoid a live AI call")
 		}
+		if os.Getenv("MINIMAX_API_KEY") != "" {
+			t.Skip("MINIMAX_API_KEY set; skipping missing-key assertion to avoid a live AI call")
+		}
 		out, err := bdProxiedRun(t, bd, p.dir, "find-duplicates", "--method", "ai")
 		if err == nil {
 			t.Fatalf("expected missing-key error for --method ai, got success: %s", out)

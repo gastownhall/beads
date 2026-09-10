@@ -17,9 +17,12 @@ import (
 var commentedMetricsRe = regexp.MustCompile(`(?m)^\s*#\s*metrics\s*:`)
 
 func EnsureUserConfigDefaults() error {
-	path := config.UserConfigYamlPath()
+	path, err := config.UserConfigYamlPath()
+	if err != nil {
+		return fmt.Errorf("ensure user config: %w", err)
+	}
 
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from config.UserConfigYamlPath
+	data, err := os.ReadFile(path) //nolint:gosec // path is a validated absolute user config path
 	if errors.Is(err, fs.ErrNotExist) {
 		return writeUserConfigBootstrap(path)
 	}

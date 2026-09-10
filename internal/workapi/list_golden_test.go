@@ -23,6 +23,19 @@ type listFilterGoldenCase struct {
 // builder before it was deleted, so a green run here is the proof that moving
 // the logic into this package changed nothing — and it keeps pinning the
 // filter shape for every later change to BuildListFilter.
+//
+// Two cases at the END of the file are NOT recorded: max_rows_cap and
+// skip_counts pin fields that did not exist when the old builder did, so there
+// was nothing to record them from. They pin what the leaf promises
+// (issueops.ListRequest.MaxRows and .SkipCounts), which is the same standard
+// the conformance contract holds the implementations to.
+//
+// ONE case has been deliberately RE-recorded rather than preserved:
+// status_all_keyword's Pinned went false -> null. The old builder compared the
+// raw selector string to "pinned"/"hooked", so --status=all — which promises
+// EVERY status — silently kept forcing Pinned=false and hid pinned beads from
+// the one selector that says it hides nothing. TestPinnedDefaultBySelector
+// below owns that behavior now; see the PR body for the compatibility note.
 func TestBuildListFilterGolden(t *testing.T) {
 	blob, err := os.ReadFile(filepath.Join("testdata", "list_filter_golden.json"))
 	if err != nil {

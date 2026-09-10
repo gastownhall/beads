@@ -65,6 +65,7 @@ dolt-server.log
 dolt-server.lock
 dolt-server.port
 dolt-server.activity
+dolt-server-config.yaml
 
 # Debug-mode pprof artifacts (written when dolt.debug: true in config.yaml)
 dolt-pprof/
@@ -129,6 +130,7 @@ var requiredPatterns = []string{
 	"dolt-server.lock",
 	"dolt-server.port",
 	"dolt-server.activity",
+	"dolt-server-config.yaml",
 	"daemon.*",
 	"*.lock",
 	"*.corrupt.backup/",
@@ -217,15 +219,24 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
+	// Tighten permissions on pre-existing files: os.WriteFile's mode argument
+	// only applies at creation, and the file may predate the 0600 policy.
+	if err := os.Chmod(gitignorePath, 0600); err != nil {
+		return fmt.Errorf("chmod .beads/.gitignore: %w", err)
+	}
+
 	return nil
 }
 
-// FixGitignore updates .beads/.gitignore to the current template.
+// FixGitignore brings .beads/.gitignore up to date: the full template when
+// the file is missing, append-only for missing required patterns otherwise.
+// It must never rewrite an existing file wholesale — local rules (e.g.
+// keep-exports-off-master negations) live in this file too, and the old
+// full-template rewrite destroyed them (bd-kaaz3).
 // If a redirect exists, it writes to the redirect target's .gitignore instead.
 // repoPath is the project root directory.
 func FixGitignore(repoPath string) error {
-	gitignorePath := filepath.Join(ResolveBeadsDirForRepo(repoPath), ".gitignore")
-	return writeGitignoreTemplate(gitignorePath)
+	return EnsureGitignoreForBeadsDir(ResolveBeadsDirForRepo(repoPath))
 }
 
 func missingGitignorePatterns(content string) []string {

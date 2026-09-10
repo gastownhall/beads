@@ -497,28 +497,12 @@ func checkDoltLocks(beadsDir string) (bool, string, error) {
 	}
 	defer rows.Close()
 
-	var changes []string
-	for rows.Next() {
-		var tableName string
-		var staged bool
-		var status string
-		if err := rows.Scan(&tableName, &staged, &status); err != nil {
-			continue
-		}
-		// Skip wisp tables — they are ephemeral and expected to have
-		// uncommitted changes (covered by dolt_ignore).
-		if isWispTable(tableName) {
-			continue
-		}
-		mark := ""
-		if staged {
-			mark = " (staged)"
-		}
-		changes = append(changes, fmt.Sprintf("%s: %s%s", tableName, status, mark))
-	}
-	if err := rows.Err(); err != nil {
+	// Same filter as the "Dolt Status" check — see describeUncommittedTables.
+	scanned, err := scanDoltStatus(rows)
+	if err != nil {
 		return false, "", fmt.Errorf("row iteration error: %w", err)
 	}
+	changes := describeUncommittedTables(scanned)
 
 	if len(changes) > 0 {
 		return true, strings.Join(changes, ", "), nil

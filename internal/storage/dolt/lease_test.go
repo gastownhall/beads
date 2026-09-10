@@ -345,7 +345,14 @@ func TestReclaimRevertsExpiredOnly(t *testing.T) {
 	seedClaimedIssue(t, ctx, store, "lease-dead", "dead-worker", time.Second)
 	seedClaimedIssue(t, ctx, store, "lease-live", "live-worker", time.Hour)
 
-	time.Sleep(1500 * time.Millisecond) // let dead's lease expire
+	// Force "dead"'s lease into the past directly rather than sleeping for it
+	// to expire: lease_expires_at is DATETIME(0) (second resolution, rounds
+	// up), so a short sleep is not a deterministic way to cross the boundary.
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE leases SET lease_expires_at = ? WHERE issue_id = ?",
+		time.Now().UTC().Add(-10*time.Second), "lease-dead"); err != nil {
+		t.Fatalf("force lease-dead expiry: %v", err)
+	}
 
 	// Grace window larger than how long the lease has been expired: nothing yet.
 	reclaimed, err := store.ReclaimExpiredLeases(ctx, time.Hour, types.ReclaimFilter{}, "reaper")

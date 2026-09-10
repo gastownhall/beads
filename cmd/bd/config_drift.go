@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -329,14 +328,7 @@ func isServerProbablyRunning(beadsDir string) bool {
 		return false
 	}
 
-	// Check if the process exists (signal 0 = existence check)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// On Unix, FindProcess always succeeds; use Signal(0) to verify
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	return pidAlive(pid)
 }
 
 // printDriftItems renders drift results in human-readable format.

@@ -1,0 +1,67 @@
+package storage
+
+import (
+	"context"
+
+	"github.com/steveyegge/beads/issueops"
+)
+
+// BatchCloser returns the inner store's batch-close surface with this
+// decorator's completion hooks layered over it.
+//
+// It recurses instead of delegating, for the reason IssueLifecycle does: a
+// blind delegation would hand back the inner store's closer and silently drop
+// every on_close script the decorator exists to run.
+func (h *HookFiringStore) BatchCloser() (issueops.BatchCloser, error) {
+	inner, err := h.inner.BatchCloser()
+	if err != nil {
+		return nil, err
+	}
+	return &hookBatchCloser{inner: inner, hooks: h}, nil
+}
+
+type hookBatchCloser struct {
+	inner issueops.BatchCloser
+	hooks issueOperationHooks
+}
+
+// CloseBatch fires the close hook once PER LANDED ITEM, in request order, and
+// fires nothing for an item that refused. Per item rather than once for the
+// batch because a hook script is written against one issue: collapsing N
+// closes into one firing would silently stop reporting N-1 of them.
+//
+// CHANGED IS THE TEST for "landed", not a nil per-item Err — the rule
+// issueops.CloseOutcome.Changed states and the sibling hookBatchApplier applies
+// to its own ItemClose. An idempotent re-close is a per-item SUCCESS that
+// persisted nothing, so announcing it would run the workspace's on_close script
+// again on every replayed teardown, for a close that already happened.
+//
+// BOTH WRITE PLUMBINGS ANSWER THIS WAY. The proxied-server path composes the
+// same close through a unit of work, and its batch compositions
+// (uow.closeBatchItem, uowApplyRun.applyClose) rewind the recorded notification
+// for an item that persisted nothing — so `bd serve` and the direct store agree
+// about what a replayed teardown announces.
+//
+// THE SINGLE-CLOSE PATHS DELIBERATELY DIFFER: HookFiringStore.CloseIssueChecked
+// and hookIssueOperations.Close both fire on any success, re-close included,
+// for the legacy parity their own comments claim. The batch verbs are where a
+// replay is cheap to produce and N times as loud, which is why they answer the
+// narrower question. uow's notifying parity table pins both halves.
+//
+// The claim, when one happened, fires the update hook the claim paths fire,
+// after the closes — the same order the transaction applied them in.
+func (o *hookBatchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	result, err := o.inner.CloseBatch(ctx, request)
+	if err != nil {
+		return result, err
+	}
+	for _, outcome := range result.Outcomes {
+		if outcome.Changed {
+			o.hooks.CompleteIssueOperationClose(outcome.Issue)
+		}
+	}
+	if result.ClaimedNext != nil {
+		o.hooks.CompleteIssueOperationUpdate(result.ClaimedNext.Issue)
+	}
+	return result, nil
+}

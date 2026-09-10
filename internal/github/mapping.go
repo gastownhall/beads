@@ -2,7 +2,10 @@
 package github
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -192,6 +195,81 @@ func BeadsIssueToGitHubFields(issue *types.Issue, config *MappingConfig) map[str
 	}
 
 	return fields
+}
+
+// PushFieldsEqual reports whether a GitHub push would be a no-op by comparing
+// only the fields a push can actually mutate: title, body, state, and the
+// label set that BeadsIssueToGitHubFields would send. When these already match
+// the remote issue, the push is redundant and can be skipped — this is what
+// prevents `bd github sync --push-only` from re-PATCHing every issue on every
+// run (gastownhall/beads#4214). Mirrors linear.PushFieldsEqual.
+func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.Title != remote.Title {
+		return false
+	}
+	if local.Description != remote.Body {
+		return false
+	}
+
+	desiredState := "open"
+	if local.Status == types.StatusClosed {
+		desiredState = "closed"
+	}
+	if !strings.EqualFold(desiredState, remote.State) {
+		return false
+	}
+
+	// Compare the label set we would push against the remote's current labels.
+	// Both include the scoped type::/priority::/status:: labels plus any
+	// non-scoped labels, so an unchanged issue produces an identical set.
+	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
+	return labelSetsEqual(desiredLabels, remote.LabelNames())
+}
+
+// PushContentHash returns a stable hex fingerprint of the fields a push would
+// send to GitHub: title, body, desired state, and the order-independent label
+// set produced by BeadsIssueToGitHubFields. The engine persists this hash in
+// local_metadata after each push and compares it before fetching the remote
+// issue, so an unchanged issue is skipped without any API call
+// (gastownhall/beads#4214). It is derived from the same fields PushFieldsEqual
+// compares, so the two agree on what "unchanged" means. Fields are
+// length-prefixed before hashing so distinct field boundaries cannot collide.
+func PushContentHash(local *types.Issue, config *MappingConfig) string {
+	if local == nil {
+		return ""
+	}
+
+	desiredState := "open"
+	if local.Status == types.StatusClosed {
+		desiredState = "closed"
+	}
+
+	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
+	sortedLabels := append([]string(nil), desiredLabels...)
+	slices.Sort(sortedLabels)
+
+	h := sha256.New()
+	for _, s := range []string{local.Title, local.Description, desiredState, strings.Join(sortedLabels, "\x00")} {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// labelSetsEqual reports whether a and b contain the same labels, ignoring
+// order (GitHub does not preserve label order across a round-trip).
+func labelSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as := append([]string(nil), a...)
+	bs := append([]string(nil), b...)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(as, bs)
 }
 
 // priorityToLabel converts beads priority (0-4) to GitHub priority label value.

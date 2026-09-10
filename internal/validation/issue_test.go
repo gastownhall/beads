@@ -144,6 +144,61 @@ func TestNotPinned(t *testing.T) {
 	}
 }
 
+func TestCanonicalActor(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty stays empty", in: "", want: ""},
+		{name: "no separators is unchanged", in: "alice", want: "alice"},
+		{name: "dot separator canonicalizes", in: "gastown.mayor", want: "gastown_mayor"},
+		{name: "double-underscore separator canonicalizes to the same form", in: "gastown__mayor", want: "gastown_mayor"},
+		{name: "hyphen separator canonicalizes to the same form", in: "gastown-mayor", want: "gastown_mayor"},
+		{name: "single underscore is already canonical", in: "gastown_mayor", want: "gastown_mayor"},
+		{name: "mixed separators each collapse to one canonical separator", in: "gastown.dog-3", want: "gastown_dog_3"},
+		{name: "leading separator is preserved as a separator, not dropped", in: ".mayor", want: "_mayor"},
+		{name: "trailing separator is preserved as a separator, not dropped", in: "mayor.", want: "mayor_"},
+		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor", want: "gastown/mayor"},
+		{name: "raw slash passes through unchanged", in: "gastown/mayor", want: "gastown/mayor"},
+		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor", want: "gastown_mayor"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanonicalActor(tt.in); got != tt.want {
+				t.Errorf("CanonicalActor(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestActorMatches(t *testing.T) {
+	tests := []struct {
+		name     string
+		assignee string
+		actor    string
+		want     bool
+	}{
+		{name: "byte-identical matches", assignee: "alice", actor: "alice", want: true},
+		{name: "different spellings of the same identity match (ga-wzl83)", assignee: "gastown.mayor", actor: "gastown__mayor", want: true},
+		{name: "genuinely different identities do not match", assignee: "gastown.mayor", actor: "gastown.dog-3", want: false},
+		{name: "both empty match", assignee: "", actor: "", want: true},
+		{name: "empty assignee never matches a non-empty actor", assignee: "", actor: "mayor", want: false},
+		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor", want: false},
+		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor", want: true},
+		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ActorMatches(tt.assignee, tt.actor); got != tt.want {
+				t.Errorf("ActorMatches(%q, %q) = %v, want %v", tt.assignee, tt.actor, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAssigneeMatches(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -190,6 +245,41 @@ func TestAssigneeMatches(t *testing.T) {
 			name:        "empty actor with assigned bead fails",
 			issue:       &types.Issue{ID: "bd-test", Assignee: "bob"},
 			actor:       "",
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+		// ga-wzl83: the assignee is stored under one layer's spelling of an
+		// identity ("gastown.mayor") while actor resolution can hand back a
+		// DIFFERENT layer's spelling of the SAME identity — a session name
+		// sanitizes the dot to "__" because a dot is unsafe there. The owner
+		// closing its own bead must not need --force just because two layers
+		// spelled its name differently.
+		{
+			name:    "same identity under session-name spelling passes (ga-wzl83)",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "gastown.mayor"},
+			actor:   "gastown__mayor",
+			wantErr: false,
+		},
+		{
+			name:    "same identity under hyphen spelling passes",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "gastown.mayor"},
+			actor:   "gastown-mayor",
+			wantErr: false,
+		},
+		{
+			name:    "same identity under single-underscore spelling passes",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "gastown.mayor"},
+			actor:   "gastown_mayor",
+			wantErr: false,
+		},
+		// The control that keeps the guard from becoming a no-op: a genuinely
+		// DIFFERENT agent must still be refused, even though its own name also
+		// contains separator characters that canonicalize.
+		{
+			name:        "genuinely different identity stays rejected despite shared separators",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "gastown.mayor"},
+			actor:       "gastown.dog-3",
+			force:       false,
 			wantErr:     true,
 			wantErrFrag: "assignee is",
 		},
@@ -299,6 +389,31 @@ func TestAssigneeNotStolen(t *testing.T) {
 			actor:       "alice",
 			newAssignee: "alice",
 			pools:       nil,
+			wantErr:     true,
+		},
+		// ga-wzl83: same class as AssigneeMatches — actor and newAssignee are
+		// compared against the stored assignee under CanonicalActor, so a
+		// different layer's spelling of the current holder's own identity is
+		// not mistaken for a stranger.
+		{
+			name:        "actor editing its own claim passes under a different spelling",
+			issue:       inProgress("gastown.mayor"),
+			actor:       "gastown__mayor",
+			newAssignee: "bob",
+			wantErr:     false,
+		},
+		{
+			name:        "idempotent re-assert under a different spelling of the current holder passes",
+			issue:       inProgress("gastown.mayor"),
+			actor:       "alice",
+			newAssignee: "gastown__mayor",
+			wantErr:     false,
+		},
+		{
+			name:        "different identity with shared separators still refused",
+			issue:       inProgress("gastown.mayor"),
+			actor:       "gastown.dog-3",
+			newAssignee: "gastown.dog-3",
 			wantErr:     true,
 		},
 	}

@@ -43,6 +43,19 @@ func requireDoltBackend(cfg *configfile.Config) error {
 	return nil
 }
 
+// normalizeLoadedConfig substitutes the default config for an absent
+// metadata.json (cfg == nil) so mode inference still runs: a remote host
+// supplied via BEADS_DOLT_SERVER_HOST or config.yaml dolt.host (GH#3545)
+// must select server mode even when no metadata.json exists — otherwise
+// the CLI silently opens the embedded store against a remote-host
+// configuration.
+func normalizeLoadedConfig(cfg *configfile.Config) *configfile.Config {
+	if cfg == nil {
+		return configfile.DefaultConfig()
+	}
+	return cfg
+}
+
 func loadDoltBackendConfig(beadsDir string) (*configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {

@@ -64,7 +64,9 @@ func Initialize() error {
 	// subsequent file so higher-priority values overwrite lower-priority ones.
 	//
 	// Precedence (highest to lowest):
-	//   BEADS_DIR/config.yaml > project .beads/config.yaml > ~/.config/bd/config.yaml > ~/.beads/config.yaml
+	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
+	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
+	//   > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
@@ -72,40 +74,27 @@ func Initialize() error {
 	var configPaths []string     // ordered lowest priority first
 	var primaryConfigPath string // project-level config (for config.local.yaml and SaveConfigValue)
 
-	// 3. Legacy: ~/.beads/config.yaml (lowest priority)
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		p := filepath.Join(homeDir, ".beads", "config.yaml")
-		if _, err := os.Stat(p); err == nil {
-			configPaths = append(configPaths, p)
+	// User-level paths are built once through the same absolute-native-path
+	// gate used by direct reads and writes. Invalid roots are silently skipped
+	// here because Initialize is an implicit read path: absent user config is a
+	// supported state, while a relative root must never reach os.Stat.
+	userConfigPaths := currentUserConfigYamlCandidates()
+	appendExistingUserConfig := func(path string) {
+		if !userConfigPathExists(path) {
+			return
 		}
-	}
-
-	// 2. User: ~/.config/bd/config.yaml
-	if configDir, err := os.UserConfigDir(); err == nil {
-		p := filepath.Join(configDir, "bd", "config.yaml")
-		if _, err := os.Stat(p); err == nil {
-			configPaths = append(configPaths, p)
-		}
-	}
-
-	// Also check ~/.config/bd/config.yaml explicitly. On macOS,
-	// os.UserConfigDir() returns ~/Library/Application Support, not ~/.config.
-	// This ensures the documented path works on all platforms.
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
-		alreadyAdded := false
 		for _, existing := range configPaths {
-			if filepath.Clean(existing) == filepath.Clean(xdgPath) {
-				alreadyAdded = true
-				break
+			if filepath.Clean(existing) == path {
+				return
 			}
 		}
-		if !alreadyAdded {
-			if _, err := os.Stat(xdgPath); err == nil {
-				configPaths = append(configPaths, xdgPath)
-			}
-		}
+		configPaths = append(configPaths, path)
 	}
+
+	// Lowest to highest user-level precedence: legacy, native, documented.
+	appendExistingUserConfig(userConfigPaths.legacy)
+	appendExistingUserConfig(userConfigPaths.native)
+	appendExistingUserConfig(userConfigPaths.documented)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
 	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
@@ -226,6 +215,33 @@ func Initialize() error {
 	// Set defaults for all flags
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
+	// Durable events journal (bd_events_journal). OFF by default because it
+	// costs a snapshot write on every mutation and exists only for a consumer
+	// that is actually tailing it. Enable per workspace with
+	// `bd config set events-journal true` or BD_EVENTS_JOURNAL=1; read it with
+	// `bd events tail/export`.
+	v.SetDefault("events-journal", false)
+	// Retention floors. retain-days keeps rows younger than N days; retain-rows
+	// always keeps the newest N rows. They bound every prune, whether an
+	// operator asked for it (`bd events prune`) or maintenance applied it
+	// (events-journal-auto-prune). Both default ON: a journal is only ever
+	// enabled because something is consuming it, and with both floors at 0 a
+	// single `bd events prune --before <large>` deletes the whole journal,
+	// stranding a consumer whose checkpoint is now below the floor with no way
+	// to recover the lost span. The defaults buy a consumer a week of downtime,
+	// or 100k mutations of backlog, whichever is larger. Setting either to 0
+	// explicitly disables that floor.
+	// Env: BD_EVENTS_JOURNAL_RETAIN_DAYS / BD_EVENTS_JOURNAL_RETAIN_ROWS.
+	v.SetDefault("events-journal-retain-days", 7)
+	v.SetDefault("events-journal-retain-rows", 100000)
+	// Automatic retention, ON by default: after a mutating command commits, and
+	// on a timer inside `bd serve`, bd deletes the journal prefix the floors
+	// above do not protect. Enabling the journal therefore yields a BOUNDED
+	// feed, which is what makes it safe to turn on and forget. Turning both
+	// floors to 0 is the deliberate way to keep every record forever; this key
+	// is for a consumer that wants the floors respected on reads but wants to
+	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
+	v.SetDefault("events-journal-auto-prune", true)
 	v.SetDefault("audit.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
@@ -324,6 +340,7 @@ func Initialize() error {
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+	v.SetDefault("ai.base_url", "")
 
 	// List command defaults
 	v.SetDefault("list.limit", 50)
@@ -756,6 +773,80 @@ func Set(key string, value interface{}) {
 // Override via: bd config set ai.model "model-name" or BD_AI_MODEL=model-name
 func DefaultAIModel() string {
 	return GetString("ai.model")
+}
+
+// DefaultAIModelFor returns the model for Anthropic-compatible AI calls,
+// accounting for which provider the resolved key selects: an explicitly
+// configured ai.model always wins; otherwise a MiniMax-selected key gets a
+// MiniMax-served default (MINIMAX_MODEL env > MiniMaxDefaultModel), since
+// MiniMax does not serve the Claude default model.
+func DefaultAIModelFor(keySource AIAPIKeySource) string {
+	if GetValueSource("ai.model") != SourceDefault {
+		return GetString("ai.model")
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if m := os.Getenv("MINIMAX_MODEL"); m != "" {
+			return m
+		}
+		return MiniMaxDefaultModel
+	}
+	return GetString("ai.model")
+}
+
+// AIAPIKeySource identifies where the active Anthropic-compatible API key came from.
+type AIAPIKeySource string
+
+const (
+	AIAPIKeySourceNone         AIAPIKeySource = ""
+	AIAPIKeySourceAnthropicEnv AIAPIKeySource = "ANTHROPIC_API_KEY" //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceMiniMaxEnv   AIAPIKeySource = "MINIMAX_API_KEY"   //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceConfig       AIAPIKeySource = "ai.api_key"
+	AIAPIKeySourceExplicit     AIAPIKeySource = "explicit"
+
+	MiniMaxDefaultBaseURL = "https://api.minimax.io/anthropic"
+
+	// MiniMaxDefaultModel is used when MINIMAX_API_KEY selected the key and
+	// the user did not configure ai.model: MiniMax's Anthropic-compatible
+	// endpoint does not serve the Claude default model, so key-only setup
+	// must route to a model MiniMax actually hosts. Override with
+	// MINIMAX_MODEL or ai.model.
+	MiniMaxDefaultModel = "MiniMax-M2"
+)
+
+// ResolveAIAPIKey returns the API key for Anthropic-compatible AI calls.
+//
+// Precedence: ANTHROPIC_API_KEY > MINIMAX_API_KEY > ai.api_key > explicit.
+func ResolveAIAPIKey(explicit string) (string, AIAPIKeySource) {
+	if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceAnthropicEnv
+	}
+	if envKey := os.Getenv("MINIMAX_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceMiniMaxEnv
+	}
+	if configKey := GetString("ai.api_key"); configKey != "" {
+		return configKey, AIAPIKeySourceConfig
+	}
+	if explicit != "" {
+		return explicit, AIAPIKeySourceExplicit
+	}
+	return "", AIAPIKeySourceNone
+}
+
+// DefaultAIBaseURL returns the configured base URL for Anthropic-compatible AI calls.
+//
+// Precedence: ai.base_url (or BD_AI_BASE_URL) > MINIMAX_BASE_URL > MiniMax default
+// when MINIMAX_API_KEY selected the key. Empty means use the SDK's Anthropic default.
+func DefaultAIBaseURL(keySource AIAPIKeySource) string {
+	if baseURL := GetString("ai.base_url"); baseURL != "" {
+		return baseURL
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if baseURL := os.Getenv("MINIMAX_BASE_URL"); baseURL != "" {
+			return baseURL
+		}
+		return MiniMaxDefaultBaseURL
+	}
+	return ""
 }
 
 // AllSettings returns all configuration settings as a map

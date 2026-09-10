@@ -42,10 +42,11 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"backup.git-repo", true},
 		{"backup.future-key", true}, // prefix match
 
-		// Import settings
+		// Import settings. import.* is exact-match, not a prefix namespace:
+		// an unlisted import.* key must not be treated as yaml-only.
 		{"import.auto", true},
 		{"import.path", true},
-		{"import.orphan_handling", false},
+		{"import.unlisted-key", false},
 
 		// Secret keys (stored in yaml to avoid leaking via Dolt push)
 		{"github.token", true},
@@ -780,11 +781,38 @@ func TestIsSecretKey(t *testing.T) {
 		{"some.secret", true},
 		{"some.api-key", true},
 
+		// Spellings the wire redaction has to cover. GET /v0/beads/config
+		// publishes a value for any key this returns false for, and bd serve's
+		// bearer — optional, and shared and surface-wide where it is
+		// configured — cannot withhold one value from one caller, so each of
+		// these is a credential in cleartext if it regresses. "apikey" in
+		// particular is the spelling the published schema promises is covered.
+		{"integrations.apikey", true},
+		{"github.pat", true},
+		{"github.auth", true},
+		{"db.pwd", true},
+		{"db.passwd", true},
+		{"ssh.key", true},
+		{"registry.bearer", true},
+		{"aws.credentials", true},
+		{"tls.cert", true},
+		{"signing.private_key", true},
+
 		{"no-db", false},
 		{"json", false},
 		{"routing.mode", false},
 		{"sync.remote", false},
 		{"linear.team_id", false},
+
+		// The near misses that make the short spellings SEGMENT matches rather
+		// than substring matches. Redacting these would be a bug in the other
+		// direction: every one is an ordinary key that merely starts with a
+		// sensitive word.
+		{"issue.path", false},
+		{"export.pattern", false},
+		{"commit.author", false},
+		{"sort.keyword", false},
+		{"build.compat", false},
 	}
 
 	for _, tt := range tests {

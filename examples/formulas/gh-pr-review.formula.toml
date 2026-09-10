@@ -33,7 +33,8 @@
 #     contents:write, pull_requests:write)
 #   - Git configured with remotes for upstream and (if fork) push target
 #   - `bd` (beads) installed with molecule/wisp support
-#   - `make`, `golangci-lint` available for quality gates (fix-merge path)
+#   - The target repository's documented quality-gate tools are available
+#     (`make` and the CI-pinned `golangci-lint` for Beads' fix-merge path)
 #
 # Pager safety (CRITICAL for non-interactive execution):
 #   - ALL `gh` commands MUST use: GH_PAGER=cat gh ...
@@ -359,11 +360,14 @@ Based on the classification, fix the identified blockers:
 - Keep changes minimal — fix the blocker, don't refactor
 
 ### Run quality gates (on the clean-base transplant)
+Use the target repository's documented required gates. For Beads:
 ```
 make test
-golangci-lint run ./...
+make ci-pr-lint
 make build
 ```
+The Beads lint wrapper must pass with zero issues. For a non-Beads repository,
+use its documented lint gate instead and require a clean pass.
 
 ### Commit with attribution
 ```

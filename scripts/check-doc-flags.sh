@@ -93,8 +93,16 @@ echo ""
 # --- Check 2: bd init flags ---
 echo "=== Check 2: bd init flags ==="
 
-# Get actual init flags
-INIT_FLAGS=$($BD init --help 2>&1 | grep -oP '^\s+--[a-z][a-z0-9-]*' | sed 's/^\s*//' || true)
+# Get actual init flags. Match both long-only rows and rows with a short alias.
+INIT_FLAGS_OK=1
+if ! INIT_FLAGS=$("$BD" init --help 2>&1 \
+    | grep -E '^[[:space:]]+(-[[:alnum:]], )?--[a-z]' \
+    | grep -oE -- '--[a-z][a-z0-9-]*' \
+    | sort -u); then
+    echo "FAIL: Could not extract flags from 'bd init --help'"
+    ERRORS=$((ERRORS + 1))
+    INIT_FLAGS_OK=0
+fi
 
 # Check for --branch on init (removed)
 BRANCH_REFS=$(grep -rn 'bd init.*--branch' \
@@ -107,7 +115,11 @@ BRANCH_REFS=$(grep -rn 'bd init.*--branch' \
     | grep -v 'CHANGELOG\|removed\|was removed\|no longer\|deprecated' \
     || true)
 
-if [ -n "$BRANCH_REFS" ]; then
+if [ "$INIT_FLAGS_OK" -ne 1 ]; then
+    echo "SKIP: Cannot validate 'bd init --branch' without the live init flag list"
+elif printf '%s\n' "$INIT_FLAGS" | grep -qx -- '--branch'; then
+    echo "PASS: 'bd init --branch' is a live flag"
+elif [ -n "$BRANCH_REFS" ]; then
     echo "FAIL: Found references to removed 'bd init --branch' flag:"
     echo "$BRANCH_REFS" | head -20
     ERRORS=$((ERRORS + 1))
