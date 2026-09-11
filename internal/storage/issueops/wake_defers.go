@@ -135,7 +135,7 @@ func wakeExpiredDefersInTable(ctx context.Context, tx DBTX, table, eventsTable s
 		// A wake is a status change, so it journals as an update. Emitted past
 		// the rows-affected re-check, so a concurrently-rescued bead records
 		// nothing.
-		if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		if err := RecordEventInTx(ctx, tx, EventUpdate, id, DeferWakeActor); err != nil {
 			return woken, err
 		}
 		woken = append(woken, id)

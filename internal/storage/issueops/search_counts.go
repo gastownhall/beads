@@ -23,7 +23,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 		}
 		if !empty && wispDepsExist {
 			wisps, err := runFilterSearchQueryInTx(ctx, tx, query, filter, WispsFilterTables, true)
-			if err != nil && !isTableNotExistError(err) {
+			if err != nil && !missingOptionalWispTable(err) {
 				return nil, err
 			}
 			if len(wisps) > 0 {
@@ -66,7 +66,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 
 	wisps, err := runFilterSearchQueryInTx(ctx, tx, query, filter, WispsFilterTables, true)
 	if err != nil {
-		if isTableNotExistError(err) {
+		if missingOptionalWispTable(err) {
 			return finishSearchIssuesWithCounts(out, filter)
 		}
 		return nil, err

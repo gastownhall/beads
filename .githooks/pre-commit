@@ -40,7 +40,7 @@ if [ -n "$staged_go_files" ]; then
     echo "$staged_go_files" | xargs git add
 fi
 
-# --- BEGIN BEADS INTEGRATION v1.2.1 ---
+# --- BEGIN BEADS INTEGRATION v1.2.2 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
@@ -97,4 +97,4 @@ if command -v bd >/dev/null 2>&1; then
   fi
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi
-# --- END BEADS INTEGRATION v1.2.1 ---
+# --- END BEADS INTEGRATION v1.2.2 ---

@@ -12,8 +12,10 @@ import (
 const maxVersionQuery = `SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`
 
 // expectGateCurrentVersion mocks the MAX(version) read that both CurrentVersion
-// and PendingVersions issue.
+// and PendingVersions issue, preceded by the be-bv7x cursor-existence probe
+// that currentVersion issues before ever reading the cursor table.
 func expectGateCurrentVersion(mock sqlmock.Sqlmock, version int) {
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(maxVersionQuery).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
 }

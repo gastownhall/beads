@@ -717,6 +717,67 @@ func TestContextResponseAllowlist(t *testing.T) {
 	}
 }
 
+// contextResponseOptional is the set of ContextResponse members a client must
+// be able to read as ABSENT. Everything else on the allowlist is required.
+//
+// Both entries describe the SERVER's filesystem rather than the workspace's
+// logical identity, and a remote client cannot act on an absolute host path —
+// it cannot open it, and `project_id`, `database` and `backend` are what tell
+// two servers apart. The schema's own text calls publishing them a cost the
+// operator accepts; while they were required, accepting it was the only
+// conforming option.
+var contextResponseOptional = []string{"beads_dir", "repo_root"}
+
+// TestContextResponseRequiredSet pins the split from both sides: the document's
+// `required` list and the generated struct's pointer-ness, which is what tells
+// a Go client that absence is representable.
+//
+// Without it the relaxation is one edit from being undone, in either direction:
+// re-listing a member under `required` re-imposes the disclosure on every
+// deployment, and dropping one that belongs there turns a guaranteed member
+// into an optional one for every client that had stopped checking.
+func TestContextResponseRequiredSet(t *testing.T) {
+	optional := map[string]bool{}
+	for _, name := range contextResponseOptional {
+		optional[name] = true
+	}
+	wantRequired := map[string]bool{}
+	for _, name := range contextResponseAllowlist {
+		if !optional[name] {
+			wantRequired[name] = true
+		}
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "ContextResponse")
+	gotRequired := map[string]bool{}
+	for _, name := range toStrings(t, schema["required"]) {
+		gotRequired[name] = true
+	}
+	if extra := diff(gotRequired, wantRequired); len(extra) > 0 {
+		t.Errorf("ContextResponse requires members this test expects to be optional: %v\n"+
+			"requiring one means no deployment may withhold it", extra)
+	}
+	if missing := diff(wantRequired, gotRequired); len(missing) > 0 {
+		t.Errorf("ContextResponse no longer requires: %v\n"+
+			"a client that had stopped checking for these now has to", missing)
+	}
+
+	rt := reflect.TypeOf(apigen.ContextResponse{})
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		name := strings.Split(f.Tag.Get("json"), ",")[0]
+		isPointer := f.Type.Kind() == reflect.Pointer
+		if optional[name] && !isPointer {
+			t.Errorf("generated ContextResponse.%s is %s; an optional member must be a pointer or the server cannot omit it",
+				f.Name, f.Type)
+		}
+		if !optional[name] && isPointer {
+			t.Errorf("generated ContextResponse.%s is %s; a required member must not be nil-able", f.Name, f.Type)
+		}
+	}
+}
+
 // TestClaimRequestMembersMatchTheHandler is the same gate for the REQUEST side
 // of the claim, where the same unpinned-surface hazard runs the other way.
 //

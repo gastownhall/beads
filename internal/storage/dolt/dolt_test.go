@@ -134,6 +134,12 @@ func requireCleanTables(ctx context.Context, t *testing.T, store *DoltStore, tab
 //
 // Automatically marks the test as safe for parallel execution since each test
 // gets its own Dolt connection checked out to a unique branch.
+//
+// This call blocks twice — once in t.Parallel() until the sequential phase
+// ends, then again on testSem, which admits two tests at a time. In a shard of
+// 60+ tests that wait is minutes, so build the test's context AFTER this
+// returns. A context created before it spends its whole budget in the queue
+// and is already expired by the time the test body runs.
 func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)

@@ -103,7 +103,7 @@ func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, quer
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts (hydrate issues): %w", err)
 	}
 	wispsByID, err := r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, hydrationFor(filter))
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !missingOptionalWispTable(err) {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts (hydrate wisps): %w", err)
 	}
 

@@ -71,8 +71,9 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 	// deletes (DeleteIssueInTx) and the per-wisp branch of the bulk delete
 	// (DeleteResolvedSetInTx); the bulk regular-issue branch journals its own
 	// ids directly. The rows==0 return above is what keeps this
-	// actually-deleted-only.
-	if err := RecordDeleteInTx(ctx, tx, id); err != nil {
+	// actually-deleted-only. The delete plumbing (storage.DeleteIssue and the
+	// bulk/cascade resolvers) carries no actor, so the row records none.
+	if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
 		return err
 	}
 	if isWisp {
@@ -333,9 +334,10 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 
 	// Journal every regular issue this bulk/cascade delete removed. Wisps went
 	// through deleteIssueRowInTx above, which journals each itself; set.All is
-	// cascade-expanded, so this records cascade deletes too.
+	// cascade-expanded, so this records cascade deletes too. The delete
+	// plumbing carries no actor, so the rows record none.
 	for _, id := range journaledDeletes {
-		if err := RecordDeleteInTx(ctx, tx, id); err != nil {
+		if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
 			return nil, err
 		}
 	}

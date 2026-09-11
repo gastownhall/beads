@@ -59,7 +59,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	}
 	wisps, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, readyHydrationFor(filter))
 	if err != nil {
-		if isTableNotExistError(err) {
+		if missingOptionalWispTable(err) {
 			return finishReadyWorkWithCounts(out, filter)
 		}
 		return nil, err
@@ -239,7 +239,7 @@ func CountReadyWorkInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter
 	}
 	wispCount, err := countReadyPredicateInTx(ctx, tx, "wisps", wispPreds.whereSQL, wispPreds.whereArgs)
 	if err != nil {
-		if isTableNotExistError(err) {
+		if missingOptionalWispTable(err) {
 			return issueCount, nil
 		}
 		return 0, fmt.Errorf("count ready work: wisps: %w", err)

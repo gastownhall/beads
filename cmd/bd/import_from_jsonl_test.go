@@ -400,7 +400,7 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
-	t.Run("skips mixed regular and wisp in-batch dependencies instead of aborting import", func(t *testing.T) {
+	t.Run("wires mixed regular and wisp in-batch dependencies through the dependency pass", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")
 		store := newTestStore(t, dbPath)
@@ -440,9 +440,11 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		if result.Created != 2 {
 			t.Fatalf("Created = %d, want 2", result.Created)
 		}
-		if got := strings.Join(result.SkippedDependencies, "\n"); !strings.Contains(got, "test-mixed-regular -> test-mixed-wisp") ||
-			!strings.Contains(got, "cross-bucket dependency") {
-			t.Fatalf("SkippedDependencies = %#v, want mixed regular/wisp dependency detail", result.SkippedDependencies)
+		// The engine's per-batch cross-bucket filter would skip-report the
+		// regular -> wisp edge in a mixed batch, so the import defers it to a
+		// single-plane dependency pass instead (wy-4276q8).
+		if len(result.SkippedDependencies) != 0 {
+			t.Fatalf("SkippedDependencies = %#v, want none", result.SkippedDependencies)
 		}
 
 		for _, id := range []string{"test-mixed-regular", "test-mixed-wisp"} {
@@ -454,8 +456,8 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetDependencyRecords(test-mixed-regular): %v", err)
 		}
-		if len(deps) != 0 {
-			t.Fatalf("test-mixed-regular deps = %#v, want none", deps)
+		if len(deps) != 1 || deps[0].DependsOnID != "test-mixed-wisp" {
+			t.Fatalf("test-mixed-regular deps = %#v, want the regular -> wisp edge wired by the dependency pass", deps)
 		}
 	})
 

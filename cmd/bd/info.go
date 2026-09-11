@@ -221,6 +221,15 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.2.2",
+		Date:    "2026-08-15",
+		Changes: []string{
+			"RELEASE: v1.2.2 re-releases the tested 1.1 line (identical code to v1.1.2) to supersede the accidental, untested v1.2.0/v1.2.1; 1.2.x-only features (leases, events journal, sync federation, HTTP API server, provenance) are not included.",
+			"RECOVERY: if v1.2.1 already migrated a database to schema v65, the v1.2.2 binary refuses with a schema version mismatch; see https://beads.gascity.com/recovery/accidental-1-2-1-release — recommended fix is rolling the schema_migrations cursor back to v53, stopgap is BD_IGNORE_SCHEMA_SKEW=1.",
+			"GO: go.mod retracts v1.2.1/v1.2.0/v1.1.1 so 'go install ...@latest' resolves to v1.2.2.",
+		},
+	},
+	{
 		Version: "1.2.1",
 		Date:    "2026-08-11",
 		Changes: []string{
