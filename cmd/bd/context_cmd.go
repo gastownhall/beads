@@ -164,6 +164,15 @@ func printContextText(info ContextInfo) {
 	fmt.Printf("  repo root:    %s\n", info.RepoRoot)
 	if info.CWDRepoRoot != "" && info.CWDRepoRoot != info.RepoRoot {
 		fmt.Printf("  cwd repo:     %s\n", info.CWDRepoRoot)
+	} else if info.CWDRepoRoot == "" {
+		// The one degraded state this command exists to report, and the one
+		// it used to swallow. An empty CWD repo root means git answered
+		// nothing for the working directory — usually "not inside a repo",
+		// but also a dangling gitfile, a dubious-ownership refusal, or no git
+		// on PATH. Printing nothing here left the text output with no hint
+		// that anything was unusual, while --json callers could still infer
+		// it from the omitted field.
+		fmt.Printf("  cwd repo:     %s\n", "git: unavailable")
 	}
 	if info.IsRedirected {
 		fmt.Printf("  redirected:   yes\n")
