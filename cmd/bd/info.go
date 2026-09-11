@@ -221,6 +221,27 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.0-rc.2",
+		Date:    "2026-09-05",
+		Changes: []string{
+			"RC: candidate for the 1.3.0 line, carrying three server-mode fixes reported against rc.1; the [1.3.0] entry below still describes everything a 1.2.2 user meets, including the migration and backup notes — read it first.",
+			"FIX: an env-pointed Dolt sql-server (BEADS_DOLT_SERVER_PORT) is classified shared, not owned, so the #5920/#6048 shared-store consent gate runs instead of being bypassed. Before this, bd migrated the shared database in place and exited 0, and older co-resident clients were then hard-refused with a schema version mismatch (#6118).",
+			"FIX: a config.yaml server-mode workspace (dolt.mode: server, no metadata.json) is no longer misread as a legacy workspace — the guard resolves mode through the IsDoltServerMode precedence chain, and a .local_version witness naming bd 1.0 or later vetoes the legacy verdict in every mode (#6119).",
+			"FIX: a metadata-less server-mode workspace no longer opens a phantom .beads/embeddeddolt database that answered 'bd list' with a false-empty exit 0; substitution gates on IsDoltServerMode and honors BEADS_DOLT_SERVER_MODE (#6120).",
+			"CHANGE: 'bd ready --claim' under --proxied-server now refuses a --max-rows/BEADS_MAX_ROWS cap instead of silently dropping it; --claim is no longer exempt. Agent rigs that set the cap globally must unset it for proxied 'bd ready --claim'. Direct mode is unchanged.",
+		},
+	},
+	{
+		// Keyed so an rc.1 tester upgrading to rc.2 gets the rc.2 digest
+		// above instead of the whole release history: getVersionsSince
+		// returns every entry when it cannot find the previous version.
+		Version: "1.3.0-rc.1",
+		Date:    "2026-08-31",
+		Changes: []string{
+			"RC: first candidate for the 1.3.0 line. Everything a 1.2.2 user meets on the way here — the in-place schema migration, the shared-server consent gate, the backup ordering, and the breaking changes — is described in the [1.3.0] entry below; read it first.",
+		},
+	},
+	{
 		Version: "1.3.0",
 		Date:    "2026-08-28",
 		Changes: []string{
