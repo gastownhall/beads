@@ -284,3 +284,32 @@ func TestTransactHonoringAutoCommitBlanksMessageInServerBatch(t *testing.T) {
 		})
 	}
 }
+
+// TestIssueOpsContextDefersByModeInProxiedServerMode covers GH#4995: batch/off must
+// defer the Dolt version commit in proxied-server mode, matching direct SQL-server mode.
+func TestIssueOpsContextDefersByModeInProxiedServerMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode         string
+		wantDeferred bool
+	}{
+		{mode: string(doltAutoCommitOn), wantDeferred: false},
+		{mode: string(doltAutoCommitBatch), wantDeferred: true},
+		{mode: string(doltAutoCommitOff), wantDeferred: true},
+		{mode: "", wantDeferred: false},
+	} {
+		t.Run("mode="+tc.mode, func(t *testing.T) {
+			saveStorageMode(t)
+			serverMode = false
+			proxiedServerMode = true
+			doltAutoCommit = tc.mode
+
+			ctx, err := issueOpsContext(context.Background())
+			if err != nil {
+				t.Fatalf("issueOpsContext: %v", err)
+			}
+			if got := storageissueops.VersionCommitDeferred(ctx); got != tc.wantDeferred {
+				t.Fatalf("VersionCommitDeferred = %v, want %v for mode %q in proxied server mode", got, tc.wantDeferred, tc.mode)
+			}
+		})
+	}
+}
