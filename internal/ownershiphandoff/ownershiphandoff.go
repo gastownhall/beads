@@ -55,6 +55,7 @@ func (e Endpoint) String() string {
 
 // Request identifies the exact scope being handed off.
 type Request struct {
+	CityRoot  string   `json:"city_root"`
 	Root      string   `json:"root"`
 	Database  string   `json:"database"`
 	Workspace string   `json:"workspace"`
@@ -81,6 +82,7 @@ type Journal struct {
 	LegacyStopInProgress bool      `json:"legacy_stop_in_progress,omitempty"`
 	CommitHookInProgress bool      `json:"commit_hook_in_progress,omitempty"`
 	CommitHookRan        bool      `json:"commit_hook_ran,omitempty"`
+	MutationOccurred     bool      `json:"mutation_occurred,omitempty"`
 	Phase                Phase     `json:"phase"`
 	Owner                Owner     `json:"owner"`
 	ErrorCode            string    `json:"error_code,omitempty"`
@@ -90,11 +92,13 @@ type Journal struct {
 
 // Result is the typed front-door outcome shared by text and JSON callers.
 type Result struct {
-	Phase    Phase    `json:"phase"`
-	Owner    Owner    `json:"owner"`
-	Root     string   `json:"root"`
-	Database string   `json:"database"`
-	Endpoint Endpoint `json:"endpoint"`
+	Phase     Phase    `json:"phase"`
+	Owner     Owner    `json:"owner"`
+	CityRoot  string   `json:"city_root"`
+	Root      string   `json:"root"`
+	Database  string   `json:"database"`
+	Workspace string   `json:"workspace"`
+	Endpoint  Endpoint `json:"endpoint"`
 	// Mutates reports whether handoff execution has touched provider-visible
 	// state, cumulatively across resumed attempts: a refusal or failure inherits
 	// the mutation an earlier attempt made durable. No-op outcomes report false
@@ -105,7 +109,14 @@ type Result struct {
 	ErrorCode string `json:"error_code,omitempty"`
 }
 
-// Hooks are provider-owned operations.
+// Hooks are provider-owned operations. StopLegacy must refuse unless it can
+// positively identify the process as the legacy owner; it must never kill an
+// unknown process. It must, however, report an identity-matching process that
+// is already gone as a successful stop, so a retry whose predecessor lost its
+// checkpoint converges instead of wedging. Configure must be non-mutating:
+// only a StopLegacy failure can report a partial mutation, so a Configure that
+// mutates the target and then fails is reported as mutates=false. See
+// engdocs/design/ownership-handoff-contract.md for the full obligation list.
 //
 // Retry contract: Execute resumes from the last durable journal phase, so a
 // crash between a hook returning and its checkpoint reaching disk replays that
@@ -145,6 +156,62 @@ type Hooks struct {
 	CommitReplay func(context.Context, Request, Snapshot) error
 }
 
+// Provider resolves the provider-owned lifecycle hooks for a handoff. The
+// provider is opened only after the request and any existing journal have been
+// validated. Providers must not infer ownership or stop an unidentified
+// process; those decisions belong in the returned hooks.
+type Provider interface {
+	OwnershipHandoffHooks(context.Context, Request) (Hooks, error)
+}
+
+// ProviderFunc adapts a function to Provider.
+type ProviderFunc func(context.Context, Request) (Hooks, error)
+
+// OwnershipHandoffHooks implements Provider.
+func (f ProviderFunc) OwnershipHandoffHooks(ctx context.Context, r Request) (Hooks, error) {
+	return f(ctx, r)
+}
+
+// CodedError lets a provider preserve a stable protocol error code at the
+// handoff front door while retaining the underlying cause for diagnostics.
+type CodedError struct {
+	Code string
+	Err  error
+}
+
+type mutationReporter interface {
+	HandoffMutationOccurred() bool
+}
+
+type mutationError struct {
+	err     error
+	mutates bool
+}
+
+func (e mutationError) Error() string { return e.err.Error() }
+
+func (e mutationError) Unwrap() error { return e.err }
+
+func (e mutationError) HandoffMutationOccurred() bool { return e.mutates }
+
+func withReportedMutation(err error, mutates bool) error {
+	return mutationError{err: err, mutates: mutates}
+}
+
+// Error implements error.
+func (e CodedError) Error() string {
+	if e.Err == nil {
+		return e.Code
+	}
+	return e.Err.Error()
+}
+
+// Unwrap exposes the provider cause to errors.Is and errors.As.
+func (e CodedError) Unwrap() error { return e.Err }
+
+// HandoffErrorCode returns the stable provider protocol code.
+func (e CodedError) HandoffErrorCode() string { return stableErrorCode(e.Code, "provider_unavailable") }
+
 // ValidateRequest rejects incomplete, non-canonical, or remotely managed identities.
 func ValidateRequest(r Request) error {
 	if !filepath.IsAbs(r.Root) || filepath.Clean(r.Root) != r.Root {
@@ -155,6 +222,26 @@ func ValidateRequest(r Request) error {
 	}
 	if r.Database == "" || r.Workspace == "" {
 		return errors.New("database and workspace are required")
+	}
+	if r.CityRoot == "" {
+		return errors.New("city root is required")
+	}
+	if !filepath.IsAbs(r.CityRoot) || filepath.Clean(r.CityRoot) != r.CityRoot {
+		return errors.New("city root must be an absolute canonical path")
+	}
+	cityInfo, err := os.Stat(r.CityRoot)
+	if err != nil {
+		return fmt.Errorf("city root must be an existing directory: %w", err)
+	}
+	if !cityInfo.IsDir() {
+		return errors.New("city root must be an existing directory")
+	}
+	cityReal, err := filepath.EvalSymlinks(r.CityRoot)
+	if err != nil {
+		return fmt.Errorf("resolve city root: %w", err)
+	}
+	if filepath.Clean(r.CityRoot) != filepath.Clean(cityReal) {
+		return errors.New("city root must be canonical and not symlinked")
 	}
 	root, err := resolveRoot(r.Root)
 	if err != nil {
@@ -258,6 +345,46 @@ func resolvePathForContainment(path string) (string, error) {
 	}
 }
 
+// validateJournalPath keeps the journal and its persistent lock beneath the
+// validated root. Missing parents are refused rather than implicitly created.
+func validateJournalPath(root, path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("journal must be an absolute canonical path")
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New("journal must be beneath the handoff root")
+	}
+	parent := filepath.Dir(path)
+	info, err := os.Stat(parent)
+	if err != nil {
+		return fmt.Errorf("stat journal parent: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("journal parent must be an existing directory")
+	}
+	real, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return fmt.Errorf("resolve journal parent: %w", err)
+	}
+	if real != parent {
+		return errors.New("journal parent must be canonical and not symlinked")
+	}
+	for _, candidate := range []string{path, path + ".lock"} {
+		info, err := os.Lstat(candidate)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stat journal artifact: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("journal and lock must be regular, non-symlinked files")
+		}
+	}
+	return nil
+}
+
 // Load reads and validates a handoff journal from path.
 func Load(path string) (Journal, error) {
 	b, err := os.ReadFile(path) //nolint:gosec // path is the operator-selected journal path
@@ -359,18 +486,153 @@ func syncDir(dir string) error {
 }
 
 func result(j Journal, mutates bool) Result {
-	return Result{Phase: j.Phase, Owner: j.Owner, Root: j.Request.Root, Database: j.Request.Database, Endpoint: j.Request.Endpoint, Mutates: mutates, ErrorCode: j.ErrorCode}
+	return Result{Phase: j.Phase, Owner: j.Owner, CityRoot: j.Request.CityRoot, Root: j.Request.Root, Database: j.Request.Database, Workspace: j.Request.Workspace, Endpoint: j.Request.Endpoint, Mutates: mutates, ErrorCode: j.ErrorCode}
 }
 
-// requestResult reports an outcome refused before any journal was adopted.
+// identityConflictError explains a journal/request identity mismatch in
+// operator terms. The refusal is fail-closed and sticky — every later attempt
+// meets the same journal — so the message names the journal it is refusing,
+// both identities, and whether discarding the journal would lose a recorded
+// mutation.
+func identityConflictError(journalPath string, j Journal, r Request) error {
+	remediation := "it records a mutation, so reconcile the scope with the lifecycle owner before removing it"
+	if !mutationOccurred(j) {
+		remediation = "it records no mutation, so removing it while no handoff is running is safe"
+	}
+	return fmt.Errorf("handoff journal identity conflicts with request: %s holds %s at phase %s, request is %s; %s",
+		journalPath, handoffIdentity(j.Request), j.Phase, handoffIdentity(r), remediation)
+}
+
+func handoffIdentity(r Request) string {
+	return fmt.Sprintf("city=%s root=%s database=%s workspace=%s endpoint=%s",
+		r.CityRoot, r.Root, r.Database, r.Workspace, r.Endpoint)
+}
+
 func requestResult(r Request, code string) Result {
-	return Result{Phase: PhasePrepared, Owner: OwnerLegacyGC, Root: r.Root, Database: r.Database, Endpoint: r.Endpoint, ErrorCode: code}
+	return Result{Phase: PhasePrepared, Owner: OwnerLegacyGC, CityRoot: r.CityRoot, Root: r.Root, Database: r.Database, Workspace: r.Workspace, Endpoint: r.Endpoint, Mutates: false, ErrorCode: code}
+}
+
+// Run resolves provider-owned hooks and executes a handoff. Request and
+// journal identity validation happen before Provider is called, so malformed,
+// remote, or conflicting requests cannot start a provider. Dry-runs validate
+// the request and journal only and never call Provider or any lifecycle hook.
+func Run(ctx context.Context, r Request, journalPath string, provider Provider, dryRun bool) (Result, error) {
+	if err := ValidateRequest(r); err != nil {
+		return requestResult(r, "invalid_request"), err
+	}
+	if err := validateJournalPath(r.Root, journalPath); err != nil {
+		return requestResult(r, "invalid_journal"), err
+	}
+	var existing *Journal
+	if j, err := Load(journalPath); err == nil {
+		// refuseOrReplay reports the journaled mutation on an identity
+		// conflict, exactly as the under-lock arms do: the refusal keys its
+		// deletion-safety guidance on the same state, and a --json caller sees
+		// only this field. A committed journal replays as a no-op here without
+		// taking the lock, so a concurrent handoff cannot mask it.
+		if out := refuseOrReplay(journalPath, j, r); out != nil {
+			return out.res, out.err
+		}
+		existing = &j
+	} else if !os.IsNotExist(err) {
+		return requestResult(r, "journal_unreadable"), err
+	}
+	if dryRun {
+		if existing != nil {
+			return result(*existing, false), nil
+		}
+		return requestResult(r, ""), nil
+	}
+	// Hold the same journal lock while resolving provider hooks and executing
+	// the handoff. A provider may open a runtime or inspect lifecycle state, so
+	// resolving it outside the lock would permit a conflicting journal writer
+	// to win the race between preflight and Execute.
+	lock, err := acquireLock(journalPath + ".lock")
+	if err != nil {
+		// Only real contention is concurrent_handoff; a lock that could not be
+		// opened at all keeps its own code so the operator is not sent hunting
+		// a handoff that does not exist.
+		code := lockErrorCode(err)
+		if existing != nil {
+			existing.ErrorCode = code
+			return result(*existing, mutationOccurred(*existing)), fmt.Errorf("acquire handoff lock: %w", err)
+		}
+		return requestResult(r, code), fmt.Errorf("acquire handoff lock: %w", err)
+	}
+	defer func() {
+		_ = lockfile.FlockUnlock(lock)
+		_ = lock.Close()
+	}()
+	// Re-read under the lock: the unlocked read above is only an optimization
+	// and may have raced with another handoff. This read is what the provider
+	// arms below report, so they describe the journal the run will adopt.
+	existing = nil
+	if j, err := Load(journalPath); err == nil {
+		if out := refuseOrReplay(journalPath, j, r); out != nil {
+			return out.res, out.err
+		}
+		existing = &j
+	} else if !os.IsNotExist(err) {
+		return requestResult(r, "journal_unreadable"), err
+	}
+	if provider == nil {
+		if existing != nil {
+			existing.ErrorCode = "provider_unavailable"
+			return result(*existing, mutationOccurred(*existing)), errors.New("ownership handoff provider is unavailable")
+		}
+		return requestResult(r, "provider_unavailable"), errors.New("ownership handoff provider is unavailable")
+	}
+	hooks, err := provider.OwnershipHandoffHooks(ctx, r)
+	if err != nil {
+		code := handoffErrorCode(err, "provider_unavailable")
+		if existing != nil {
+			existing.ErrorCode = code
+			return result(*existing, mutationOccurred(*existing)), fmt.Errorf("resolve ownership handoff provider: %w", err)
+		}
+		return requestResult(r, code), fmt.Errorf("resolve ownership handoff provider: %w", err)
+	}
+	return newRun(r, journalPath, hooks).run(ctx)
 }
 
 func mutationOccurred(j Journal) bool {
-	return j.Phase == PhaseOldOwnerStopped || j.Phase == PhaseVerified ||
+	return j.MutationOccurred || j.Phase == PhaseOldOwnerStopped || j.Phase == PhaseVerified ||
 		j.Phase == PhaseCommitted || j.CommitHookRan || j.CommitHookInProgress ||
 		j.LegacyStopInProgress
+}
+
+func reportedMutation(err error) (bool, bool) {
+	var reporter mutationReporter
+	if !errors.As(err, &reporter) {
+		return false, false
+	}
+	return reporter.HandoffMutationOccurred(), true
+}
+
+func handoffErrorCode(err error, fallback string) string {
+	if err == nil {
+		return fallback
+	}
+	var coded interface{ HandoffErrorCode() string }
+	if errors.As(err, &coded) && coded.HandoffErrorCode() != "" {
+		return stableErrorCode(coded.HandoffErrorCode(), fallback)
+	}
+	return fallback
+}
+
+func stableErrorCode(code, fallback string) string {
+	switch code {
+	case "invalid_request", "invalid_journal", "journal_unreadable", "concurrent_handoff",
+		"provider_unavailable", "snapshot_unavailable", "snapshot_failed", "configure_unavailable",
+		"target_configure_failed", "owner_stop_unavailable", "owner_stop_failed", "verification_failed",
+		"verify_unavailable", "commit_unavailable", "commit_failed", "commit_recovery_required",
+		"commit_recovery_failed", "journal_save_failed", "protocol_version", "unsupported_scope",
+		"managed_owner_missing", "state_missing", "process_missing", "process_unowned",
+		"endpoint_unreachable", "port_conflict", "identity_changed", "lifecycle_busy", "data_lock_held",
+		"stop_failed":
+		return code
+	default:
+		return fallback
+	}
 }
 
 func snapshotCaptured(j Journal) bool {
@@ -413,21 +675,9 @@ func lockErrorCode(err error) string {
 // and never invokes a hook or opens a provider. A committed journal replays as
 // a no-op. Failures are journaled and leave legacy-gc authoritative.
 func Execute(ctx context.Context, r Request, journalPath string, h Hooks, dryRun bool) (Result, error) {
-	if err := ValidateRequest(r); err != nil {
-		return requestResult(r, "invalid_request"), err
-	}
-	if out := preflight(r, journalPath, dryRun); out != nil {
-		return out.res, out.err
-	}
-	lock, err := acquireLock(journalPath + ".lock")
-	if err != nil {
-		return requestResult(r, lockErrorCode(err)), fmt.Errorf("acquire handoff lock: %w", err)
-	}
-	defer func() {
-		_ = lockfile.FlockUnlock(lock)
-		_ = lock.Close()
-	}()
-	return newRun(r, journalPath, h).run(ctx)
+	return Run(ctx, r, journalPath, ProviderFunc(func(context.Context, Request) (Hooks, error) {
+		return h, nil
+	}), dryRun)
 }
 
 // stepOutcome is a terminal answer from a handoff step. A nil *stepOutcome
@@ -439,37 +689,15 @@ type stepOutcome struct {
 
 func done(res Result, err error) *stepOutcome { return &stepOutcome{res: res, err: err} }
 
-// preflight answers from an unlocked journal read. Identity conflicts,
-// committed replays, unreadable journals, and dry runs never need the lock.
-func preflight(r Request, journalPath string, dryRun bool) *stepOutcome {
-	j, err := Load(journalPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return done(requestResult(r, "journal_unreadable"), err)
-		}
-		if dryRun {
-			return done(requestResult(r, ""), nil)
-		}
-		return nil
-	}
-	if out := refuseOrReplay(j, r); out != nil {
-		return out
-	}
-	if dryRun {
-		// Report the adopted journal's real phase: an operator probing a
-		// mid-flight handoff must not be told the scope is still prepared.
-		return done(result(j, false), nil)
-	}
-	return nil
-}
-
 // refuseOrReplay settles the two questions a durable journal answers on its
 // own: whether it belongs to a different scope, and whether the handoff already
 // committed. A nil outcome means the journal matches and is still in flight.
-func refuseOrReplay(j Journal, r Request) *stepOutcome {
+// Run answers both from its unlocked read as well, so an identity conflict, a
+// committed replay, an unreadable journal, and a dry run never need the lock.
+func refuseOrReplay(journalPath string, j Journal, r Request) *stepOutcome {
 	if j.Request != r {
 		j.ErrorCode = "identity_conflict"
-		return done(result(j, mutationOccurred(j)), errors.New("handoff journal identity conflicts with request"))
+		return done(result(j, mutationOccurred(j)), identityConflictError(journalPath, j, r))
 	}
 	if j.Phase == PhaseCommitted {
 		return done(result(j, false), nil)
@@ -506,7 +734,7 @@ func (x *handoffRun) run(ctx context.Context) (Result, error) {
 	return result(x.j, true), nil
 }
 
-// adopt re-reads the journal under the lock. The preflight read is only an
+// adopt re-reads the journal under the lock. Run's preflight read is only an
 // optimization and may have raced with another handoff.
 func (x *handoffRun) adopt(context.Context) *stepOutcome {
 	old, err := Load(x.journalPath)
@@ -517,7 +745,7 @@ func (x *handoffRun) adopt(context.Context) *stepOutcome {
 		x.j.ErrorCode = "journal_unreadable"
 		return done(result(x.j, false), err)
 	}
-	if out := refuseOrReplay(old, x.j.Request); out != nil {
+	if out := refuseOrReplay(x.journalPath, old, x.j.Request); out != nil {
 		return out
 	}
 	x.j = old
@@ -536,9 +764,12 @@ func (x *handoffRun) advance(p Phase) *stepOutcome {
 	return nil
 }
 
-// fail journals a typed refusal and leaves legacy-gc authoritative.
+// fail journals a typed refusal and leaves legacy-gc authoritative. A provider
+// error that names its own stable code keeps it, so an operator reads why the
+// provider refused rather than only which step was running; code is the
+// fallback for every error that does not name one.
 func (x *handoffRun) fail(code string, err error) *stepOutcome {
-	x.j.ErrorCode, x.j.Error, x.j.UpdatedAt = code, err.Error(), time.Now().UTC()
+	x.j.ErrorCode, x.j.Error, x.j.UpdatedAt = handoffErrorCode(err, code), err.Error(), time.Now().UTC()
 	if saveErr := x.save(); saveErr != nil {
 		return done(journalSaveError(x.j, errors.Join(err, saveErr)))
 	}
@@ -600,9 +831,21 @@ func (x *handoffRun) stepStopLegacy(ctx context.Context) *stepOutcome {
 		}
 	}
 	if err := x.hooks.StopLegacy(ctx, x.j.Request, x.j.Snapshot); err != nil {
+		// A provider that knows what its failed stop actually did says so, and
+		// that report supersedes the reservation above, which exists only to
+		// be conservative when nothing reported. A reported mutation is
+		// recorded durably because the reservation is retired by a later clean
+		// retry and the mutation must outlive it; a reported non-mutation
+		// retires the reservation now, because the ambiguous window it covers
+		// is exactly what the provider just closed.
+		if mutates, reported := reportedMutation(err); reported {
+			x.j.MutationOccurred = x.j.MutationOccurred || mutates
+			x.j.LegacyStopInProgress = mutates
+		}
 		return x.fail("owner_stop_failed", err)
 	}
 	x.j.LegacyStopInProgress = false
+	x.j.MutationOccurred = true
 	return x.advance(PhaseOldOwnerStopped)
 }
 

@@ -23,7 +23,7 @@ func validRequest(t *testing.T) Request {
 		t.Fatal(err)
 	}
 	root = canonical
-	return Request{Root: root, Database: "beads", Workspace: "ws-1", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
+	return Request{CityRoot: root, Root: root, Database: "beads", Workspace: "ws-1", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
 }
 
 func TestValidateRejectsSymlinkRootAndExternalEndpoint(t *testing.T) {
@@ -145,6 +145,129 @@ func TestDryRunDoesNotInvokeHooks(t *testing.T) {
 	}
 	if called || got.Mutates || got.Phase != PhasePrepared {
 		t.Fatalf("dry run result=%+v called=%v", got, called)
+	}
+}
+
+func TestRunRejectsUnsafeJournalBeforeProviderOrMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		path func(*testing.T, Request) string
+	}{
+		{name: "relative", path: func(_ *testing.T, _ Request) string { return "handoff.json" }},
+		{name: "noncanonical", path: func(_ *testing.T, r Request) string {
+			return r.Root + string(filepath.Separator) + "." + string(filepath.Separator) + "handoff.json"
+		}},
+		{name: "outside root", path: func(t *testing.T, _ Request) string {
+			return filepath.Join(validRequest(t).Root, "handoff.json")
+		}},
+		{name: "missing parent", path: func(_ *testing.T, r Request) string {
+			return filepath.Join(r.Root, "missing", "handoff.json")
+		}},
+		{name: "symlinked parent", path: func(t *testing.T, r Request) string {
+			parent := filepath.Join(r.Root, "alias")
+			if err := os.Symlink(validRequest(t).Root, parent); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(parent, "handoff.json")
+		}},
+		{name: "symlinked journal", path: func(t *testing.T, r Request) string {
+			path := filepath.Join(r.Root, "handoff.json")
+			if err := os.Symlink(filepath.Join(validRequest(t).Root, "handoff.json"), path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{name: "symlinked lock", path: func(t *testing.T, r Request) string {
+			path := filepath.Join(r.Root, "handoff.json")
+			if err := os.Symlink(filepath.Join(validRequest(t).Root, "handoff.json.lock"), path+".lock"); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := validRequest(t)
+			path := tc.path(t, r)
+			before, err := os.ReadDir(r.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			provider := ProviderFunc(func(context.Context, Request) (Hooks, error) {
+				called = true
+				return Hooks{}, nil
+			})
+			for _, dryRun := range []bool{true, false} {
+				got, err := Run(context.Background(), r, path, provider, dryRun)
+				if err == nil || got.ErrorCode != "invalid_journal" || got.Mutates || called {
+					t.Fatalf("dry-run=%v result=%+v err=%v provider=%v, want preflight refusal", dryRun, got, err, called)
+				}
+			}
+			after, err := os.ReadDir(r.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(after) != len(before) {
+				t.Fatalf("journal preflight mutated root: before=%v after=%v", before, after)
+			}
+		})
+	}
+}
+
+func TestRunLockConflictPreservesExistingJournal(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	seed := Journal{Request: r, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+		Phase: PhaseTargetConfigured, Owner: OwnerLegacyGC}
+	b, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireLock(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = lockfile.FlockUnlock(lock)
+		_ = lock.Close()
+	}()
+	called := false
+	got, err := Run(context.Background(), r, path, ProviderFunc(func(context.Context, Request) (Hooks, error) {
+		called = true
+		return Hooks{}, nil
+	}), false)
+	if err == nil || got.Phase != PhaseTargetConfigured || got.Owner != OwnerLegacyGC || got.Mutates ||
+		got.ErrorCode != "concurrent_handoff" || called {
+		t.Fatalf("result=%+v err=%v provider=%v, want existing state and lock refusal", got, err, called)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ErrorCode != "" || loaded.Phase != PhaseTargetConfigured {
+		t.Fatalf("lock conflict rewrote journal: %+v", loaded)
+	}
+}
+
+func TestDryRunReportsExistingJournalPhase(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	j := Journal{Request: r, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+		Phase: PhaseTargetConfigured, Owner: OwnerLegacyGC}
+	b, err := json.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Execute(context.Background(), r, path, Hooks{}, true)
+	if err != nil || got.Phase != PhaseTargetConfigured || got.Owner != OwnerLegacyGC || got.Mutates {
+		t.Fatalf("dry-run result=%+v err=%v, want existing target_configured state without mutation", got, err)
 	}
 }
 
@@ -410,6 +533,73 @@ func TestJournalIdentityConflictIsTyped(t *testing.T) {
 	}
 }
 
+// TestPreflightIdentityConflictReportsJournaledMutation pins the preflight
+// identity-conflict arm to the same mutation reporting as its under-lock twins.
+// The refusal keys its deletion-safety guidance on the journaled mutation, and
+// a --json caller sees only Mutates, so reporting mutates=false for a
+// mutation-recording journal would tell tooling the opposite of the message.
+// Any existing journal is refused before the lock is taken, so the lock is held
+// here to prove the refusal came from that preflight arm: without it the
+// request would be refused as concurrent_handoff instead.
+func TestPreflightIdentityConflictReportsJournaledMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		journal func(Request) Journal
+	}{
+		{
+			name: "durable mutation flag",
+			journal: func(r Request) Journal {
+				other := r
+				other.Database = "other"
+				return Journal{Request: other, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+					MutationOccurred: true, Phase: PhaseTargetConfigured, Owner: OwnerLegacyGC}
+			},
+		},
+		{
+			// A journal written before city_root joined the request decodes
+			// with an empty city root, so it conflicts with every request a
+			// current binary makes. At old_owner_stopped the legacy server is
+			// genuinely stopped, which is exactly when an operator must not be
+			// told the journal records no mutation.
+			name: "pre-release journal at old_owner_stopped",
+			journal: func(Request) Journal {
+				return Journal{Phase: PhaseOldOwnerStopped, Owner: OwnerLegacyGC}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := validRequest(t)
+			path := filepath.Join(r.Root, "handoff.json")
+			b, err := json.Marshal(tc.journal(r))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+				t.Fatal(err)
+			}
+			lock, err := acquireLock(path + ".lock")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = lockfile.FlockUnlock(lock)
+				_ = lock.Close()
+			}()
+			called := false
+			got, err := Run(context.Background(), r, path, ProviderFunc(func(context.Context, Request) (Hooks, error) {
+				called = true
+				return Hooks{}, nil
+			}), false)
+			if err == nil || got.ErrorCode != "identity_conflict" || !got.Mutates || called {
+				t.Fatalf("result=%+v err=%v provider=%v, want a preflight identity conflict reporting the journaled mutation", got, err, called)
+			}
+			if !strings.Contains(err.Error(), "records a mutation") {
+				t.Fatalf("refusal text disagrees with the reported mutation: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsUnknownPhase(t *testing.T) {
 	r := validRequest(t)
 	path := filepath.Join(r.Root, "handoff.json")
@@ -587,11 +777,24 @@ func TestIdentityConflictReportsAccumulatedMutation(t *testing.T) {
 }
 
 // TestUnopenableLockIsNotReportedAsConcurrency keeps an incident honest: only
-// real contention may send an operator hunting a concurrent handoff.
+// real contention may send an operator hunting a concurrent handoff. The
+// journal path itself is valid here — a missing or non-canonical parent is
+// refused earlier, and more precisely, as invalid_journal — so this reaches the
+// lock with nothing but the directory mode standing between it and the file.
 func TestUnopenableLockIsNotReportedAsConcurrency(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory write permissions")
+	}
 	r := validRequest(t)
-	path := filepath.Join(r.Root, "missing-dir", "handoff.json")
-	got, err := Execute(context.Background(), r, path, Hooks{}, false)
+	dir := filepath.Join(r.Root, "handoff")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	got, err := Execute(context.Background(), r, filepath.Join(dir, "handoff.json"), Hooks{}, false)
 	if err == nil || got.ErrorCode != "lock_unavailable" {
 		t.Fatalf("unopenable lock result=%+v err=%v, want lock_unavailable", got, err)
 	}

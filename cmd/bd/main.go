@@ -153,6 +153,14 @@ var (
 // store gate locally, without editing the central noDbCommands list.
 const skipStoreAnnotation = "bd:skip_store"
 
+// skipLegacyGuardAnnotation, when set to "1" on a command, exempts that command
+// from the legacy workspace guard. Unlike skipStoreAnnotation it is honored
+// leaf-only, on the invoked command alone: the guard protects an operator from
+// acting on a legacy workspace, and inheriting an opt-out down a subcommand
+// tree would fail open for subcommands nobody vetted. Annotate each maintenance
+// front door that needs it.
+const skipLegacyGuardAnnotation = "bd:skip_legacy_guard"
+
 // commandOptsOutOfStore reports whether cmd or any of its ancestors carries the
 // skipStoreAnnotation set to "1". The whole ancestor chain is walked, so
 // annotating a command exempts that command and every subcommand beneath it.
@@ -935,6 +943,13 @@ func guardLegacyNoStoreCommand(cmd *cobra.Command, beadsDir string) error {
 	if cmd == nil || !cmd.Runnable() || cmd.Parent() == nil || cmd == versionCmd ||
 		cmd == doctorCmd || cmd == initCmd || cmd == bootstrapCmd ||
 		cmd == legacySQLiteCmd {
+		return nil
+	}
+	// Some explicit maintenance front doors validate an operator-selected
+	// target that is not an active workspace. They opt out of the legacy
+	// workspace guard in addition to the store-init guard; ordinary commands
+	// retain the guard by default.
+	if cmd.Annotations[skipLegacyGuardAnnotation] == "1" {
 		return nil
 	}
 	if cmd == schemaCmd && cmd.Parent() != nil && cmd.Parent().Parent() == nil {
