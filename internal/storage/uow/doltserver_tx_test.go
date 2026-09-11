@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -201,4 +202,62 @@ func TestDoltServerTxEphemeralCommitSkipsPendingCheck(t *testing.T) {
 	err = tx.Commit(context.Background(), "")
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDoltServerTxCommitDefersDoltCommitUnderDeferredContext pins GH#4995:
+// dolt.auto-commit=batch/off marks the context with WithDeferredVersionCommit.
+// doltServerTx.Commit must blank the commit message, bypassing DOLT_COMMIT
+// and the HasPendingChanges dolt_status check, and executing a plain COMMIT
+// to persist writes into the working set without advancing Dolt history.
+func TestDoltServerTxCommitDefersDoltCommitUnderDeferredContext(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deferred bool
+	}{
+		{name: "on (not deferred)", deferred: false},
+		{name: "batch or off (deferred)", deferred: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, mock := newMockTxProvider(t)
+			mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+			if tc.deferred {
+				// With deferred version commit (GH#4995), the non-empty message is blanked,
+				// skipping DOLT_COMMIT and executing plain COMMIT without status check.
+				mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+			} else {
+				expectPendingChanges(mock, 1)
+				mock.ExpectExec("DOLT_COMMIT").WithArgs("bd: real write").WillReturnResult(sqlmock.NewResult(0, 1))
+			}
+
+			tx, err := p.BeginTx(context.Background())
+			require.NoError(t, err)
+
+			ctx := context.Background()
+			if tc.deferred {
+				ctx = issueops.WithDeferredVersionCommit(ctx)
+			}
+
+			err = tx.Commit(ctx, "bd: real write")
+			require.NoError(t, err)
+			require.NoError(t, mock.ExpectationsWereMet())
+			assert.Equal(t, 1, p.db.Stats().OpenConnections, "session must cleanly return to pool")
+		})
+	}
+}
+
+// TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit verifies that a complete
+// unit of work executed via RunTx under deferred version commit commits via plain
+// COMMIT and succeeds without advancing Dolt history (GH#4995).
+func TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	ctx := issueops.WithDeferredVersionCommit(context.Background())
+	err := RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		return "bd: update bd-4995", nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+	assert.Equal(t, 1, p.db.Stats().OpenConnections)
 }
