@@ -56,6 +56,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concept, themes are labels here, and `--label theme:x` is the native way to
   say it.
 
+### Fixed
+
+- **`bd context` resolves a workspace outside a git repository instead of
+  hard-failing** ([#4772](https://github.com/gastownhall/beads/issues/4772)).
+  The command's own help promises it "does not require the database to be open,
+  making it useful for diagnostics in degraded states", but it exited with
+  `cannot determine repository root` whenever the working directory was not
+  inside a git repo — even with a perfectly valid `.beads/` present — so
+  consumers using `bd context --json` as a health probe got a false
+  "unreachable" in healthy non-git scopes.
+
+  `GetRepoContext()` finds and boundary-validates `.beads/` *before* it asks
+  git for a root, so that one failure means only that git is missing. It now
+  returns a typed `*beads.NoRepoRootError`, and `GetRepoContextAllowingNoGit()`
+  selects it with `errors.As` and roots the context at the `.beads` parent.
+  Typed rather than by message text on purpose: the SEC-003 unsafe-location
+  rejection embeds the offending path verbatim, so a substring test would let a
+  workspace under a hostile path clear its own security refusal. Every other
+  failure, that one included, propagates untouched.
+
+  Scoped to the callers that only read config: `bd context` on both routes, and
+  the `domain/fs` context provider — which `bd serve` also resolves through, so
+  `bd serve` in a non-git directory with a valid `.beads/` now proceeds rather
+  than failing at context resolution. Anything that runs git commands still
+  uses `GetRepoContext()`. The synthesized context reports `is_redirected` from
+  `BEADS_DIR` (the only evidence available once git cannot be asked), and
+  `bd context` prints `cwd repo: git: unavailable` rather than silently
+  omitting the one degraded state it exists to report.
+
 ### Changed
 
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
