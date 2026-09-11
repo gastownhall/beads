@@ -366,10 +366,26 @@ func isUserHomeDir(dir string) bool {
 // the mode globals RunE sets on itself. A guard placed after any of those
 // refuses only after the damage it exists to prevent.
 //
-// Fail-open by construction: an unresolvable home, an explicit BEADS_DIR, or an
-// already-tracked home all mean "not the case this guards", and init proceeds.
+// Fail-open by construction: an unresolvable home, a caller-supplied BEADS_DIR,
+// or an already-tracked home all mean "not the case this guards", and init
+// proceeds.
+//
+// The opt-in check reads beadsDirFromCaller, NOT os.Getenv("BEADS_DIR"). By the
+// time this runs the root PersistentPreRunE has already exported a beads dir it
+// discovered for itself, and beads.FindBeadsDir() accepts any ancestor .beads/
+// holding a config.yaml — including this project's own legacy user-level
+// ~/.beads/config.yaml. Keying off the live environment therefore made the
+// guard fail open for exactly the long-standing users most likely to have
+// scaffolding in $HOME worth not clobbering. `bd -C <dir> init` exported one
+// too, and that one does not even move the working directory the scaffolding
+// lands in.
+//
+// Refusals carry ExitHomeDirRefused so a script can branch on the number, like
+// init's three other refusal classes. The message is printed here rather than
+// returned so the exit code is the error's whole payload; docs/recovery/
+// init-safety.md#init-home-refused is the recovery playbook it points at.
 func guardInitInHomeDir() error {
-	if os.Getenv("BEADS_DIR") != "" {
+	if beadsDirFromCaller != "" {
 		return nil
 	}
 	if isGitRepo() {
@@ -379,10 +395,37 @@ func guardInitInHomeDir() error {
 	if err != nil || !isUserHomeDir(cwd) {
 		return nil
 	}
-	return fmt.Errorf("refusing to 'bd init' directly in your home directory (%s):\n"+
-		"  this would turn it into a git repository and scaffold agent files here,\n"+
-		"  overwriting any existing ones. cd into a project directory and re-run, or set\n"+
-		"  BEADS_DIR to an explicit location if you really mean to initialize here", cwd)
+	fmt.Fprintf(os.Stderr, "%s\n", homeDirRefusalMessage(cwd))
+	return &exitError{Code: ExitHomeDirRefused}
+}
+
+// homeDirRefusalMessage is the What/Why/Next refusal text for a `bd init` run
+// directly in an untracked home directory.
+//
+// The BEADS_DIR escape hatch is described honestly: setting it does not run the
+// init the caller asked for in $HOME, it runs a different one — an explicit
+// BEADS_DIR makes hasExplicitBeadsDir true, which skips the `git init` and the
+// CWD-local .beads semantics. Saying "set BEADS_DIR if you really mean it"
+// without that caveat sends the user somewhere they did not intend to go.
+func homeDirRefusalMessage(cwd string) string {
+	return fmt.Sprintf(`bd init refuses: %s is your home directory, and it is not a git repository.
+
+  Why: init would 'git init' your home directory and scaffold agent files
+       into it (CLAUDE.md, AGENTS.md, .gitignore, .claude/, .codex/,
+       .agents/), overwriting any you already keep there. A project is
+       virtually never the home directory itself.
+
+  Next:
+    Initialize a project instead (recommended):
+      cd ~/some-project && bd init
+
+    Keep the workspace elsewhere, with no scaffolding in your home:
+      BEADS_DIR=<path>/.beads bd init
+      (this is a DIFFERENT init: an explicit BEADS_DIR skips the git init
+       and the working-directory-local .beads, so nothing is written here)
+
+    Recovery playbook:
+      docs/recovery/init-safety.md#init-home-refused`, cwd)
 }
 
 var initCmd = &cobra.Command{

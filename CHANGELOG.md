@@ -153,6 +153,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured. Auto-start warns and retargets, as it did before. Shared-server
   mode still fails closed there — a repo-local auto-start is a different
   database, not a port refresh — but now says so in its own words.
+- **`bd init` refuses to initialize directly in your home directory**
+  ([#4635](https://github.com/gastownhall/beads/issues/4635)). Run there, `bd
+  init` would `git init` your home directory and scaffold agent files into it —
+  `CLAUDE.md`, `AGENTS.md`, `.gitignore`, `.claude/`, `.codex/`, `.agents/` —
+  overwriting any you already keep there, and it did so silently under
+  `--non-interactive`, which engages automatically whenever stdin is not a TTY
+  (so: whenever an agent runs it). A project is virtually never the home
+  directory itself, so this now refuses with exit code `13`
+  (`ExitHomeDirRefused`), documented at
+  `docs/recovery/init-safety.md#init-home-refused`.
+
+  Deliberately narrow: it fires only when the working directory is *exactly*
+  your home directory, your home is not already a git repository (tracked
+  dotfiles are unaffected), and you did not name a `BEADS_DIR` yourself. A
+  subdirectory of home is an ordinary project and is never refused. `--force`
+  and `--reinit-local` do not override it — they bypass the local data-safety
+  guard, which is a different question from "is this the right directory". The
+  guard runs first in init's `RunE`, ahead of every path with an effect,
+  including the proxied dispatch and the store-opening `--reinit-local`
+  pre-checks.
 
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica

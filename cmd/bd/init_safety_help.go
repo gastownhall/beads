@@ -81,6 +81,8 @@ EXIT CODES
   12    refused: destructive re-init (--discard-remote, or --reinit-local
         over existing issues) without a valid --destroy-token
         (non-interactive mode)
+  13    refused: run directly in your home directory, which is not already
+        a git repository, with no BEADS_DIR named by the caller
 
 RECOVERY
 
