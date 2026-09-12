@@ -725,6 +725,7 @@ jobs:
 
       - name: Run PR core wrapper
         env:
+          BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION: '1'
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: make ci-pr-core
