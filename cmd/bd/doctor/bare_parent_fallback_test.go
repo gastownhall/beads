@@ -4,9 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -154,4 +156,67 @@ func runGitInDirForDoctorTest(t *testing.T, dir string, args ...string) string {
 	}
 
 	return strings.TrimSpace(string(output))
+}
+
+func TestDoctorWorktreeFallbackIgnoresInheritedRouting(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, t.TempDir())
+	}
+	// Production ScrubRouting removes this flag; it does not suppress system config there.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	targetParent, target := setupBareParentWorktreeForDoctorTest(t)
+	decoyParent, decoy := setupBareParentWorktreeForDoctorTest(t)
+	want := utils.CanonicalizePath(filepath.Join(targetParent, ".beads"))
+	for _, dir := range []string{want, filepath.Join(decoyParent, ".beads")} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("fixture must require common-parent fallback: %v", err)
+	}
+	decoyGitDir := runGitInDirForDoctorTest(t, decoy, "rev-parse", "--absolute-git-dir")
+	for _, name := range []string{"decoy", "invalid_git_dir"} {
+		t.Run(name, func(t *testing.T) {
+			gitDir := decoyGitDir
+			if name == "invalid_git_dir" {
+				gitDir = filepath.Join(t.TempDir(), "missing.git")
+			}
+			t.Setenv("GIT_DIR", gitDir)
+			t.Setenv("GIT_WORK_TREE", decoy)
+			t.Setenv("GIT_COMMON_DIR", decoyParent)
+			before := strings.Join(os.Environ(), "\x00")
+			clearResolveBeadsDirCache()
+			if got := ResolveBeadsDirForRepo(target); !utils.PathsEqual(got, want) {
+				t.Errorf("cold ResolveBeadsDirForRepo() = %q, want target %q", got, want)
+			}
+			clearResolveBeadsDirCache() // Exercise the constructor's own cold resolution.
+			ss := NewSharedStore(target)
+			defer ss.Close()
+			if got := ss.BeadsDir(); !utils.PathsEqual(got, want) {
+				t.Errorf("cold NewSharedStore().BeadsDir() = %q, want target %q", got, want)
+			}
+			// Empty .beads proves path selection only, not a database or role read.
+			if ss.Store() != nil {
+				t.Error("empty fixture unexpectedly opened a database")
+			}
+			if entries, err := os.ReadDir(want); err != nil || len(entries) != 0 {
+				t.Errorf("empty target .beads changed: entries=%v, err=%v", entries, err)
+			}
+			if strings.Join(os.Environ(), "\x00") != before {
+				t.Error("doctor changed inherited environment")
+			}
+		})
+	}
 }

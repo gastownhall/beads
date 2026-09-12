@@ -6,11 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -2450,4 +2453,189 @@ func TestGitPathForRepo(t *testing.T) {
 			t.Fatalf("gitPathForRepo() = %q, want %q", got, want)
 		}
 	})
+}
+
+func TestFindBeadsDirFromIgnoresInheritedRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	for _, layout := range []string{"regular", "bare"} {
+		t.Run(layout, func(t *testing.T) {
+			setup := setupRegularWorktreeRepo
+			if layout == "bare" {
+				setup = setupBareParentWorktree
+			}
+			main, target := setup(t)
+			decoyMain, decoy := setup(t)
+			for _, dir := range []string{main, decoyMain} {
+				if err := os.MkdirAll(filepath.Join(dir, ".beads", "dolt"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			decoyGit := runGitInDir(t, decoy, "rev-parse", "--absolute-git-dir")
+			start := filepath.Join(target, "sub dir")
+			if err := os.Mkdir(start, 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(decoy)
+			t.Setenv("BEADS_DIR", filepath.Join(decoyMain, ".beads"))
+			for _, name := range []string{"ordinary", "decoy", "invalid", "work_tree_only"} {
+				t.Run(name, func(t *testing.T) {
+					if name != "ordinary" {
+						t.Setenv("GIT_WORK_TREE", decoy)
+						if name != "work_tree_only" {
+							gitDir := decoyGit
+							if name == "invalid" {
+								gitDir = filepath.Join(home, "missing git dir")
+							}
+							t.Setenv("GIT_DIR", gitDir)
+						}
+						got, err := gitOutput(start, "rev-parse", "--show-toplevel")
+						if (name == "invalid" && err == nil) || (name != "invalid" && (err != nil || !utils.PathsEqual(got, decoy))) {
+							t.Fatalf("inherited probe precondition: %q (%v)", got, err)
+						}
+					}
+					before := os.Environ()
+					if got := FindBeadsDirFrom(start); !utils.PathsEqual(got, filepath.Join(main, ".beads")) {
+						t.Errorf("explicit discovery = %q, want selected shared .beads", got)
+					}
+					cwd, err := os.Getwd()
+					if err != nil || !utils.PathsEqual(cwd, decoy) || !reflect.DeepEqual(before, os.Environ()) {
+						t.Errorf("explicit discovery changed process directory/environment: %q (%v)", cwd, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestSelectedBeadsCanonicalizerIgnoresInheritedRouting(t *testing.T) {
+	t.Chdir(t.TempDir())
+	detached, stable, database := setupDetachedCommitBeadsWorktree(t)
+	_, decoy, _ := setupDetachedCommitBeadsWorktree(t)
+	decoyGitDir := runGitInDir(t, filepath.Dir(decoy), "rev-parse", "--absolute-git-dir")
+	decoyCommonDir := runGitInDir(t, filepath.Dir(decoy), "rev-parse", "--path-format=absolute", "--git-common-dir")
+	redirect := filepath.Join(t.TempDir(), ".beads")
+	if err := os.Mkdir(redirect, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirect, RedirectFileName), []byte(detached), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		query []string
+	}{
+		{"decoy", map[string]string{"GIT_DIR": decoyGitDir}, []string{"rev-parse", "--abbrev-ref", "HEAD"}},
+		{"invalid", map[string]string{"GIT_DIR": filepath.Join(t.TempDir(), "missing git dir")}, []string{"rev-parse", "--abbrev-ref", "HEAD"}},
+		{"work_tree_only", map[string]string{"GIT_WORK_TREE": filepath.Dir(decoy)}, []string{"rev-parse", "--show-toplevel"}},
+		{"common_dir_only", map[string]string{"GIT_COMMON_DIR": decoyCommonDir}, []string{"rev-parse", "--git-common-dir"}},
+		// Linked worktrees stay non-bare regardless of core.bare; observe the config itself.
+		{"inline_config", map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.bare", "GIT_CONFIG_VALUE_0": "false"}, []string{"config", "--get", "core.bare"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			t.Setenv("BEADS_DIR", detached)
+			t.Setenv("BEADS_DB", "")
+			// Each vector changes the generic query; selected queries keep their own context.
+			inherited, inheritedErr := gitOutput(filepath.Dir(detached), tc.query...)
+			selected, err := selectedBeadsGitOutput(filepath.Dir(detached), tc.query...)
+			if err != nil || (tc.name == "invalid" && inheritedErr == nil) ||
+				(tc.name != "invalid" && (inheritedErr != nil || inherited == selected)) {
+				t.Fatalf("routing precondition: inherited=%q (%v), selected=%q (%v)", inherited, inheritedErr, selected, err)
+			}
+			for _, check := range []struct{ name, got, want string }{
+				{"FollowRedirect", FollowRedirect(redirect), stable},
+				{"FindBeadsDir", FindBeadsDir(), stable},
+				{"FindDatabasePath", FindDatabasePath(), database},
+			} {
+				if !utils.PathsEqual(check.got, check.want) {
+					t.Errorf("%s = %q, want selected stable path %q", check.name, check.got, check.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectedBeadsCanonicalizerFallbacks(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, name := range []string{"stable_branch", "different_head", "missing_stable"} {
+		t.Run(name, func(t *testing.T) {
+			detached, stable, _ := setupDetachedCommitBeadsWorktree(t)
+			want := detached
+			switch name {
+			case "stable_branch":
+				want = stable
+			case "different_head":
+				runGitInDir(t, filepath.Dir(stable), "commit", "--allow-empty", "-m", "Different branch head")
+			case "missing_stable":
+				if err := os.Rename(stable, stable+".saved"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := canonicalizeBeadsDirPath(want); !utils.PathsEqual(got, want) {
+				t.Errorf("canonical path = %q, want unchanged %q", got, want)
+			}
+		})
+	}
+}
+
+func TestResolveBeadsDirForRepoIgnoresInheritedRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, t.TempDir())
+	}
+	// Production ScrubRouting removes this flag; it does not suppress system config there.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	targetParent, target := setupRegularWorktreeRepo(t)
+	decoyParent, decoy := setupRegularWorktreeRepo(t)
+	want := utils.CanonicalizePath(filepath.Join(targetParent, ".beads"))
+	for _, dir := range []string{want, filepath.Join(decoyParent, ".beads")} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("fixture must require common-parent fallback: %v", err)
+	}
+	decoyGitDir := runGitInDir(t, decoy, "rev-parse", "--absolute-git-dir")
+	for _, name := range []string{"decoy", "invalid_git_dir"} {
+		t.Run(name, func(t *testing.T) {
+			gitDir := decoyGitDir
+			if name == "invalid_git_dir" {
+				gitDir = filepath.Join(t.TempDir(), "missing.git")
+			}
+			t.Setenv("GIT_DIR", gitDir)
+			t.Setenv("GIT_WORK_TREE", decoy)
+			t.Setenv("GIT_COMMON_DIR", filepath.Join(decoyParent, ".git"))
+			before := strings.Join(os.Environ(), "\x00")
+			if got := ResolveBeadsDirForRepo(target); !utils.PathsEqual(got, want) {
+				t.Errorf("ResolveBeadsDirForRepo() = %q, want target %q", got, want)
+			}
+			if strings.Join(os.Environ(), "\x00") != before {
+				t.Error("resolver changed inherited environment")
+			}
+		})
+	}
 }

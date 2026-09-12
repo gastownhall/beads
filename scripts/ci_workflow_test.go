@@ -142,6 +142,22 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	}
 }
 
+func TestPRWorkflowExercisesWindowsEnvironmentHelpers(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	// The benchmark test owns this shared job's matrix and CI Gate propagation.
+	job := workflow.job(t, "pr-preflight-platforms")
+	step := job.step(t, "Check shared environment key semantics")
+	if step.If != "matrix.os == 'windows-latest'" || step.Shell != "bash" {
+		t.Errorf("environment helpers need native Windows Bash: if=%q shell=%q", step.If, step.Shell)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Error("environment helper step may not continue on error")
+	}
+	if got := strings.TrimSpace(step.Run); got != "bash scripts/ci/test-windows-env-helpers.sh" {
+		t.Errorf("environment helper entrypoint = %q", got)
+	}
+}
+
 func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-cmd-bd-puregeo-tests")

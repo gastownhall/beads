@@ -21,6 +21,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/utils"
@@ -228,12 +229,12 @@ func preferStableBranchWorktreeBeadsDir(beadsDir string) string {
 		return ""
 	}
 
-	branch, err := gitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	branch, err := selectedBeadsGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil || branch != "HEAD" {
 		return ""
 	}
 
-	head, err := gitOutput(repoRoot, "rev-parse", "HEAD")
+	head, err := selectedBeadsGitOutput(repoRoot, "rev-parse", "HEAD")
 	if err != nil || head == "" {
 		return ""
 	}
@@ -282,9 +283,21 @@ func isDetachedCommitWorktreePath(path string) bool {
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
+	return gitOutputEnv(nil, dir, args...)
+}
+
+// selectedBeadsGitOutput probes the repository of an already selected .beads path.
+// The shared filter also removes GIT_CONFIG_* sandbox overrides; ordinary
+// system/global config becomes visible again. Config authority is a separate policy.
+func selectedBeadsGitOutput(dir string, args ...string) (string, error) {
+	return gitOutputEnv(gitenv.ScrubRouting(os.Environ()), dir, args...)
+}
+
+func gitOutputEnv(env []string, dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // args are internal, not user-supplied
+	cmd.Env = env
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -293,7 +306,7 @@ func gitOutput(dir string, args ...string) (string, error) {
 }
 
 func listWorktrees(repoRoot string) ([]worktreeInfo, error) {
-	output, err := gitOutput(repoRoot, "worktree", "list", "--porcelain")
+	output, err := selectedBeadsGitOutput(repoRoot, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +611,7 @@ func FindBeadsDirFrom(startDir string) string {
 
 	startDir = utils.CanonicalizePath(startDir)
 	repoRoot := ""
-	if out, err := gitOutput(startDir, "rev-parse", "--show-toplevel"); err == nil {
+	if out, err := selectedBeadsGitOutput(startDir, "rev-parse", "--show-toplevel"); err == nil {
 		repoRoot = utils.CanonicalizePath(out)
 	}
 
@@ -1053,6 +1066,7 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 
 func worktreeFallbackBeadsDirForRepo(repoPath string) string {
 	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return ""
