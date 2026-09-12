@@ -9,8 +9,8 @@
   - Both SHAs independently re-verified via `git rev-parse --verify --quiet "<sha>^{commit}"` — both resolve.
   - Base: `origin/main` @ `a690b0a8c4d1ddc4f0bd9bf767499625dd71bc96`. Re-confirmed via fresh `git fetch origin main` immediately before writing this gate: `origin/main` tip and `merge-base(HEAD, origin/main)` are identical — origin/main has not moved since be-193q1's review.
 **Branch:** `deploy/be-gftj8-gate`
-**Push target:** `headfork` (`quad341/beads-sec003-contrib`)
-**PR:** to be opened immediately following this gate record.
+**Push target:** `headfork` (`quad341/beads-sec003-contrib`) — pushed and independently re-verified: `git ls-remote headfork refs/heads/deploy/be-gftj8-gate` returns `517c6d1c267ee54a24be17e55c1bf09fd4f8bf4a`, matching local `HEAD` exactly.
+**PR:** [gastownhall/beads#6501](https://github.com/gastownhall/beads/pull/6501) — `quad341:deploy/be-gftj8-gate` → `gastownhall:main`. Verified via `gh pr view 6501`: `state=OPEN`, `mergeable=MERGEABLE`, `author=quad341` (our own account — not an external contributor, no human-hold triggered).
 
 ## Verdict: 7/7 — PASS, no waivers
 
@@ -79,4 +79,4 @@ This follows established precedent: be-gd3v, be-79jh, be-39ss, be-pp7e, be-r3ysh
 
 ## Disposition
 
-**PASS, 7/7, no waivers.** PR to be opened on `headfork` (`quad341/beads-sec003-contrib`) `deploy/be-gftj8-gate` → `gastownhall/beads` `main`. Two pre-existing, non-diff-owned policy/lint findings encountered during gate evaluation, both attributed to their exact pre-existing tracker beads (be-a0dxu, be-w4qbu) with clause-3 proof and citation comments posted this round. Full-suite test lane clean: zero failures, all 8 diff-owned tests independently confirmed by name. Reporting to mayor for visibility only; no merge-request routed, per contributor-only merge-authority carve-out.
+**PASS, 7/7, no waivers.** PR [gastownhall/beads#6501](https://github.com/gastownhall/beads/pull/6501) opened, verified OPEN and MERGEABLE, authored by our own account (no external-contributor human-hold triggered). Two pre-existing, non-diff-owned policy/lint findings encountered during gate evaluation, both attributed to their exact pre-existing tracker beads (be-a0dxu, be-w4qbu) with clause-3 proof and citation comments posted this round. Full-suite test lane clean: zero failures, all 8 diff-owned tests independently confirmed by name. Reporting to mayor for visibility only; no merge-request routed, per contributor-only merge-authority carve-out.
