@@ -550,6 +550,54 @@ func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(ctx, cliExecTimeoutDuration())
 }
 
+// transferExecTimeout is the default read deadline on the one-shot connections
+// that carry server-side transfer work — CALL DOLT_PUSH / DOLT_FETCH /
+// DOLT_PULL and the merge that follows a pull. It is the server-mode sibling of
+// cliExecTimeout: the pool's much shorter deadline would kill any procedure
+// that performs sustained network I/O to a git remote, so these callers open
+// their own connection with this deadline instead.
+//
+// Five minutes is ample for an ordinary store and far too short for a large
+// one. A 2.3GB / ~28k-commit store took well over half an hour to push, and
+// before this was configurable every attempt died at exactly 5m with a bare
+// "read tcp ...: i/o timeout / invalid connection" that named neither the
+// deadline nor a way to raise it. Set BEADS_DOLT_TRANSFER_TIMEOUT to override.
+const transferExecTimeout = 5 * time.Minute
+
+// transferExecTimeoutEnv is the environment variable that overrides
+// transferExecTimeout.
+const transferExecTimeoutEnv = "BEADS_DOLT_TRANSFER_TIMEOUT"
+
+// annotateTransferTimeout turns the driver's opaque read-deadline failure into
+// an actionable one. When the one-shot connection's ReadTimeout fires mid
+// transfer, the go-sql-driver logs "read tcp ...: i/o timeout" and returns
+// driver.ErrBadConn, which surfaces to the user as a bare "invalid connection"
+// — naming neither the deadline that fired nor the knob that raises it. This
+// mirrors what cliTransferError does for the dolt-CLI path.
+func annotateTransferTimeout(err error, deadline time.Duration) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, mysql.ErrInvalidConn) && !errors.Is(err, driver.ErrBadConn) &&
+		!errors.Is(err, os.ErrDeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w (the server-side transfer exceeded the %v read deadline; raise it with %s, e.g. %s=90m)",
+		err, deadline, transferExecTimeoutEnv, transferExecTimeoutEnv)
+}
+
+// transferExecTimeoutDuration returns the configured server-side transfer read
+// deadline. BEADS_DOLT_TRANSFER_TIMEOUT overrides the compiled-in
+// transferExecTimeout const; valid time.ParseDuration strings (e.g. "90m",
+// "300s") or bare numbers treated as seconds (e.g. "5400") are accepted. Unset,
+// invalid, or non-positive values fall back to transferExecTimeout — to remove
+// the deadline entirely, pass a duration longer than any transfer you expect
+// (the no-deadline callers below pass 0 to oneShotConn directly and are
+// deliberately not routed through this).
+func transferExecTimeoutDuration() time.Duration {
+	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
+}
+
 // timeoutFromEnv returns the duration configured in the named env var, falling
 // back to fallback when the var is unset, unparsable, or non-positive. Valid
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
@@ -2229,9 +2277,11 @@ func buildServerDSN(cfg *Config, database string) string {
 	return parsed.FormatDSN()
 }
 
-// execWithLongTimeout opens a one-shot database connection with readTimeout=5m
-// and executes the given query. Push/pull operations can exceed the default
-// readTimeout when the server performs network I/O to git remotes.
+// execWithLongTimeout opens a one-shot database connection with the configured
+// transfer read deadline (transferExecTimeoutDuration, default 5m, overridable
+// with BEADS_DOLT_TRANSFER_TIMEOUT) and executes the given query. Push/pull
+// operations can exceed the default readTimeout when the server performs
+// network I/O to git remotes.
 //
 // The query is wrapped in an explicit transaction (BEGIN/COMMIT) so that
 // DOLT_PULL merge operations succeed even when the server runs with
@@ -2251,7 +2301,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	if err != nil {
 		return fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
 	}
-	cfg.ReadTimeout = 5 * time.Minute
+	cfg.ReadTimeout = transferExecTimeoutDuration()
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
 		return fmt.Errorf("failed to open long-timeout connection: %w", err)
@@ -2278,19 +2328,21 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
-	db, err := s.oneShotConn(5 * time.Minute)
+	deadline := transferExecTimeoutDuration()
+	db, err := s.oneShotConn(deadline)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	return annotateTransferTimeout(err, deadline)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
 // (0 = no deadline), for callers that pass a DBConn into versioncontrolops.
 // The pool's 10s ReadTimeout kills any server-side procedure that performs
-// sustained network I/O; push/pull use 5m, while backup sync/restore use no
+// sustained network I/O; push/pull use transferExecTimeoutDuration (5m by
+// default, BEADS_DOLT_TRANSFER_TIMEOUT), while backup sync/restore use no
 // deadline at all — a first sync to a remote destination (gs://) can exceed
 // any fixed budget, and the server aborts the transfer when the client
 // connection drops, so a too-short deadline can never converge by retrying.
@@ -4320,7 +4372,7 @@ func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
 	}
-	cfg.ReadTimeout = 5 * time.Minute
+	cfg.ReadTimeout = transferExecTimeoutDuration()
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open long-timeout connection: %w", err)
