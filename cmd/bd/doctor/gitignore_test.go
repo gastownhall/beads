@@ -1967,6 +1967,59 @@ func TestEnsureProjectGitignore_AppendsToExisting(t *testing.T) {
 	}
 }
 
+func TestEnsureProjectGitignore_PreservesAppendLineEndings(t *testing.T) {
+	lfSection := ProjectGitignoreHeader + "\n" + strings.Join(ProjectGitignorePatterns, "\n") + "\n"
+	lfBlock := "\n" + lfSection
+	crlfBlock := "\r\n" + ProjectGitignoreHeader + "\r\n" + strings.Join(ProjectGitignorePatterns, "\r\n") + "\r\n"
+	partial := ProjectGitignoreHeader + "\r\n" + ProjectGitignorePatterns[0] + "\r\n"
+	remaining := "\r\n" + ProjectGitignoreHeader + "\r\n" + strings.Join(ProjectGitignorePatterns[1:], "\r\n") + "\r\n"
+	complete := ProjectGitignoreHeader + "\r\n" + strings.Join(ProjectGitignorePatterns, "\r\n")
+	for _, tc := range []struct {
+		name, existing, want string
+		missing              bool
+	}{
+		{"empty", "", lfSection, false},
+		{"missing", "", lfSection, true},
+		{"whitespace", " \t", " \t\n" + lfBlock, false},
+		{"blank LF", "\n", "\n" + lfBlock, false},
+		{"blank CRLF", "\r\n", "\r\n" + crlfBlock, false},
+		{"delimiter-free", "local", "local\n" + lfBlock, false},
+		{"LF", "local\n", "local\n" + lfBlock, false},
+		{"CRLF", "local\r\n", "local\r\n" + crlfBlock, false},
+		{"CRLF unterminated", "local\r\nlast", "local\r\nlast\r\n" + crlfBlock, false},
+		{"CRLF trailing CR", "local\r\nlast\r", "local\r\nlast\r\n" + crlfBlock, false},
+		{"LF trailing CR", "local\nlast\r", "local\nlast\r\n" + lfBlock, false},
+		{"only trailing CR", "local\r", "local\r\n" + lfBlock, false},
+		{"mixed majority CRLF", "a\r\nb\r\nc\n", "a\r\nb\r\nc\n" + lfBlock, false},
+		// Re-emitting an existing header is pre-existing behavior, preserved here.
+		{"partial with header", partial, partial + remaining, false},
+		{"complete unterminated", complete, complete, false},
+		{"complete CRLF", complete + "\r\n", complete + "\r\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".gitignore")
+			if !tc.missing {
+				if err := os.WriteFile(path, []byte(tc.existing), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for call := 1; call <= 2; call++ {
+				if err := EnsureProjectGitignore(dir); err != nil {
+					t.Fatalf("call %d: %v", call, err)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != tc.want {
+					t.Fatalf("call %d: got bytes %q, want %q", call, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestEnsureProjectGitignore_Idempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldDir, err := os.Getwd()

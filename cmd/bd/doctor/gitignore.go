@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/gitignore"
 )
 
 // GitignoreTemplate is the canonical .beads/.gitignore content
@@ -762,19 +764,20 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 
 // EnsureProjectGitignore adds .dolt/, *.db, and .beads-credential-key patterns
 // to the project-root .gitignore if they are not already present. Creates the
-// file if it doesn't exist. This prevents users from accidentally committing
+// file if it doesn't exist. Empty or missing files start with the header;
+// nonempty files retain their bytes and receive a blank separator before it.
+// This prevents users from accidentally committing
 // Dolt database files or the credential encryption key.
 // repoPath is the project root directory.
 func EnsureProjectGitignore(repoPath string) error {
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
 
-	var existingContent string
 	// #nosec G304 -- path is hardcoded
-	if content, err := os.ReadFile(gitignorePath); err == nil {
-		existingContent = string(content)
-	} else if !os.IsNotExist(err) {
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to read .gitignore: %w", err)
 	}
+	existingContent := string(content)
 
 	var toAdd []string
 	for _, pattern := range ProjectGitignorePatterns {
@@ -787,18 +790,16 @@ func EnsureProjectGitignore(repoPath string) error {
 		return nil // All patterns already present
 	}
 
-	newContent := existingContent
-	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
-		newContent += "\n"
+	lines := make([]string, 0, len(toAdd)+2)
+	if len(content) > 0 {
+		lines = append(lines, "")
 	}
-
-	newContent += "\n" + ProjectGitignoreHeader + "\n"
-	for _, pattern := range toAdd {
-		newContent += pattern + "\n"
-	}
+	lines = append(lines, ProjectGitignoreHeader)
+	lines = append(lines, toAdd...)
+	newContent := gitignore.AppendLines(content, lines)
 
 	// #nosec G306 -- gitignore needs to be readable by git and collaborators
-	if err := os.WriteFile(gitignorePath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(gitignorePath, newContent, 0644); err != nil {
 		return fmt.Errorf("failed to write .gitignore: %w", err)
 	}
 
