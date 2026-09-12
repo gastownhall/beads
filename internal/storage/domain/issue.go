@@ -21,6 +21,12 @@ type InsertIssueOpts struct {
 
 type IssueTableOpts struct {
 	UseWispsTable bool
+	// IsClaim marks an update that rides the same transaction as the claim
+	// verb that produced the row's in_progress state (ExecuteUpdate's
+	// --claim path). It lets the repository's lease-clear decision re-arm
+	// the lease instead of deleting it when the update still leaves the
+	// issue in_progress with a live assignee (be-plv).
+	IsClaim bool
 }
 
 type ClaimRowResult struct {
@@ -477,11 +483,11 @@ func (u *issueUseCaseImpl) getByIDs(ctx context.Context, ids []string, useWisp b
 }
 
 func (u *issueUseCaseImpl) UpdateIssue(ctx context.Context, id string, updates map[string]any, actor string) error {
-	return u.update(ctx, id, updates, actor, false)
+	return u.update(ctx, id, updates, actor, false, false)
 }
 
 func (u *issueUseCaseImpl) UpdateWisp(ctx context.Context, id string, updates map[string]any, actor string) error {
-	return u.update(ctx, id, updates, actor, true)
+	return u.update(ctx, id, updates, actor, true, false)
 }
 
 // CompareAndSetMetadataKey passes the plan straight through.
@@ -504,7 +510,7 @@ func (u *issueUseCaseImpl) ReleaseIssue(ctx context.Context, req publicops.Relea
 	return u.issueRepo.ReleaseIssue(ctx, req)
 }
 
-func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[string]any, actor string, useWisp bool) error {
+func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[string]any, actor string, useWisp, isClaim bool) error {
 	if id == "" {
 		return fmt.Errorf("update: id must not be empty")
 	}
@@ -517,7 +523,7 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if err := u.validateIssueTypeUpdate(ctx, updates); err != nil {
 		return err
 	}
-	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp})
+	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp, IsClaim: isClaim})
 }
 
 // validateIssueTypeUpdate rejects an issue_type the configuration does not
@@ -729,14 +735,14 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	if len(spec.Fields) > 0 {
-		if useWisp {
-			if err := u.UpdateWisp(ctx, id, spec.Fields, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := u.UpdateIssue(ctx, id, spec.Fields, actor); err != nil {
-				return nil, err
-			}
+		// Call the private helper directly instead of UpdateWisp/UpdateIssue
+		// so spec.Claim reaches the repository: this update rides the same
+		// transaction as the ClaimIssue/ClaimWisp call above when spec.Claim
+		// is set, and the repository needs that signal to re-arm the lease
+		// instead of deleting it if the update leaves the issue in_progress
+		// with a live assignee (be-plv).
+		if err := u.update(ctx, id, spec.Fields, actor, useWisp, spec.Claim); err != nil {
+			return nil, err
 		}
 	}
 

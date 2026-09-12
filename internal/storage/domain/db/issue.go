@@ -283,7 +283,32 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 	}
 	if clearLease && !opts.UseWispsTable {
-		if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
+		// opts.IsClaim marks an update riding the same transaction as the
+		// claim verb that produced oldIssue's in_progress state (ExecuteUpdate's
+		// --claim path, e.g. `bd update --claim --assignee=X`). ManageLeaseOnUpdate
+		// above reads an assignee override as an ownership transfer and asks for
+		// the lease to be deleted, but here it's the claim verb's own lease being
+		// deleted microseconds after ClaimIssue/ClaimWisp granted it (be-plv). Read
+		// the row this transaction just wrote — rather than re-deriving status/
+		// assignee from the updates map, which would duplicate
+		// issueops.finalAssigneeIfStillClaimed's field-resolution switch — and
+		// re-arm instead of delete when the issue is still in_progress with a
+		// live assignee.
+		holder, stillClaimed := "", false
+		if opts.IsClaim {
+			freshIssue, ferr := r.Get(ctx, id, opts)
+			if ferr != nil {
+				return fmt.Errorf("db: Update %s: read updated issue for lease check: %w", id, ferr)
+			}
+			if freshIssue.Status == types.StatusInProgress && freshIssue.Assignee != "" {
+				holder, stillClaimed = freshIssue.Assignee, true
+			}
+		}
+		if stillClaimed {
+			if err := issueops.UpsertLeaseInTx(ctx, r.runner, id, holder, time.Now().UTC(), issueops.LeaseTTL(ctx)); err != nil {
+				return fmt.Errorf("db: Update %s: re-arm lease: %w", id, err)
+			}
+		} else if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
 			return fmt.Errorf("db: Update %s: clear lease: %w", id, err)
 		}
 	}
