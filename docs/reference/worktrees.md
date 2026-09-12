@@ -12,6 +12,11 @@ separate from Git branch commits.
 All worktrees in the same repository use the same beads workspace unless you
 override discovery with `BEADS_DIR`.
 
+Startup Git discovery probes for every `bd` command scrub inherited Git routing
+variables such as `GIT_DIR` and `GIT_WORK_TREE` from their subprocess environment.
+Clearing those variables from the `bd` process environment applies only to
+`bd worktree` commands.
+
 ```
 project/
 ├── .git/                 # Shared Git directory
