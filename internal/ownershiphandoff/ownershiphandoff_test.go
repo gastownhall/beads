@@ -77,6 +77,43 @@ func TestValidateRejectsSymlinkRootAndExternalEndpoint(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsRawParentEscapeAfterSymlink pins the canonical-form rule on
+// Endpoint.Socket. resolvePathForContainment opens with filepath.Clean, which
+// collapses "link/.." lexically before any symlink is resolved, so a socket
+// spelled with a raw ".." after a symlinked directory looked contained to the
+// Rel check while the kernel, which walks the link before the "..", creates it
+// outside root. Root carries this rule already; its sibling field did not.
+//
+// The escaping path must be built by string concatenation. filepath.Join cleans
+// the ".." away itself, so a Join-built case never reaches the validator in the
+// form that escapes and would pass with or without the rule.
+func TestValidateRejectsRawParentEscapeAfterSymlink(t *testing.T) {
+	r := validRequest(t)
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(r.Root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	sep := string(filepath.Separator)
+	r.Endpoint = Endpoint{Socket: r.Root + sep + "link" + sep + ".." + sep + "evil.sock"}
+	if err := ValidateRequest(r); err == nil {
+		t.Fatalf("socket escaping root through a raw parent reference accepted: %q", r.Endpoint.Socket)
+	}
+
+	// The rule must not cost a canonical socket inside root its eligibility.
+	r.Endpoint = Endpoint{Socket: filepath.Join(r.Root, "beads.sock")}
+	if err := ValidateRequest(r); err != nil {
+		t.Fatalf("canonical in-root socket rejected: %v", err)
+	}
+}
+
 // TestValidateNamesTheIncompleteEndpoint pins the message, not just the
 // rejection: an endpoint with no host at all is incomplete, and reporting it as
 // "external" misdirects the reader.
