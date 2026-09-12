@@ -1,0 +1,1763 @@
+{
+  "fixtureVersion": 1,
+  "id": "reference-read-v1",
+  "realization": "bdptest",
+  "seed": 0,
+  "capabilities": [
+    "public-http",
+    "controlled-read-advertised-limits-v1",
+    "controlled-read-external-endpoint-v1",
+    "controlled-read-pagination-v1",
+    "controlled-read-problem-table-v1",
+    "controlled-read-scope-restore-v1",
+    "controlled-external-type-publisher-v1",
+    "exact-raw-request-target",
+    "reference-read-v1",
+    "reference-read-v1-single-page",
+    "cors-disabled",
+    "unexpected-internal-fault",
+    "alias-resolution-v1",
+    "disclosure-v1",
+    "owned-links-v1",
+    "attribution-links-v1",
+    "attribution-v1",
+    "owned-wildcard-v1"
+  ],
+  "bindings": {
+    "bead.demo-a": "beads/demo-a",
+    "bead.demo-b": "beads/demo-b",
+    "bead.demo-c": "beads/demo-c",
+    "link.demo-b-a": "links/demo-b-a",
+    "bead.demo-f": "beads/demo-f",
+    "alias.decision": "alias/decision",
+    "alias.releases-latest": "alias/releases/latest",
+    "alias.unknown": "alias/never-created",
+    "bead.pruned": "beads/pruned-relic",
+    "bead.erased": "beads/erased-relic",
+    "link.demo-j-k": "links/demo-j-k"
+  },
+  "aliases": {
+    "decision": "beads/demo-f",
+    "releases/latest": "beads/demo-a"
+  },
+  "disclosures": [
+    {
+      "localId": "beads/pruned-relic",
+      "code": "resource-pruned",
+      "archivedAt": {
+        "uri": "https://archive.example/acme/beads/pruned-relic",
+        "revision": "arch-r4 (as-written)"
+      }
+    },
+    {
+      "localId": "beads/erased-relic",
+      "code": "resource-erased"
+    }
+  ],
+  "private": {
+    "internalFaultSentinel": "bdp-private-internal-fault-reference-91c50f775b1b"
+  },
+  "oracles": {
+    "external-endpoint": {
+      "input": {
+        "linkIds": [
+          "links/external-target",
+          "links/external-source",
+          "links/pinned-local",
+          "links/ZZ-collation"
+        ]
+      },
+      "rows": [
+        [
+          "links/external-target",
+          "https://work.example/types/blocks",
+          ["beads/demo-f"],
+          ["external:beads:mol-run-assignee", "  Cited-9F2c — α/β (draft) Å\t"]
+        ],
+        [
+          "links/external-source",
+          "https://work.example/types/blocks",
+          ["external:beads:mol-run-assignee"],
+          ["beads/demo-f"]
+        ],
+        [
+          "links/pinned-local",
+          "https://work.example/types/blocks",
+          ["urn:external:pin-witness"],
+          ["beads/demo-f", "pin-a-r1 (as-written)"]
+        ],
+        [
+          "links/ZZ-collation",
+          "https://work.example/types/blocks",
+          ["urn:external:collation-witness"],
+          ["beads/demo-f"]
+        ]
+      ],
+      "externalEndpoints": 4,
+      "localSource": 1,
+      "localTarget": 3
+    },
+    "scope-restore": {
+      "input": {
+        "stableId": "beads/demo-a",
+        "deletedId": "beads/demo-f",
+        "view": "restore-view",
+        "epoch": "restore-epoch"
+      },
+      "evidence": {
+        "mode": "same-scope",
+        "scopeChanged": false,
+        "stableIdentityChanged": false,
+        "deletedStatusAtRestoredScope": 404,
+        "deletedCodeAtRestoredScope": "resource-not-found",
+        "scopeEpochChanged": true,
+        "staleCursorStatus": 410,
+        "staleCursorCode": "cursor-expired",
+        "oldStableStatus": null,
+        "oldDeletedStatus": null
+      }
+    },
+    "cross-target": {
+      "input": {
+        "relationshipRoles": [
+          {
+            "type": "https://work.example/types/blocks",
+            "role": "blocks"
+          },
+          {
+            "type": "https://work.example/types/relates",
+            "role": "relates"
+          }
+        ],
+        "realizationOnlyLinkIds": ["links/pinned-local", "links/cites-local", "links/cites-witness"]
+      },
+      "projection": {
+        "beadStatuses": [
+          ["A", "open", 2],
+          ["B", "open", 2],
+          ["C", "closed", 2],
+          ["D", "open", 2],
+          ["E", "deferred", 2],
+          ["F", "open", 2],
+          ["I", "open", 2],
+          ["J", "open", 2],
+          ["K", "closed", 2]
+        ],
+        "relationships": [
+          ["A", "C", "blocks"],
+          ["B", "A", "blocks"],
+          ["D", "C", "blocks"],
+          ["E", "F", "relates"],
+          ["F", "E", "blocks"],
+          ["I", "A", "blocks"],
+          ["I", "C", "blocks"],
+          ["J", "C", "blocks"],
+          ["J", "K", "blocks"]
+        ]
+      }
+    },
+    "pagination": {
+      "selector": {
+        "input": {
+          "collection": "beads",
+          "selector": "$[?@.properties.status == \"open\" && @.type == \"https://work.example/types/task\"]",
+          "limit": 2,
+          "syntaxSelector": "$[?]",
+          "overLimitSelector": "$[?@.properties.status == \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]",
+          "selectorLimits": {
+            "bytes": 128,
+            "depth": 16,
+            "nodes": 64
+          },
+          "authorizationExcludedId": "beads/demo-b",
+          "view": "view-a",
+          "epoch": "epoch-a"
+        },
+        "expectedIds": ["beads/demo-a", "beads/demo-d", "beads/demo-i", "beads/demo-j"],
+        "expectedPageSizes": [2, 2]
+      },
+      "collection-snapshot": {
+        "input": {
+          "collection": "beads",
+          "limit": 2,
+          "mutation": {
+            "candidateIds": ["beads/demo-k"],
+            "revision": "conformance-mutated-revision"
+          },
+          "view": "view-a",
+          "epoch": "epoch-a"
+        },
+        "expectedIds": [
+          "beads/demo-a",
+          "beads/demo-b",
+          "beads/demo-c",
+          "beads/demo-d",
+          "beads/demo-e",
+          "beads/demo-f",
+          "beads/demo-i",
+          "beads/demo-j",
+          "beads/demo-k"
+        ],
+        "expectedPageSizes": [2, 2, 2, 2, 1]
+      },
+      "cursor-errors": {
+        "input": {
+          "collection": "beads",
+          "limit": 2,
+          "malformedQuery": {
+            "cursor": "not-issued",
+            "limit": "2"
+          },
+          "clockAdvanceMs": 101,
+          "initialView": "view-a",
+          "foreignView": "view-b",
+          "initialEpoch": "epoch-a",
+          "foreignEpoch": "epoch-b"
+        }
+      },
+      "incident-links": {
+        "input": {
+          "collection": "links",
+          "bead": "beads/demo-a",
+          "direction": "both",
+          "limit": 1,
+          "mutation": {
+            "candidateIds": [
+              "links/cites-local",
+              "links/demo-a-c",
+              "links/demo-b-a",
+              "links/demo-i-a"
+            ],
+            "revision": "conformance-mutated-revision"
+          },
+          "clockAdvanceMs": 101,
+          "view": "view-a",
+          "epoch": "epoch-a"
+        },
+        "expectedCollectionIds": [
+          "links/ZZ-collation",
+          "links/cites-local",
+          "links/cites-witness",
+          "links/demo-a-c",
+          "links/demo-b-a",
+          "links/demo-d-c",
+          "links/demo-e-f",
+          "links/demo-f-e",
+          "links/demo-i-a",
+          "links/demo-i-c",
+          "links/demo-j-c",
+          "links/demo-j-k",
+          "links/external-source",
+          "links/external-target",
+          "links/pinned-local"
+        ],
+        "expectedIncidentLinkIds": [
+          "links/cites-local",
+          "links/demo-a-c",
+          "links/demo-b-a",
+          "links/demo-i-a"
+        ],
+        "expectedCollectionPageSizes": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "expectedIncidentPageSizes": [1, 1, 1, 1],
+        "publicRequests": 23
+      }
+    },
+    "resources": {
+      "bead.demo-a": {
+        "id": "beads/demo-a",
+        "properties": {
+          "id": "demo-a",
+          "title": "A",
+          "status": "open",
+          "priority": 2,
+          "issue_type": "task",
+          "created_at": "2026-08-08T23:33:31Z",
+          "created_by": "bdp-conformance",
+          "updated_at": "2026-08-08T23:33:31Z",
+          "dependencies": [
+            {
+              "issue_id": "demo-a",
+              "depends_on_id": "demo-c",
+              "type": "blocks",
+              "created_at": "2026-08-08T23:33:31Z",
+              "created_by": "bdp-conformance",
+              "metadata": "{}"
+            }
+          ],
+          "dependency_count": 1,
+          "dependent_count": 2,
+          "comment_count": 0,
+          "extension": "retained"
+        }
+      },
+      "link.demo-b-a": {
+        "id": "links/demo-b-a",
+        "source": "beads/demo-b",
+        "target": "beads/demo-a",
+        "properties": {
+          "constraint": "hard",
+          "extension": "retained"
+        }
+      }
+    },
+    "collections": {
+      "bead-titles": ["A", "B", "C", "D", "E", "F", "I", "J", "K"],
+      "link-records": [
+        [
+          "links/demo-b-a",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-b",
+          "",
+          "beads/demo-a",
+          "",
+          {
+            "constraint": "hard",
+            "extension": "retained"
+          }
+        ],
+        [
+          "links/demo-a-c",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-a",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/demo-d-c",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-d",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/demo-f-e",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-f",
+          "",
+          "beads/demo-e",
+          "",
+          {}
+        ],
+        [
+          "links/demo-e-f",
+          "https://work.example/types/relates",
+          "1",
+          "beads/demo-e",
+          "",
+          "beads/demo-f",
+          "",
+          {
+            "context": "reference",
+            "extension": "retained"
+          }
+        ],
+        [
+          "links/demo-i-a",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-i",
+          "",
+          "beads/demo-a",
+          "",
+          {}
+        ],
+        [
+          "links/demo-i-c",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-i",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/demo-j-c",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-j",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/demo-j-k",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-j",
+          "",
+          "beads/demo-k",
+          "",
+          {}
+        ],
+        [
+          "links/external-target",
+          "https://work.example/types/blocks",
+          "1",
+          "beads/demo-f",
+          "",
+          "external:beads:mol-run-assignee",
+          "  Cited-9F2c — α/β (draft) Å\t",
+          {
+            "label": "opaque authored label",
+            "source": {
+              "ownedLinks": {
+                "*": ["opaque authored value"]
+              }
+            }
+          }
+        ],
+        [
+          "links/external-source",
+          "https://work.example/types/blocks",
+          "1",
+          "external:beads:mol-run-assignee",
+          "",
+          "beads/demo-f",
+          "",
+          {}
+        ],
+        [
+          "links/pinned-local",
+          "https://work.example/types/blocks",
+          "1",
+          "urn:external:pin-witness",
+          "",
+          "beads/demo-f",
+          "pin-a-r1 (as-written)",
+          {}
+        ],
+        [
+          "links/cites-local",
+          "https://work.example/types/cites",
+          "1",
+          "beads/demo-f",
+          "",
+          "beads/demo-a",
+          "",
+          {}
+        ],
+        [
+          "links/cites-witness",
+          "https://work.example/types/cites",
+          "1",
+          "beads/demo-f",
+          "",
+          "urn:external:cites-witness",
+          "w-1",
+          {}
+        ],
+        [
+          "links/ZZ-collation",
+          "https://work.example/types/blocks",
+          "1",
+          "urn:external:collation-witness",
+          "",
+          "beads/demo-f",
+          "",
+          {}
+        ]
+      ],
+      "type-ids": [
+        "https://work.example/types/tracked-item",
+        "https://work.example/types/work-item",
+        "https://work.example/types/task",
+        "https://work.example/types/bug",
+        "https://work.example/types/feature",
+        "https://work.example/types/chore",
+        "https://work.example/types/epic",
+        "https://work.example/types/decision",
+        "https://work.example/types/relationship",
+        "https://work.example/types/dependency",
+        "https://work.example/types/blocks",
+        "https://work.example/types/relates",
+        "https://work.example/types/cites"
+      ]
+    },
+    "structural-predicates": {
+      "beads-type": ["A", "B", "D", "I", "J", "K"],
+      "beads-type-is-exact": [],
+      "beads-conforms-to-declared-type": ["A", "B", "D", "I", "J", "K"],
+      "beads-conforms-to": ["A", "B", "C", "D", "E", "I", "J", "K"],
+      "beads-predicates-and": [],
+      "links-source-local": ["links/demo-a-c"],
+      "links-target-absolute": [
+        "links/demo-a-c",
+        "links/demo-d-c",
+        "links/demo-i-c",
+        "links/demo-j-c"
+      ],
+      "links-endpoint-or": [
+        "links/demo-b-a",
+        "links/demo-a-c",
+        "links/demo-i-a",
+        "links/cites-local"
+      ],
+      "links-type": [
+        "links/demo-b-a",
+        "links/demo-a-c",
+        "links/demo-d-c",
+        "links/demo-f-e",
+        "links/demo-i-a",
+        "links/demo-i-c",
+        "links/demo-j-c",
+        "links/demo-j-k",
+        "links/external-target",
+        "links/external-source",
+        "links/pinned-local",
+        "links/ZZ-collation"
+      ],
+      "links-type-is-exact": [],
+      "links-conforms-to-declared-type": [
+        "links/demo-b-a",
+        "links/demo-a-c",
+        "links/demo-d-c",
+        "links/demo-f-e",
+        "links/demo-i-a",
+        "links/demo-i-c",
+        "links/demo-j-c",
+        "links/demo-j-k",
+        "links/external-target",
+        "links/external-source",
+        "links/pinned-local",
+        "links/ZZ-collation"
+      ],
+      "links-conforms-to": [
+        "links/demo-b-a",
+        "links/demo-a-c",
+        "links/demo-d-c",
+        "links/demo-f-e",
+        "links/demo-i-a",
+        "links/demo-i-c",
+        "links/demo-j-c",
+        "links/demo-j-k",
+        "links/external-target",
+        "links/external-source",
+        "links/pinned-local",
+        "links/ZZ-collation"
+      ],
+      "links-conforms-to-cross-kind": [],
+      "links-predicates-and": ["links/demo-a-c"],
+      "links-endpoint-pinned-target": [
+        "links/demo-f-e",
+        "links/demo-e-f",
+        "links/external-target",
+        "links/external-source",
+        "links/pinned-local",
+        "links/cites-local",
+        "links/cites-witness",
+        "links/ZZ-collation"
+      ]
+    },
+    "incident-links": {
+      "demo-a-inbound": ["links/demo-b-a", "links/demo-i-a", "links/cites-local"],
+      "demo-a-outbound": ["links/demo-a-c"],
+      "demo-b-outbound": ["links/demo-b-a"],
+      "demo-b-inbound": [],
+      "demo-a-both": ["links/demo-b-a", "links/demo-a-c", "links/demo-i-a", "links/cites-local"],
+      "demo-a-default": ["links/demo-b-a", "links/demo-a-c", "links/demo-i-a", "links/cites-local"]
+    },
+    "alias": {
+      "root": "alias/"
+    },
+    "ordering": {
+      "beads": [
+        ["beads/demo-a"],
+        ["beads/demo-b"],
+        ["beads/demo-c"],
+        ["beads/demo-d"],
+        ["beads/demo-e"],
+        ["beads/demo-f"],
+        ["beads/demo-i"],
+        ["beads/demo-j"],
+        ["beads/demo-k"]
+      ],
+      "links": [
+        ["links/ZZ-collation"],
+        ["links/cites-local"],
+        ["links/cites-witness"],
+        ["links/demo-a-c"],
+        ["links/demo-b-a"],
+        ["links/demo-d-c"],
+        ["links/demo-e-f"],
+        ["links/demo-f-e"],
+        ["links/demo-i-a"],
+        ["links/demo-i-c"],
+        ["links/demo-j-c"],
+        ["links/demo-j-k"],
+        ["links/external-source"],
+        ["links/external-target"],
+        ["links/pinned-local"]
+      ],
+      "order": "canonical-uri",
+      "types": [
+        ["https://work.example/types/blocks"],
+        ["https://work.example/types/bug"],
+        ["https://work.example/types/chore"],
+        ["https://work.example/types/cites"],
+        ["https://work.example/types/decision"],
+        ["https://work.example/types/dependency"],
+        ["https://work.example/types/epic"],
+        ["https://work.example/types/feature"],
+        ["https://work.example/types/relates"],
+        ["https://work.example/types/relationship"],
+        ["https://work.example/types/task"],
+        ["https://work.example/types/tracked-item"],
+        ["https://work.example/types/work-item"]
+      ],
+      "links-type": [
+        ["links/ZZ-collation"],
+        ["links/demo-a-c"],
+        ["links/demo-b-a"],
+        ["links/demo-d-c"],
+        ["links/demo-f-e"],
+        ["links/demo-i-a"],
+        ["links/demo-i-c"],
+        ["links/demo-j-c"],
+        ["links/demo-j-k"],
+        ["links/external-source"],
+        ["links/external-target"],
+        ["links/pinned-local"]
+      ],
+      "demo-a-inbound": [["links/cites-local"], ["links/demo-b-a"], ["links/demo-i-a"]],
+      "demo-a-outbound": [["links/demo-a-c"]],
+      "demo-a-both": [
+        ["links/cites-local"],
+        ["links/demo-a-c"],
+        ["links/demo-b-a"],
+        ["links/demo-i-a"]
+      ]
+    },
+    "owned-links": {
+      "input": {
+        "bead": "beads/demo-f"
+      },
+      "ownedLinks": {
+        "https://work.example/types/cites": [
+          {
+            "id": "https://scope.example/acme/links/cites-local",
+            "type": "https://work.example/types/cites",
+            "revision": "1",
+            "source": "https://scope.example/acme/beads/demo-f",
+            "target": "https://scope.example/acme/beads/demo-a",
+            "properties": {}
+          },
+          {
+            "id": "https://scope.example/acme/links/cites-witness",
+            "type": "https://work.example/types/cites",
+            "revision": "1",
+            "source": "https://scope.example/acme/beads/demo-f",
+            "target": {
+              "uri": "urn:external:cites-witness",
+              "revision": "w-1"
+            },
+            "properties": {}
+          }
+        ],
+        "https://work.example/types/relates": [],
+        "https://work.example/types/blocks": [
+          {
+            "type": "https://work.example/types/blocks",
+            "revision": "1",
+            "source": "https://scope.example/acme/beads/demo-f",
+            "target": "https://scope.example/acme/beads/demo-e",
+            "properties": {},
+            "id": "https://scope.example/acme/links/demo-f-e"
+          },
+          {
+            "type": "https://work.example/types/blocks",
+            "revision": "1",
+            "source": "https://scope.example/acme/beads/demo-f",
+            "target": {
+              "uri": "external:beads:mol-run-assignee",
+              "revision": "  Cited-9F2c — α/β (draft) Å\t"
+            },
+            "properties": {
+              "label": "opaque authored label",
+              "source": {
+                "ownedLinks": {
+                  "*": ["opaque authored value"]
+                }
+              }
+            },
+            "id": "https://scope.example/acme/links/external-target",
+            "attribution": {
+              "principal": "agent:reference-wildcard",
+              "status": "claimed"
+            }
+          }
+        ]
+      }
+    },
+    "attribution": {
+      "bead": {
+        "principal": "agent:fixture-author",
+        "status": "claimed"
+      },
+      "link": {
+        "principal": "svc:reference-realization",
+        "status": "unknown"
+      }
+    },
+    "wildcard-descriptors": {
+      "declaration": {
+        "input": {
+          "ids": [
+            "https://work.example/types/wildcard-probe-only",
+            "https://work.example/types/wildcard-probe-mixed",
+            "https://work.example/types/wildcard-probe-link"
+          ]
+        },
+        "descriptors": [
+          {
+            "id": "https://work.example/types/wildcard-probe-only",
+            "name": "only",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-mixed",
+            "name": "mixed",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 2
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-link",
+            "name": "link",
+            "describes": "link",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              }
+            },
+            "source": {
+              "conformsTo": []
+            },
+            "target": {
+              "conformsTo": []
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": "https://work.example/types/wildcard-probe-only",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-only",
+              "name": "only",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-mixed",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-mixed",
+              "name": "mixed",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                },
+                "https://work.example/types/cites": {
+                  "max": 2
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-link",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          }
+        ]
+      },
+      "max-required": {
+        "input": {
+          "ids": [
+            "https://work.example/types/wildcard-probe-missing",
+            "https://work.example/types/wildcard-probe-label",
+            "https://work.example/types/wildcard-probe-unknown",
+            "https://work.example/types/wildcard-probe-zero",
+            "https://work.example/types/wildcard-probe-negative",
+            "https://work.example/types/wildcard-probe-fraction",
+            "https://work.example/types/wildcard-probe-max-valid"
+          ]
+        },
+        "descriptors": [
+          {
+            "id": "https://work.example/types/wildcard-probe-missing",
+            "name": "missing",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {}
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-label",
+            "name": "label",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3,
+                "label": "no"
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-unknown",
+            "name": "unknown",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3,
+                "extra": true
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-zero",
+            "name": "zero",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 0
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-negative",
+            "name": "negative",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": -1
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-fraction",
+            "name": "fraction",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 1.5
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-max-valid",
+            "name": "missing",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 4
+              }
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": "https://work.example/types/wildcard-probe-missing",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-label",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-unknown",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-zero",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-negative",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-fraction",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-max-valid",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-max-valid",
+              "name": "missing",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 4
+                }
+              }
+            }
+          }
+        ]
+      },
+      "explicit-max-bounded": {
+        "input": {
+          "ids": [
+            "https://work.example/types/wildcard-probe-below",
+            "https://work.example/types/wildcard-probe-equal",
+            "https://work.example/types/wildcard-probe-above"
+          ]
+        },
+        "descriptors": [
+          {
+            "id": "https://work.example/types/wildcard-probe-below",
+            "name": "below",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 2
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-equal",
+            "name": "equal",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 3
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-above",
+            "name": "above",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 4
+              }
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": "https://work.example/types/wildcard-probe-below",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-below",
+              "name": "below",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                },
+                "https://work.example/types/cites": {
+                  "max": 2
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-equal",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-equal",
+              "name": "equal",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                },
+                "https://work.example/types/cites": {
+                  "max": 3
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-above",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          }
+        ]
+      }
+    },
+    "ownership-inventory": {
+      "beadsWithOwnership": 2,
+      "input": {
+        "ids": [
+          "https://work.example/types/tracked-item",
+          "https://work.example/types/work-item",
+          "https://work.example/types/task",
+          "https://work.example/types/bug",
+          "https://work.example/types/feature",
+          "https://work.example/types/chore",
+          "https://work.example/types/epic",
+          "https://work.example/types/decision",
+          "https://work.example/types/relationship",
+          "https://work.example/types/dependency",
+          "https://work.example/types/blocks",
+          "https://work.example/types/relates",
+          "https://work.example/types/cites"
+        ]
+      },
+      "resolvedOwnedTypes": 2
+    },
+    "numeric-model": {
+      "declaration": {
+        "name": "bdptest-fixture-literal-v1",
+        "numberModel": "not-content-derived",
+        "source": "packages/adapter-in-memory/README.md",
+        "description": "bdptest-fixture-literal-v1 uses fixture-authored opaque revision strings. It does not derive revisions from properties or any numeric serialization. The packaged reference fixture and its portable realization carry the same literal revisions. The conditional content-derived numeric-revision obligation is not applicable to this discipline."
+      },
+      "input": {
+        "ids": ["beads/demo-a", "beads/demo-c", "links/demo-b-a"],
+        "numberModel": "not-content-derived"
+      }
+    },
+    "wildcard-present": {
+      "input": {
+        "owner": "beads/demo-f",
+        "empty": "beads/demo-c",
+        "nonowner": "beads/demo-a",
+        "groups": {
+          "https://work.example/types/blocks": ["links/demo-f-e", "links/external-target"],
+          "https://work.example/types/cites": ["links/cites-local", "links/cites-witness"],
+          "https://work.example/types/relates": []
+        }
+      }
+    }
+  },
+  "beads": [
+    {
+      "localId": "beads/demo-a",
+      "type": "https://work.example/types/task",
+      "revision": "1",
+      "attribution": {
+        "principal": "agent:fixture-author",
+        "status": "claimed"
+      },
+      "properties": {
+        "id": "demo-a",
+        "title": "A",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:31Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:31Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-a",
+            "depends_on_id": "demo-c",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:31Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 1,
+        "dependent_count": 2,
+        "comment_count": 0,
+        "extension": "retained"
+      }
+    },
+    {
+      "localId": "beads/demo-b",
+      "type": "https://work.example/types/task",
+      "revision": "1",
+      "properties": {
+        "id": "demo-b",
+        "title": "B",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:32Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:32Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-b",
+            "depends_on_id": "demo-a",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:32Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 1,
+        "dependent_count": 0,
+        "comment_count": 0
+      }
+    },
+    {
+      "localId": "beads/demo-c",
+      "type": "https://work.example/types/feature",
+      "revision": "1",
+      "properties": {
+        "id": "demo-c",
+        "title": "C",
+        "status": "closed",
+        "priority": 2,
+        "issue_type": "feature",
+        "created_at": "2026-08-08T23:33:33Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:33Z",
+        "dependency_count": 0,
+        "dependent_count": 5,
+        "comment_count": 0
+      }
+    },
+    {
+      "localId": "beads/demo-d",
+      "type": "https://work.example/types/task",
+      "revision": "1",
+      "properties": {
+        "id": "demo-d",
+        "title": "D",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:34Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:34Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-d",
+            "depends_on_id": "demo-c",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:34Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 1,
+        "dependent_count": 0,
+        "comment_count": 0
+      }
+    },
+    {
+      "localId": "beads/demo-e",
+      "type": "https://work.example/types/bug",
+      "revision": "1",
+      "properties": {
+        "id": "demo-e",
+        "title": "E",
+        "status": "deferred",
+        "priority": 2,
+        "issue_type": "bug",
+        "created_at": "2026-08-08T23:33:35Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:35Z",
+        "dependency_count": 0,
+        "dependent_count": 1,
+        "comment_count": 0
+      }
+    },
+    {
+      "localId": "beads/demo-f",
+      "type": "https://work.example/types/decision",
+      "revision": "1",
+      "properties": {
+        "id": "demo-f",
+        "title": "F",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "decision",
+        "created_at": "2026-08-08T23:33:36Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:36Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-f",
+            "depends_on_id": "demo-e",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:36Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 1,
+        "dependent_count": 0,
+        "comment_count": 0
+      }
+    },
+    {
+      "localId": "beads/demo-i",
+      "type": "https://work.example/types/task",
+      "revision": "1",
+      "properties": {
+        "id": "demo-i",
+        "title": "I",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:37Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:37Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-i",
+            "depends_on_id": "demo-a",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:37Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          },
+          {
+            "issue_id": "demo-i",
+            "depends_on_id": "demo-c",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:37Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 2,
+        "dependent_count": 0,
+        "comment_count": 0
+      }
+    },
+    {
+      "localId": "beads/demo-j",
+      "type": "https://work.example/types/task",
+      "revision": "1",
+      "properties": {
+        "id": "demo-j",
+        "title": "J",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:38Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:38Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-j",
+            "depends_on_id": "demo-c",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:38Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          },
+          {
+            "issue_id": "demo-j",
+            "depends_on_id": "demo-k",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:38Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 2,
+        "dependent_count": 0,
+        "comment_count": 0
+      }
+    },
+    {
+      "localId": "beads/demo-k",
+      "type": "https://work.example/types/task",
+      "revision": "1",
+      "properties": {
+        "id": "demo-k",
+        "title": "K",
+        "status": "closed",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:39Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:39Z",
+        "dependency_count": 0,
+        "dependent_count": 1,
+        "comment_count": 0
+      }
+    }
+  ],
+  "links": [
+    {
+      "localId": "links/demo-b-a",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-b",
+      "target": "beads/demo-a",
+      "properties": {
+        "constraint": "hard",
+        "extension": "retained"
+      }
+    },
+    {
+      "localId": "links/demo-a-c",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-a",
+      "target": "beads/demo-c",
+      "properties": {}
+    },
+    {
+      "localId": "links/demo-d-c",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-d",
+      "target": "beads/demo-c",
+      "properties": {}
+    },
+    {
+      "localId": "links/demo-f-e",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-f",
+      "target": "beads/demo-e",
+      "properties": {}
+    },
+    {
+      "localId": "links/demo-e-f",
+      "type": "https://work.example/types/relates",
+      "revision": "1",
+      "source": "beads/demo-e",
+      "target": "beads/demo-f",
+      "properties": {
+        "context": "reference",
+        "extension": "retained"
+      }
+    },
+    {
+      "localId": "links/demo-i-a",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-i",
+      "target": "beads/demo-a",
+      "properties": {}
+    },
+    {
+      "localId": "links/demo-i-c",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-i",
+      "target": "beads/demo-c",
+      "properties": {}
+    },
+    {
+      "localId": "links/demo-j-c",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-j",
+      "target": "beads/demo-c",
+      "properties": {}
+    },
+    {
+      "localId": "links/demo-j-k",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "attribution": {
+        "principal": "svc:reference-realization",
+        "status": "unknown"
+      },
+      "source": "beads/demo-j",
+      "target": "beads/demo-k",
+      "properties": {}
+    },
+    {
+      "localId": "links/external-target",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-f",
+      "target": {
+        "uri": "external:beads:mol-run-assignee",
+        "revision": "  Cited-9F2c — α/β (draft) Å\t"
+      },
+      "properties": {
+        "label": "opaque authored label",
+        "source": {
+          "ownedLinks": {
+            "*": ["opaque authored value"]
+          }
+        }
+      },
+      "attribution": {
+        "principal": "agent:reference-wildcard",
+        "status": "claimed"
+      }
+    },
+    {
+      "localId": "links/external-source",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "external:beads:mol-run-assignee",
+      "target": "beads/demo-f",
+      "properties": {}
+    },
+    {
+      "localId": "links/pinned-local",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "urn:external:pin-witness",
+      "target": {
+        "uri": "beads/demo-f",
+        "revision": "pin-a-r1 (as-written)"
+      },
+      "properties": {}
+    },
+    {
+      "localId": "links/cites-local",
+      "type": "https://work.example/types/cites",
+      "revision": "1",
+      "source": "beads/demo-f",
+      "target": "beads/demo-a",
+      "properties": {}
+    },
+    {
+      "localId": "links/cites-witness",
+      "type": "https://work.example/types/cites",
+      "revision": "1",
+      "source": "beads/demo-f",
+      "target": {
+        "uri": "urn:external:cites-witness",
+        "revision": "w-1"
+      },
+      "properties": {}
+    },
+    {
+      "localId": "links/ZZ-collation",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "urn:external:collation-witness",
+      "target": "beads/demo-f",
+      "properties": {}
+    }
+  ],
+  "types": [
+    {
+      "id": "https://work.example/types/tracked-item",
+      "name": "Tracked Item",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/work-item",
+      "name": "Work Item",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/task",
+      "name": "Task",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/bug",
+      "name": "Bug",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/feature",
+      "name": "Feature",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/chore",
+      "name": "Chore",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/epic",
+      "name": "Epic",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/decision",
+      "name": "Decision",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/relationship",
+      "name": "Relationship",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/dependency",
+      "name": "Dependency",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/blocks",
+      "name": "Blocks",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/relates",
+      "name": "Relates",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/cites",
+      "name": "Cites",
+      "describes": "link"
+    }
+  ],
+  "typeDescriptors": [
+    {
+      "id": "https://work.example/types/tracked-item",
+      "name": "Tracked Item",
+      "describes": "bead",
+      "conformsTo": []
+    },
+    {
+      "id": "https://work.example/types/work-item",
+      "name": "Work Item",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/tracked-item"]
+    },
+    {
+      "id": "https://work.example/types/task",
+      "name": "Task",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/bug",
+      "name": "Bug",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/feature",
+      "name": "Feature",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"],
+      "ownsOutgoing": {
+        "*": {
+          "max": 8
+        }
+      }
+    },
+    {
+      "id": "https://work.example/types/chore",
+      "name": "Chore",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/epic",
+      "name": "Epic",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/decision",
+      "name": "Decision",
+      "describes": "bead",
+      "conformsTo": [],
+      "ownsOutgoing": {
+        "*": {
+          "max": 8
+        },
+        "https://work.example/types/cites": {
+          "label": "cites",
+          "max": 8
+        },
+        "https://work.example/types/relates": {
+          "max": 1
+        }
+      }
+    },
+    {
+      "id": "https://work.example/types/relationship",
+      "name": "Relationship",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/dependency",
+      "name": "Dependency",
+      "describes": "link",
+      "conformsTo": ["https://work.example/types/relationship"],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/blocks",
+      "name": "Blocks",
+      "describes": "link",
+      "conformsTo": ["https://work.example/types/dependency"],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/relates",
+      "name": "Relates",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/cites",
+      "name": "Cites",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    }
+  ],
+  "expectations": {
+    "readyTitles": ["J", "D", "A"],
+    "readyJson": [
+      {
+        "id": "demo-j",
+        "title": "J",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:38Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:38Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-j",
+            "depends_on_id": "demo-c",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:38Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          },
+          {
+            "issue_id": "demo-j",
+            "depends_on_id": "demo-k",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:38Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 2,
+        "dependent_count": 0,
+        "comment_count": 0
+      },
+      {
+        "id": "demo-d",
+        "title": "D",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:34Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:34Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-d",
+            "depends_on_id": "demo-c",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:34Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 1,
+        "dependent_count": 0,
+        "comment_count": 0
+      },
+      {
+        "id": "demo-a",
+        "title": "A",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-08-08T23:33:31Z",
+        "created_by": "bdp-conformance",
+        "updated_at": "2026-08-08T23:33:31Z",
+        "dependencies": [
+          {
+            "issue_id": "demo-a",
+            "depends_on_id": "demo-c",
+            "type": "blocks",
+            "created_at": "2026-08-08T23:33:31Z",
+            "created_by": "bdp-conformance",
+            "metadata": "{}"
+          }
+        ],
+        "dependency_count": 1,
+        "dependent_count": 2,
+        "comment_count": 0
+      }
+    ],
+    "beadCount": 9,
+    "linkCount": 15,
+    "typeCount": 13
+  }
+}

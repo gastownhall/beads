@@ -252,6 +252,28 @@ linters:
             - "**/beadserrors/**"
           allow:
             - "$gostd"
+        # graphops is the bead graph's public leaf (values, laws, roles) and
+        # sits one rung above beadserrors: every storage leg, the BDP handler,
+        # the wire client and cmd/bd import it, so anything it imported would
+        # be imported by all of them, and any internal/ type reachable from
+        # it would have to be aliased into backend/ by the completeness guard.
+        # The design pins it to the standard library plus beadserrors
+        # (engdocs/BDP_GRAPH_ARCHITECTURE.md §3) - no internal/types, no
+        # storage, no wire - which is what keeps a graph value
+        # transport-neutral and the laws free of any engine's opinions.
+        #
+        # strict, for the reason the beadserrors rule gives. The negation
+        # keeps the P1 transaction-body package, internal/storage/graphops,
+        # out of a rule written for the public leaf; that package gets its
+        # own, stricter, consumer-side rule when it lands (spec B6).
+        graphops-leaf:
+          list-mode: strict
+          files:
+            - "**/graphops/**"
+            - "!**/internal/storage/graphops/**"
+          allow:
+            - "$gostd"
+            - "github.com/steveyegge/beads/beadserrors"
     # The CONSTRUCTION half of that same boundary, and the half that actually
     # matches the failure. The depguard rule above denies a handler IMPORTING
     # the builders; it does not deny a handler naming the filter types, which

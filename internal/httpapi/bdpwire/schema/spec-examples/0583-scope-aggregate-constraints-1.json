@@ -1,0 +1,9 @@
+{
+  "maximumEndpointMultiplicity": [
+    {
+      "linkConformsTo": "https://work.example/types/parent-child",
+      "endpoint": "source",
+      "max": 1
+    }
+  ]
+}

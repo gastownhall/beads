@@ -1,0 +1,10 @@
+{
+  "id": "https://work.example/types/task",
+  "name": "Task",
+  "description": "A unit of work that can be completed.",
+  "describes": "bead",
+  "conformsTo": [
+    "https://work.example/types/issue"
+  ],
+  "propertiesSchema": "https://work.example/schemas/task-properties-v1"
+}

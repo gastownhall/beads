@@ -1,0 +1,12 @@
+{
+  "limits": {
+    "page": {
+      "defaultItems": 50,
+      "maximumItems": 200
+    },
+    "request": {
+      "targetBytes": 2048,
+      "bodyBytes": 65536
+    }
+  }
+}
