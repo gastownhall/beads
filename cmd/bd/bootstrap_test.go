@@ -1773,10 +1773,11 @@ func TestFinalizeSyncedBootstrapSharedServerSetsServerMode(t *testing.T) {
 // be-cy41 bug #1: existingBootstrapDBPlan returned BootstrapPlan{}, false (and
 // detectBootstrapAction fell through toward Action="init") purely because no
 // local shadow dolt-data directory existed — but in server mode that is the
-// NORMAL state for a fresh clone of an already-initialized project. The
-// server-side existence check must run unconditionally in server mode rather
-// than being gated behind local filesystem state that a legitimate clone will
-// never have (same ambiguity be-5up5 fixed in cmd/bd/init.go).
+// NORMAL state for a fresh clone of an already-initialized project. When
+// metadata.json carries a ProjectID (proving this workspace was previously
+// initialized), the server-side existence check must still run instead of
+// being short-circuited by local filesystem state that a legitimate clone
+// will never have (same ambiguity be-5up5 fixed in cmd/bd/init.go).
 func TestDetectBootstrapAction_NoLocalShadowDirStillLiveChecksExisting(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
@@ -1806,6 +1807,7 @@ func TestDetectBootstrapAction_NoLocalShadowDirStillLiveChecksExisting(t *testin
 	cfg.DoltMode = configfile.DoltModeServer
 	cfg.DoltDatabase = "project_exists"
 	cfg.DoltDataDir = doltDataDir
+	cfg.ProjectID = "proj-already-initialized-456"
 	t.Setenv("BEADS_DOLT_DATA_DIR", doltDataDir)
 
 	probed := false
