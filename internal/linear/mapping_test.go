@@ -464,6 +464,105 @@ func TestIssueToBeads(t *testing.T) {
 	}
 }
 
+func TestMergeLocalControlStatePreservesControlsAndSyncsProductFields(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	tests := []struct {
+		name           string
+		localStatus    types.Status
+		localAssignee  string
+		localLabels    []string
+		remoteStatus   types.Status
+		remoteAssignee string
+		remoteLabels   []string
+		wantLabels     []string
+	}{
+		{
+			name:           "agent plan reservation",
+			localStatus:    types.StatusInProgress,
+			localAssignee:  "planner@example.com",
+			localLabels:    []string{"agent-plan", "planner-intake"},
+			remoteStatus:   types.StatusClosed,
+			remoteAssignee: "linear@example.com",
+			remoteLabels:   []string{"product"},
+			wantLabels:     []string{"agent-plan", "planner-intake", "product"},
+		},
+		{
+			name:           "human gate",
+			localStatus:    types.StatusBlocked,
+			localAssignee:  "operator@example.com",
+			localLabels:    []string{"human"},
+			remoteStatus:   types.StatusOpen,
+			remoteAssignee: "linear@example.com",
+			remoteLabels:   []string{"product"},
+			wantLabels:     []string{"human", "product"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local := &types.Issue{
+				Status:   tt.localStatus,
+				Assignee: tt.localAssignee,
+				Labels:   append([]string(nil), tt.localLabels...),
+			}
+			remote := &types.Issue{
+				Title:       "Linear title",
+				Description: "Linear description",
+				Priority:    1,
+				Status:      tt.remoteStatus,
+				Assignee:    tt.remoteAssignee,
+				Labels:      append([]string(nil), tt.remoteLabels...),
+			}
+
+			(&linearFieldMapper{config: config}).MergeLocalFields(local, remote)
+
+			if remote.Status != tt.localStatus {
+				t.Fatalf("status = %q, want local %q", remote.Status, tt.localStatus)
+			}
+			if remote.Assignee != tt.localAssignee {
+				t.Fatalf("assignee = %q, want local %q", remote.Assignee, tt.localAssignee)
+			}
+			gotLabels := append([]string(nil), remote.Labels...)
+			slices.Sort(gotLabels)
+			wantLabels := append([]string(nil), tt.wantLabels...)
+			slices.Sort(wantLabels)
+			if !slices.Equal(gotLabels, wantLabels) {
+				t.Fatalf("labels = %v, want %v", gotLabels, wantLabels)
+			}
+			if remote.Title != "Linear title" || remote.Description != "Linear description" || remote.Priority != 1 {
+				t.Fatalf("product fields changed during merge: %+v", remote)
+			}
+			if !slices.Equal(local.Labels, tt.localLabels) {
+				t.Fatalf("local labels mutated: %v", local.Labels)
+			}
+		})
+	}
+}
+
+func TestMergeLocalControlStateLeavesOrdinaryIssueRemoteOwned(t *testing.T) {
+	config := DefaultMappingConfig()
+	local := &types.Issue{
+		Status:   types.StatusOpen,
+		Assignee: "local@example.com",
+		Labels:   []string{"old-product"},
+	}
+	remote := &types.Issue{
+		Status:   types.StatusInProgress,
+		Assignee: "remote@example.com",
+		Labels:   []string{"new-product"},
+	}
+
+	MergeLocalControlState(local, remote, config)
+
+	if remote.Status != types.StatusInProgress || remote.Assignee != "remote@example.com" {
+		t.Fatalf("ordinary issue lost remote ownership: status=%q assignee=%q", remote.Status, remote.Assignee)
+	}
+	if !slices.Equal(remote.Labels, []string{"new-product"}) {
+		t.Fatalf("ordinary issue labels = %v, want [new-product]", remote.Labels)
+	}
+}
+
 func TestIssueToBeadsWithParent(t *testing.T) {
 	config := DefaultMappingConfig()
 

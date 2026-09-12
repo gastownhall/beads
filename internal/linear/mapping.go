@@ -160,7 +160,14 @@ type MappingConfig struct {
 	// CustomStatuses holds typed entries from status.custom (beads config).
 	// Used for push-time state_map validation and matching non-built-in statuses.
 	CustomStatuses []types.CustomStatus
+
+	// LocalControlLabels identifies labels owned by a local orchestration layer
+	// rather than Linear. Existing issues carrying one of these labels retain
+	// their local status, assignee, and control labels during Linear pull.
+	LocalControlLabels []string
 }
+
+var defaultLocalControlLabels = []string{"agent-plan", "planner-intake", "human"}
 
 // DefaultMappingConfig returns sensible default mappings.
 func DefaultMappingConfig() *MappingConfig {
@@ -182,8 +189,9 @@ func DefaultMappingConfig() *MappingConfig {
 			"completed": "closed",
 			"canceled":  "closed",
 		},
-		ExplicitStateMap: make(map[string]string),
-		OutboundStateMap: make(map[string]string),
+		ExplicitStateMap:   make(map[string]string),
+		OutboundStateMap:   make(map[string]string),
+		LocalControlLabels: append([]string(nil), defaultLocalControlLabels...),
 		// Label patterns for issue type inference
 		LabelTypeMap: map[string]string{
 			"bug":         "bug",
@@ -207,6 +215,66 @@ func DefaultMappingConfig() *MappingConfig {
 			"related":   "related",
 		},
 	}
+}
+
+// MergeLocalControlState overlays local orchestration controls onto a Linear
+// conversion. Linear remains authoritative for product fields and labels; a
+// local issue carrying a configured control label keeps its status and
+// assignee, and its control labels are merged back into the converted label
+// set. The input local issue is never mutated.
+func MergeLocalControlState(local, remote *types.Issue, config *MappingConfig) {
+	if local == nil || remote == nil {
+		return
+	}
+
+	controlNames := localControlLabelNames(config)
+	localControls := make([]string, 0)
+	for _, label := range local.Labels {
+		trimmed := strings.TrimSpace(label)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := controlNames[strings.ToLower(trimmed)]; ok {
+			localControls = append(localControls, trimmed)
+		}
+	}
+	if len(localControls) == 0 {
+		return
+	}
+
+	remote.Status = local.Status
+	remote.Assignee = local.Assignee
+
+	labels := append([]string(nil), remote.Labels...)
+	seen := make(map[string]struct{}, len(labels)+len(localControls))
+	for _, label := range labels {
+		trimmed := strings.TrimSpace(label)
+		if trimmed != "" {
+			seen[trimmed] = struct{}{}
+		}
+	}
+	for _, label := range localControls {
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		labels = append(labels, label)
+		seen[label] = struct{}{}
+	}
+	remote.Labels = labels
+}
+
+func localControlLabelNames(config *MappingConfig) map[string]struct{} {
+	labels := defaultLocalControlLabels
+	if config != nil && len(config.LocalControlLabels) > 0 {
+		labels = config.LocalControlLabels
+	}
+	names := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		if normalized := strings.ToLower(strings.TrimSpace(label)); normalized != "" {
+			names[normalized] = struct{}{}
+		}
+	}
+	return names
 }
 
 // ConfigLoader is an interface for loading configuration values.
