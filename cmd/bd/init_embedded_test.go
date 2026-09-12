@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
@@ -1432,5 +1434,207 @@ func TestInitGateBusyClassifiedAsLockContention(t *testing.T) {
 
 	if !isEmbeddedLockOutput(loserOutput) {
 		t.Fatalf("gate-busy loser output not classified as lock contention: %q", loserOutput)
+	}
+}
+
+func TestEmbeddedInitGitBootstrapRouting(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	for _, name := range []string{"fresh", "decoy", "invalid", "existing_invalid", "explicit_storage", "quiet"} {
+		t.Run(name, func(t *testing.T) {
+			existing, decoy, home := newInitRoleFixture(t)
+			target := t.TempDir()
+			if name == "existing_invalid" {
+				target = existing
+			}
+			global := filepath.Join(home, ".gitconfig")
+			initRoleFixtureGit(t, existing, "config", "--file", global, "user.name", "Bootstrap Fixture")
+			initRoleFixtureGit(t, existing, "config", "--file", global, "user.email", "bootstrap@example.invalid")
+			missingGit := filepath.Join(home, "missing git dir")
+			if name == "invalid" || name == "existing_invalid" {
+				t.Setenv("GIT_DIR", missingGit)
+			} else if name == "decoy" || name == "explicit_storage" {
+				t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+				t.Setenv("GIT_WORK_TREE", decoy)
+			}
+			preserveInitRoleInputs(t, global, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "HEAD"))
+			beadsDir := filepath.Join(target, ".beads")
+			args := []string{"init", "--prefix", "bootstrapfixture", "--non-interactive", "--skip-hooks", "--skip-agents", "--role", "maintainer"}
+			if name == "quiet" {
+				args = append(args, "--quiet")
+			}
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = target
+			env := bdEnv(home)
+			for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+				env = envWithout(env, key)
+			}
+			if name == "explicit_storage" {
+				beadsDir = filepath.Join(home, "separate storage", ".beads")
+				if err := os.MkdirAll(filepath.Dir(beadsDir), 0750); err != nil {
+					t.Fatal(err)
+				}
+				env = append(env, "BEADS_DIR="+beadsDir)
+			}
+			cmd.Env = append(env, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("embedded bootstrap failed: %v\n%s", err, out)
+			}
+			cfg, err := configfile.Load(beadsDir)
+			if err != nil || cfg == nil || cfg.DoltMode != configfile.DoltModeEmbedded {
+				t.Fatalf("embedded metadata missing: %+v (%v)", cfg, err)
+			}
+			if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt", "bootstrapfixture", ".dolt")); err != nil || !info.IsDir() {
+				t.Fatalf("embedded database missing: %v", err)
+			}
+			gitDir := filepath.Join(target, ".git")
+			if name == "explicit_storage" {
+				if _, err := os.Stat(gitDir); !os.IsNotExist(err) {
+					t.Fatalf("explicit storage must skip repository creation: %v", err)
+				}
+			} else {
+				actualGit := initRoleFixtureGit(t, target, "rev-parse", "--absolute-git-dir")
+				wantInfo, err := os.Stat(gitDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actualInfo, err := os.Stat(actualGit)
+				if err != nil || !os.SameFile(wantInfo, actualInfo) {
+					t.Fatalf("selected Git directory = %q (%v)", actualGit, err)
+				}
+			}
+			wantBanner := name != "quiet" && name != "existing_invalid" && name != "explicit_storage"
+			if got := strings.Count(string(out), "Initialized git repository"); (wantBanner && got != 1) || (!wantBanner && got != 0) {
+				t.Errorf("initialization banner count = %d, want visible=%v: %s", got, wantBanner, out)
+			}
+			if _, err := os.Stat(missingGit); !os.IsNotExist(err) {
+				t.Errorf("init created the inherited invalid Git directory: %v", err)
+			}
+		})
+	}
+}
+
+func TestEmbeddedInitRoleRouting(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	// Serial: newInitRoleFixture owns CWD and environment for each child.
+	for _, tc := range []struct{ name, initial, flag, want string }{
+		{"explicit", "maintainer", "contributor", "contributor"},
+		{"default", "", "", "maintainer"},
+		{"retained", "contributor", "", "contributor"},
+		{"fork", "", "", "contributor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, decoy, home := newInitRoleFixture(t)
+			if tc.initial != "" {
+				initRoleFixtureGit(t, target, "config", "--local", "beads.role", tc.initial)
+			}
+			global := filepath.Join(home, ".gitconfig")
+			initRoleFixtureGit(t, target, "config", "--file", global, "user.name", "Embedded Init Fixture")
+			initRoleFixtureGit(t, target, "config", "--file", global, "user.email", "embedded@example.invalid")
+			t.Setenv("GIT_DIR", filepath.Join(home, "missing.git"))
+			if isGitRepo() {
+				t.Fatal("invalid routing must refuse the inherited repository probe")
+			}
+			preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), global)
+			beadsDir := filepath.Join(target, ".beads")
+			if tc.name == "fork" {
+				initRoleFixtureGit(t, target, "remote", "add", "upstream", filepath.Join(home, "upstream.git"))
+				if err := os.MkdirAll(beadsDir, 0750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# owned fork configuration\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{"init", "--prefix", "rolefixture", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents"}
+			if tc.flag != "" {
+				args = append(args, "--role", tc.flag)
+			}
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = target
+			env := bdEnv(home)
+			for _, key := range []string{"BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+				env = envWithout(env, key)
+			}
+			// Explicit storage selection bypasses the separate early git-init guard.
+			cmd.Env = append(env, "BEADS_DIR="+beadsDir, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("embedded init failed: %v\n%s", err, out)
+			}
+			cfg, err := configfile.Load(beadsDir)
+			if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt || cfg.DoltMode != configfile.DoltModeEmbedded {
+				t.Fatalf("init must persist embedded metadata: %+v, %v", cfg, err)
+			}
+			if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt", "rolefixture", ".dolt")); err != nil || !info.IsDir() {
+				t.Fatalf("embedded database directory missing: %v", err)
+			}
+			if got := initRoleFixtureGit(t, target, "config", "--local", "--get", "beads.role"); got != tc.want {
+				t.Errorf("embedded init target role = %q, want %q", got, tc.want)
+			}
+			if tc.name == "fork" {
+				planning := filepath.Join(home, ".beads-planning")
+				if got := initRoleFixtureGit(t, planning, "rev-parse", "--is-inside-work-tree"); got != "true" {
+					t.Errorf("planning Git repository missing: %q", got)
+				}
+				// Read the stored value; config get reads this key's YAML/default source.
+				routing := readBack(t, beadsDir, "rolefixture", "routing.contributor", false)
+				if filepath.Clean(routing) != filepath.Clean(planning) {
+					t.Errorf("persisted contributor routing = %q; want %q", routing, planning)
+				}
+				repos, err := config.GetReposFromYAML(filepath.Join(beadsDir, "config.yaml"))
+				if err != nil || len(repos.Additional) != 1 || filepath.Clean(repos.Additional[0]) != filepath.Clean(planning) {
+					t.Errorf("planning repo in config.yaml = %+v, %v", repos, err)
+				}
+			}
+		})
+	}
+}
+
+func TestEmbeddedInitArtifactRouting(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	target, decoy, home := newInitRoleFixture(t)
+	global := filepath.Join(home, ".gitconfig")
+	initRoleFixtureGit(t, target, "config", "--file", global, "user.name", "Artifact Fixture")
+	initRoleFixtureGit(t, target, "config", "--file", global, "user.email", "artifact@example.invalid")
+	t.Setenv("GIT_DIR", filepath.Join(home, "missing.git"))
+	preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), global)
+	beadsDir := filepath.Join(target, ".beads")
+	cmd := exec.Command(bd, "init", "--prefix", "artifactfixture", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--role", "contributor")
+	cmd.Dir = target
+	env := bdEnv(home)
+	for _, key := range []string{"BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+		env = envWithout(env, key)
+	}
+	cmd.Env = append(env, "BEADS_DIR="+beadsDir, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("embedded artifact init failed: %v\n%s", err, out)
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt || cfg.DoltMode != configfile.DoltModeEmbedded {
+		t.Fatalf("artifact init must persist embedded metadata: %+v, %v", cfg, err)
+	}
+	if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt", "artifactfixture", ".dolt")); err != nil || !info.IsDir() {
+		t.Fatalf("embedded artifact database directory missing: %v", err)
+	}
+	if got := initRoleFixtureGit(t, target, "config", "--local", "--get", "beads.role"); got != "contributor" {
+		t.Errorf("embedded role/artifact composition lost explicit role: %q", got)
+	}
+	want, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	show := exec.Command("git", "show", "HEAD:.beads/metadata.json")
+	show.Dir, show.Env = target, gitenv.ScrubRouting(os.Environ())
+	if got, err := show.CombinedOutput(); err != nil || !bytes.Equal(got, want) {
+		t.Errorf("embedded init did not commit target metadata: %v: %s", err, got)
 	}
 }
