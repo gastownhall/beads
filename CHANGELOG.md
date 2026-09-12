@@ -14,6 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count the same metadata-scoped set `bd list` returns without fetching every
   row.
 
+- **A long-running schema migration now says so instead of going quiet**
+  ([#5997](https://github.com/gastownhall/beads/pull/5997)). Migrations are
+  allowed to take a long time by design — migration 0047's full-table
+  `is_blocked` recompute is a real example — but until now a slow one and a
+  wedged one looked identical from outside: `bd` simply stopped printing. A
+  watchdog now emits a WARN naming the migration's version, name, and elapsed
+  time once it passes the interval, and repeats every interval while it keeps
+  running, so an operator reading logs can tell "still working" from "stopped
+  emitting anything". Set `BEADS_MIGRATION_WATCHDOG_INTERVAL` to change the
+  5-minute default; it accepts durations like `10m` and bare seconds like `90`,
+  and falls back to the default when unset or unparsable. This is observability
+  only and never a circuit breaker: the migration receives the caller's exact
+  context, its error is passed through unchanged, and nothing is aborted or
+  rolled back. The warning is deliberately not terminal-gated, so it survives
+  `bd serve`, systemd, CI, and piped invocations.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped
