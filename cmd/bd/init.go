@@ -24,8 +24,10 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
@@ -2635,37 +2637,55 @@ Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), prefix)
 	return nil // No database found, safe to init
 }
 
-// countExistingIssues attempts to connect to the existing database and count
-// issues. Returns 0 if the database is unreachable or empty. Used by --force
-// safeguard to show users what they're about to destroy.
-func countExistingIssues(_ string) (int, error) {
+// countExistingIssues inspects existing data without initializing or migrating
+// it. An unreadable store is not evidence that there are no issues to protect.
+func countExistingIssues(_ string) (result storageissueops.ReinitIssueCount, err error) {
 	var beadsDir string
 	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
 		beadsDir = utils.CanonicalizePath(envBeadsDir)
 	} else {
 		beadsDir = beads.FindBeadsDir()
 		if beadsDir == "" {
-			return 0, nil
+			return result, nil
 		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
+	entries, err := os.ReadDir(beadsDir)
+	if os.IsNotExist(err) || (err == nil && len(entries) == 0) {
+		return result, nil
+	}
 	if err != nil {
-		return 0, err
+		return result, err
+	}
+	// The preview open permits older schemas but never migrates them. The
+	// reinit count below reads only existing tables, not current-schema stats.
+	store, err := newPreviewStoreFromConfig(ctx, beadsDir)
+	if errors.Is(err, dberrors.ErrDatabaseNotFound) {
+		return result, nil
+	}
+	if err != nil {
+		return result, err
 	}
 	defer func() { _ = store.Close() }()
 
+	if counter, ok := store.(interface {
+		CountIssuesForReinit(context.Context) (storageissueops.ReinitIssueCount, error)
+	}); ok {
+		return counter.CountIssuesForReinit(ctx)
+	}
+	// Registered non-SQL backends retain their statistics contract, through
+	// their read-only open rather than their writable factory.
 	stats, err := store.GetStatistics(ctx)
 	if err != nil {
-		return 0, err
+		return result, err
 	}
-	if stats == nil {
-		return 0, nil
+	if stats != nil {
+		result.Count = stats.TotalIssues
 	}
-	return stats.TotalIssues, nil
+	return result, nil
 }
 
 // runInitReinitPreflight confirms the destructive local replacement while the
@@ -2674,23 +2694,33 @@ func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error
 	if !reinitLocal {
 		return nil
 	}
-	count, err := countExistingIssues(prefix)
-	if err != nil || count == 0 {
+	inspection, err := countExistingIssues(prefix)
+	if err != nil {
+		return fmt.Errorf("cannot verify existing issues; refusing re-initialization: %w", err)
+	}
+	if inspection.Count == 0 && len(inspection.UnknownTables) == 0 {
 		return nil
+	}
+	count := strconv.Itoa(inspection.Count)
+	if len(inspection.UnknownTables) != 0 {
+		count = "unknown"
 	}
 
 	fmt.Fprintf(os.Stderr, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
-	fmt.Fprintf(os.Stderr, "  Existing issues: %d\n\n", count)
+	fmt.Fprintf(os.Stderr, "  Existing issues: %s\n\n", count)
+	if len(inspection.UnknownTables) != 0 {
+		fmt.Fprintf(os.Stderr, "  Unrecognized schema (no issues table). Existing tables: %q\n\n", inspection.UnknownTables)
+	}
 	fmt.Fprintf(os.Stderr, "  This action CANNOT be undone. All issues, dependencies, and\n")
 	fmt.Fprintf(os.Stderr, "  Dolt commit history will be permanently lost.\n\n")
 	fmt.Fprintf(os.Stderr, "  Before proceeding, consider:\n")
 	fmt.Fprintf(os.Stderr, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
 	fmt.Fprintf(os.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprintf(os.Stderr, "Type 'destroy %d issues' to confirm: ", count)
+		fmt.Fprintf(os.Stderr, "Type 'destroy %s issues' to confirm: ", count)
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Scan()
-		expected := fmt.Sprintf("destroy %d issues", count)
+		expected := fmt.Sprintf("destroy %s issues", count)
 		if strings.TrimSpace(scanner.Text()) != expected {
 			fmt.Fprintf(os.Stderr, "\nAborted. Database was NOT modified.\n")
 			return &exitError{Code: ExitLocalExistsRefused}
@@ -2709,7 +2739,7 @@ func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error
 		fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
+	fmt.Fprintf(os.Stderr, "Refusing to destroy %s issues in non-interactive mode.\n", count)
 	fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
 	fmt.Fprintf(os.Stderr, "  Or export issue records first: bd export > issue-export.jsonl\n")
 	return &exitError{Code: ExitDestroyTokenMissing}

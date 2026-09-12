@@ -9,6 +9,10 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 )
 
+// ErrDatabaseNotFound means the configured database is confirmed absent, not
+// merely inaccessible. Storage opens must not use it for permission or I/O errors.
+var ErrDatabaseNotFound = errors.New("database does not exist")
+
 // IsNoRows reports whether err is a "no rows in result set" error — a single-row
 // query (QueryRow/Scan) that matched nothing. Repository Get methods surface a
 // missing row as the bare sql.ErrNoRows; classifying it here lets callers detect
