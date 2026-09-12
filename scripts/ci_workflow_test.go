@@ -61,6 +61,29 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRCoreRequiresExcludeReadPermissionCoverage(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-core-wrapper")
+	if job.RunsOn != "ubuntu-latest" || job.If != "" || job.ContinueOnError {
+		t.Error("exclude permission coverage must remain in the required Linux PR Core job")
+	}
+	step := job.Steps[job.stepIndex(t, "Run PR core wrapper")]
+	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) || strings.TrimSpace(step.Run) != "make ci-pr-core" {
+		t.Error("exclude permission coverage must run through the nonoptional PR Core wrapper")
+	}
+	if step.Env["BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION"] != "1" {
+		t.Error("PR Core must require actual exclude read-permission coverage")
+	}
+	gate := workflow.job(t, "ci-gate")
+	evaluate := gate.step(t, "Evaluate CI gate")
+	if gate.If != "${{ always() }}" || gate.ContinueOnError || evaluate.If != "" || (evaluate.ContinueOnError != nil && evaluate.ContinueOnError != false) {
+		t.Error("CI gate must propagate required PR Core failures")
+	}
+	if !contains(gate.Needs, "pr-core-wrapper") || evaluate.Env["PR_CORE_WRAPPER"] != "${{ needs.pr-core-wrapper.result }}" || !contains(strings.Fields(evaluate.Env["CI_GATE_REQUIRED"]), "PR_CORE_WRAPPER") {
+		t.Error("CI gate must require the PR Core result")
+	}
+}
+
 func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "complexity-report")
