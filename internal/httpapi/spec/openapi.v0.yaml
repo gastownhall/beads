@@ -6458,6 +6458,11 @@ components:
           items: { $ref: '#/components/schemas/Dependency' }
         comments:
           type: array
+          description: >-
+            The issue's comment bodies. On a listing they are populated only
+            when the caller opts in (`bd list --include-comments`); absent
+            otherwise, which is what `comment_count` and `comments_omitted`
+            report about.
           items: { $ref: '#/components/schemas/Comment' }
         sender: { type: string }
         ephemeral: { type: boolean }
@@ -6490,6 +6495,16 @@ components:
           description: Number of issues that depend on this one.
         comment_count:
           type: integer
+        comments_omitted:
+          type: boolean
+          description: >-
+            True when `comment_count` is nonzero and `comments` was left out —
+            every such row on a listing that did not opt into comment bodies.
+            Without it, an absent `comments` key is ambiguous between "no
+            comments" and "comments not included in this response", and on a
+            LISTING that ambiguity is what makes a content search over the page
+            answer with a plausible non-empty result whose matching rows are
+            missing.
         parent:
           type: string
           description: Parent issue id, computed from the parent-child edge.
