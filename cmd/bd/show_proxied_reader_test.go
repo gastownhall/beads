@@ -27,12 +27,11 @@ var _ uow.IssueReaderSource = readerProvider{}
 
 func withStubbedProxiedReader(t *testing.T, hardErr error) {
 	t.Helper()
-	oldProvider, oldJSON := uowProvider, jsonOutput
+	oldProvider := uowProvider
 	uowProvider = readerProvider{lookupOnlyProvider{issues: stubLookupIssueUC{hardErr: hardErr}}}
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	t.Cleanup(func() {
 		uowProvider = oldProvider
-		jsonOutput = oldJSON
 	})
 }
 

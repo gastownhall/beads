@@ -140,8 +140,21 @@ type savedGlobals struct {
 	exportIncludeMemories bool
 }
 
+// pinJSONOutput owns the global JSON mode for a test and restores it through
+// t.Cleanup. Tests that inspect output must select their mode explicitly;
+// saveAndRestoreGlobals does not include this separate flag.
+// A fixture that leaves it set can pass alone and break a later text test in
+// a full run, so each fixture must own restoration even when its mode matches.
+func pinJSONOutput(t *testing.T, on bool) {
+	t.Helper()
+	restore := jsonOutput
+	jsonOutput = on
+	t.Cleanup(func() { jsonOutput = restore })
+}
+
 // saveAndRestoreGlobals snapshots all commonly-mutated package-level globals
 // and registers a t.Cleanup() to restore them when the test completes.
+// Set and restore the separate JSON output mode with pinJSONOutput(t, on).
 // This replaces the fragile manual save/defer pattern:
 //
 //	oldDBPath := dbPath
@@ -396,6 +409,25 @@ func initGitRepoAt(t *testing.T, dir string) {
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+		}
+	}
+}
+
+func TestPinJSONOutputRestoresAfterSubtest(t *testing.T) {
+	starting := jsonOutput
+	t.Cleanup(func() { jsonOutput = starting })
+	// Keep these children synchronous: their cleanup must finish before the
+	// parent checks the flag. The outer restore does not use the helper.
+	for _, prior := range []bool{false, true} {
+		jsonOutput = prior
+		t.Run(fmt.Sprintf("prior_%t", prior), func(t *testing.T) {
+			pinJSONOutput(t, !prior)
+			if jsonOutput != !prior {
+				t.Errorf("pinned jsonOutput = %t, want %t", jsonOutput, !prior)
+			}
+		})
+		if jsonOutput != prior {
+			t.Errorf("jsonOutput after child cleanup = %t, want prior %t", jsonOutput, prior)
 		}
 	}
 }
