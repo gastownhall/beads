@@ -519,14 +519,19 @@ func buildParentEpicMapProxied(ctx context.Context, uw uow.UnitOfWork, issues []
 	if len(parentIDs) == 0 {
 		return nil
 	}
-	epicTitles := make(map[string]string)
+	parentList := make([]string, 0, len(parentIDs))
 	for parentID := range parentIDs {
-		parent, err := uw.IssueUseCase().GetIssue(ctx, parentID)
-		if err != nil || parent == nil {
-			continue
-		}
-		if parent.IssueType == "epic" {
-			epicTitles[parentID] = parent.Title
+		parentList = append(parentList, parentID)
+	}
+	parents, err := uw.IssueUseCase().GetIssuesByIDs(ctx, parentList)
+	if err != nil {
+		debug.Logf("warning: failed to get parent issues: %v", err)
+		return nil
+	}
+	epicTitles := make(map[string]string)
+	for _, parent := range parents {
+		if parent != nil && parent.IssueType == types.TypeEpic {
+			epicTitles[parent.ID] = parent.Title
 		}
 	}
 	result := make(map[string]string)
