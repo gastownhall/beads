@@ -7,12 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -271,6 +274,137 @@ func TestBeadsRoleGitConfig(t *testing.T) {
 		}
 		if got := strings.TrimSpace(string(output)); got != "maintainer" {
 			t.Errorf("expected 'maintainer', got %q", got)
+		}
+	})
+}
+
+func TestBeadsRoleCommandsIgnoreInheritedGitRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	pinJSONOutput(t, false)
+	runGit := func(t *testing.T, repo string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("fixture git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	target, decoy := t.TempDir(), t.TempDir()
+	for _, repo := range []string{target, decoy} {
+		runGit(t, repo, "init", "--quiet")
+		runGit(t, repo, "config", "--local", "core.hooksPath", ".git/hooks")
+	}
+	t.Chdir(target)
+	localRole := func(t *testing.T, repo string) string {
+		t.Helper()
+		for _, line := range strings.Split(runGit(t, repo, "config", "--local", "--list"), "\n") {
+			if value, ok := strings.CutPrefix(line, "beads.role="); ok {
+				return value
+			}
+		}
+		return ""
+	}
+	commands := []struct {
+		name       string
+		cmd        *cobra.Command
+		args       []string
+		wantRole   string
+		wantOutput string
+	}{
+		{"set", configSetCmd, []string{"beads.role", "contributor"}, "contributor", "Set beads.role = contributor (in git config)"},
+		{"get", configGetCmd, []string{"beads.role"}, "maintainer", "maintainer"},
+		{"unset", configUnsetCmd, []string{"beads.role"}, "", "Unset beads.role (in git config)"},
+		{"set-many", configSetManyCmd, []string{"beads.role=contributor"}, "contributor", "Set beads.role = contributor (in git config)"},
+	}
+	for _, command := range commands {
+		for _, poison := range []struct {
+			name string
+			env  map[string]string
+		}{
+			{"repository", map[string]string{"GIT_DIR": filepath.Join(decoy, ".git"), "GIT_WORK_TREE": decoy}},
+			{"inline_config", map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "beads.role", "GIT_CONFIG_VALUE_0": "injected-role"}},
+		} {
+			t.Run(command.name+"/"+poison.name, func(t *testing.T) {
+				runGit(t, target, "config", "--local", "beads.role", "maintainer")
+				runGit(t, decoy, "config", "--local", "beads.role", "decoy-role")
+				for key, value := range poison.env {
+					t.Setenv(key, value)
+				}
+				out := captureStdout(t, func() error { return command.cmd.RunE(command.cmd, command.args) })
+				if strings.TrimSpace(out) != command.wantOutput {
+					t.Errorf("handler output = %q, want %q", out, command.wantOutput)
+				}
+				if got := localRole(t, target); got != command.wantRole {
+					t.Errorf("target role = %q, want %q", got, command.wantRole)
+				}
+				if got := localRole(t, decoy); got != "decoy-role" {
+					t.Errorf("decoy role changed to %q", got)
+				}
+				for key, value := range poison.env {
+					if os.Getenv(key) != value {
+						t.Errorf("handler changed parent environment %s", key)
+					}
+				}
+			})
+		}
+	}
+	for _, command := range []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"invalid set", configSetCmd, []string{"beads.role", "admin"}},
+		{"invalid batch", configSetManyCmd, []string{"beads.role=contributor", "beads.role=admin"}},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			runGit(t, target, "config", "--local", "beads.role", "maintainer")
+			var err error
+			out := captureStderr(t, func() { err = command.cmd.RunE(command.cmd, command.args) })
+			if code, ok := exitCodeFromError(err); !ok || code != 1 || !strings.Contains(out, "invalid role") {
+				t.Errorf("invalid role refusal = %v, stderr %q", err, out)
+			}
+			if got := localRole(t, target); got != "maintainer" {
+				t.Errorf("invalid role changed target to %q", got)
+			}
+		})
+	}
+	t.Run("absent role", func(t *testing.T) {
+		runGit(t, target, "config", "--local", "beads.role", "maintainer")
+		runGit(t, target, "config", "--local", "--unset", "beads.role")
+		out := captureStdout(t, func() error { return configGetCmd.RunE(configGetCmd, []string{"beads.role"}) })
+		if strings.TrimSpace(out) != "beads.role (not set in git config)" {
+			t.Errorf("absent role output = %q", out)
+		}
+		var err error
+		stderr := captureStderr(t, func() { err = configUnsetCmd.RunE(configUnsetCmd, []string{"beads.role"}) })
+		if code, ok := exitCodeFromError(err); !ok || code != 1 || !strings.Contains(stderr, "unsetting beads.role in git config") {
+			t.Errorf("absent unset = %v, stderr %q", err, stderr)
+		}
+	})
+	t.Run("default global role", func(t *testing.T) {
+		runGit(t, target, "config", "--local", "beads.role", "maintainer")
+		runGit(t, target, "config", "--local", "--unset", "beads.role")
+		if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\n\trole = contributor\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := captureStdout(t, func() error { return configGetCmd.RunE(configGetCmd, []string{"beads.role"}) })
+		if strings.TrimSpace(out) != "contributor" {
+			t.Errorf("default global role output = %q", out)
 		}
 	})
 }
