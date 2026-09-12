@@ -63,6 +63,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
@@ -132,15 +133,27 @@ func translateLegacyEnv() []string {
 
 // buildResource assembles the OTel Resource describing this bd process.
 //
+// prefix, when non-empty, is stamped as a custom bd.prefix attribute. The
+// issue prefix is the project-level identifier in beads (it shows in every
+// issue ID), so dashboards split on it. We deliberately use a custom
+// attribute rather than service.namespace: OTel k8s resource detectors and
+// the OTel Operator both populate service.namespace from the kubernetes
+// namespace, so reusing it here would either be overwritten or clash with
+// cluster conventions.
+//
 // Defaults are merged with the host/process detectors and finally with the
 // FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
 // override anything set by the caller.
-func buildResource(ctx context.Context, serviceName, version string) (*resource.Resource, error) {
+func buildResource(ctx context.Context, serviceName, version, prefix string) (*resource.Resource, error) {
+	attrs := []attribute.KeyValue{
+		semconv.ServiceNameKey.String(serviceName),
+		semconv.ServiceVersionKey.String(version),
+	}
+	if prefix != "" {
+		attrs = append(attrs, attribute.String("bd.prefix", prefix))
+	}
 	return resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String(serviceName),
-			semconv.ServiceVersionKey.String(version),
-		),
+		resource.WithAttributes(attrs...),
 		resource.WithHost(),
 		resource.WithProcess(),
 		resource.WithFromEnv(),
@@ -154,7 +167,16 @@ func buildResource(ctx context.Context, serviceName, version string) (*resource.
 // Traces are exported only when OTEL_TRACES_EXPORTER=console (stdout, for
 // local debugging); there is no remote trace backend.
 // Metrics are exported to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and/or stdout.
-func Init(ctx context.Context, serviceName, version string) error {
+//
+// prefix, when non-empty, is captured as bd.prefix on the resource and stamped
+// as a per-measurement attribute on every emitted metric so dashboards can
+// split bd.* series per beads project. The issue prefix (visible in every
+// issue ID like "myproject-123") is the project-level identifier in beads.
+// captureBaseAttrs runs unconditionally so BaseAttrs() reports the configured
+// prefix even when telemetry is disabled — call sites get a stable contract.
+func Init(ctx context.Context, serviceName, version, prefix string) error {
+	captureBaseAttrs(prefix)
+
 	if mappings := translateLegacyEnv(); len(mappings) > 0 {
 		fmt.Fprintf(os.Stderr,
 			"warning: BD_OTEL_* environment variables are deprecated. Replace with BD_OTEL_ENABLED=true plus the standard OpenTelemetry SDK variables. Translated for this run: %s\n",
@@ -167,7 +189,7 @@ func Init(ctx context.Context, serviceName, version string) error {
 		return nil
 	}
 
-	res, err := buildResource(ctx, serviceName, version)
+	res, err := buildResource(ctx, serviceName, version, prefix)
 	if err != nil {
 		return fmt.Errorf("telemetry: resource: %w", err)
 	}

@@ -33,13 +33,17 @@ func commandSpanAttrs(cmdName, version string, args []string, secretFlags map[st
 // telemetry falls back to noop providers, matching the rest of bd's
 // "telemetry is opt-in, never blocks the user" stance.
 //
-// Extracted so the call from main.go's PreRunE is a single testable line.
-// Must run before any DB access so SQL spans nest under the command span;
-// in main.go it runs ahead of the usage-metrics bootstrap block (a separate
-// subsystem, unrelated to OTel), so it is kept independent of
-// startCommandSpan rather than folded into a single combined call.
-func initTelemetry(ctx context.Context, version string) {
-	if err := telemetry.Init(ctx, "bd", version); err != nil {
+// Extracted so the call from main.go's PreRunE is a single testable line. It
+// is kept independent of startCommandSpan rather than folded into a single
+// combined call, so callers can interleave other setup between the two.
+//
+// prefix is the project's issue prefix, read from the store's config table.
+// It lands as bd.prefix on the resource and on every metric measurement, so
+// dashboards can split bd.* series per beads project. main.go therefore calls
+// this after the store opens; commands that exit before that never initialize
+// OTel.
+func initTelemetry(ctx context.Context, version, prefix string) {
+	if err := telemetry.Init(ctx, "bd", version, prefix); err != nil {
 		debug.Logf("warning: telemetry init failed: %v", err)
 	}
 }
@@ -65,7 +69,7 @@ func startCommandSpan(ctx context.Context, cmdName, version string, args []strin
 // called) taught us that wiring inside cobra PreRunE is exactly the kind of
 // code that decays silently — this and its two constituent halves exist so
 // that wiring is a single testable line wherever it's used.
-func startCommandTelemetry(ctx context.Context, cmdName, version string, args []string, secretFlags map[string]bool) (context.Context, oteltrace.Span) {
-	initTelemetry(ctx, version)
+func startCommandTelemetry(ctx context.Context, cmdName, version, prefix string, args []string, secretFlags map[string]bool) (context.Context, oteltrace.Span) {
+	initTelemetry(ctx, version, prefix)
 	return startCommandSpan(ctx, cmdName, version, args, secretFlags)
 }

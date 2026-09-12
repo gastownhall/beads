@@ -49,6 +49,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -870,67 +871,67 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount           metric.Int64Counter
-	lockWaitMs           metric.Float64Histogram
-	circuitTrips         metric.Int64Counter
-	circuitRejected      metric.Int64Counter
-	serializationErrors  metric.Int64Counter
-	writeRetries         metric.Int64Counter
-	connAcquireMs        metric.Float64Histogram
-	poolWaitCount        metric.Int64Counter
-	poolWaitMs           metric.Float64Histogram
-	claimVerifyLost      metric.Int64Counter
-	claimVerifyRecovered metric.Int64Counter
-	ignoredTxFreshPool   metric.Int64Counter
+	retryCount           telemetry.Counter
+	lockWaitMs           telemetry.Histogram
+	circuitTrips         telemetry.Counter
+	circuitRejected      telemetry.Counter
+	serializationErrors  telemetry.Counter
+	writeRetries         telemetry.Counter
+	connAcquireMs        telemetry.Histogram
+	poolWaitCount        telemetry.Counter
+	poolWaitMs           telemetry.Histogram
+	claimVerifyLost      telemetry.Counter
+	claimVerifyRecovered telemetry.Counter
+	ignoredTxFreshPool   telemetry.Counter
 }
 
 func init() {
 	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
-	doltMetrics.retryCount, _ = m.Int64Counter("bd.db.retry_count",
+	doltMetrics.retryCount = telemetry.NewCounter(m, "bd.db.retry_count",
 		metric.WithDescription("SQL operations retried due to server-mode transient errors"),
 		metric.WithUnit("{retry}"),
 	)
-	doltMetrics.lockWaitMs, _ = m.Float64Histogram("bd.db.lock_wait_ms",
+	doltMetrics.lockWaitMs = telemetry.NewHistogram(m, "bd.db.lock_wait_ms",
 		metric.WithDescription("Time spent waiting to acquire database locks"),
 		metric.WithUnit("ms"),
 	)
-	doltMetrics.circuitTrips, _ = m.Int64Counter("bd.db.circuit_trips",
+	doltMetrics.circuitTrips = telemetry.NewCounter(m, "bd.db.circuit_trips",
 		metric.WithDescription("Number of times the Dolt circuit breaker tripped open"),
 		metric.WithUnit("{trip}"),
 	)
-	doltMetrics.circuitRejected, _ = m.Int64Counter("bd.db.circuit_rejected",
+	doltMetrics.circuitRejected = telemetry.NewCounter(m, "bd.db.circuit_rejected",
 		metric.WithDescription("Requests rejected by open circuit breaker (fail-fast)"),
 		metric.WithUnit("{request}"),
 	)
-	doltMetrics.serializationErrors, _ = m.Int64Counter("bd.db.serialization_errors",
+	doltMetrics.serializationErrors = telemetry.NewCounter(m, "bd.db.serialization_errors",
 		metric.WithDescription("Serialization failures (MySQL 1213/1205) before retry"),
 		metric.WithUnit("{error}"),
 	)
-	doltMetrics.writeRetries, _ = m.Int64Counter("bd.write_retries_total",
+	doltMetrics.writeRetries = telemetry.NewCounter(m, "bd.write_retries_total",
 		metric.WithDescription("Write-tx retries in withRetryTx (label: type=serialization|connection)"),
 		metric.WithUnit("{retry}"),
 	)
-	doltMetrics.connAcquireMs, _ = m.Float64Histogram("bd.db.conn_acquire_ms",
+	doltMetrics.connAcquireMs = telemetry.NewHistogram(m, "bd.db.conn_acquire_ms",
 		metric.WithDescription("Time to acquire a pooled connection for a Dolt transaction"),
 		metric.WithUnit("ms"),
 	)
-	doltMetrics.poolWaitCount, _ = m.Int64Counter("bd.db.pool_wait_count",
+	doltMetrics.poolWaitCount = telemetry.NewCounter(m, "bd.db.pool_wait_count",
 		metric.WithDescription("Number of times a connection acquisition had to wait for the pool"),
 		metric.WithUnit("{wait}"),
 	)
-	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
+	doltMetrics.poolWaitMs = telemetry.NewHistogram(m, "bd.db.pool_wait_ms",
 		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
 		metric.WithUnit("ms"),
 	)
-	doltMetrics.claimVerifyLost, _ = m.Int64Counter("bd.claim_verify_lost_total",
+	doltMetrics.claimVerifyLost = telemetry.NewCounter(m, "bd.claim_verify_lost_total",
 		metric.WithDescription("Claim-family writes that reported success but failed verify-by-re-read (label: op=claim|unclaim)"),
 		metric.WithUnit("{write}"),
 	)
-	doltMetrics.claimVerifyRecovered, _ = m.Int64Counter("bd.claim_verify_recovered_total",
+	doltMetrics.claimVerifyRecovered = telemetry.NewCounter(m, "bd.claim_verify_recovered_total",
 		metric.WithDescription("Indeterminate claim-family commits resolved by re-read (label: op, outcome=applied|replayed)"),
 		metric.WithUnit("{write}"),
 	)
-	doltMetrics.ignoredTxFreshPool, _ = m.Int64Counter("bd.db.ignored_tx_fresh_pool",
+	doltMetrics.ignoredTxFreshPool = telemetry.NewCounter(m, "bd.db.ignored_tx_fresh_pool",
 		metric.WithDescription("ignored-tx transactions that fell back to a dedicated single-connection pool instead of borrowing from the main pool"),
 		metric.WithUnit("{tx}"),
 	)
@@ -947,7 +948,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Current number of open connections (in-use + idle)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().OpenConnections))
+			o.Observe(int64(db.Stats().OpenConnections), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -955,7 +956,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Connections currently in use"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().InUse))
+			o.Observe(int64(db.Stats().InUse), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -963,7 +964,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Idle connections in pool"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().Idle))
+			o.Observe(int64(db.Stats().Idle), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -971,7 +972,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Maximum number of open connections (pool limit)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().MaxOpenConnections))
+			o.Observe(int64(db.Stats().MaxOpenConnections), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -1157,7 +1158,7 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 		// that recreates the complete SQL transaction on every attempt.
 		if isDoltAutocommitRollbackError(err) {
 			doltMetrics.serializationErrors.Add(ctx, 1)
-			doltMetrics.writeRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "serialization")))
+			doltMetrics.writeRetries.Add(ctx, 1, attribute.String("type", "serialization"))
 			return err
 		}
 		// A commit result marked indeterminate may have landed before its
@@ -1170,14 +1171,14 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 		// so the write never landed — safe to replay at any phase.
 		if isSerializationError(err) {
 			doltMetrics.serializationErrors.Add(ctx, 1)
-			doltMetrics.writeRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "serialization")))
+			doltMetrics.writeRetries.Add(ctx, 1, attribute.String("type", "serialization"))
 			return err // retryable
 		}
 		// Connection failures reaching this branch happened before commit;
 		// withWriteTx marks ambiguous commit response loss with the public
 		// ErrCommitIndeterminate sentinel above.
 		if isRetryableError(err) {
-			doltMetrics.writeRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "connection")))
+			doltMetrics.writeRetries.Add(ctx, 1, attribute.String("type", "connection"))
 			if s.breaker != nil && isConnectionError(err) {
 				s.breaker.RecordFailure()
 				if s.breaker.State() == circuitOpen {

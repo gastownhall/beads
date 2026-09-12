@@ -117,9 +117,24 @@ If `bd.storage.*` and `bd.issue.count` are absent but `bd.db.pool_*` is
 present, the storage decorator is not in the chain — check
 `wireStorageDecorators` in `cmd/bd/storage_chain.go`.
 
+Every emitted measurement also carries `bd_prefix=<issue prefix>` (e.g.
+`bd_prefix=hl` for a project whose IDs are `hl-1`, `hl-2`, …). The same
+value lands as a resource attribute too, but per-measurement stamping is
+what makes `bd_prefix` directly queryable from a Prometheus-style backend
+without a join through `target_info`. To see the label, scan the same
+stdout output:
+
+```bash
+BD_OTEL_STDOUT=true bd list 2>&1 | grep -E 'bd[._]prefix'
+```
+
 ---
 
 ## Metrics
+
+> **Per-project label**: every `bd_*` series in this section carries
+> `bd_prefix=<issue prefix>` in addition to the per-metric attributes
+> shown below, so dashboards can filter and split by project directly.
 
 ### Storage (`bd_storage_*`)
 
@@ -215,3 +230,32 @@ internal/telemetry/storage.go → bd_storage_* metrics (SDK wrapper)
 When no OpenTelemetry SDK environment variable selects an exporter,
 `telemetry.Init()` installs **no-op** providers: hot paths execute only no-op
 calls with no memory allocation.
+
+### Adding a metric
+
+Build the instrument with `telemetry.NewCounter`, `telemetry.NewHistogram` or
+`telemetry.NewGauge`, and hold it as `telemetry.Counter` / `telemetry.Histogram`
+/ `telemetry.Gauge` rather than the `metric.*` type:
+
+```go
+var myMetrics struct {
+	thing telemetry.Counter
+}
+
+func init() {
+	m := otel.Meter("github.com/steveyegge/beads/mypackage")
+	myMetrics.thing = telemetry.NewCounter(m, "bd.my.thing",
+		metric.WithDescription("Things that happened"),
+		metric.WithUnit("{thing}"),
+	)
+}
+
+myMetrics.thing.Add(ctx, 1, attribute.String("kind", "example"))
+```
+
+`Add` and `Record` merge `bd_prefix` (and any future process-wide attribute)
+onto every measurement, so the new series is per-project without the call site
+having to remember. A raw `metric.Int64Counter` gives up that guarantee.
+
+Observable gauges register their own callbacks, so they still stamp explicitly:
+`o.Observe(v, telemetry.WithMergedAttrs())`.
