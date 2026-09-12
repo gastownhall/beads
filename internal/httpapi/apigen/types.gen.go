@@ -2350,6 +2350,11 @@ type CountIssuesParams struct {
 	// MetadataField Top-level metadata equality filter as `key=value`, split on the first `=`. Repeatable. An invalid key is a 400.
 	MetadataField *[]string `form:"metadata_field,omitempty" json:"metadata_field,omitempty"`
 
+	// IncludeEphemeral Admit the EPHEMERAL PLANE — the wisps table — and nothing else. Exactly the first of `include_infra`'s four changes, with none of the other three: no type exclusion is taken off, so a row whose TYPE a default count already excludes stays excluded.
+	//
+	// It exists because there was no way to ask for that one thing. The write path routes on STORAGE CLASS, not type, so a `no_history` bead lives in the wisps table while remaining ordinary durable work. Reaching it needed `include_infra`, which also drops template rows of the named type — one silent undercount traded for another.
+	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
+
 	// IncludeInfra Count the cardinality of `bd list --include-infra --all` instead of the durable plane. IT CHANGES FOUR THINGS AT ONCE, and they are listed rather than summarized because a caller reading "include infra" would expect one:
 	//
 	// the ephemeral wisps tier is MERGED IN, picking up both wisps and the `no_history` beads that are durable work stored in that tier; template molecules are EXCLUDED, which a default count includes; gate beads are EXCLUDED unless `type=gate` asks for them by name; and a `type` this workspace calls infra ROUTES the count to the ephemeral tier instead of the durable one.
