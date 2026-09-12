@@ -1299,23 +1299,39 @@ func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localP
 	return result.Issues, nil
 }
 
+// parsedJSONL is the result of reading a JSONL file: the records that parsed,
+// where each one came from, the memory records, and the lines that could not be
+// parsed at all. Malformed lines are collected rather than returned as an error
+// so one corrupt line cannot discard a whole file (GH#4492); callers that want
+// the old abort behavior check Rejected themselves.
+type parsedJSONL struct {
+	Issues   []*types.Issue
+	Sources  []recordSource
+	Config   map[string]string
+	Rejected []rejectedRecord
+}
+
 // parseJSONLFile reads a JSONL file and returns parsed issues and config
 // entries (memories). Pure function — no store I/O.
-func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
+func parseJSONLFile(path string) (*parsedJSONL, error) {
 	//nolint:gosec // G304: path from user-provided CLI argument
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	// Allow up to 64MB per line for large descriptions
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 	var issues []*types.Issue
+	var sources []recordSource
+	var rejected []rejectedRecord
 	configEntries := make(map[string]string)
+	lineNo := 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		lineNo++
 		if line == "" {
 			continue
 		}
@@ -1323,7 +1339,13 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 		// Peek at the record to check for _type field
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			rejected = append(rejected, rejectedRecord{
+				Line:   lineNo,
+				Reason: fmt.Sprintf("failed to parse JSONL line: %v", err),
+				Kind:   rejectParse,
+				raw:    line,
+			})
+			continue
 		}
 
 		// Skip the optional beads-jsonl metadata/header record.
@@ -1346,7 +1368,13 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					rejected = append(rejected, rejectedRecord{
+						Line:   lineNo,
+						Reason: fmt.Sprintf("failed to parse memory record: %v", err),
+						Kind:   rejectParse,
+						raw:    line,
+					})
+					continue
 				}
 				if mem.Key != "" && mem.Value != "" {
 					configEntries[kvPrefix+memoryPrefix+mem.Key] = mem.Value
@@ -1358,7 +1386,13 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 		// Regular issue record
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			rejected = append(rejected, rejectedRecord{
+				Line:   lineNo,
+				Reason: fmt.Sprintf("failed to parse issue from JSONL: %v", err),
+				Kind:   rejectParse,
+				raw:    line,
+			})
+			continue
 		}
 		// Skip tombstone entries: these are deleted issues exported by older
 		// versions (pre-v0.50) with status "tombstone" and deleted_at set.
@@ -1371,12 +1405,18 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 
 		issue.SetDefaults()
 		issues = append(issues, &issue)
+		sources = append(sources, recordSource{Line: lineNo, Raw: line})
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
 
-	return issues, configEntries, nil
+	return &parsedJSONL{
+		Issues:   issues,
+		Sources:  sources,
+		Config:   configEntries,
+		Rejected: rejected,
+	}, nil
 }
 
 // applyImportWispPlane resolves which storage plane (wisps vs issues table) a
@@ -1460,10 +1500,43 @@ func importFromLocalJSONLConflictSkip(ctx context.Context, store storage.DoltSto
 // SetConfig, while routing regular issue records through the normal path.
 // conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
 func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage, localPath string, conflictSkip bool) (*importLocalResult, error) {
-	issues, configEntries, err := parseJSONLFile(localPath)
+	parsed, err := parseJSONLFile(localPath)
 	if err != nil {
 		return nil, err
 	}
+	issues, configEntries := parsed.Issues, parsed.Config
+
+	// These are whole-database restore paths (`bd bootstrap`,
+	// `bd init --from-jsonl`), so a line that is not JSON at all still fails
+	// the import: a truncated or corrupt export must not be restored minus its
+	// damaged part while reporting success.
+	if bad := firstParseReject(parsed.Rejected); bad != nil {
+		return nil, fmt.Errorf("%s (line %d)", bad.Reason, bad.Line)
+	}
+
+	// A record the writer would refuse is different: that is one bad row in an
+	// otherwise readable file, and it must not discard the other 4,999
+	// (GH#4492).
+	rejected := parsed.Rejected
+	if customStatuses, customTypes, vocabErr := importVocabulary(ctx, store); vocabErr == nil {
+		var invalid []rejectedRecord
+		issues, invalid = partitionImportRecords(issues, parsed.Sources, customStatuses, customTypes)
+		rejected = append(rejected, invalid...)
+	} else {
+		// Without the vocabulary we cannot tell a custom status from a typo, so
+		// leave the batch alone and let the writer's error stand as before.
+		fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
+	}
+	rejected = orderRejects(rejected)
+	quarantine := rejectFilePath(localPath)
+	wrote, werr := writeRejectFile(quarantine, rejected)
+	if werr != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", werr)
+		quarantine = ""
+	} else if !wrote {
+		quarantine = ""
+	}
+	reportRejectedRecords(os.Stderr, localPath, rejected, quarantine)
 
 	result := &importLocalResult{}
 

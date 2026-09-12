@@ -45,7 +45,7 @@ func proxiedImporter() (publicops.Importer, error) {
 //     its own read (reporting StaleSkippedIDs and keeping stale rows' aux data
 //     out of the batch), and RejectStaleUpserts re-checks updated_at inside
 //     the write transaction, closing the same race the classic path closes.
-func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string, rejects importRejectOutcome) error {
 	if uowProvider == nil {
 		return fmt.Errorf("proxied-server UOW provider not initialized")
 	}
@@ -69,9 +69,12 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 	}
 
 	result := importResultJSON{
-		Source:    source,
-		DedupHits: dedupHits,
-		DryRun:    importDryRun,
+		Source:           source,
+		DedupHits:        dedupHits,
+		DryRun:           importDryRun,
+		Invalid:          len(rejects.rejected),
+		InvalidRecords:   rejects.rejected,
+		RejectsWrittenTo: rejects.writtenTo,
 	}
 
 	if importDryRun {
