@@ -445,7 +445,7 @@ Selected commonly-used variables:
 
 | Variable | Description |
 |---|---|
-| `BD_DB`, `BEADS_DB` | Database path (legacy `BEADS_DB` still honored) |
+| `BD_DB`, `BEADS_DB` | Database path (legacy `BEADS_DB` still honored). Point these at a workspace's `.beads` directory — a path naming the workspace root is not resolved. |
 | `BD_JSON` | Force JSON output |
 | `BD_DOLT_AUTO_COMMIT` | Override `dolt.auto-commit` (`on`/`off`) |
 | `BD_DOLT_AUTO_PUSH`, `BD_DOLT_AUTO_PUSH_INTERVAL`, `BD_DOLT_AUTO_PUSH_TIMEOUT` | Override auto-push settings |
@@ -457,12 +457,26 @@ Selected commonly-used variables:
 | `BD_NO_PAGER`, `BD_PAGER` | Pager behavior |
 | `BD_NON_INTERACTIVE` | Disable prompts |
 | `BD_DEBUG` | Enable debug logging |
-| `BEADS_DIR` | Force the active beads workspace directory |
+| `BEADS_DIR` | Force the active beads workspace directory. Ranks **below** `BEADS_DB`/`BD_DB` — see the precedence note under this table. |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
 | `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |
 | `BEADS_DOLT_SERVER_MODE`, `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_DATA_DIR`, `BEADS_DOLT_PORT`, ... | Embedded/server Dolt overrides |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist |
+
+**Workspace-selection precedence.** When more than one of these names a
+workspace, the first that resolves wins, on both the no-DB commands (`bd
+where`) and the store-requiring ones (`bd list`, `create`, `update`):
+
+1. `--db` (explicit flag)
+2. `BEADS_DB`
+3. `BD_DB`
+4. `BEADS_DIR`
+5. directory discovery (`.beads/` in the current directory or an ancestor)
+
+`BEADS_DIR` ranking below `BEADS_DB`/`BD_DB` matters when both are exported in
+one shell: a stale `BEADS_DB` silently overrides a `BEADS_DIR` you set
+deliberately. Unset the one you do not mean rather than relying on order.
 
 Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.
 
