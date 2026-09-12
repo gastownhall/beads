@@ -157,7 +157,20 @@ func withOuterStatementIsRead(upperTrimmed string) bool {
 	for i := 0; i < len(upperTrimmed); i++ {
 		c := upperTrimmed[i]
 		if quote != 0 {
+			// MySQL escapes inside strings: a backslash escapes the next
+			// character (in ' and " strings), and a doubled quote is a
+			// literal quote. Without these, 'a\'(' un-quotes early and the
+			// scanner loses parenthesis depth - misclassifying a CTE write
+			// as read-only.
+			if c == '\\' && quote != '`' && i+1 < len(upperTrimmed) {
+				i++
+				continue
+			}
 			if c == quote {
+				if i+1 < len(upperTrimmed) && upperTrimmed[i+1] == quote {
+					i++
+					continue
+				}
 				quote = 0
 			}
 			continue
