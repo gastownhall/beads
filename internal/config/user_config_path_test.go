@@ -4,8 +4,74 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
+	t.Setenv("HOME", "~")
+	t.Setenv("USERPROFILE", "~")
+	t.Setenv("home", "~")
+	t.Setenv("APPDATA", "relative-appdata")
+	for _, xdg := range []string{"relative-xdg", ""} {
+		name := "XDG configured"
+		wantSource := "XDG_CONFIG_HOME"
+		if xdg == "" {
+			name, wantSource = "XDG absent", "HOME"
+		}
+		switch runtime.GOOS {
+		case "windows":
+			wantSource = "APPDATA"
+		case "darwin", "ios":
+			wantSource = "HOME"
+		case "plan9":
+			wantSource = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", xdg)
+			path, err := UserConfigYamlPath()
+			if err == nil || path != "" {
+				t.Fatalf("unsafe roots produced path %q, err=%v", path, err)
+			}
+			wantLabel := "native user config directory (" + wantSource + ")"
+			if wantSource == "XDG_CONFIG_HOME" {
+				// Go rejects relative XDG roots before returning a directory;
+				// preserve its source-bearing error under the generic label.
+				wantLabel = "native user config directory: "
+			}
+			if !strings.Contains(err.Error(), wantLabel) || !strings.Contains(err.Error(), wantSource) {
+				t.Errorf("native config error %q does not identify %s", err, wantSource)
+			}
+		})
+	}
+}
+
+func TestUserConfigYamlCandidatesOwnNativeDiagnostics(t *testing.T) {
+	wantSource := "HOME"
+	if runtime.GOOS == "windows" {
+		wantSource = "APPDATA"
+	} else if runtime.GOOS == "plan9" {
+		wantSource = "home"
+	}
+	t.Run("validation identifies its source", func(t *testing.T) {
+		candidates := buildUserConfigYamlCandidates(t.TempDir(), nil, "relative-native", nil)
+		want := "native user config directory (" + wantSource + ")"
+		if candidates.nativeErr == nil || !strings.Contains(candidates.nativeErr.Error(), want) {
+			t.Fatalf("builder native error = %v, want label %q", candidates.nativeErr, want)
+		}
+	})
+	t.Run("resolver diagnostic and identity are preserved", func(t *testing.T) {
+		resolverErr := errors.New("XDG_CONFIG_HOME resolver diagnostic")
+		candidates := buildUserConfigYamlCandidates(t.TempDir(), nil, "", resolverErr)
+		if !errors.Is(candidates.nativeErr, resolverErr) {
+			t.Fatalf("builder native error = %v, want original resolver error", candidates.nativeErr)
+		}
+		if got, want := candidates.nativeErr.Error(), "native user config directory: "+resolverErr.Error(); got != want {
+			t.Fatalf("builder native error = %q, want %q", got, want)
+		}
+	})
+}
 
 func TestSelectUserConfigYamlPathPrecedence(t *testing.T) {
 	t.Run("existing documented path wins", func(t *testing.T) {
