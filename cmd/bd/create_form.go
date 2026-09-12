@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -156,33 +155,52 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 	}
 
 	// Parse dependency specs before creating anything. The form keeps its
-	// historical lenient parsing (warn and skip malformed entries), but the
-	// edges that do parse commit atomically with the create below.
-	var depSpecs []domain.DependencySpec
+	// historical lenient parsing (warn and skip malformed entries) for the
+	// type itself, but once an entry's type is accepted it goes through the
+	// same parseDepSpecs/dedupeDepSpecs pair `bd create --deps` uses, so
+	// alias normalization (GH#5069) and the same-target-different-type
+	// conflict (GH#4626, #4833) are handled identically on both paths.
+	var validDepStrings []string
 	for _, depSpec := range fv.Dependencies {
 		depSpec = strings.TrimSpace(depSpec)
 		if depSpec == "" {
 			continue
 		}
 
-		var depType types.DependencyType
-		var dependsOnID string
-
+		var rawType types.DependencyType
 		if strings.Contains(depSpec, ":") {
 			parts := strings.SplitN(depSpec, ":", 2)
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			dependsOnID = strings.TrimSpace(parts[1])
+			rawType = types.DependencyType(strings.TrimSpace(parts[0]))
 		} else {
-			depType = types.DepBlocks
-			dependsOnID = depSpec
+			rawType = types.DepBlocks
 		}
 
-		if !depType.IsValid() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)\n", depType)
+		if err := validateDependencyType(canonicalDependencyType(rawType)); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: %s)\n", rawType, createDepsAcceptedTypeList())
 			continue
 		}
 
-		depSpecs = append(depSpecs, domain.DependencySpec{Type: depType, TargetID: dependsOnID})
+		validDepStrings = append(validDepStrings, depSpec)
+	}
+
+	// The form's `blocks:<id>` has always meant "the new issue depends on
+	// <id>" - the OPPOSITE of --deps' explicit blocks: spelling, which
+	// swaps direction. Parse each entry for alias canonicalization and
+	// conflict detection, but pin the form's historical direction (every
+	// form dep is an edge FROM the new issue) BEFORE deduping, so the
+	// dedupe key sees the direction that will actually be stored.
+	var depEntries []depSpecEntry
+	for _, raw := range validDepStrings {
+		spec, rawType, err := parseDepSpec(raw)
+		if err != nil {
+			return nil, err
+		}
+		spec.SwapDirection = false
+		depEntries = append(depEntries, depSpecEntry{spec: spec, rawType: rawType})
+	}
+	depSpecs, err := dedupeDepSpecs(dropConflictingFormDeps(depEntries))
+	if err != nil {
+		return nil, err
 	}
 
 	// The issue and its edges (parent-child per GH#1983, plus form deps)
@@ -209,6 +227,34 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 	}
 
 	return issue, nil
+}
+
+// dropConflictingFormDeps applies the form's lenient posture to the
+// same-target/different-type collision that dedupeDepSpecs rejects. On the
+// `bd create --deps` path a hard failure is right: the caller re-runs with the
+// flag fixed. In the interactive form the user has already typed every field,
+// and an error at this point throws all of it away (review on #5648), so the
+// form keeps the FIRST entry for each target, warns with the spellings as
+// typed, and drops the rest. Identical repeats (e.g. blocked-by and depends-on
+// both normalizing to blocks) are left for dedupeDepSpecs to collapse.
+func dropConflictingFormDeps(entries []depSpecEntry) []depSpecEntry {
+	seen := make(map[string]depSpecEntry, len(entries))
+	kept := make([]depSpecEntry, 0, len(entries))
+	for _, e := range entries {
+		key := fmt.Sprintf("%t|%s", e.spec.SwapDirection, e.spec.TargetID)
+		prev, ok := seen[key]
+		switch {
+		case !ok:
+			seen[key] = e
+			kept = append(kept, e)
+		case prev.spec.Type != e.spec.Type:
+			fmt.Fprintf(os.Stderr, "Warning: dropping %q on %s: it already carries %q and a target can only carry one dependency type at a time (GH#4626)\n",
+				e.rawType, e.spec.TargetID, prev.rawType)
+		default:
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 var createFormCmd = &cobra.Command{
