@@ -80,6 +80,14 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
+the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test
+container is started, that container's port overwrites both variables; when one
+cannot be started -- for any reason, including `BEADS_TEST_SKIP=dolt` -- both
+are cleared, so a store fails closed instead of resolving onto whatever server
+the environment happens to name. Point a test run at a specific Dolt server by
+starting a container for it, not by exporting a port.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.
