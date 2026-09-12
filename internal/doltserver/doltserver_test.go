@@ -824,6 +824,53 @@ func TestKillStaleServersPreservesOtherRepoServers(t *testing.T) {
 	}
 }
 
+// TestKillStaleServersReapsOrphanUnderAmbientServerPort is the regression gate
+// for the resolveServerModeIgnoringPortEnv carve-out. killStaleServersForDir
+// must keep reaping a same-repo orphan (GH#2430) even when an ambient
+// BEADS_DOLT_SERVER_PORT is set: without the carve-out the port var makes the
+// dir resolve external, the kill path treats the server as somebody else's and
+// declines to reap, and GH#2430 silently regresses.
+//
+// The existing TestKillStaleServersPreservesOtherRepoServers does not cover
+// this -- it never sets the variable, so it only catches the regression on a
+// host that happens to export one.
+func TestKillStaleServersReapsOrphanUnderAmbientServerPort(t *testing.T) {
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "3308")
+	t.Setenv("BEADS_DOLT_PORT", "")
+
+	dir := t.TempDir()
+	canonicalPID := 111
+	sameRepoOrphanPID := 222
+	otherRepoPID := 333
+
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(canonicalPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var killed []int
+	got, err := killStaleServersForDir(
+		dir,
+		[]int{canonicalPID, sameRepoOrphanPID, otherRepoPID},
+		func(pid int, _ string) bool {
+			return pid == canonicalPID || pid == sameRepoOrphanPID
+		},
+		func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("killStaleServersForDir error: %v", err)
+	}
+	if len(got) != 1 || got[0] != sameRepoOrphanPID {
+		t.Fatalf("killed=%v, want [%d] -- an ambient BEADS_DOLT_SERVER_PORT must not stop the orphan reap (GH#2430)", got, sameRepoOrphanPID)
+	}
+	if len(killed) != 1 || killed[0] != sameRepoOrphanPID {
+		t.Fatalf("kill callback got %v, want [%d]", killed, sameRepoOrphanPID)
+	}
+}
+
 func TestKillStaleServersWithoutCanonicalPIDIsNoop(t *testing.T) {
 	// Without a PID file, beads has no record of starting a server.
 	// killStaleServersForDir should be a no-op to avoid killing
@@ -1554,6 +1601,8 @@ func TestDefaultConfig_SharedModeBeadsDir(t *testing.T) {
 func TestResolveServerMode_Default(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	dir := t.TempDir()
@@ -1601,6 +1650,13 @@ func TestResolveServerMode_HostInferredExternal(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	// Same ambient-inheritance fix as TestResolveServerMode_EnvHostBeatsEmbeddedMetadata:
+	// this asserts the host-only DEFAULT port, so an inherited
+	// BEADS_DOLT_SERVER_PORT silently becomes the expected value's competitor.
+	// Pre-dates check 2c -- it fails on origin/main too, on any host that
+	// exports one.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	dir := t.TempDir()
@@ -1662,6 +1718,15 @@ func TestResolveServerMode_EnvHostBeatsEmbeddedMetadata(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+	// This test is about HOST inference; the port env vars are a different
+	// input and must be neutralized rather than inherited. Without these two
+	// lines the test reads whatever the developer's shell exports: on a rig
+	// with BEADS_DOLT_SERVER_PORT set it failed at the DefaultConfig.Port
+	// assertion below (that failure predates the port-env work and reproduces
+	// on origin/main) and, once check 2c existed, at the proxied-server and
+	// localhost-override assertions too.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	dir := t.TempDir()
@@ -1690,6 +1755,17 @@ func TestResolveServerMode_EnvHostBeatsEmbeddedMetadata(t *testing.T) {
 	if mode := ResolveServerMode(dir); mode == ServerModeExternal {
 		t.Errorf("proxied-server workspace must not be reclassified external by env host; got %v", mode)
 	}
+	// Same exemption, the other inference input: an ambient server port must
+	// not reclassify a proxied workspace either. Check 2c originally lacked
+	// this guard, so a proxied constellation with BEADS_DOLT_SERVER_PORT set
+	// -- ours -- resolved external.
+	func() {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "3308")
+		defer t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		if mode := ResolveServerMode(dir); mode == ServerModeExternal {
+			t.Errorf("proxied-server workspace must not be reclassified external by an ambient server port; got %v", mode)
+		}
+	}()
 
 	// An EMPTY env host behaves as unset (matching GetDoltServerHost,
 	// cross-vendor review round 6): the remote metadata host stays
@@ -1726,6 +1802,8 @@ func TestResolveServerMode_ServerModeEnv(t *testing.T) {
 func TestResolveServerMode_EmbeddedMode(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	dir := t.TempDir()
@@ -1740,6 +1818,39 @@ func TestResolveServerMode_EmbeddedMode(t *testing.T) {
 	mode := ResolveServerMode(dir)
 	if mode != ServerModeEmbedded {
 		t.Errorf("expected ServerModeEmbedded with dolt_mode=embedded, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_EnvPortImpliesExternal(t *testing.T) {
+	// A port arriving via env var (BEADS_DOLT_SERVER_PORT or the legacy
+	// BEADS_DOLT_PORT) is the orchestrator's signal that the server address
+	// is externally managed — GetDoltServerPort() already treats both as
+	// first-class port signals ("orchestrator sets this"). ResolveServerMode
+	// must agree, or a deployment whose port arrives via env var resolves
+	// owned even though bd never launched the server and ensureDoltInit
+	// never ran for it (be-9i0yq.1).
+	tests := []struct {
+		name   string
+		envVar string
+	}{
+		{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_PORT"},
+		{"BEADS_DOLT_PORT", "BEADS_DOLT_PORT"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+			t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+			t.Setenv("BEADS_DOLT_PORT", "")
+			t.Setenv(tc.envVar, "13307")
+			config.ResetForTesting()
+
+			dir := t.TempDir()
+			mode := ResolveServerMode(dir)
+			if mode != ServerModeExternal {
+				t.Errorf("expected ServerModeExternal with %s set and no metadata.json, got %v", tc.envVar, mode)
+			}
+		})
 	}
 }
 
@@ -1848,11 +1959,44 @@ func TestResolveServerMode_EmbeddedHonoredWithoutServerEnv(t *testing.T) {
 
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	got := ResolveServerMode(beadsDir)
 	if got != ServerModeEmbedded {
 		t.Errorf("ResolveServerMode with no server env = %v, want ServerModeEmbedded", got)
+	}
+}
+
+func TestResolveServerMode_EnvPortOverridesStaleEmbedded(t *testing.T) {
+	// GH#2949 precedent applied to the port env var: a runtime
+	// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT must beat stale
+	// dolt_mode=embedded metadata, same as the shared-server, explicit
+	// server-mode, and host env vars above (be-9i0yq.1).
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configfile.Config{
+		Database: "dolt",
+		Backend:  "dolt",
+		DoltMode: configfile.DoltModeEmbedded,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "13307")
+	t.Setenv("BEADS_DOLT_PORT", "")
+	config.ResetForTesting()
+
+	got := ResolveServerMode(beadsDir)
+	if got != ServerModeExternal {
+		t.Errorf("ResolveServerMode with env port + stale embedded = %v, want ServerModeExternal", got)
 	}
 }
 
