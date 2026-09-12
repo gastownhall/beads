@@ -27,7 +27,25 @@ import (
 // ignored migration, each Dolt-committed), which grows as migrations
 // accumulate — with headroom for a loaded machine; some tests set up two
 // stores under one context.
-const testTimeout = 45 * time.Second
+//
+// Was 45s; raised to 90s for be-696w. At 45s, migrating-open tests
+// (cross_project_test.go's TestCrossProject_*, TestMigratingOpen_FirstReadSucceeds)
+// intermittently failed with "failed to initialize schema: context deadline
+// exceeded" at exactly the old bound under real host contention (15+
+// concurrent agent sessions) — see TestSchemaInitTimeoutHasLoadHeadroom for
+// the regression guard.
+//
+// This is not a two-test change. testTimeout backs testContext, which 125
+// files in this package call, and it is multiplied at 13 `5*testTimeout`
+// sites (the dropCtx database-drop cleanups in initschema_pool_poison_test.go,
+// schema_version_test.go, schema_skew_test.go, remote_migrate_gate_test.go and
+// smart_remote_migrate_gate_test.go). Raising 45s to 90s therefore takes those
+// bounds from 225s to 450s: a genuinely hung drop now needs 7.5 minutes to
+// report instead of 3.75. That is the cost being accepted here — a slower
+// failure signal across the package in exchange for not failing honest work
+// under host contention. If that trade stops being worth it, the fix is to
+// give the schema-init path its own bound rather than to lower this one back.
+const testTimeout = 90 * time.Second
 
 // testSem limits concurrent database-touching tests to avoid overwhelming the
 // shared Dolt testcontainer. Without this, 200+ parallel tests cause a
