@@ -1248,6 +1248,56 @@ jobs:
             throw 'Native Make split the spaced install path or otherwise mutated the fixture repository'
           }
 
+          # Clean only the selected build outputs, including both host suffixes.
+          foreach ($cleanDir in @('.', 'clean output')) {
+            $targetDir = Join-Path $fixtureRepo $cleanDir
+            New-Item -ItemType Directory -Force -Path (Join-Path $targetDir 'keep dir') | Out-Null
+            Set-Content -LiteralPath (Join-Path $targetDir 'keep.txt') -NoNewline -Value 'keep'
+            foreach ($name in @('bd', 'bd.exe')) {
+              Set-Content -LiteralPath (Join-Path $targetDir $name) -NoNewline -Value 'clean-output'
+              if ($cleanDir -ne '.') {
+                Set-Content -LiteralPath (Join-Path $fixtureRepo $name) -NoNewline -Value 'keep-root'
+              }
+            }
+            $cleanArgs = @('--no-print-directory', 'clean')
+            if ($cleanDir -ne '.') { $cleanArgs += "BUILD_DIR=$cleanDir" }
+            Push-Location $fixtureRepo
+            try {
+              foreach ($attempt in 1..2) {
+                & $make @cleanArgs
+                if ($LASTEXITCODE -ne 0) { throw "Native Make clean failed for $cleanDir (attempt $attempt)" }
+              }
+            } finally {
+              Pop-Location
+            }
+            foreach ($name in @('bd', 'bd.exe')) {
+              if (Test-Path -LiteralPath (Join-Path $targetDir $name)) { throw "Clean left $cleanDir/$name" }
+              if ($cleanDir -ne '.' -and [IO.File]::ReadAllText((Join-Path $fixtureRepo $name)) -cne 'keep-root') {
+                throw "Custom clean changed root $name"
+              }
+            }
+            if ([IO.File]::ReadAllText((Join-Path $targetDir 'keep.txt')) -cne 'keep' -or
+                -not (Test-Path -LiteralPath (Join-Path $targetDir 'keep dir') -PathType Container)) {
+              throw 'Clean changed an unrelated neighbor or directory'
+            }
+          }
+          $absentDir = 'absent clean output'
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory "BUILD_DIR=$absentDir" clean
+            if ($LASTEXITCODE -ne 0) { throw 'Clean failed for a missing build directory' }
+          } finally {
+            Pop-Location
+          }
+          if (Test-Path -LiteralPath (Join-Path $fixtureRepo $absentDir)) {
+            throw 'Clean created a missing build directory'
+          }
+          foreach ($name in @('bd', 'bd.exe')) {
+            if ([IO.File]::ReadAllText((Join-Path $fixtureRepo $name)) -cne 'keep-root') {
+              throw "Missing-directory clean changed root $name"
+            }
+          }
+          Write-Output 'Native Make clean default, spaced, repeated and missing-directory checks passed'
       - name: Exercise MSYS2-hosted Make
         if: matrix.host == 'msys2'
         shell: msys2 {0}

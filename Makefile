@@ -398,8 +398,8 @@ check-testing-short:
 # Clean build artifacts and benchmark profiles
 clean:
 	@echo "Cleaning..."
-	rm -f bd
-	rm -f bd.exe
+	rm -f "$(BUILD_DIR)/bd"
+	rm -f "$(BUILD_DIR)/bd.exe"
 	rm -f internal/storage/dolt/bench-cpu-*.prof
 	rm -f beads-perf-*.prof
 
