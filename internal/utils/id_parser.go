@@ -17,6 +17,20 @@ import (
 // "not found" and surface the candidate list instead of a generic failure.
 var ErrAmbiguousID = errors.New("ambiguous issue ID")
 
+// ErrAbbreviatedIDNotAllowed is the sentinel wrapped into the error
+// ResolvePartialIDExact returns when the input does not exactly name an
+// issue but WOULD have resolved via leading-prefix abbreviation matching —
+// the behavior ResolvePartialID allows and exact-only callers refuse.
+//
+// Distinguishing this from "no such issue at all" matters because the two
+// are not the same failure: an abbreviation that matches a real issue is
+// proof the issue exists, so telling the caller "no issue found matching"
+// (the message a genuine not-found gets) is false. Exact-only callers use
+// errors.Is(err, ErrAbbreviatedIDNotAllowed) to give a truthful, actionable
+// message instead ("id abbreviations are not accepted here; use the full
+// id") — see bd comment's resolveAndGetIssueForMutationExact caller.
+var ErrAbbreviatedIDNotAllowed = errors.New("id is a valid abbreviation, but exact-match resolution is required here")
+
 type PartialIDResolverStore interface {
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
@@ -50,6 +64,29 @@ func parseIssueID(input string, prefix string) string {
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
 func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
+	return resolvePartialID(ctx, store, input, true)
+}
+
+// ResolvePartialIDExact resolves an issue ID like ResolvePartialID, but never
+// falls back to leading-prefix abbreviation matching (e.g. "a3f8" ->
+// "a3f8e9...", or a wisp's stripped hash "list" -> "list3t0") — only a full
+// exact ID or exact hash match (with or without a "wisp-" infix) succeeds.
+//
+// Intended for write paths where a mistyped or coincidentally-prefix-matching
+// argument must return "not found" instead of silently mutating an unrelated
+// issue (e.g. `bd comment list <id>`, a typo for `bd comments list`, was
+// silently fuzzy-resolving "list" to a wisp whose hash happened to start with
+// "list" and writing the rest of the command line to it as a comment).
+//
+// When the input matches nothing exactly but WOULD have resolved via
+// leading-prefix abbreviation, the returned error wraps
+// ErrAbbreviatedIDNotAllowed rather than being indistinguishable from a
+// genuine not-found — see that sentinel's doc comment.
+func ResolvePartialIDExact(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
+	return resolvePartialID(ctx, store, input, false)
+}
+
+func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input string, allowAbbrev bool) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("cannot resolve issue ID %q: storage is nil", input)
 	}
@@ -141,6 +178,10 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 
 	var matches []string
 	var exactMatch string
+	// abbrevOnly collects candidates that matched ONLY via leading-prefix
+	// abbreviation while allowAbbrev is false — never resolved to, only used
+	// to make the final "not found" error truthful (see ErrAbbreviatedIDNotAllowed).
+	var abbrevOnly []string
 
 	for _, id := range ids {
 		// Check for exact full ID match first (case: user typed full ID with different prefix)
@@ -167,7 +208,14 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 			// Leading-prefix abbreviation (documented UX, e.g. "a3f8" -> "a3f8e9...").
 			// HasPrefix rather than Contains: reject interior-substring matches
 			// like "kt8" inside "j0kt8" (GH#4234).
-			matches = append(matches, id)
+			if allowAbbrev {
+				matches = append(matches, id)
+			} else {
+				// Exact-only callers must never silently resolve to this
+				// candidate, but its existence is what makes "no issue found
+				// matching" false below — track it instead of discarding it.
+				abbrevOnly = append(abbrevOnly, id)
+			}
 		}
 	}
 
@@ -202,7 +250,11 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 				if wHash == hashPart || wispHash == hashPart {
 					exactMatch = wID
 				} else if strings.HasPrefix(wispHash, hashPart) {
-					matches = append(matches, wID)
+					if allowAbbrev {
+						matches = append(matches, wID)
+					} else {
+						abbrevOnly = append(abbrevOnly, wID)
+					}
 				}
 			}
 			if exactMatch != "" {
@@ -212,6 +264,16 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 	}
 
 	if len(matches) == 0 {
+		if !allowAbbrev && len(abbrevOnly) > 0 {
+			// The input matched nothing exactly, but it IS a valid leading-
+			// prefix abbreviation of at least one real issue — telling the
+			// caller "no issue found" here would be false. Report the
+			// truthful reason instead so an exact-only caller (comment.go's
+			// resolveAndGetIssueForMutationExact) can surface an accurate,
+			// actionable message rather than claiming the issue is missing.
+			sort.Strings(abbrevOnly)
+			return "", fmt.Errorf("%w: %q (matches %v)", ErrAbbreviatedIDNotAllowed, input, abbrevOnly)
+		}
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
 

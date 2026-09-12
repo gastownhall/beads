@@ -185,6 +185,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd comment`/`bd comments add` refuse an abbreviated id and a reserved
+  word instead of silently resolving one to the wrong issue**
+  ([#5393](https://github.com/gastownhall/beads/pull/5393)). `bd comment list
+  <id>`, a typo for `bd comments list`, used to parse as id="list" with no
+  guard on the id slot — and since no issue is ever literally named "list",
+  the default abbreviation-tolerant resolver would fuzzy-match it against
+  whatever existing bead or wisp id happened to start with "list" and write
+  the rest of the command line there as a comment. Confirmed in production:
+  15+ automated sessions made this exact typo over two days and all landed on
+  the same unrelated wisp. `bd comment`'s id positional now (a) refuses the
+  four words a `bd comments <verb>` typo is likely to produce — `list`, `add`,
+  `rm`, `delete` — before any id resolution is attempted, on both the
+  embedded and proxied-server paths, and (b) requires an EXACT id match
+  (`bd-a1b2c3d4`, not `a1b2`) rather than the abbreviation-tolerant matching
+  every other command keeps. The refusal message is truthful about which
+  case applies: a reserved word gets a hint toward `bd comments`; an
+  abbreviation of a REAL issue gets `id abbreviations are not accepted on
+  comment writes; use the full id from \`bd show <id>\`` rather than the
+  generic (and in that case false) "no issue found matching" text a genuine
+  not-found gets. See [Working with
+  IDs](docs/core-concepts/hash-ids.md#working-with-ids) for the full
+  read/write distinction. The proxied-server comment path was investigated
+  separately and found to already be exact-id-only by construction (its
+  resolution never performed abbreviation matching in the first place) — a
+  regression test now locks that in rather than leaving it undocumented.
+
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
   unreachable store made prime omit the memory section entirely, so a session

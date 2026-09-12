@@ -1,12 +1,59 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
+
+// commentReservedIDWords are "comments" subcommand names that must never be
+// silently accepted as the <id> positional of "bd comment" (singular). They
+// exist so a typo'd plural form — "bd comment list <id>", meant to be
+// "bd comments list" / "bd comments <id>" — fails loudly instead of treating
+// "list" as the id and the real id as comment text.
+//
+// This is not a hypothetical: 15+ automated sessions in one deployment made
+// exactly this typo over two days, and because "list" happened to be a
+// leading-prefix abbreviation of an unrelated wisp's hash ("list3t0"), each
+// one silently wrote a garbage comment onto that wisp instead of erroring.
+// The word list mirrors the real "comments" subcommand (add) plus the other
+// verbs a "comments <verb>" typo is likely to produce.
+var commentReservedIDWords = map[string]bool{
+	"list":   true,
+	"add":    true,
+	"rm":     true,
+	"delete": true,
+}
+
+// checkCommentIDNotReservedWord rejects an id argument that is one of
+// commentReservedIDWords, with a message pointing at the "bd comments"
+// subcommand the caller most likely meant. Pure and side-effect free so it
+// can run before either the direct or proxied-server RunE branch, and be
+// unit tested without a store.
+func checkCommentIDNotReservedWord(id string) error {
+	if !commentReservedIDWords[id] {
+		return nil
+	}
+	// "list" and "add" are genuinely misplaced "bd comments" subcommands, but
+	// "rm" and "delete" are not — there is no "bd comments rm"/"bd comments
+	// delete" (they read as bd's own delete command, or "dep rm"'s pattern,
+	// used in the wrong place). The message below must hold for all four, so
+	// it says "reserved word", never "misplaced bd comments subcommand".
+	return HandleErrorRespectJSON(`%q is not a valid issue id — bd reserves it as a command/subcommand word (a real id never collides with one), so it is refused as an id instead of silently resolved as one.
+
+To comment on an issue:
+  bd comment <issue-id> "text"
+  bd comments add <issue-id> "text"
+
+To list comments:
+  bd comments <issue-id>
+
+See: bd comment --help`, id)
+}
 
 // validateCommentArgs runs as cobra's Args validation for the singular
 // "comment" shorthand, before RunE's usesProxiedServer() dispatch and (on
@@ -45,7 +92,15 @@ To add a comment:
 
 See: bd comment --help`)
 	}
-	return nil
+	// The two cases above carry hand-written messages for the two typos that
+	// were actually reported, both real "bd comments" subcommands. The
+	// remaining reserved words ("rm", "delete") are not "bd comments"
+	// subcommands — they collide with words bd uses elsewhere ("bd delete",
+	// "dep rm") — so they get checkCommentIDNotReservedWord's word-agnostic
+	// generic message instead of a claim that would be false for them.
+	// Keeping the whole set in commentReservedIDWords also keeps the check
+	// unit-testable on its own.
+	return checkCommentIDNotReservedWord(args[0])
 }
 
 var commentCmd = &cobra.Command{
@@ -96,10 +151,17 @@ To list comments on an issue, use the plural form: bd comments <id>`,
 
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueForMutation(ctx, store, id)
+		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()
+			}
+			if errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
+				// The issue does exist — id just isn't its full form — so
+				// "resolving %s: %v"'s generic wording (and the "no issue
+				// found matching" text underneath a plain not-found) would be
+				// false here. Say what actually happened instead.
+				return HandleErrorRespectJSON("id abbreviations are not accepted on comment writes; use the full id from `bd show %s`", id)
 			}
 			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}

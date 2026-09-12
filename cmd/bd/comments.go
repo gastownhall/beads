@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -165,6 +167,21 @@ See: bd comments --help`)
 	},
 }
 
+// validateCommentsAddArgs runs as cobra's Args validation for "comments add",
+// the plural twin of "comment"'s validateCommentArgs. It exists for the same
+// reason: an id argument that IS a reserved word (see
+// commentReservedIDWords) must never reach either dispatch branch (local or
+// proxied) or fuzzy resolution, where it could silently land on an unrelated
+// issue instead of erroring. Unlike validateCommentArgs, there is no
+// singular/plural confusion to special-case here — "comments add" is already
+// the plural form — so this only runs the word-agnostic generic check.
+func validateCommentsAddArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	return checkCommentIDNotReservedWord(args[0])
+}
+
 var commentsAddCmd = &cobra.Command{
 	Use:   "add [issue-id] [text...]",
 	Short: "Add a comment to an issue",
@@ -176,7 +193,7 @@ Examples:
 
   # Add a comment from a file
   bd comments add bd-123 -f notes.txt`,
-	Args:          cobra.MinimumNArgs(1),
+	Args:          validateCommentsAddArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -213,10 +230,18 @@ Examples:
 		}
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueForMutation(ctx, store, issueID)
+		result, err := resolveAndGetIssueForMutationExact(ctx, store, issueID)
 		if err != nil {
 			if result != nil {
 				result.Close()
+			}
+			if errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
+				// The issue does exist — id just isn't its full form — so
+				// "resolving %s: %v"'s generic wording (and the "no issue
+				// found matching" text underneath a plain not-found) would be
+				// false here. Say what actually happened instead, matching
+				// "bd comment"'s truthful message.
+				return HandleErrorRespectJSON("id abbreviations are not accepted on comment writes; use the full id from `bd show %s`", issueID)
 			}
 			return HandleErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
