@@ -110,6 +110,46 @@ external-dependency boundary. Keep new uses within the repository policy:
 make check-testing-short
 ```
 
+### Dolt Container Tests (podman-rootless)
+
+Anything that does not carry `BEADS_TEST_SKIP=dolt` — including
+`BEADS_TEST_ENV_RUN_DOLT=1` and a bare `go test` — reaches a real
+`dolt sql-server` through testcontainers-go. Two limitations of that harness
+are worth recognizing before reading a failure as a product bug. Neither is
+reachable in production or on GitHub Actions.
+
+**Migration 0032 hangs over the wire protocol.** Migration `0032`
+(`drop_schema_migrations_applied_at`) hangs indefinitely when applied through
+the containerized sql-server, surfacing after roughly 60s as:
+
+```
+failed to create embedded DoltStore: failed to initialize schema: context deadline exceeded
+```
+
+A `go test ./internal/storage/uow/... -count=1` with no `BEADS_TEST_SKIP` sits
+in `initSchema` until the package timeout rather than failing. The cause is the
+container port-forwarding path, not migration 0032's SQL: the identical
+statement completes normally through the embedded/CLI engine, and against a
+bare-host-process `dolt sql-server` matching the deployed shape. Evidence chain
+in `be-j3szz`. Use `BEADS_TEST_SKIP=dolt` unless the container path is what you
+are testing.
+
+**Disabling Ryuk removes the container safety net.** This repository sets no
+`TESTCONTAINERS_RYUK_DISABLED`, so CI runs with Ryuk — testcontainers-go's
+orphan-reaper sidecar — enabled. The podman-rootless flow generally requires
+turning it off by hand (`TESTCONTAINERS_RYUK_DISABLED=true`), because under
+rootless podman Ryuk frequently cannot start: it wants the runtime socket. See
+`be-w3n2m`. With Ryuk off, nothing reaps a container whose test process exited
+without running its cleanup — `os.Exit` reached before a deferred
+`TerminateDoltContainer`, for instance. `be-5kkk6` records the cost: 101 leaked
+containers, and an exhausted swap. When running with Ryuk disabled, keep
+teardown on the normal return path using the `testMainInner` pattern
+(`beads_test.go`), and check for strays afterwards:
+
+```bash
+docker ps -a --filter ancestor=dolthub/dolt-sql-server:2.2.0
+```
+
 ## Test Design
 
 ### Seams, Scenarios, and Doubles
