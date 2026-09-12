@@ -637,10 +637,12 @@ func TestFilteredPushUsesDedicatedLongTimeoutConnection(t *testing.T) {
 	if err := held.Close(); err != nil {
 		t.Fatalf("release shared pool: %v", err)
 	}
+	// A name with no federation_peers row is a credential-free remote, so
+	// withPeerCredentials proceeds to Dolt and Dolt reports the unknown remote.
 	if err := <-errCh; err == nil {
-		t.Fatal("expected peer credential error for nonexistent peer")
-	} else if !strings.Contains(err.Error(), "failed to get peer credentials") {
-		t.Fatalf("filtered push failed before peer lookup: %v", err)
+		t.Fatal("expected Dolt unknown-remote error for nonexistent peer")
+	} else if !strings.Contains(err.Error(), "remote 'nonexistent-peer' not found") {
+		t.Fatalf("filtered push failed for an unexpected reason: %v", err)
 	}
 	assertFederationStagingBranchAbsent(t, ctx, observer)
 }
