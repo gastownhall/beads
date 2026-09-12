@@ -173,6 +173,11 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 	if err != nil {
 		return nil, err
 	}
+	// The edge's referencing (source) issue is versioned by AddDependencyInTx
+	// itself, at the row write — once, and only for a genuinely inserted row
+	// (the idempotent re-add mints nothing, the same exemption eventWritten
+	// draws for the events table below) — so every leg that reaches that
+	// helper versions identically and this role adds no second mint.
 	// Stage the source's dependency table always and its events table only
 	// when a row was recorded — the same selective staging the stores' own
 	// AddDependencyWithOptions does, so an idempotent re-add cannot sweep
@@ -258,6 +263,9 @@ func ExecuteRemoveDependency(ctx context.Context, tx *sql.Tx, request publicops.
 	if !eventWritten {
 		return publicops.RemoveDependencyResult{Removed: false}, nil, nil
 	}
+	// A removal that actually happened versioned the referencing issue inside
+	// RemoveDependencyInTx, at the row delete; an absent edge returned above
+	// without ever reaching that seam.
 	tables := ChangedTables{}
 	tables.Add(depTable, eventTable)
 	return publicops.RemoveDependencyResult{Removed: true}, tables, nil

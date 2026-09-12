@@ -306,6 +306,7 @@ var _ storage.Compactor = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*DoltStore)(nil)
+var _ storage.VersionedHistoryConfigurer = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -317,12 +318,16 @@ type DoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
-	connStr              string       // Connection string for reconnection
-	cfg                  *Config      // Config this store was opened with (rebuildPoolAfterMigration)
-	serverEndpoint       string       // Exact endpoint bound to bootstrap reset authority
-	mu                   sync.RWMutex // Protects concurrent access
-	readOnly             bool         // True if opened in read-only mode
-	credentialKey        []byte       // Random encryption key for federation credentials
+	// versionedHistoryEnabled activates dual-write issue-version history for
+	// THIS store instance only (storage.VersionedHistoryConfigurer); never
+	// process-global.
+	versionedHistoryEnabled atomic.Bool
+	connStr                 string       // Connection string for reconnection
+	cfg                     *Config      // Config this store was opened with (rebuildPoolAfterMigration)
+	serverEndpoint          string       // Exact endpoint bound to bootstrap reset authority
+	mu                      sync.RWMutex // Protects concurrent access
+	readOnly                bool         // True if opened in read-only mode
+	credentialKey           []byte       // Random encryption key for federation credentials
 
 	// localActiveDatabaseDir is the exact active database directory when this
 	// store instance has authoritative local filesystem access. It is resolved
@@ -1201,6 +1206,8 @@ func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	}
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearVersionScope := s.scopeVersionedHistoryTransaction(tx)
+	defer clearVersionScope()
 	if err := fn(tx); err != nil {
 		return errors.Join(err, tx.Rollback())
 	}
@@ -1217,6 +1224,16 @@ func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 
 func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
 	return issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+}
+
+// SetVersionedHistoryEnabled activates dual-write issue-version history for
+// this store instance only.
+func (s *DoltStore) SetVersionedHistoryEnabled(enabled bool) {
+	s.versionedHistoryEnabled.Store(enabled)
+}
+
+func (s *DoltStore) scopeVersionedHistoryTransaction(tx *sql.Tx) func() {
+	return issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
 }
 
 func (s *DoltStore) commitSQLTx(ctx context.Context, op string, tx *sql.Tx) error {

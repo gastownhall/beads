@@ -136,13 +136,15 @@ var mutationEntryPoints = []string{
 
 // beadDMLExemptions are exported functions the DML detector flags as writing a
 // work-bead table but which legitimately do NOT journal, each with a reason.
-// They fall into four buckets: (1) derived child-counter maintenance; (2)
+// They fall into five buckets: (1) derived child-counter maintenance; (2)
 // aux-table writers the templated-%s heuristic can't distinguish from a bead
 // table (events, child counters); (3) constituent sub-helpers of a
 // create/rename/promote/delete whose top-level entry point journals the whole
 // mutation once; (4) compaction maintenance outside the
-// create/update/close/delete/dep/label op vocabulary. The staleness check fails
-// if any stops being flagged, so an exemption cannot rot.
+// create/update/close/delete/dep/label op vocabulary; (5) dual-write
+// version-history bookkeeping that runs after the mutation is already
+// journaled. The staleness check fails if any stops being flagged, so an
+// exemption cannot rot.
 var beadDMLExemptions = map[string]string{
 	// (1) Child counters are derived CLI acceleration state. In contrast,
 	// is_blocked is part of the exported bead snapshot and its recompute helpers
@@ -181,6 +183,20 @@ var beadDMLExemptions = map[string]string{
 	// omission is invisible to consumers.
 	"ApplyCompactionInTx":     "compaction content rewrite outside the op vocabulary; consumer mirrors of this bead go stale until its next journaled mutation (known contract gap, carried from the reference lineage)",
 	"RestoreFromSnapshotInTx": "restores a compacted issue outside the op vocabulary; consumer mirrors of this bead go stale until its next journaled mutation (known contract gap, carried from the reference lineage)",
+
+	// (5) dual-write version-history bookkeeping. RecordVersionInTx is called
+	// from inside the same mutationEntryPoints functions (the create, update,
+	// close, reopen, claim, release, lease-reclaim, defer-wake, label,
+	// dependency, promote and persistence-move bodies, and their domain/db
+	// equivalents used by the uow leg — version_completeness_test.go pins the
+	// set) immediately after those callers already invoke RecordEventInTx, so the
+	// mutation itself is already journaled by the time RecordVersionInTx runs.
+	// Its own UPDATE issues SET current_revision = ? only advances a
+	// denormalized pointer to match the snapshot row it just inserted into
+	// issue_versions (not a bead table, so it can't anchor the exemption on
+	// its own) — bookkeeping for an already-journaled mutation, not a second
+	// mutation that needs its own emit.
+	"RecordVersionInTx": "advances the denormalized current_revision pointer to match a snapshot just inserted into issue_versions (not a bead table); called from the same entry points that already journal the mutation via RecordEventInTx, so this is bookkeeping for an already-journaled mutation, not a second one",
 }
 
 // journalExemptMutations are mutation paths that deliberately do NOT journal

@@ -820,6 +820,30 @@ type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
 }
 
+// VersionedHistoryConfigurer controls dual-write issue-version history
+// activation on ONE storage instance. Implementations must never use
+// process-global state, for the same reason as EventsJournalConfigurer:
+// a process can hold several stores at once, and enabling history on one must
+// not turn it on for any other. Callers type-assert; a store that does not
+// implement it simply cannot record version history.
+//
+// SINGLE WRITER ONLY until the version_id primary-key swap lands.
+// issue_versions is keyed PRIMARY KEY (issue_id, revision), and revision is
+// a local ordinal (MAX(revision)+1 inside the writing transaction), so two
+// disconnected writers that each mint the same ordinal for the same issue
+// collide on merge — and TryAutoResolveMergeConflicts
+// (versioncontrolops/mergesettle.go) fails the pull for a table it does not
+// know. Enabling versioned history is therefore safe only with a SINGLE
+// writer per store until migration 0068 steps 1-3 (UUID version_id primary
+// key, ordinal demoted to an index) land; those steps follow as their own
+// PR. "Single writer" means one writer at a time per store, not merely one
+// clone: MAX(revision)+1 is not a safe allocator for two concurrent
+// transactions in one store either (gastownhall/beads#6379, item 4). See
+// issueops/version_history.go for why the ordinal is never an address.
+type VersionedHistoryConfigurer interface {
+	SetVersionedHistoryEnabled(enabled bool)
+}
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool

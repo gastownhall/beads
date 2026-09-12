@@ -49,6 +49,9 @@ type doltSQLProvider struct {
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
+	// versionedHistoryEnabled activates dual-write issue-version history for
+	// THIS provider instance only. See SetVersionedHistoryEnabled.
+	versionedHistoryEnabled atomic.Bool
 }
 
 // SetEventsJournalEnabled activates the durable events journal for every unit
@@ -63,6 +66,13 @@ type doltSQLProvider struct {
 // write lands and the journal is simply empty.
 func (p *doltSQLProvider) SetEventsJournalEnabled(enabled bool) {
 	p.eventsJournalEnabled.Store(enabled)
+}
+
+// SetVersionedHistoryEnabled activates dual-write issue-version history for
+// every unit of work this provider begins from now on. Per instance, never
+// process-global — see SetEventsJournalEnabled.
+func (p *doltSQLProvider) SetVersionedHistoryEnabled(enabled bool) {
+	p.versionedHistoryEnabled.Store(enabled)
 }
 
 type bootstrapPreparationError struct {
@@ -125,9 +135,10 @@ func applyProviderOptions(opts []ProviderOption) providerOptions {
 }
 
 var (
-	_ UnitOfWorkProvider              = (*doltSQLProvider)(nil)
-	_ TxProvider                      = (*doltSQLProvider)(nil)
-	_ storage.EventsJournalConfigurer = (*doltSQLProvider)(nil)
+	_ UnitOfWorkProvider                 = (*doltSQLProvider)(nil)
+	_ TxProvider                         = (*doltSQLProvider)(nil)
+	_ storage.EventsJournalConfigurer    = (*doltSQLProvider)(nil)
+	_ storage.VersionedHistoryConfigurer = (*doltSQLProvider)(nil)
 )
 
 func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
@@ -155,14 +166,16 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
 
-	// Bind journal activation to the connection this unit of work is pinned to,
-	// AFTER START TRANSACTION so the seq allocation's UPDATE and the SELECT that
-	// must observe it are inside one transaction on one session. The scope is
-	// released when the connection is (doltServerTx.releaseConn / poisonConn),
-	// so an entry cannot outlive its transaction.
+	// Bind journal and versioned-history activation to the connection this unit
+	// of work is pinned to, AFTER START TRANSACTION so the seq allocation's
+	// UPDATE and the SELECT that must observe it are inside one transaction on
+	// one session. Both scopes are released when the connection is
+	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
+	// transaction.
 	return &doltServerTx{
 		conn:              conn,
 		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
+		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, p.versionedHistoryEnabled.Load()),
 	}, nil
 }
 
