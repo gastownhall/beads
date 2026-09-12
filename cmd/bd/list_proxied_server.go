@@ -196,11 +196,12 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 // workapi.FinishPage's, inside issueops.Reader.List, where the direct route's
 // are too.
 func emitProxiedListJSONResult(iwc []*types.IssueWithCounts, in listInput, hasMore bool) error {
+	pag := listPaginationMeta(len(iwc), hasMore, in.effectiveLimit)
 	var err error
 	if in.SkipLabels {
-		err = outputJSON(newSkipLabelsListJSONResponse(iwc))
+		err = outputJSONWithPagination(newSkipLabelsListJSONResponse(iwc), pag)
 	} else {
-		err = outputJSON(iwc)
+		err = outputJSONWithPagination(iwc, pag)
 	}
 	if err != nil {
 		return err
