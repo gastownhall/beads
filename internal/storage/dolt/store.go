@@ -2455,10 +2455,20 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	// server down, bad credentials — falls through to the historical
 	// probe-then-create path, which owns creation, the #5042 ownership
 	// signal, databaseNotFoundError, and every error message callers match.
-	if pingErr := db.PingContext(ctx); pingErr == nil {
+	pingErr := db.PingContext(ctx)
+	if pingErr == nil {
 		connReady = true
 		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
 	}
+
+	// Advisory only: the probe-then-create path below is the historical open,
+	// so a failure here is never fatal. But a silently discarded error is a
+	// fast path that has quietly stopped firing — here that means every open
+	// is back to burning the extra MySQL session this path exists to remove,
+	// with nothing to say so. Same reasoning as the convergence probe in
+	// internal/storage/schema/lock.go.
+	debug.Logf("dolt: direct-connect fast path unavailable for %q on %s:%d, using the no-database init connection: %v\n",
+		cfg.Database, cfg.ServerHost, cfg.ServerPort, pingErr)
 
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it

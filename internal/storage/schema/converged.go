@@ -36,12 +36,17 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 		return false, nil
 	}
 
-	// Put the session on the target database first. The hot path — the proxied
-	// CLI open in uow.openAndInitSchema — pins its schema-init pool with an
-	// EMPTY DSN database and only USEs the database after GET_LOCK, so a probe
-	// that merely ASKED whether the session was already on databaseName read
-	// NULL from DATABASE() and declined on every single invocation: the fast
-	// path never fired where it was needed.
+	// Put the session on the target database first. Callers arrive in two
+	// shapes. The proxied CLI open in uow.openAndInitSchema now connects
+	// straight to the target database on its own steady-state path
+	// (wy-s8ytnw), so the session is already there and the DATABASE() read
+	// below is the whole cost. Its fall-through open — and, before that fast
+	// path existed, every invocation of the hot path — pins the schema-init
+	// pool with an EMPTY DSN database and only USEs the database after
+	// GET_LOCK, so a probe that merely ASKED whether the session was already
+	// on databaseName read NULL from DATABASE() and declined every single
+	// time: the fast path never fired where it was needed. The selector is
+	// what keeps that second shape working.
 	onTarget, qualifier, err := selectTargetDatabase(ctx, db, databaseName, selector)
 	if err != nil {
 		return false, err

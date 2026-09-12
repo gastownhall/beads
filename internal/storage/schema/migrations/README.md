@@ -62,6 +62,19 @@ duplicate primary key given: [w2,external:e1]
 Normalize *after* dropping the generated column and its key, not before. (0058
 normalizes before, and reaches the abort on any store whose rows collide.)
 
+**Restore any session variable you set, in the script that set it.** Six
+migrations here clear `FOREIGN_KEY_CHECKS` and restore it (0041, 0043, 0047,
+0050, 0053, 0058); keep that shape. Since wy-s8ytnw the steady-state open in
+`uow.openAndInitSchema` hands the pool that ran the migration straight to the
+provider for live queries, so a system session variable still changed when a
+script reports success leaks into ordinary queries. Pairing the SETs inside one
+script is what makes that safe — `initSchemaAttempt` pins one session per
+attempt, so both statements land on the same session, and an attempt that dies
+between them returns its connection to the pool, which is why the restore
+cannot be the caller's job. User variables (`SET @sql`, `SET @needs_add`) are
+exempt: nothing outside these scripts reads one, and each assigns before it
+reads.
+
 **The `dolt` CLI is not a safe harness for guarded migrations, twice over.**
 `dolt sql -f`/`-q`/piped-stdin silently no-ops `PREPARE`/`EXECUTE`-driven
 `ALTER TABLE` — every guarded migration here uses exactly that shape — and

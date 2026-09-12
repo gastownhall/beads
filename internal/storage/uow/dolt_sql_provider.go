@@ -14,6 +14,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -167,10 +168,14 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 }
 
 // selectProbeDatabase lets schema's pre-lock convergence probe reach the
-// database on a session that is not yet on one. openAndInitSchema pins its
-// schema-init pool with an EMPTY DSN database, so without this the probe reads
-// NULL from DATABASE(), declines, and every invocation queues on the
-// server-wide migration lock it exists to skip.
+// database on a session that is not yet on one. openAndInitSchema has two entry
+// shapes since wy-s8ytnw, and only one of them needs this: the steady-state
+// open connects straight to the target database, so the probe reads it from
+// DATABASE() and returns before consulting the selector at all
+// (schema.selectTargetDatabase). The fall-through open still pins its
+// schema-init pool with an EMPTY DSN database, and there, without this, the
+// probe reads NULL from DATABASE(), declines, and every invocation queues on
+// the server-wide migration lock it exists to skip.
 //
 // The USE MUST remain the DDL repository's own UseDatabase — the exact
 // statement prepareBootstrap issues below. That identity is the reason the
@@ -466,14 +471,48 @@ func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff
 	}, backoff.WithContext(bo, ctx))
 }
 
+// openDB opens dsn and waits out a server that is still coming up, retrying
+// transient ping failures for up to 30s (#6003).
 func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
+	bo := backoff.NewExponentialBackOff()
+	bo.MaxElapsedTime = 30 * time.Second
+	return openPool(dsn, func(conn *sql.DB) error {
+		return pingWithRetry(ctx, conn, bo, pingAttemptTimeout)
+	})
+}
+
+// openDBProbe opens dsn and proves it with ONE bounded ping instead of
+// openDB's 30s retry budget. It exists for openAndInitSchema's fast path,
+// whose failure is not terminal: every error there falls through to the
+// historical open, which keeps the retry budget it has always owned. Retrying
+// here as well would charge an unreachable server twice — this budget and then
+// the fall-through's, ~60s where the pre-fast-path code spent 30s — to answer
+// a question one ping answers. The sibling fast path in internal/storage/dolt
+// (openServerConnection's bare PingContext ahead of its no-database init
+// connection) is deliberately the same shape.
+//
+// The one attempt is still capped at pingAttemptTimeout, for the reason
+// pingWithRetry caps its own attempts: the DSN sets no ReadTimeout, so a server
+// that accepts TCP and then stalls mid-handshake is otherwise bounded only by
+// the caller's context.
+func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
+	return openPool(dsn, func(conn *sql.DB) error {
+		pingCtx, cancel := context.WithTimeout(ctx, pingAttemptTimeout)
+		defer cancel()
+		return conn.PingContext(pingCtx)
+	})
+}
+
+// openPool opens dsn and hands the pool to prove, which must establish that
+// the server answers on it. The error texts are load-bearing — callers match
+// on "uow: open db" and "uow: ping db" — and a pool whose prove fails is
+// closed here rather than leaked to a caller that only sees an error.
+func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
-	bo := backoff.NewExponentialBackOff()
-	bo.MaxElapsedTime = 30 * time.Second
-	if err := pingWithRetry(ctx, conn, bo, pingAttemptTimeout); err != nil {
+	if err := prove(conn); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
@@ -501,21 +540,55 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	// preparation is refused with 1007 exactly as it is on a no-database
 	// connection, so `created` stays false and fresh-bootstrap heal can
 	// never be armed by a database this call did not create), and the
-	// same pool is then handed to the provider. Nothing in the migration
-	// path mutates session state, so reusing its pool is safe.
+	// same pool is then handed to the provider.
+	//
+	// Reusing the migrating pool is safe — but NOT because migrations leave
+	// the session alone. They do not: six shipped migrations issue
+	// `SET FOREIGN_KEY_CHECKS = 0` and restore `= 1` (0041, 0043, 0047,
+	// 0050, 0053, 0058 under internal/storage/schema/migrations), and the
+	// guarded ones leave user variables (`SET @sql`, `SET @needs_add`) set.
+	// It is safe because of three narrower facts:
+	//   - initSchemaAttempt pins ONE session per attempt (p.db.Conn), so a
+	//     script's SET and its restoring SET cannot land on different
+	//     sessions;
+	//   - every script that clears FOREIGN_KEY_CHECKS restores it before it
+	//     can report success, and a leftover user variable is inert: nothing
+	//     outside these scripts reads one, and each script assigns before it
+	//     reads;
+	//   - every initSchema failure below closes this whole pool, so a script
+	//     that died between the two SETs never hands its session back.
+	// That is a convention where it used to be structural: before this fast
+	// path the schema-init pool was always discarded, so a migration could
+	// leak session state with impunity. Now a migration that leaves a system
+	// session variable changed on the success path would leak it into live
+	// query sessions — and an attempt that dies mid-script returns its
+	// connection to the pool, so the restore has to be part of the script,
+	// not of the caller. See internal/storage/schema/migrations/README.md.
 	//
 	// Any connect failure — the database does not exist yet (1049), the
 	// server is down, bad credentials — falls through to the historical
 	// no-database init connection, which owns creation, the ownership
-	// signal, and every error message callers already match on.
-	if dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName)); err == nil {
-		provider := newProvider(dbConn)
+	// signal, and every error message callers already match on. The probe is
+	// single-shot (openDBProbe) precisely so that fall-through cannot cost a
+	// second full retry budget.
+	probeConn, probeErr := openDBProbe(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	if probeErr == nil {
+		provider := newProvider(probeConn)
 		if err := provider.initSchema(ctx, database); err != nil {
-			_ = dbConn.Close()
+			_ = probeConn.Close()
 			return nil, fmt.Errorf("uow: init schema: %w", err)
 		}
 		return provider, nil
 	}
+
+	// Advisory only: the fall-through below is the historical open, so this is
+	// never fatal. But a silently discarded error is a fast path that has
+	// quietly stopped firing — here that means every bd invocation is back to
+	// burning two MySQL sessions, the exact cost this path exists to remove,
+	// with nothing to say so. Same reasoning as the convergence probe in
+	// internal/storage/schema/lock.go.
+	debug.Logf("uow: single-session open unavailable for %q, using the no-database init connection: %v\n",
+		database, probeErr)
 
 	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
