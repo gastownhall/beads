@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -853,16 +854,25 @@ func isBdOwnedHookFile(path string) bool {
 	return err == nil && versionInfo.IsBdHook
 }
 
-// isGitTrackedFile reports whether path is tracked by git in the repository
-// containing it. Errors (not a repo, path inside .git/, no work tree) count
+// isGitTrackedFile reports whether either the containing repository or the
+// inherited Git context tracks path. If neither probe succeeds, errors count
 // as untracked — the guard only blocks writes it can prove are unsafe.
 func isGitTrackedFile(path string) bool {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	// #nosec G204 G702 - fixed "git" command; dir/base come from the hooks
-	// directory bd itself resolved, not user input
-	cmd := exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base)
-	return cmd.Run() == nil
+	inherited := os.Environ()
+	// Check the containing repository first so inherited routing cannot hide a
+	// tracked hook. The fallback preserves bare work trees and trusted config.
+	for _, env := range [][]string{gitenv.ScrubRouting(inherited), inherited} {
+		// #nosec G204 G702 - fixed "git" command; dir/base come from the hooks
+		// directory bd itself resolved, not user input
+		cmd := exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base)
+		cmd.Env = env
+		if cmd.Run() == nil {
+			return true
+		}
+	}
+	return false
 }
 
 //nolint:unparam // force and chain kept for CLI flag compatibility; section markers make them no-ops
@@ -1400,10 +1410,21 @@ func resetHooksPathIfBeadsManaged() error {
 		return nil // not in a git repo
 	}
 
+	// These checks are defensive: repoRoot and commonDir share the cached Git context.
+	// The common-dir pin states intent: --local addresses the common config through either gitdir.
+	commonDir, err := git.GetGitCommonDir()
+	if err != nil {
+		return fmt.Errorf("resolve Git common directory for role reset: %w", err)
+	}
+	if commonDir == "" {
+		return fmt.Errorf("empty Git common directory for role reset")
+	}
+	configEnv := gitenv.ScrubRouting(os.Environ())
 	var failures []string
 
-	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "core.hooksPath")
 	cmd.Dir = repoRoot
+	cmd.Env = configEnv
 	if out, err := cmd.Output(); err == nil {
 		hooksPath := strings.TrimSpace(string(out))
 		// Matches both relative (legacy) and absolute (GH#2414) beads hooks
@@ -1411,29 +1432,42 @@ func resetHooksPathIfBeadsManaged() error {
 		// doctor.CheckHooksPath/FixHooksPath so uninstall and `bd doctor --fix`
 		// cannot disagree about what "beads-managed" means.
 		if doctor.IsBeadsManagedHooksPath(repoRoot, hooksPath) {
-			unsetCmd := exec.Command("git", "config", "--unset", "core.hooksPath")
+			unsetCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "core.hooksPath")
 			unsetCmd.Dir = repoRoot
+			unsetCmd.Env = configEnv
 			if output, err := unsetCmd.CombinedOutput(); err != nil {
 				failures = append(failures, fmt.Sprintf("core.hooksPath: %v (output: %s)", err, strings.TrimSpace(string(output))))
 			}
 		}
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		var diagnostic string
+		if ok {
+			diagnostic = strings.TrimSpace(string(exit.Stderr))
+		}
+		failures = append(failures, fmt.Sprintf("read core.hooksPath: %v (output: %s)", err, diagnostic))
 	}
-	// core.hooksPath not set at all — nothing to reset there; still fall
-	// through to beads.role below.
+	// Exit 1 means the key is absent. Other read failures must remain visible.
 
 	// Read before unsetting rather than treating git's exit 5 as "already
 	// absent". Exit 5 also means "the key has multiple values, refusing an
 	// ambiguous unset" — a repo with a duplicated beads.role (bad merge, hand
 	// edit) would then report a clean uninstall while leaving the key set,
 	// which is the exact failure this is supposed to stop.
-	getRoleCmd := exec.Command("git", "config", "--get", "beads.role")
+	// Keep the selected main/common config, including bare repositories with an
+	// external worktree, while dropping routing overrides from both commands.
+	// The presence query must use the same local scope as the unset.
+	getRoleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "beads.role")
 	getRoleCmd.Dir = repoRoot
-	if _, err := getRoleCmd.Output(); err == nil {
-		roleCmd := exec.Command("git", "config", "--unset", "beads.role")
+	getRoleCmd.Env = configEnv
+	if out, err := getRoleCmd.CombinedOutput(); err == nil {
+		roleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "beads.role")
 		roleCmd.Dir = repoRoot
+		roleCmd.Env = configEnv
 		if output, err := roleCmd.CombinedOutput(); err != nil {
 			failures = append(failures, fmt.Sprintf("beads.role: %v (output: %s)", err, strings.TrimSpace(string(output))))
 		}
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		failures = append(failures, fmt.Sprintf("read beads.role: %v (output: %s)", err, strings.TrimSpace(string(out))))
 	}
 
 	if len(failures) > 0 {
