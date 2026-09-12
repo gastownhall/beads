@@ -270,7 +270,7 @@ func applyBootstrapMetadataRepair(beadsDir string, cfg *configfile.Config, apply
 
 // BootstrapPlan describes what bootstrap will do.
 type BootstrapPlan struct {
-	Action      string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none"
+	Action      string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none", "refuse"
 	Reason      string `json:"reason"` // Human-readable explanation
 	BeadsDir    string `json:"beads_dir"`
 	Database    string `json:"database"`
@@ -278,6 +278,12 @@ type BootstrapPlan struct {
 	BackupDir   string `json:"backup_dir,omitempty"`
 	JSONLFile   string `json:"jsonl_file,omitempty"`
 	HasExisting bool   `json:"has_existing"`
+
+	// refusalDetail is the full operator-facing explanation for
+	// Action=="refuse". It is unexported so the ANSI styling it carries never
+	// leaks into --json output; JSON consumers read the plain-text one-liner
+	// in Reason instead.
+	refusalDetail string
 }
 
 func noWorkspaceBootstrapPayload() map[string]interface{} {
@@ -336,7 +342,8 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// and the multi-clone upgrade guide. If the local beadsDir does not exist
 	// yet, still prefer sync recovery first for Action=="none" so a default
 	// shared-server "beads" DB from another project cannot mask a real clone.
-	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
+	dbAction, dbProbe, hasExistingDB := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer)
+	if hasExistingDB {
 		if beadsDirExists || dbAction.Action != "none" {
 			return dbAction
 		}
@@ -401,13 +408,59 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		return plan
 	}
 
+	// Every recovery source has now been ruled out, so the fall-through below
+	// is a fresh, empty database. Decide the refusal HERE rather than inside
+	// executeInitAction: at plan time the answer reaches --dry-run and --json,
+	// printBootstrapPlan never advertises "will create fresh database" for a
+	// plan that cannot run, and confirmPrompt never asks the operator to
+	// approve one. The probe result is reused, so no second dial is needed.
+	if refusal, refused := refuseServerModeInitPlan(plan, cfg, isServer, isSharedServer, dbProbe); refused {
+		return refusal
+	}
+
 	// Fresh setup
 	plan.Action = "init"
 	plan.Reason = "No existing database, remote, or backup — will create fresh database"
 	return plan
 }
 
-func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, isSharedServer bool) (BootstrapPlan, bool) {
+// refuseServerModeInitPlan turns a would-be fresh "init" into an explicit
+// "refuse" plan when metadata.json proves this workspace was already
+// initialized (ProjectID set) and the configured server-mode database could
+// not be confirmed to exist. Creating one here would strand the existing issue
+// data behind a new, empty database of the same name — the same root cause
+// PR #5791 (open, not yet merged) addresses for bd init.
+//
+// Reaching the init fall-through already implies the database was not
+// confirmed: existingBootstrapDBPlan returns a settled "none" plan whenever a
+// probe found it. The probe is passed in rather than re-run so the refusal
+// costs no extra round-trip and can quote why the check failed.
+func refuseServerModeInitPlan(plan BootstrapPlan, cfg *configfile.Config, isServer, isSharedServer bool, probe serverDBProbe) (BootstrapPlan, bool) {
+	if !isServer || cfg.ProjectID == "" || !probe.Ran || probe.Exists {
+		return BootstrapPlan{}, false
+	}
+	host := cfg.GetDoltServerHost()
+	port := bootstrapServerPort(plan.BeadsDir, cfg, isSharedServer)
+	plan.Action = "refuse"
+	plan.Reason = bootstrapMissingServerDBSummary(plan.Database, host, port, probe.Err)
+	plan.refusalDetail = bootstrapMissingServerDBRefusal(plan.Database, host, port, probe.Err).Error()
+	return plan, true
+}
+
+// serverDBProbe records what a server-mode existence probe concluded, so the
+// answer can be reused by the init fall-through instead of dialing the server
+// a second time.
+type serverDBProbe struct {
+	Ran    bool  // a probe was actually performed
+	Exists bool  // the server confirmed the database exists
+	Err    error // the probe could not reach or question the server
+}
+
+// existingBootstrapDBPlan reports whether an existing database already settles
+// the bootstrap plan. The returned serverDBProbe carries the server-mode
+// probe result — including on the false path, where the caller needs it to
+// decide whether a fall-through to "init" is safe.
+func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, isSharedServer bool) (BootstrapPlan, serverDBProbe, bool) {
 	plan := BootstrapPlan{
 		BeadsDir: beadsDir,
 		Database: cfg.GetDoltDatabase(),
@@ -429,49 +482,68 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 		// short-circuit and live-probe the server directly rather than
 		// concluding "no database" from local-disk state alone.
 		if !hasLocalShadowDir && cfg.ProjectID == "" {
-			return BootstrapPlan{}, false
+			return BootstrapPlan{}, serverDBProbe{}, false
 		}
 
-		// When the server is reachable but the DB appears absent, retry with
-		// exponential backoff before concluding the DB is genuinely missing.
-		// A managed Dolt restart completes in <30 s; three retries over 70 s
-		// cover all observed restart windows.
-		result := probeBootstrapServerDB(beadsDir, cfg, isSharedServer)
-		if result.Err != nil {
-			plan.Action = "none"
-			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
-			return plan, true
-		}
+		// Retry the reachable-but-absent window only when the local shadow
+		// directory says this database really does live here; see
+		// probeBootstrapServerDB for why a fresh clone must not pay 70s.
+		result := probeBootstrapServerDB(beadsDir, cfg, isSharedServer, hasLocalShadowDir)
+		probe := serverDBProbe{Ran: true, Exists: result.Exists, Err: result.Err}
+
 		if result.Exists {
 			plan.HasExisting = true
 			plan.Action = "none"
 			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s:%d", cfg.GetDoltDatabase(), cfg.GetDoltServerHost(), bootstrapServerPort(beadsDir, cfg, isSharedServer))
-			return plan, true
+			return plan, probe, true
 		}
-		return BootstrapPlan{}, false
+		// An unverifiable probe means UNKNOWN, never "exists". Answering
+		// "nothing to do" for it is only defensible with local evidence that
+		// the database lives here — a populated shadow directory, where a
+		// down server is a live database we simply cannot see right now.
+		// Without that evidence the very same error describes a fresh clone
+		// whose server has not been started yet, which is the normal state of
+		// every locally-managed server-mode clone before its first sync. Such
+		// a clone must stay eligible for sync.remote, refs/dolt/data,
+		// .beads/backup/ and issues.jsonl, so report "not found" and let
+		// detectBootstrapAction consult them.
+		if result.Err != nil && hasLocalShadowDir {
+			plan.Action = "none"
+			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
+			return plan, probe, true
+		}
+		return BootstrapPlan{}, probe, false
 	}
 
 	dbPath := filepath.Join(beadsDir, "embeddeddolt")
 	if info, err := os.Stat(dbPath); err != nil || !info.IsDir() {
-		return BootstrapPlan{}, false
+		return BootstrapPlan{}, serverDBProbe{}, false
 	}
 
 	entries, _ := os.ReadDir(dbPath)
 	if len(entries) == 0 {
-		return BootstrapPlan{}, false
+		return BootstrapPlan{}, serverDBProbe{}, false
 	}
 
 	plan.HasExisting = true
 	plan.Action = "none"
 	plan.Reason = "Database already exists at " + dbPath
-	return plan, true
+	return plan, serverDBProbe{}, true
 }
 
 // probeBootstrapServerDB checks whether the configured database exists on
-// the Dolt server, retrying with backoff while the server is reachable but
-// the database appears absent (a managed restart can transiently look like
-// a missing database for up to ~30s).
-func probeBootstrapServerDB(beadsDir string, cfg *configfile.Config, isSharedServer bool) bootstrapServerDBCheck {
+// the Dolt server.
+//
+// When retryTransient is set, a reachable server that reports the database
+// absent is retried with backoff, because a managed Dolt restart can
+// transiently look like a missing database for up to ~30s. That budget costs
+// 70s, so it is only worth paying when something independent says the
+// database really is supposed to be here — in practice, a populated local
+// shadow directory. A caller with no such evidence (a fresh clone, which by
+// design has no shadow directory) is not watching a database disappear; it is
+// simply ahead of its first sync, and must pass retryTransient=false so the
+// answer costs one round-trip instead of 70s.
+func probeBootstrapServerDB(beadsDir string, cfg *configfile.Config, isSharedServer, retryTransient bool) bootstrapServerDBCheck {
 	probeCfg := bootstrapServerProbeConfig{
 		host:     cfg.GetDoltServerHost(),
 		port:     bootstrapServerPort(beadsDir, cfg, isSharedServer),
@@ -479,6 +551,9 @@ func probeBootstrapServerDB(beadsDir string, cfg *configfile.Config, isSharedSer
 		pass:     cfg.GetDoltServerPassword(),
 		database: cfg.GetDoltDatabase(),
 		tls:      cfg.GetDoltServerTLS(),
+	}
+	if !retryTransient {
+		return checkBootstrapServerDB(probeCfg)
 	}
 	retryDelays := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second}
 	var result bootstrapServerDBCheck
@@ -577,6 +652,13 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	case "init":
 		fmt.Printf("Bootstrap plan: create fresh database\n")
 		fmt.Printf("  Database: %s\n", plan.Database)
+	case "refuse":
+		// Deliberately the one-line summary, not refusalDetail: the full
+		// explanation is the error executeBootstrapPlan returns, and printing
+		// both would render it twice.
+		fmt.Printf("Bootstrap plan: refuse — will NOT create a database\n")
+		fmt.Printf("  Database: %s\n", plan.Database)
+		fmt.Printf("  Reason: %s\n", plan.Reason)
 	}
 }
 
@@ -599,6 +681,16 @@ func confirmPrompt(message string, nonInteractive bool) bool {
 func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool) error {
 	if err := requireBootstrapDoltBackend(cfg); err != nil {
 		return err
+	}
+	// A refusal is a decision, not an action awaiting approval: surface it
+	// before confirmPrompt so the operator is never asked to approve it, and
+	// before the workspace gates below so no state is touched.
+	if plan.Action == "refuse" {
+		detail := plan.refusalDetail
+		if detail == "" {
+			detail = plan.Reason
+		}
+		return errors.New(detail)
 	}
 	if !confirmPrompt("Proceed?", nonInteractive) {
 		fmt.Fprintf(os.Stderr, "Aborted.\n")
@@ -674,20 +766,23 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	return nil
 }
 
-// refuseServerModeInitForExistingProject blocks executeInitAction from
-// silently creating a fresh, empty server-mode database when metadata.json
-// proves this workspace was already initialized (ProjectID set) and the
-// configured database cannot be confirmed to exist on the server. Without
-// this gate, a transient server outage or misconfigured host/port would be
-// indistinguishable from "genuinely new project" and would strand any
-// existing issue data behind a new, empty database of the same name — the
-// same root cause as be-5up5's bd init guard.
+// refuseServerModeInitForExistingProject is the belt-and-braces half of the
+// guard whose real decision is made at plan time by refuseServerModeInitPlan.
+// It re-checks, at the last moment before a database would actually be
+// created, that this workspace is not an already-initialized project
+// (ProjectID set) whose server-mode database cannot be confirmed to exist —
+// covering any caller that reaches executeInitAction with a plan that did not
+// come from detectBootstrapAction.
+//
+// It deliberately probes ONCE. The transient-restart backoff belongs to the
+// plan-time probe; repeating it here would charge a second 70s to a decision
+// that has already been made, and refusing is the safe direction anyway.
 func refuseServerModeInitForExistingProject(plan BootstrapPlan, cfg *configfile.Config) error {
-	if !cfg.IsDoltServerMode() || cfg.ProjectID == "" {
+	isSharedServer := bootstrapSharedServerMode(plan.BeadsDir)
+	if (!cfg.IsDoltServerMode() && !isSharedServer) || cfg.ProjectID == "" {
 		return nil
 	}
-	isSharedServer := bootstrapSharedServerMode(plan.BeadsDir)
-	result := probeBootstrapServerDB(plan.BeadsDir, cfg, isSharedServer)
+	result := probeBootstrapServerDB(plan.BeadsDir, cfg, isSharedServer, false)
 	if result.Exists {
 		return nil
 	}
@@ -696,11 +791,24 @@ func refuseServerModeInitForExistingProject(plan BootstrapPlan, cfg *configfile.
 	return bootstrapMissingServerDBRefusal(cfg.GetDoltDatabase(), host, port, result.Err)
 }
 
+// bootstrapMissingServerDBSummary is the single-line, unstyled form of
+// bootstrapMissingServerDBRefusal, used as BootstrapPlan.Reason so --json
+// consumers get the explanation without ANSI escapes.
+func bootstrapMissingServerDBSummary(dbName, host string, port int, probeErr error) string {
+	if probeErr != nil {
+		return fmt.Sprintf("Could not verify database %q on Dolt server at %s:%d (%v); workspace already initialized (project_id set) — refusing to create an empty database", dbName, host, port, probeErr)
+	}
+	return fmt.Sprintf("Database %q not found on server at %s:%d; workspace already initialized (project_id set) — refusing to create an empty database", dbName, host, port)
+}
+
 // bootstrapMissingServerDBRefusal builds the refusal error shown when bd
 // bootstrap would otherwise create a fresh, empty server-mode database for a
-// workspace that was already initialized elsewhere. Adapted from be-5up5's
-// initGuardMissingServerDBMessage; per GH#2363, this must never suggest a
-// destructive "recreate" action as an actionable next step.
+// workspace that was already initialized elsewhere. Per GH#2363, this must
+// never suggest a destructive "recreate" action as an actionable next step.
+//
+// The equivalent guard for `bd init` is proposed in PR #5791, which is open
+// and not yet merged; this wording is kept deliberately close to it so the
+// two can share one message once that lands.
 func bootstrapMissingServerDBRefusal(dbName, host string, port int, probeErr error) error {
 	var b strings.Builder
 	if probeErr != nil {
