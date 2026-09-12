@@ -19,7 +19,15 @@ func TestMain(m *testing.M) {
 }
 
 func testMainInner(m *testing.M) int {
-	root, err := testutil.PinSuiteTempRoot("beads-doctor-tests-*")
+	// Clear out the roots of earlier runs of this suite whose process is
+	// gone, before claiming one of our own. A `go test -timeout` panic skips
+	// every defer here AND the post-run sweep, so the servers such a run
+	// started outlive every cleanup this process installs and nothing ever
+	// looks at that run's tree again (wy-j2zc8q). Roots with no owner marker,
+	// and roots whose owner is still running, are left untouched.
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
+	root, err := testutil.PinSuiteTempRoot(suiteRootPrefix + "*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: suite temp root: %v\n", err)
 		return 1
@@ -27,7 +35,14 @@ func testMainInner(m *testing.M) int {
 	suiteTempRoot = root
 	defer os.RemoveAll(root)
 
+	// Claim the root for this process so the NEXT run can tell our debris
+	// from a concurrent run's live tree.
+	if err := doltserver.WriteSuiteOwnerMarker(root); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", root, err)
+	}
+
 	code := m.Run()
-	doltserver.SweepOrphanedTestServers(root)
+	swept := doltserver.SweepOrphanedTestServers(root)
+	code = doltserver.ApplyLeakPolicy("cmd/bd/doctor", code, swept)
 	return code
 }

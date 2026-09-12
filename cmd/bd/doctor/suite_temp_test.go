@@ -11,6 +11,10 @@ import (
 // land under so SweepOrphanedTestServers can reap leaked sql-servers.
 var suiteTempRoot string
 
+// suiteRootPrefix is this suite's PinSuiteTempRoot pattern without its
+// random tail. SweepDeadSuiteRoots globs for it, so the two must not drift.
+const suiteRootPrefix = "beads-doctor-tests-"
+
 func TestTempDirLandsUnderSuiteSweepRoot(t *testing.T) {
 	if suiteTempRoot == "" {
 		t.Fatal("TestMain did not pin suiteTempRoot; leaked dolt sql-server processes cannot be swept")

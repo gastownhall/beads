@@ -62,16 +62,30 @@ func testMainInner(m *testing.M) int {
 	// doctor_pkg_shared and doctest_*-prefixed databases through.
 	os.Setenv("BEADS_TEST_SERVER", "1")
 
+	// Clear out the roots of earlier runs of this suite whose process is
+	// gone, before claiming one of our own. A `go test -timeout` panic skips
+	// every defer here AND the post-run sweep, so the servers such a run
+	// started outlive every cleanup this process installs and nothing ever
+	// looks at that run's tree again (wy-j2zc8q). Roots with no owner marker,
+	// and roots whose owner is still running, are left untouched.
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
 	// Pin t.TempDir() under a suite-owned root so SweepOrphanedTestServers
 	// can reap AutoStart leftovers whose t.TempDir() cleanup failed because
 	// the live child still holds the tree (gastownhall/beads#5631).
-	root, pinErr := testutil.PinSuiteTempRoot("beads-doctor-tests-*")
+	root, pinErr := testutil.PinSuiteTempRoot(suiteRootPrefix + "*")
 	if pinErr != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: suite temp root: %v\n", pinErr)
 		return 1
 	}
 	suiteTempRoot = root
 	defer os.RemoveAll(root)
+
+	// Claim the root for this process so the NEXT run can tell our debris
+	// from a concurrent run's live tree.
+	if err := doltserver.WriteSuiteOwnerMarker(root); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", root, err)
+	}
 
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
@@ -101,7 +115,8 @@ func testMainInner(m *testing.M) int {
 	// Best-effort reap of any dolt sql-server left running under a temp dir
 	// this suite created (e.g. a SIGKILLed run) — see
 	// gastownhall/beads mybd-q6cz / #5631.
-	doltserver.SweepOrphanedTestServers(root, testBDDir)
+	swept := doltserver.SweepOrphanedTestServers(root, testBDDir)
+	code = doltserver.ApplyLeakPolicy("cmd/bd/doctor", code, swept)
 
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
