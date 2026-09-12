@@ -1,7 +1,9 @@
 package git
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -57,6 +59,59 @@ func (s *testSuite) TestConfig_RoundTrip() {
 	s.Require().NoError(err)
 	s.True(found)
 	s.Equal("maintainer", value)
+}
+
+func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
+	s.gitInit()
+	s.T().Setenv("LC_ALL", "C")
+	configPath := filepath.Join(s.tmpDir, ".git", "config")
+	original, err := os.ReadFile(configPath)
+	s.Require().NoError(err)
+	for _, tc := range []struct {
+		name, key, diagnostic string
+	}{
+		{"malformed_config", "beads.role", "bad config line"},
+		{"invalid_key", "invalid", "key does not contain a section"},
+		{"invalid_routing_boolean", "beads.role", "bad boolean"},
+	} {
+		s.Run(tc.name, func() {
+			switch tc.name {
+			case "malformed_config":
+				s.Require().NoError(os.WriteFile(configPath, []byte("[broken\n"), 0600))
+				t := s.T()
+				t.Cleanup(func() {
+					if err := os.WriteFile(configPath, original, 0600); err != nil {
+						t.Errorf("restore repository config: %v", err)
+					}
+				})
+			case "invalid_routing_boolean":
+				s.T().Setenv("GIT_CONFIG_NOSYSTEM", "not-a-boolean")
+			}
+			value, found, err := s.repo.GetConfig(s.Ctx(), tc.key)
+			s.Require().Error(err)
+			s.False(found)
+			s.Empty(value)
+			s.Contains(err.Error(), tc.diagnostic)
+			var exitErr *exec.ExitError
+			s.Require().ErrorAs(err, &exitErr)
+			if tc.name == "invalid_key" {
+				s.Equal(1, exitErr.ExitCode())
+			} else {
+				_, _, roleErr := domain.NewGitUseCase(s.tmpDir, s.repo).BeadsRole(s.Ctx())
+				s.Require().Error(roleErr)
+				s.ErrorAs(roleErr, &exitErr)
+			}
+		})
+	}
+}
+
+func (s *testSuite) TestConfig_CancellationIsNotMissing() {
+	ctx, cancel := context.WithCancel(s.Ctx())
+	cancel()
+	value, found, err := s.repo.GetConfig(ctx, "beads.role")
+	s.ErrorIs(err, context.Canceled)
+	s.False(found)
+	s.Empty(value)
 }
 
 func (s *testSuite) TestConfig_SetEmptyKeyErrors() {
