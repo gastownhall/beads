@@ -48,7 +48,7 @@ ManifestType: version
 ManifestVersion: 1.6.0
 EOF
 
-# Update installer manifest
+# Update installer manifest (PortableCommandAlias required — GH#4908)
 cat > "$WINGET_DIR/SteveYegge.beads.installer.yaml" << EOF
 # yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 PackageIdentifier: SteveYegge.beads
@@ -99,11 +99,48 @@ ManifestType: defaultLocale
 ManifestVersion: 1.6.0
 EOF
 
+# GasTownHall.Beads is the package id users install today (v1.x on winget-pkgs).
+# Always set PortableCommandAlias so WinGet\\Links\\bd.exe is created (GH#4908).
+# SHA256 for arm64 is left for the releaser to fill from checksums.txt when present.
+ARM_SHA=$(curl -sL "https://github.com/gastownhall/beads/releases/download/v$VERSION/checksums.txt" | grep 'windows_arm64' | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
+if [ -z "$ARM_SHA" ]; then
+  ARM_SHA="0000000000000000000000000000000000000000000000000000000000000000"
+fi
+
+cat > "$WINGET_DIR/GasTownHall.Beads.installer.yaml" << EOF
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# PortableCommandAlias creates WinGet\\Links\\bd.exe (required — GH#4908).
+# Commands: is search metadata only and does not create the symlink.
+PackageIdentifier: GasTownHall.Beads
+PackageVersion: $VERSION
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: bd.exe
+    PortableCommandAlias: bd
+Commands:
+  - bd
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/gastownhall/beads/releases/download/v$VERSION/beads_${VERSION}_windows_amd64.zip
+    InstallerSha256: $SHA256
+  - Architecture: arm64
+    InstallerUrl: https://github.com/gastownhall/beads/releases/download/v$VERSION/beads_${VERSION}_windows_arm64.zip
+    InstallerSha256: $ARM_SHA
+ManifestType: installer
+ManifestVersion: 1.12.0
+EOF
+
 echo ""
 echo "✓ Updated winget manifests for v$VERSION"
 echo ""
 echo "Next steps:"
 echo "1. Commit these changes"
 echo "2. Fork https://github.com/microsoft/winget-pkgs"
-echo "3. Copy winget/*.yaml to manifests/s/SteveYegge/beads/$VERSION/"
+echo "3. Prefer GasTownHall.Beads:"
+echo "     copy winget/GasTownHall.Beads.installer.yaml"
+echo "     → manifests/g/GasTownHall/Beads/$VERSION/"
+echo "   (legacy SteveYegge.beads → manifests/s/SteveYegge/beads/$VERSION/)"
 echo "4. Submit PR to microsoft/winget-pkgs"
+echo ""
+echo "Reminder: PortableCommandAlias: bd is required (GH#4908)."
