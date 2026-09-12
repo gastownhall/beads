@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
@@ -21,7 +22,14 @@ var searchCmd = &cobra.Command{
 	Long: `Search issues across title and ID (all statuses, including closed).
 
 ID-like queries (e.g., "bd-123", "hq-319") use fast exact/prefix matching.
-Text queries search titles. Use --desc-contains for description search.
+Text queries search titles. Use --all-fields to search the whole issue —
+title, ID, external ref, description, design, acceptance criteria, notes,
+close reason, and comments — with each hit annotated by the field it
+matched in. Use --desc-contains for description-only filtering.
+--all-fields is a full scan of the issues and comments tables (no index
+serves an unanchored substring match), so on a large database prefer a
+distinctive query, or narrow with --status / --label. When a default-scope
+search finds nothing, a one-line hint about --all-fields goes to stderr.
 Use --status open (etc.) to narrow; closed issues are included by default
 so "was this already filed/fixed?" cannot silently answer no. Matches
 beyond --limit are dropped status-blind, so when hunting live work in a
@@ -29,6 +37,7 @@ large DB, narrow with --status open or raise --limit.
 
 Examples:
   bd search "authentication bug"
+  bd search "env var" --all-fields  # Full-text: description, notes, comments, ...
   bd search "login" --status open
   bd search "database" --label backend --limit 10
   bd search --query "performance" --assignee alice
@@ -93,6 +102,7 @@ Examples:
 		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
 
 		// Pattern matching flags
+		allFields, _ := cmd.Flags().GetBool("all-fields")
 		descContains, _ := cmd.Flags().GetString("desc-contains")
 		notesContains, _ := cmd.Flags().GetString("notes-contains")
 		externalContains, _ := cmd.Flags().GetString("external-contains")
@@ -145,6 +155,7 @@ Examples:
 		}
 
 		// Pattern matching
+		filter.AllFields = allFields
 		if descContains != "" {
 			filter.DescriptionContains = descContains
 		}
@@ -298,6 +309,9 @@ Examples:
 					CommentCount:    commentCounts[issue.ID],
 				}
 			}
+			if allFields {
+				return outputJSON(annotateMatchedIn(issuesWithCounts, query))
+			}
 			return outputJSON(issuesWithCounts)
 		}
 
@@ -311,16 +325,97 @@ Examples:
 			issue.Labels = labelsMap[issue.ID]
 		}
 
-		outputSearchResults(issues, query, longFormat)
+		outputSearchResults(issues, query, longFormat, allFields)
 		return nil
 	},
 }
 
-// outputSearchResults formats and displays search results
-func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
+// searchResultJSON is types.IssueWithCounts plus matched-in provenance for
+// --all-fields --json output. The embedded pointer keeps the JSON shape flat
+// and byte-identical to the non-annotated form apart from the added field.
+type searchResultJSON struct {
+	*types.IssueWithCounts
+	MatchedIn string `json:"matched_in,omitempty"`
+}
+
+// annotateMatchedIn wraps counted results with the field each hit matched in.
+func annotateMatchedIn(items []*types.IssueWithCounts, query string) []searchResultJSON {
+	out := make([]searchResultJSON, len(items))
+	for i, item := range items {
+		out[i] = searchResultJSON{IssueWithCounts: item, MatchedIn: matchedInField(item.Issue, query)}
+	}
+	return out
+}
+
+// matchedInField attributes an --all-fields hit to the first matching field,
+// walking id then sqlbuild.AllFieldsTextColumns in the same order the SQL
+// clause lists its arms. An issue none of whose loaded fields contain the
+// query must have matched in a comment: comments live in their own table and
+// are never hydrated onto types.Issue, so "comments" is the elimination
+// bucket rather than a checked match.
+func matchedInField(issue *types.Issue, query string) string {
+	q := strings.ToLower(query)
+	id := strings.ToLower(issue.ID)
+	idLike := sqlbuild.LooksLikeIssueID(query)
+	if (idLike && (id == q || strings.HasPrefix(id, q))) || (!idLike && strings.Contains(id, q)) {
+		return "id"
+	}
+	for _, col := range sqlbuild.AllFieldsTextColumns {
+		if strings.Contains(strings.ToLower(allFieldsColumnValue(issue, col)), q) {
+			return col
+		}
+	}
+	return "comments"
+}
+
+// allFieldsColumnValue maps a sqlbuild.AllFieldsTextColumns column name to the
+// corresponding loaded issue field.
+func allFieldsColumnValue(issue *types.Issue, col string) string {
+	switch col {
+	case "title":
+		return issue.Title
+	case "external_ref":
+		if issue.ExternalRef != nil {
+			return *issue.ExternalRef
+		}
+		return ""
+	case "description":
+		return issue.Description
+	case "design":
+		return issue.Design
+	case "acceptance_criteria":
+		return issue.AcceptanceCriteria
+	case "notes":
+		return issue.Notes
+	case "close_reason":
+		return issue.CloseReason
+	}
+	return ""
+}
+
+// outputSearchResults formats and displays search results. allFields controls
+// two --all-fields affordances: matched-in provenance on each hit, and — when
+// it is off and nothing matched — a hint on stderr that the wider scope
+// exists, so a title/ID miss cannot silently read as "nothing anywhere
+// mentions this" (GH#2883). The hint fires on any empty default-scope result,
+// including one narrowed to nothing by --status or --label; it is advice
+// about scope, not a claim about why the result is empty.
+func outputSearchResults(issues []*types.Issue, query string, longFormat bool, allFields bool) {
 	if len(issues) == 0 {
 		fmt.Printf("No issues found matching '%s'\n", query)
+		if !allFields {
+			// stderr, so a caller parsing text output sees no new stdout
+			// line; the hint is advice, not a result.
+			fmt.Fprintln(os.Stderr, "(searched title and ID only; retry with --all-fields to include description, notes, comments, and other text fields)")
+		}
 		return
+	}
+
+	matchedSuffix := func(issue *types.Issue) string {
+		if !allFields {
+			return ""
+		}
+		return fmt.Sprintf(" (matched: %s)", matchedInField(issue, query))
 	}
 
 	if longFormat {
@@ -334,6 +429,9 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 			}
 			if len(issue.Labels) > 0 {
 				fmt.Printf("  Labels: %v\n", issue.Labels)
+			}
+			if allFields {
+				fmt.Printf("  Matched in: %s\n", matchedInField(issue, query))
 			}
 			fmt.Println()
 		}
@@ -349,9 +447,9 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 			if issue.Assignee != "" {
 				assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 			}
-			fmt.Printf("%s [P%d] [%s] %s%s%s - %s\n",
+			fmt.Printf("%s [P%d] [%s] %s%s%s - %s%s\n",
 				issue.ID, issue.Priority, issue.IssueType, issue.Status,
-				assigneeStr, labelsStr, issue.Title)
+				assigneeStr, labelsStr, issue.Title, matchedSuffix(issue))
 		}
 	}
 }
@@ -381,6 +479,7 @@ func init() {
 	searchCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
 
 	// Pattern matching flags
+	searchCmd.Flags().Bool("all-fields", false, "Match query against all text fields (title, ID, external ref, description, design, acceptance criteria, notes, close reason, comments)")
 	searchCmd.Flags().String("desc-contains", "", "Filter by description substring (case-insensitive)")
 	searchCmd.Flags().String("notes-contains", "", "Filter by notes substring (case-insensitive)")
 	searchCmd.Flags().String("external-contains", "", "Filter by external ref substring (case-insensitive)")

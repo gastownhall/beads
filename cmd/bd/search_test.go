@@ -314,3 +314,41 @@ func TestSearchWithDateAndPriorityFilters(t *testing.T) {
 		}
 	})
 }
+
+// TestMatchedInField pins --all-fields provenance attribution: first match in
+// sqlbuild.AllFieldsTextColumns order wins, id wins over everything, and an
+// issue with no loaded-field match is attributed to comments by elimination
+// (GH#2883).
+func TestMatchedInField(t *testing.T) {
+	t.Parallel()
+
+	ref := "gh-42"
+	cases := []struct {
+		name  string
+		issue types.Issue
+		query string
+		want  string
+	}{
+		{name: "id first", issue: types.Issue{ID: "bd-envvar", Title: "envvar too"}, query: "envvar", want: "id"},
+		{name: "id-like query does not use substring id attribution", issue: types.Issue{ID: "other-bd-12-tail", Title: "work related to bd-12"}, query: "bd-12", want: "title"},
+		{name: "id-like query attributes id prefix", issue: types.Issue{ID: "bd-12-tail", Title: "work related to bd-12"}, query: "bd-12", want: "id"},
+		{name: "title", issue: types.Issue{ID: "bd-1", Title: "Env Var lookup"}, query: "env var", want: "title"},
+		{name: "external ref", issue: types.Issue{ID: "bd-1", ExternalRef: &ref}, query: "gh-42", want: "external_ref"},
+		{name: "description", issue: types.Issue{ID: "bd-1", Title: "t", Description: "the ROOT cause"}, query: "root cause", want: "description"},
+		{name: "design", issue: types.Issue{ID: "bd-1", Design: "keyset pagination"}, query: "keyset", want: "design"},
+		{name: "acceptance", issue: types.Issue{ID: "bd-1", AcceptanceCriteria: "must dedup"}, query: "dedup", want: "acceptance_criteria"},
+		{name: "notes", issue: types.Issue{ID: "bd-1", Notes: "workaround known"}, query: "workaround", want: "notes"},
+		{name: "close reason", issue: types.Issue{ID: "bd-1", CloseReason: "fixed upstream"}, query: "upstream", want: "close_reason"},
+		{name: "comments by elimination", issue: types.Issue{ID: "bd-1", Title: "unrelated"}, query: "env var", want: "comments"},
+		{name: "title beats description", issue: types.Issue{ID: "bd-1", Title: "env var", Description: "env var"}, query: "env var", want: "title"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchedInField(&tc.issue, tc.query); got != tc.want {
+				t.Errorf("matchedInField(%s, %q) = %q, want %q", tc.issue.ID, tc.query, got, tc.want)
+			}
+		})
+	}
+}

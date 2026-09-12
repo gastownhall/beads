@@ -67,12 +67,17 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 
 	if query != "" {
 		lowerQuery := strings.ToLower(query)
-		if LooksLikeIssueID(query) {
+		switch {
+		case filter.AllFields:
+			clause, clauseArgs := allFieldsQueryClause(query, tables)
+			whereClauses = append(whereClauses, clause)
+			args = append(args, clauseArgs...)
+		case LooksLikeIssueID(query):
 			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ? OR LOWER(external_ref) LIKE ?)")
 			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%", "%"+lowerQuery+"%")
-		} else {
-			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
-			pattern := "%" + lowerQuery + "%"
+		default:
+			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? ESCAPE '|' OR id LIKE ? ESCAPE '|')")
+			pattern := containsLikePattern(lowerQuery)
 			args = append(args, pattern, pattern)
 		}
 	}
@@ -368,6 +373,69 @@ func AppendMetadataClauses(where []string, args []any, hasKey string, fields map
 		}
 	}
 	return where, args, nil
+}
+
+// AllFieldsTextColumns is the ordered list of main-table text columns the
+// IssueFilter.AllFields query clause matches, beyond id and the comments
+// subquery. Every name must exist on BOTH the issues and wisps tables (the
+// same clause runs against each leg). The CLI's matched-in provenance
+// (cmd/bd/search.go) walks this list in this order to attribute a hit to a
+// field, so order here is a user-visible tie-break: an issue matching in
+// several fields reports the first. (GH#2883)
+var AllFieldsTextColumns = []string{
+	"title",
+	"external_ref",
+	"description",
+	"design",
+	"acceptance_criteria",
+	"notes",
+	"close_reason",
+}
+
+// allFieldsQueryClause renders the IssueFilter.AllFields form of the free-text
+// query predicate: the AllFieldsTextColumns LIKE arms, the id arm (exact +
+// prefix for ID-like queries, substring otherwise — a superset of the default
+// clause's id handling), and a correlated comments-table subquery keyed by
+// issue_id, per this file's invariant. tables.Comments resolves to comments or
+// wisp_comments depending on the leg; wisp_comments is on the OptionalWispTable
+// tolerance list because the schema migrations allow a database with wisps
+// but no wisp_comments, and that shape must not turn --all-fields into a hard
+// error where the default search works. (GH#2883)
+func allFieldsQueryClause(query string, tables FilterTables) (string, []any) {
+	lowerQuery := strings.ToLower(query)
+	pattern := containsLikePattern(lowerQuery)
+
+	var preds []string
+	var args []any
+	if LooksLikeIssueID(query) {
+		preds = append(preds, "id = ?", "id LIKE ?")
+		args = append(args, lowerQuery, lowerQuery+"%")
+	} else {
+		preds = append(preds, "id LIKE ? ESCAPE '|'")
+		args = append(args, pattern)
+	}
+	for _, col := range AllFieldsTextColumns {
+		preds = append(preds, fmt.Sprintf("LOWER(%s) LIKE ? ESCAPE '|'", col))
+		args = append(args, pattern)
+	}
+	preds = append(preds, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE LOWER(text) LIKE ? ESCAPE '|')", tables.Comments))
+	args = append(args, pattern)
+
+	return "(" + strings.Join(preds, " OR ") + ")", args
+}
+
+// containsLikePattern returns a SQL LIKE pattern that searches for text
+// literally. The escape character is deliberately the same one used by
+// globToLikePattern, so callers must pair the result with ESCAPE '|'.
+//
+// Case-insensitivity here (as in every free-text arm in this file) is simple
+// lowercasing — Go's strings.ToLower on the query, SQL LOWER() on the column.
+// Unicode multi-variant case equivalences that simple lowercasing does not
+// unify (e.g. Greek final sigma: LOWER('Σ')='σ' never matches a stored 'ς')
+// are a known, pre-existing limitation shared with the default title/ID
+// search, not something this pattern can fix from inside a portable LIKE.
+func containsLikePattern(text string) string {
+	return "%" + strings.NewReplacer("|", "||", "%", "|%", "_", "|_").Replace(text) + "%"
 }
 
 // globToLikePattern converts a shell-style glob (* and ?) to a SQL LIKE

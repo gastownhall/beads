@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd search --all-fields`: full-text search across the whole issue,
+  including comments** (#2883). `bd search` matches only title and ID, so an
+  issue whose matching text lives in its description, notes or comments
+  answered "No issues found", a silent false negative exactly where the command
+  is used to ask "was this already filed?". `--all-fields` matches the query
+  against title, ID, external ref, description, design, acceptance criteria,
+  notes, close reason and comments in one query, on both storage stacks. Each
+  hit says where it matched: `matched_in` in `--json` (only emitted with the
+  flag; the default JSON shape is unchanged) and `(matched: ...)` /
+  `Matched in:` in text output. A default-scope search that finds nothing now
+  prints a one-line hint about `--all-fields` on **stderr**; stdout is
+  unchanged. `--all-fields` is a full scan of issues plus comments, since no
+  index serves an unanchored substring match.
+
+  **One default-path change**: free-text search queries are now matched
+  literally. `%` and `_` in a query used to act as SQL LIKE wildcards (an
+  unescaped `%` matched every issue), with or without the new flag; both are
+  now escaped, so `bd search "100%"` finds issues containing `100%`. Anyone
+  relying on `%`/`_` as wildcards in a search query loses that; use `bd list
+  --title-contains` style filters or a more specific query instead. ID-like
+  queries keep their exact/prefix matching.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every

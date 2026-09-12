@@ -1874,6 +1874,16 @@ type IssueFilter struct {
 	ExternalRefContains string
 	ExternalRef         *string // exact match on external_ref
 
+	// AllFields broadens the free-text query argument that accompanies this
+	// filter from its default title/ID scope to the whole text corpus of an
+	// issue: title, id, external_ref, description, design,
+	// acceptance_criteria, notes, close_reason, and the issue's comments
+	// (via the comments/wisp_comments table for the issues/wisps leg
+	// respectively). It affects only the query clause — it is a no-op when
+	// the query string is empty — and composes with every other filter.
+	// (GH#2883)
+	AllFields bool
+
 	// Date ranges
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time

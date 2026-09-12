@@ -50,6 +50,7 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	priorityMinStr, _ := cmd.Flags().GetString("priority-min")
 	priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
 
+	allFields, _ := cmd.Flags().GetBool("all-fields")
 	descContains, _ := cmd.Flags().GetString("desc-contains")
 	notesContains, _ := cmd.Flags().GetString("notes-contains")
 	externalContains, _ := cmd.Flags().GetString("external-contains")
@@ -85,6 +86,7 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		filter.LabelsAny = labelsAny
 	}
 
+	filter.AllFields = allFields
 	if descContains != "" {
 		filter.DescriptionContains = descContains
 	}
@@ -211,6 +213,9 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		if items == nil {
 			items = []*types.IssueWithCounts{}
 		}
+		if allFields {
+			return outputJSON(annotateMatchedIn(items, query))
+		}
 		return outputJSON(items)
 	}
 
@@ -220,6 +225,6 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	}
 	issues := page.Items
 	workapi.SortIssues(issues, sortBy, reverse)
-	outputSearchResults(issues, query, longFormat)
+	outputSearchResults(issues, query, longFormat, allFields)
 	return nil
 }
