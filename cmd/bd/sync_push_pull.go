@@ -607,15 +607,26 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PushHooks = buildGitHubPushHooks(gt)
 
-	result, err := engine.Sync(ctx, tracker.SyncOptions{
+	opts := tracker.SyncOptions{
 		Push:     true,
 		Pull:     false,
 		DryRun:   dryRun,
 		IssueIDs: args,
-	})
+	}
+	result, err := engine.Sync(ctx, opts)
 	if err != nil {
 		return err
 	}
+
+	// Relationship push pass, matching `bd github sync`: converge beads
+	// epic/child links and "blocks" dependencies among the requested issues
+	// into GitHub sub-issues and issue dependencies.
+	warnLink := func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	linksPushed := pushGitHubDependencyLinks(ctx, gt, store, opts, dryRun, os.Stdout, warnLink)
+	if linksPushed > 0 && !jsonOutput {
+		fmt.Printf("✓ Synced %d relationship links\n", linksPushed)
+	}
+
 	outputSyncResult(result, dryRun)
 	return nil
 }
