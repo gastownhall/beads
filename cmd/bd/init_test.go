@@ -1086,6 +1086,25 @@ func TestInitPromptExistingRole(t *testing.T) {
 func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	skipIfNoDolt(t)
 
+	// Serial: this fixture owns command flags, stdin, cwd and process environment.
+	// The pipe below supplies real wizard answers; explicitly allow interaction
+	// even when CI or terminal detection would normally suppress it.
+	t.Setenv("BD_NON_INTERACTIVE", "0")
+	for _, name := range []string{"contributor", "team", "force", "non-interactive", "role", "prefix", "quiet"} {
+		flag := initCmd.Flags().Lookup(name)
+		value, changed := flag.Value.String(), flag.Changed
+		t.Cleanup(func() {
+			if err := flag.Value.Set(value); err != nil {
+				t.Errorf("restore --%s: %v", name, err)
+			}
+			flag.Changed = changed
+		})
+		if err := flag.Value.Set(flag.DefValue); err != nil {
+			t.Fatalf("reset --%s: %v", name, err)
+		}
+		flag.Changed = false
+	}
+
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
 	dbPath = ""
@@ -1097,24 +1116,23 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 		git.ResetCaches()
 	}()
 
-	initCmd.Flags().Set("contributor", "false")
-	initCmd.Flags().Set("team", "false")
-	initCmd.Flags().Set("force", "false")
+	// Keep test isolated from the real home/planning repo.
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(testHome, ".config"))
 
 	tmpDir := newGitRepo(t)
 	t.Chdir(tmpDir)
 
-	// Keep test isolated from the real home/planning repo.
-	testHome := t.TempDir()
-	t.Setenv("HOME", testHome)
-
-	// Configure remotes so contributor wizard doesn't ask the "continue anyway" prompt.
-	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:osamu2001/zmx.git")
+	// Local remotes avoid external lookups during initialization and let the
+	// contributor wizard detect a fork without an extra "continue anyway" prompt.
+	cmd := exec.Command("git", "remote", "add", "origin", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add origin remote: %v", err)
 	}
-	cmd = exec.Command("git", "remote", "add", "upstream", "git@github.com:neurosnap/zmx.git")
+	cmd = exec.Command("git", "remote", "add", "upstream", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add upstream remote: %v", err)
