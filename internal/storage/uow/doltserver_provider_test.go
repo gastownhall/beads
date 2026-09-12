@@ -192,7 +192,12 @@ func TestNewDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) {
 var (
 	bdBinaryOnce sync.Once
 	bdBinary     string
-	bdBinaryErr  error
+	// bdBinaryDir holds the scratch dir buildBDBinary created for its own
+	// compiled binary. Left empty when BEADS_TEST_BD_BINARY served the
+	// binary instead — there is nothing for this package to own or remove
+	// on that path.
+	bdBinaryDir string
+	bdBinaryErr error
 )
 
 func buildBDBinary(t *testing.T) string {
@@ -211,6 +216,7 @@ func buildBDBinary(t *testing.T) string {
 			bdBinaryErr = fmt.Errorf("temp dir: %w", err)
 			return
 		}
+		bdBinaryDir = tmpDir
 		name := "bd"
 		if runtime.GOOS == "windows" {
 			name = "bd.exe"
@@ -225,6 +231,22 @@ func buildBDBinary(t *testing.T) string {
 		t.Fatalf("build bd: %v", bdBinaryErr)
 	}
 	return bdBinary
+}
+
+// TestMain enforces that buildBDBinary's scratch directory does not outlive
+// this package's test run. That directory holds a ~200MB compiled bd
+// binary, and on hosts where /tmp is tmpfs (RAM-backed), a per-run leak
+// accumulates without bound.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if bdBinaryDir != "" {
+		os.RemoveAll(bdBinaryDir)
+		if _, err := os.Stat(bdBinaryDir); !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "FAIL: %s (buildBDBinary's scratch dir) was not cleaned up after the test run\n", bdBinaryDir)
+			os.Exit(1)
+		}
+	}
+	os.Exit(code)
 }
 
 func writeServerConfig(t *testing.T, port int) string {
