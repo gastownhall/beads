@@ -208,14 +208,22 @@ func validateEndpoint(root string, e Endpoint) error {
 	return nil
 }
 
-// validateSocketEndpoint requires an absolute socket path that stays inside
-// root once symlinked parent directories are resolved.
+// validateSocketEndpoint requires an absolute canonical socket path that stays
+// inside root once symlinked parent directories are resolved. The canonical-form
+// requirement is load-bearing, not cosmetic: containment resolution has to clean
+// the path before it can walk it, and cleaning collapses a "link/.." pair
+// lexically, whereas the kernel walks the symlink first and lands somewhere
+// else. Rejecting the non-canonical spelling outright keeps the two readings
+// from ever disagreeing — the same reason Root must be canonical.
 func validateSocketEndpoint(root string, e Endpoint) error {
 	if e.Host != "" {
 		return errors.New("socket endpoint must not specify a host")
 	}
 	if !filepath.IsAbs(e.Socket) {
 		return errors.New("socket must be absolute")
+	}
+	if filepath.Clean(e.Socket) != e.Socket {
+		return errors.New("socket must be a canonical path")
 	}
 	resolved, err := resolvePathForContainment(e.Socket)
 	if err != nil {
