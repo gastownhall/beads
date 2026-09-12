@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -105,9 +106,13 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 	}
 
 	var existing string
+	var content []byte
 	// #nosec G304 - git config path
-	if content, rerr := os.ReadFile(excludePath); rerr == nil {
+	if readContent, rerr := os.ReadFile(excludePath); rerr == nil {
+		content = readContent
 		existing = string(content)
+	} else if !os.IsNotExist(rerr) {
+		return nil, excludePath, fmt.Errorf("failed to read git exclude file: %w", rerr)
 	}
 
 	for _, p := range patterns {
@@ -120,17 +125,14 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 		return nil, excludePath, nil
 	}
 
-	newContent := existing
-	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
-		newContent += "\n"
+	lines := []string{header}
+	if len(content) > 0 {
+		lines = []string{"", header}
 	}
-	newContent += "\n" + header + "\n"
-	for _, p := range added {
-		newContent += p + "\n"
-	}
+	newContent := gitignore.AppendLines(content, append(lines, added...))
 
 	// #nosec G306 - config file needs 0644
-	if err = os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
+	if err = os.WriteFile(excludePath, newContent, 0644); err != nil {
 		return nil, excludePath, fmt.Errorf("failed to write git exclude file: %w", err)
 	}
 	return added, excludePath, nil
@@ -417,6 +419,8 @@ func setupGlobalGitIgnore(homeDir string, projectPath string, verbose bool) erro
 	// #nosec G304 - user config path
 	if content, err := os.ReadFile(ignorePath); err == nil {
 		existingContent = string(content)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read global gitignore file: %w", err)
 	}
 
 	// Use absolute paths for this specific project (fixes GitHub #538)
@@ -435,25 +439,18 @@ func setupGlobalGitIgnore(homeDir string, projectPath string, verbose bool) erro
 	}
 
 	// Append missing patterns
-	newContent := existingContent
-	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
-		newContent += "\n"
-	}
-
-	if !hasBeads || !hasClaude {
-		newContent += fmt.Sprintf("\n# Beads stealth mode: %s (added by bd init --stealth)\n", projectPath)
-	}
-
+	lines := []string{"", fmt.Sprintf("# Beads stealth mode: %s (added by bd init --stealth)", projectPath)}
 	if !hasBeads {
-		newContent += beadsPattern + "\n"
+		lines = append(lines, beadsPattern)
 	}
 	if !hasClaude {
-		newContent += claudePattern + "\n"
+		lines = append(lines, claudePattern)
 	}
+	newContent := gitignore.AppendLines([]byte(existingContent), lines)
 
 	// Write the updated ignore file
 	// #nosec G306 - config file needs 0644
-	if err := os.WriteFile(ignorePath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(ignorePath, newContent, 0644); err != nil {
 		fmt.Printf("\nUnable to write to %s (file is read-only)\n\n", ignorePath)
 		fmt.Printf("To enable stealth mode, add these lines to your global gitignore:\n\n")
 		if !hasBeads || !hasClaude {
