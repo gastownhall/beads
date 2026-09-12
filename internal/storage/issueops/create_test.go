@@ -3,15 +3,103 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type utcTimeBetween struct {
+	before time.Time
+	after  time.Time
+}
+
+func (m utcTimeBetween) Match(value driver.Value) bool {
+	timestamp, ok := value.(time.Time)
+	return ok && timestamp.Location() == time.UTC && !timestamp.Before(m.before) && !timestamp.After(m.after)
+}
+
+func offsetTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		t.Fatalf("time.Parse(%q): %v", value, err)
+	}
+	return parsed
+}
+
+func TestPrepareIssueForInsertNormalizesTimestampsToUTC(t *testing.T) {
+	createdAt := offsetTime(t, "2026-07-11T18:40:00+10:00")
+	startedAt := offsetTime(t, "2026-07-11T18:41:00+10:00")
+	closedAt := offsetTime(t, "2026-07-11T18:42:00+10:00")
+	leaseExpiresAt := offsetTime(t, "2026-07-11T18:43:00+10:00")
+	heartbeatAt := offsetTime(t, "2026-07-11T18:44:00+10:00")
+	dueAt := offsetTime(t, "2026-07-11T18:45:00+10:00")
+	deferUntil := offsetTime(t, "2026-07-11T18:46:00+10:00")
+	compactedAt := offsetTime(t, "2026-07-11T18:47:00+10:00")
+	issue := &types.Issue{
+		ID: "test-utc", Title: "UTC", Status: types.StatusClosed, IssueType: types.TypeTask,
+		CreatedAt: createdAt, UpdatedAt: createdAt, StartedAt: &startedAt, ClosedAt: &closedAt,
+		LeaseExpiresAt: &leaseExpiresAt, HeartbeatAt: &heartbeatAt, DueAt: &dueAt,
+		DeferUntil: &deferUntil, CompactedAt: &compactedAt,
+	}
+
+	if err := PrepareIssueForInsert(issue, nil, nil); err != nil {
+		t.Fatalf("PrepareIssueForInsert: %v", err)
+	}
+	values := []time.Time{issue.CreatedAt, issue.UpdatedAt, *issue.StartedAt, *issue.ClosedAt,
+		*issue.LeaseExpiresAt, *issue.HeartbeatAt, *issue.DueAt, *issue.DeferUntil, *issue.CompactedAt}
+	for _, value := range values {
+		if value.Location() != time.UTC {
+			t.Errorf("timestamp location = %v, want UTC", value.Location())
+		}
+	}
+	if got, want := issue.ClosedAt.Format(time.RFC3339), "2026-07-11T08:42:00Z"; got != want {
+		t.Errorf("ClosedAt = %s, want %s", got, want)
+	}
+}
+
+func TestPersistCommentsNormalizesImportedTimestampToUTC(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	createdAt := offsetTime(t, "2026-07-11T18:42:00+10:00")
+	wantUTCText := FormatAuxTime(createdAt)
+	if want := "2026-07-11 08:42:00"; wantUTCText != want {
+		t.Fatalf("FormatAuxTime = %q, want %q", wantUTCText, want)
+	}
+	issue := &types.Issue{ID: "source", Comments: []*types.Comment{{
+		ID: "comment-id", Author: "original-author", Text: "kept", CreatedAt: createdAt,
+	}}}
+
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM comments").
+		WithArgs("source", "original-author", wantUTCText, "kept").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec("INSERT INTO comments").
+		WithArgs("comment-id", "source", "original-author", "kept", wantUTCText).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	result, err := PersistComments(ctx, tx, issue)
+	if err != nil {
+		t.Fatalf("PersistComments: %v", err)
+	}
+	if !result.ChangedTables["comments"] {
+		t.Fatalf("ChangedTables = %#v, want comments changed", result.ChangedTables)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
 
 func TestValidateCreateIssuesMixedBucketDependenciesRejectsCrossBucketEdges(t *testing.T) {
 	regularA := &types.Issue{ID: "test-regular-a", IssueType: types.TypeTask}
@@ -116,6 +204,7 @@ func TestPersistDependenciesHonorsImportedCreatedBy(t *testing.T) {
 	db, mock, tx := beginMockTx(t)
 	defer db.Close()
 
+	createdAt := offsetTime(t, "2026-07-11T18:41:00+10:00")
 	target := &types.Issue{ID: "target", IssueType: types.TypeTask}
 	source := &types.Issue{
 		ID:        "source",
@@ -124,6 +213,7 @@ func TestPersistDependenciesHonorsImportedCreatedBy(t *testing.T) {
 			DependsOnID: "target",
 			Type:        types.DepRelated,
 			CreatedBy:   "someone.else",
+			CreatedAt:   createdAt,
 		}},
 	}
 
@@ -134,7 +224,7 @@ func TestPersistDependenciesHonorsImportedCreatedBy(t *testing.T) {
 		WithArgs("target").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 	mock.ExpectExec("INSERT INTO dependencies").
-		WithArgs(depid.New("source", "target"), "source", "target", types.DepRelated, "someone.else", sqlmock.AnyArg(), "{}", "").
+		WithArgs(depid.New("source", "target"), "source", "target", types.DepRelated, "someone.else", createdAt.UTC(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	result, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{target, source}, "current.user", storage.BatchCreateOptions{})
@@ -229,6 +319,92 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 		t.Fatalf("ChangedTables = %#v, want dependencies changed", result.ChangedTables)
 	}
 
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestDependencyCreatedAtNormalizesToUTC(t *testing.T) {
+	createdAt := offsetTime(t, "2026-07-11T18:41:00+10:00")
+	got := dependencyCreatedAt(&types.Dependency{CreatedAt: createdAt})
+	if got.Location() != time.UTC {
+		t.Fatalf("Location = %v, want UTC", got.Location())
+	}
+	if want := "2026-07-11T08:41:00Z"; got.Format(time.RFC3339) != want {
+		t.Fatalf("dependencyCreatedAt = %s, want %s", got.Format(time.RFC3339), want)
+	}
+
+	before := time.Now().UTC().Add(-time.Second)
+	defaulted := dependencyCreatedAt(&types.Dependency{})
+	after := time.Now().UTC().Add(time.Second)
+	if defaulted.Before(before) || defaulted.After(after) || defaulted.Location() != time.UTC {
+		t.Fatalf("default dependency time = %v, want current UTC instant", defaulted)
+	}
+}
+
+func TestAddDependencyInTxBindsCreatedAtUTC(t *testing.T) {
+	ctx := context.Background()
+	kind := DepTargetIssue
+	opts := AddDependencyOpts{
+		SourceTable:    "issues",
+		TargetTable:    "issues",
+		WriteTable:     "dependencies",
+		SkipCycleCheck: true,
+		TargetKind:     &kind,
+	}
+
+	t.Run("preserves supplied instant", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		createdAt := offsetTime(t, "2026-07-11T18:41:00+10:00")
+		dep := &types.Dependency{
+			IssueID: "source", DependsOnID: "target", Type: types.DepRelated, CreatedAt: createdAt,
+		}
+
+		expectAddDependencyInsert(mock, dep, createdAt.UTC())
+		if _, err := AddDependencyInTx(ctx, tx, dep, "current.user", opts); err != nil {
+			t.Fatalf("AddDependencyInTx: %v", err)
+		}
+		finishMockTx(t, mock, tx)
+	})
+
+	t.Run("defaults zero time to current UTC", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		dep := &types.Dependency{IssueID: "source", DependsOnID: "target", Type: types.DepRelated}
+		before := time.Now().UTC()
+		createdAt := utcTimeBetween{before: before, after: before.Add(5 * time.Second)}
+
+		expectAddDependencyInsert(mock, dep, createdAt)
+		if _, err := AddDependencyInTx(ctx, tx, dep, "current.user", opts); err != nil {
+			t.Fatalf("AddDependencyInTx: %v", err)
+		}
+		finishMockTx(t, mock, tx)
+	})
+}
+
+func expectAddDependencyInsert(mock sqlmock.Sqlmock, dep *types.Dependency, createdAt driver.Value) {
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs(dep.IssueID).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow(types.TypeTask))
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs(dep.DependsOnID).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow(types.TypeTask))
+	mock.ExpectQuery("SELECT type FROM dependencies").
+		WithArgs(dep.IssueID, dep.DependsOnID).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO dependencies").
+		WithArgs(depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type,
+			createdAt, "current.user", "{}", "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+func finishMockTx(t *testing.T, mock sqlmock.Sqlmock, tx *sql.Tx) {
+	t.Helper()
 	mock.ExpectRollback()
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("rollback: %v", err)
