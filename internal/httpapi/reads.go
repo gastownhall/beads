@@ -217,6 +217,7 @@ func countFilters(q *query) issueops.CountRequest {
 		NoAssignee:     q.boolean("no_assignee"),
 		NoLabels:       q.boolean("no_labels"),
 		MetadataFields: q.metadataFields("metadata_field"),
+		HasMetadataKey: q.str("has_metadata_key"),
 
 		// The plane switch, forwarded as the boolean the caller sent. What it
 		// MEANS — merge the wisps tier, drop templates, drop gates, and route an

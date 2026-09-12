@@ -121,6 +121,12 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 			request.MetadataFields[k] = v
 		}
 	}
+	if k, _ := cmd.Flags().GetString("has-metadata-key"); k != "" {
+		if err := storage.ValidateMetadataKey(k); err != nil {
+			return issueops.CountRequest{}, "", HandleErrorRespectJSON("invalid --has-metadata-key: %v", err)
+		}
+		request.HasMetadataKey = k
+	}
 
 	if cmd.Flags().Changed("priority") {
 		priority, _ := cmd.Flags().GetInt("priority")
@@ -279,6 +285,7 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
 	cmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
 	cmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
+	cmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
 
 	// Priority ranges
 	cmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")

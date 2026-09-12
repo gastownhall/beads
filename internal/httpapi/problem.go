@@ -719,9 +719,10 @@ var operationCodes = map[string][]Code{
 	// malformed values, repeated single-valued parameters and a `group_by`
 	// outside the closed set. countGroupOf stops that last case at the edge.
 	// The role has exactly one reachable refusal: BuildCountFilter rejects an
-	// invalid metadata key. failReadErr classifies it through invalidFilterParam
-	// as a 400 on `metadata_field`. An unrecognized status or type is not a
-	// refusal; the role promises it matches nothing and answers 0.
+	// invalid metadata key, from `metadata_field` or `has_metadata_key`.
+	// failReadErr classifies it through invalidFilterParam as a 400 naming the
+	// parameter it came from. An unrecognized status or type is not a refusal;
+	// the role promises it matches nothing and answers 0.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an

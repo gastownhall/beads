@@ -160,6 +160,7 @@ func TestABuilderRefusalIsTheDocumentedBadRequest(t *testing.T) {
 		{"a metadata field key on the ready surface", "/v0/beads/ready?metadata_field=1bad=x", "metadata_field"},
 		{"a has-metadata key on the ready surface", "/v0/beads/ready?has_metadata_key=1bad", "has_metadata_key"},
 		{"a metadata field key on the count surface", "/v0/beads/issues:count?metadata_field=1bad=x", "metadata_field"},
+		{"a has-metadata key on the count surface", "/v0/beads/issues:count?has_metadata_key=1bad", "has_metadata_key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts, _ := newReadServer(t, Config{})

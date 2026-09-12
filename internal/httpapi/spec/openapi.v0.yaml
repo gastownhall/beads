@@ -1956,6 +1956,11 @@ paths:
             type: array
             items:
               type: string
+        - name: has_metadata_key
+          in: query
+          description: Only issues carrying this top-level metadata key.
+          schema:
+            type: string
         - name: include_infra
           in: query
           description: >-
@@ -2029,9 +2034,9 @@ paths:
             A malformed `metadata_field` shape and an unknown `group_by` are
             transport refusals. An invalid metadata key passes query decoding,
             then `BuildCountFilter` rejects it and `failReadErr` classifies the
-            role's error as a `400` on `metadata_field`. An unrecognized
-            `status` or `type` is not a refusal; it matches nothing and answers
-            `0`.
+            role's error as a `400` naming the parameter it came from —
+            `metadata_field` or `has_metadata_key`. An unrecognized `status` or
+            `type` is not a refusal; it matches nothing and answers `0`.
           x-bd-codes: [invalid_argument]
           content:
             application/problem+json:
