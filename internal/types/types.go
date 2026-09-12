@@ -1166,6 +1166,30 @@ type IssueDetails struct {
 	// Comments slice or a zero count: a true empty stays plain omission.
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
+	// UnresolvableDependencies / UnresolvableDependents count the edges
+	// DependencyCount / DependentCount include that the Dependencies /
+	// Dependents slices could not represent, because the issue on the far
+	// end has no row in this database: a cross-repo id or an `external:`
+	// reference, both of which live in the one dependency target column
+	// carrying no foreign key into issues (issueops.IsExternalDepTarget).
+	// The edge is real and correctly stored; only its far end is
+	// unreachable from here, so the enumeration drops it while the count
+	// keeps it.
+	//
+	// Without these, the count is a number with no referent (be-lpi): a
+	// caller reads `dependency_count: 1` beside `dependencies: null`,
+	// finds nothing in `bd dep list`, and concludes the count is phantom.
+	// It is not — `bd dep list <id> <id>` shows the raw edge record.
+	//
+	// Set only when the slice was actually READ and came back short. A
+	// failed or skipped read leaves them unset, because "could not be
+	// represented" and "was never fetched" must not collapse into one
+	// signal — the same distinction CommentsOmitted draws above.
+	// UnresolvableDependents is therefore set only under
+	// DetailOptions.IncludeDependents, where the rows are collected.
+	UnresolvableDependencies *int64 `json:"unresolvable_dependencies,omitempty"`
+	UnresolvableDependents   *int64 `json:"unresolvable_dependents,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
