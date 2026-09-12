@@ -665,6 +665,22 @@ func runDiagnostics(path string) doctorResult {
 	doltOriginCheck := convertWithCategory(doctor.CheckDoltRemoteGitOrigin(path), doctor.CategoryDolt)
 	result.Checks = append(result.Checks, doltOriginCheck)
 
+	// Check 7g: S3 backup freshness (state file mtime). Opt-in via
+	// BEADS_S3_BACKUP_STATE / BEADS_S3_BACKUP_PREFIX. Reports N/A when
+	// unconfigured.
+	s3FreshCheck := convertWithCategory(doctor.CheckS3BackupFreshness(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, s3FreshCheck)
+
+	// Check 7h: S3 backup coverage. Warns when a local Dolt DB lacks a
+	// corresponding entry in the sync state file or its last sync failed.
+	s3CoverageCheck := convertWithCategory(doctor.CheckS3BackupCoverage(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, s3CoverageCheck)
+
+	// Check 7i: S3 backup head parity. Compares local manifest mtime
+	// against the S3 object LastModified via aws s3api head-object.
+	s3ParityCheck := convertWithCategory(doctor.CheckS3BackupHeadParity(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, s3ParityCheck)
+
 	// Check 7f: Migration content skew vs the cached remote ref (#4259). Advisory.
 	skewCheck := convertWithCategory(doctor.CheckMigrationContentSkew(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, skewCheck)
