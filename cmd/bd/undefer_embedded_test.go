@@ -69,6 +69,79 @@ func TestEmbeddedUndefer(t *testing.T) {
 			t.Errorf("expected 'not deferred' message: %s", out)
 		}
 	})
+
+	// ===== Stray defer_until on a non-deferred status (ga-bq3w5) =====
+
+	t.Run("undefer_clears_stray_defer_until_when_status_not_deferred", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Stray future defer on open issue", "--type", "task")
+		// Reproduces ga-bq3w5: an explicit --status wins over --defer's own
+		// status=deferred default (update.go), so this single command leaves
+		// status=open with a live future defer_until — exactly the shape that
+		// silently starves an issue out of `bd ready` with no status-based
+		// signal anywhere.
+		cmd := exec.Command(bd, "update", issue.ID, "--status", "open", "--defer", "2099-01-01")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd update --status open --defer failed: %v\n%s", err, out)
+		}
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "open" || deferUntil == nil {
+			t.Fatalf("precondition: expected status=open with defer_until set, got status=%q defer_until=%v", status, deferUntil)
+		}
+		if ids := wakeReadyIDs(t, bd, dir); ids[issue.ID] {
+			t.Fatalf("precondition: issue should be hidden from bd ready by its future defer_until")
+		}
+
+		out := bdUndefer(t, bd, dir, issue.ID)
+		if strings.Contains(out, "is not deferred") {
+			t.Errorf("undefer refused instead of clearing the stray defer_until: %s", out)
+		}
+
+		status, deferUntil = showDeferState(t, bd, dir, issue.ID)
+		if status != "open" {
+			t.Errorf("expected status to stay open, got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected defer_until cleared after undefer, got %v", deferUntil)
+		}
+		if ids := wakeReadyIDs(t, bd, dir); !ids[issue.ID] {
+			t.Errorf("expected issue back in bd ready after undefer cleared its defer_until")
+		}
+	})
+
+	// ===== Stray defer_until on a non-open status must not be clobbered =====
+
+	t.Run("undefer_clears_stray_defer_until_without_clobbering_in_progress", func(t *testing.T) {
+		// The "open" case above can't distinguish the conditional status
+		// write (only flip to open when wasDeferred) from an unconditional
+		// one: writing status=open to an already-open issue is a no-op.
+		// in_progress makes the distinction observable.
+		issue := bdCreate(t, bd, dir, "Stray future defer on in_progress issue", "--type", "task")
+		cmd := exec.Command(bd, "update", issue.ID, "--status", "in_progress", "--defer", "2099-01-01")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd update --status in_progress --defer failed: %v\n%s", err, out)
+		}
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "in_progress" || deferUntil == nil {
+			t.Fatalf("precondition: expected status=in_progress with defer_until set, got status=%q defer_until=%v", status, deferUntil)
+		}
+
+		out := bdUndefer(t, bd, dir, issue.ID)
+		if strings.Contains(out, "is not deferred") {
+			t.Errorf("undefer refused instead of clearing the stray defer_until: %s", out)
+		}
+
+		status, deferUntil = showDeferState(t, bd, dir, issue.ID)
+		if status != "in_progress" {
+			t.Errorf("expected status to stay in_progress (not clobbered to open), got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected defer_until cleared after undefer, got %v", deferUntil)
+		}
+	})
 }
 
 // TestEmbeddedUndeferConcurrent exercises undefer operations concurrently.
