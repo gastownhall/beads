@@ -38,6 +38,7 @@ func (s *testSuite) TestBeadsDirFSRepository() {
 		s.Run("SkipsAlreadyPresentPatterns", s.writeProjectGitignoreNoDuplicates)
 		s.Run("NoChangeWhenAllPresent", s.writeProjectGitignoreNoOpWhenComplete)
 		s.Run("AddsLeadingNewlineWhenMissing", s.writeProjectGitignoreFixesTrailingNewline)
+		s.Run("PreservesAppendLineEndings", s.writeProjectGitignorePreservesAppendLineEndings)
 	})
 	s.Run("ProjectGitignoreExists", func() {
 		s.Run("MissingReturnsFalse", s.projectGitignoreExistsMissing)
@@ -276,6 +277,50 @@ func (s *testSuite) writeProjectGitignoreFixesTrailingNewline() {
 
 	s.True(strings.HasPrefix(body, "no-trailing-newline\n"), "trailing newline must be inserted before appended content")
 	s.Contains(body, testTemplates().ProjectGitignoreHeader)
+}
+
+func (s *testSuite) writeProjectGitignorePreservesAppendLineEndings() {
+	tpl := testTemplates()
+	lfSection := tpl.ProjectGitignoreHeader + "\n" + strings.Join(tpl.ProjectGitignorePatterns, "\n") + "\n"
+	crlfSection := tpl.ProjectGitignoreHeader + "\r\n" + strings.Join(tpl.ProjectGitignorePatterns, "\r\n") + "\r\n"
+	partial := tpl.ProjectGitignoreHeader + "\r\n.dolt/\r\n"
+	complete := strings.TrimSuffix(crlfSection, "\r\n")
+	for _, tc := range []struct {
+		name, existing, want string
+		omitHeader           bool
+	}{
+		{"empty", "", lfSection, false},
+		{"delimiter-free", "local", "local\n\n" + lfSection, false},
+		{"LF", "local\n", "local\n\n" + lfSection, false},
+		{"CRLF", "local\r\n", "local\r\n\r\n" + crlfSection, false},
+		{"CRLF unterminated", "local\r\nlast", "local\r\nlast\r\n\r\n" + crlfSection, false},
+		{"CRLF trailing CR", "local\r\nlast\r", "local\r\nlast\r\n\r\n" + crlfSection, false},
+		{"LF trailing CR", "local\nlast\r", "local\nlast\r\n\n" + lfSection, false},
+		{"only trailing CR", "local\r", "local\r\n\n" + lfSection, false},
+		{"mixed majority CRLF", "a\r\nb\r\nc\n", "a\r\nb\r\nc\n\n" + lfSection, false},
+		{"partial with header", partial, partial + "*.db\r\n", false},
+		{"complete unterminated", complete, complete, false},
+		{"complete CRLF", crlfSection, crlfSection, false},
+		{"no header", "local\r\n", "local\r\n.dolt/\r\n*.db\r\n", true},
+	} {
+		s.Run(tc.name, func() {
+			s.T().Setenv("BEADS_DIR", "")
+			dir := s.T().TempDir()
+			templates := testTemplates()
+			if tc.omitHeader {
+				templates.ProjectGitignoreHeader = ""
+			}
+			repo := NewBeadsDirFSRepository(dir, templates)
+			path := filepath.Join(dir, ".gitignore")
+			s.Require().NoError(os.WriteFile(path, []byte(tc.existing), 0600))
+			for call := 1; call <= 2; call++ {
+				s.Require().NoError(repo.WriteProjectGitignore(s.Ctx()), "call %d", call)
+				got, err := os.ReadFile(path)
+				s.Require().NoError(err)
+				s.Equal(tc.want, string(got), "call %d: exact file bytes", call)
+			}
+		})
+	}
 }
 
 func (s *testSuite) projectGitignoreExistsMissing() {
