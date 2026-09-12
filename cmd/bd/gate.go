@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -126,8 +127,12 @@ By default, shows only open gates. Use --all to include closed gates.`,
 // honoring the same open/closed and limit semantics as the DB-wide list path.
 // Pulled out as a pure helper so the bead-scoping logic is unit-testable without
 // a live store.
+//
+// Results are sorted by issue ID before the limit is applied: unlike the
+// DB-wide path (an ORDER BY query), the input here is dependency-map
+// iteration order, which is not guaranteed stable across calls.
 func filterIssueGates(deps []*types.Issue, all bool, limit int) []*types.Issue {
-	var gates []*types.Issue
+	gates := make([]*types.Issue, 0, len(deps))
 	for _, d := range deps {
 		if d == nil || d.IssueType != types.IssueType("gate") {
 			continue
@@ -136,9 +141,10 @@ func filterIssueGates(deps []*types.Issue, all bool, limit int) []*types.Issue {
 			continue
 		}
 		gates = append(gates, d)
-		if limit > 0 && len(gates) >= limit {
-			break
-		}
+	}
+	sort.Slice(gates, func(i, j int) bool { return gates[i].ID < gates[j].ID })
+	if limit > 0 && len(gates) > limit {
+		gates = gates[:limit]
 	}
 	return gates
 }

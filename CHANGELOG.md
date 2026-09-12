@@ -2354,6 +2354,19 @@ never reused, per the v1.1.1 precedent.)
 
 ### Fixed
 
+- **`bd list --tree` now nests only parent-child edges**
+  ([#4686](https://github.com/gastownhall/beads/pull/4686)).
+  `buildIssueTreeWithDeps` treated any dependency whose target was an epic as
+  a parent-child relationship, so a task that merely `blocks` (or `waits-for`,
+  `discovered-from`, ...) an epic rendered as that epic's child — a genuinely
+  2-layer parent tree could display as a 6+ level tangle. Nesting is now
+  driven strictly by the parent-child edge type (plus the existing dotted-ID
+  fallback), matching the storage layer's own scoping (`epic_closure.go`).
+  **Visible change for legacy databases**: a dependency other than
+  parent-child that previously nested under an epic in `bd list --tree` now
+  displays flat instead; it remains visible via `bd show`, `bd dep tree`, and
+  the compact list view.
+
 - **Multi-id `bd dep list` no longer changes its JSON shape on failure**
   (bd-nhsno). The direct route used the batched edge read only `if err == nil`
   and otherwise fell through to the neighbour path, which emits a different
