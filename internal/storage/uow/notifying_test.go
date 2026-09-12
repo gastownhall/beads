@@ -281,9 +281,12 @@ func seedIssue(id string) *types.Issue {
 func closeThroughBatch(ctx context.Context, t *testing.T, uw UnitOfWork, ids ...string) {
 	t.Helper()
 	for _, id := range ids {
-		outcome := closeBatchItem(ctx, uw,
+		outcome, err := closeBatchItem(ctx, uw,
 			publicops.CloseBatchRequest{Actor: "tester"},
 			publicops.BatchCloseItem{IssueID: id})
+		if err != nil {
+			t.Fatalf("closeBatchItem(%s) infrastructure failure: %v", id, err)
+		}
 		if outcome.Err != nil {
 			t.Fatalf("closeBatchItem(%s): %v", id, outcome.Err)
 		}

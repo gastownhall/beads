@@ -1673,7 +1673,11 @@ func (u *issueUseCaseImpl) closeChecked(ctx context.Context, id string, params C
 	}
 	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: row.IsWisp || useWisp})
 	if err != nil {
-		return CloseIssueResult{}, fmt.Errorf("close %s: reload: %w", id, err)
+		// Post-write: the close row is already staged. Marked so the batch
+		// taxonomy keeps a reload miss request-level (see
+		// publicops.PostWriteError); single-close callers see the same
+		// error chain as before via Unwrap.
+		return CloseIssueResult{}, publicops.MarkPostWrite(fmt.Errorf("close %s: reload: %w", id, err))
 	}
 	return CloseIssueResult{Issue: issue, Closed: !row.AlreadyClosed, OpenChildren: row.OpenChildren}, nil
 }

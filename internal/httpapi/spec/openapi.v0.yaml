@@ -3006,6 +3006,12 @@ paths:
         on the unversioned plane and records no durable history entry.
 
 
+        A missing target before the write is a `404`. A missing row during
+        post-write hydration is an infrastructure failure and returns `500`,
+        with the transaction rolled back. It is not a client-addressable
+        not-found refusal.
+
+
         ## Hooks and auto-commit
 
 
