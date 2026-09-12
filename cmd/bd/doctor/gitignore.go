@@ -87,6 +87,12 @@ backup/
 *.db-shm
 db.sqlite
 bd.db
+# Machine-local config sidecar: overrides that describe THIS host (which Dolt
+# to talk to, whether this host takes backups) rather than the project. bd
+# routes those keys here precisely so the tracked config.yaml stops being
+# rewritten underneath clean-tree guards.
+config.local.yaml
+
 # NOTE: Do NOT add negation patterns here.
 # They would override fork protection in .git/info/exclude.
 # Config files (metadata.json, config.yaml) are tracked by git by default
@@ -113,6 +119,11 @@ const ProjectGitignoreHeader = "# Beads / Dolt files (added by bd init)"
 var requiredPatterns = []string{
 	"*.db?*",
 	".env",
+	// Machine-local config sidecar. Required rather than merely templated so
+	// that repositories initialized before it existed pick it up from
+	// `bd doctor --fix`; without that, an existing checkout gets the sidecar
+	// written but not ignored, and trades one self-dirtying file for another.
+	"config.local.yaml",
 	"redirect",
 	"last-touched",
 	"bd.sock.startlock",

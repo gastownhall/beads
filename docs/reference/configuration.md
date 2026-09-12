@@ -27,7 +27,7 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
 4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
-A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+A `config.local.yaml` next to the project `config.yaml` is merged in after all of them, so a value there wins. bd writes this file itself for the handful of keys that describe one machine — see [Machine-local keys](#machine-local-keys) — and you can add your own overrides to it. It is never committed.
 
 ## Precedence
 
@@ -72,7 +72,7 @@ bd config validate
 bd config unset jira.url
 ```
 
-`bd config set` automatically routes the write to the right location: keys in the YAML namespace (see below) are written to the project `config.yaml`; everything else is written to the Dolt database. `beads.role` is stored in git config.
+`bd config set` automatically routes the write to the right location: keys in the YAML namespace (see below) are written to the project `config.yaml`, except the few [machine-local keys](#machine-local-keys) that go to the untracked `config.local.yaml`; everything else is written to the Dolt database. `beads.role` is stored in git config.
 
 Unrecognized keys produce a warning with a did-you-mean suggestion; use the `custom.*` namespace for user-defined keys.
 
@@ -91,6 +91,42 @@ Plus these individual keys:
 `no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`.
 
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
+
+### Machine-local Keys
+
+A few of those YAML keys answer a question about *this machine* rather than about the project: which Dolt this host talks to, and whether this host takes backups. Storing one host's answer in the tracked `config.yaml` costs twice. It travels to everyone who pulls, and because bd rewrites `config.yaml` as a side effect of ordinary work, `git status` reports a change nobody made — which a release script, a pre-commit hook, or a CI clean-tree check then refuses on.
+
+So `bd config set` writes these keys to `.beads/config.local.yaml` instead, and keeps git from seeing that file.
+
+| Key | What it says about this host |
+|---|---|
+| `dolt.mode` | embedded or server |
+| `dolt.host`, `dolt.port`, `dolt.socket`, `dolt.user` | how to reach the Dolt server |
+| `dolt.data-dir` | where this host keeps Dolt data |
+| `dolt.debug` | whether to write pprof artifacts here |
+| `backup.enabled`, `backup.interval` | whether this host takes backups, and how often |
+
+The list is exact, not a namespace. The rest of `dolt.*` and `backup.*` — `dolt.auto-start`, `dolt.max-conns`, `dolt.shared-server`, `backup.git-repo` and the others — stay in `config.yaml` as shared project settings.
+
+```bash
+bd config set dolt.mode server
+# → Set dolt.mode = server (in config.local.yaml)
+
+# See everything this machine has overridden
+bd config show --source config.local.yaml
+# →   dolt.mode  = server  (config.local.yaml)
+```
+
+Because the sidecar is merged last, a value there overrides `config.yaml`. A committed value still works: it is a shared default that any machine can override locally.
+
+Two consequences worth knowing:
+
+- **The first machine-local write tidies `config.yaml` once.** If the tracked file already holds one of these keys, bd moves it into the sidecar and comments it out of `config.yaml` — one small diff, once per workspace, for you to review and commit.
+- **`bd config unset` on these keys clears the sidecar only.** A value still sitting in `config.yaml` is a shared default, and only an explicit edit should remove it, so `bd config get` can keep returning a value after an unset. `bd config show` reports which file each value came from.
+
+<Note>
+bd never commits the sidecar. `bd init` lists `config.local.yaml` in `.beads/.gitignore`; in a checkout made before bd wrote that entry, bd adds a per-clone line to `.git/info/exclude` the first time it writes the file. Run `bd doctor --fix` to add the tracked entry.
+</Note>
 
 ## Tool-Level Settings (config.yaml)
 
@@ -531,7 +567,7 @@ output:
   title-length: 255
 ```
 
-For machine-specific overrides that should not be committed, drop them in `.beads/config.local.yaml`; it is merged in last.
+Machine-specific settings do not belong in this file. bd routes [machine-local keys](#machine-local-keys) to the untracked `.beads/config.local.yaml`, which is merged in last; you can add your own overrides there too.
 
 ## Per-Command Override
 

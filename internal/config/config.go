@@ -376,7 +376,7 @@ func Initialize() error {
 
 		// Merge local config overrides if present (config.local.yaml)
 		// This allows machine-specific settings without polluting tracked config
-		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), "config.local.yaml")
+		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
 		if _, err := os.Stat(localConfigPath); err == nil {
 			v.SetConfigFile(localConfigPath)
 			if err := v.MergeInConfig(); err != nil {
@@ -630,9 +630,23 @@ func LogOverride(override ConfigOverride) {
 // SaveConfigValue sets a key-value pair and writes it to the config file.
 // If no config file is currently loaded, it creates config.yaml in the given beadsDir.
 // Only the specified key is modified; other file contents are preserved.
+//
+// This writer is NOT routed to the machine-local sidecar, and refuses a
+// machine-local key rather than silently writing it to the tracked
+// config.yaml. Routing it would be wrong here for two reasons: it takes an
+// interface{} value where the sidecar writers take the validated string form,
+// and it re-marshals the whole document through viper, which is exactly the
+// whole-file rewrite the sidecar path exists to avoid. Its one caller
+// (cmd/bd/init.go, writing no-git-ops) is a genuine project key. The refusal
+// keeps the "every writer of config.yaml is covered" invariant enforced at
+// runtime for the next key added to MachineLocalKeys, instead of leaving it to
+// whoever notices; a caller that hits it should use SetYamlConfigInDir.
 func SaveConfigValue(key string, value interface{}, beadsDir string) error {
 	if v == nil {
 		return fmt.Errorf("config not initialized")
+	}
+	if IsMachineLocalKey(key) {
+		return fmt.Errorf("SaveConfigValue cannot write machine-local key %q to the tracked config.yaml; use SetYamlConfigInDir, which routes it to %s", key, LocalConfigFileName)
 	}
 	v.Set(key, value)
 
@@ -682,15 +696,25 @@ func GetString(key string) string {
 	return v.GetString(key)
 }
 
-// GetStringFromDir reads a single string configuration value directly from
-// <beadsDir>/config.yaml without using or modifying global viper state.
-// This is intended for library consumers that call NewFromConfigWithOptions
-// without first invoking config.Initialize().
+// GetStringFromDir reads a single string configuration value for the workspace
+// at beadsDir without using or modifying global viper state. This is intended
+// for library consumers that call NewFromConfigWithOptions without first
+// invoking config.Initialize().
+//
+// It mirrors Initialize's precedence for the workspace's two files: a value in
+// the untracked config.local.yaml sidecar wins over the tracked config.yaml.
+// Without that, machine-local keys routed to the sidecar would be invisible
+// here — `bd bootstrap` resolves dolt.port through this path — and the caller
+// would silently fall back to a default while bd's merged config said
+// otherwise.
 //
 // The key uses dotted notation (e.g. "dolt.auto-start"). YAML booleans and
 // numbers are coerced to their string representations ("true", "false", etc.).
 // Returns "" if the file is absent, the key is not found, or any error occurs.
 func GetStringFromDir(beadsDir, key string) string {
+	if v, ok := readYamlValueAtPath(filepath.Join(beadsDir, LocalConfigFileName), key); ok {
+		return v
+	}
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
