@@ -450,3 +450,61 @@ func TestSetupGitExclude_RegularRepo(t *testing.T) {
 		t.Errorf("exclude file missing .claude/settings.local.json pattern: %s", content)
 	}
 }
+
+func TestAddExcludePatternsPreservesAppendLineEndings(t *testing.T) {
+	const lf = "\n# managed\n.beads/\ncache/\n"
+	const crlf = "\r\n# managed\r\n.beads/\r\ncache/\r\n"
+	for _, tc := range []struct{ name, existing, want, added string }{
+		{"empty", "", lf, ".beads/,cache/"},
+		{"delimiter-free", "local", "local\n" + lf, ".beads/,cache/"},
+		{"LF", "local\n", "local\n" + lf, ".beads/,cache/"},
+		{"CRLF", "local\r\n", "local\r\n" + crlf, ".beads/,cache/"},
+		{"CRLF unterminated", "local\r\nlast", "local\r\nlast\r\n" + crlf, ".beads/,cache/"},
+		{"CRLF pending CR", "local\r\nlast\r", "local\r\nlast\r\n" + crlf, ".beads/,cache/"},
+		{"LF pending CR", "local\nlast\r", "local\nlast\r\n" + lf, ".beads/,cache/"},
+		{"only pending CR", "local\r", "local\r\n" + lf, ".beads/,cache/"},
+		{"mixed", "a\r\nb\r\nc\n", "a\r\nb\r\nc\n" + lf, ".beads/,cache/"},
+		{"partial", ".beads/\r\n", ".beads/\r\n\r\n# managed\r\ncache/\r\n", "cache/"},
+		{"complete", ".beads/\r\ncache/", ".beads/\r\ncache/", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newGitRepo(t)
+			gitignorePath := filepath.Join(dir, ".gitignore")
+			const tracked = "user-rule\r\n"
+			if err := os.WriteFile(gitignorePath, []byte(tracked), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command("git", "-C", dir, "add", "--", ".gitignore").CombinedOutput(); err != nil {
+				t.Fatalf("track .gitignore: %v: %s", err, out)
+			}
+			path, err := resolveGitExcludePath(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.existing), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for pass := 0; pass < 2; pass++ {
+				added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/", "cache/"})
+				if err != nil || gotPath != path {
+					t.Fatalf("addExcludePatterns: path=%q, err=%v", gotPath, err)
+				}
+				wantAdded := tc.added
+				if pass == 1 {
+					wantAdded = ""
+				}
+				if strings.Join(added, ",") != wantAdded {
+					t.Errorf("pass %d added=%q, want %q", pass, added, wantAdded)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != tc.want {
+					t.Fatalf("pass %d exclude=%q, want %q: %v", pass, got, tc.want, err)
+				}
+				got, err = os.ReadFile(gitignorePath)
+				if err != nil || string(got) != tracked {
+					t.Fatalf("tracked .gitignore changed: %q: %v", got, err)
+				}
+			}
+		})
+	}
+}

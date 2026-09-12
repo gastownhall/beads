@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -105,8 +106,10 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 	}
 
 	var existing string
+	var content []byte
 	// #nosec G304 - git config path
-	if content, rerr := os.ReadFile(excludePath); rerr == nil {
+	if readContent, rerr := os.ReadFile(excludePath); rerr == nil {
+		content = readContent
 		existing = string(content)
 	}
 
@@ -120,13 +123,18 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 		return nil, excludePath, nil
 	}
 
+	lineEnding := gitignore.AppendLineEnding(content)
 	newContent := existing
 	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
-		newContent += "\n"
+		if strings.HasSuffix(newContent, "\r") {
+			newContent += "\n" // Complete the existing CR without doubling it.
+		} else {
+			newContent += lineEnding
+		}
 	}
-	newContent += "\n" + header + "\n"
+	newContent += lineEnding + header + lineEnding
 	for _, p := range added {
-		newContent += p + "\n"
+		newContent += p + lineEnding
 	}
 
 	// #nosec G306 - config file needs 0644
