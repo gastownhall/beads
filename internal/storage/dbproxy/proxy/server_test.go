@@ -30,6 +30,8 @@ const (
 	ioTimeout    = 2 * time.Second
 )
 
+var proxyReadinessGreeting = []byte("\x0a5.7.9-proxy-readiness-test\x00")
+
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -66,6 +68,9 @@ func (h *proxyHandle) waitErr(t *testing.T, timeout time.Duration) error {
 
 func runProxy(t *testing.T, opts proxy.ProxyOpts) *proxyHandle {
 	t.Helper()
+	if s, ok := opts.Server.(interface{ SetFirstDialGreeting([]byte) }); ok {
+		s.SetFirstDialGreeting(proxyReadinessGreeting)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &proxyHandle{
 		cancel: cancel,
@@ -674,6 +679,7 @@ func TestProxy_ConcurrentInstantiation_OnlyOneWinsLock(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func() {
 			ts := server.New()
+			ts.SetFirstDialGreeting(proxyReadinessGreeting)
 			stats := &proxy.Stats{}
 			p := proxy.NewProxyServer(proxy.ProxyOpts{
 				RootDir: root, Port: port,
