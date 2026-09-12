@@ -74,6 +74,8 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 				"score":      p.score,
 				"reasons":    p.reasons,
 				"created_at": p.issue.CreatedAt,
+				// cleanable marks issues in the high-confidence band that clean mode acts on.
+				"cleanable": p.score >= 0.9,
 			})
 		}
 
@@ -105,13 +107,28 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 		fmt.Printf("  (Total: %d issues)\n\n", len(mediumConfidence))
 	}
 
+	// Only high-confidence hits are eligible for --clean (GH#5025).
+	// Medium scores are review-only; never auto-suggest bulk delete of them.
+	cleanable := highConfidence
 	if !clean {
-		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete these issues (with confirmation).\n")
+		if len(cleanable) > 0 {
+			fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete %d high-confidence fixture(s) (with confirmation).\n", len(cleanable))
+			if len(mediumConfidence) > 0 {
+				fmt.Printf("Medium-confidence hits are review-only and will not be deleted by --clean.\n")
+			}
+		} else {
+			fmt.Printf("No high-confidence fixtures to delete. Medium-confidence hits are review-only.\n")
+		}
+		return nil
+	}
+
+	if len(cleanable) == 0 {
+		fmt.Println("No high-confidence fixtures to delete.")
 		return nil
 	}
 
 	if !yes {
-		fmt.Printf("\nDelete %d test issues? [y/N] ", len(polluted))
+		fmt.Printf("\nDelete %d high-confidence test fixtures? [y/N] ", len(cleanable))
 		var response string
 		_, _ = fmt.Scanln(&response)
 		if strings.ToLower(response) != "y" {
@@ -121,14 +138,14 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	backupPath := ".beads/pollution-backup.jsonl"
-	if err := backupPollutedIssues(polluted, backupPath); err != nil {
+	if err := backupPollutedIssues(cleanable, backupPath); err != nil {
 		return HandleError("backing up issues: %v", err)
 	}
-	fmt.Printf("Backed up %d issues to %s\n", len(polluted), backupPath)
+	fmt.Printf("Backed up %d issues to %s\n", len(cleanable), backupPath)
 
-	fmt.Printf("\nDeleting %d issues...\n", len(polluted))
+	fmt.Printf("\nDeleting %d issues...\n", len(cleanable))
 	deleted := 0
-	for _, p := range polluted {
+	for _, p := range cleanable {
 		if err := deleteIssue(ctx, p.issue.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error deleting %s: %v\n", p.issue.ID, err)
 			continue
