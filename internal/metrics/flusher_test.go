@@ -7,8 +7,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dolthub/eventkit"
 	"github.com/dolthub/fslock"
 )
+
+// writeValidQueuedEvent writes a real, eventkit-parseable queued event batch
+// via the same FileEmitter.Send path production code uses. Unlike
+// writeQueuedEventNamed's placeholder content (fine for tests that only need
+// a file with the right extension to satisfy a filename-based scan), a batch
+// eventkit.FileFlusher will actually attempt to Send needs a filename that
+// matches the MD5 of its own content: readBatch's CheckFilenameMD5 gate
+// silently skips (no error) any file where it doesn't, which is why a fake
+// name+content pair never reaches the unreachable endpoint at all.
+func writeValidQueuedEvent(t *testing.T, dir string) {
+	t.Helper()
+	fe, err := eventkit.NewFileEmitter(dir)
+	if err != nil {
+		t.Fatalf("eventkit.NewFileEmitter: %v", err)
+	}
+	req := &eventkit.LogEventsRequest{
+		DistinctID: "test",
+		AppName:    "beads",
+		AppVersion: "0.0.0-test",
+		Platform:   "test",
+		Events: []eventkit.EventRecord{{
+			ID:        "1",
+			Name:      "test_event",
+			StartTime: time.Now(),
+			EndTime:   time.Now(),
+		}},
+	}
+	if err := fe.Send(context.Background(), req); err != nil {
+		t.Fatalf("FileEmitter.Send: %v", err)
+	}
+}
 
 // TestPruneUnderLockSkipsWhenAlreadyHeld is the Factor B "bounded, never
 // hangs" regression: when another process already holds the eventkit lock
@@ -127,7 +159,7 @@ func TestRunSendMetricsReleasesLockBeforeFlush(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatalf("mkdir eventsData: %v", err)
 	}
-	writeQueuedEventNamed(t, dir, "batch-release-check")
+	writeValidQueuedEvent(t, dir)
 
 	if _, err := Init("0.0.0-test", true, "http://127.0.0.1:1/collect"); err != nil {
 		t.Fatalf("Init: %v", err)
