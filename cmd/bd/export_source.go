@@ -207,10 +207,14 @@ func (s *uowExportSource) GetAllConfig(ctx context.Context) (map[string]string, 
 //     by wisps-table membership (issueops.PartitionWispIDsInTx). Row flags are
 //     NOT a substitute for that partition — a promoted no-history wisp is a
 //     durable issues-table row that (as wild data from the pre-bd-r9uce
-//     promote) still carries NoHistory=true — so both
-//     planes are queried with the FULL ID set and merged. The planes are
-//     ID-disjoint (GH#4455 cross-table guard), so at most one plane returns
-//     rows for any id and the merge cannot collide.
+//     promote) still carries NoHistory=true — so membership is read from the
+//     wisps table itself (WispPlaneIDs), never inferred. The durable plane is
+//     then queried with the FULL ID set and the wisp plane only with that
+//     membership subset (wispReaderIDs), and the two are merged. Unreadable
+//     membership fails OPEN to the full id list, so a nil set is never
+//     mistaken for "no wisps" (wy-237yfi). The planes are ID-disjoint
+//     (GH#4455 cross-table guard), so at most one plane returns rows for any
+//     id and the merge cannot collide.
 //   - Dependency records: domain GetIssueDependencyRecords already partitions
 //     internally (same issueops helper), so one call covers both planes.
 //   - Dependency counts: classic GetDependencyCountsInTx queries BOTH dep
@@ -219,7 +223,12 @@ func (s *uowExportSource) GetAllConfig(ctx context.Context) (map[string]string, 
 //     queried for the full ID set and summed here too.
 //
 // Wisp-plane reads tolerate a rig without the wisp tables (IsTableNotExist),
-// mirroring the dependency-counts leg.
+// mirroring the dependency-counts leg. The three wisp-relation readers below
+// keep that blanket check: each is a single-table read, so blanket and
+// table-specific are the same test there. The membership probe is the
+// exception — WispPlaneIDs renders FROM wisps LEFT JOIN leases, so its
+// tolerance is pinned to a missing `wisps` table and a broken database
+// surfaces as an error instead of an empty wisp plane.
 func (s *uowExportSource) LoadExportRelations(ctx context.Context, issues []*types.Issue) (exportRelations, error) {
 	rel := exportRelations{
 		labels:        map[string][]string{},
