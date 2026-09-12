@@ -112,6 +112,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
+| `dolt.open-retry-budget` | — | — | `0` (off) | Bound retries around the connectivity probe when opening against a Dolt server bd does not manage (see [below](#open-retry-budget)) |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
 | `create.require-description` | — | `BD_CREATE_REQUIRE_DESCRIPTION` | `false` | Require description on `bd create` |
@@ -242,6 +243,97 @@ How it works:
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+
+### Open-retry budget
+
+`dolt.open-retry-budget` bounds how long `bd` keeps re-probing a Dolt
+sql-server that will not answer while opening a store. It is **off by
+default**, so the out-of-the-box behavior is behaviorally identical: one
+connectivity probe, then the usual "Dolt server unreachable" error. The only
+difference with the key unset is one extra config read on the failure path --
+a server-backed open that fails its first probe reads the key to discover it
+is off. A successful open reads nothing extra.
+
+```yaml
+dolt:
+  open-retry-budget: 30s    # duration, or a bare number of seconds ("30")
+```
+
+What it does and does not cover:
+
+- **It applies only to a server `bd` does not manage** — a non-localhost host,
+  a unix socket, or a project whose configured server `bd` will not auto-start.
+  There, waiting is the only remedy `bd` has.
+- **The workspace must resolve to server-backed storage**, by the same test that
+  routes the open to the server backend in the first place -- the workspace's own
+  `dolt_mode` (plus shared-server mode), never the calling command. An embedded
+  project never engages the budget, not even from a diagnostic that turns
+  auto-start off (`bd config drift`, `bd config apply`, `bd doctor`): its
+  "server" is a TCP port with nothing behind it, so waiting there is pure delay.
+  Those same commands against a server-backed workspace **do** get the budget,
+  and that is worth costing out for the one command an operator runs *because*
+  the server is down. **The budget is spent per open, with no aggregate cap**,
+  so a command that opens several stores can wait several times.
+  Measured on a single-repo server-mode workspace pointed at a dead port, with
+  `open-retry-budget: 6s`: a default `bd doctor` run makes ten server-mode
+  opens, four of which resolve the workspace mode and so reach the budget --
+  the shared store its database checks use, two maintenance checks, and the KV
+  check. In that fixture the other six go through a hand-built config that
+  never sets the server-mode flag and stay fail-fast, and a multi-repo setup
+  adds further opens on top.
+  What the run actually cost: **5.7 s**, against 208 ms with the key unset.
+  Only the first of the four waited, because the circuit breaker opened partway
+  through the same command -- it trips after five consecutive failed
+  connections, which a doctor run reaches on its own -- and then rejected the
+  remaining opens immediately. Starting from a clear breaker does not avoid
+  this; the run trips it itself. With the breaker disabled outright the same
+  run waits four times and took **20.3 s** -- a measured figure, not a bound:
+  each open gets its own full budget, so four of them can cost four budgets
+  plus the run's other work.
+  To disable the additional open-probe retry waits for one command without
+  editing the workspace configuration, override the key through the
+  environment: `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms
+  against a dead port). Only the retry waits go: an open the circuit breaker
+  admits still makes its first probe with the 500 ms timeout, and an endpoint
+  that accepts TCP while SQL is unresponsive still costs its SQL-level
+  timeouts.
+- **Only transient network-level failures are retried**, using the same
+  `isRetryableError` classification the rest of the Dolt client uses. A
+  misconfigured endpoint (an unknown host, and similar non-transient errors)
+  fails immediately, exactly as it does with the budget off. In unix socket
+  mode a server that has been stopped usually removes its socket file, and the
+  resulting "no such file or directory" is not in that set — so a socket-mode
+  restart window is not covered by the budget today. TCP endpoints report
+  "connection refused" and are.
+- **It never applies to embedded mode or to a `bd`-managed localhost server.**
+  Those recover by *starting* a server, which `bd` already does; a managed open
+  that finds nothing listening goes straight to auto-start as before.
+- **It bounds the retries, not the first probe.** The first probe keeps its own
+  timeout and is never shortened by the budget, so a value too small to buy a
+  retry simply degrades to today's fail-fast open. No setting here can make
+  `bd` less patient than the default.
+- **Cancellation is honored.** If the caller's context is canceled, the open
+  ends at once, and — because that says nothing about the server's health — it
+  does not count towards the circuit breaker.
+- **A wait announces itself.** When the loop is entered, `bd` prints one line
+  to stderr naming the address and the budget:
+  `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
+  (dolt.open-retry-budget)`. One line per open, printed once a retry wait is
+  scheduled -- a cancellation during that wait can still end the open before
+  the retry dials -- so a budget-long wait is legible rather than looking like
+  a hang.
+
+The key is read with the same scope rules as `dolt.auto-start`: the merged
+configuration first, then the project's own `.beads/config.yaml`. Setting it to
+`0`, to an empty value, or to anything unparseable means off. The merged
+configuration includes `bd`'s automatic environment binding, so
+`BD_DOLT_OPEN_RETRY_BUDGET` overrides the file for a single command in either
+direction -- `=0` to opt out of a wait, `=6s` to opt into one without writing
+the key.
+
+Typical use is a shared or remote Dolt server that restarts on a schedule, where
+a command issued during the restart window should wait a few seconds rather than
+fail.
 
 ## Actor Identity Resolution
 

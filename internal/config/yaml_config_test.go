@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -1395,4 +1396,127 @@ func TestMetricsNoticeShownResolvesUserGlobalOnly(t *testing.T) {
 			t.Errorf("MetricsNoticeShownByUserConfig() = false; user-global true must win over project false")
 		}
 	})
+}
+
+// dolt.open-retry-budget is validated at `bd config set` time because a value
+// the reader cannot parse resolves to "off" and would otherwise sit in
+// config.yaml doing nothing while looking configured (GH#4379).
+func TestParseOpenRetryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		value   string
+		want    time.Duration
+		wantErr bool
+		// wantHint, when set, must appear in the rejection message. A
+		// refusal that suggests an unwritable spelling is a refusal the user
+		// cannot act on, and wantErr alone cannot see that.
+		wantHint string
+	}{
+		// Duration grammar.
+		{value: "30s", want: 30 * time.Second},
+		{value: "2m", want: 2 * time.Minute},
+		{value: "500ms", want: 500 * time.Millisecond},
+		{value: "1m30s", want: 90 * time.Second},
+		// Bare seconds.
+		{value: "30", want: 30 * time.Second},
+		{value: "0", want: 0},
+		// Empty is a valid "off", not a user error.
+		{value: "", want: 0},
+		{value: "   ", want: 0},
+		// Rejected.
+		{value: "banana", wantErr: true},
+		{value: "-5s", wantErr: true},
+		{value: "-1", wantErr: true},
+		{value: "-5", wantErr: true},
+		{value: "30 seconds", wantErr: true},
+		// Near-misses on the duration grammar. Each of these becomes a VALID
+		// duration once "s" is appended, so a bare-seconds fallback that
+		// appends the unit to anything time.ParseDuration rejected accepts
+		// them: "1m30" would enable 90 seconds, "1h0m0" an hour, ".5" half a
+		// second. None is a duration and none is a number, so all are
+		// rejected -- and the reader must agree, which the wantErr branch
+		// below checks through ResolveOpenRetryBudget.
+		{value: "1m30", wantErr: true},
+		// A leading zero: the setter writes bare seconds unquoted, so YAML
+		// would read "030" as octal 24 where this parser says 30. Refused so
+		// the two readers cannot disagree on a persisted value.
+		{value: "030", wantErr: true, wantHint: `write "30"`},
+		{value: "007", wantErr: true, wantHint: `write "7"`},
+		// All zeros: trimming the leading zeros leaves nothing, so the
+		// suggestion has to name the spelling that means the same thing
+		// rather than advise writing the empty string.
+		{value: "00", wantErr: true, wantHint: `write "0" (budget off)`},
+		{value: "000", wantErr: true, wantHint: `write "0" (budget off)`},
+		{value: "1h0m0", wantErr: true},
+		{value: ".5", wantErr: true},
+		{value: "30.5", wantErr: true},
+		// Trailing junk that "s" cannot rescue: rejected before and after,
+		// present so the table pins the whole fallback and not only the
+		// cases the restriction changed.
+		{value: "30x", wantErr: true},
+		{value: "3 0", wantErr: true},
+		{value: "+30", wantErr: true},
+		// Overflow. Both of these are accepted by the tempting
+		// strconv.Atoi(value) * time.Second form: 18446744074 wraps to a
+		// positive 290ms and -9223372037 wraps to a positive 2562047h. Going
+		// through time.ParseDuration(value+"s") rejects them instead of
+		// letting a value the validator never really saw reach the reader.
+		{value: "18446744074", wantErr: true},
+		{value: "-9223372037", wantErr: true},
+	} {
+		t.Run("value="+tc.value, func(t *testing.T) {
+			got, err := ParseOpenRetryBudget(tc.value)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ParseOpenRetryBudget(%q) = %v, want an error", tc.value, got)
+				}
+				// The reader's half must agree: anything the validator
+				// rejects resolves to off, never to a surprising duration.
+				if resolved := ResolveOpenRetryBudget(tc.value); resolved != 0 {
+					t.Fatalf("ResolveOpenRetryBudget(%q) = %v, want 0 for a value the validator rejects", tc.value, resolved)
+				}
+				if tc.wantHint != "" && !strings.Contains(err.Error(), tc.wantHint) {
+					t.Fatalf("ParseOpenRetryBudget(%q) error = %q, want it to suggest %s", tc.value, err, tc.wantHint)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseOpenRetryBudget(%q) unexpected error: %v", tc.value, err)
+			}
+			if got != tc.want {
+				t.Fatalf("ParseOpenRetryBudget(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+			if resolved := ResolveOpenRetryBudget(tc.value); resolved != tc.want {
+				t.Fatalf("ResolveOpenRetryBudget(%q) = %v, want %v: the reader and the validator disagree", tc.value, resolved, tc.want)
+			}
+		})
+	}
+}
+
+// `bd config set` routes dolt.* keys through validateYamlConfigValue, so the
+// budget key must be rejected there rather than accepted and silently ignored.
+func TestValidateYamlConfigValue_OpenRetryBudget(t *testing.T) {
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "30s"); err != nil {
+		t.Fatalf("valid budget rejected: %v", err)
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "banana"); err == nil {
+		t.Fatal("unparseable budget accepted by bd config set")
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "-5s"); err == nil {
+		t.Fatal("negative budget accepted by bd config set")
+	}
+	// The bare-seconds fallback must not rescue a malformed duration: "1m30s"
+	// is valid and "1m30" is not, and the difference has to survive the
+	// command that writes the key, not only the parser under it.
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "1m30s"); err != nil {
+		t.Fatalf("valid compound duration rejected: %v", err)
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "1m30"); err == nil {
+		t.Fatal("malformed duration \"1m30\" accepted by bd config set: the bare-seconds fallback appended a unit to it")
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "30x"); err == nil {
+		t.Fatal("\"30x\" accepted by bd config set")
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "30"); err != nil {
+		t.Fatalf("bare seconds rejected: %v", err)
+	}
 }

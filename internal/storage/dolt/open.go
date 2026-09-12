@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -21,6 +22,38 @@ const (
 	ServerModeExternal = doltserver.ServerModeExternal
 	ServerModeEmbedded = doltserver.ServerModeEmbedded
 )
+
+// configStringForDir resolves a dotted dolt.* config key with the scope rules
+// the dolt.* keys already use: the merged viper view first (config.Initialize
+// has folded BEADS_DIR, the project .beads/config.yaml and the user-level
+// files into it), then a direct read of <beadsDir>/config.yaml for library
+// consumers that call the storage layer without ever invoking
+// config.Initialize.
+//
+// It exists as ONE function rather than as the same four lines written three
+// times so that dolt.open-retry-budget and dolt.auto-start cannot drift apart:
+// matching the sibling key's scope is the contract the open-retry budget ships
+// under, and a shared reader makes that a property of the code instead of a
+// claim in a comment. TestOpenRetryBudgetSiblingScopeParity pins it.
+func configStringForDir(beadsDir, key string) string {
+	if v := config.GetString(key); v != "" {
+		return v
+	}
+	return config.GetStringFromDir(beadsDir, key)
+}
+
+// openRetryBudget resolves config.OpenRetryBudgetKey for an open rooted at
+// beadsDir. Zero -- absent, empty, "0", negative or unparseable -- is off, and
+// off is the pre-existing fail-fast open.
+//
+// The value bounds the RETRIES that follow the open's first connectivity
+// probe. The first probe keeps its own timeout and is never shortened by this
+// budget, so a value too small to buy a retry degrades to exactly today's
+// behavior -- one probe, no retries -- and no setting here can make bd less
+// patient than the default.
+func openRetryBudget(beadsDir string) time.Duration {
+	return config.ResolveOpenRetryBudget(configStringForDir(beadsDir, config.OpenRetryBudgetKey))
+}
 
 // ApplyCLIAutoStart sets the standalone auto-start policy used by the
 // normal CLI path. Honors the actual server mode resolved from
@@ -40,10 +73,7 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 		cfg.AutoStart = false
 		return
 	}
-	autoStartCfg := config.GetString("dolt.auto-start")
-	if autoStartCfg == "" {
-		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
-	}
+	autoStartCfg := configStringForDir(beadsDir, "dolt.auto-start")
 	mode := doltserver.ResolveServerMode(beadsDir)
 	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
 }
@@ -171,10 +201,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	// Prefer the global viper config (populated when config.Initialize() has been
 	// called, i.e. all CLI paths). Fall back to a direct read of the project
 	// config.yaml for library consumers that never call config.Initialize().
-	autoStartCfg := config.GetString("dolt.auto-start")
-	if autoStartCfg == "" {
-		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
-	}
+	autoStartCfg := configStringForDir(beadsDir, "dolt.auto-start")
 	// When the server is externally managed (explicit port in metadata.json,
 	// shared server mode, etc.), suppress auto-start. This prevents bd from
 	// launching a different server when the user's configured server is
@@ -266,6 +293,45 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		fmt.Fprintf(os.Stderr, "In server mode, data-dir does not control which database is used.\n")
 		fmt.Fprintf(os.Stderr, "This may cause commands to operate on the wrong database.\n")
 		fmt.Fprintf(os.Stderr, "Fix: bd dolt set data-dir ''   (clear the data-dir setting)\n\n")
+	}
+
+	// Classify the workspace the way the CLI does, unless the caller already
+	// decided. New -> newServerMode gates the open-retry budget on
+	// cfg.ServerMode, and the constructors above are reached with that field
+	// at its zero value by the store factory's own server branches
+	// (cmd/bd/store_factory.go routed creates and read-only cross-workspace
+	// opens, plus their non-CGO twins), which classify the workspace
+	// themselves and then call NewFromConfig / NewFromConfigWithOptions
+	// without restating it. Leaving it unset there costs those opens the
+	// budget they are configured for, while the primary CLI path keeps it
+	// because main.go sets the field before routing.
+	//
+	// The predicate mirrors cmd/bd/main.go rather than inventing a second
+	// classification: metadata dolt_mode (:1507), then shared-server mode as a
+	// form of server mode, skipped for proxied-server because that is its own
+	// backend (:1512, repeated at :1548). main.go writes those two steps
+	// inline in both places, so there is no helper to call; the same two steps
+	// are written here and nowhere else in this package.
+	//
+	// It is an OR and never an overwrite: a caller that already set ServerMode
+	// keeps it, so this cannot turn a server-mode open into an embedded one.
+	// Only the retry gate reads this field after this point -- the store's own
+	// s.serverMode is set unconditionally by newServerMode, and no caller of
+	// these constructors reads the config back, so the assignment changes
+	// nothing else about the open.
+	//
+	// A proxied-server workspace is its own backend and never a candidate:
+	// the constructors leave cfg.ProxiedServer unset, so the metadata mode is
+	// asked directly. Without that, a proxied workspace under shared-server
+	// mode would read as server-backed (IsDoltServerMode answers true on the
+	// shared-server env alone) and a diagnostic open would retry the shared
+	// endpoint the proxy never dials.
+	proxied := cfg.ProxiedServer || fileCfg.IsDoltProxiedServerMode()
+	if !cfg.ServerMode && !proxied {
+		cfg.ServerMode = fileCfg.IsDoltServerMode()
+	}
+	if !cfg.ServerMode && !proxied && doltserver.IsSharedServerMode() {
+		cfg.ServerMode = true
 	}
 
 	// Always apply database name from metadata.json (prefix-based naming, bd-u8rda).

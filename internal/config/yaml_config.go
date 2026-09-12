@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -872,6 +873,95 @@ func isDuration(s string) bool {
 	return isNumeric(s[:len(s)-1])
 }
 
+// OpenRetryBudgetKey is the config.yaml key holding the Dolt open-retry
+// budget: how long a failing pre-dial probe against a sql-server that bd does
+// not manage may keep retrying before the open fails (GH#4379).
+const OpenRetryBudgetKey = "dolt.open-retry-budget"
+
+// ParseOpenRetryBudget parses the OpenRetryBudgetKey grammar: a Go duration
+// string ("30s", "2m", "1m30s", "500ms") or a bare number read as seconds
+// ("30"). An empty value is a valid "off".
+//
+// The bare-seconds form is DIGITS ONLY. The fallback below appends "s", and
+// appending it to whatever time.ParseDuration rejected turns near-misses into
+// accepted values: "1m30" is neither a Go duration nor a number, but "1m30s"
+// parses, so an unrestricted fallback silently enabled 90 seconds for a value
+// the user got wrong. A fractional value carries its own unit ("30.5s"); the
+// rejection message names both accepted forms.
+//
+// Bare seconds are resolved by re-parsing value+"s" rather than by
+// multiplying a strconv.Atoi result by time.Second, because the multiplying
+// form accepts values it should reject: 18446744074 wraps to a positive 290ms
+// and -9223372037 wraps to a positive 2562047h. A validator built that way
+// would pass a value the reader then resolves to something unrelated.
+func ParseOpenRetryBudget(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		notInGrammar := fmt.Errorf("%s must be a duration (e.g. \"30s\", \"2m\") or a number of seconds, got %q", OpenRetryBudgetKey, value)
+		if !isBareSeconds(value) {
+			return 0, notInGrammar
+		}
+		// A leading zero is rejected rather than read as decimal: the setter
+		// persists bare seconds as an unquoted YAML scalar, and both YAML
+		// readers take "030" as octal 24 while this parser would say 30. The
+		// two must agree, so the ambiguous spelling is refused at set time.
+		if len(value) > 1 && value[0] == '0' {
+			// The suggestion is the value without its leading zeros -- except
+			// for an all-zero value, where that is the empty string and the
+			// hint would advise writing nothing at all. "0" is the spelling
+			// that means what "000" was trying to mean.
+			hint := fmt.Sprintf("write %q", strings.TrimLeft(value, "0"))
+			if strings.TrimLeft(value, "0") == "" {
+				hint = `write "0" (budget off)`
+			}
+			return 0, fmt.Errorf("%s must not start with 0 (%q is read as octal when written unquoted in YAML); %s or add a unit", OpenRetryBudgetKey, value, hint)
+		}
+		var secErr error
+		d, secErr = time.ParseDuration(value + "s")
+		if secErr != nil {
+			return 0, notInGrammar
+		}
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s must not be negative, got %q", OpenRetryBudgetKey, value)
+	}
+	return d, nil
+}
+
+// isBareSeconds reports whether value is the bare-seconds form of the
+// OpenRetryBudgetKey grammar: one or more decimal digits and nothing else.
+//
+// Deliberately stricter than isNumeric above, which also admits '.'. This
+// check gates a fallback that appends a unit, so every character it lets
+// through is a character time.ParseDuration gets to reinterpret afterwards.
+func isBareSeconds(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveOpenRetryBudget is the READER's half of the same grammar: it shares
+// ParseOpenRetryBudget so a value `bd config set` accepted can never resolve
+// to something the validator never saw. Anything unparseable, negative or
+// absent is off, which is the pre-existing fail-fast open.
+func ResolveOpenRetryBudget(value string) time.Duration {
+	d, err := ParseOpenRetryBudget(value)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
 // validateYamlConfigValue validates a configuration value before setting.
 // Returns an error if the value is invalid for the given key.
 func validateYamlConfigValue(key, value string) error {
@@ -899,6 +989,13 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "server" && lower != "embedded" {
 			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
+		}
+	case OpenRetryBudgetKey:
+		// Validated at set time because a value the reader cannot parse -- or
+		// a negative one -- resolves to "off" and would otherwise sit in
+		// config.yaml doing nothing while looking configured.
+		if _, err := ParseOpenRetryBudget(value); err != nil {
+			return err
 		}
 	case "prime.max-memories":
 		n, err := strconv.Atoi(value)
