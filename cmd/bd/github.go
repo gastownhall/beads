@@ -421,7 +421,7 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 
 	// Set up GitHub-specific pull and push hooks
 	engine.PullHooks = buildGitHubPullHooks(ctx)
-	engine.PushHooks = buildGitHubPushHooks(gt)
+	engine.PushHooks = buildGitHubPushHooks(ctx, gt)
 
 	// Build sync options from CLI flags
 	pull := !githubSyncPushOnly
@@ -482,12 +482,61 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 // The ContentEqual hook lets the engine skip issues whose pushable fields
 // already match GitHub, so repeated `github sync --push-only` / `github push`
 // runs don't re-PATCH unchanged issues (gastownhall/beads#4214).
-func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
+// The FormatDescription hook renders the managed Beads metadata footer into
+// the pushed body (gastownhall/beads#4307); ContentEqual and ContentHash
+// operate on that same rendered body so the no-op detection matches what is
+// actually on GitHub, and so a dependency-graph change invalidates the cache.
+func buildGitHubPushHooks(ctx context.Context, gt *github.Tracker) *tracker.PushHooks {
 	config := gt.MappingConfig()
 	if config == nil {
 		config = github.DefaultMappingConfig()
 	}
+	targetRepoURL := gt.TargetRepoHTMLURL()
+	renderBody := func(issue *types.Issue) (string, error) {
+		// A failed graph query must abort this issue's push rather than
+		// degrade to an empty edge list: rendering "no dependencies" would
+		// delete an existing tasklist on GitHub and then cache that wrong
+		// body as pushed.
+		dependencies, err := store.GetDependenciesWithMetadata(ctx, issue.ID)
+		if err != nil {
+			return "", fmt.Errorf("fetching dependencies for %s: %w", issue.ID, err)
+		}
+		dependents, err := store.GetDependentsWithMetadata(ctx, issue.ID)
+		if err != nil {
+			return "", fmt.Errorf("fetching dependents for %s: %w", issue.ID, err)
+		}
+		return github.RenderGitHubIssueBody(issue, dependencies, dependents, targetRepoURL), nil
+	}
+	// The engine calls FormatDescription, ContentEqual, and ContentHash with
+	// the same *types.Issue within one push-loop iteration, and each needs the
+	// same rendered body. Memoize the last render (the loop is serial) so the
+	// dependency-graph queries run once per issue instead of once per hook.
+	var (
+		memoIssue *types.Issue
+		memoBody  string
+		memoErr   error
+	)
+	renderBodyOnce := func(issue *types.Issue) (string, error) {
+		if issue != memoIssue {
+			memoIssue = issue
+			memoBody, memoErr = renderBody(issue)
+		}
+		return memoBody, memoErr
+	}
+	// The engine hands ContentEqual/ContentHash the raw local issue but pushes
+	// the FormatDescription output, so compare/hash a copy carrying the
+	// rendered body.
+	withRenderedBody := func(local *types.Issue) (*types.Issue, error) {
+		body, err := renderBodyOnce(local)
+		if err != nil {
+			return nil, err
+		}
+		rendered := *local
+		rendered.Description = body
+		return &rendered, nil
+	}
 	return &tracker.PushHooks{
+		FormatDescription: renderBodyOnce,
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			if remote == nil {
 				return false
@@ -496,14 +545,23 @@ func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 			if !ok || gh == nil {
 				return false
 			}
-			return github.PushFieldsEqual(local, gh, config)
+			rendered, err := withRenderedBody(local)
+			if err != nil {
+				return false
+			}
+			return github.PushFieldsEqual(rendered, gh, config)
 		},
 		// ContentHash lets the engine skip the per-issue GitHub fetch entirely
 		// when an issue is unchanged since its last push, so a no-op
 		// `github sync --push-only` makes ~zero REST calls instead of one GET
-		// per linked issue (gastownhall/beads#4214).
+		// per linked issue (gastownhall/beads#4214). A render failure returns
+		// "" which disables the short-circuit for that issue.
 		ContentHash: func(local *types.Issue) string {
-			return github.PushContentHash(local, config)
+			rendered, err := withRenderedBody(local)
+			if err != nil {
+				return ""
+			}
+			return github.PushContentHash(rendered, config)
 		},
 		// TargetScope supplies the host and repository omitted by shorthand refs
 		// such as github:42, so changing GitHub target configuration invalidates

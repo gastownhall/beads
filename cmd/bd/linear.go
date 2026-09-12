@@ -761,8 +761,8 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 		return labelCache
 	}
 	return &tracker.PushHooks{
-		FormatDescription: func(issue *types.Issue) string {
-			return linear.BuildLinearDescription(issue)
+		FormatDescription: func(issue *types.Issue) (string, error) {
+			return linear.BuildLinearDescription(issue), nil
 		},
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			remoteIssue, ok := remote.Raw.(*linear.Issue)

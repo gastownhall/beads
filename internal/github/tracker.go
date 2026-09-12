@@ -78,6 +78,17 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	}
 
 	t.config = DefaultMappingConfig()
+
+	// Resolve the local issue prefix so pull can validate bead IDs embedded
+	// in synced issue bodies (same precedence as cmd/bd's pull hooks: YAML
+	// config first, then the store, defaulting to "bd").
+	prefix := "bd"
+	if p := config.GetString("issue-prefix"); p != "" {
+		prefix = p
+	} else if p, err := store.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
+		prefix = p
+	}
+	t.config.IssuePrefix = prefix
 	return nil
 }
 
@@ -136,8 +147,10 @@ func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.T
 func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker.TrackerIssue, error) {
 	fields := BeadsIssueToGitHubFields(issue, t.config)
 	labels, _ := fields["labels"].([]string)
+	title, _ := fields["title"].(string)
+	body, _ := fields["body"].(string)
 
-	created, err := t.client.CreateIssue(ctx, issue.Title, issue.Description, labels)
+	created, err := t.client.CreateIssue(ctx, title, body, labels)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +197,39 @@ func (t *Tracker) PushTargetScope() string {
 		strings.ToLower(strings.TrimSpace(t.client.Owner)),
 		strings.ToLower(strings.TrimSpace(t.client.Repo)),
 	)
+}
+
+// TargetRepoHTMLURL returns the HTML URL of the configured push target
+// repository (e.g. "https://github.com/owner/repo"), used by the body
+// renderer to decide when a dependency's external ref may be shortened to
+// #<number>. It returns "" when the URL cannot be derived with confidence
+// (missing client, malformed base URL, or an API host whose HTML host is
+// unknown, such as subdomain-isolated GitHub Enterprise); callers treat ""
+// as "never shorten", which degrades to full URLs and stays correct.
+func (t *Tracker) TargetRepoHTMLURL() string {
+	if t.client == nil {
+		return ""
+	}
+	owner := strings.TrimSpace(t.client.Owner)
+	repo := strings.TrimSpace(t.client.Repo)
+	if owner == "" || repo == "" {
+		return ""
+	}
+	u, err := url.Parse(canonicalGitHubBaseURL(t.client.BaseURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Host)
+	switch {
+	case host == "api.github.com":
+		host = "github.com"
+	case strings.HasPrefix(host, "api."):
+		// Subdomain-isolated GHE: the HTML host cannot be derived reliably.
+		return ""
+	}
+	// Path-form GHE ("https://ghe.example/api/v3") shares the HTML host, so
+	// dropping the path yields the repo root in every remaining case.
+	return u.Scheme + "://" + host + "/" + owner + "/" + repo
 }
 
 // canonicalGitHubBaseURL normalizes the URL components that are
