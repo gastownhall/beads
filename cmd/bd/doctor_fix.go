@@ -328,6 +328,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.OrphanedDependencies(path, doctorVerbose)
 		case "Clone-Local FKs":
 			err = fix.CloneLocalFKEnforcement(path, doctorVerbose)
+		case "Orphaned Child Counters":
+			err = fix.OrphanedChildCounters(path, doctorVerbose)
 		case "Dependency Keys":
 			err = fix.DependencyKeys(path, doctorVerbose)
 		case "Blocked State":
