@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -220,5 +222,50 @@ func TestTouchFlushMarkerCreatesThenBumps(t *testing.T) {
 func TestFlusherMarkerInertToFileFlusher(t *testing.T) {
 	if filepath.Ext(flushMarkerName) == queuedEventExt {
 		t.Fatalf("flushMarkerName %q must not use the queued-event extension %q", flushMarkerName, queuedEventExt)
+	}
+}
+
+// TestClaimFlushExactlyOneWinnerUnderConcurrency is the Factor A regression:
+// concurrent bd invocations racing MaybeSpawnFlusher's spawn decision must
+// produce exactly one winner, not one spawn attempt per invocation. claimFlush
+// is the extracted double-checked-lock decision (TryLock -> re-check
+// flusherDue under the lock -> touchFlushMarker -> Unlock); this drives it
+// directly with real goroutines, each opening its own fslock fd on the shared
+// dir, so the contention is genuine OS-level flock contention rather than a
+// mocked stand-in (each fslock.New opens its own fd even within one process).
+func TestClaimFlushExactlyOneWinnerUnderConcurrency(t *testing.T) {
+	dir := t.TempDir()
+	writeQueuedEvent(t, dir)
+	now := time.Now()
+
+	const n = 50
+	var wins int32
+	var wg sync.WaitGroup
+	wg.Add(n)
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if claimFlush(dir, now) {
+				atomic.AddInt32(&wins, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if wins != 1 {
+		t.Fatalf("claimFlush winners = %d across %d goroutines, want exactly 1", wins, n)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("claimFlush race took %v, want well under 2s (lock contention must resolve fast, not block)", elapsed)
+	}
+
+	fi, err := os.Stat(filepath.Join(dir, flushMarkerName))
+	if err != nil {
+		t.Fatalf("winner did not touch the flush marker: %v", err)
+	}
+	if fi.ModTime().Before(now) {
+		t.Errorf("flush marker mtime %v predates the race start %v", fi.ModTime(), now)
 	}
 }

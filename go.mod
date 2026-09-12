@@ -151,7 +151,7 @@ require (
 	github.com/dolthub/dolt/go v0.40.5-0.20260806213044-796d07497741
 	github.com/dolthub/eventsapi_schema v0.0.0-20260715220557-d9b4a1c6b4d4 // indirect
 	github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 // indirect
-	github.com/dolthub/fslock v0.0.5 // indirect
+	github.com/dolthub/fslock v0.0.5
 	github.com/dolthub/go-icu-regex v0.0.0-20260610153742-72563bc7ca83 // indirect
 	github.com/dolthub/go-mysql-server v0.20.1-0.20260805191915-e5eafe0da809
 	github.com/dolthub/gozstd v0.0.0-20240423170813-23a2903bca63 // indirect
