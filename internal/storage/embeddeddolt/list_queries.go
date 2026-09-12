@@ -31,6 +31,18 @@ func (s *EmbeddedDoltStore) SearchIssueIDs(ctx context.Context, query string, fi
 	return result, err
 }
 
+// SearchIssueSummaries is the narrow-projection variant of SearchIssues;
+// returns []*types.IssueSummary instead of full issues.
+func (s *EmbeddedDoltStore) SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
+	var result []*types.IssueSummary
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssueSummariesInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	var result []*types.IssueWithCounts
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
