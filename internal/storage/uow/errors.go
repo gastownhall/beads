@@ -50,3 +50,15 @@ func isDatabaseExistsError(err error) bool {
 	errLower := strings.ToLower(err.Error())
 	return strings.Contains(errLower, "database exists") || strings.Contains(errLower, "1007")
 }
+
+func isUnknownDatabaseError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1049 {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	errLower := strings.ToLower(err.Error())
+	return strings.Contains(errLower, "database not found") || strings.Contains(errLower, "unknown database")
+}

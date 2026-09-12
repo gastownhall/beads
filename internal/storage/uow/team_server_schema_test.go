@@ -279,3 +279,81 @@ func TestCheckTeamServerIdentity_ReadError_Surfaces(t *testing.T) {
 		t.Errorf("error %q should name the database", err)
 	}
 }
+
+func expectConvergedProbe(mock sqlmock.Sqlmock, version int, projectID any) {
+	mock.ExpectQuery(`SELECT \(SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations\), \(SELECT value FROM metadata`).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "project_id"}).AddRow(version, projectID))
+}
+
+func TestCheckTeamServerSchemaAndIdentity_Converged_OneQuery(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectConvergedProbe(mock, schema.LatestVersion(), "project-AAAA")
+
+	if err := checkTeamServerSchemaAndIdentity(context.Background(), db, "beads_team", "project-AAAA"); err != nil {
+		t.Fatalf("checkTeamServerSchemaAndIdentity = %v, want nil", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("converged state must be answered by the single probe: %v", err)
+	}
+}
+
+func TestCheckTeamServerSchemaAndIdentity_Mismatch_FallsThroughToDiagnostics(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectConvergedProbe(mock, schema.LatestVersion(), "project-BBBB")
+	expectVersionQuery(mock, schema.LatestVersion())
+	expectProjectIDQuery(mock, "project-BBBB")
+
+	err := checkTeamServerSchemaAndIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil || !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+		t.Fatalf("checkTeamServerSchemaAndIdentity = %v, want identity mismatch from the two-step check", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestCheckTeamServerSchemaAndIdentity_ProbeError_FallsThroughToDiagnostics(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	mock.ExpectQuery(`SELECT \(SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations\)`).
+		WillReturnError(errors.New("table not found: schema_migrations"))
+	expectVersionQuery(mock, 0)
+
+	err := checkTeamServerSchemaAndIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil || !strings.Contains(err.Error(), "bts init") {
+		t.Fatalf("checkTeamServerSchemaAndIdentity = %v, want the fresh-database diagnostic", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestCheckTeamServerSchemaAndIdentity_NoExpectedID_SkipsProbe(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectVersionQuery(mock, schema.LatestVersion())
+
+	if err := checkTeamServerSchemaAndIdentity(context.Background(), db, "beads_team", ""); err != nil {
+		t.Fatalf("checkTeamServerSchemaAndIdentity = %v, want nil", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestCheckTeamServerSchemaAndIdentity_Behind_RefusesWithBtsMigrate(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectConvergedProbe(mock, schema.LatestVersion()-1, "project-AAAA")
+	expectVersionQuery(mock, schema.LatestVersion()-1)
+
+	err := checkTeamServerSchemaAndIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil || !strings.Contains(err.Error(), "bts migrate") {
+		t.Fatalf("checkTeamServerSchemaAndIdentity = %v, want the bts-migrate refusal for a behind schema even with a matching identity", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

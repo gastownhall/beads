@@ -2,11 +2,38 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
+
+func checkTeamServerSchemaAndIdentity(ctx context.Context, conn schema.DBConn, database, expectedProjectID string) error {
+	// This SELECT can fail against a database without the beads schema, which
+	// schema.currentVersion avoids by probing information_schema first (be-bv7x:
+	// a failed statement can pin a pooled Dolt session to a stale catalog). It
+	// does not bind here: a failure falls through to the two-step checks, every
+	// path out of those on such a database is a refusal, and a refused open
+	// closes the pool, so the session never serves another statement. The one
+	// exception is a serialization-class failure, which backoff retries on the
+	// same pool; that session keeps the pin, on a bts-managed schema that any
+	// skew already refuses.
+	if expectedProjectID != "" {
+		var current int
+		var projectID sql.NullString
+		err := conn.QueryRowContext(ctx,
+			"SELECT (SELECT COALESCE(MAX(version), 0) FROM schema_migrations), "+
+				"(SELECT value FROM metadata WHERE `key` = '_project_id' LIMIT 1)").Scan(&current, &projectID)
+		if err == nil && current == schema.LatestVersion() && projectID.Valid && projectID.String == expectedProjectID {
+			return nil
+		}
+	}
+	if err := checkTeamServerSchema(ctx, conn, database); err != nil {
+		return err
+	}
+	return checkTeamServerIdentity(ctx, conn, database, expectedProjectID)
+}
 
 // checkTeamServerSchema verifies that a bts-managed database's schema version
 // matches this binary's. The connection must already have the database selected.
