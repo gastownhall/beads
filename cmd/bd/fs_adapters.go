@@ -34,3 +34,15 @@ func newFileSystemAdapters() domain.BeadsDirFSAdapters {
 		SetYAMLConfig:        config.SetYamlConfig,
 	}
 }
+
+// newInitFileSystemAdapters keeps the selected Git project separate from storage paths.
+func newInitFileSystemAdapters(workDir string) domain.BeadsDirFSAdapters {
+	adapters := newFileSystemAdapters()
+	adapters.SetupForkExclude = func(verbose bool) error {
+		return setupForkExcludeAt(workDir, verbose)
+	}
+	adapters.SetupStealthMode = func(verbose bool) error {
+		return setupStealthModeAt(workDir, verbose)
+	}
+	return adapters
+}
