@@ -76,6 +76,18 @@ func (s *DoltStore) GetAllConfig(ctx context.Context) (map[string]string, error)
 	return result, err
 }
 
+// GetConfigByPrefix retrieves the configuration values whose key starts with
+// prefix, filtered in SQL (the domain.ConfigPrefixReader optional fast path).
+func (s *DoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetConfigByPrefixInTx(ctx, tx, prefix)
+		return err
+	})
+	return result, err
+}
+
 // DeleteConfig removes a configuration value
 func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {

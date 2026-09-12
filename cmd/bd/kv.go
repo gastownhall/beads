@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -108,6 +109,32 @@ func kvPairsFromConfig(allConfig map[string]string) map[string]string {
 		}
 	}
 	return kvPairs
+}
+
+// configPrefixReader mirrors domain.ConfigPrefixReader structurally: the
+// optional store fast path that reads only the keys under a prefix. Both
+// list paths discover it by assertion and fall back to the full read plus
+// kvPairsWithPrefix when the store predates it.
+type configPrefixReader interface {
+	GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error)
+}
+
+// kvPairsWithPrefix is kvPairsFromConfig narrowed to user keys starting with
+// userPrefix. It runs on every listing: after a SQL-side prefix read it is a
+// no-op re-check, and on the GetAllConfig fallback it IS the filter — so the
+// output is identical whichever path served the read.
+func kvPairsWithPrefix(allConfig map[string]string, userPrefix string) map[string]string {
+	kvPairs := kvPairsFromConfig(allConfig)
+	if userPrefix == "" {
+		return kvPairs
+	}
+	out := make(map[string]string)
+	for k, v := range kvPairs {
+		if strings.HasPrefix(k, userPrefix) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // printKVListResult renders the `bd kv list` output. Shared by the classic
@@ -292,15 +319,23 @@ Examples:
 	},
 }
 
+// kvListPrefix is the --prefix flag: list only keys starting with it.
+var kvListPrefix string
+
 // kvListCmd lists all key-value pairs
 var kvListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all key-value pairs",
 	Long: `List all key-value pairs in the beads key-value store.
 
+With --prefix, list only the keys starting with that prefix. The filter is
+pushed into SQL on stores that support it, so a scoped read of a large kv
+store does not serialize the whole table.
+
 Examples:
   bd kv list
-  bd kv list --json`,
+  bd kv list --json
+  bd kv list --prefix mail.dog. --json`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -312,7 +347,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			return runKVListProxiedServer(rootCtx)
+			return runKVListProxiedServer(rootCtx, kvListPrefix)
 		}
 
 		if err := ensureDirectMode("kv list requires direct database access"); err != nil {
@@ -320,16 +355,24 @@ Examples:
 		}
 
 		ctx := rootCtx
-		allConfig, err := store.GetAllConfig(ctx)
+		var allConfig map[string]string
+		var err error
+		if pr, ok := store.(configPrefixReader); ok && kvListPrefix != "" {
+			allConfig, err = pr.GetConfigByPrefix(ctx, kvPrefix+kvListPrefix)
+		} else {
+			allConfig, err = store.GetAllConfig(ctx)
+		}
 		if err != nil {
 			return HandleErrorRespectJSON("listing keys: %v", err)
 		}
 
-		return printKVListResult(kvPairsFromConfig(allConfig))
+		return printKVListResult(kvPairsWithPrefix(allConfig, kvListPrefix))
 	},
 }
 
 func init() {
+	kvListCmd.Flags().StringVar(&kvListPrefix, "prefix", "", "list only keys starting with this prefix (filtered in SQL where supported)")
+
 	// Register all kv subcommands under kvCmd
 	kvCmd.AddCommand(kvSetCmd)
 	kvCmd.AddCommand(kvGetCmd)
