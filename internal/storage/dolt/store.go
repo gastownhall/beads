@@ -2422,6 +2422,36 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return db, connStr, serverConnFacts{}, nil
 	}
 
+	// A caller that will not create the database does not need the
+	// no-database admin connection: the only thing SHOW DATABASES can tell it
+	// is whether to give up, and connecting to the database-scoped DSN answers
+	// that too. This is the same reasoning the Gateway branch above already
+	// applies ("a successful connect IS the existence proof"), narrowed to the
+	// case where the create machinery is unreachable anyway.
+	//
+	// It matters because bd is a one-shot CLI: every invocation paid a second
+	// TCP connect, MySQL handshake and auth on a pool that ran one
+	// SHOW DATABASES and was thrown away. In server mode that was a third of
+	// all connections bd opened, on every command.
+	//
+	// Both facts are decided without the probe: CreateIfMissing is false, so
+	// this call cannot be the creator; and a database that answers a ping
+	// existed before the call. A ping that fails because the database is not
+	// there is reported as the same databaseNotFoundError the SHOW DATABASES
+	// path returned.
+	if !cfg.CreateIfMissing {
+		if err := db.PingContext(ctx); err != nil {
+			if isUnknownDatabaseError(err) {
+				return nil, "", serverConnFacts{}, databaseNotFoundError(cfg)
+			}
+			return nil, "", serverConnFacts{}, fmt.Errorf(
+				"failed to connect to Dolt server %s:%d (database %q): %w",
+				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
+		}
+		connReady = true
+		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
+	}
+
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it
 	initConnStr := buildServerDSN(cfg, "")
@@ -2563,6 +2593,33 @@ func serverEndpointIdentity(cfg *Config) string {
 		return "unix:" + cfg.ServerSocket
 	}
 	return "tcp:" + net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+}
+
+// erUnknownDatabase is MySQL's ER_BAD_DB_ERROR: the server refused the
+// connection because the database named in the DSN does not exist.
+const erUnknownDatabase = 1049
+
+// isUnknownDatabaseError reports whether err is that refusal. The error number
+// is the authoritative signal and is matched first: Dolt and MySQL word 1049
+// differently ("database not found: x" vs "Unknown database 'x'"), so text
+// matching alone silently misses one of them. The text check remains as a
+// fallback for wrapped errors that lost the typed value.
+//
+// isRetryableError treats the same condition as transient, but only in the
+// window right after a CREATE DATABASE, where the server's catalog has not
+// caught up yet (GH-1851). Here no CREATE was attempted, so 1049 is proof of
+// absence rather than a race.
+func isUnknownDatabaseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == erUnknownDatabase
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "unknown database") ||
+		strings.Contains(lower, "database not found")
 }
 
 // databaseExistsOnServer checks if a database with the exact given name exists
