@@ -14,6 +14,8 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+const deferUntilFormatHint = "Use a relative offset [+-]<n><unit> with unit h=hours, d=days, w=weeks, m=months, y=years (+1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)"
+
 var deferCmd = &cobra.Command{
 	Use:   "defer [id...]",
 	Short: "Defer one or more issues for later",
@@ -52,7 +54,7 @@ Examples:
 		if untilStr != "" {
 			t, err := timeparsing.ParseRelativeTime(untilStr, time.Now())
 			if err != nil {
-				return HandleError("invalid --until format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", untilStr)
+				return HandleError("invalid --until format %q. %s", untilStr, deferUntilFormatHint)
 			}
 			if t.Before(time.Now()) && !jsonOutput {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
