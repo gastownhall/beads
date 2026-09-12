@@ -444,7 +444,8 @@ func shouldBeBlockedIDsUnionScopedSQL(depTable, scope string) string {
 // detection behind the bd doctor "Blocked State" check (bd-6dnrw.37); the
 // repair is RecomputeAllIsBlockedInTx.
 //
-// The two share no SQL but are pinned together by the blocked-consistency
+// Both derive their membership test from the one shouldBeBlockedIDsUnionSQL
+// builder above, and they are pinned together by the blocked-consistency
 // lockstep test: a converged database counts 0, and any row this counts is one
 // a recompute pass changes. The count is a single-pass lower bound — a
 // corrupted parent's children are only counted on the pass after the parent is
