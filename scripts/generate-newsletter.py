@@ -154,9 +154,32 @@ def get_previous_version() -> tuple[str, datetime]:
 
 
 def get_commits_since(since_date: datetime) -> list[dict]:
-    """Get git commits since the given date."""
+    """Get git commits since the given date.
+
+    Two things below are deliberate, and both of them were bugs whose failure
+    direction is silent-and-shorter: the newsletter comes out missing commits
+    and nothing about it looks wrong.
+
+    THE TIMESTAMP IS WRITTEN OUT IN FULL because `--since` takes an
+    APPROXIDATE, and a bare `2026-09-10` does not mean the start of that day --
+    it means that day at the CURRENT TIME OF DAY.  Measured on this tree at
+    17:02 local, `git log --since=2026-09-10` returned 0 commits where
+    `--since=2026-09-10T00:00:00` returned 60.  Every commit made before the
+    hour the script happens to run is dropped, so the same command answers
+    differently depending on when it is invoked.
+
+    `--since-as-filter` IS NOT A TYPO.  Plain `--since` is a traversal CUTOFF:
+    git stops walking the moment it meets a commit older than the bound, so any
+    commit whose date is out of order with its topology -- rebase, cherry-pick,
+    imported history, clock skew between machines -- is dropped even though it
+    is inside the range.  `--since-as-filter` (git 2.37+) walks the whole
+    history and filters, which is what a date range is supposed to mean.
+
+    Do not "simplify" either one back.  (igr/fable, 2026-09-10.)
+    """
+    since_arg = since_date.strftime('%Y-%m-%dT%H:%M:%S')
     result = subprocess.run(
-        ["git", "log", f"--since={since_date.strftime('%Y-%m-%d')}", "--oneline", "--format=%h|%s|%an|%ai"],
+        ["git", "log", f"--since-as-filter={since_arg}", "--oneline", "--format=%h|%s|%an|%ai"],
         capture_output=True,
         text=True
     )
