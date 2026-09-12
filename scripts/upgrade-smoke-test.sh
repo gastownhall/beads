@@ -22,12 +22,15 @@ set -euo pipefail
 #
 
 # The candidate binary is built from the current worktree if CANDIDATE_BIN
-# is not set. The previous release binary is downloaded and cached in
+# is unset or empty. Nonempty values must name an executable file.
+# The previous release binary is downloaded and cached in
 # ~/.cache/beads-regression/.
 #
 # Exit codes:
 #   0  All scenarios passed
 #   1  One or more scenarios failed
+#   2  Invalid nonempty CANDIDATE_BIN (compiler failures retain their exit status)
+# SMOKE_VERSIONS dispatch returns 1 if any child fails, including child status 2.
 # =============================================================================
 
 RED='\033[0;31m'
@@ -41,6 +44,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
 # shellcheck source=../.buildflags
 source "$PROJECT_ROOT/.buildflags"
+# shellcheck source=lib/smoke-candidate.sh
+source "$PROJECT_ROOT/scripts/lib/smoke-candidate.sh" || exit $?
 
 # ---------------------------------------------------------------------------
 # Multi-version mode: SMOKE_VERSIONS overrides single-version argument
@@ -136,20 +141,14 @@ get_previous_binary() {
     echo "$cached"
 }
 
-build_candidate() {
-    if [ -n "${CANDIDATE_BIN:-}" ] && [ -x "${CANDIDATE_BIN}" ]; then
-        echo "$(cd "$(dirname "$CANDIDATE_BIN")" && pwd)/$(basename "$CANDIDATE_BIN")"
-        return
-    fi
-
-    local candidate="$CACHE_DIR/bd-candidate-$$"
-    echo -e "${YELLOW}Building candidate binary...${NC}" >&2
-    (cd "$PROJECT_ROOT" && go build -o "$candidate" ./cmd/bd) >&2
-    echo "$candidate"
-}
-
+# Refuse invalid prebuilt input early; build only after the previous release is available.
+if [ -n "${CANDIDATE_BIN:-}" ]; then
+    CAND_BIN=$(build_candidate) || exit $?
+fi
 PREV_BIN=$(get_previous_binary)
-CAND_BIN=$(build_candidate)
+if [ -z "${CANDIDATE_BIN:-}" ]; then
+    CAND_BIN=$(build_candidate) || exit $?
+fi
 
 echo "Previous: $PREV_BIN (${PREV_VERSION})"
 echo "Candidate: $CAND_BIN"

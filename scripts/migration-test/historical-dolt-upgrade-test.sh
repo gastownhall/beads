@@ -27,6 +27,7 @@ Usage: historical-dolt-upgrade-test.sh [--version VERSION]
 Runs the authentic historical SQLite bridges (v0.9.1, v0.17.0, v0.49.6, v0.50.3), historical server-Dolt corpus
 (v0.55.4, v0.56.1, v0.57.0, v0.62.0), and direct embedded-Dolt corpus
 (v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2) against CANDIDATE_BIN. Every release archive is pinned and verified.
+An invalid nonempty CANDIDATE_BIN exits 2; compiler failures retain their exit status.
 EOF
 }
 
@@ -98,8 +99,7 @@ for version in "${SELECTED_VERSIONS[@]}"; do
     esac
 done
 
-candidate="${CANDIDATE_BIN:-}"
-if [ -z "$candidate" ]; then candidate=$(build_candidate); fi
+candidate=$(build_candidate) || exit $?
 candidate=$(resolve_existing_path "$candidate") || die 'candidate binary cannot be resolved'
 [ -x "$candidate" ] || die "candidate binary is not executable: $candidate"
 
