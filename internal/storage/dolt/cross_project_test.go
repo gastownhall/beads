@@ -19,7 +19,6 @@
 package dolt
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,9 +40,6 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 	skipIfNoDolt(t)
 	acquireTestSlot()
 	t.Cleanup(releaseTestSlot)
-
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
 
 	tmpDirA, err := os.MkdirTemp("", "dolt-project-a-*")
 	if err != nil {
@@ -73,7 +69,12 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		CreateIfMissing: true,
 	}
 
-	storeA, err = New(ctx, cfgA)
+	// Each cold open gets its own budget (openStoreWithOwnBudget); ctx below
+	// covers only the cheap SetConfig calls, which are not cold opens.
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	storeA, err = openStoreWithOwnBudget(t, cfgA)
 	if err != nil {
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
@@ -87,7 +88,7 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		t.Fatalf("failed to set prefix for project A: %v", err)
 	}
 
-	storeB, err = New(ctx, cfgB)
+	storeB, err = openStoreWithOwnBudget(t, cfgB)
 	if err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
@@ -240,7 +241,7 @@ func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 		CreateIfMissing: true,
 	}
 
-	storeA, err := New(ctx, cfgA)
+	storeA, err := openStoreWithOwnBudget(t, cfgA)
 	if err != nil {
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
@@ -253,7 +254,7 @@ func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 		t.Fatalf("set prefix A: %v", err)
 	}
 
-	storeB, err := New(ctx, cfgB)
+	storeB, err := openStoreWithOwnBudget(t, cfgB)
 	if err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
@@ -745,7 +746,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.
 	ownerID := "11111111-1111-1111-1111-111111111111"
 	f.saveLocalProjectID(t, ownerID)
 
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
@@ -762,7 +763,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.
 	foreignID := "22222222-2222-2222-2222-222222222222"
 	f.saveLocalProjectID(t, foreignID)
 
-	foreignStore, err := New(ctx, f.config())
+	foreignStore, err := openStoreWithOwnBudget(t, f.config())
 	if err == nil {
 		foreignStore.Close()
 		t.Fatalf("expected identity mismatch error, got nil (silently connected to foreign project's database)")
@@ -789,7 +790,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_MatchingSucceeds(t *testing
 	projectID := "55555555-5555-5555-5555-555555555555"
 	f.saveLocalProjectID(t, projectID)
 
-	firstStore, err := New(ctx, f.config())
+	firstStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create first store: %v", err)
 	}
@@ -799,7 +800,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_MatchingSucceeds(t *testing
 	}
 	firstStore.Close()
 
-	secondStore, err := New(ctx, f.config())
+	secondStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("reconnect with matching project id must succeed, got: %v", err)
 	}
@@ -836,7 +837,7 @@ func TestCrossProject_IdentityCheck_SoftSkip_NoLocalMetadata(t *testing.T) {
 
 	f := newIdentityTestFixture(t, "nolocal")
 
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
@@ -847,7 +848,7 @@ func TestCrossProject_IdentityCheck_SoftSkip_NoLocalMetadata(t *testing.T) {
 	ownerStore.Close()
 
 	// No metadata.json written for this reopen — configfile.Load returns nil.
-	reopenStore, err := New(ctx, f.config())
+	reopenStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("expected soft-skip (no local metadata.json), got error: %v", err)
 	}
@@ -864,21 +865,19 @@ func TestCrossProject_IdentityCheck_SoftSkip_EmptyDBProjectID(t *testing.T) {
 	skipIfNoDolt(t)
 	acquireTestSlot()
 	t.Cleanup(releaseTestSlot)
-	ctx, cancel := testContext(t)
-	defer cancel()
 
 	f := newIdentityTestFixture(t, "emptydb")
 
 	// Create the database but never seed _project_id — simulating an
 	// old-style database from before GH#2372.
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
 	ownerStore.Close()
 
 	f.saveLocalProjectID(t, "66666666-6666-6666-6666-666666666666")
-	reopenStore, err := New(ctx, f.config())
+	reopenStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("expected soft-skip (database has no _project_id), got error: %v", err)
 	}
@@ -909,7 +908,7 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 	f.saveLocalProjectID(t, ownerID)
 
 	// Seed schema and _project_id with a normal (non-gateway) open first.
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
@@ -929,7 +928,7 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 
 	gatewayCfg := f.config()
 	gatewayCfg.Gateway = true
-	gatewayStore, err := New(ctx, gatewayCfg)
+	gatewayStore, err := openStoreWithOwnBudget(t, gatewayCfg)
 	if err != nil {
 		t.Fatalf("gateway open must skip identity verification (reconciled by resolveInitProjectID instead), got error: %v", err)
 	}
