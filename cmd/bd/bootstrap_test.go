@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1765,5 +1766,133 @@ func TestFinalizeSyncedBootstrapSharedServerSetsServerMode(t *testing.T) {
 	}
 	if loaded.GetDoltMode() != configfile.DoltModeServer {
 		t.Errorf("dolt_mode = %q, want %q — shared server should set server mode", loaded.GetDoltMode(), configfile.DoltModeServer)
+	}
+}
+
+// TestDetectBootstrapAction_NoLocalShadowDirStillLiveChecksExisting reproduces
+// be-cy41 bug #1: existingBootstrapDBPlan returned BootstrapPlan{}, false (and
+// detectBootstrapAction fell through toward Action="init") purely because no
+// local shadow dolt-data directory existed — but in server mode that is the
+// NORMAL state for a fresh clone of an already-initialized project. The
+// server-side existence check must run unconditionally in server mode rather
+// than being gated behind local filesystem state that a legitimate clone will
+// never have (same ambiguity be-5up5 fixed in cmd/bd/init.go).
+func TestDetectBootstrapAction_NoLocalShadowDirStillLiveChecksExisting(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately do NOT create doltDataDir at all — no local shadow
+	// directory, which is the normal state for a fresh clone of a
+	// pre-existing server-mode project.
+	doltDataDir := filepath.Join(tmpDir, "dolt-data")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "project_exists"
+	cfg.DoltDataDir = doltDataDir
+	t.Setenv("BEADS_DOLT_DATA_DIR", doltDataDir)
+
+	probed := false
+	origCheck := checkBootstrapServerDB
+	checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		probed = true
+		if probeCfg.database != "project_exists" {
+			t.Fatalf("unexpected dbName: %s", probeCfg.database)
+		}
+		return bootstrapServerDBCheck{Exists: true, Reachable: true}
+	}
+	defer func() { checkBootstrapServerDB = origCheck }()
+	origDelay := bootstrapRetryDelay
+	bootstrapRetryDelay = func(time.Duration) {}
+	defer func() { bootstrapRetryDelay = origDelay }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if !probed {
+		t.Fatal("checkBootstrapServerDB was never called — a local-shadow-directory gate short-circuited the real server-side existence check before it could run")
+	}
+	if plan.Action != "none" {
+		t.Fatalf("action = %q, want %q — bootstrap must not plan to recreate a database that already exists on the server just because no local shadow directory is present", plan.Action, "none")
+	}
+	if !plan.HasExisting {
+		t.Error("HasExisting = false, want true")
+	}
+}
+
+// TestExecuteInitAction_ServerModeExistingProjectMissingDBRefuses reproduces
+// be-cy41 bug #2: executeInitAction is mode-blind — it always builds a
+// dolt.Config with CreateIfMissing:true, AutoStart:true, and no server
+// host/port/mode fields, so it silently creates an embedded-style database
+// even for a server-mode workspace. When the workspace was already
+// initialized (metadata.json has a project_id — same signal be-5up5 uses) but
+// the configured database is missing on the server, this silently strands any
+// existing issue data behind a new, empty database of the same name.
+// executeInitAction must refuse instead (same root cause as be-5up5's fix to
+// cmd/bd/init.go's checkExistingBeadsDataAt).
+func TestExecuteInitAction_ServerModeExistingProjectMissingDBRefuses(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "myproj"
+	cfg.ProjectID = "proj-existing-123"
+
+	origCheck := checkBootstrapServerDB
+	checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		return bootstrapServerDBCheck{Exists: false, Reachable: true}
+	}
+	defer func() { checkBootstrapServerDB = origCheck }()
+	origDelay := bootstrapRetryDelay
+	bootstrapRetryDelay = func(time.Duration) {}
+	defer func() { bootstrapRetryDelay = origDelay }()
+
+	plan := BootstrapPlan{BeadsDir: beadsDir, Database: "myproj", Action: "init"}
+	err = executeInitAction(context.Background(), plan, cfg)
+
+	if err == nil {
+		t.Fatal("executeInitAction succeeded silently for an existing project with a missing server-mode database — want a refusal error")
+	}
+	if !strings.Contains(err.Error(), "myproj") {
+		t.Errorf("error %q does not mention the missing database name %q", err.Error(), "myproj")
+	}
+	if !strings.Contains(err.Error(), "will NOT create") && !strings.Contains(err.Error(), "not found on server") {
+		t.Errorf("error %q does not read as a refusal to auto-create", err.Error())
+	}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); statErr == nil {
+		t.Error("executeInitAction created an embedded database as a side effect of a refused server-mode init — no database should have been created at all")
 	}
 }
