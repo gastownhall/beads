@@ -218,11 +218,6 @@ Examples:
 			return HandleError("%v", err)
 		}
 
-		if usesProxiedServer() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
-			return nil
-		}
-
 		if doctorFix && isOrchestratorRoot(absPath) {
 			return HandleErrorWithHint(
 				"refusing to run 'bd doctor --fix' at orchestrator workspace root",

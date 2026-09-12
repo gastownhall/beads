@@ -58,6 +58,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Commands that cannot work under `--proxied-server` now refuse before any
+  provider opens** ([#6293](https://github.com/gastownhall/beads/pull/6293)).
+  `bd doctor`, `bd backup`, `bd restore`, `bd diff`, `bd migrate`, `bd branch`,
+  `bd conflicts`, `bd vc`, `bd federation`, `bd repo`, `bd flatten`, `bd sync`,
+  `bd dolt push|pull|commit`, `bd dolt remote add|list|reset-data`, and
+  `bd admin compact` without `--dolt` return a typed refusal carrying a stable
+  code (`proxy.doctor.unsupported` and friends) instead of failing partway
+  through, or silently doing nothing. Two changes worth planning for:
+  - `bd doctor` under `--proxied-server` used to print a note to stderr and
+    exit **0**; it now exits **1** with `proxy.doctor.unsupported`. A script
+    that treated bare `bd doctor` as a no-op in this mode needs to stop calling
+    it, or tolerate the non-zero status.
+  - Under `--json`, a refusal is strict JSON on **stdout**
+    (`{"code": …, "error": …, "mutates": false}`) rather than prose on stderr,
+    so a wrapper parsing stdout gets a machine-readable answer and
+    `"mutates": false` states that the refusal touched nothing.
+
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and
