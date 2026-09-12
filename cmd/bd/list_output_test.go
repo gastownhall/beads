@@ -90,6 +90,37 @@ func TestOutputFormattedListExactBytes(t *testing.T) {
 	}
 }
 
+func TestOutputFormattedListBuiltInFormatsIgnoreCase(t *testing.T) {
+	t.Parallel()
+	issues, deps := listOutputFixture()
+
+	var dot bytes.Buffer
+	if err := outputDotFormat(&dot, issues, deps); err != nil {
+		t.Fatalf("outputDotFormat: %v", err)
+	}
+
+	for _, tc := range []struct {
+		format string
+		want   string
+	}{
+		{format: "DOT", want: dot.String()},
+		{format: "DoT", want: dot.String()},
+		{format: "DIGRAPH", want: "list-a list-b\n"},
+		{format: "DiGraph", want: "list-a list-b\n"},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			if err := outputFormattedList(&out, issues, deps, tc.format); err != nil {
+				t.Fatalf("outputFormattedList: %v", err)
+			}
+			if got := out.String(); got != tc.want {
+				t.Fatalf("formatted output bytes differ: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOutputFormattedListWriterErrors(t *testing.T) {
 	t.Parallel()
 	issues, deps := listOutputFixture()
