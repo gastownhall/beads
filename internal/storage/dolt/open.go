@@ -313,6 +313,22 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
 
+	// config.yaml rung shared by the pool knobs below. It needs both reads:
+	// config.GetString reads a package-global viper populated only by
+	// cmd/bd's config.Initialize(), so for a library consumer it always
+	// returns "" and the project's configured values were silently ignored.
+	// Fall back to a direct read of the project's config.yaml, the same
+	// fallback dolt.auto-start carries above for this exact hole. The
+	// fallback follows GetStringFromDir's ladder, so when beadsDir is not
+	// the process CWD a user-level ~/.config/bd/config.yaml value outranks
+	// that project's file — same behavior as dolt.auto-start.
+	poolCfg := func(key string) string {
+		if v := config.GetString(key); v != "" {
+			return v
+		}
+		return config.GetStringFromDir(beadsDir, key)
+	}
+
 	// Pool size: env var > config.yaml > caller override > default (10).
 	// Useful for shared-server setups with many worktrees (GH#3140).
 	if cfg.MaxOpenConns == 0 {
@@ -323,7 +339,7 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		}
 	}
 	if cfg.MaxOpenConns == 0 {
-		if v := config.GetString("dolt.max-conns"); v != "" {
+		if v := poolCfg("dolt.max-conns"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxOpenConns = n
 			}
@@ -338,13 +354,13 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
 	}
 	if cfg.PoolReadTimeout == 0 {
-		cfg.PoolReadTimeout = parseTimeout(config.GetString("dolt.pool-read-timeout"), 0)
+		cfg.PoolReadTimeout = parseTimeout(poolCfg("dolt.pool-read-timeout"), 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
-		cfg.PoolWriteTimeout = parseTimeout(config.GetString("dolt.pool-write-timeout"), 0)
+		cfg.PoolWriteTimeout = parseTimeout(poolCfg("dolt.pool-write-timeout"), 0)
 	}
 
 	return nil
