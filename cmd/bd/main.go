@@ -1615,6 +1615,16 @@ var rootCmd = &cobra.Command{
 			}
 			uowProvider = wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(p, uowSinks))
 
+			// Honor dolt.auto-commit for proxied writes the same way
+			// issueOpsContext already does for the direct/SQL-server routes
+			// (bd-4wamg): batch/off defer the Dolt version commit rather than
+			// minting one per write (GH#4995). uow.issueOperations reads this
+			// off the context for every Create/Update/Close/Reopen it runs.
+			rootCtx, err = issueOpsContext(rootCtx)
+			if err != nil {
+				return HandleError("failed to resolve dolt auto-commit policy: %v", err)
+			}
+
 			if !previewMode {
 				reconcileVersionProxiedServer(rootCtx)
 			}
