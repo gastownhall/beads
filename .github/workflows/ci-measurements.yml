@@ -103,7 +103,13 @@ jobs:
     name: Measure macOS short Go tests
     if: ${{ inputs.suite == 'macos-short' }}
     runs-on: macos-latest
-    timeout-minutes: 30
+    # 60m: the Measure commands step below carries a 25m go test deadline, and
+    # that deadline can only fire -- printing goroutine stacks for a real hang --
+    # if 25m of one package still fits after checkout, setup-go, install-dolt and
+    # the compile of every package ahead of the slow one. At 30m the runner kill
+    # won that race and the flag was decorative. macos-candidates below pairs
+    # -timeout=30m with the same 60m budget (be-xagyw).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -128,7 +134,9 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "macos short go test" -- go test -v -race -short -skip '^TestEmbedded' ./...
+          # -timeout=25m: without it, go test's 10m per-package default can kill this
+          # -race run mid-package on macOS before it reports a real pass/fail (be-xagyw).
+          ci_time "macos short go test" -- go test -v -race -short -timeout=25m -skip '^TestEmbedded' ./...
 
   macos-candidates:
     name: Measure macOS no-short candidates

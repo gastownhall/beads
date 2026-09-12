@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -247,6 +248,129 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	}
 }
 
+// TestMacOSCITestLegsHaveExplicitTimeout is the regression test for be-xagyw:
+// go test's 10m per-package default applied to three macOS -race legs that
+// run whole-module ./... (pr.yml test-macos, main.yml test's macOS matrix
+// entry, ci-measurements.yml macos-short), and -race on macOS is slow enough
+// that cmd/bd alone can approach or exceed 10m, killing the run mid-package
+// rather than reporting a real pass/fail (be-dvbq9's investigation). This is
+// a floor check, not an exact-match one: it fails if -timeout is missing or
+// parses below 20m, but tolerates the deadline moving up over time in any
+// duration form go test accepts. Each leg's enclosing job also needs a
+// timeout-minutes backstop so a real hang still produces a bounded,
+// diagnosable job failure instead of running to GitHub's 360m default. On
+// main.yml that backstop is job-level over the whole two-entry matrix, so
+// despite this subtest's name the assertion covers the ubuntu leg too.
+func TestMacOSCITestLegsHaveExplicitTimeout(t *testing.T) {
+	const (
+		minTimeout           = 20 * time.Minute
+		minJobTimeoutMinutes = 60
+	)
+
+	// Capture the whole flag value and let time.ParseDuration judge it, rather
+	// than pattern-matching bare integer minutes: go test accepts any Go
+	// duration, so 1h, 1h30m and 25m0s are all legitimate ways to raise this
+	// deadline and none of them are Nm.
+	timeoutPattern := regexp.MustCompile(`-timeout[= ](\S+)`)
+	assertHasTimeoutFloor := func(t *testing.T, label, command string) {
+		t.Helper()
+		matches := timeoutPattern.FindStringSubmatch(command)
+		if matches == nil {
+			t.Errorf("%s command has no -timeout flag: %q", label, command)
+			return
+		}
+		timeout, err := time.ParseDuration(matches[1])
+		if err != nil {
+			t.Errorf("%s -timeout value %q is not a Go duration: %v", label, matches[1], err)
+			return
+		}
+		if timeout < minTimeout {
+			t.Errorf("%s -timeout = %s, want at least %s", label, timeout, minTimeout)
+		}
+	}
+
+	t.Run("pr.yml test-macos", func(t *testing.T) {
+		const label = "pr.yml test-macos Test step"
+		job := readCIWorkflow(t, "pr.yml").job(t, "test-macos")
+		assertHasTimeoutFloor(t, label, goTestCommandLine(t, label, job.step(t, "Test").Run))
+		if job.TimeoutMinutes < minJobTimeoutMinutes {
+			t.Errorf("pr.yml test-macos job timeout-minutes = %d, want at least %d", job.TimeoutMinutes, minJobTimeoutMinutes)
+		}
+	})
+
+	t.Run("main.yml test macOS leg", func(t *testing.T) {
+		job := readCIWorkflow(t, "main.yml").job(t, "test")
+		var macOSFlags string
+		for _, include := range job.Strategy.Matrix.Include {
+			if include.OS == macOSRunner {
+				macOSFlags = include.TestFlags
+			}
+		}
+		assertHasTimeoutFloor(t, "main.yml test macOS matrix test-flags", macOSFlags)
+		if job.TimeoutMinutes < minJobTimeoutMinutes {
+			t.Errorf("main.yml test job timeout-minutes = %d, want at least %d", job.TimeoutMinutes, minJobTimeoutMinutes)
+		}
+	})
+
+	t.Run("ci-measurements.yml macos-short", func(t *testing.T) {
+		const label = "ci-measurements.yml macos-short Measure commands step"
+		job := readCIWorkflow(t, "ci-measurements.yml").job(t, "macos-short")
+		assertHasTimeoutFloor(t, label, goTestCommandLine(t, label, job.step(t, "Measure commands").Run))
+		if job.TimeoutMinutes < minJobTimeoutMinutes {
+			t.Errorf("ci-measurements.yml macos-short job timeout-minutes = %d, want at least %d", job.TimeoutMinutes, minJobTimeoutMinutes)
+		}
+	})
+}
+
+// goTestCommandLine reduces a step's run block to the single line that invokes
+// `go test`. A YAML block scalar carries its own `#` comments inside step.Run,
+// so applying a flag pattern to the raw block can match the rationale comment
+// instead of the command it describes — which leaves the guard green with the
+// very flag it exists to pin deleted from the command. Comments are stripped,
+// whole-line and trailing, before the search.
+func goTestCommandLine(t *testing.T, label, run string) string {
+	t.Helper()
+
+	var found []string
+	for _, line := range strings.Split(run, "\n") {
+		if line = strings.TrimSpace(stripShellComment(line)); strings.Contains(line, "go test") {
+			found = append(found, line)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0]
+	case 0:
+		t.Fatalf("%s: no `go test` invocation in run block: %q", label, run)
+	default:
+		t.Fatalf("%s: want exactly one `go test` invocation in run block, got %d: %q", label, len(found), found)
+	}
+	return ""
+}
+
+// stripShellComment drops a trailing `#` comment from one shell line, tracking
+// quote state so a `#` inside an argument survives.
+func stripShellComment(line string) string {
+	var inSingle, inDouble bool
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '#':
+			if !inSingle && !inDouble && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+				return line[:i]
+			}
+		}
+	}
+	return line
+}
+
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 	const (
 		storageTimeoutMinutes     = 15
@@ -298,7 +422,7 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
 		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
-		prTestCommand     = "go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./..."
+		prTestCommand     = "go test -tags gms_pure_go -v -race -short -timeout=25m -skip '^TestEmbedded' ./..."
 		mainTestCommand   = "go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./..."
 		// The macOS leg is the only consumer of main.yml's matrix test-flags (the
 		// ubuntu leg's coverage step hardcodes its own), and it carries an explicit
