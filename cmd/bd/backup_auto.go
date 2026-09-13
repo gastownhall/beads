@@ -141,7 +141,12 @@ func maybeAutoBackup(ctx context.Context) {
 		return
 	}
 
-	// Throttle: skip if we backed up recently
+	// Throttle: skip if we backed up recently. Checked before the size-cap
+	// walk below so the common case — the majority of bd invocations,
+	// still inside the interval — pays zero directory-walk cost (ga-y6gjv
+	// PR #6071 review: getDirSize's filepath.Walk cost 65-100ms per
+	// invocation at 20k files when the cap check ran unconditionally,
+	// before this throttle, on every single command).
 	interval := config.GetDuration("backup.interval")
 	if interval == 0 {
 		interval = 15 * time.Minute
@@ -149,6 +154,16 @@ func maybeAutoBackup(ctx context.Context) {
 	if !state.Timestamp.IsZero() && time.Since(state.Timestamp) < interval {
 		debug.Logf("backup: throttled (last backup %s ago, interval %s)\n",
 			time.Since(state.Timestamp).Round(time.Second), interval)
+		return
+	}
+
+	// Size cap: skip entirely once the destination has grown past
+	// backup.size-cap-mb (ga-y6gjv) — see backupSizeCapExceeded for why a
+	// cap, not an in-place prune, is the safe fix here.
+	if exceeded, size, err := backupSizeCapExceeded(dir); err != nil {
+		debug.Logf("backup: size cap check failed (non-fatal): %v\n", err)
+	} else if exceeded {
+		maybeWarnBackupSizeCap(dir, state, size)
 		return
 	}
 

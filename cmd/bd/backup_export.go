@@ -19,6 +19,7 @@ import (
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
 	Timestamp      time.Time `json:"timestamp"`
+	LastCapWarnAt  time.Time `json:"last_cap_warn_at"`
 }
 
 // backupDir returns the backup directory path, creating it if needed.

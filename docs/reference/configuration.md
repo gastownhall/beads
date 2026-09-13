@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-07-10
+Last reviewed: 2026-09-10
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
 
@@ -124,6 +124,8 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `backup.interval` | — | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-backups |
 | `backup.git-push` | — | — | `false` | Auto-push backup repo |
 | `backup.git-repo` | — | `BD_BACKUP_GIT_REPO` | (none) | Backup git repo URL; when set, backups go to a `backup/` directory inside that repo |
+| `backup.size-cap-mb` | — | `BD_BACKUP_SIZE_CAP_MB` | `2048` | Pause auto-backup once the destination directory reaches this size; `0` disables the cap (see [below](#auto-backup)) |
+| `backup.size-warn-interval` | — | `BD_BACKUP_SIZE_WARN_INTERVAL` | `24h` | Minimum time between repeated "auto-backup paused" warnings |
 | `audit.enabled` | — | `BD_AUDIT_ENABLED` | `false` | Enable the optional JSONL interaction sidecar at `.beads/interactions.jsonl`, written by `bd audit record` / `bd audit label`. While disabled, `bd init` does not create the file and `bd audit record` / `bd audit label` refuse to write. Issue history is always recorded in the database either way — see `bd history <id> --events` |
 | `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
@@ -202,15 +204,19 @@ Periodic Dolt-native backup to `.beads/backup/` provides a recovery path indepen
 
 ```yaml
 backup:
-  enabled: true    # Enable auto-backup after write commands
-  interval: 15m    # Minimum time between auto-backups
+  enabled: true              # Enable auto-backup after write commands
+  interval: 15m              # Minimum time between auto-backups
+  size-cap-mb: 2048          # Pause auto-backup once the destination reaches this size; 0 disables the cap
+  size-warn-interval: 24h    # Minimum time between repeated "paused" warnings
 ```
 
 How it works:
 
 - After each write command, `bd` compares the Dolt HEAD commit hash against the last backup state.
-- If data changed and the throttle interval has passed, a Dolt-native backup is synced to `.beads/backup/` (or to a `backup/` directory inside `backup.git-repo` when configured).
-- State is tracked in `backup_state.json` inside the backup directory.
+- If data changed and the throttle interval has passed, `bd` checks the destination directory's on-disk size against `backup.size-cap-mb`. `CALL DOLT_BACKUP('sync', ...)` only ever adds new chunks to the destination — it never prunes ones that became unreachable on the source (history rewrites, superseded data), and Dolt exposes no supported way to GC a backup destination in place. Left uncapped, the destination can only grow until disk fills; this was the root cause of a 2026-06-19 outage where a 1.7GB store produced a 43GB backup directory. Once the cap is reached, auto-backup pauses — nothing is deleted, but no further syncs run until you raise `backup.size-cap-mb` or point to a fresh destination with `bd backup init <new-path>`. Set `size-cap-mb: 0` to disable the cap entirely.
+- If the destination is under its cap, a Dolt-native backup is synced to `.beads/backup/` (or to a `backup/` directory inside `backup.git-repo` when configured).
+- State is tracked in `backup_state.json` inside the backup directory. `bd backup status` (and its `--json` output, via the `size_cap` field) reports `PAUSED (cap exceeded)` when the destination is over its cap — so an agent/CI caller relying on `--json` or `--quiet` can see that auto-backup has stopped instead of reading a reassuring "Last backup" line while nothing further syncs.
+- The cap applies only to auto-backup; manual `bd backup` / `bd backup sync` are not capped.
 
 Manual commands (see [bd backup](/cli-reference/backup)):
 

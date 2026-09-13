@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -155,6 +156,135 @@ func TestBackupStatusIncludesAvailableDatabaseSize(t *testing.T) {
 		}
 		if !strings.Contains(stdout, "Database size: 1.5 KB") {
 			t.Errorf("available database size missing: %s", stdout)
+		}
+	})
+}
+
+// TestBackupStatusShowsSizeCapPaused pins the PR #6071 review's second
+// major point: `bd --json` / `--quiet` callers never saw the size-cap
+// pause — the warning is stderr-only and throttled, and status previously
+// said nothing about the cap, so an agent/CI caller saw a reassuring
+// "Last backup" line while auto-backup was silently, permanently paused.
+func TestBackupStatusShowsSizeCapPaused(t *testing.T) {
+	t.Setenv("BD_BACKUP_SIZE_CAP_MB", "1")
+	prepareBackupStatusTest(t)
+	sizeDatabase := func(context.Context) (int64, bool, error) { return 0, false, nil }
+
+	dir, err := backupDir()
+	if err != nil {
+		t.Fatalf("backupDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "filler"), make([]byte, 2*1024*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seeded := &backupState{Timestamp: time.Now().UTC().Add(-time.Hour), LastDoltCommit: "deadbeef"}
+	if err := saveBackupState(dir, seeded); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("json", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status", "--json"})
+		stdout, stderr, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want empty", stderr)
+		}
+		var response struct {
+			SizeCap struct {
+				Enabled      bool  `json:"enabled"`
+				CapMB        int   `json:"cap_mb"`
+				CurrentBytes int64 `json:"current_bytes"`
+				Exceeded     bool  `json:"exceeded"`
+			} `json:"size_cap"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\nstdout: %s", err, stdout)
+		}
+		if !response.SizeCap.Enabled {
+			t.Errorf("size_cap.enabled = false, want true: %s", stdout)
+		}
+		if !response.SizeCap.Exceeded {
+			t.Errorf("size_cap.exceeded = false, want true: %s", stdout)
+		}
+		if response.SizeCap.CapMB != 1 {
+			t.Errorf("size_cap.cap_mb = %d, want 1: %s", response.SizeCap.CapMB, stdout)
+		}
+		if response.SizeCap.CurrentBytes < 2*1024*1024 {
+			t.Errorf("size_cap.current_bytes = %d, want >= 2MB: %s", response.SizeCap.CurrentBytes, stdout)
+		}
+	})
+
+	t.Run("human", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, stderr, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want empty", stderr)
+		}
+		if !strings.Contains(stdout, "PAUSED (cap exceeded)") {
+			t.Errorf("status text missing PAUSED indicator: %s", stdout)
+		}
+	})
+}
+
+// TestBackupStatusShowsSizeCapDisabled pins the PR #6071 review's first
+// major point from the status side: backup.size-cap-mb: 0 must render as
+// disabled in status, not silently report the legacy 2048MB default.
+func TestBackupStatusShowsSizeCapDisabled(t *testing.T) {
+	t.Setenv("BD_BACKUP_SIZE_CAP_MB", "0")
+	prepareBackupStatusTest(t)
+	sizeDatabase := func(context.Context) (int64, bool, error) { return 0, false, nil }
+
+	dir, err := backupDir()
+	if err != nil {
+		t.Fatalf("backupDir: %v", err)
+	}
+	seeded := &backupState{Timestamp: time.Now().UTC().Add(-time.Hour), LastDoltCommit: "deadbeef"}
+	if err := saveBackupState(dir, seeded); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("json", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status", "--json"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\nstdout: %s", err, stdout)
+		}
+		sizeCapRaw, ok := raw["size_cap"]
+		if !ok {
+			t.Fatalf("size_cap key missing from status JSON: %s", stdout)
+		}
+		var sizeCap struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(sizeCapRaw, &sizeCap); err != nil {
+			t.Fatalf("size_cap is not valid JSON: %v\nraw: %s", err, sizeCapRaw)
+		}
+		if sizeCap.Enabled {
+			t.Errorf("size_cap.enabled = true with backup.size-cap-mb=0, want false: %s", stdout)
+		}
+	})
+
+	t.Run("human", func(t *testing.T) {
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if !strings.Contains(stdout, "Size cap: disabled") {
+			t.Errorf("status text missing disabled size-cap line: %s", stdout)
 		}
 	})
 }
