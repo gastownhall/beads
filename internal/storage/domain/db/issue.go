@@ -145,6 +145,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// unrecognized keys, so a surviving override would reach the field
 	// allowlist and be refused by name.
 	forceClosePolicy := issueops.PopForceClosePolicy(updates)
+	dueClearReason := issueops.PopDueClearReason(updates)
 
 	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
 	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed
@@ -210,6 +211,9 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	updates = filteredUpdates
 	if len(updates) == 0 {
 		return nil
+	}
+	if err := issueops.ValidateDueClear(oldIssue, updates, dueClearReason); err != nil {
+		return fmt.Errorf("db: Update %s: %w", id, err)
 	}
 	// A status that matched the row was already dropped as a no-op, so the
 	// lifecycle side effects below only fire on a real transition.
@@ -299,6 +303,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		IssueID: id,
 		Type:    eventType,
 		Actor:   actor,
+		Comment: dueClearReason,
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}

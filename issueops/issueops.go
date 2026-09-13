@@ -255,6 +255,12 @@ type UpdateRequest struct {
 	// It is the update-side spelling of CloseRequest.Force; a command adapter
 	// that maps one flag to both spells both.
 	ForceClosePolicy bool
+	// DueClearReason is why a Patch.DueAt of nil is clearing the due date.
+	// While the workspace requires due dates, clearing one is the single edit
+	// that can undo the invariant, so the storage funnel refuses the clear
+	// unless a non-blank reason accompanies it, and then records the reason
+	// on the update event. It has no effect on any other patch.
+	DueClearReason string
 	// The three Expected* guards below are this package's FOUNDING spelling of
 	// the compare-and-set family, and the family's rules are stated once, at
 	// length, on DeleteRequest.ExpectedVersion (deleter.go) and
