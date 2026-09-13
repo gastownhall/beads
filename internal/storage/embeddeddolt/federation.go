@@ -186,6 +186,8 @@ func (s *EmbeddedDoltStore) withPeerAuth(ctx context.Context, peer string, fn fu
 	federationEnvMutex.Lock()
 	defer federationEnvMutex.Unlock()
 
+	warnStoredPeerSuppressesAmbientPassword(peer, p)
+
 	restoreUser := overrideEnv("DOLT_REMOTE_USER", p.Username)
 	restorePassword := overrideEnv("DOLT_REMOTE_PASSWORD", p.Password)
 	defer func() {
@@ -194,6 +196,36 @@ func (s *EmbeddedDoltStore) withPeerAuth(ctx context.Context, peer string, fn fu
 	}()
 
 	return fn(p.Username)
+}
+
+// federationWarnWriter receives the peer-credential diagnostics. Defaults to
+// os.Stderr, matching the unconditional warnings this package writes from
+// store.go; overridable in tests.
+var federationWarnWriter io.Writer = os.Stderr
+
+// warnStoredPeerSuppressesAmbientPassword emits one line when a peer stores a
+// username but no password while DOLT_REMOTE_PASSWORD is set. Suppressing the
+// ambient password is the intended security default, but a setup that used to
+// authenticate off the environment then fails with no hint about why (GH#5085
+// review). Call with federationEnvMutex held and before overrideEnv rewrites
+// the pair, so the value read is the ambient one and not another peer's
+// installed password.
+func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationPeer) {
+	// Defensive: withPeerAuth returns before this guard when both fields are empty.
+	if p.Username == "" || p.Password != "" {
+		return
+	}
+	// An ambient empty value is treated as no ambient password: unsetting it
+	// changes nothing the user could be puzzled by.
+	if os.Getenv("DOLT_REMOTE_PASSWORD") == "" {
+		return
+	}
+	fmt.Fprintf(federationWarnWriter,
+		"Warning: peer %[1]q stores a username with an empty password, "+
+			"which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; "+
+			"store a password with 'bd federation add-peer %[1]s <url> "+
+			"--user %[2]s --password <password>'.\n",
+		peer, p.Username)
 }
 
 // verifyPeerRemoteURL fails closed when the live remote named peer does not
