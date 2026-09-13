@@ -84,7 +84,7 @@ func (emptyDeps) GetIssueDependencyRecords(context.Context, []string) (map[strin
 // DetectCycleReport answers for a workspace with no cycles. Without it the
 // promoted method on the embedded nil interface panics, and the provider-backed
 // cycle route would 500 through the panic recovery rather than answering.
-func (emptyDeps) DetectCycleReport(context.Context) (issueops.CycleReport, error) {
+func (emptyDeps) DetectCycleReport(context.Context, issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
 	return issueops.CycleReport{Cycles: []issueops.Cycle{}}, nil
 }
 
