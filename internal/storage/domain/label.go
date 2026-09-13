@@ -16,6 +16,11 @@ type LabelSQLRepository interface {
 	ListByIssueIDs(ctx context.Context, issueIDs []string, opts LabelOpts) (map[string][]string, error)
 	DeleteAllForIDs(ctx context.Context, ids []string, opts LabelOpts) (int, error)
 	CountAllForIDs(ctx context.Context, ids []string, opts LabelOpts) (int, error)
+	// RenameLabel renames oldLabel to newLabel across every issue and wisp
+	// that carries it - both label planes, not the one LabelOpts would
+	// otherwise pick, since a rename by definition is not scoped to one id's
+	// plane. See domain.LabelUseCase.RenameLabel for the return contract.
+	RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error)
 }
 
 type LabelUseCase interface {
@@ -27,6 +32,19 @@ type LabelUseCase interface {
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
 	GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error)
 	InheritFromParent(ctx context.Context, childID, parentID, actor string, skipExisting []string) ([]string, error)
+
+	// RenameLabel renames oldLabel to newLabel across every issue and wisp
+	// that carries it - the proxied-server counterpart of
+	// DoltStore/EmbeddedDoltStore.RenameLabel, carrying the same merge
+	// semantics (an issue that already carries newLabel keeps it and drops
+	// the stale oldLabel row instead of erroring) and emitting one
+	// EventLabelRenamed per touched issue, matching the direct route event
+	// for event, rather than an add+remove pair. renamed is the count of
+	// issues and wisps that carried oldLabel; merged is the subset that
+	// already had newLabel; ids lists every touched id, both planes
+	// together. oldLabel and newLabel equal after trimming is refused with
+	// issueops.ErrRenameLabelSameName.
+	RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error)
 
 	AddWispLabel(ctx context.Context, wispID, label, actor string) error
 	RemoveWispLabel(ctx context.Context, wispID, label, actor string) error
@@ -67,6 +85,24 @@ func (u *labelUseCaseImpl) add(ctx context.Context, id, label, actor string, use
 		return fmt.Errorf("add label %s/%s: %w", id, label, err)
 	}
 	return nil
+}
+
+// RenameLabel is not id-scoped like the verbs around it - a rename sweeps
+// both label planes for every carrier of oldLabel, so it validates the two
+// label arguments rather than an issue id and delegates straight to the
+// repository, which owns the merge semantics and the same-name refusal.
+func (u *labelUseCaseImpl) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	if oldLabel == "" {
+		return 0, 0, nil, fmt.Errorf("rename label: oldLabel must not be empty")
+	}
+	if newLabel == "" {
+		return 0, 0, nil, fmt.Errorf("rename label: newLabel must not be empty")
+	}
+	renamed, merged, ids, err = u.labelRepo.RenameLabel(ctx, oldLabel, newLabel, actor)
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("rename label %s -> %s: %w", oldLabel, newLabel, err)
+	}
+	return renamed, merged, ids, nil
 }
 
 func (u *labelUseCaseImpl) RemoveLabel(ctx context.Context, issueID, label, actor string) error {

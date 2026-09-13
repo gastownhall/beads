@@ -361,6 +361,29 @@ Output:
 ]
 ```
 
+### Renaming Labels
+
+`bd label rename` fixes a label everywhere it appears, in one command, instead
+of a per-issue add-then-remove loop:
+
+```bash
+# Fix a typo or a taxonomy drift across the whole database
+bd label rename Backend backend
+
+# Preview the blast radius first - no writes, just a count and the first issues
+bd label rename Backend backend --dry-run
+```
+
+If an issue already carries the new label, the rename doesn't error - it
+drops the stale old label and reports that issue as a merge:
+
+```
+Renamed label 'Backend' to 'backend': 6 issues (2 already had 'backend')
+```
+
+A label nothing carries renames to a clean no-op (`No issues found with label
+'Backend'`, exit 0). Rename sweeps both planes: durable issues and wisps.
+
 ### Bulk Operations
 
 Add labels in batch during creation:

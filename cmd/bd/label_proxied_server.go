@@ -132,6 +132,34 @@ func runLabelListAllProxiedServer(ctx context.Context) error {
 	return nil
 }
 
+// runLabelRenameProxiedServer is the proxied-server counterpart of
+// DoltStore/EmbeddedDoltStore.RenameLabel. It calls the same
+// domain.LabelUseCase.RenameLabel every proxied write reaches through
+// uw.LabelUseCase(), which in turn delegates to issueops.RenameLabelInTx -
+// the identical merge semantics, same-name refusal and one EventLabelRenamed
+// per touched issue that the direct route produces. A prior version of this
+// route fanned each issue out into a per-issue AddLabel-then-RemoveLabel
+// pair, journaling label_added/label_removed instead of label_renamed; that
+// divergence is what this delegation replaces.
+func runLabelRenameProxiedServer(ctx context.Context, oldLabel, newLabel string) (renamed, merged int, err error) {
+	if uowProvider == nil {
+		return 0, 0, HandleError("proxied-server UOW provider not initialized")
+	}
+
+	err = uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		var rerr error
+		renamed, merged, _, rerr = uw.LabelUseCase().RenameLabel(ctx, oldLabel, newLabel, actor) //nolint:forbidigo // bulk rename; no role serves it, and Patch.Labels would reintroduce the per-issue add/remove event divergence this delegation replaced
+		if rerr != nil {
+			return "", fmt.Errorf("rename label '%s' -> '%s': %w", oldLabel, newLabel, rerr)
+		}
+		if renamed == 0 {
+			return "", nil
+		}
+		return fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed), nil
+	})
+	return renamed, merged, err
+}
+
 func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 	label := strings.TrimSpace(args[1])
 	if label == "" {

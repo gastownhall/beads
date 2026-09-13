@@ -43,6 +43,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   damage still exits 0. As with the rest of bare `bd doctor`, it does not yet
   run in embedded mode (GH#3794).
 
+- **`bd label rename <old> <new>` fixes a label everywhere it appears, in one
+  command instead of a per-issue add-then-remove loop**
+  ([#6009](https://github.com/gastownhall/beads/pull/6009)). An issue that
+  already carries the new label doesn't error — the rename drops its stale
+  old label and counts the issue as a merge instead, reported honestly:
+  `Renamed label 'Backend' to 'backend': 6 issues (2 already had 'backend')`.
+  A label nothing carries is a clean no-op (`No issues found with label
+  'Backend'`, exit 0). The sweep covers both planes, durable issues and
+  wisps, and the direct and proxied-server routes end at the same
+  `issueops.RenameLabelInTx` primitive — the proxied route journals through
+  `domain.LabelUseCase.RenameLabel` rather than a per-issue add+remove
+  fan-out, so merge semantics, the zero-carrier no-op, and the single
+  `label_renamed` event per touched row are identical on both.
+
+  `--dry-run` previews the blast radius (a count and the first 10 issues,
+  all of them under `--json`) without writing anything, through a read-only
+  path kept apart from the write path so a preview can never reach a
+  transaction. Its `merged` count is a plain snapshot intersection of two
+  independent reads, though, not the write path's measured one: the real
+  rename derives `merged` from what its `INSERT IGNORE` actually affected,
+  specifically so a concurrent label add between two reads can't skew the
+  count, and the preview has no insert to measure against. Treat the
+  dry-run number as an estimate — the flag's own help text says so now too.
+  A rename that fails partway through reports an UPPER BOUND - up to how many
+  issues may have been renamed, and up to how many of those were merges -
+  rather than only the error. It cannot be a landed count: both routes assign
+  those numbers inside the transaction, so a rollback or an exhausted retry
+  returns them still describing an attempt that landed nothing. Only a Dolt
+  publication failure after the SQL side already committed is a genuine
+  partial, and the count alone cannot tell the two apart.
+
 - **`bd stale` and `bd blocked` gain `--label`, `--label-any` and
   `--exclude-label`** ([#5822](https://github.com/gastownhall/beads/pull/5822)),
   with the same meanings and the same flag names they already have on `bd list`

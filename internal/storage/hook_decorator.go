@@ -327,6 +327,19 @@ func (h *HookFiringStore) RemoveLabel(ctx context.Context, issueID, label, actor
 	return nil
 }
 
+// RenameLabel renames a label across every issue and wisp that carries it,
+// firing on_update for each touched id.
+func (h *HookFiringStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	renamed, merged, ids, err = h.inner.RenameLabel(ctx, oldLabel, newLabel, actor)
+	if err != nil {
+		return renamed, merged, ids, err
+	}
+	for _, id := range ids {
+		h.fireHookByID(ctx, hooks.EventUpdate, id)
+	}
+	return renamed, merged, ids, nil
+}
+
 // ── Comment mutations ───────────────────────────────────────────────
 
 // AddIssueComment adds a comment and fires on_update.
