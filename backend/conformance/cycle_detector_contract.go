@@ -75,11 +75,11 @@ type SQLStatement struct {
 	Args  []any
 }
 
-// RunCycleDetectorReportsNoCycleForAnAcyclicSubgraph pins cycledetector.go:135
+// RunCycleDetectorReportsNoCycleForAnAcyclicSubgraph pins cycledetector.go:171
 // from the empty side: an acyclic graph is an empty report and a nil error,
 // with no ErrNotFound to classify. The nil-slice half IS asserted globally —
 // that one is a property of the answer, not of the workspace
-// (cycledetector.go:78).
+// (cycledetector.go:108).
 func RunCycleDetectorReportsNoCycleForAnAcyclicSubgraph(t *testing.T, ctx context.Context, fixture CycleDetectorFixture) {
 	t.Helper()
 	first := fixture.IssuePrefix + "-acyclic-a"
@@ -98,10 +98,10 @@ func RunCycleDetectorReportsNoCycleForAnAcyclicSubgraph(t *testing.T, ctx contex
 }
 
 // RunCycleDetectorFindsADurableCycleRotatedToItsLowestID pins the shape of a
-// found cycle: members in EDGE ORDER (cycledetector.go:48-50), rotated so the
-// lowest id comes first (cycledetector.go:52-58), the closing edge implied
+// found cycle: members in EDGE ORDER (cycledetector.go:78-80), rotated so the
+// lowest id comes first (cycledetector.go:82-88), the closing edge implied
 // rather than repeated, and Partial false when every member was described
-// (cycledetector.go:63).
+// (cycledetector.go:93).
 //
 // The three ids are seeded so that the edge order and the sorted order are NOT
 // the same sequence, which is what makes the rotation assertion say something.
@@ -138,8 +138,8 @@ func RunCycleDetectorFindsADurableCycleRotatedToItsLowestID(t *testing.T, ctx co
 	}
 }
 
-// RunCycleDetectorReportsTheSameCyclesEveryRun pins cycledetector.go:52-58 and
-// :91-92: two calls against an unchanged database must agree, id for id and
+// RunCycleDetectorReportsTheSameCyclesEveryRun pins cycledetector.go:82-88 and
+// :126-127: two calls against an unchanged database must agree, id for id and
 // cycle for cycle.
 //
 // It compares the WHOLE report rather than the case's own cycle: the walk used
@@ -175,7 +175,7 @@ func RunCycleDetectorReportsTheSameCyclesEveryRun(t *testing.T, ctx context.Cont
 }
 
 // RunCycleDetectorMergesTheDurableAndEphemeralPlanes pins
-// cycledetector.go:120-122: the two dependency planes are one graph, so a cycle
+// cycledetector.go:156-158: the two dependency planes are one graph, so a cycle
 // that runs issue → wisp → issue is found. This is the clause a single-table
 // read passes every other case and fails here.
 func RunCycleDetectorMergesTheDurableAndEphemeralPlanes(t *testing.T, ctx context.Context, fixture CycleDetectorFixture) {
@@ -198,7 +198,7 @@ func RunCycleDetectorMergesTheDurableAndEphemeralPlanes(t *testing.T, ctx contex
 	}
 }
 
-// RunCycleDetectorFollowsOnlyBlockingEdges pins cycledetector.go:110-119: the
+// RunCycleDetectorFollowsOnlyBlockingEdges pins cycledetector.go:145-154: the
 // walk follows `blocks` and `conditional-blocks`, and nothing else — not
 // `waits-for`, whose gate semantics make a mutual wait legitimate, not
 // `parent-child`, which the ADD-time gate does walk, and not `tracks`, on the
@@ -286,8 +286,40 @@ func RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape(t *testing.T, ctx co
 	assertCycleDetectorPath(t, cycle, root, step)
 }
 
-// RunCycleDetectorReportsAnHonestPartial pins cycledetector.go:140-144 and
-// :24-33 against real storage: a member the database cannot describe keeps its
+// RunCycleDetectorIncludeTracksWalksEachEdgeInItsStoredDirection pins the
+// direction of the widened graph, which the two-node cases above cannot: a
+// two-node cycle reads the same reversed once it is rotated to its lowest id.
+// This loop has three nodes in edge order a, c, b. Reversed it is a, b, c, the
+// same member set in the other order, so a graph builder that stored
+// depends_on_id -> issue_id would still find exactly one cycle here and fail
+// only on the path.
+//
+// The blocks edge sits in the middle of the loop and the closing edges are
+// tracks, so the default request must see nothing.
+func RunCycleDetectorIncludeTracksWalksEachEdgeInItsStoredDirection(t *testing.T, ctx context.Context, fixture CycleDetectorFixture) {
+	t.Helper()
+	a := fixture.IssuePrefix + "-trkdir-a"
+	b := fixture.IssuePrefix + "-trkdir-b"
+	c := fixture.IssuePrefix + "-trkdir-c"
+	for _, id := range []string{a, b, c} {
+		seedCycleDetectorIssue(t, ctx, fixture, id)
+	}
+	// a -> c -> b -> a.
+	seedCycleDetectorEdges(t, ctx, fixture, false,
+		cycleDetectorEdge{Source: a, Target: c, Type: types.DepTracks},
+		cycleDetectorEdge{Source: c, Target: b, Type: types.DepBlocks},
+		cycleDetectorEdge{Source: b, Target: a, Type: types.DepTracks})
+
+	if found := cycleDetectorTouching(cycleDetectorReport(t, ctx, fixture), a, b, c); len(found) > 0 {
+		t.Errorf("the default request reported %v; two of the three edges are tracks, outside the base walk", found)
+	}
+
+	cycle := cycleDetectorFind(t, cycleDetectorReportIncludingTracks(t, ctx, fixture), a, b, c)
+	assertCycleDetectorPath(t, cycle, a, c, b)
+}
+
+// RunCycleDetectorReportsAnHonestPartial pins cycledetector.go:176-180 and
+// :54-63 against real storage: a member the database cannot describe keeps its
 // place on the path, carries no issue, and marks the cycle. The previous body
 // dropped the member, so this three-node cycle came back as a TWO-node cycle and
 // looked complete.
@@ -322,7 +354,7 @@ func RunCycleDetectorReportsAnHonestPartial(t *testing.T, ctx context.Context, f
 	}
 }
 
-// RunCycleDetectorCountsAWhollyUndescribableCycle pins cycledetector.go:81-85:
+// RunCycleDetectorCountsAWhollyUndescribableCycle pins cycledetector.go:111-115:
 // a cycle no member of which can be described is still IN the report, so the
 // count cannot shrink because rows went missing. Under the previous body this
 // cycle produced nothing at all, so `bd dep cycles` printed a smaller number and
@@ -347,7 +379,7 @@ func RunCycleDetectorCountsAWhollyUndescribableCycle(t *testing.T, ctx context.C
 	}
 }
 
-// RunCycleDetectorWritesNothing pins cycledetector.go:130-131: detecting is a
+// RunCycleDetectorWritesNothing pins cycledetector.go:166-167: detecting is a
 // read. It is asserted on the history log rather than on a row read-back
 // because every versioned unit of work in this tree ends in a Dolt commit, so a
 // sweep that took a write transaction would show up here even when it changed
