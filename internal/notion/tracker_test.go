@@ -631,3 +631,108 @@ func TestGetConfig_YamlOnlyKeyBypassesStore(t *testing.T) {
 		}
 	})
 }
+
+func TestTrackerMaxQueryPages(t *testing.T) {
+	ctx := context.Background()
+
+	// Unset means "use the client's own default": a data source under the
+	// default ceiling needs no configuration at all.
+	t.Run("unset falls back to the client default", func(t *testing.T) {
+		t.Setenv("NOTION_MAX_QUERY_PAGES", "")
+		tr := &Tracker{}
+		got, err := tr.maxQueryPages(ctx)
+		if err != nil {
+			t.Fatalf("maxQueryPages returned error: %v", err)
+		}
+		if got != 0 {
+			t.Fatalf("maxQueryPages = %d, want 0 (unset)", got)
+		}
+	})
+
+	t.Run("a positive value is read", func(t *testing.T) {
+		t.Setenv("NOTION_MAX_QUERY_PAGES", "120")
+		tr := &Tracker{}
+		got, err := tr.maxQueryPages(ctx)
+		if err != nil {
+			t.Fatalf("maxQueryPages returned error: %v", err)
+		}
+		if got != 120 {
+			t.Fatalf("maxQueryPages = %d, want 120", got)
+		}
+	})
+
+	// Set-but-unusable is an error, not a silent fallback. The operator sets
+	// this key because sync is already failing on the bound; ignoring a bad
+	// value would reproduce the identical failure with nothing to explain it.
+	for _, bad := range []string{"lots", "0", "-5", "12.5"} {
+		t.Run("rejects "+bad, func(t *testing.T) {
+			t.Setenv("NOTION_MAX_QUERY_PAGES", bad)
+			tr := &Tracker{}
+			if _, err := tr.maxQueryPages(ctx); err == nil {
+				t.Fatalf("maxQueryPages(%q) succeeded, want an error", bad)
+			}
+		})
+	}
+}
+
+// The bound is useless if it stops at the config read, which is exactly what
+// this PR was first sent without. This pins the whole path: env var through
+// Init to the field the client paginates on.
+func TestTrackerInitAppliesMaxQueryPagesToClient(t *testing.T) {
+	t.Setenv("NOTION_TOKEN", "secret-token")
+	t.Setenv("NOTION_DATA_SOURCE_ID", "ds_123")
+	t.Setenv("NOTION_MAX_QUERY_PAGES", "120")
+
+	original := newNotionClient
+	defer func() { newNotionClient = original }()
+
+	var applied int
+	newNotionClient = func(token string, maxQueryPages int) notionAPI {
+		applied = maxQueryPages
+		return original(token, maxQueryPages)
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), nil); err != nil {
+		t.Fatalf("Init returned error: %v", err)
+	}
+	if applied != 120 {
+		t.Fatalf("bound passed to the client = %d, want 120", applied)
+	}
+	client, ok := tr.client.(*Client)
+	if !ok {
+		t.Fatalf("client type = %T, want *Client", tr.client)
+	}
+	if client.maxQueryPages() != 120 {
+		t.Fatalf("client paginates at %d, want 120", client.maxQueryPages())
+	}
+}
+
+func TestTrackerInitRejectsUnusableMaxQueryPages(t *testing.T) {
+	t.Setenv("NOTION_TOKEN", "secret-token")
+	t.Setenv("NOTION_DATA_SOURCE_ID", "ds_123")
+	t.Setenv("NOTION_MAX_QUERY_PAGES", "lots")
+
+	tr := &Tracker{}
+	err := tr.Init(context.Background(), nil)
+	if err == nil {
+		t.Fatal("Init succeeded, want an error naming the bad value")
+	}
+	if !strings.Contains(err.Error(), "notion.max_query_pages") {
+		t.Fatalf("error should name the config key, got: %v", err)
+	}
+}
+
+// An unset bound must leave the client exactly where it was before this option
+// existed — 50 pages, hardcoded here so lowering the default fails the test.
+func TestNewNotionClientUnsetBoundKeepsDefault(t *testing.T) {
+	t.Parallel()
+
+	client, ok := newNotionClient("secret-token", 0).(*Client)
+	if !ok {
+		t.Fatalf("client type = %T, want *Client", client)
+	}
+	if client.maxQueryPages() != 50 {
+		t.Fatalf("client paginates at %d, want the unchanged default 50", client.maxQueryPages())
+	}
+}
