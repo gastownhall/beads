@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Go embedders can apply Beads' native external-capability dependency
+  policy.** `WithExternalDependencyPolicy` gives long-lived orchestrators the
+  same fail-closed `external:<project>:<capability>` readiness and close guards
+  as the `bd` CLI, without copying the resolver or rewriting dependency edges.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every
