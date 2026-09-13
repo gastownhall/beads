@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	storagememoryops "github.com/steveyegge/beads/internal/storage/memoryops"
 )
 
 // countMemoryDoltCommits reads dolt_log for an embedded workspace. It is how
@@ -36,6 +37,30 @@ func countMemoryDoltCommits(t *testing.T, beadsDir string) int {
 		t.Fatalf("query dolt_log: %v", err)
 	}
 	return count
+}
+
+// storeMemoryValueOutOfBand overwrites a memory row's value with SQL, beneath
+// every bd code path. It is the only way a test gets an empty-valued memory:
+// `bd remember` refuses empty content, so such a row always arrives out of band.
+func storeMemoryValueOutOfBand(t *testing.T, beadsDir, key, value string) {
+	t.Helper()
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	res, err := db.ExecContext(t.Context(), "UPDATE config SET value = ? WHERE `key` = ?", value, storagememoryops.StorageKey(key))
+	if err != nil {
+		t.Fatalf("update memory %q: %v", key, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("update memory %q: %d rows affected (err %v), want 1", key, n, err)
+	}
 }
 
 // bdRemember runs "bd remember" with the given args and returns stdout.
@@ -278,6 +303,29 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdForget(t, bd, dir, "forget-me")
 		// After forget, recall should fail
 		bdRecallFail(t, bd, dir, "forget-me")
+	})
+
+	// AN EMPTY-VALUED MEMORY IS PRESENT (#5963). These run the real commands, so
+	// they pin each RunE's wiring and not only its renderer: a call site that
+	// went back to deciding presence from value != "" fails here while
+	// TestPrintRecallResult and TestRememberBareKeyPath stay green. Its own
+	// workspace, because the row is emptied beneath bd.
+	t.Run("empty_valued_memory_is_present", func(t *testing.T) {
+		edir, ebeads, _ := bdInit(t, bd, "--prefix", "em")
+		bdRemember(t, bd, edir, "placeholder the test empties", "--key", "stored-empty")
+		storeMemoryValueOutOfBand(t, ebeads, "stored-empty", "")
+
+		// The placeholder check proves bd sees the emptied row. Without it, a
+		// write bd never read would leave this test green on a reverted fix.
+		if out := bdRecall(t, bd, edir, "stored-empty"); strings.Contains(out, "placeholder") {
+			t.Fatalf("bd recall still sees the placeholder, so the row was not emptied: %s", out)
+		}
+		// A bare key naming the empty-valued memory recalls it instead of refusing.
+		if out := bdRemember(t, bd, edir, "stored-empty"); strings.Contains(out, "placeholder") {
+			t.Fatalf("bd remember <bare-key> still sees the placeholder: %s", out)
+		}
+		bdForget(t, bd, edir, "stored-empty")
+		bdRecallFail(t, bd, edir, "stored-empty")
 	})
 
 	// THE AUTO-COMMIT EPILOGUE, which is the trap this convergence was most

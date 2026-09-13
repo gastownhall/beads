@@ -147,8 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answered 404, while `GET /v0/beads/memories` already enumerated the same
   row. Presence now comes from row existence on direct Dolt, embedded Dolt and
   the proxied backend. An empty-valued memory is found, recalls as an empty
-  string, and is deleted on the first forget. Only a key nothing ever stored
-  is a miss.
+  string, and is deleted on the first forget. Only a key with no row is a
+  miss.
 
 - **Incremental auto-export now actually takes the incremental path**
   ([#5806](https://github.com/gastownhall/beads/pull/5806)). Change detection

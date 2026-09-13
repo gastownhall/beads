@@ -539,9 +539,8 @@ func TestListMemoriesAnswersThePlaneOrderedByKey(t *testing.T) {
 		"alpha":        "first by key",
 		"Has Spaces.✓": "an explicit key",
 		// A row written out of band with an empty value. It is enumerated here
-		// — its KEY exists — while GET /v0/beads/memories/{key} answers 404 for
-		// it, and that asymmetry is the one way a client tells a row stored
-		// empty from a row that is not there.
+		// like any other row, and GET /v0/beads/memories/{key} answers it with a
+		// 200 and an empty value (TestGetMemoryAnswersAnEmptyValueWith200).
 		"stored-empty": "",
 	}}}
 	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))

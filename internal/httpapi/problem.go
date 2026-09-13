@@ -945,8 +945,9 @@ var operationCodes = map[string][]Code{
 	// the CLI itself prints identically, so a 404 would publish an invented
 	// distinction. Here the CLI already distinguishes a miss — `bd recall` has
 	// an exit-code contract for it — and the role answers Found rather than a
-	// value, so the 404 reports a distinction that exists. The stored-empty row
-	// falls on the miss side of it, which the document states.
+	// value, so the 404 reports a distinction that exists. Found is row
+	// existence: a row stored as the empty string is a 200 with an empty value,
+	// and only an absent row is the 404, which the document states.
 	OpGetMemory: {CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The read's vocabulary exactly, because the two operations address the same
 	// resource the same way and this one's Found false is the same answer: a key
@@ -1319,10 +1320,9 @@ func EventsWatchSaturated() Result {
 //
 // A separate constructor rather than a detail argument on NotFound, because the
 // two say different things: that one is about the issue id space, and reusing
-// its sentence here would tell a client its memory key was an issue id. The
-// detail deliberately does NOT distinguish an absent row from one stored as the
-// empty string — the role cannot see the difference, so the wire must not claim
-// to.
+// its sentence here would tell a client its memory key was an issue id. It is
+// only ever the answer for an absent row: a row stored as the empty string is
+// found, and the read answers it with a 200.
 func MemoryNotFound() Result {
 	return newResult(CodeNotFound, "this workspace holds no memory under that key")
 }
