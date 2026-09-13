@@ -7,15 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **`bd ready --claim` now refuses a row cap under `--proxied-server`.** The
-  proxied ready role cannot enforce `--max-rows`/`BEADS_MAX_ROWS`, so bd fails
-  loudly rather than silently dropping the limit; `--claim` no longer exempts
-  the command. Agent rigs that set the cap globally must unset it for proxied
-  `bd ready --claim`. Direct mode is unchanged, and a claim there still
-  succeeds against a ready pool larger than the cap.
-
 ## [1.3.0] - 2026-08-28
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
@@ -521,6 +512,13 @@ which dumps the entire release history.)
   encoding changes equivalence class silently, with no error to notice. Longer
   or mixed runs, `__` and `---` included, are unaffected and still collapse.
 
+- **`bd ready --claim` now refuses a row cap under `--proxied-server`.** The
+  proxied ready role cannot enforce `--max-rows`/`BEADS_MAX_ROWS`, so bd fails
+  loudly rather than silently dropping the limit; `--claim` no longer exempts
+  the command. Agent rigs that set the cap globally must unset it for proxied
+  `bd ready --claim`. Direct mode is unchanged, and a claim there still
+  succeeds against a ready pool larger than the cap. (#6269)
+
 ### Fixed
 
 - **Server-mode issue mutations no longer revert concurrent writers' committed
@@ -879,6 +877,32 @@ which dumps the entire release history.)
   set; it reports the pending migration instead. Both gates key on the directory
   doctor was pointed at, not just the one it was launched in. Diagnosis itself
   keeps working under a freeze.
+
+- **An externally-managed Dolt sql-server is no longer mistaken for bd's own**,
+  which had silently disarmed the shared-store migrate gate (#6118). When the
+  port arrived from `BEADS_DOLT_SERVER_PORT`, from `bd init --server-port`, or
+  from a stale port file left by a server that had since died, bd classified a
+  genuinely shared server as workspace-owned and migrated its schema in place —
+  no prompt, no warning, exit 0 — after which every older client on that server
+  was hard-refused with `schema version mismatch`. Ownership is now *proven*
+  from bd's own live port and PID record rather than inferred from how the
+  endpoint was named: bd must have bound that port and the process answering it
+  must still be alive. Everything else is shared, and stays gated.
+
+- **A `dolt.mode: server` workspace declared in `.beads/config.yaml` is no
+  longer refused as a legacy workspace** (#6119). The upgrade guard resolved the
+  connection mode from `metadata.json` alone, so a workspace that names its mode
+  only in config.yaml fell through to the embedded arm and was refused outright
+  — including workspaces this release had just created and was already
+  operating on. The guard now resolves the mode through the same
+  `IsDoltServerMode` precedence chain the rest of bd uses, and a
+  `.local_version` witness naming bd 1.0 or later vetoes the legacy verdict in
+  every mode rather than only in server mode.
+
+- **A server-mode workspace with no `metadata.json` no longer opens a phantom
+  embedded database** and answers `bd list` with a false-empty result and exit 0
+  (#6120). Config substitution now gates on `IsDoltServerMode`, and
+  `BEADS_DOLT_SERVER_MODE` is honored on that path instead of being ignored.
 
 ### Security
 
