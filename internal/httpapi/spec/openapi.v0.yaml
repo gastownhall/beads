@@ -5182,10 +5182,10 @@ paths:
 
 
         A memory stored as the EMPTY STRING is enumerated here, because its key
-        exists, while `GET /v0/beads/memories/{key}` answers `404` for it. That
-        asymmetry is the one way a client can tell a row stored empty from a row
-        that is not there, and it is the storage seam's conflation showing
-        through rather than a rule this surface invented.
+        exists, and `GET /v0/beads/memories/{key}` agrees: it answers `200` for
+        that same row, with an empty `value`. Presence is row existence on both
+        surfaces, never whether the value happens to be non-empty; only a key
+        nothing stored is missing from either one.
 
 
         The envelope is the paginated one and `has_more` is ALWAYS false:
@@ -5342,12 +5342,13 @@ paths:
         — so a 404 reports a distinction that exists rather than minting one.
 
 
-        A MEMORY STORED AS THE EMPTY STRING IS A 404 TOO. No front door can
-        create one — storing empty content is refused — but an out-of-band write
-        to the config table can, and the role does not invent a distinction the
-        storage seam beneath it cannot see. `GET /v0/beads/memories` DOES
-        enumerate such a row, because its key exists, and that asymmetry is the
-        one way a client can tell the two apart.
+        A MEMORY STORED AS THE EMPTY STRING IS A 200, WITH AN EMPTY `value`. No
+        front door can create one — storing empty content is refused — but an
+        out-of-band write to the config table can, and presence here is row
+        existence, never whether the value happens to be non-empty. That is the
+        same rule `GET /v0/beads/memories` already followed by enumerating such
+        a row because its key exists; the two surfaces now agree rather than
+        splitting on an asymmetry a client would have had to know about.
 
 
         MEMORY CONTENT IS SERVED IN FULL, and a configured bearer does not
@@ -5389,9 +5390,9 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           description: >-
-            This workspace holds no memory under that key — or holds one stored
-            as the empty string, which answers the same way. `detail` says which
-            plane was asked, not which of those two it was.
+            This workspace holds no memory under that key. A row stored as the
+            empty string is not this case: it exists, so this operation returns
+            it as a `200` with an empty `value`, the same as any other memory.
           x-bd-codes: [not_found]
           content:
             application/problem+json:
@@ -5473,9 +5474,10 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           description: >-
-            This workspace holds no memory under that key — or holds one stored
-            as the empty string, which answers the same way — and NOTHING WAS
-            REMOVED.
+            This workspace holds no memory under that key, and NOTHING WAS
+            REMOVED. A row stored as the empty string is not this case: it
+            exists, so forgetting it removes it and answers `200`, the same as
+            any other memory.
           x-bd-codes: [not_found]
           content:
             application/problem+json:
@@ -7964,9 +7966,9 @@ components:
 
 
             Always present. It is the empty string only where a row was written
-            out of band with an empty value, which
-            `GET /v0/beads/memories/{key}` answers as a `404` and
-            `GET /v0/beads/memories` enumerates.
+            out of band with an empty value — a row `GET /v0/beads/memories/{key}`
+            answers `200` for, and `GET /v0/beads/memories` enumerates, the same
+            as any other memory.
 
     MemoriesPage:
       type: object
@@ -8054,11 +8056,10 @@ components:
 
 
             A previous value that was the EMPTY STRING reports true: the ROW
-            existed, even though `GET /v0/beads/memories/{key}` would have
-            answered `404` for it. That divergence is the storage seam's
-            conflation showing through, and it is stated rather than smoothed
-            over, because smoothing it would mean this member reporting
-            "nothing was there" about a write that overwrote something.
+            existed, and `GET /v0/beads/memories/{key}` would have answered
+            `200` for it too, with an empty `value` — this member and that
+            endpoint agree on what counts as present, because both read it off
+            the row rather than off the value it happened to hold.
 
     SetSettingRequest:
       type: object

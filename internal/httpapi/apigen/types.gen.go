@@ -1423,7 +1423,7 @@ type Memory struct {
 
 	// Value The stored content, verbatim: newlines, surrounding space and unicode as stored, never truncated and never withheld.
 	//
-	// Always present. It is the empty string only where a row was written out of band with an empty value, which `GET /v0/beads/memories/{key}` answers as a `404` and `GET /v0/beads/memories` enumerates.
+	// Always present. It is the empty string only where a row was written out of band with an empty value — a row `GET /v0/beads/memories/{key}` answers `200` for, and `GET /v0/beads/memories` enumerates, the same as any other memory.
 	Value string `json:"value"`
 }
 
@@ -1667,7 +1667,7 @@ type RememberedMemory struct {
 
 	// Replaced True when a previous value existed under `key` and this request overwrote it; false when the key was new. It is observed in the same transaction as the write, so it describes the row this request wrote.
 	//
-	// A previous value that was the EMPTY STRING reports true: the ROW existed, even though `GET /v0/beads/memories/{key}` would have answered `404` for it. That divergence is the storage seam's conflation showing through, and it is stated rather than smoothed over, because smoothing it would mean this member reporting "nothing was there" about a write that overwrote something.
+	// A previous value that was the EMPTY STRING reports true: the ROW existed, and `GET /v0/beads/memories/{key}` would have answered `200` for it too, with an empty `value` — this member and that endpoint agree on what counts as present, because both read it off the row rather than off the value it happened to hold.
 	Replaced bool `json:"replaced"`
 
 	// Value The stored content, echoed verbatim. Always present, and never withheld — this plane has no redaction; see the operation description.
