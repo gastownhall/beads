@@ -56,8 +56,8 @@ func TestMemoriesContract(t *testing.T) {
 	t.Run("RecallReportsAMissAsNotFoundNotAnError", func(t *testing.T) {
 		conformance.RunMemoriesRecallReportsAMissAsNotFoundNotAnError(t, ctx, fixture)
 	})
-	t.Run("RecallConflatesStoredEmptyWithAbsent", func(t *testing.T) {
-		conformance.RunMemoriesRecallConflatesStoredEmptyWithAbsent(t, ctx, fixture)
+	t.Run("EmptyRowIsPresentUntilForgotten", func(t *testing.T) {
+		conformance.RunMemoriesEmptyRowIsPresentUntilForgotten(t, ctx, fixture)
 	})
 	t.Run("ForgetRemovesExactlyTheNamedRow", func(t *testing.T) {
 		conformance.RunMemoriesForgetRemovesExactlyTheNamedRow(t, ctx, fixture)

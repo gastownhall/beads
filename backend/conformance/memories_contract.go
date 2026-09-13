@@ -233,14 +233,11 @@ func RunMemoriesRememberWithExplicitKeyStoresVerbatim(t *testing.T, ctx context.
 }
 
 // RunMemoriesRememberReplacesAndReportsIt pins
-// memoryops.RememberResult.Replaced, including the leg that makes it different
-// from RecallResult.Found.
+// memoryops.RememberResult.Replaced against row presence.
 //
 // Three legs: a first write reports false, a second reports true and REPLACES
-// rather than appends, and a write over an out-of-band EMPTY row reports true
-// even though a Recall of that key would have reported Found false. The third
-// is the divergence the leaf doc states — Replaced is about the ROW — and it is
-// the one a body computing `previous != ""` gets wrong.
+// rather than appends, and a write over an out-of-band EMPTY row reports true.
+// The third is the one a body computing `previous != ""` gets wrong.
 func RunMemoriesRememberReplacesAndReportsIt(t *testing.T, ctx context.Context, fixture MemoriesFixture) {
 	t.Helper()
 	neighbors := seedMemoriesAllFourClasses(t, ctx, fixture)
@@ -262,7 +259,7 @@ func RunMemoriesRememberReplacesAndReportsIt(t *testing.T, ctx context.Context, 
 	if err := fixture.SetConfig(ctx, "kv.memory."+emptied, ""); err != nil {
 		t.Fatalf("seed an empty memory row out of band: %v", err)
 	}
-	assertMemoriesRecall(t, ctx, fixture, emptied, "", false)
+	assertMemoriesRecall(t, ctx, fixture, emptied, "", true)
 	overEmpty := rememberMemory(t, ctx, fixture, memoryops.RememberRequest{Key: emptied, Content: "now it has content"})
 	if !overEmpty.Replaced {
 		t.Fatalf("Remember over a row stored EMPTY reported Replaced false: Replaced is about the row, " +
@@ -374,8 +371,8 @@ func RunMemoriesRecallAnswersTheStoredValue(t *testing.T, ctx context.Context, f
 }
 
 // RunMemoriesRecallReportsAMissAsNotFoundNotAnError pins the decision recorded
-// in memoryops/errors.go: there is no ErrNotFound on this role, because the
-// seam beneath it cannot see the difference the error would claim.
+// in memoryops/errors.go: absence is a result callers inspect, not an
+// operational error they must classify.
 func RunMemoriesRecallReportsAMissAsNotFoundNotAnError(t *testing.T, ctx context.Context, fixture MemoriesFixture) {
 	t.Helper()
 	seedMemoriesAllFourClasses(t, ctx, fixture)
@@ -401,32 +398,64 @@ func RunMemoriesRecallReportsAMissAsNotFoundNotAnError(t *testing.T, ctx context
 	}
 }
 
-// RunMemoriesRecallConflatesStoredEmptyWithAbsent pins
-// memoryops.RecallResult.Found's central claim, and the one asymmetry that lets
-// a caller see past it: List enumerates the key, because the ROW exists.
+// RunMemoriesEmptyRowIsPresentUntilForgotten pins presence to the ROW rather
+// than to whether its value is non-empty. No front door creates an empty
+// memory, but out-of-band config writes and older workspaces can contain one,
+// and it must remain addressable through Recall and Forget.
 //
-// That is the same same-answer-different-row shape the settings contract pins
-// for `bd config get`, and stating it is what keeps a backend from "fixing" it
-// on one leg and making the answer depend on the route.
-func RunMemoriesRecallConflatesStoredEmptyWithAbsent(t *testing.T, ctx context.Context, fixture MemoriesFixture) {
+// The second Forget is the retry leg: after the first call deletes the row, it
+// reports a genuine miss and records no further history.
+func RunMemoriesEmptyRowIsPresentUntilForgotten(t *testing.T, ctx context.Context, fixture MemoriesFixture) {
 	t.Helper()
-	seedMemoriesAllFourClasses(t, ctx, fixture)
+	neighbors := seedMemoriesAllFourClasses(t, ctx, fixture)
 	emptied := fixture.IssuePrefix + "-stored-empty"
 	never := fixture.IssuePrefix + "-never-stored"
 
 	if err := fixture.SetConfig(ctx, "kv.memory."+emptied, ""); err != nil {
 		t.Fatalf("seed an empty memory row out of band: %v", err)
 	}
-	assertMemoriesRecall(t, ctx, fixture, emptied, "", false)
+	assertMemoriesRecall(t, ctx, fixture, emptied, "", true)
 	assertMemoriesRecall(t, ctx, fixture, never, "", false)
 
 	plane := listMemories(t, ctx, fixture, "")
 	if value, ok := plane[emptied]; !ok || value != "" {
-		t.Fatalf("List[%q] = %q (present=%v), want an empty value that IS enumerated: "+
-			"the row exists even though Recall denies it", emptied, value, ok)
+		t.Fatalf("List[%q] = %q (present=%v), want an enumerated empty value", emptied, value, ok)
 	}
 	if _, ok := plane[never]; ok {
 		t.Fatalf("List carries %q, which nothing stored", never)
+	}
+
+	first := forgetMemory(t, ctx, fixture, emptied)
+	if !first.Found || first.Value != "" {
+		t.Fatalf("first Forget(%q) = %+v, want Found true with the empty stored value", emptied, first)
+	}
+	assertMemoriesRawAbsent(t, ctx, fixture, "kv.memory."+emptied)
+	assertMemoriesNeighborsSurvived(t, ctx, fixture, neighbors)
+
+	var afterFirst int
+	if fixture.CountHistory != nil {
+		var err error
+		afterFirst, err = fixture.CountHistory(ctx)
+		if err != nil {
+			t.Fatalf("CountHistory after first Forget: %v", err)
+		}
+	}
+
+	second := forgetMemory(t, ctx, fixture, emptied)
+	if second.Found || second.Value != "" {
+		t.Fatalf("second Forget(%q) = %+v, want Found false with no value", emptied, second)
+	}
+	assertMemoriesRawAbsent(t, ctx, fixture, "kv.memory."+emptied)
+	assertMemoriesNeighborsSurvived(t, ctx, fixture, neighbors)
+
+	if fixture.CountHistory != nil {
+		afterSecond, err := fixture.CountHistory(ctx)
+		if err != nil {
+			t.Fatalf("CountHistory after second Forget: %v", err)
+		}
+		if afterSecond != afterFirst {
+			t.Fatalf("history entries went %d -> %d across the second Forget, want no write", afterFirst, afterSecond)
+		}
 	}
 }
 
@@ -528,13 +557,7 @@ func RunMemoriesForgetReportsTheForgottenValue(t *testing.T, ctx context.Context
 // RunMemoriesForgetOfAnAbsentKeyIsNotFoundAndDeletesNothing pins that a miss is
 // a RESULT and not an error, that it changes no row anywhere in the table, that
 // the second call — the one a retrying caller actually makes — answers the same
-// way, and that the SECOND kind of miss behaves like the first: a memory stored
-// as the empty string is Found false, and its row is left standing.
-//
-// That last leg is memoryops.ForgetResult.Found's parenthesis, and it keeps
-// Forget's answer and Recall's answer the same statement. A body that deleted
-// on "the row is there" rather than on "Recall would find it" would report
-// nothing removed while removing something.
+// way.
 //
 // The whole-table row count is the assertion that matters: "the key is still
 // absent" would pass on a delete that swept a neighboring plane.
@@ -542,10 +565,6 @@ func RunMemoriesForgetOfAnAbsentKeyIsNotFoundAndDeletesNothing(t *testing.T, ctx
 	t.Helper()
 	neighbors := seedMemoriesAllFourClasses(t, ctx, fixture)
 	key := fixture.IssuePrefix + "-never-stored-forget"
-	emptied := fixture.IssuePrefix + "-empty-forget"
-	if err := fixture.SetConfig(ctx, "kv.memory."+emptied, ""); err != nil {
-		t.Fatalf("seed an empty memory row out of band: %v", err)
-	}
 
 	var before int
 	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM config", nil, &before); err != nil {
@@ -553,14 +572,12 @@ func RunMemoriesForgetOfAnAbsentKeyIsNotFoundAndDeletesNothing(t *testing.T, ctx
 	}
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		for _, miss := range []string{key, emptied} {
-			result, err := fixture.Memories.Forget(ctx, memoryops.ForgetRequest{Key: miss})
-			if err != nil {
-				t.Fatalf("Forget(%q) attempt %d = %v, want success with Found false", miss, attempt, err)
-			}
-			if result.Found || result.Value != "" {
-				t.Fatalf("Forget(%q) attempt %d = %+v, want Found false and no value", miss, attempt, result)
-			}
+		result, err := fixture.Memories.Forget(ctx, memoryops.ForgetRequest{Key: key})
+		if err != nil {
+			t.Fatalf("Forget(%q) attempt %d = %v, want success with Found false", key, attempt, err)
+		}
+		if result.Found || result.Value != "" {
+			t.Fatalf("Forget(%q) attempt %d = %+v, want Found false and no value", key, attempt, result)
 		}
 	}
 
@@ -569,11 +586,8 @@ func RunMemoriesForgetOfAnAbsentKeyIsNotFoundAndDeletesNothing(t *testing.T, ctx
 		t.Fatalf("count config rows after: %v", err)
 	}
 	if after != before {
-		t.Fatalf("config rows went %d -> %d across four forgets that found nothing, want no change", before, after)
+		t.Fatalf("config rows went %d -> %d across two forgets that found nothing, want no change", before, after)
 	}
-	// The stored-empty row is specifically still there: Found false said nothing
-	// was removed, and that has to be true of the row as well as of the answer.
-	assertMemoriesRawValue(t, ctx, fixture, "kv.memory."+emptied, "")
 	assertMemoriesNeighborsSurvived(t, ctx, fixture, neighbors)
 
 	// The empty key is a refusal, not a miss.
