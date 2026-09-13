@@ -104,6 +104,18 @@ func BuildBatchCommitMessage(ctx context.Context, db SQLQuerier, actor string) s
 	return msg
 }
 
+// HasStagedChanges reports whether the Dolt working set has any STAGED changes,
+// i.e. rows that a subsequent DOLT_COMMIT('-m', …) would actually commit.
+func HasStagedChanges(ctx context.Context, db SQLQuerier) (bool, error) {
+	var count int
+	err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE staged = 1").Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to check staged status: %w", err)
+	}
+	return count > 0, nil
+}
+
 // IsNothingToCommitError returns true if the error indicates there was nothing
 // to commit (Dolt may report this even when dolt_status showed changes).
 func IsNothingToCommitError(err error) bool {

@@ -231,7 +231,7 @@ func (s *testSuite) ucStatsReadyDerived() {
 	s.Require().NoError(err)
 	s.Equal(2, stats.OpenIssues)
 	s.Equal(1, derefInt(stats.BlockedIssues))
-	s.Equal(1, stats.ReadyIssues, "UC must surface ready = open - blocked")
+	s.Equal(1, derefInt(stats.ReadyIssues), "UC must surface ready = open - blocked")
 }
 
 // ---------- DetectCycles UC ----------

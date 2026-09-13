@@ -846,7 +846,7 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 	}
 	defer func() { _ = cleanup() }()
 
-	if err := versioncontrolops.DoltClone(ctx, db, remoteURL, dbName); err != nil {
+	if err := versioncontrolops.DoltClone(ctx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s\n", remoteURL)
@@ -883,7 +883,7 @@ func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg
 			cfg.GetDoltServerHost(), port, err)
 	}
 
-	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName); err != nil {
+	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s:%d)\n",

@@ -41,11 +41,30 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
-	if _, err := r.runner.ExecContext(ctx,
+	result, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)", table),
 		issueID, label,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: rows affected: %w", issueID, label, err)
+	}
+	if rows == 0 {
+		issueTable := "issues"
+		if opts.UseWispsTable {
+			issueTable = "wisps"
+		}
+		var count int
+		//nolint:gosec // G201: issueTable is one of two hardcoded constants.
+		if err := r.runner.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", issueTable), issueID).Scan(&count); err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: verify issue: %w", issueID, label, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: issue does not exist", issueID, label)
+		}
 	}
 	return r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
