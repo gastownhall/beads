@@ -2816,6 +2816,12 @@ func TestValidateStrictLaunchOptionsResolvesSymlinkedWorkspace(t *testing.T) {
 }
 
 func TestStartWithOptionsRecoverOnlyAbsentChildNeverSpawns(t *testing.T) {
+	// "No child found" is only distinguishable from "cannot look" where the
+	// platform can enumerate launch candidates. Elsewhere strictLaunchCandidates
+	// refuses, and recover-only correctly reports ErrFreshStartRequired instead.
+	if !SupportsStrictLaunchRecovery() {
+		t.Skip("platform cannot prove strict launch recovery")
+	}
 	beadsDir := canonicalTempDir(t)
 	id := "0123456789abcdef0123456789abcdef"
 	doltBin, err := exec.LookPath("dolt")
