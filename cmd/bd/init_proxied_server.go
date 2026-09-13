@@ -386,6 +386,20 @@ func recordProxiedInitTrackingState(ctx context.Context, provider uow.UnitOfWork
 	})
 }
 
+// proxiedInitDoltRemoteURL is the form of the sync remote proxied init stores
+// and decides the ref against. A URL dolt would not read as git-backed as
+// written (a forge URL without .git) is routed to its git+ form as direct init
+// routes it (doltRemoteURL). A URL dolt already reads as git-backed, an
+// scp-style git@host:path.git among them, is stored as written: dolt's own
+// normalization keeps the relative path of the scp form, which bd's rewrite
+// to git+ssh:// does not. Everything else is returned byte-identical.
+func proxiedInitDoltRemoteURL(remoteURL string) string {
+	if isGitBackedDoltRemoteURL(remoteURL) {
+		return remoteURL
+	}
+	return doltRemoteURL(remoteURL)
+}
+
 // configureProxiedInitDoltRemote adds the sync remote, skipping a name that is
 // already taken.
 func configureProxiedInitDoltRemote(ctx context.Context, provider uow.UnitOfWorkProvider, remoteURL string) error {
@@ -399,7 +413,8 @@ func configureProxiedInitDoltRemote(ctx context.Context, provider uow.UnitOfWork
 				return "", nil
 			}
 		}
-		if err := uw.DoltRemoteUseCase().CreateRemote(ctx, "origin", remoteURL); err != nil {
+		routed := proxiedInitDoltRemoteURL(remoteURL)
+		if err := uw.DoltRemoteUseCase().CreateRemoteWithRef(ctx, "origin", routed, syncRemoteRefForURL(routed)); err != nil {
 			return "", fmt.Errorf("create remote origin: %w", err)
 		}
 		return "", nil

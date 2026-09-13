@@ -143,6 +143,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
 | `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing when a merge deletes most issues |
+| `sync.remote-ref` | `--ref` (`bd dolt remote add`, `bd bootstrap`) | — | `refs/dolt/data` | Full git ref holding the Dolt data of a git-backed `sync.remote`; written by `bd dolt remote add origin --ref`, read by `bd bootstrap` and `bd init` |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
 | `ai.model` | — | `BD_AI_MODEL` | `claude-haiku-4-5-20251001` | Default AI model |
 | `agents.file` | — | — | `AGENTS.md` | Agents instruction filename; see routing note below |

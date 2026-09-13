@@ -463,7 +463,10 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 	if err != nil || originURL == "" {
 		return false, nil
 	}
-	remoteURL := normalizeRemoteURL(originURL)
+	// The origin is spelled the way bd init and bd bootstrap spell it, so the
+	// one shape dolt does not read as a git repository (a local path without
+	// .git) carries the key's ref here too.
+	remoteURL := gitOriginDoltURL(originURL, resolveSyncRemoteRef())
 
 	if proceed, err := applyAdoptionConsent(remoteURL, policy, optIn); err != nil || !proceed {
 		return false, err
@@ -474,8 +477,23 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 		return false, fmt.Errorf("no active beads workspace")
 	}
 
-	if err := st.AddRemote(ctx, "origin", remoteURL); err != nil {
+	// The adopted origin goes on the configured git data ref, the same one
+	// bd init and bd bootstrap use, so a CI push cannot land on
+	// refs/dolt/data while the committed key names another ref.
+	ref, applies := refForAdoptedRemote(remoteURL, resolveSyncRemoteRefFromDir(beadsDir))
+	if canceled, err := guardGitDataRefTarget(remoteURL, ref, policy.AssumeYes, confirmGitDataRefTarget); err != nil {
 		return false, err
+	} else if canceled {
+		return false, nil
+	}
+	if err := st.AddRemoteWithRef(ctx, "origin", remoteURL, ref); err != nil {
+		return false, err
+	}
+	switch {
+	case ref != "":
+		fmt.Fprintf(os.Stderr, "Dolt remote origin uses the git data ref %s (%s).\n", ref, syncRemoteRefKey)
+	case !applies:
+		fmt.Fprintf(os.Stderr, "Warning: %s is set but %s is not a git-backed remote; origin is on the default ref.\n", syncRemoteRefKey, remoteURL)
 	}
 
 	if err := config.SetYamlConfigInDir(beadsDir, "sync.remote", remoteURL); err != nil {
@@ -1553,8 +1571,13 @@ func purgeDroppedDatabases(ctx context.Context, conn versioncontrolops.DBConn) e
 type doltRemoteAddStore interface {
 	ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error)
 	AddRemote(ctx context.Context, name, url string) error
+	AddRemoteWithRef(ctx context.Context, name, url, ref string) error
 	RemoveRemote(ctx context.Context, name string) error
 }
+
+// remoteAddStdinIsTerminal is stdinIsTerminal behind a variable, so tests can
+// exercise the non-interactive refusal of a ref change.
+var remoteAddStdinIsTerminal = stdinIsTerminal
 
 type doltRemoteAddResult struct {
 	Canceled bool
@@ -1578,46 +1601,115 @@ func confirmDoltRemoteOverwrite(surface, name, existingURL, newURL string) bool 
 	return response == "y" || response == "yes"
 }
 
-func findDoltRemoteURL(remotes []storage.RemoteInfo, name string) string {
+func findDoltRemote(remotes []storage.RemoteInfo, name string) (storage.RemoteInfo, bool) {
 	for _, remote := range remotes {
 		if remote.Name == name {
-			return remote.URL
+			return remote, true
 		}
 	}
-	return ""
+	return storage.RemoteInfo{}, false
+}
+
+// refForAdoptedRemote returns the ref an adopted origin is added on: the
+// configured one when the derived URL is git-backed, else none. The second
+// result is false when a configured ref had to be dropped, so the caller
+// can say so.
+func refForAdoptedRemote(remoteURL, configured string) (string, bool) {
+	if configured == "" {
+		return "", true
+	}
+	if isGitBackedDoltRemoteURL(remoteURL) {
+		return configured, true
+	}
+	return "", false
+}
+
+// describeDoltRemote renders a remote for a prompt as its URL and the git
+// data ref it lives on.
+func describeDoltRemote(url, ref string) string {
+	return url + " (ref " + storage.EffectiveGitDataRef(ref) + ")"
 }
 
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
+	return ensureDoltRemoteWithRef(ctx, st, name, url, "", false, confirm)
+}
+
+// ensureDoltRemoteWithRef makes the named remote point at url on the git data
+// ref ref ("" = refs/dolt/data). A remote already on that URL and ref is left
+// alone. A different URL is replaced after the usual confirmation. A different
+// ref moves where the remote's data is pushed, so it is replaced only after an
+// explicit answer: yes, or a confirmed prompt; without a terminal and without
+// yes it is refused, naming both refs.
+func ensureDoltRemoteWithRef(ctx context.Context, st doltRemoteAddStore, name, url, ref string, yes bool, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
+	return ensureDoltRemoteGuarded(ctx, st, name, url, ref, yes, confirm, nil)
+}
+
+// ensureDoltRemoteGuarded is ensureDoltRemoteWithRef with a guard that runs
+// only when a remote is about to be created or replaced, never for a re-add
+// that changes nothing (see guardGitDataRefTarget).
+func ensureDoltRemoteGuarded(ctx context.Context, st doltRemoteAddStore, name, url, ref string, yes bool, confirm doltRemoteOverwriteConfirmer, guard gitDataRefTargetGuard) (doltRemoteAddResult, error) {
+	runGuard := func() (doltRemoteAddResult, bool, error) {
+		if guard == nil {
+			return doltRemoteAddResult{}, false, nil
+		}
+		canceled, err := guard()
+		if err != nil {
+			return doltRemoteAddResult{}, true, err
+		}
+		if canceled {
+			return doltRemoteAddResult{Canceled: true}, true, nil
+		}
+		return doltRemoteAddResult{}, false, nil
+	}
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
 		return doltRemoteAddResult{}, fmt.Errorf("list existing remotes: %w", err)
 	}
 
-	existingURL := findDoltRemoteURL(remotes, name)
+	existing, found := findDoltRemote(remotes, name)
 	existingFromDiskOnly := false
-	if existingURL == "" {
+	if !found {
 		// An empty listing is not proof the remote is absent: a freshly
 		// (auto-)started sql-server can report empty dolt_remotes while the
 		// remote is persisted on disk (GH#2118, wy-6k7f7). Recover the
 		// persisted URL so the add gets the same match/confirm treatment it
 		// would after the window, instead of silently writing over an
 		// invisible remote.
-		existingURL = findDoltRemoteURL(persistedRemoteInfosFor(st), name)
-		existingFromDiskOnly = existingURL != ""
+		existing, found = findDoltRemote(persistedRemoteInfosFor(st), name)
+		existingFromDiskOnly = found
 	}
-	if existingURL == "" {
-		if err := st.AddRemote(ctx, name, url); err != nil {
+	if !found {
+		if res, stop, err := runGuard(); stop {
+			return res, err
+		}
+		if err := st.AddRemoteWithRef(ctx, name, url, ref); err != nil {
 			return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)
 		}
 		return doltRemoteAddResult{}, nil
 	}
 
-	if doltutil.RemoteURLsMatch(existingURL, url) {
+	refsMatch := storage.RemoteRefsMatch(existing.Ref, ref)
+	if doltutil.RemoteURLsMatch(existing.URL, url) && refsMatch {
 		return doltRemoteAddResult{}, nil
 	}
 
-	if !confirm("SQL server", name, existingURL, url) {
-		return doltRemoteAddResult{Canceled: true}, nil
+	if !yes {
+		if refsMatch {
+			if !confirm("SQL server", name, existing.URL, url) {
+				return doltRemoteAddResult{Canceled: true}, nil
+			}
+		} else {
+			if !remoteAddStdinIsTerminal() {
+				return doltRemoteAddResult{}, fmt.Errorf("remote %q is on %s; re-adding it on %s replaces the remote and moves where its data is pushed. Re-run with --yes to confirm",
+					name, storage.EffectiveGitDataRef(existing.Ref), storage.EffectiveGitDataRef(ref))
+			}
+			if !confirm("SQL server", name, describeDoltRemote(existing.URL, existing.Ref), describeDoltRemote(url, ref)) {
+				return doltRemoteAddResult{Canceled: true}, nil
+			}
+		}
+	}
+	if res, stop, err := runGuard(); stop {
+		return res, err
 	}
 	if err := st.RemoveRemote(ctx, name); err != nil {
 		// A remote known only from disk may not be removable through a
@@ -1627,7 +1719,7 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 			return doltRemoteAddResult{}, fmt.Errorf("remove existing remote %s: %w", name, err)
 		}
 	}
-	if err := st.AddRemote(ctx, name, url); err != nil {
+	if err := st.AddRemoteWithRef(ctx, name, url, ref); err != nil {
 		return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)
 	}
 	return doltRemoteAddResult{}, nil
@@ -1650,7 +1742,37 @@ var doltRemoteAddCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Add a Dolt remote",
-	Args:          cobra.ExactArgs(2),
+	Long: `Add a Dolt remote for push/pull replication.
+
+A git-backed remote (a git+https://, git+ssh://, git+file://, or git+http://
+URL, or a URL ending in .git that dolt rewrites to one of those: https://,
+http://, ssh://, file://, user@host:path, host/path, or a local path) keeps
+the issue data on one git ref of that repository, refs/dolt/data by default.
+--ref names another full ref for it: a branch such as refs/heads/beads-data
+for a host that only accepts pushes under refs/heads/, or a ref of your own
+such as refs/dolt/units/team-a when one repository holds several Dolt
+databases. Only a full ref starting with refs/ is accepted. The first push
+replaces the ref's tip with Dolt storage, so a branch or tag that already
+exists is taken only after confirmation (--yes without a terminal), and the
+repository's default branch is refused.
+
+For the remote named origin the ref is also written to .beads/config.yaml as
+sync.remote-ref, next to sync.remote, and read back when origin is re-added
+without --ref; bd bootstrap and bd init read it too. --ref refs/dolt/data
+clears the key. Re-adding a remote on a different ref replaces the remote
+after confirmation (--yes skips the prompt; without a terminal it is
+required).
+
+Examples:
+  bd dolt remote add origin git+ssh://git@github.com/org/repo.git
+  bd dolt remote add origin git+https://github.com/org/repo.git --ref refs/heads/beads-data
+  bd dolt remote add origin git+file:///srv/ledgers.git --ref refs/dolt/units/team-a`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if err := cobra.ExactArgs(2)(cmd, args); err != nil {
+			return err
+		}
+		return validateRefFlagArg(cmd)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			fmt.Fprintln(os.Stderr, "Error: cannot add Dolt remote: remote sync is disabled (dolt.local-only=true).")
@@ -1667,14 +1789,37 @@ var doltRemoteAddCmd = &cobra.Command{
 			}
 			fmt.Fprintf(os.Stderr, "Warning: %q matches the git origin — proceeding because --allow-git-origin is set.\n", args[1])
 		}
+		name, url := args[0], args[1]
+		yes, _ := cmd.Flags().GetBool("yes")
+		ref := ""
+		refSource := "--ref"
+		if cmd.Flags().Changed("ref") {
+			refFlag, _ := cmd.Flags().GetString("ref")
+			validated, err := validateGitDataRef(refFlag)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			ref = validated
+		} else if name == "origin" {
+			ref = resolveSyncRemoteRef()
+			refSource = syncRemoteRefKey
+		}
+		if ref != "" && !isGitBackedDoltRemoteURL(url) {
+			msg := fmt.Sprintf("%s %s applies to git-backed remotes only (%s); %q is not one", refSource, ref, gitBackedRemoteShapes, url)
+			if refSource == syncRemoteRefKey {
+				msg += ". Re-run with --ref refs/dolt/data to put origin on the default ref and clear the key"
+			}
+			return HandleError("%s", msg)
+		}
+
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			return HandleError("no store available")
 		}
-		name, url := args[0], args[1]
 
-		result, err := ensureDoltRemote(ctx, st, name, url, confirmDoltRemoteOverwrite)
+		guard := func() (bool, error) { return guardGitDataRefTarget(url, ref, yes, confirmGitDataRefTarget) }
+		result, err := ensureDoltRemoteGuarded(ctx, st, name, url, ref, yes, confirmDoltRemoteOverwrite, guard)
 		if err != nil {
 			if jsonOutput {
 				_ = outputJSONError(err, "remote_add_failed")
@@ -1692,18 +1837,35 @@ var doltRemoteAddCmd = &cobra.Command{
 			if err := config.SetYamlConfig("sync.remote", url); err != nil {
 				return HandleError("failed to persist sync.remote to config.yaml: %v", err)
 			}
+			// The ref rides beside the URL so other clones bootstrap from the
+			// same ref; the default ref means no key.
+			if ref != "" {
+				if err := config.SetYamlConfig(syncRemoteRefKey, ref); err != nil {
+					return HandleError("failed to persist %s to config.yaml: %v", syncRemoteRefKey, err)
+				}
+			} else if config.GetString(syncRemoteRefKey) != "" {
+				if err := config.SetYamlConfig(syncRemoteRefKey, ""); err != nil {
+					return HandleError("failed to clear %s in config.yaml: %v", syncRemoteRefKey, err)
+				}
+			}
 			if isGitRepo() {
 				commitBeadsConfig("bd: update sync.remote")
 			}
 		}
 
 		if jsonOutput {
-			if err := outputJSON(map[string]interface{}{
+			out := map[string]interface{}{
 				"name": name,
 				"url":  url,
-			}); err != nil {
+			}
+			if ref != "" {
+				out["ref"] = ref
+			}
+			if err := outputJSON(out); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			}
+		} else if ref != "" {
+			fmt.Printf("Added remote %q → %s (ref %s)\n", name, url, ref)
 		} else {
 			fmt.Printf("Added remote %q → %s\n", name, url)
 		}
@@ -1746,6 +1908,10 @@ var doltRemoteListCmd = &cobra.Command{
 		}
 
 		for _, r := range remotes {
+			if r.Ref != "" {
+				fmt.Printf("%-20s %s (ref %s)\n", r.Name, r.URL, r.Ref)
+				continue
+			}
 			fmt.Printf("%-20s %s\n", r.Name, r.URL)
 		}
 		return nil
@@ -1755,6 +1921,7 @@ var doltRemoteListCmd = &cobra.Command{
 type doltRemoteListJSON struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`
+	Ref    string `json:"ref,omitempty"`
 	SQLURL string `json:"sql_url,omitempty"`
 	CLIURL string `json:"cli_url,omitempty"`
 	Status string `json:"status"`
@@ -1766,6 +1933,7 @@ func formatDoltRemoteListJSON(remotes []storage.RemoteInfo) []doltRemoteListJSON
 		out = append(out, doltRemoteListJSON{
 			Name:   r.Name,
 			URL:    r.URL,
+			Ref:    r.Ref,
 			SQLURL: r.URL,
 			Status: "ok",
 		})
@@ -1802,14 +1970,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 		}
 
 		if name == "origin" {
-			if current := config.GetYamlConfig("sync.remote"); current != "" {
-				if err := config.UnsetYamlConfig("sync.remote"); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to clear sync.remote from config.yaml: %v\n", err)
-				}
-				if isGitRepo() {
-					commitBeadsConfig("bd: clear sync.remote")
-				}
-			}
+			clearOriginSyncConfig()
 		}
 
 		if jsonOutput {
@@ -1856,6 +2017,8 @@ func init() {
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
 	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
+	doltRemoteAddCmd.Flags().String("ref", "", "Full git ref (refs/...) that holds the Dolt data on a git-backed remote; default refs/dolt/data. Saved as sync.remote-ref for origin")
+	doltRemoteAddCmd.Flags().BoolP("yes", "y", false, "Replace an existing remote without prompting (required without a terminal when the ref changes)")
 	doltRemoteResetDataCmd.Flags().BoolVarP(&doltRemoteResetDataYes, "yes", "y", false, "Skip the confirmation prompt (required in non-interactive use)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
 	doltRemoteCmd.AddCommand(doltRemoteListCmd)
