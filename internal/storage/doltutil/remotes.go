@@ -85,7 +85,8 @@ func IsGitProtocolURL(url string) bool {
 // distinguishable (bd-6dnrw.33). A missing .dolt directory or repo_state.json
 // means "not a dolt repository here" and returns (nil, nil); an unreadable or
 // unparseable file returns an error so callers can tell "definitely none"
-// from "could not tell". Results are sorted by name.
+// from "could not tell". Results are sorted by name. Ref is the remote's
+// git_ref parameter when recorded, else empty.
 func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	path := filepath.Join(dbPath, ".dolt", "repo_state.json")
 	data, err := os.ReadFile(path) // #nosec G304 -- repo-local dolt state file
@@ -97,7 +98,8 @@ func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	}
 	var state struct {
 		Remotes map[string]struct {
-			URL string `json:"url"`
+			URL    string         `json:"url"`
+			Params map[string]any `json:"params"`
 		} `json:"remotes"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -105,15 +107,28 @@ func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	}
 	remotes := make([]storage.RemoteInfo, 0, len(state.Remotes))
 	for name, r := range state.Remotes {
-		remotes = append(remotes, storage.RemoteInfo{Name: name, URL: r.URL})
+		remotes = append(remotes, storage.RemoteInfo{
+			Name: name,
+			URL:  r.URL,
+			Ref:  gitRefParamValue(r.Params),
+		})
 	}
 	sort.Slice(remotes, func(i, j int) bool { return remotes[i].Name < remotes[j].Name })
 	return remotes, nil
 }
 
+// gitRefParamValue returns the git_ref remote parameter, or "" when absent
+// or not a string.
+func gitRefParamValue(params map[string]any) string {
+	v, _ := params[storage.GitRefParam].(string)
+	return strings.TrimSpace(v)
+}
+
 // ListCLIRemotes parses `dolt remote -v` output from the given database
 // directory. This is a read-only guard for deciding whether CLI push/pull/fetch
 // can safely run from that directory; remote mutation still goes through SQL.
+// Ref is not populated here (the params column is not parsed from the
+// listing); callers that need it use FindCLIRemoteRef.
 func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), listCLIRemotesTimeout(dbPath))
 	defer cancel()
@@ -151,17 +166,52 @@ func RemoteURLsMatch(got, want string) bool {
 	return false
 }
 
+// ValidateGitDataRefArg checks a git data ref before it becomes a dolt
+// command-line argument: no control characters or whitespace, and no leading
+// dash, so the value cannot be read as another option. An empty ref is valid
+// and means Dolt's default.
+func ValidateGitDataRefArg(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("git data ref %q must not start with a dash", ref)
+	}
+	for _, r := range ref {
+		if r < 0x20 || r == 0x7f || r == ' ' {
+			return fmt.Errorf("git data ref %q contains whitespace or a control character", ref)
+		}
+	}
+	return nil
+}
+
 // AddCLIRemote adds a remote at the filesystem level via dolt CLI.
 // Remote mutation should normally go through SQL; this is reserved for the
 // local CLI mirror required by subprocess push/pull/fetch routing.
 func AddCLIRemote(dbPath, name, url string) error {
+	return AddCLIRemoteWithRef(dbPath, name, url, "")
+}
+
+// AddCLIRemoteWithRef is AddCLIRemote for a git-backed remote whose Dolt data
+// lives on the git ref ref (`dolt remote add --ref`). An empty ref is
+// AddCLIRemote.
+func AddCLIRemoteWithRef(dbPath, name, url, ref string) error {
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
 	}
 	if err := remotecache.ValidateRemoteURL(url); err != nil {
 		return fmt.Errorf("invalid remote URL: %w", err)
 	}
-	cmd := exec.Command("dolt", "remote", "add", name, url) // #nosec G204 -- validated argv
+	ref = strings.TrimSpace(ref)
+	if err := ValidateGitDataRefArg(ref); err != nil {
+		return fmt.Errorf("invalid git data ref: %w", err)
+	}
+	args := []string{"remote", "add"}
+	if ref != "" {
+		args = append(args, "--ref", ref)
+	}
+	args = append(args, name, url)
+	cmd := exec.Command("dolt", args...) // #nosec G204 -- validated argv
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -199,10 +249,59 @@ func FindCLIRemote(dbPath, name string) string {
 	return ""
 }
 
-// EnsureCLIRemote makes the local CLI remote match the SQL-visible remote URL.
-// It is intentionally idempotent and only mutates the CLI surface when the
-// remote is absent or points somewhere else.
-func EnsureCLIRemote(dbPath, name, url string) error {
+// cliRefProbePrefix names the throwaway remote probeCLIRemoteRef adds.
+const cliRefProbePrefix = "bd-ref-probe-"
+
+// probeCLIRemoteRef adds and removes a throwaway remote with url and ref
+// before EnsureCLIRemote removes the real one: a dolt CLI proxied to a
+// running sql-server refuses remote parameters, and that refusal must come
+// before anything is deleted. Only a leftover with exactly this process's
+// probe name is cleaned up first.
+func probeCLIRemoteRef(dbPath, url, ref string) error {
+	if strings.TrimSpace(ref) == "" {
+		return nil
+	}
+	probe := fmt.Sprintf("%s%d", cliRefProbePrefix, os.Getpid())
+	if remotes, err := PersistedRemotes(dbPath); err == nil {
+		for _, r := range remotes {
+			if r.Name == probe {
+				_ = RemoveCLIRemote(dbPath, r.Name)
+			}
+		}
+	}
+	if err := AddCLIRemoteWithRef(dbPath, probe, url, ref); err != nil {
+		return fmt.Errorf("cannot record git data ref %s on the CLI mirror in %s (a dolt sql-server serving this directory refuses remote parameters over the CLI): %w", ref, dbPath, err)
+	}
+	if err := RemoveCLIRemote(dbPath, probe); err != nil {
+		return fmt.Errorf("remove ref probe remote %s in %s: %w", probe, dbPath, err)
+	}
+	return nil
+}
+
+// FindCLIRemoteRef returns the git data ref recorded for the named remote in
+// dbPath's .dolt/repo_state.json, verbatim (compare with
+// storage.RemoteRefsMatch), or "" when the remote is absent or carries no
+// ref. A state file that cannot be read or parsed is an error, never the
+// default ref: treating it as the default would feed a remove-and-re-add of
+// a ref remote onto refs/dolt/data.
+func FindCLIRemoteRef(dbPath, name string) (string, error) {
+	remotes, err := PersistedRemotes(dbPath)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range remotes {
+		if r.Name == name {
+			return r.Ref, nil
+		}
+	}
+	return "", nil
+}
+
+// EnsureCLIRemote makes the local CLI remote match the SQL-visible remote URL
+// and git data ref (an empty ref is Dolt's default). It is intentionally
+// idempotent and only mutates the CLI surface when the remote is absent,
+// points somewhere else, or sits on a different ref.
+func EnsureCLIRemote(dbPath, name, url, ref string) error {
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
 	}
@@ -215,19 +314,26 @@ func EnsureCLIRemote(dbPath, name, url string) error {
 	defer lock.Unlock()
 
 	current := FindCLIRemote(dbPath, name)
-	if RemoteURLsMatch(current, url) {
+	currentRef, err := FindCLIRemoteRef(dbPath, name)
+	if err != nil {
+		return fmt.Errorf("read the recorded ref of CLI remote %q in %s: %w", name, dbPath, err)
+	}
+	if RemoteURLsMatch(current, url) && storage.RemoteRefsMatch(currentRef, ref) {
 		return nil
 	}
 	if current != "" {
+		if err := probeCLIRemoteRef(dbPath, url, ref); err != nil {
+			return err
+		}
 		if err := RemoveCLIRemote(dbPath, name); err != nil {
 			return err
 		}
 	}
-	if err := AddCLIRemote(dbPath, name, url); err != nil {
+	if err := AddCLIRemoteWithRef(dbPath, name, url, ref); err != nil {
 		if current == "" {
 			return err
 		}
-		if restoreErr := AddCLIRemote(dbPath, name, current); restoreErr != nil {
+		if restoreErr := AddCLIRemoteWithRef(dbPath, name, current, currentRef); restoreErr != nil {
 			return fmt.Errorf("add replacement CLI remote failed: %w; additionally failed to restore previous URL %q: %v", err, current, restoreErr)
 		}
 		return fmt.Errorf("add replacement CLI remote failed; previous URL %q restored: %w", current, err)
