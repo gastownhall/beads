@@ -183,7 +183,9 @@ func removeBeadsProjectGitignoreSection(repoPath string) (bool, error) {
 		managed[p] = true
 	}
 
-	lines := strings.Split(string(content), "\n")
+	// Keep each line's terminator so removing an unterminated managed tail
+	// cannot remove the newline from the last retained user line.
+	lines := strings.SplitAfter(string(content), "\n")
 	out := make([]string, 0, len(lines))
 	changed := false
 	for i := 0; i < len(lines); i++ {
@@ -207,7 +209,7 @@ func removeBeadsProjectGitignoreSection(repoPath string) (bool, error) {
 		return false, nil
 	}
 
-	newContent := strings.Join(out, "\n")
+	newContent := strings.Join(out, "")
 	if strings.TrimSpace(newContent) == "" {
 		// beads was the only reason this .gitignore existed — remove it for true stealth.
 		if err := os.Remove(gitignorePath); err != nil {
