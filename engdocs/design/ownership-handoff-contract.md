@@ -85,16 +85,23 @@ This package enforces only the Beads side of the protocol. The peer lives in
 another codebase, so the following obligations are stated here and pinned by
 in-tree fakes rather than by the real provider:
 
-- `StopLegacy` must treat an identity-matching process that is already gone as
-  success — `result=stopped` with `mutates=true` — not as a refusal. A crash
-  between a successful stop and its `old_owner_stopped` checkpoint leaves the
-  journal at `target_configured` while the owner is in fact stopped; the retry
-  re-invokes the stop hook. A provider that refuses that retry (for example
-  with `process_missing`) wedges the handoff mid-migration with the server
-  down and no mutation recorded — the untruthful `mutates=false` the journaled
-  mutation flag exists to prevent. Pinned from both directions by
-  `TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped` and
-  `TestGCProviderResumeWedgesWhenStopRefusesMissingOwner`.
+- `StopLegacy` must report an identity-matching process that is already gone
+  *as that*, however it spells it. A crash between a successful stop and its
+  `old_owner_stopped` checkpoint leaves the journal at `target_configured`
+  while the owner is in fact stopped, and the retry re-invokes the stop hook
+  against nothing. Three answers settle it, and the phase machine treats all
+  three as the stop having happened: `result=stopped` with `mutates=true`,
+  `result=stopped` with `mutates=false`, and a `process_missing` refusal. The
+  third is what the Gas City responder actually returns — it will not call a
+  process it never signaled "stopped" — so requiring the first would wedge
+  every interrupted handoff against the real peer, with the legacy server down
+  and no way forward. Absence is what the stop is *for*; a process that is
+  present but not provably the legacy owner is a different answer
+  (`process_unowned`, `identity_changed`, `port_conflict`) and stays a refusal.
+  Pinned by `TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped`,
+  `TestGCProviderResumeConvergesWhenStopRefusesMissingOwner`,
+  `TestGCProviderResumeConvergesWhenStopReportsNonMutatingStop`, and
+  `TestGCProviderResumeStillRefusesStopOfAnotherIdentity`.
 - The shipped GC provider is unix-only. It requires `GC_BIN` to be an absolute,
   canonical, executable regular file, and Go synthesises fixed modes with no
   execute bit on Windows, so `GC_BIN` there is always `provider_unavailable`.

@@ -878,6 +878,47 @@ func TestStopRetryAfterUncheckpointedStopSucceeds(t *testing.T) {
 	}
 }
 
+// TestStopResumeSettlesWhenProviderReportsAbsentLegacyOwner is the resume the
+// Gas City responder actually produces. It cannot call a process it never
+// signaled "stopped", so it refuses — but it refuses *because the owner is
+// gone*, which is the state the stop exists to reach. The refusal therefore
+// settles the reserved stop instead of wedging the journal at
+// target_configured with the legacy server already down and no way forward.
+func TestStopResumeSettlesWhenProviderReportsAbsentLegacyOwner(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	killedMidStop := Journal{Request: r, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+		LegacyStopInProgress: true, Phase: PhaseTargetConfigured, Owner: OwnerLegacyGC}
+	b, err := json.Marshal(killedMidStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stops, rollbacks := 0, 0
+	h := Hooks{
+		StopLegacy: func(context.Context, Request, Snapshot) error {
+			stops++
+			return withAbsentLegacyOwner(CodedError{Code: "process_missing", Err: errors.New("GC handoff stop refused")}, false)
+		},
+		Verify: passingVerify,
+		Commit: func(context.Context, Request, Snapshot) error { return nil },
+		Rollback: func(context.Context, Request, Snapshot, Phase, func(Phase, Snapshot) error) (Snapshot, error) {
+			rollbacks++
+			return Snapshot{}, nil
+		},
+	}
+	got, execErr := Execute(context.Background(), r, path, h, false)
+	if execErr != nil || got.Phase != PhaseCommitted || stops != 1 || rollbacks != 0 {
+		t.Fatalf("absent-owner resume result=%+v err=%v stops=%d rollbacks=%d", got, execErr, stops, rollbacks)
+	}
+	final, loadErr := Load(path)
+	if loadErr != nil || final.LegacyStopInProgress || !final.MutationOccurred {
+		t.Fatalf("journal=%+v err=%v, want the reservation retired and the mutation recorded", final, loadErr)
+	}
+}
+
 // TestStopResumeKeepsInheritedReservationOnReportedNonMutation covers the other
 // exit from that crash window: the retry's stop refuses and explicitly reports
 // mutates=false. A provider speaks only for its own call, so a fresh

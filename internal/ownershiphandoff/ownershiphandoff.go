@@ -243,19 +243,51 @@ type mutationReporter interface {
 	HandoffMutationOccurred() bool
 }
 
-type mutationError struct {
-	err     error
-	mutates bool
+// absentOwnerReporter is how a provider says that the refusal it is returning
+// from StopLegacy is the legacy owner already being gone, rather than a reason
+// to leave the scope alone. Only the provider can tell the two apart: it is
+// the component that identified the process in the first place.
+type absentOwnerReporter interface {
+	HandoffLegacyOwnerAbsent() bool
 }
 
-func (e mutationError) Error() string { return e.err.Error() }
+type stopReportError struct {
+	err     error
+	mutates bool
+	absent  bool
+}
 
-func (e mutationError) Unwrap() error { return e.err }
+func (e stopReportError) Error() string { return e.err.Error() }
 
-func (e mutationError) HandoffMutationOccurred() bool { return e.mutates }
+func (e stopReportError) Unwrap() error { return e.err }
+
+func (e stopReportError) HandoffMutationOccurred() bool { return e.mutates }
+
+func (e stopReportError) HandoffLegacyOwnerAbsent() bool { return e.absent }
 
 func withReportedMutation(err error, mutates bool) error {
-	return mutationError{err: err, mutates: mutates}
+	return stopReportError{err: err, mutates: mutates}
+}
+
+// withAbsentLegacyOwner marks a stop refusal whose reason is that the
+// identity-matching legacy owner is already gone.
+func withAbsentLegacyOwner(err error, mutates bool) error {
+	return stopReportError{err: err, mutates: mutates, absent: true}
+}
+
+// LegacyOwnerAbsent marks a StopLegacy refusal whose reason is that the
+// identity-matching legacy owner is already gone. It is how a provider outside
+// this package states the difference between "I would not stop it" and "there
+// was nothing left to stop"; Execute settles a reserved stop on the second.
+func LegacyOwnerAbsent(err error) error { return withAbsentLegacyOwner(err, false) }
+
+// ReportsLegacyOwnerAbsent reports whether err carries a provider's statement
+// that the legacy owner it was asked to stop is already absent. A hook that
+// wraps another provider uses it to re-prove that absence before passing the
+// report on; the decision to treat it as a completed stop stays in Execute.
+func ReportsLegacyOwnerAbsent(err error) bool {
+	var reporter absentOwnerReporter
+	return errors.As(err, &reporter) && reporter.HandoffLegacyOwnerAbsent()
 }
 
 // Error implements error.
@@ -1062,6 +1094,18 @@ func (x *handoffRun) stepStopLegacy(ctx context.Context) *stepOutcome {
 		}
 	}
 	if err := x.hooks.StopLegacy(ctx, x.j.Request, x.j.Snapshot); err != nil {
+		// The provider refused because the legacy owner it identified is
+		// already gone. Absence is the whole point of the stop, and the stop is
+		// durably reserved by the time the hook can report it, so this is the
+		// stop having happened rather than a reason to stay pre-stop: the
+		// predecessor that reserved it may have been killed after its signal
+		// landed but before its checkpoint, and the GC responder cannot
+		// truthfully call a process it never signaled "stopped". A provider
+		// that finds a *different* process on the identity refuses with its own
+		// code instead, and that refusal is still refused here.
+		if ReportsLegacyOwnerAbsent(err) {
+			return x.recordLegacyStopped()
+		}
 		// A provider that knows what its failed stop actually did says so, and
 		// that report supersedes the reservation this attempt took, which exists
 		// only to be conservative when nothing reported. A reported mutation is
@@ -1092,6 +1136,12 @@ func (x *handoffRun) stepStopLegacy(ctx context.Context) *stepOutcome {
 		}
 		return x.fail("owner_stop_failed", err)
 	}
+	return x.recordLegacyStopped()
+}
+
+// recordLegacyStopped retires the stop reservation and advances past a legacy
+// owner that is known to be gone.
+func (x *handoffRun) recordLegacyStopped() *stepOutcome {
 	x.j.LegacyStopInProgress = false
 	x.j.MutationOccurred = true
 	return x.advance(PhaseOldOwnerStopped)

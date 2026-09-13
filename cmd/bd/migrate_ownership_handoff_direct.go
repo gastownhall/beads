@@ -110,19 +110,21 @@ func (p directHandoffProvider) OwnershipHandoffHooks(ctx context.Context, reques
 		},
 		StopLegacy: func(stopCtx context.Context, r ownershiphandoff.Request, s ownershiphandoff.Snapshot) error {
 			err := legacy.StopLegacy(stopCtx, r, s)
-			if err == nil || !isHandoffProcessMissing(err) {
+			if err == nil || !ownershiphandoff.ReportsLegacyOwnerAbsent(err) {
 				return err
 			}
-			// A timed-out handoff-stop can have delivered its signal after the
-			// caller's deadline but before GC could write the response. A retry
-			// then sees process_missing. Re-prove that exact legacy absence using
-			// the GC hook before advancing; this never adopts a listener and lets
-			// the normal direct-target verification own the next transition.
-			_, verifyErr := legacy.Verify(stopCtx, r, s, nil)
-			if verifyErr != nil {
-				return fmt.Errorf("verify legacy absence after process_missing stop: %w", verifyErr)
+			// GC refused because the legacy owner it identified is already gone
+			// — a timed-out handoff-stop, for instance, can deliver its signal
+			// after the caller's deadline but before GC writes its response, so
+			// the retry finds nothing to stop. Re-prove that exact absence with
+			// a fresh identity-checked inspect, then hand the report back
+			// unchanged: whether an absent owner settles the stop is the phase
+			// machine's decision, not this hook's, and this hook never adopts a
+			// listener on the strength of it.
+			if _, verifyErr := legacy.Verify(stopCtx, r, s, nil); verifyErr != nil {
+				return fmt.Errorf("verify legacy absence after a refused stop: %w", verifyErr)
 			}
-			return nil
+			return err
 		},
 		Verify: func(verifyCtx context.Context, r ownershiphandoff.Request, s ownershiphandoff.Snapshot, checkpoint func(ownershiphandoff.Snapshot) error) (ownershiphandoff.Snapshot, error) {
 			identity, err := handoffGCIdentity(s.Metadata)

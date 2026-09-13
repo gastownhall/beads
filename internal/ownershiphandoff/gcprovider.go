@@ -148,14 +148,35 @@ func (p *GCProvider) OwnershipHandoffHooks(ctx context.Context, r Request) (Hook
 			if stopped.Operation != "handoff-stop" {
 				return CodedError{Code: "protocol_version", Err: errors.New("GC handoff stop returned an unexpected operation")}
 			}
-			if stopped.Result != "stopped" || !stopped.Mutates {
-				return withReportedMutation(responseError(stopped, "GC handoff stop refused"), stopped.Mutates)
+			if stopped.Result != "stopped" {
+				refusal := responseError(stopped, "GC handoff stop refused")
+				// process_missing is GC saying the managed process it would have
+				// signaled is not there. It reaches that answer only after
+				// proving the runtime state still names this scope's data
+				// directory and this request's port: a process that is present
+				// but different is identity_changed, process_unowned or
+				// port_conflict, and each of those stays an ordinary refusal.
+				// Report the absence so the caller can settle the stop rather
+				// than wedge on a stop that can never be reported again.
+				if stableErrorCode(stopped.ErrorCode, "") == "process_missing" {
+					return withAbsentLegacyOwner(refusal, stopped.Mutates)
+				}
+				return withReportedMutation(refusal, stopped.Mutates)
 			}
 			if err := validateGCIdentity(request, stopped); err != nil {
 				return withReportedMutation(err, stopped.Mutates)
 			}
 			if stopped.IdentityToken != identityToken {
 				return withReportedMutation(CodedError{Code: "identity_changed", Err: errors.New("GC handoff stop token changed")}, stopped.Mutates)
+			}
+			if !stopped.Mutates {
+				// A stop that changed nothing and still calls itself stopped is
+				// an idempotent no-op over the identity just validated: the
+				// owner was already gone when GC looked. That is the same
+				// settled absence as process_missing, not a completed stop this
+				// call performed, so it is reported rather than returned as
+				// success.
+				return withAbsentLegacyOwner(CodedError{Code: "process_missing", Err: errors.New("GC handoff stop reported a non-mutating stop")}, false)
 			}
 			return nil
 		},

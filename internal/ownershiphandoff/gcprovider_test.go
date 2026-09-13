@@ -434,11 +434,11 @@ func stopCrashWindow(t *testing.T, city, scope, stoppedFile string, provider Pro
 }
 
 // TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped pins the
-// stop-hook obligation stated in engdocs/design/ownership-handoff-contract.md:
-// a provider that answers an already-gone identity-matching process with
-// result=stopped/mutates=true lets the handoff converge out of the stop crash
-// window. The in-tree fake models that provider, so this is what the rest of
-// the suite silently assumes; the companion test below prices the alternative.
+// simplest way out of the stop crash window: a provider that can answer an
+// already-gone identity-matching process with result=stopped/mutates=true
+// converges on the spot. The in-tree fake models that provider, so this is
+// what the rest of the suite assumes; the companion tests below cover the real
+// responder, which refuses process_missing instead and converges anyway.
 func TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped(t *testing.T) {
 	city := canonicalTestDir(t)
 	scope := filepath.Join(city, "scope")
@@ -469,14 +469,45 @@ func TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped(t *testing
 	}
 }
 
-// TestGCProviderResumeWedgesWhenStopRefusesMissingOwner is the counterfactual
-// for the obligation above: a strict provider that refuses to stop a process it
-// can no longer see leaves the handoff wedged at target_configured with the
-// legacy server actually down and mutation_occurred=false. The refusal is
-// fail-closed and journaled, so nothing is silently committed — but the handoff
-// cannot complete, which is why the contract states the obligation the in-tree
-// fake cannot enforce.
-func TestGCProviderResumeWedgesWhenStopRefusesMissingOwner(t *testing.T) {
+// TestGCProviderResumeConvergesWhenStopRefusesMissingOwner is the case the
+// real Gas City responder produces, and the one that used to strand a city.
+// GC cannot honestly answer "stopped" for a process it never signaled, so it
+// refuses process_missing — and a retry that meets that refusal has the legacy
+// server already down. Absence is what the stop was for, so the refusal
+// settles the stop rather than wedging at target_configured forever.
+func TestGCProviderResumeConvergesWhenStopRefusesMissingOwner(t *testing.T) {
+	city := canonicalTestDir(t)
+	scope := filepath.Join(city, "scope")
+	if err := os.Mkdir(scope, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeGCProtocol(t)
+	logPath := filepath.Join(city, "gc.log")
+	stoppedFile := filepath.Join(city, "stopped")
+	t.Setenv("GC_HANDOFF_LOG", logPath)
+	t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(city, "gc.err"))
+	t.Setenv("GC_HANDOFF_STOPPED_FILE", stoppedFile)
+	t.Setenv("GC_HANDOFF_STOP_STRICT_MISSING", "1")
+	provider, err := NewGCProvider(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, journalPath := stopCrashWindow(t, city, scope, stoppedFile, provider)
+	second, err := Run(context.Background(), request, journalPath, provider, false)
+	if err != nil || second.Phase != PhaseCommitted || second.Owner != OwnerBD || !second.Mutates {
+		t.Fatalf("second result=%+v err=%v, want a committed resume through the refused missing-owner stop", second, err)
+	}
+	journal, err := Load(journalPath)
+	if err != nil || journal.Phase != PhaseCommitted || journal.LegacyStopInProgress {
+		t.Fatalf("journal=%+v err=%v, want a committed journal with its stop reservation retired", journal, err)
+	}
+}
+
+// TestGCProviderResumeConvergesWhenStopReportsNonMutatingStop covers the other
+// truthful answer to the same situation: a responder that calls the no-op a
+// "stop" but declines to claim it mutated anything. bd must not read that as a
+// completed stop it performed, and must not wedge on it either.
+func TestGCProviderResumeConvergesWhenStopReportsNonMutatingStop(t *testing.T) {
 	city := canonicalTestDir(t)
 	scope := filepath.Join(city, "scope")
 	if err := os.Mkdir(scope, 0700); err != nil {
@@ -487,19 +518,48 @@ func TestGCProviderResumeWedgesWhenStopRefusesMissingOwner(t *testing.T) {
 	t.Setenv("GC_HANDOFF_LOG", filepath.Join(city, "gc.log"))
 	t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(city, "gc.err"))
 	t.Setenv("GC_HANDOFF_STOPPED_FILE", stoppedFile)
-	t.Setenv("GC_HANDOFF_STOP_STRICT_MISSING", "1")
+	t.Setenv("GC_HANDOFF_STOP_NONMUTATING", "1")
 	provider, err := NewGCProvider(binary)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request, journalPath := stopCrashWindow(t, city, scope, stoppedFile, provider)
 	second, err := Run(context.Background(), request, journalPath, provider, false)
+	if err != nil || second.Phase != PhaseCommitted || second.Owner != OwnerBD {
+		t.Fatalf("second result=%+v err=%v, want a committed resume through the non-mutating stop", second, err)
+	}
+}
+
+// TestGCProviderResumeStillRefusesStopOfAnotherIdentity is the other half of
+// that relaxation, and the reason it is not simply "ignore stop refusals": the
+// convergence above is for an absent owner only. A process that is present but
+// cannot be proven to be the legacy owner is a refusal the handoff must keep,
+// with the legacy owner left authoritative and the reservation intact.
+func TestGCProviderResumeStillRefusesStopOfAnotherIdentity(t *testing.T) {
+	city := canonicalTestDir(t)
+	scope := filepath.Join(city, "scope")
+	if err := os.Mkdir(scope, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeGCProtocol(t)
+	stoppedFile := filepath.Join(city, "stopped")
+	t.Setenv("GC_HANDOFF_LOG", filepath.Join(city, "gc.log"))
+	t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(city, "gc.err"))
+	t.Setenv("GC_HANDOFF_STOPPED_FILE", stoppedFile)
+	provider, err := NewGCProvider(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, journalPath := stopCrashWindow(t, city, scope, stoppedFile, provider)
+	t.Setenv("GC_HANDOFF_STOP_REFUSE", "1")
+	t.Setenv("GC_HANDOFF_STOP_MUTATES", "false")
+	second, err := Run(context.Background(), request, journalPath, provider, false)
 	if err == nil || second.Phase != PhaseTargetConfigured || second.Owner != OwnerLegacyGC ||
-		second.ErrorCode != "process_missing" || second.Mutates {
-		t.Fatalf("second result=%+v err=%v, want a wedged, fail-closed target_configured refusal", second, err)
+		second.ErrorCode != "process_unowned" {
+		t.Fatalf("second result=%+v err=%v, want an unproven-identity stop to stay refused", second, err)
 	}
 	journal, err := Load(journalPath)
-	if err != nil || journal.Phase != PhaseTargetConfigured || journal.Owner != OwnerLegacyGC || journal.MutationOccurred {
+	if err != nil || journal.Phase != PhaseTargetConfigured || journal.Owner != OwnerLegacyGC {
 		t.Fatalf("journal=%+v err=%v, want the handoff to stay uncommitted and legacy-owned", journal, err)
 	}
 }
@@ -813,9 +873,13 @@ if [ "$operation" = "handoff-stop" ] && [ "$GC_HANDOFF_STOP_REFUSE" = "1" ]; the
   mutates="${GC_HANDOFF_STOP_MUTATES:-false}"
   error_code=process_unowned
 fi
-# Variant provider that violates the stop-hook obligation in
-# engdocs/design/ownership-handoff-contract.md by refusing to "stop" an
-# identity-matching process that is already gone.
+# A stop that truthfully reports it changed nothing: the owner was already gone
+# when GC looked, so there was nothing to signal.
+if [ "$operation" = "handoff-stop" ] && [ "$GC_HANDOFF_STOP_NONMUTATING" = "1" ]; then mutates=false; fi
+# Variant provider that answers the stop-hook obligation in
+# engdocs/design/ownership-handoff-contract.md the way the real responder does:
+# by refusing to call an identity-matching process that is already gone
+# "stopped".
 if [ "$operation" = "handoff-stop" ] && [ "$GC_HANDOFF_STOP_STRICT_MISSING" = "1" ] && [ "$already_stopped" = "1" ]; then
   result=refused
   mutates=false

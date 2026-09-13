@@ -394,7 +394,12 @@ func TestDirectHandoffConfigureStagesWithoutRetiringGCControls(t *testing.T) {
 	}
 }
 
-func TestDirectHandoffReconcilesMissingLegacyAfterAmbiguousStop(t *testing.T) {
+// TestDirectHandoffRePprovesAbsentLegacyAndPassesTheReportOn covers the hook's
+// half of the absent-owner settlement: it re-proves the absence GC reported
+// with a fresh identity-checked inspect, and then hands the report back rather
+// than deciding for itself that the stop happened. Execute owns that decision,
+// because only Execute knows the stop was reserved.
+func TestDirectHandoffRePprovesAbsentLegacyAndPassesTheReportOn(t *testing.T) {
 	if !doltserver.SupportsStrictLaunchRecovery() {
 		t.Skip("pure direct hook test requires a supported strict platform")
 	}
@@ -408,7 +413,7 @@ func TestDirectHandoffReconcilesMissingLegacyAfterAmbiguousStop(t *testing.T) {
 			},
 			Configure: func(context.Context, ownershiphandoff.Request, ownershiphandoff.Snapshot) error { return nil },
 			StopLegacy: func(context.Context, ownershiphandoff.Request, ownershiphandoff.Snapshot) error {
-				return ownershiphandoff.CodedError{Code: "process_missing", Err: errors.New("legacy process already stopped")}
+				return ownershiphandoff.LegacyOwnerAbsent(ownershiphandoff.CodedError{Code: "process_missing", Err: errors.New("legacy process already stopped")})
 			},
 			Verify: func(context.Context, ownershiphandoff.Request, ownershiphandoff.Snapshot, func(ownershiphandoff.Snapshot) error) (ownershiphandoff.Snapshot, error) {
 				verified++
@@ -420,8 +425,9 @@ func TestDirectHandoffReconcilesMissingLegacyAfterAmbiguousStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := hooks.StopLegacy(context.Background(), request, ownershiphandoff.Snapshot{}); err != nil {
-		t.Fatalf("reconcile missing legacy stop: %v", err)
+	err = hooks.StopLegacy(context.Background(), request, ownershiphandoff.Snapshot{})
+	if !ownershiphandoff.ReportsLegacyOwnerAbsent(err) {
+		t.Fatalf("re-proved missing legacy stop = %v, want the absence report passed on", err)
 	}
 	if verified != 1 {
 		t.Fatalf("legacy absence verifications = %d, want 1", verified)
@@ -442,7 +448,7 @@ func TestDirectHandoffReportsMissingLegacyProofFailure(t *testing.T) {
 			},
 			Configure: func(context.Context, ownershiphandoff.Request, ownershiphandoff.Snapshot) error { return nil },
 			StopLegacy: func(context.Context, ownershiphandoff.Request, ownershiphandoff.Snapshot) error {
-				return ownershiphandoff.CodedError{Code: "process_missing", Err: errors.New("legacy process already stopped")}
+				return ownershiphandoff.LegacyOwnerAbsent(ownershiphandoff.CodedError{Code: "process_missing", Err: errors.New("legacy process already stopped")})
 			},
 			Verify: func(context.Context, ownershiphandoff.Request, ownershiphandoff.Snapshot, func(ownershiphandoff.Snapshot) error) (ownershiphandoff.Snapshot, error) {
 				return ownershiphandoff.Snapshot{}, proofErr
