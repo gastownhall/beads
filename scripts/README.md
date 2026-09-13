@@ -32,6 +32,11 @@ The broad Go wrappers also cap package and test parallelism to `4` by default
 (`GO_TEST_PKG_PARALLEL` and `GO_TEST_PARALLEL`). This avoids turning high-core
 shared hosts into a different test topology than GitHub Actions.
 
+They also pass an explicit `-timeout` (`TEST_TIMEOUT`, default `25m`) rather
+than riding `go test`'s 10m default. That deadline is a hang backstop, not a
+performance budget — it costs nothing while packages pass — and the floor is
+set by `cmd/bd`, which exceeds 10m on a loaded runner even under `-short`.
+
 `make ci-pr-policy` includes `scripts/check-testing-short.sh`, which enforces
 that `testing.Short()` is only used for runtime, stress, or large-fixture skips.
 Use build tags, environment checks, or named wrappers for integration/e2e/API
