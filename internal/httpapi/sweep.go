@@ -23,6 +23,7 @@ const (
 	sweepClosedBeforeMember      = "closed_before"
 	sweepPatternMember           = "pattern"
 	sweepProtectReferencedMember = "protect_referenced"
+	sweepProtectedLabelsMember   = "protected_labels"
 	sweepDryRunMember            = "dry_run"
 )
 
@@ -35,6 +36,7 @@ var sweepMembers = []string{
 	sweepClosedBeforeMember,
 	sweepPatternMember,
 	sweepProtectReferencedMember,
+	sweepProtectedLabelsMember,
 	sweepDryRunMember,
 }
 
@@ -43,7 +45,7 @@ var sweepMembers = []string{
 //
 // WHAT THIS HANDLER DOES NOT DO. It does not decide which beads are closed,
 // does not match the glob, does not recheck closed_at, does not protect pinned
-// beads, and — the one that matters most — does not implement the
+// or labeled beads, and — the one that matters most — does not implement the
 // require-a-filter safety gate. All of that is issueops.Sweeper, the same
 // library surface `bd prune` calls, so this endpoint could not erase every
 // closed bead in a workspace by omission even if a future edit here forgot the
@@ -51,7 +53,7 @@ var sweepMembers = []string{
 // would be one handler away from an unguarded mass delete.
 //
 // Everything above the role here is argument validation: the media type, the
-// body shape, and the six members the document publishes.
+// body shape, and the seven members the document publishes.
 //
 // NO ACTOR IS INFERRED, for the reason the claim gives: the server's own
 // identity is meaningless to a remote caller. Unlike the claim, the actor is
@@ -194,6 +196,25 @@ func (s *Server) sweepRequest(w http.ResponseWriter, r *http.Request) (issueops.
 		request.IDPattern = *value
 	}
 
+	if raw, ok := members[sweepProtectedLabelsMember]; ok {
+		var value *[]string
+		if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+			s.fail(w, r, InvalidArgument(sweepProtectedLabelsMember, ReasonInvalidValue,
+				"`"+sweepProtectedLabelsMember+"` must be an array of strings"))
+			return issueops.SweepRequest{}, false
+		}
+		// NO DEFAULT IS APPLIED when the member is absent, and that is a known
+		// asymmetry rather than a considered default: `bd purge` resolves the
+		// guard from wisp.protected_labels and always sends it, so a remote
+		// caller that omits this member gets weaker protection than the local
+		// operator. Resolving that config here would put a SECOND definition
+		// of "which labels are protected" beside the one in cmd/bd — the
+		// divergence that made this protection necessary in the first place,
+		// reintroduced one surface over. The fix is to share the resolution,
+		// not to copy it. Recorded on the schema member too.
+		request.ProtectedLabels = *value
+	}
+
 	for _, flag := range []struct {
 		member string
 		dest   *bool
@@ -263,6 +284,7 @@ func sweepResponse(result issueops.SweepResult) apigen.SweepResult {
 		Skipped: apigen.SweepSkips{
 			Pinned:                result.Skipped.Pinned,
 			Referenced:            result.Skipped.Referenced,
+			Labeled:               result.Skipped.Labeled,
 			NotClosed:             result.Skipped.NotClosed,
 			UnknownClosedAt:       result.Skipped.UnknownClosedAt,
 			ClosedAtOrAfterCutoff: result.Skipped.ClosedAtOrAfterCutoff,

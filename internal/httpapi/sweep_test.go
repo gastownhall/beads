@@ -112,7 +112,7 @@ func TestSweepDefaultsTheOptionalMembers(t *testing.T) {
 	// surface-wide, so an omitted member must not buy weaker protection than
 	// `bd prune` gives by default.
 	want := issueops.SweepRequest{Tier: issueops.SweepEphemeral, ProtectReferenced: true}
-	if reqs[0] != want {
+	if !reflect.DeepEqual(reqs[0], want) {
 		t.Errorf("request = %+v, want %+v", reqs[0], want)
 	}
 }
