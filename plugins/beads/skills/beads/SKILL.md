@@ -10,7 +10,7 @@ allowed-tools: "Read,Bash(bd:*)"
 version: "0.60.0"
 author: "Steve Yegge <steve.yegge@gmail.com>"
 license: "MIT"
-compatible-with: [claude-code, codex]
+compatible-with: [claude-code, codex, pi]
 tags: [issue-tracking, task-management, multi-session, dependencies]
 ---
 

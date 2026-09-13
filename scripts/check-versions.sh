@@ -51,6 +51,10 @@ check_version "plugins/beads/.codex-plugin/plugin.json" \
     "$(jq -r '.version' plugins/beads/.codex-plugin/plugin.json 2>/dev/null)" \
     "Codex plugin.json"
 
+check_version "plugins/beads/package.json" \
+    "$(jq -r '.version' plugins/beads/package.json 2>/dev/null)" \
+    "Pi package.json"
+
 check_version ".claude-plugin/marketplace.json" \
     "$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json 2>/dev/null)" \
     "Claude marketplace.json"

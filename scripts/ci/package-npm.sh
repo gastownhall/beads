@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NPM_DIR="$REPO_ROOT/npm-package"
 NPM_BIN="$NPM_DIR/bin/bd"
+PI_PLUGIN_DIR="$REPO_ROOT/plugins/beads"
 
 # shellcheck source=../../.buildflags
 source "$REPO_ROOT/.buildflags"
@@ -60,6 +61,11 @@ npm_pack_dry_run() {
     npm pack --dry-run
 }
 
+pi_plugin_test() {
+    cd "$PI_PLUGIN_DIR"
+    npm test
+}
+
 cd "$REPO_ROOT"
 
 # The package postinstall script downloads the latest published release when
@@ -70,3 +76,4 @@ ci_time "prepare bd for npm package" -- prepare_bd_binary
 ci_time "npm package install" -- npm_install
 ci_time "npm package test:all" -- npm_test_all
 ci_time "npm package pack dry-run" -- npm_pack_dry_run
+ci_time "Pi plugin test" -- pi_plugin_test
