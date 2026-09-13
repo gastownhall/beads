@@ -37,20 +37,40 @@ func checkRyukDisabled(home string, disabled, allowUnreaped bool) error {
 	)
 }
 
-var (
-	ryukCheckOnce sync.Once
-	ryukCheckErr  error
-)
+// ryukGuardExitCode is the process exit status checkRyukEnabled uses. Distinct
+// from go test's own failure status (1) so a Ryuk-disabled box is
+// distinguishable from an ordinary test failure in CI logs.
+const ryukGuardExitCode = 2
+
+var ryukCheckOnce sync.Once
 
 // checkRyukEnabled runs checkRyukDisabled against the live testcontainers
-// config once per process and caches the result, so every container-harness
-// entry point (NewContainerProvider, startDoltContainer,
-// StartIsolatedDoltContainerHandle) reports the same unmissable failure
-// instead of only whichever one happens to run first.
-func checkRyukEnabled() error {
+// config once per process, for every container-harness entry point
+// (NewContainerProvider, startDoltContainer, StartIsolatedDoltContainerHandle).
+//
+// It does not return an error: on a Ryuk-disabled box it prints the reason to
+// stderr and terminates the process with ryukGuardExitCode, which go test
+// reports as a package-level FAIL.
+//
+// Exiting rather than returning is the whole point, and is deliberate. An
+// error here is swallowed by 13 of the 18 call sites that reach a
+// container-start path — 11 TestMains downgrade it to
+// "WARN: ..., skipping Dolt tests" and carry on green, and the two
+// NewContainerProvider callers t.Skipf on any error — which reproduces
+// exactly the "tests ran normally, nothing to see" mode this guard exists to
+// close (be-ovg86). Callers therefore get no say in the matter. This is
+// test-harness-only code; nothing in a shipped binary reaches it.
+//
+// TestRyukDisabled_SwallowingCallerStillDies pins the behavior end-to-end
+// through the swallowing caller shape.
+func checkRyukEnabled() {
 	ryukCheckOnce.Do(func() {
 		allowUnreaped := os.Getenv("BEADS_ALLOW_UNREAPED_TESTCONTAINERS") == "1"
-		ryukCheckErr = checkRyukDisabled(resolvedHome(), testcontainers.ReadConfig().RyukDisabled, allowUnreaped)
+		err := checkRyukDisabled(resolvedHome(), testcontainers.ReadConfig().RyukDisabled, allowUnreaped)
+		if err == nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(ryukGuardExitCode)
 	})
-	return ryukCheckErr
 }

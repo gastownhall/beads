@@ -23,9 +23,7 @@ type ContainerProvider struct {
 
 // NewContainerProvider starts a Dolt container and returns a provider.
 func NewContainerProvider() (*ContainerProvider, error) {
-	if err := checkRyukEnabled(); err != nil {
-		return nil, err
-	}
+	checkRyukEnabled()
 	if state := checkDolt(); state != doltReady {
 		return nil, fmt.Errorf("cannot create container provider: %s", state)
 	}

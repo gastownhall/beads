@@ -138,9 +138,10 @@ func isDoltRepoImageCached() bool {
 
 // startDoltContainer starts the singleton Dolt container.
 func startDoltContainer() error {
-	if err := checkRyukEnabled(); err != nil {
-		return err
-	}
+	// Callers reach here only via ensureSharedContainer, whose two entry
+	// points (EnsureDoltContainerForTestMain, RequireDoltContainer) have
+	// already confirmed checkDolt() == doltReady.
+	checkRyukEnabled()
 
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
@@ -268,9 +269,7 @@ func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
 	if state := checkDolt(); state != doltReady {
 		t.Skipf("skipping test: %s", state)
 	}
-	if err := checkRyukEnabled(); err != nil {
-		t.Fatalf("%v", err)
-	}
+	checkRyukEnabled()
 
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
