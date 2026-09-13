@@ -30,10 +30,21 @@ func TestOwnershipHandoffCommandIsExplicitAndSkipsStore(t *testing.T) {
 			t.Fatal("ownership-handoff must not be an ordinary top-level bd command")
 		}
 	}
-	for _, name := range []string{"city", "root", "database", "workspace", "host", "port", "socket", "journal", "dry-run", "resume", "retry"} {
+	for _, name := range []string{"city", "root", "database", "workspace", "host", "port", "socket", "journal", "dry-run"} {
 		if ownershipHandoffCmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing --%s flag", name)
 		}
+	}
+	// A handoff always resumes from its journal, so there is no resume mode to
+	// select. Accepting these spellings and ignoring them told operators the
+	// front door had a retry knob it never had.
+	for _, name := range []string{"resume", "retry"} {
+		if ownershipHandoffCmd.Flags().Lookup(name) != nil {
+			t.Errorf("--%s is a no-op flag and must not be offered", name)
+		}
+	}
+	if !strings.Contains(ownershipHandoffCmd.Long, "resumes") {
+		t.Errorf("help must state that a handoff resumes from its journal: %q", ownershipHandoffCmd.Long)
 	}
 }
 
@@ -241,6 +252,7 @@ func TestOwnershipHandoffJSONShapeIsStable(t *testing.T) {
 		Owner:   ownershiphandoff.OwnerLegacyGC,
 		Mutates: false,
 		Identity: ownershipHandoffIdentity{
+			CityRoot:  "/srv/city",
 			Root:      "/srv/beads",
 			Database:  "beads",
 			Workspace: "workspace",
@@ -256,9 +268,18 @@ func TestOwnershipHandoffJSONShapeIsStable(t *testing.T) {
 	if err := json.Unmarshal(b, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"phase", "owner", "mutates", "identity", "error_code"} {
+	for _, field := range []string{"phase", "owner", "mutates", "identity", "error_code", "error"} {
 		if _, ok := fields[field]; !ok {
 			t.Errorf("JSON missing required field %q: %s", field, b)
+		}
+	}
+	var identity map[string]json.RawMessage
+	if err := json.Unmarshal(fields["identity"], &identity); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"city_root", "root", "database", "workspace", "endpoint"} {
+		if _, ok := identity[field]; !ok {
+			t.Errorf("identity JSON missing required field %q: %s", field, b)
 		}
 	}
 	if _, ok := fields["schema_version"]; ok {
@@ -364,6 +385,62 @@ func TestOwnershipHandoffCommandRejectsAlternateJournal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "alternate.json")); !os.IsNotExist(err) {
 		t.Fatalf("alternate journal was created: %v", err)
+	}
+}
+
+// TestOwnershipHandoffCommandJSONCarriesRefusalText pins the one refusal whose
+// remediation lives only in prose: an identity conflict names the journal it is
+// refusing and says whether discarding it would lose a recorded mutation.
+// Without an error field that guidance reached text callers only, which are the
+// callers least likely to need it.
+func TestOwnershipHandoffCommandJSONCarriesRefusalText(t *testing.T) {
+	root := canonicalTempDir(t)
+	journalPath := filepath.Join(root, ownershipHandoffJournalName)
+	foreign := ownershiphandoff.Request{
+		CityRoot: root, Root: root, Database: "other-database", Workspace: "workspace",
+		Endpoint: ownershiphandoff.Endpoint{Host: "127.0.0.1", Port: 3307},
+		Owner:    ownershiphandoff.OwnerLegacyGC,
+	}
+	seed := ownershiphandoff.Journal{Request: foreign, Phase: ownershiphandoff.PhasePrepared,
+		Owner: ownershiphandoff.OwnerLegacyGC}
+	b, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journalPath, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	setOwnershipHandoffFlag(t, "city", root)
+	setOwnershipHandoffFlag(t, "root", root)
+	setOwnershipHandoffFlag(t, "database", "beads")
+	setOwnershipHandoffFlag(t, "workspace", "workspace")
+	setOwnershipHandoffFlag(t, "host", "127.0.0.1")
+	setOwnershipHandoffFlag(t, "port", "3307")
+	setOwnershipHandoffFlag(t, "socket", "")
+	setOwnershipHandoffFlag(t, "journal", "")
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	var runErr error
+	out := captureStdout(t, func() error {
+		runErr = runOwnershipHandoffCommand(ownershipHandoffCmd, nil)
+		return nil // captureStdout treats a command error as a test failure.
+	})
+	if runErr == nil {
+		t.Fatal("conflicting journal unexpectedly succeeded")
+	}
+	var got ownershipHandoffOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode strict handoff JSON %q: %v", out, err)
+	}
+	if got.ErrorCode != "identity_conflict" {
+		t.Fatalf("output=%+v, want identity_conflict", got)
+	}
+	for _, want := range []string{journalPath, "other-database", "safe"} {
+		if !strings.Contains(got.Error, want) {
+			t.Errorf("JSON error %q does not name %q", got.Error, want)
+		}
 	}
 }
 

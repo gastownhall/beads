@@ -23,13 +23,18 @@ type ownershipHandoffIdentity struct {
 
 // ownershipHandoffOutput is deliberately separate from the generic bd JSON
 // envelope. Handoff is used by lifecycle tooling, so its fields and nesting
-// are stable and error_code is present on both success and failure.
+// are stable and error_code is present on both success and failure. Error
+// carries the same refusal text the text renderer writes to stderr: several
+// refusals — an identity conflict above all — say which journal is being
+// refused and whether discarding it is safe, and a --json caller has nowhere
+// else to read that.
 type ownershipHandoffOutput struct {
 	Phase     ownershiphandoff.Phase   `json:"phase"`
 	Owner     ownershiphandoff.Owner   `json:"owner"`
 	Mutates   bool                     `json:"mutates"`
 	Identity  ownershipHandoffIdentity `json:"identity"`
 	ErrorCode string                   `json:"error_code"`
+	Error     string                   `json:"error"`
 }
 
 // ownershipHandoffProvider invokes only the explicit GC handoff protocol. It
@@ -38,8 +43,15 @@ type ownershipHandoffOutput struct {
 var ownershipHandoffProvider ownershiphandoff.Provider = ownershiphandoff.NewGCProviderFromEnv()
 
 var ownershipHandoffCmd = &cobra.Command{
-	Use:           "ownership-handoff",
-	Short:         "Explicitly hand a legacy local Dolt owner to bd",
+	Use:   "ownership-handoff",
+	Short: "Explicitly hand a legacy local Dolt owner to bd",
+	Long: `Explicitly hand a legacy local Dolt owner to bd.
+
+The handoff is journaled at <root>/ownership-handoff.json and always resumes
+from the last durable checkpoint that journal records, so re-running the same
+command after a failure or a crash is the retry: there is no separate resume
+mode and no flag to ask for one. A committed journal replays as a no-op, and a
+journal belonging to a different identity is refused rather than resumed.`,
 	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -62,15 +74,6 @@ func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 	socket, _ := cmd.Flags().GetString("socket")
 	journal, _ := cmd.Flags().GetString("journal")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	resume, _ := cmd.Flags().GetBool("resume")
-	retry, _ := cmd.Flags().GetBool("retry")
-	// Execute is journal-resuming by construction. Both spellings are accepted
-	// for automation readability; normalize the alias here so the front door
-	// does not silently grow a second retry implementation.
-	if retry {
-		resume = true
-	}
-	_ = resume
 	if socket != "" {
 		if cmd.Flags().Changed("host") || cmd.Flags().Changed("port") {
 			err := errors.New("socket endpoint cannot be combined with explicit --host or --port")
@@ -96,16 +99,9 @@ func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 	if journal == "" {
 		journal = filepath.Join(root, ownershipHandoffJournalName)
 	}
-	if cityRoot == "" {
-		err := errors.New("city root is required to identify the lifecycle owner")
-		result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
-			CityRoot: cityRoot, Root: root, Database: database, Workspace: workspace,
-			Endpoint: request.Endpoint, ErrorCode: "invalid_request"}
-		if outputErr := writeOwnershipHandoffOutput(result, err); outputErr != nil {
-			return outputErr
-		}
-		return &exitError{Code: 1}
-	}
+	// An empty or non-canonical city root is refused by ValidateRequest, before
+	// Run touches a journal or opens a provider, so the front door does not
+	// carry a second copy of that check with its own wording.
 	if journal != filepath.Join(root, ownershipHandoffJournalName) {
 		err := errors.New("journal must be the canonical <root>/ownership-handoff.json path")
 		result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
@@ -139,6 +135,9 @@ func writeOwnershipHandoffOutput(result ownershiphandoff.Result, runErr error) e
 		},
 		ErrorCode: result.ErrorCode,
 	}
+	if runErr != nil {
+		output.Error = runErr.Error()
+	}
 	if jsonOutput {
 		if err := outputJSONRaw(output); err != nil {
 			return err
@@ -164,7 +163,5 @@ func init() {
 	ownershipHandoffCmd.Flags().String("socket", "", "Unix socket beneath --root (alternative to --host/--port)")
 	ownershipHandoffCmd.Flags().String("journal", "", "Handoff journal path (only canonical <root>/ownership-handoff.json is accepted)")
 	ownershipHandoffCmd.Flags().Bool("dry-run", false, "Validate identity without opening a provider or mutating state")
-	ownershipHandoffCmd.Flags().Bool("resume", false, "Accepted for automation readability; never changes behavior (a handoff always resumes from its journal)")
-	ownershipHandoffCmd.Flags().Bool("retry", false, "Alias for --resume; never changes behavior")
 	migrateCmd.AddCommand(ownershipHandoffCmd)
 }
