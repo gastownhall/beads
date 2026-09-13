@@ -770,6 +770,53 @@ func TestValidateYamlConfigValue_PrimeMaxMemoryChars(t *testing.T) {
 	}
 }
 
+// TestValidateYamlConfigValue_MemoriesBudgetChars tests validation of
+// memories.budget-chars, the opt-in `bd remember` corpus ceiling. A negative
+// value is rejected at SET time rather than silently clamped at read time, so
+// an operator who types "-1" hears about it instead of getting a budget that
+// is quietly off.
+func TestValidateYamlConfigValue_MemoriesBudgetChars(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		expectErr bool
+		errMsg    string
+	}{
+		{"valid zero (off)", "0", false, ""},
+		{"valid positive", "250000", false, ""},
+		{"invalid negative", "-1", true, "memories.budget-chars must be a non-negative integer (0 = off), got \"-1\""},
+		{"invalid non-integer", "abc", true, "memories.budget-chars must be a non-negative integer (0 = off), got \"abc\""},
+		{"invalid float", "3.5", true, "memories.budget-chars must be a non-negative integer (0 = off), got \"3.5\""},
+		{"invalid empty", "", true, "memories.budget-chars must be a non-negative integer (0 = off), got \"\""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateYamlConfigValue("memories.budget-chars", tt.value)
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("expected error for value %q, got nil", tt.value)
+				} else if err.Error() != tt.errMsg {
+					t.Errorf("expected error %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for value %q: %v", tt.value, err)
+				}
+			}
+		})
+	}
+}
+
+// TestMemoriesBudgetCharsIsYamlOnly pins the routing: the key is read through
+// viper (config.GetInt), so a DB-backed write would be accepted and then never
+// read by `bd remember`. YamlOnlyKeys is what keeps `bd config set` honest.
+func TestMemoriesBudgetCharsIsYamlOnly(t *testing.T) {
+	if !IsYamlOnlyKey("memories.budget-chars") {
+		t.Error("memories.budget-chars must be yaml-only: bd remember reads it through viper")
+	}
+}
+
 func TestIsSecretKey(t *testing.T) {
 	tests := []struct {
 		key      string
