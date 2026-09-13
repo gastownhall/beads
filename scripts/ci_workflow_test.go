@@ -94,6 +94,36 @@ func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	}
 }
 
+func TestPRWorkflowExercisesNativeUserConfigDiagnostics(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-preflight-platforms")
+	// The benchmark-environment test owns the shared job and matrix shape.
+	wantHosts := map[string]string{"ubuntu-latest": "linux", "macos-latest": "darwin", "windows-latest": "windows"}
+	gotHosts := make(map[string][]string)
+	for _, tuple := range job.Strategy.Matrix.Include {
+		gotHosts[tuple.OS] = append(gotHosts[tuple.OS], tuple.ExpectedGOOS)
+	}
+	for host, want := range wantHosts {
+		if got := gotHosts[host]; len(got) != 1 || got[0] != want {
+			t.Fatalf("native host %s = %v, want exactly one %s", host, got, want)
+		}
+	}
+	step := job.step(t, "Check native user config diagnostics")
+	if step.If != "" || step.Shell != "bash" || step.Env["CGO_ENABLED"] != "0" ||
+		(step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Fatalf("native diagnostic step is conditional, optional, or uses the wrong host: %+v", step)
+	}
+	assertStepRunsExactly(t, job, step.Name, "bash scripts/ci/test-user-config-diagnostic.sh '${{ matrix.expected_goos }}'")
+	assertStepsBefore(t, job, []string{"Set up Go", "Restore Go module cache"}, []string{step.Name})
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "pr-preflight-platforms") ||
+		gateEnv["PR_PREFLIGHT_PLATFORMS"] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Fatal("native diagnostic platform results must feed the required aggregate gate")
+	}
+}
+
 func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
