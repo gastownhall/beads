@@ -24,12 +24,21 @@ effect — and an ambiguous commit refuses to advance unless the provider
 supplies an explicitly idempotent replay hook.
 The per-journal advisory lock is persistent and kernel-released rather than an
 `O_EXCL` marker, so a crashed process cannot leave a stale file that wedges
-future retries.
+future retries. It follows that `<root>/ownership-handoff.json.lock` outlives
+every attempt that reached the lock, including refusals that write no journal
+at all — a `provider_unavailable` run with no `GC_BIN` configured, the most
+likely first contact, leaves the lock inode and nothing else. An empty lock
+file beside no journal therefore means a handoff was attempted, not that one is
+in flight or was mutated; only refusals raised before the lock leave the root
+untouched.
 
 ## Identity and invocation
 
 `bd migrate ownership-handoff` is the only invocation path; nothing else in
-`bd` constructs a handoff request. Request identity includes the canonical Gas
+`bd` constructs a handoff request. Resuming is inherent rather than selected:
+re-running the same command is the retry, so the front door offers no `--resume`
+or `--retry` flag and there is no non-resuming mode to ask for. Request identity
+includes the canonical Gas
 City root that owns the legacy server, so the same Dolt scope under a different
 city is a different handoff: it is refused as `identity_conflict` rather than
 resumed. A journal written before `city_root` joined the request — pre-release
@@ -50,6 +59,21 @@ Commit is not trusted to the phase machine alone — the commit hook must
 re-prove that the legacy owner is gone (a `process_missing` refusal on a fresh
 inspect) before ownership moves to `bd`.
 
+The stop reservation is scoped to the attempt that took it. A provider that
+reports its failed stop made no mutation retires the reservation this attempt
+wrote, because the ambiguous window it covered is the one that provider just
+closed. It does not retire a reservation inherited from an earlier attempt: a
+process killed mid-stop leaves the reservation set, and the next attempt's
+provider can only speak for its own call, so clearing it would report
+`mutates: false` for a half stop — precisely the untruthful answer the
+reservation exists to prevent.
+
+Every refusal the front door can produce also reaches `--json` callers as text:
+the typed output carries an `error` field alongside `error_code`, because the
+identity-conflict refusal names the journal, both identities, and whether
+discarding the journal is safe, and a machine caller has no other channel for
+that guidance.
+
 ## Provider obligations
 
 This package enforces only the Beads side of the protocol. The peer lives in
@@ -66,6 +90,12 @@ in-tree fakes rather than by the real provider:
   mutation flag exists to prevent. Pinned from both directions by
   `TestGCProviderResumeCompletesWhenStopTreatsMissingOwnerAsStopped` and
   `TestGCProviderResumeWedgesWhenStopRefusesMissingOwner`.
+- The shipped GC provider is unix-only. It requires `GC_BIN` to be an absolute,
+  canonical, executable regular file, and Go synthesises fixed modes with no
+  execute bit on Windows, so `GC_BIN` there is always `provider_unavailable`.
+  The Windows command shim bounds the pipe drain and nothing else: there is no
+  process group to signal, so a hung protocol command's children are not
+  reaped. Do not read that shim as Windows support.
 - `Configure` must be non-mutating. Mutation reporting is honored on the
   `StopLegacy` failure path only, so a `Configure` that mutates the target and
   then fails is reported as `mutates=false`.
