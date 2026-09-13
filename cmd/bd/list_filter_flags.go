@@ -1,6 +1,11 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/spf13/pflag"
+)
 
 // unionStringFlag accumulates repeated flag occurrences into a comma-joined
 // set: `--status open --status closed` means the same union as
@@ -19,9 +24,22 @@ func (f *unionStringFlag) Set(s string) error {
 	case f.value == "":
 		f.value = s
 	default:
-		f.value += "," + s
+		for _, tok := range strings.Split(s, ",") {
+			if !slicesContains(strings.Split(f.value, ","), tok) {
+				f.value += "," + tok
+			}
+		}
 	}
 	return nil
+}
+
+func slicesContains(list []string, want string) bool {
+	for _, have := range list {
+		if have == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *unionStringFlag) String() string { return f.value }
@@ -67,10 +85,25 @@ var (
 	listAssigneeFlag = onceStringFlag{name: "assignee"}
 )
 
-func resetListFilterFlags() {
+// resetListFilterFlags returns listCmd's five filter flags to their unparsed
+// state: the values are cleared AND pflag's Changed bit is lowered on the
+// given flag set, so an in-process caller that Execute()s listCmd twice sees
+// neither the previous filter nor a stale "the user passed --status" signal.
+// It takes the flag set as an argument rather than reading listCmd so that
+// listCmd's initializer (via runListCore -> gatherListInput) does not refer
+// back to itself.
+func resetListFilterFlags(flags *pflag.FlagSet) {
 	_ = listStatusFlag.Set("")
 	_ = listStateFlag.Set("")
 	_ = listIDFlag.Set("")
 	_ = listTypeFlag.Set("")
 	_ = listAssigneeFlag.Set("")
+	if flags == nil {
+		return
+	}
+	for _, name := range []string{"status", "state", "type", "assignee", "id"} {
+		if fl := flags.Lookup(name); fl != nil {
+			fl.Changed = false
+		}
+	}
 }

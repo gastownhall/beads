@@ -45,7 +45,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 
 	// The custom filter values persist across in-process Execute() calls;
 	// clear them once this read has copied them out.
-	defer resetListFilterFlags()
+	defer resetListFilterFlags(cmd.Flags())
 
 	in.Status, _ = cmd.Flags().GetString("status")
 	if in.Status == "" {

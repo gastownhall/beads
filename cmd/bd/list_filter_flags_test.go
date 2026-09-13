@@ -9,14 +9,7 @@ import (
 // state so these tests leave nothing behind for the rest of the package.
 func resetListFilterFlagState(t *testing.T) {
 	t.Helper()
-	t.Cleanup(func() {
-		resetListFilterFlags()
-		for _, name := range []string{"status", "state", "type", "assignee", "id"} {
-			if fl := listCmd.Flags().Lookup(name); fl != nil {
-				fl.Changed = false
-			}
-		}
-	})
+	t.Cleanup(func() { resetListFilterFlags(listCmd.Flags()) })
 }
 
 func TestListRepeatedStatusUnions(t *testing.T) {
@@ -44,7 +37,7 @@ func TestListSingleAndCommaStatusUnchanged(t *testing.T) {
 		t.Fatalf("single --status = %q, want %q", got, "open")
 	}
 
-	resetListFilterFlags()
+	resetListFilterFlags(listCmd.Flags())
 	if err := listCmd.ParseFlags([]string{"--status", "open,in_progress"}); err != nil {
 		t.Fatalf("ParseFlags: %v", err)
 	}
@@ -71,7 +64,7 @@ func TestListRepeatedTypeRefused(t *testing.T) {
 		{"--type", "bug", "--type", "epic"},
 		{"-t", "bug", "-t", "epic"},
 	} {
-		resetListFilterFlags()
+		resetListFilterFlags(listCmd.Flags())
 		err := listCmd.ParseFlags(args)
 		if err == nil {
 			t.Fatalf("ParseFlags(%v) accepted a repeated --type", args)
@@ -139,11 +132,45 @@ func TestFilterFlagsDoNotLeakAcrossParses(t *testing.T) {
 	if err := listCmd.ParseFlags([]string{"--status", "open", "--status", "closed"}); err != nil {
 		t.Fatalf("ParseFlags: %v", err)
 	}
-	resetListFilterFlags()
+	resetListFilterFlags(listCmd.Flags())
 	if err := listCmd.ParseFlags([]string{"--status", "pinned"}); err != nil {
 		t.Fatalf("ParseFlags: %v", err)
 	}
 	if got, _ := listCmd.Flags().GetString("status"); got != "pinned" {
 		t.Fatalf("status after second parse = %q, want %q (leaked prior parse)", got, "pinned")
+	}
+}
+
+func TestListRepeatedStatusDedupes(t *testing.T) {
+	resetListFilterFlagState(t)
+
+	if err := listCmd.ParseFlags([]string{"--status", "open", "--status", "open,closed", "--status", "closed"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	got, err := listCmd.Flags().GetString("status")
+	if err != nil {
+		t.Fatalf("GetString(status): %v", err)
+	}
+	if got != "open,closed" {
+		t.Fatalf("repeated --status with duplicates = %q, want %q", got, "open,closed")
+	}
+}
+
+func TestResetListFilterFlagsLowersChanged(t *testing.T) {
+	resetListFilterFlagState(t)
+
+	if err := listCmd.ParseFlags([]string{"--status", "open", "--type", "bug"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	for _, name := range []string{"status", "type"} {
+		if !listCmd.Flags().Changed(name) {
+			t.Fatalf("precondition: --%s should read as Changed after parse", name)
+		}
+	}
+	resetListFilterFlags(listCmd.Flags())
+	for _, name := range []string{"status", "state", "type", "assignee", "id"} {
+		if listCmd.Flags().Changed(name) {
+			t.Fatalf("--%s still reads as Changed after resetListFilterFlags", name)
+		}
 	}
 }
