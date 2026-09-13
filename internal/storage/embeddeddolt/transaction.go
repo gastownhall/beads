@@ -300,7 +300,12 @@ func (t *embeddedTransaction) AddComment(ctx context.Context, issueID, actor, co
 }
 
 func (t *embeddedTransaction) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
-	return nil, fmt.Errorf("embeddedTransaction: ImportIssueComment not implemented")
+	comment, err := issueops.ImportIssueCommentInTx(ctx, t.tx, issueID, author, text, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	t.dirty.MarkDirty("comments")
+	return comment, nil
 }
 
 func (t *embeddedTransaction) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {

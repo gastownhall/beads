@@ -109,28 +109,62 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 	}
 
 	result := make([]tracker.TrackerIssue, 0, len(issues))
-	for _, gh := range issues {
-		result = append(result, githubToTrackerIssue(&gh))
+	for i := range issues {
+		ti := githubToTrackerIssue(&issues[i])
+		if opts.IncludeComments {
+			if err := t.hydrateComments(ctx, &issues[i]); err != nil {
+				ti.Warnings = append(ti.Warnings, err.Error())
+			}
+		}
+		result = append(result, ti)
 	}
 	return result, nil
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
+	gh, err := t.fetchIssueByNumber(ctx, identifier)
+	if err != nil || gh == nil {
+		return nil, err
+	}
+	ti := githubToTrackerIssue(gh)
+	return &ti, nil
+}
+
+func (t *Tracker) FetchIssueWithComments(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
+	gh, err := t.fetchIssueByNumber(ctx, identifier)
+	if err != nil || gh == nil {
+		return nil, err
+	}
+	ti := githubToTrackerIssue(gh)
+	if err := t.hydrateComments(ctx, gh); err != nil {
+		ti.Warnings = append(ti.Warnings, err.Error())
+	}
+	return &ti, nil
+}
+
+func (t *Tracker) fetchIssueByNumber(ctx context.Context, identifier string) (*Issue, error) {
 	number, err := strconv.Atoi(identifier)
 	if err != nil {
 		return nil, fmt.Errorf("invalid GitHub issue number %q: %w", identifier, err)
 	}
+	return t.client.FetchIssueByNumber(ctx, number)
+}
 
-	gh, err := t.client.FetchIssueByNumber(ctx, number)
+// hydrateComments fetches an issue's comment thread when the list response
+// reported a nonzero comment count. Failures leave the issue importable
+// without its thread and surface as a TrackerIssue warning for retry on a
+// later sync.
+func (t *Tracker) hydrateComments(ctx context.Context, gh *Issue) error {
+	if gh.Comments <= 0 {
+		return nil
+	}
+	comments, err := t.client.ListIssueComments(ctx, gh.Number)
 	if err != nil {
-		return nil, err
+		gh.HydratedComments = nil
+		return fmt.Errorf("comment thread for #%d not imported: %w", gh.Number, err)
 	}
-	if gh == nil {
-		return nil, nil
-	}
-
-	ti := githubToTrackerIssue(gh)
-	return &ti, nil
+	gh.HydratedComments = comments
+	return nil
 }
 
 func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker.TrackerIssue, error) {

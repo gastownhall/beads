@@ -58,6 +58,14 @@ type IssueTracker interface {
 	BuildExternalRef(issue *TrackerIssue) string
 }
 
+// CommentThreadFetcher is an optional capability for trackers whose issues
+// carry comment threads that cost an extra fetch. The pull path prefers it
+// over FetchIssue so single-issue fetches for push, dry-run, and conflict
+// detection never pay for threads they discard.
+type CommentThreadFetcher interface {
+	FetchIssueWithComments(ctx context.Context, identifier string) (*TrackerIssue, error)
+}
+
 // BatchPushTracker is an optional capability for trackers that can export
 // multiple issues in one remote call.
 type BatchPushTracker interface {
