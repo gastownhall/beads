@@ -54,6 +54,36 @@ func TestPersistedRemotes(t *testing.T) {
 		}
 	})
 
+	t.Run("git_ref parameter is surfaced as Ref", func(t *testing.T) {
+		dir := writeState(t, `{"remotes":{
+			"branch":{"name":"branch","url":"git+https://example.com/repo.git","fetch_specs":["refs/heads/*:refs/remotes/branch/*"],"params":{"git_ref":"refs/heads/issue-data"}},
+			"plain":{"name":"plain","url":"file:///tmp/p","fetch_specs":["refs/heads/*:refs/remotes/plain/*"],"params":{}},
+			"unit":{"name":"unit","url":"git+file:///srv/ledgers","fetch_specs":["refs/heads/*:refs/remotes/unit/*"],"params":{"git_ref":"refs/dolt/units/team-12542"}}
+		}}`)
+		remotes, err := PersistedRemotes(dir)
+		if err != nil {
+			t.Fatalf("PersistedRemotes: %v", err)
+		}
+		want := map[string]string{"branch": "refs/heads/issue-data", "plain": "", "unit": "refs/dolt/units/team-12542"}
+		if len(remotes) != len(want) {
+			t.Fatalf("PersistedRemotes = %+v, want %d remotes", remotes, len(want))
+		}
+		for _, r := range remotes {
+			if r.Ref != want[r.Name] {
+				t.Errorf("remote %s: Ref = %q, want %q", r.Name, r.Ref, want[r.Name])
+			}
+		}
+		if got, _ := FindCLIRemoteRef(dir, "unit"); got != "refs/dolt/units/team-12542" {
+			t.Errorf("FindCLIRemoteRef(unit) = %q", got)
+		}
+		if got, _ := FindCLIRemoteRef(dir, "plain"); got != "" {
+			t.Errorf("FindCLIRemoteRef(plain) = %q, want empty", got)
+		}
+		if got, _ := FindCLIRemoteRef(dir, "absent"); got != "" {
+			t.Errorf("FindCLIRemoteRef(absent) = %q, want empty", got)
+		}
+	})
+
 	t.Run("corrupt state file is an error, not silently none", func(t *testing.T) {
 		dir := writeState(t, `{"remotes": not-json`)
 		if _, err := PersistedRemotes(dir); err == nil {
