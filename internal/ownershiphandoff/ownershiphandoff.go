@@ -69,8 +69,28 @@ type Snapshot struct {
 	Sentinel string `json:"sentinel,omitempty"`
 }
 
+// JournalSchemaVersion is the journal format this bd understands. bd does not
+// write the field, so a journal with no schema_version is version 1 by
+// omission and must keep loading.
+const JournalSchemaVersion = 1
+
+// ErrUnsupportedJournalVersion reports a journal written by a newer bd. It is
+// a sentinel because a version refusal and a corrupt journal ask opposite
+// things of an operator: this journal is intact and a newer bd can still
+// resume the handoff from it, so a caller must be able to say so rather than
+// collapse it into journal_unreadable and invite a deletion.
+var ErrUnsupportedJournalVersion = errors.New("unsupported handoff journal version")
+
 // Journal is the atomically persisted handoff state.
 type Journal struct {
+	// SchemaVersion lets a later format renumber itself and be refused here
+	// rather than misread. A revision that reorders the phase vocabulary keeps
+	// the phase names but moves what they mean: a journal stopped at
+	// old_owner_stopped under an order that stops the legacy owner before
+	// configuring the target records a scope with no server behind it at all,
+	// while this bd reads that same phase as proof the target is already
+	// configured and would advance straight to verification.
+	SchemaVersion    int      `json:"schema_version,omitempty"`
 	Request          Request  `json:"request"`
 	Snapshot         Snapshot `json:"snapshot,omitempty"`
 	SnapshotCaptured bool     `json:"snapshot_captured,omitempty"`
@@ -267,6 +287,14 @@ func Load(path string) (Journal, error) {
 	var j Journal
 	if err := json.Unmarshal(b, &j); err != nil {
 		return Journal{}, fmt.Errorf("decode handoff journal: %w", err)
+	}
+	// The version decides whether the rest of the journal still means what this
+	// bd thinks it means, so it is settled before validateJournal inspects a
+	// single field. Checked the other way round, a newer journal whose phase
+	// vocabulary this bd does not carry would be reported as corruption.
+	if j.SchemaVersion > JournalSchemaVersion {
+		return Journal{}, fmt.Errorf("%w: journal is version %d, this bd supports version %d",
+			ErrUnsupportedJournalVersion, j.SchemaVersion, JournalSchemaVersion)
 	}
 	if err := validateJournal(j); err != nil {
 		return Journal{}, err

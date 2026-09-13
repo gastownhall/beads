@@ -421,6 +421,69 @@ func TestLoadRejectsUnknownPhase(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsNewerJournalVersion pins the forward-compatibility refusal. A
+// later format reorders the phase vocabulary without renaming it, so a journal
+// this bd cannot interpret has to be refused outright instead of resumed from a
+// phase that no longer means what this bd reads it to mean.
+func TestLoadRejectsNewerJournalVersion(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	raw := `{"schema_version":2,"request":{},"phase":"old_owner_stopped","owner":"legacy-gc"}`
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if !errors.Is(err, ErrUnsupportedJournalVersion) {
+		t.Fatalf("newer journal error = %v, want ErrUnsupportedJournalVersion", err)
+	}
+	if !strings.Contains(err.Error(), "version 2") || !strings.Contains(err.Error(), "version 1") {
+		t.Fatalf("newer journal error = %v, want both the found and supported versions named", err)
+	}
+}
+
+// TestLoadAcceptsSupportedJournalVersions keeps the guard from becoming a
+// regression: an absent schema_version is version 1 by omission, which is
+// exactly what this bd writes today, and an explicit 1 must read the same.
+func TestLoadAcceptsSupportedJournalVersions(t *testing.T) {
+	for _, raw := range []string{
+		`{"request":{},"phase":"prepared","owner":"legacy-gc"}`,
+		`{"schema_version":1,"request":{},"phase":"prepared","owner":"legacy-gc"}`,
+	} {
+		r := validRequest(t)
+		path := filepath.Join(r.Root, "handoff.json")
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		j, err := Load(path)
+		if err != nil {
+			t.Fatalf("supported journal %s rejected: %v", raw, err)
+		}
+		if j.Phase != PhasePrepared {
+			t.Fatalf("supported journal %s loaded as %+v", raw, j)
+		}
+	}
+}
+
+// TestLoadReportsVersionBeforePhase pins the check order. A journal from a
+// later format is likely to carry phases this bd has never heard of, and
+// naming the unknown phase would send an operator hunting corruption instead of
+// the version skew that actually explains it.
+func TestLoadReportsVersionBeforePhase(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	raw := `{"schema_version":2,"request":{},"phase":"bogus","owner":"legacy-gc"}`
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if !errors.Is(err, ErrUnsupportedJournalVersion) {
+		t.Fatalf("newer journal with unknown phase error = %v, want the version refusal", err)
+	}
+	if strings.Contains(err.Error(), "unknown phase") {
+		t.Fatalf("newer journal reported as a phase problem: %v", err)
+	}
+}
+
 func TestLoadRejectsOwnerPhaseMismatch(t *testing.T) {
 	r := validRequest(t)
 	path := filepath.Join(r.Root, "handoff.json")
