@@ -65,9 +65,48 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 			Message: fmt.Sprintf("Git sync remote set to %q. Ensure this git remote exists.", value),
 			Command: fmt.Sprintf("git remote -v | grep %s", value),
 		})
+
+	case key == syncRemoteRefKey && canonicalGitDataRef(value) == "":
+		// The empty value and refs/dolt/data both mean the default, and unlike
+		// an unset the key stays in this file with that value, so a
+		// sync.remote-ref configured elsewhere (the user-global config.yaml)
+		// does not show through.
+		effects = append(effects, configSideEffect{
+			Message: "Dolt data ref for origin set to the default in this config: bootstrap and init read refs/dolt/data here, also when a user-global sync.remote-ref is configured. An existing origin remote keeps its ref until re-added.",
+			Command: "bd dolt remote add origin <url> --ref refs/dolt/data",
+		})
+
+	case key == syncRemoteRefKey:
+		effects = append(effects, configSideEffect{
+			Message: fmt.Sprintf("Dolt data ref for origin set to %q. bd bootstrap and bd init read it; an existing origin remote keeps its ref until re-added.", value),
+			Command: fmt.Sprintf("bd dolt remote add origin <url> --ref %s", value),
+		})
+
+	case key == "sync.remote":
+		// The ref that applies to this workspace, not the merged value: a
+		// committed empty value pins the default over a user-global ref.
+		if hint, ok := syncRemoteRefIgnoredHint(value, resolveSyncRemoteRef()); ok {
+			effects = append(effects, hint)
+		}
 	}
 
 	return effects
+}
+
+// syncRemoteRefIgnoredHint warns when sync.remote is pointed at a URL that
+// cannot carry the configured sync.remote-ref, so the stale key is named
+// before a later bootstrap or init trips over it. The URL is judged in the
+// form bootstrap and init store it (doltRemoteURL): a forge URL without .git
+// is not git-backed as written, but its git+ form is, and that is the form
+// the ref applies to.
+func syncRemoteRefIgnoredHint(remoteURL, configuredRef string) (configSideEffect, bool) {
+	if configuredRef == "" || isGitBackedDoltRemoteURL(doltRemoteURL(remoteURL)) {
+		return configSideEffect{}, false
+	}
+	return configSideEffect{
+		Message: fmt.Sprintf("%s is %q, but %q is not a git-backed Dolt remote, so the ref cannot apply to it and is ignored. Clear the key, or use a git+ URL.", syncRemoteRefKey, configuredRef, remoteURL),
+		Command: fmt.Sprintf("bd config set %s \"\"", syncRemoteRefKey),
+	}, true
 }
 
 // checkConfigUnsetSideEffects returns any hints/warnings for a config key being unset.
@@ -96,6 +135,12 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 	case "backup.enabled":
 		effects = append(effects, configSideEffect{
 			Message: "Backup config removed. Automatic backups will no longer run.",
+		})
+
+	case syncRemoteRefKey:
+		effects = append(effects, configSideEffect{
+			Message: "Dolt data ref removed from this config; bootstrap and init read the next configured sync.remote-ref, refs/dolt/data when there is none. An existing origin remote keeps its ref until re-added.",
+			Command: "bd dolt remote add origin <url> --ref refs/dolt/data",
 		})
 	}
 

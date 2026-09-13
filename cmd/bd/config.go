@@ -555,6 +555,28 @@ var configGetCmd = &cobra.Command{
 				return nil
 			}
 
+			if key == syncRemoteRefKey {
+				// The ref that governs this workspace, resolved the way bootstrap,
+				// init, and the origin probe resolve it (environment, local layer,
+				// this workspace's file in either spelling, then user-global). The
+				// merged value would report a user-global ref over a committed
+				// empty value that pins the default.
+				value := resolveSyncRemoteRef()
+				if jsonOutput {
+					return outputJSON(map[string]interface{}{
+						"key":      key,
+						"value":    value,
+						"location": "config.yaml",
+					})
+				}
+				if value == "" {
+					fmt.Printf("%s (not set; the default data ref applies)\n", key)
+				} else {
+					fmt.Printf("%s\n", value)
+				}
+				return nil
+			}
+
 			value := config.GetYamlConfig(key)
 
 			if jsonOutput {

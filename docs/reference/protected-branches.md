@@ -10,6 +10,12 @@ branches such as `main`. Beads commands do not commit issue updates to your
 current code branch, so GitHub, GitLab, and Bitbucket branch protection rules
 continue to apply only to your code history.
 
+The exception is a repository that keeps the data on a branch instead, with
+`bd dolt remote add --ref refs/heads/<branch>` for a host that refuses pushes
+outside `refs/heads/`. Protection rules and workflow triggers that cover all
+branches do apply to that branch; scope them to your code branches. See
+[Keeping the data on another git ref](/getting-started/sync-setup#keeping-the-data-on-another-git-ref).
+
 ## Current Workflow
 
 Initialize beads in the project:
