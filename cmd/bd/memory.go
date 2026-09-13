@@ -210,22 +210,24 @@ func printForgetResult(key, existing string) error {
 }
 
 // printRecallResult renders the `bd recall` output (including the not-found
-// SilentExit contract).
-func printRecallResult(key, value string) error {
+// SilentExit contract). Presence comes from found — ROW EXISTENCE, per the
+// role's RecallResult.Found — never from value != "": a memory stored as the
+// empty string is found and recalls as "", and only an absent key is a miss.
+func printRecallResult(key, value string, found bool) error {
 	if jsonOutput {
 		if jerr := outputJSON(map[string]interface{}{
 			"key":   key,
 			"value": value,
-			"found": value != "",
+			"found": found,
 		}); jerr != nil {
 			return jerr
 		}
-		if value == "" {
+		if !found {
 			return SilentExit()
 		}
 		return nil
 	}
-	if value == "" {
+	if !found {
 		fmt.Fprintf(os.Stderr, "No memory with key %q\n", key)
 		return SilentExit()
 	}
@@ -472,7 +474,7 @@ Examples:
 			return HandleErrorRespectJSON("recalling memory: %v", err)
 		}
 
-		return printRecallResult(result.Key, result.Value)
+		return printRecallResult(result.Key, result.Value, result.Found)
 	},
 }
 

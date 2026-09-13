@@ -3,7 +3,11 @@
 
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 // TestMatchesKnownCommand guards the `bd remember <subcommand>` misfire fix
 // (GH#4401): a bare word that names a real top-level command must be flagged so
@@ -38,4 +42,117 @@ func TestMatchesKnownCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPrintRecallResult guards the bd-5963 fix: presence must come from
+// `RecallResult.Found` (row existence), never from `value != ""`. Before the
+// fix, `bd recall` on a memory stored as the empty string printed "No memory
+// with key" and exited 1 even though the row was there and `bd forget` would
+// delete it — the CLI disagreed with the role and with the HTTP door about
+// what "found" means for that row.
+func TestPrintRecallResult(t *testing.T) {
+	t.Run("found with empty value prints the empty value and exits clean", func(t *testing.T) {
+		savedJSONOutput := jsonOutput
+		jsonOutput = false
+		defer func() { jsonOutput = savedJSONOutput }()
+
+		var err error
+		out := captureStdout(t, func() error {
+			err = printRecallResult("empty-key", "", true)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out != "\n" {
+			t.Errorf("stdout = %q, want a single newline (the empty value)", out)
+		}
+	})
+
+	t.Run("found with empty value in JSON reports found true", func(t *testing.T) {
+		savedJSONOutput := jsonOutput
+		jsonOutput = true
+		defer func() { jsonOutput = savedJSONOutput }()
+
+		var err error
+		out := captureStdout(t, func() error {
+			err = printRecallResult("empty-key", "", true)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var body map[string]interface{}
+		if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &body); uerr != nil {
+			t.Fatalf("unmarshal %q: %v", out, uerr)
+		}
+		if body["found"] != true {
+			t.Errorf("found = %v, want true", body["found"])
+		}
+		if body["value"] != "" {
+			t.Errorf("value = %v, want \"\"", body["value"])
+		}
+		if body["key"] != "empty-key" {
+			t.Errorf("key = %v, want %q", body["key"], "empty-key")
+		}
+	})
+
+	t.Run("found with non-empty value is unchanged", func(t *testing.T) {
+		savedJSONOutput := jsonOutput
+		jsonOutput = false
+		defer func() { jsonOutput = savedJSONOutput }()
+
+		var err error
+		out := captureStdout(t, func() error {
+			err = printRecallResult("k", "hello", true)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out != "hello\n" {
+			t.Errorf("stdout = %q, want %q", out, "hello\n")
+		}
+	})
+
+	t.Run("not found prints the miss and exits 1", func(t *testing.T) {
+		savedJSONOutput := jsonOutput
+		jsonOutput = false
+		defer func() { jsonOutput = savedJSONOutput }()
+
+		var err error
+		stderr := captureStderr(t, func() {
+			err = printRecallResult("gone", "", false)
+		})
+		if !strings.Contains(stderr, `No memory with key "gone"`) {
+			t.Errorf("stderr = %q, want it to name the missing key", stderr)
+		}
+		ee, ok := err.(*exitError)
+		if !ok || ee.Code != 1 {
+			t.Errorf("err = %v, want *exitError{Code: 1}", err)
+		}
+	})
+
+	t.Run("not found in JSON reports found false and exits 1", func(t *testing.T) {
+		savedJSONOutput := jsonOutput
+		jsonOutput = true
+		defer func() { jsonOutput = savedJSONOutput }()
+
+		var err error
+		out := captureStdout(t, func() error {
+			err = printRecallResult("gone", "", false)
+			return nil
+		})
+		var body map[string]interface{}
+		if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &body); uerr != nil {
+			t.Fatalf("unmarshal %q: %v", out, uerr)
+		}
+		if body["found"] != false {
+			t.Errorf("found = %v, want false", body["found"])
+		}
+		ee, ok := err.(*exitError)
+		if !ok || ee.Code != 1 {
+			t.Errorf("err = %v, want *exitError{Code: 1}", err)
+		}
+	})
 }
