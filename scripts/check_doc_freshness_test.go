@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/scripts/internal/testbash"
 )
 
 var freshnessDocuments = []struct {
@@ -158,16 +160,59 @@ func TestDocFreshnessBashProbeIgnoresStartupEnvironment(t *testing.T) {
 		t.Skip("Git Bash discovery is Windows-specific")
 	}
 
-	poison := filepath.Join(t.TempDir(), "poison.sh")
-	if err := os.WriteFile(poison, []byte("exit 97\n"), 0o600); err != nil {
-		t.Fatalf("write startup poison: %v", err)
-	}
-	t.Setenv("BASH_ENV", poison)
-	t.Setenv("ENV", poison)
+	t.Run("startup and option controls", func(t *testing.T) {
+		poison := filepath.Join(t.TempDir(), "poison.sh")
+		if err := os.WriteFile(poison, []byte("exit 97\n"), 0o600); err != nil {
+			t.Fatalf("write startup poison: %v", err)
+		}
+		t.Setenv("BASH_ENV", poison)
+		t.Setenv("ENV", poison)
+		t.Setenv("SHELLOPTS", "noexec")
+		t.Setenv("BASHOPTS", "failglob")
+		t.Setenv("BASH_FUNC_uname%%", "() { builtin printf 'Linux\\n'; }")
 
-	if bash := docFreshnessBash(t); bash == "" {
-		t.Fatal("docFreshnessBash returned an empty executable")
-	}
+		if bash := docFreshnessBash(t); bash == "" {
+			t.Fatal("docFreshnessBash returned an empty executable")
+		}
+	})
+
+	t.Run("valid explicit override", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "")
+		resolved := docFreshnessBash(t)
+		t.Setenv(testbash.OverrideEnv, resolved)
+		if got := docFreshnessBash(t); !strings.EqualFold(filepath.Clean(got), filepath.Clean(resolved)) {
+			t.Fatalf("resolved override = %q, want %q", got, resolved)
+		}
+	})
+
+	t.Run("invalid explicit override is configuration", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "bash.exe")
+		if _, err := testbash.Resolve(); err == nil {
+			t.Fatal("relative Git Bash override unexpectedly succeeded")
+		} else if !testbash.IsConfigurationError(err) {
+			t.Fatalf("relative override error was not classified as configuration: %v", err)
+		}
+	})
+
+	t.Run("poisoned Git exec path", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "")
+		t.Setenv("GIT_EXEC_PATH", t.TempDir())
+		if bash := docFreshnessBash(t); bash == "" {
+			t.Fatal("docFreshnessBash returned an empty executable")
+		}
+	})
+
+	t.Run("success without execution sentinel", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "")
+		bash := docFreshnessBash(t)
+		err := testbash.Probe(bash, "early exit", "exit 0", os.Environ())
+		if err == nil {
+			t.Fatal("early successful exit unexpectedly passed without the execution sentinel")
+		}
+		if !strings.Contains(err.Error(), "without the exact execution sentinel") {
+			t.Fatalf("early-exit error = %v", err)
+		}
+	})
 }
 
 func TestDocFreshnessPreservesDateDiagnostics(t *testing.T) {
@@ -428,59 +473,23 @@ func runDocFreshnessProcess(t *testing.T, reviewed string, today, maxAge *string
 func docFreshnessBash(t *testing.T) string {
 	t.Helper()
 
+	bash, err := testbash.Resolve()
+	if err != nil {
+		t.Fatalf("bash is required to exercise check-doc-freshness.sh: %v", err)
+	}
 	if runtime.GOOS != "windows" {
-		bash, err := exec.LookPath("bash")
-		if err != nil {
-			t.Fatalf("bash is required to exercise check-doc-freshness.sh: %v", err)
-		}
 		return bash
 	}
 
-	git, err := exec.LookPath("git.exe")
-	if err != nil {
-		t.Fatalf("Git for Windows is required to exercise check-doc-freshness.sh: %v", err)
-	}
-	execPathCommand := exec.Command(git, "--exec-path")
-	execPathCommand.Env = docFreshnessProbeEnv()
-	execPathOutput, err := execPathCommand.CombinedOutput()
-	if err != nil {
-		t.Fatalf("locate the Git for Windows installation: %v: %s", err, strings.TrimSpace(string(execPathOutput)))
-	}
-	execPath := filepath.Clean(strings.TrimSpace(string(execPathOutput)))
-	if !filepath.IsAbs(execPath) {
-		t.Fatalf("Git for Windows returned a non-absolute exec path: %q", execPath)
-	}
-	gitRoot := filepath.Clean(filepath.Join(execPath, "..", "..", ".."))
-	candidates := []string{
-		filepath.Join(gitRoot, "bin", "bash.exe"),
-		filepath.Join(gitRoot, "usr", "bin", "bash.exe"),
-	}
-	var diagnostics []string
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err != nil {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s: %v", candidate, err))
-			continue
-		}
-		probe := exec.Command(candidate, "--noprofile", "--norc", "-c", `
-export BASH_ENV=
-export ENV=
+	err = testbash.Probe(bash, "Git Bash date environment", `set -eu
 PATH=/usr/bin:/bin
 export PATH
-case "$(uname -s)" in
-    MINGW*|MSYS*) command -v date >/dev/null ;;
-    *) exit 1 ;;
-esac
-`)
-		probe.Env = docFreshnessProbeEnv()
-		if output, err := probe.CombinedOutput(); err == nil {
-			return candidate
-		} else {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s: %v: %s", candidate, err, strings.TrimSpace(string(output))))
-		}
+command -v date >/dev/null
+`, docFreshnessProbeEnv())
+	if err != nil {
+		t.Fatalf("a working Git Bash date environment is required: %v", err)
 	}
-
-	t.Fatalf("a working Git Bash date environment is required: %s", strings.Join(diagnostics, "; "))
-	return ""
+	return bash
 }
 
 func docFreshnessMarkerExists(t *testing.T, path string) bool {
