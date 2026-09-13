@@ -1,12 +1,10 @@
 package metrics
 
 import (
+	"container/heap"
 	"context"
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -58,14 +56,20 @@ const (
 // GH#5649 lane).
 //
 // The scan is bounded by ctx: it reads the directory in chunks and, once the
-// context is done, abandons the walk and keeps whatever it already deleted
+// context is done, abandons the walk and keeps whatever it already decided
 // (GH#5871 — the child advertises a flushTimeout budget, and a spool large
 // enough to matter is exactly the one whose per-entry stat walk outruns it).
-// The one exception is a pass that has deleted nothing when its budget runs
-// out: it finishes the listing anyway, because abandoning it there would also
-// skip the oldest-first caps and leave the queue with no bound applied at all
-// (see the walk below). That pass can outrun ctx; the walk is otherwise the
-// bounded half of a child that used to run ~15 minutes against a 30s budget.
+// Every chunk boundary is a safe place to stop, with no exception: the
+// oldest-first caps are applied incrementally as each live entry is seen, via
+// a bounded min-heap capped at maxFiles/maxBytes, rather than deferred to a
+// pass over the whole listing. A later entry can only compete with — never
+// retroactively invalidate — an eviction the heap already made, so a
+// truncated walk's evictions are exactly the ones a full walk would have made
+// over the same prefix. A queue too large to fully examine within one budget
+// converges to the caps across repeated calls instead of within a single one
+// (be-wwy2.3 — this replaced an earlier version where an all-young over-cap
+// pile made no TTL progress and so was allowed to outrun its own budget to
+// the end of the listing just to let the caps fire at all; see GH#5660).
 func PruneQueue(ctx context.Context, dir string, now time.Time) (dropped int, freed int64) {
 	return pruneQueue(ctx, dir, now, pruneTTL, maxQueueFiles, maxQueueBytes)
 }
@@ -79,10 +83,39 @@ type queueEntry struct {
 
 // dirChunkReader is the chunked-listing half of *os.File. It is a seam so a
 // test can inject a listing that fails part way through: a mid-listing read
-// error leaves a PARTIAL prefix, which must never reach the oldest-first cap
-// pass below.
+// error simply ends the walk, leaving whatever eviction decisions were
+// already made for the examined prefix in place — the unexamined remainder is
+// left untouched, never guessed at.
 type dirChunkReader interface {
 	ReadDir(n int) ([]os.DirEntry, error)
+}
+
+// queueMinHeap is a container/heap.Interface over queueEntry ordered by
+// modTime ascending, so Pop always removes the oldest live entry. Capping it
+// at maxFiles/maxBytes during the walk — push, then pop while over either cap
+// — bounds the live-candidate set at O(maxFiles) in memory regardless of how
+// many entries the directory holds. It is also what makes a streaming,
+// incremental cap decision correct: a later entry can only be newer than one
+// already evicted, never able to un-evict it, so the entries the heap holds
+// at any point are exactly the maxFiles-newest (within maxBytes) of
+// everything examined so far — including at a chunk boundary where the walk
+// might stop.
+type queueMinHeap []queueEntry
+
+func (h queueMinHeap) Len() int           { return len(h) }
+func (h queueMinHeap) Less(i, j int) bool { return h[i].modTime.Before(h[j].modTime) }
+func (h queueMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *queueMinHeap) Push(x any) {
+	*h = append(*h, x.(queueEntry))
+}
+
+func (h *queueMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	e := old[n-1]
+	*h = old[:n-1]
+	return e
 }
 
 // pruneQueue is PruneQueue with the knobs exposed for tests.
@@ -98,30 +131,36 @@ func pruneQueue(ctx context.Context, dir string, now time.Time, ttl time.Duratio
 
 // pruneQueueFrom is pruneQueue over an already-opened listing of dir.
 func pruneQueueFrom(ctx context.Context, r dirChunkReader, dir string, now time.Time, ttl time.Duration, maxFiles int, maxBytes int64) (dropped int, freed int64) {
-	var live []queueEntry // surviving .evtq batches, candidates for the caps
+	live := &queueMinHeap{}
+	heap.Init(live)
 	var liveBytes int64
-	truncated := false
-	for chunk := 0; ; chunk++ {
+
+	// evict pops the oldest live entry while either cap is exceeded. Called
+	// after every push, so the heap never holds more than maxFiles entries
+	// (or maxBytes worth) at any point the walk might stop.
+	evict := func() {
+		for live.Len() > 0 && (live.Len() > maxFiles || liveBytes > maxBytes) {
+			e := heap.Pop(live).(queueEntry)
+			liveBytes -= e.size
+			if remove(e.path) {
+				dropped++
+				freed += e.size
+			}
+		}
+	}
+
+	for {
 		// One budget check per chunk, so the worst-case overrun is one
 		// chunk of stats rather than the whole spool. os.ReadDir is not
 		// usable here: it reads AND name-sorts every entry before the caller
 		// sees one, which on a backed-up queue is precisely the unbounded
 		// prologue this bounds (same reason hasQueuedEvents streams).
 		//
-		// Out of budget is not automatically "stop". A truncated walk cannot
-		// run the cap pass below, so a pass that also deleted nothing has
-		// applied NEITHER drain — and since the next child reopens the
-		// directory at offset zero, it would walk the same young prefix and
-		// stop in the same place, leaving the file/byte caps inert forever
-		// against exactly the young oversized spool they were added for
-		// (GH#5660). So the deadline stops the walk only once there is TTL
-		// progress to keep (or before the first chunk, where the caller
-		// handed over no budget at all and the queue may not even be large).
-		// The cost is disclosed: on a big all-young queue this child runs
-		// past its budget to the end of the listing, because that is the
-		// only pass in which the caps can fire.
-		if ctx.Err() != nil && (chunk == 0 || dropped > 0) {
-			truncated = true
+		// Unconditional, with no exception for a chunk that dropped nothing:
+		// the caps are applied incrementally below as each live entry is
+		// pushed, so stopping here never leaves them unapplied the way a
+		// deferred whole-listing pass would (be-wwy2.3 / GH#5660).
+		if ctx.Err() != nil {
 			break
 		}
 		dirents, readErr := r.ReadDir(pruneChunkSize)
@@ -151,47 +190,17 @@ func pruneQueueFrom(ctx context.Context, r dirChunkReader, dir string, now time.
 				continue
 			}
 			if isBatch {
-				live = append(live, queueEntry{filepath.Join(dir, name), fi.ModTime(), fi.Size()})
+				heap.Push(live, queueEntry{filepath.Join(dir, name), fi.ModTime(), fi.Size()})
 				liveBytes += fi.Size()
+				evict()
 			}
 		}
 		if readErr != nil {
-			// io.EOF means the whole directory was listed and the caps below
-			// may run. Anything else ended the listing early, so what we
-			// hold is a prefix, not the queue: the cap pass must not see it.
-			if !errors.Is(readErr, io.EOF) {
-				truncated = true
-			}
+			// Whatever was examined already had its caps applied above via
+			// evict(); a non-EOF error just ends the walk here rather than
+			// making any decision about the unexamined remainder.
 			break
 		}
-	}
-
-	if truncated {
-		// The caps are an oldest-first decision over the WHOLE queue; a
-		// partial listing cannot make it correctly, and guessing from a
-		// prefix would drop batches that are not actually the oldest. The
-		// TTL deletions above already stand.
-		return dropped, freed
-	}
-
-	if len(live) <= maxFiles && liveBytes <= maxBytes {
-		return dropped, freed
-	}
-	// Drop oldest-first until both caps are satisfied.
-	sort.Slice(live, func(i, j int) bool { return live[i].modTime.Before(live[j].modTime) })
-	remaining, remainingBytes := len(live), liveBytes
-	for _, e := range live {
-		if remaining <= maxFiles && remainingBytes <= maxBytes {
-			break
-		}
-		if remove(e.path) {
-			dropped++
-			freed += e.size
-		}
-		// A lost race (the file was uploaded-and-deleted concurrently) still
-		// shrinks the queue, so it counts against the caps either way.
-		remaining--
-		remainingBytes -= e.size
 	}
 	return dropped, freed
 }
