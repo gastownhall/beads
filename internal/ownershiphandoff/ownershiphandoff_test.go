@@ -714,6 +714,62 @@ func TestStopRetryAfterUncheckpointedStopSucceeds(t *testing.T) {
 	}
 }
 
+// TestStopResumeKeepsInheritedReservationOnReportedNonMutation covers the other
+// exit from that crash window: the retry's stop refuses and explicitly reports
+// mutates=false. A provider speaks only for its own call, so a fresh
+// non-mutating refusal cannot retire a reservation an earlier, killed attempt
+// left behind — doing so would answer mutates=false for a half stop, which is
+// exactly what the journaled reservation exists to prevent.
+func TestStopResumeKeepsInheritedReservationOnReportedNonMutation(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	killedMidStop := Journal{Request: r, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+		LegacyStopInProgress: true, Phase: PhaseTargetConfigured, Owner: OwnerLegacyGC}
+	b, err := json.Marshal(killedMidStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := Hooks{
+		StopLegacy: func(context.Context, Request, Snapshot) error {
+			return withReportedMutation(CodedError{Code: "process_unowned", Err: errors.New("stop refused")}, false)
+		},
+	}
+	got, execErr := Execute(context.Background(), r, path, h, false)
+	if execErr == nil || !got.Mutates || got.Phase != PhaseTargetConfigured || got.ErrorCode != "process_unowned" {
+		t.Fatalf("resumed stop refusal result=%+v err=%v, want the inherited mutation retained", got, execErr)
+	}
+	final, loadErr := Load(path)
+	if loadErr != nil || !final.LegacyStopInProgress {
+		t.Fatalf("journal=%+v err=%v, want the inherited stop reservation kept", final, loadErr)
+	}
+}
+
+// TestStopRefusalRetiresOwnReservationOnReportedNonMutation is the companion
+// bound: a reservation this attempt took is this attempt's to retire, because
+// the provider just closed the ambiguous window it covered.
+func TestStopRefusalRetiresOwnReservationOnReportedNonMutation(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	h := Hooks{
+		Snapshot:  func(context.Context, Request) (Snapshot, error) { return Snapshot{}, nil },
+		Configure: func(context.Context, Request, Snapshot) error { return nil },
+		StopLegacy: func(context.Context, Request, Snapshot) error {
+			return withReportedMutation(CodedError{Code: "process_unowned", Err: errors.New("stop refused")}, false)
+		},
+	}
+	got, execErr := Execute(context.Background(), r, path, h, false)
+	if execErr == nil || got.Mutates || got.Phase != PhaseTargetConfigured || got.ErrorCode != "process_unowned" {
+		t.Fatalf("stop refusal result=%+v err=%v, want a clean non-mutating refusal", got, execErr)
+	}
+	final, loadErr := Load(path)
+	if loadErr != nil || final.LegacyStopInProgress || final.MutationOccurred {
+		t.Fatalf("journal=%+v err=%v, want this attempt's reservation retired", final, loadErr)
+	}
+}
+
 func TestExecuteRefusesCorruptJournal(t *testing.T) {
 	for _, dryRun := range []bool{false, true} {
 		r := validRequest(t)

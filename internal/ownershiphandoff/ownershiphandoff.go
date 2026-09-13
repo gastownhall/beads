@@ -224,7 +224,7 @@ func ValidateRequest(r Request) error {
 		return errors.New("database and workspace are required")
 	}
 	if r.CityRoot == "" {
-		return errors.New("city root is required")
+		return errors.New("city root is required to identify the lifecycle owner")
 	}
 	if !filepath.IsAbs(r.CityRoot) || filepath.Clean(r.CityRoot) != r.CityRoot {
 		return errors.New("city root must be an absolute canonical path")
@@ -823,7 +823,8 @@ func (x *handoffRun) stepStopLegacy(ctx context.Context) *stepOutcome {
 	// Reserve the stop durably before invoking it. Once the hook has been
 	// entered its effect cannot be assumed absent, so a failed or interrupted
 	// stop must report a mutation rather than an untouched legacy owner.
-	if !x.j.LegacyStopInProgress {
+	reservedNow := !x.j.LegacyStopInProgress
+	if reservedNow {
 		x.j.LegacyStopInProgress = true
 		x.j.UpdatedAt = time.Now().UTC()
 		if err := x.save(); err != nil {
@@ -832,15 +833,24 @@ func (x *handoffRun) stepStopLegacy(ctx context.Context) *stepOutcome {
 	}
 	if err := x.hooks.StopLegacy(ctx, x.j.Request, x.j.Snapshot); err != nil {
 		// A provider that knows what its failed stop actually did says so, and
-		// that report supersedes the reservation above, which exists only to
-		// be conservative when nothing reported. A reported mutation is
+		// that report supersedes the reservation this attempt took, which exists
+		// only to be conservative when nothing reported. A reported mutation is
 		// recorded durably because the reservation is retired by a later clean
 		// retry and the mutation must outlive it; a reported non-mutation
-		// retires the reservation now, because the ambiguous window it covers
-		// is exactly what the provider just closed.
+		// retires the reservation this attempt took, because the ambiguous
+		// window it covers is exactly what the provider just closed.
+		//
+		// An inherited reservation is not this attempt's to retire. It records a
+		// stop that was entered and never reached a checkpoint — a process
+		// killed mid-stop — and this attempt's provider can only speak for its
+		// own call, not for whatever the killed one left behind. Clearing it on
+		// a fresh non-mutating refusal would answer mutates=false for a half
+		// stop, which is the outcome the reservation exists to prevent.
 		if mutates, reported := reportedMutation(err); reported {
 			x.j.MutationOccurred = x.j.MutationOccurred || mutates
-			x.j.LegacyStopInProgress = mutates
+			if mutates || reservedNow {
+				x.j.LegacyStopInProgress = mutates
+			}
 		}
 		return x.fail("owner_stop_failed", err)
 	}
