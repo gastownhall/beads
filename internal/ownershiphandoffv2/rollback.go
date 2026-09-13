@@ -87,12 +87,14 @@ func (x *run) stopTarget(e *Evidence) error {
 		e.note("target_stop", "an unconfirmed launch was retired by its nonce")
 		return nil
 	}
-	if err := stopByIdentity(target.PID, target.Birth); err != nil {
+	binding, err := stopByIdentity(target.PID, target.Birth)
+	e.note("target_stop_binding", binding)
+	if err != nil {
 		e.record("target_stopped", GateSkipped)
 		return err
 	}
 	e.record("target_stopped", GatePassed)
-	e.note("target_stop", fmt.Sprintf("stopped pid %d by its captured identity", target.PID))
+	e.note("target_stop", fmt.Sprintf("stopped pid %d by its captured identity (%s)", target.PID, binding))
 	x.j.Reservations.TargetLaunch = ""
 	return x.save()
 }

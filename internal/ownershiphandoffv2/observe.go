@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // registers the "mysql" driver
+	mysql "github.com/go-sql-driver/mysql" // also registers the "mysql" driver
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -92,8 +92,8 @@ func handshakes(host string, port int) bool {
 // readSentinels captures the cheap facts that prove two servers are serving the
 // same scope: the lowest issue id, the lowest dependency edge, and the commit
 // the branch head points at. Absence is itself a sentinel — an empty database
-// must still compare equal to an empty database, so "no rows" is recorded as
-// found=false rather than as an error.
+// must compare equal to an empty database — so a missing table and an empty one
+// are recorded as states rather than raised as errors.
 func readSentinels(ctx context.Context, db *sql.DB, database string) (Sentinels, error) {
 	var s Sentinels
 	if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&s.DatabaseSelection); err != nil {
@@ -104,25 +104,20 @@ func readSentinels(ctx context.Context, db *sql.DB, database string) (Sentinels,
 	}
 
 	var issueID sql.NullString
-	err := db.QueryRowContext(ctx, "SELECT id FROM issues ORDER BY id LIMIT 1").Scan(&issueID)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-	case err != nil:
+	var err error
+	s.IssuesState, err = scanSentinel(ctx, db, "SELECT id FROM issues ORDER BY id LIMIT 1", &issueID)
+	if err != nil {
 		return s, fmt.Errorf("read issue sentinel: %w", err)
-	default:
-		s.FirstIssueID, s.FirstIssueFound = issueID.String, issueID.Valid
 	}
+	s.FirstIssue = issueID.String
 
-	var from, to sql.NullString
-	err = db.QueryRowContext(ctx,
-		"SELECT from_id, to_id FROM dependencies ORDER BY from_id, to_id LIMIT 1").Scan(&from, &to)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-	case err != nil:
+	var edge sql.NullString
+	s.DependenciesState, err = scanSentinel(ctx, db,
+		"SELECT CONCAT(from_id, '->', to_id) FROM dependencies ORDER BY from_id, to_id LIMIT 1", &edge)
+	if err != nil {
 		return s, fmt.Errorf("read dependency sentinel: %w", err)
-	default:
-		s.FirstDependency, s.FirstDepFound = from.String+"->"+to.String, from.Valid || to.Valid
 	}
+	s.FirstDependency = edge.String
 
 	if err := db.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&s.HeadHash); err != nil {
 		return s, fmt.Errorf("read head hash: %w", err)
@@ -130,15 +125,43 @@ func readSentinels(ctx context.Context, db *sql.DB, database string) (Sentinels,
 	return s, nil
 }
 
+// scanSentinel runs a one-row query and classifies the outcome. A table that is
+// not there is a fact about the database, not a failure to read it: an empty
+// workspace and one whose schema was never created must not look alike.
+func scanSentinel(ctx context.Context, db *sql.DB, query string, dest *sql.NullString) (string, error) {
+	err := db.QueryRowContext(ctx, query).Scan(dest)
+	switch {
+	case err == nil:
+		return TablePresent, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return TableEmpty, nil
+	case isMissingTable(err):
+		return TableMissing, nil
+	default:
+		return "", err
+	}
+}
+
+// isMissingTable recognizes MySQL error 1146 (ER_NO_SUCH_TABLE), which Dolt
+// returns for a database that has no beads schema.
+func isMissingTable(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1146
+	}
+	return false
+}
+
 // sentinelsEqual compares two captures. The database selection is excluded on
 // purpose: it is checked against the request separately at each end, and
 // comparing it here would only restate that.
 func sentinelsEqual(a, b Sentinels) (string, bool) {
 	switch {
-	case a.FirstIssueFound != b.FirstIssueFound || a.FirstIssueID != b.FirstIssueID:
-		return fmt.Sprintf("first issue %q/%v vs %q/%v", a.FirstIssueID, a.FirstIssueFound, b.FirstIssueID, b.FirstIssueFound), false
-	case a.FirstDepFound != b.FirstDepFound || a.FirstDependency != b.FirstDependency:
-		return fmt.Sprintf("first dependency %q/%v vs %q/%v", a.FirstDependency, a.FirstDepFound, b.FirstDependency, b.FirstDepFound), false
+	case a.IssuesState != b.IssuesState || a.FirstIssue != b.FirstIssue:
+		return fmt.Sprintf("issues %s/%q vs %s/%q", a.IssuesState, a.FirstIssue, b.IssuesState, b.FirstIssue), false
+	case a.DependenciesState != b.DependenciesState || a.FirstDependency != b.FirstDependency:
+		return fmt.Sprintf("dependencies %s/%q vs %s/%q",
+			a.DependenciesState, a.FirstDependency, b.DependenciesState, b.FirstDependency), false
 	case a.HeadHash != b.HeadHash:
 		return fmt.Sprintf("head hash %q vs %q", a.HeadHash, b.HeadHash), false
 	}
@@ -282,17 +305,34 @@ func dataDirLocked(dir string) (locked bool, ok bool, detail string) {
 // workspace. It is the one question ManagesLiveServerOnPort is used for: is
 // that server ours? Both the recorded port and a caller-named port are checked,
 // because a stale record pointing elsewhere still means bd holds this root.
+// It deliberately does not use doltserver.IsRunning, which shells out to `ps`
+// to confirm the process is a dolt binary. An ownership handoff spawns nothing
+// but dolt, and ManagesLiveServerOnPort answers the same question from the
+// recorded port and pid alone.
 func bdServerPresent(beadsDir string, ports ...int) (present bool, detail string) {
-	state, err := doltserver.IsRunning(beadsDir)
-	if err == nil && state != nil && state.Running && state.PID > 0 {
-		return true, fmt.Sprintf("bd records a live server pid %d on port %d", state.PID, state.Port)
+	// The recorded port first: that is the server bd believes it owns here.
+	if recorded := recordedPort(beadsDir); recorded > 0 {
+		ports = append([]int{recorded}, ports...)
 	}
 	for _, port := range ports {
 		if port > 0 && doltserver.ManagesLiveServerOnPort(beadsDir, port) {
-			return true, fmt.Sprintf("bd manages a live server on port %d", port)
+			return true, fmt.Sprintf("bd manages a live server on port %d for this root", port)
 		}
 	}
 	return false, "no live bd-managed server for this root"
+}
+
+// recordedPort reads the port bd last recorded for this workspace, or 0.
+func recordedPort(beadsDir string) int {
+	data, err := os.ReadFile(filepath.Join(beadsDir, doltserver.PortFileName)) //nolint:gosec // workspace lifecycle file
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return port
 }
 
 // isDoltRoot is beads' own predicate for "this directory is a Dolt database

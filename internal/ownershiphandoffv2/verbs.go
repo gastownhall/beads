@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // Verb names, as typed on the command line.
@@ -137,7 +139,7 @@ func Run(ctx context.Context, verb string, opts Options) (Result, error) {
 	// belief, and a stale one is less useful than none.
 	j.Hints = opts.Hints
 
-	x := &run{j: j, path: journalPath, opts: opts, req: req, ctx: ctx}
+	x := &run{j: j, path: journalPath, opts: opts, req: req, ctx: ctx, existed: existed}
 	var runErr error
 	switch verb {
 	case VerbPrepare:
@@ -167,6 +169,9 @@ type run struct {
 	opts Options
 	req  Request
 	ctx  context.Context
+	// existed records whether a journal was on disk when this verb started, so
+	// a refusal can tell leaving one behind from updating one already there.
+	existed bool
 }
 
 func (x *run) save() error {
@@ -188,7 +193,15 @@ func (x *run) advance(phase Phase, e Evidence) error {
 
 // fail records a refusal in the journal without advancing. The journal is the
 // record of what bd tried, not only of what worked.
+//
+// One exception: a prepare that refuses before it ever reached a phase leaves
+// NO journal. prepare's contract is that it mutates nothing, and dropping a
+// file into someone else's .beads directory is a mutation — one the caller
+// would then have to clean up before it could retry.
 func (x *run) fail(err error, e *Evidence) error {
+	if !x.existed && x.j.Phase == "" {
+		return err
+	}
 	x.j.ErrorCode = ErrorCode(err)
 	x.j.Error = err.Error()
 	if e != nil {
@@ -204,7 +217,13 @@ func (p Phase) String() string { return string(p) }
 func (x *run) evidence() Evidence { return newEvidence(x.opts.BDVersion) }
 
 func (x *run) beadsDir() string { return BeadsDir(x.req.Root) }
-func (x *run) dataDir() string  { return filepath.Join(x.beadsDir(), "dolt") }
+
+// dataDir is where bd's own resolver says this workspace's Dolt storage lives.
+// It is deliberately not <root>/.beads/dolt spelled out: an env override or a
+// dolt_data_dir in metadata.json moves it, and the replacement server is
+// launched against whatever this returns — so a gate that looked somewhere else
+// would be proving things about a directory nobody is serving.
+func (x *run) dataDir() string { return doltserver.ResolveDoltDir(x.beadsDir()) }
 
 // reserve records an intent to mutate, durably, before the mutation happens.
 func (x *run) reserve(name, state string) error {

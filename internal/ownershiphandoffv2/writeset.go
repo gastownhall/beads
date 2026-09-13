@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -169,14 +172,32 @@ func applyCommitWriteSet(root string, target Target) error {
 	if err := os.WriteFile(portFilePath(beadsDir), []byte(strconv.Itoa(target.Port)), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", doltserver.PortFileName, err)
 	}
-	for key, value := range map[string]string{
+	// SetYamlConfigInDir refuses a workspace with no config.yaml, telling the
+	// operator to run `bd init`. That is right for a person typing a config
+	// command and wrong here: a caller-managed workspace need never have had
+	// one, and the write set is not optional. The snapshot recorded its absence,
+	// so rollback removes the file this creates.
+	if err := ensureConfigYAML(beadsDir); err != nil {
+		return err
+	}
+	yamlKeys := map[string]string{
 		"dolt.host":       target.Host,
 		"dolt.port":       strconv.Itoa(target.Port),
 		"dolt.auto-start": "true",
 		"dolt.mode":       "server",
-	} {
+	}
+	for key, value := range yamlKeys {
 		if err := config.SetYamlConfigInDir(beadsDir, key, value); err != nil {
 			return fmt.Errorf("write config.yaml %s: %w", key, err)
+		}
+	}
+	// Read every key back through the resolver bd will actually use. A write
+	// that lands somewhere the reader cannot see it is worse than a failed
+	// write: it looks like success and is discovered later, by a rollback that
+	// cannot prove config.yaml points anywhere.
+	for key, want := range yamlKeys {
+		if got := config.GetStringFromDir(beadsDir, key); got != want {
+			return fmt.Errorf("config.yaml %s reads back as %q, not %q", key, got, want)
 		}
 	}
 	cfg, err := configfile.Load(beadsDir)
@@ -192,6 +213,60 @@ func applyCommitWriteSet(root string, target Target) error {
 		return fmt.Errorf("write metadata.json: %w", err)
 	}
 	return syncDir(beadsDir)
+}
+
+// ensureConfigYAML makes beadsDir's config.yaml ready for the dotted-key writes
+// that follow: the file exists, and it already has a non-empty `dolt:` mapping.
+//
+// Both halves work around the same defect in config.SetYamlConfigInDir. Writing
+// `dolt.host` into a file with no `dolt:` mapping appends a FLAT
+// `dolt.host: 127.0.0.1` line — a key literally named "dolt.host" — and only
+// the next write creates the real `dolt:` block. config.GetStringFromDir splits
+// on the dot and looks for a nested map, so it never sees the flat key: bd
+// would write the host and be unable to read it back, and R2 would later refuse
+// with "config.yaml resolves to :3307". An empty `dolt:` is no better, since it
+// parses to nil rather than to a mapping.
+//
+// Seeding one real key gives every later write a mapping to nest into. `mode`
+// is the seed because commit sets it to this value anyway, so nothing here is
+// a value the write set would not have written.
+//
+// This works around the defect rather than fixing it: SetYamlConfigInDir is
+// used across bd, and changing how it creates sections belongs in its own
+// change with its own tests. The readback assertion in applyCommitWriteSet is
+// what makes the workaround safe — if it ever stops working, commit refuses
+// instead of silently writing somewhere nothing reads.
+func ensureConfigYAML(beadsDir string) error {
+	path := configYAMLPath(beadsDir)
+	content, err := os.ReadFile(path) //nolint:gosec // workspace config under .beads
+	switch {
+	case os.IsNotExist(err):
+		content = []byte("# created by bd ownership handoff\n")
+	case err != nil:
+		return fmt.Errorf("read config.yaml: %w", err)
+	}
+	if hasDoltMapping(content) {
+		return nil
+	}
+	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
+		content = append(content, '\n')
+	}
+	content = append(content, []byte("dolt:\n    mode: "+configfile.DoltModeServer+"\n")...)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		return fmt.Errorf("write config.yaml: %w", err)
+	}
+	return nil
+}
+
+// hasDoltMapping reports whether content already has a `dolt:` key whose value
+// is a non-empty mapping — the shape SetYamlConfigInDir needs to nest into.
+func hasDoltMapping(content []byte) bool {
+	var root map[string]any
+	if err := yaml.Unmarshal(content, &root); err != nil {
+		return false
+	}
+	section, ok := root["dolt"].(map[string]any)
+	return ok && len(section) > 0
 }
 
 // restoreCommitWriteSet puts the four artifacts back exactly as captured. It

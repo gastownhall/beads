@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -53,6 +54,15 @@ func (x *run) prepare() error {
 	e.record("workspace_metadata", GatePassed)
 
 	dataDir := x.dataDir()
+	// A data dir outside the workspace is a shared or relocated server. Taking
+	// it over would transfer a scope other workspaces are also using, which is
+	// not what this verb means.
+	if !strings.HasPrefix(dataDir, x.req.Root+string(filepath.Separator)) {
+		e.record("data_dir_present", GateSkipped)
+		return x.fail(codedf(CodeUnsupportedScope,
+			"workspace data dir %s is outside %s; only a workspace-local server can be taken over",
+			dataDir, x.req.Root), &e)
+	}
 	if _, statErr := os.Stat(dataDir); statErr != nil {
 		e.record("data_dir_present", GateSkipped)
 		return x.fail(codedf(CodeDataDirInvalid, "workspace data dir %s: %v", dataDir, statErr), &e)
@@ -469,7 +479,9 @@ func (x *run) retireOrphanTarget(e *Evidence) error {
 		e.record("orphan_retired", GateSkipped)
 		return codedf(CodeTargetLaunchFailed, "look for the interrupted launch: %v", err)
 	}
-	if err := stopByIdentity(state.PID, state.Birth); err != nil {
+	binding, err := stopByIdentity(state.PID, state.Birth)
+	e.note("target_stop_binding", binding)
+	if err != nil {
 		e.record("orphan_retired", GateSkipped)
 		return err
 	}
@@ -517,25 +529,67 @@ func newLaunchID() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
-// stopByIdentity terminates a process only when the kernel can prove it is
-// still the one that was captured. Nothing here falls back to signaling a
-// bare pid: that is the pid-reuse race this whole mechanism exists to avoid.
-func stopByIdentity(pid int, birth string) error {
+// stopByIdentity terminates a process only when it can be shown to still be the
+// one that was captured. Nothing here signals a bare pid: that is the pid-reuse
+// race this whole mechanism exists to avoid.
+//
+// The binding is not equally strong everywhere, and the caller journals which
+// one was used. Where the kernel offers a handle bound to the process itself
+// (pidfd on Linux), OpenStrict holds it across the signal and reuse is
+// impossible. Elsewhere — darwin, Windows — procid.Open verifies the birth
+// token and then signals, which leaves a narrow window in which the process
+// could exit and its pid be reused. That is strictly stronger than not checking
+// at all, and it is the most those platforms offer; refusing outright would
+// leave a rollback with no way to stop the server it just started.
+func stopByIdentity(pid int, birth string) (binding string, err error) {
 	if pid <= 0 || birth == "" {
-		return codedf(CodeTargetIdentityChanged, "no captured identity for pid %d", pid)
+		return "", codedf(CodeTargetIdentityChanged, "no captured identity for pid %d", pid)
 	}
-	handle, err := procid.OpenStrict(pid, procid.Token(birth))
+	open, binding := procid.OpenStrict, "kernel-bound"
+	if !procid.SupportsKernelBoundHandle() {
+		open, binding = procid.Open, "verify-then-signal"
+	}
+	handle, err := open(pid, procid.Token(birth))
 	if err != nil {
 		if procid.IsProcessGone(err) {
-			return nil // already gone; stopping it is what was wanted
+			return binding, nil // already gone; stopping it is what was wanted
 		}
-		return codedf(CodeTargetIdentityChanged, "open pid %d by its captured identity: %v", pid, err)
+		return binding, codedf(CodeTargetIdentityChanged,
+			"open pid %d by its captured identity: %v", pid, err)
 	}
 	defer handle.Close() //nolint:errcheck // best effort on a handle being discarded
 	if err := handle.Kill(); err != nil {
-		return codedf(CodeTargetIdentityChanged, "stop pid %d: %v", pid, err)
+		return binding, codedf(CodeTargetIdentityChanged, "stop pid %d: %v", pid, err)
 	}
-	return nil
+	// Wait for it to actually go. A signal delivered is not a process exited,
+	// and the caller restarts its own server into this data dir the moment
+	// rollback returns — into Dolt's storage lock, if this returns early.
+	if !waitForExit(pid, procid.Token(birth), targetExitTimeout) {
+		return binding, codedf(CodeTargetIdentityChanged,
+			"pid %d did not exit within %s of being stopped", pid, targetExitTimeout)
+	}
+	return binding, nil
+}
+
+// targetExitTimeout bounds the wait for a stopped replacement to leave. A Dolt
+// server flushes on shutdown, so this is generous.
+const targetExitTimeout = 30 * time.Second
+
+// waitForExit polls until the captured identity is no longer running.
+func waitForExit(pid int, birth procid.Token, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		match, err := verifyBirth(pid, birth)
+		if err != nil || !match {
+			// Gone, recycled into something else, or unobservable. None of
+			// those is the process this handoff launched still serving.
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // configuredEndpoint reads the workspace config.yaml's resolved dolt endpoint.
