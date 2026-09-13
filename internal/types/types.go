@@ -501,6 +501,27 @@ func (i *Issue) SetDefaults() {
 	}
 }
 
+// NormalizeOptionalTimestampsToUTC converts every set optional timestamp to UTC
+// in place. CreatedAt and UpdatedAt are value fields normalized separately by
+// the insert paths; the optional pointer timestamps below were previously left
+// in their original location. An offset-bearing value imported from JSONL — for
+// example a closed_at carrying a -04:00 offset from an older SQLite-era export —
+// was therefore stored with its local wall-clock digits relabeled UTC, shifting
+// the recorded instant by the offset. Normalizing to UTC here matches how
+// CreatedAt/UpdatedAt are already handled and keeps every timestamp on a row
+// referring to the same absolute instant. Fixes #5765.
+func (i *Issue) NormalizeOptionalTimestampsToUTC() {
+	for _, ts := range []**time.Time{
+		&i.StartedAt, &i.ClosedAt, &i.CompactedAt,
+		&i.DueAt, &i.DeferUntil, &i.LeaseExpiresAt, &i.HeartbeatAt,
+	} {
+		if *ts != nil {
+			utc := (*ts).UTC()
+			*ts = &utc
+		}
+	}
+}
+
 // Status represents the current state of an issue
 type Status string
 
