@@ -63,6 +63,10 @@ var YamlOnlyKeys = map[string]bool{
 	// Create command settings
 	"create.require-description": true,
 
+	// Mandatory due dates (read on every create, before the database is
+	// necessarily reachable, so it lives in yaml alongside the create settings)
+	"due.required": true,
+
 	// Prime memory-injection caps (read at session start, possibly before
 	// the database is reachable, so they must live in yaml)
 	"prime.max-memories":     true,

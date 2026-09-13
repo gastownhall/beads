@@ -25,7 +25,7 @@ func (r *eventsSQLRepositoryImpl) Record(ctx context.Context, evt domain.Event, 
 	if opts.UseWispsTable {
 		table = "wisp_events"
 	}
-	if err := issueops.RecordFullEventInTable(ctx, r.runner, table, evt.IssueID, evt.Type, evt.Actor, evt.OldValue, evt.NewValue); err != nil {
+	if err := issueops.RecordFullEventWithCommentInTable(ctx, r.runner, table, evt.IssueID, evt.Type, evt.Actor, evt.OldValue, evt.NewValue, evt.Comment); err != nil {
 		return fmt.Errorf("db: record event in %s: %w", table, err)
 	}
 	return nil

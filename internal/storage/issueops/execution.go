@@ -207,6 +207,9 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	if attempt.ForceClosePolicy && attempt.Patch.Status.Set {
 		updates[OpForceClosePolicy] = true
 	}
+	if attempt.DueClearReason != "" && attempt.Patch.DueAt.Set && attempt.Patch.DueAt.Value == nil {
+		updates[OpDueClearReason] = attempt.DueClearReason
+	}
 	if len(updates) > 0 {
 		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
 		if err != nil {

@@ -8993,6 +8993,16 @@ components:
             workspace's done category. It has no effect without such a status
             change, and it never bypasses validation, the preconditions above,
             or the assignee fence.
+        due_clear_reason:
+          type: string
+          maxLength: 255
+          description: >-
+            Why a `patch.due_at` of `null` is clearing the due date. While the
+            workspace sets `due.required`, clearing a due date is the one edit
+            that can undo the invariant, so it is refused without a non-blank
+            reason; the reason is recorded on the update event. Ignored on any
+            patch that is not clearing a due date, and ignored entirely while
+            `due.required` is off.
         force_assignee_transfer:
           type: boolean
           default: false
@@ -10276,6 +10286,16 @@ components:
             workspace's done category. It has no effect without such a status
             change, and it never bypasses validation, the preconditions above,
             or the assignee fence.
+        due_clear_reason:
+          type: string
+          maxLength: 255
+          description: >-
+            Why a `patch.due_at` of `null` is clearing the due date. While the
+            workspace sets `due.required`, clearing a due date is the one edit
+            that can undo the invariant, so it is refused without a non-blank
+            reason; the reason is recorded on the update event. Ignored on any
+            patch that is not clearing a due date, and ignored entirely while
+            `due.required` is off.
         force_assignee_transfer:
           type: boolean
           default: false

@@ -64,7 +64,7 @@ var (
 		"notes", "owner", "priority", "sender", "status", "title",
 	}
 	applyUpdateItemMembers = []string{
-		"expected_assignee", "expected_status", "expected_version",
+		"due_clear_reason", "expected_assignee", "expected_status", "expected_version",
 		"force_assignee_transfer", "force_close_policy", "patch", "target",
 	}
 	applyPatchMembers = []string{
@@ -459,6 +459,7 @@ func applyUpdateItem(prefix string, encoded json.RawMessage, raw map[string]json
 	if wire.ForceAssigneeTransfer != nil {
 		item.ForceAssigneeTransfer = *wire.ForceAssigneeTransfer
 	}
+	item.DueClearReason = derefString(wire.DueClearReason)
 	return item, nil
 }
 

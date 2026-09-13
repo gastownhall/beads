@@ -343,6 +343,9 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 	if request.ForceClosePolicy && patch.Status.Set {
 		fields[storageissueops.OpForceClosePolicy] = true
 	}
+	if request.DueClearReason != "" && patch.DueAt.Set && patch.DueAt.Value == nil {
+		fields[storageissueops.OpDueClearReason] = request.DueClearReason
+	}
 	var persistence *types.PersistenceMode
 	if patch.Persistence.Set {
 		value := patch.Persistence.Value
