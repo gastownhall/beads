@@ -174,12 +174,12 @@ func CheckReadonly(operation string) {
 //     doesn't block it either), so it cannot inherit the freeze check from
 //     caller 1 and needs its own explicit call.
 func CheckMigrationFreeze(operation string) {
-	townRoot := findTownRoot()
-	if !migration.IsFrozen(townRoot) {
+	root, inTown := freezeRootAndScope()
+	if !migration.IsFrozen(root) {
 		return
 	}
 
-	info := migration.Read(townRoot)
+	info := migration.Read(root)
 	operator := "unknown"
 	reason := ""
 	if info != nil {
@@ -187,11 +187,21 @@ func CheckMigrationFreeze(operation string) {
 		reason = info.Reason
 	}
 
-	fmt.Fprintf(os.Stderr, "⛔ ERROR: town is frozen for migration (by %s).\n", operator)
+	// The subject and the way out both depend on which sentinel was found. A
+	// town freeze is cleared by gt, which owns it; a workspace freeze is a
+	// file the operator put there by hand and removes the same way. Telling a
+	// non-Gas-Town user to run `gt migrate thaw` would name a binary they do
+	// not have, for a town that does not exist.
+	subject, remedy := "workspace", "remove "+migration.FilePath(root)
+	if inTown {
+		subject, remedy = "town", "gt migrate thaw"
+	}
+
+	fmt.Fprintf(os.Stderr, "⛔ ERROR: %s is frozen for migration (by %s).\n", subject, operator)
 	if reason != "" {
 		fmt.Fprintf(os.Stderr, "   Reason: %s\n", reason)
 	}
-	fmt.Fprintf(os.Stderr, "   bd %s is blocked. Clear the freeze: gt migrate thaw\n", operation)
+	fmt.Fprintf(os.Stderr, "   bd %s is blocked. Clear the freeze: %s\n", operation, remedy)
 	metrics.CloseAndFlush()
 	os.Exit(1)
 }

@@ -73,6 +73,11 @@ dolt-pprof/
 # Corrupt backup directories (created by bd doctor --fix recovery)
 *.corrupt.backup/
 
+# Migration freeze sentinel (internal/migration): a live operational stand-down
+# for THIS clone. Committing it would freeze every clone that pulls it, with a
+# refusal message naming a local path.
+MIGRATION-FREEZE
+
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
@@ -138,6 +143,10 @@ var requiredPatterns = []string{
 	"proxied_server_client_info.json",
 	".local_version",
 	"backup/",
+	// A live sentinel is per-clone operational state; committed, it would
+	// freeze every clone that pulls it. In the template AND here, so bd doctor
+	// carries it to workspaces initialized before it was added.
+	"MIGRATION-FREEZE",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.

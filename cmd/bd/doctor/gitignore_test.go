@@ -2828,3 +2828,52 @@ func TestCheckNoVestigialSyncWorktrees_VestigialDetected(t *testing.T) {
 		t.Errorf("Message = %q, want it to contain 'Vestigial'", check.Message)
 	}
 }
+
+// TestGitignore_ContainsMigrationFreeze pins the MIGRATION-FREEZE sentinel in
+// BOTH lists, for the reason the sibling entries above are pinned: the generic
+// loops iterate requiredPatterns, so they cannot notice its removal.
+//
+// The template covers workspaces bd init creates from now on. requiredPatterns
+// is what bd doctor actually checks, so it is the half that carries the line
+// to workspaces initialized before the sentinel existed — drop it and
+// `bd doctor --fix` silently stops healing them.
+//
+// The stakes: a committed sentinel freezes every clone that pulls it, and the
+// refusal (cmd/bd/errors.go) names a LOCAL path, so the first person to hit it
+// has no reason to suspect it came over the wire.
+func TestGitignore_ContainsMigrationFreeze(t *testing.T) {
+	// Keep in sync with migration.FileName. Not imported here because
+	// cmd/bd/doctor must not depend on that package for a string constant —
+	// the same rule TestGitignore_ContainsDoltServerConfig follows.
+	const pattern = "MIGRATION-FREEZE"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+
+	found := false
+	for _, p := range requiredPatterns {
+		if p == pattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("requiredPatterns should contain %q, otherwise bd doctor --fix cannot heal an existing .beads/.gitignore", pattern)
+	}
+
+	// And an old .gitignore must be reported as missing it, which is the
+	// behaviour the retrofit depends on.
+	old := "dolt/\nembeddeddolt/\n*.lock\n"
+	missing := missingGitignorePatterns(old)
+	seen := false
+	for _, p := range missing {
+		if p == pattern {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		t.Errorf("missingGitignorePatterns should report %q missing from a pre-change .gitignore; got %v", pattern, missing)
+	}
+}
