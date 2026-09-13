@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -122,14 +123,26 @@ Non-interactive mode (--non-interactive, --yes/-y, or BD_NON_INTERACTIVE=1):
   Skips the confirmation prompt before executing the bootstrap plan.
   Also auto-detected when stdin is not a terminal or CI=true is set.
 
+Git-backed remotes keep the issue data on one git ref, refs/dolt/data by
+default. When it lives elsewhere (a branch such as refs/heads/beads-data, or
+refs/dolt/units/<name> in a repository that holds several databases), bootstrap
+reads sync.remote-ref from .beads/config.yaml; --ref overrides it for a clone
+whose config does not carry the key yet. With a ref, a git+ sync.remote that
+looks like a code repository (a .git suffix, a well-known forge) is accepted:
+sharing the repository with source code is the point of the ref.
+
 Examples:
   bd bootstrap              # Auto-detect and set up
   bd bootstrap --dry-run    # Show what would be done
   bd bootstrap --json       # Output plan as JSON
   bd bootstrap --yes        # Skip confirmation prompt
+  bd bootstrap --ref refs/dolt/units/team-a   # Data lives on that ref
 `,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	Args: func(cmd *cobra.Command, _ []string) error {
+		return validateRefFlagArg(cmd)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		evt := metrics.NewCommandEvent("bootstrap")
 		defer func() {
@@ -141,6 +154,15 @@ Examples:
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		yesFlag, _ := cmd.Flags().GetBool("yes")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
+		dataRef := resolveSyncRemoteRef()
+		if cmd.Flags().Changed("ref") {
+			refFlag, _ := cmd.Flags().GetString("ref")
+			validated, err := validateGitDataRef(refFlag)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			dataRef = validated
+		}
 
 		// Resolve non-interactive mode: flag > env var > CI env > terminal detection.
 		nonInteractive := isNonInteractiveBootstrap(yesFlag || nonInteractiveFlag)
@@ -161,7 +183,7 @@ Examples:
 			// to preserve --dry-run semantics.
 			if isGitRepo() && !isBareGitRepo() {
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
-					if gitOriginHasDoltDataRef() {
+					if gitRemoteHasDoltDataRefAt("origin", dataRef) {
 						if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
 							beadsDir = fallbackDir
 						} else {
@@ -224,7 +246,15 @@ Examples:
 		}
 
 		// Determine action based on state
-		plan := detectBootstrapAction(beadsDir, cfg)
+		refExplicit := cmd.Flags().Changed("ref")
+		plan := detectBootstrapActionForRef(beadsDir, cfg, dataRef, refExplicit)
+		if plan.RefRejected {
+			return HandleError("%s", plan.Reason)
+		}
+		plan.ClearSyncRemoteRef = refExplicit && dataRef == ""
+		if refExplicit && plan.Action != "sync" {
+			fmt.Fprintf(os.Stderr, "Note: --ref applies to a clone from a remote; this plan is %q, so it has no effect.\n", plan.Action)
+		}
 
 		if jsonOutput {
 			if err := outputJSON(plan); err != nil {
@@ -269,11 +299,20 @@ func applyBootstrapMetadataRepair(beadsDir string, cfg *configfile.Config, apply
 
 // BootstrapPlan describes what bootstrap will do.
 type BootstrapPlan struct {
-	Action      string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none"
-	Reason      string `json:"reason"` // Human-readable explanation
-	BeadsDir    string `json:"beads_dir"`
-	Database    string `json:"database"`
-	SyncRemote  string `json:"sync_remote,omitempty"`
+	Action     string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none"
+	Reason     string `json:"reason"` // Human-readable explanation
+	BeadsDir   string `json:"beads_dir"`
+	Database   string `json:"database"`
+	SyncRemote string `json:"sync_remote,omitempty"`
+	// SyncRemoteRef is the git ref a git-backed SyncRemote keeps its Dolt data
+	// on when it is not refs/dolt/data (--ref or sync.remote-ref).
+	SyncRemoteRef string `json:"sync_remote_ref,omitempty"`
+	// ClearSyncRemoteRef is set when --ref named the default explicitly, so
+	// a configured sync.remote-ref is cleared after the clone.
+	ClearSyncRemoteRef bool `json:"-"`
+	// RefRejected is set when an explicit --ref cannot apply to the configured
+	// sync.remote; Reason says why and bootstrap exits non-zero on it.
+	RefRejected bool   `json:"-"`
 	BackupDir   string `json:"backup_dir,omitempty"`
 	JSONLFile   string `json:"jsonl_file,omitempty"`
 	HasExisting bool   `json:"has_existing"`
@@ -305,6 +344,49 @@ func requireBootstrapDoltBackend(cfg *configfile.Config) error {
 }
 
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {
+	return detectBootstrapActionWithRef(beadsDir, cfg, resolveSyncRemoteRef())
+}
+
+// detectBootstrapActionWithRef is detectBootstrapActionForRef for a ref that
+// came from configuration rather than an explicit --ref.
+func detectBootstrapActionWithRef(beadsDir string, cfg *configfile.Config, dataRef string) BootstrapPlan {
+	return detectBootstrapActionForRef(beadsDir, cfg, dataRef, false)
+}
+
+// persistBootstrapRef records the git data ref beside sync.remote in the
+// bootstrapped workspace, so later bootstraps and clones that pick up the
+// committed config.yaml read it without --ref; when the default was asked
+// for explicitly, a configured key is cleared (an empty value is the
+// default).
+func persistBootstrapRef(beadsDir, ref string, clear bool) error {
+	switch {
+	case ref != "":
+		if err := config.SetYamlConfigInDir(beadsDir, syncRemoteRefKey, ref); err != nil {
+			return fmt.Errorf("persist %s to config.yaml: %w", syncRemoteRefKey, err)
+		}
+	case clear && resolveSyncRemoteRefFromDir(beadsDir) != "":
+		if err := config.SetYamlConfigInDir(beadsDir, syncRemoteRefKey, ""); err != nil {
+			return fmt.Errorf("clear %s in config.yaml: %w", syncRemoteRefKey, err)
+		}
+	}
+	return nil
+}
+
+// gitDataRefAdmitsCodeRepoURL reports whether the user has stated the layout
+// the code-repository guard exists to question: a sync.remote-ref, or an
+// explicit --ref (the default included), says the git-backed URL holds Dolt
+// data on a named ref of a repository shared with source code. Without that
+// statement the guard stands, since bd init writes exactly such URLs into
+// sync.remote for workspaces that never meant them as Dolt remotes.
+func gitDataRefAdmitsCodeRepoURL(syncRemote, dataRef string, refExplicit bool) bool {
+	return (dataRef != "" || refExplicit) && isGitBackedDoltRemoteURL(syncRemote)
+}
+
+// detectBootstrapActionForRef plans a bootstrap for a git data ref ("" =
+// refs/dolt/data): the ref is probed on origin, carried on the plan, and
+// handed to the clone. refExplicit records that --ref was given, which
+// counts as intent for the code-repository guard even for the default.
+func detectBootstrapActionForRef(beadsDir string, cfg *configfile.Config, dataRef string, refExplicit bool) BootstrapPlan {
 	plan := BootstrapPlan{
 		BeadsDir: beadsDir,
 		Database: cfg.GetDoltDatabase(),
@@ -345,7 +427,7 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
 	syncRemote := resolveSyncRemote()
 	if syncRemote != "" {
-		if isGitCodeRepoURL(syncRemote) {
+		if isGitCodeRepoURL(syncRemote) && !gitDataRefAdmitsCodeRepoURL(syncRemote, dataRef, refExplicit) {
 			// Cloning from a git code-repo URL via DOLT_CLONE spins dolt to
 			// 1000% CPU and requires manual SIGKILL. Reject and
 			// surface the misconfiguration rather than attempting the clone.
@@ -354,12 +436,28 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 			plan.Reason = fmt.Sprintf("sync.remote %q rejected: git code-repository URL (not a Dolt remote)", syncRemote)
 			return plan
 		}
+		// A ref only exists on a git-backed remote. An explicit --ref that
+		// cannot apply is refused here, where the message can name the URL;
+		// a configured key is dropped with a warning naming it.
+		if dataRef != "" && !isGitBackedDoltRemoteURL(syncRemote) {
+			if refExplicit {
+				plan.Action = "none"
+				plan.RefRejected = true
+				plan.Reason = fmt.Sprintf("--ref %s cannot apply: sync.remote %q is not a git-backed Dolt remote (%s)", dataRef, syncRemote, gitBackedRemoteShapes)
+				return plan
+			}
+			dataRef = dataRefForRemoteURL(syncRemote, dataRef)
+		}
 		// User-provided sync.remote — trust the URL format as-is.
 		// normalizeRemoteURL would convert http:// to git+http://,
 		// breaking Dolt remotesapi endpoints (GH#3339).
 		plan.SyncRemote = syncRemote
+		plan.SyncRemoteRef = dataRef
 		plan.Action = "sync"
 		plan.Reason = "sync.remote configured — will clone from " + syncRemote
+		if dataRef != "" {
+			plan.Reason += " (data ref " + dataRef + ")"
+		}
 		return plan
 	}
 
@@ -368,10 +466,11 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// remotes (DoltHub, S3, etc.) must be configured via sync.remote.
 	if isGitRepo() && !isBareGitRepo() {
 		if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
-			if gitOriginHasDoltDataRef() {
-				plan.SyncRemote = normalizeRemoteURL(originURL)
+			if gitRemoteHasDoltDataRefAt("origin", dataRef) {
+				plan.SyncRemote = gitOriginDoltURL(originURL, dataRef)
+				plan.SyncRemoteRef = dataRefForRemoteURL(plan.SyncRemote, dataRef)
 				plan.Action = "sync"
-				plan.Reason = "Found Dolt data on git origin (refs/dolt/data) — will clone from " + originURL
+				plan.Reason = "Found Dolt data on git origin (" + storage.EffectiveGitDataRef(dataRef) + ") — will clone from " + originURL
 				return plan
 			}
 		}
@@ -543,6 +642,9 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	case "sync":
 		fmt.Printf("Bootstrap plan: clone from remote\n")
 		fmt.Printf("  Remote: %s\n", plan.SyncRemote)
+		if plan.SyncRemoteRef != "" {
+			fmt.Printf("  Data ref: %s\n", plan.SyncRemoteRef)
+		}
 		fmt.Printf("  Database: %s\n", plan.Database)
 	case "restore":
 		fmt.Printf("Bootstrap plan: restore from backup\n")
@@ -723,7 +825,7 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	}
 
 	dbName := cfg.GetDoltDatabase()
-	if err := cloneFromRemote(ctx, plan.BeadsDir, plan.SyncRemote, dbName, cfg); err != nil {
+	if err := cloneFromRemoteWithMode(ctx, plan.BeadsDir, plan.SyncRemote, dbName, plan.SyncRemoteRef, cfg, remoteCloneAuto); err != nil {
 		return err
 	}
 
@@ -737,6 +839,9 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	// newDoltStore + createConfigYaml; the sync path historically did not.
 	// (GH#3201)
 	if err := finalizeSyncedBootstrap(plan.BeadsDir, plan.SyncRemote, cfg, dbName); err != nil {
+		return err
+	}
+	if err := persistBootstrapRef(plan.BeadsDir, plan.SyncRemoteRef, plan.ClearSyncRemoteRef); err != nil {
 		return err
 	}
 
@@ -771,7 +876,7 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		fmt.Fprintf(os.Stderr, "Warning: post-clone store init failed (wisp tables may be missing): %v\n", err)
 		return nil
 	}
-	configureInitDoltRemote(ctx, warmupStore, plan.SyncRemote, false)
+	configureInitDoltRemote(ctx, warmupStore, plan.SyncRemote, plan.SyncRemoteRef, false)
 	_ = warmupStore.Close()
 
 	return nil
@@ -862,23 +967,25 @@ const (
 	remoteCloneCLI
 )
 
-// cloneFromRemote clones a Dolt database from a remote URL.
+// cloneFromRemoteWithMode clones a Dolt database from a remote URL.
 // In embedded mode, uses the embedded engine's DOLT_CLONE procedure.
 // In external server mode, connects to the running server via MySQL and
 // executes DOLT_CLONE so the server places the database in its own data
 // directory. In owned-server mode, shells out to dolt clone via
-// BootstrapFromRemoteWithDB.
+// BootstrapFromRemoteWithDBRef. ref is the git ref a git-backed remote
+// keeps its data on ("" = refs/dolt/data); the clone records it on the
+// resulting origin remote.
 // Shared by bd init and bd bootstrap to keep clone logic in one place.
 func cloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config) error {
-	return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cfg, remoteCloneAuto)
+	return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, "", cfg, remoteCloneAuto)
 }
 
-func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config, cloneMode remoteCloneMode) error {
+func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName, ref string, cfg *configfile.Config, cloneMode remoteCloneMode) error {
 	mode := resolveRemoteCloneMode(beadsDir, cfg, cloneMode)
 
 	switch mode {
 	case remoteCloneEmbedded:
-		return cloneViaEmbedded(ctx, beadsDir, remoteURL, dbName)
+		return cloneViaEmbedded(ctx, beadsDir, remoteURL, dbName, ref)
 
 	case remoteCloneExternalServer:
 		if cfg == nil {
@@ -888,14 +995,14 @@ func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName st
 			}
 		}
 		if cfg != nil {
-			return cloneViaServer(ctx, beadsDir, remoteURL, dbName, cfg)
+			return cloneViaServer(ctx, beadsDir, remoteURL, dbName, ref, cfg)
 		}
 		// No config available — fall through to CLI clone.
 		fmt.Fprintf(os.Stderr, "Warning: server mode detected but no config available, falling back to CLI clone\n")
-		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName)
+		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName, ref)
 
 	default:
-		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName)
+		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName, ref)
 	}
 }
 
@@ -922,7 +1029,7 @@ func resolveRemoteCloneMode(beadsDir string, cfg *configfile.Config, cloneMode r
 }
 
 // cloneViaEmbedded clones using the embedded Dolt engine (CGO required).
-func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) error {
+func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName, ref string) error {
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return fmt.Errorf("create embeddeddolt directory: %w", err)
@@ -933,7 +1040,7 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 	}
 	defer func() { _ = cleanup() }()
 
-	if err := versioncontrolops.DoltClone(ctx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
+	if err := versioncontrolops.DoltCloneWithRef(ctx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER"), ref); err != nil {
 		return fmt.Errorf("clone from remote: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s\n", remoteURL)
@@ -944,7 +1051,7 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 // executing CALL DOLT_CLONE. The server places the database in its own
 // data directory, which is the correct behavior for externally managed
 // servers where bd does not know the filesystem layout.
-func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config) error {
+func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName, ref string, cfg *configfile.Config) error {
 	port := serverClonePort(beadsDir, cfg)
 	dsn := doltutil.ServerDSN{
 		Socket:   cfg.GetDoltServerSocket(),
@@ -970,7 +1077,7 @@ func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg
 			cfg.GetDoltServerHost(), port, err)
 	}
 
-	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
+	if err := versioncontrolops.DoltCloneWithRef(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER"), ref); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s:%d)\n",
@@ -1003,9 +1110,9 @@ func serverClonePort(beadsDir string, cfg *configfile.Config) int {
 
 // cloneViaCLI clones by shelling out to the dolt CLI.
 // Used for owned-server mode where bd manages the server lifecycle.
-func cloneViaCLI(ctx context.Context, beadsDir, remoteURL, dbName string) error {
+func cloneViaCLI(ctx context.Context, beadsDir, remoteURL, dbName, ref string) error {
 	doltDir := doltserver.ResolveDoltDir(beadsDir)
-	synced, err := dolt.BootstrapFromRemoteWithDB(ctx, doltDir, remoteURL, dbName)
+	synced, err := dolt.BootstrapFromRemoteWithDBRef(ctx, doltDir, remoteURL, dbName, ref)
 	if err != nil {
 		return fmt.Errorf("sync from remote: %w", err)
 	}
@@ -1082,6 +1189,7 @@ func init() {
 	bootstrapCmd.Flags().Bool("dry-run", false, "Show what would be done without doing it")
 	bootstrapCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompts (for CI/automation)")
 	bootstrapCmd.Flags().Bool("non-interactive", false, "Alias for --yes")
+	bootstrapCmd.Flags().String("ref", "", "Full git ref (refs/...) that holds the Dolt data on a git-backed remote; default sync.remote-ref, else refs/dolt/data")
 	rootCmd.AddCommand(bootstrapCmd)
 }
 

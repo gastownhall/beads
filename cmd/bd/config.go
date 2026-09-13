@@ -580,6 +580,11 @@ var configUnsetCmd = &cobra.Command{
 			if unsetErr != nil {
 				return HandleError("unsetting config: %v", unsetErr)
 			}
+			if key == syncRemoteRefKey {
+				if err := ensureSyncRemoteRefCleared(); err != nil {
+					return HandleError("unsetting config: %v", err)
+				}
+			}
 
 			if jsonOutput {
 				if err := outputJSON(map[string]interface{}{

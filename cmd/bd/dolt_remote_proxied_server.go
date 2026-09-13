@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
@@ -30,14 +29,7 @@ func runDoltRemoteRemoveProxied(ctx context.Context, name string) error {
 	}
 
 	if name == "origin" {
-		if current := config.GetYamlConfig("sync.remote"); current != "" {
-			if err := config.UnsetYamlConfig("sync.remote"); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to clear sync.remote from config.yaml: %v\n", err)
-			}
-			if isGitRepo() {
-				commitBeadsConfig("bd: clear sync.remote")
-			}
-		}
+		clearOriginSyncConfig()
 	}
 
 	if jsonOutput {

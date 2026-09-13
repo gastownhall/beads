@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/doltremote"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // isGitRepo checks if the current working directory is in a git repository.
@@ -93,7 +94,8 @@ func gitOriginGetURLForActiveRepo(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// gitOriginHasDoltDataRef checks if origin has refs/dolt/data.
+// gitOriginHasDoltDataRef checks if origin has Dolt data on the configured
+// data ref (sync.remote-ref, else refs/dolt/data).
 // Returns false on any error (network, no remote, timeout, etc).
 // Uses a 10s timeout since this is a network call used for auto-detection,
 // and suppresses credential prompts to avoid blocking on SSH remotes.
@@ -112,14 +114,29 @@ func gitOriginHasDoltDataRefStatus() (bool, error) {
 }
 
 // A non-nil error means UNKNOWN, not "no data" — the bool is meaningless.
+// The ref probed is sync.remote-ref when configured, else refs/dolt/data.
 func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
+	return gitRemoteHasDoltDataRefAtStatus(remote, resolveSyncRemoteRef())
+}
+
+// gitRemoteHasDoltDataRefAt is gitRemoteHasDoltDataRef for an explicit data
+// ref ("" = refs/dolt/data).
+func gitRemoteHasDoltDataRefAt(remote, ref string) bool {
+	hasData, err := gitRemoteHasDoltDataRefAtStatus(remote, ref)
+	return err == nil && hasData
+}
+
+// gitRemoteHasDoltDataRefAtStatus probes remote for Dolt data on ref ("" =
+// refs/dolt/data). A non-nil error means UNKNOWN, not "no data".
+func gitRemoteHasDoltDataRefAtStatus(remote, ref string) (bool, error) {
+	dataRef := storage.EffectiveGitDataRef(ref)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), dataRef) // #nosec G204 -- remote and ref come from configuration
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("probe refs/dolt/data on %s: %w", remote, err)
+		return false, fmt.Errorf("probe %s on %s: %w", dataRef, remote, err)
 	}
 	return strings.TrimSpace(string(output)) != "", nil
 }

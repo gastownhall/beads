@@ -27,6 +27,7 @@ type ContextInfo struct {
 	DataDir       string `json:"data_dir,omitempty"`
 	ProjectID     string `json:"project_id,omitempty"`
 	SyncRemote    string `json:"sync_remote,omitempty"`
+	SyncRemoteRef string `json:"sync_remote_ref,omitempty"`
 	SyncGitRemote string `json:"sync_git_remote,omitempty"` // Deprecated: use sync_remote
 	Role          string `json:"role,omitempty"`
 	BdVersion     string `json:"bd_version"`
@@ -111,6 +112,7 @@ Examples:
 		snapshot.SyncRemote = resolveSyncRemoteFromDir(rc.BeadsDir)
 
 		info := contextInfoView(snapshot)
+		info.SyncRemoteRef = resolveSyncRemoteRefFromDir(rc.BeadsDir)
 		if jsonOutput {
 			return outputJSON(info)
 		}
@@ -206,6 +208,9 @@ func printContextText(info ContextInfo) {
 		fmt.Println()
 		fmt.Println("Sync:")
 		fmt.Printf("  remote:       %s\n", info.SyncRemote)
+		if info.SyncRemoteRef != "" {
+			fmt.Printf("  data ref:     %s\n", info.SyncRemoteRef)
+		}
 	}
 }
 
