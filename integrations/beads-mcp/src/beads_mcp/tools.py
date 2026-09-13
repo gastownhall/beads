@@ -465,6 +465,18 @@ async def beads_create_issue(
     labels: Annotated[list[str] | None, "List of labels"] = None,
     id: Annotated[str | None, "Explicit issue ID (e.g., bd-42)"] = None,
     deps: Annotated[list[str] | None, "Dependencies (e.g., ['bd-20', 'blocks:bd-15'])"] = None,
+    due: Annotated[
+        str | None,
+        "Due date, in the bd CLI's formats: +6h, +3d, tomorrow, next monday, or a date (2026-03-01)",
+    ] = None,
+    repeat: Annotated[
+        str | None,
+        "Recurrence rule: an interval (+1d, +2w, +1m) or a 5-field cron expression "
+        "('0 9 * * 1'). Closing a recurring issue spawns the next instance. Without "
+        "a due date, the first instance is dated from the rule itself",
+    ] = None,
+    repeat_start: Annotated[str | None, "Earliest occurrence of a recurring issue. Same formats as due"] = None,
+    repeat_end: Annotated[str | None, "Last occurrence of a recurring issue; the series stops after it"] = None,
 ) -> Issue:
     """Create a new issue.
 
@@ -491,6 +503,10 @@ async def beads_create_issue(
         labels=labels or [],
         id=id,
         deps=deps or [],
+        due=due,
+        repeat=repeat,
+        repeat_start=repeat_start,
+        repeat_end=repeat_end,
     )
     return await client.create(params)
 
@@ -508,6 +524,17 @@ async def beads_update_issue(
     acceptance_criteria: Annotated[str | None, "Acceptance criteria"] = None,
     notes: Annotated[str | None, "Additional notes"] = None,
     external_ref: Annotated[str | None, "External reference (e.g., gh-9, jira-ABC)"] = None,
+    due: Annotated[
+        str | None,
+        "New due date, in the bd CLI's formats (+3d, tomorrow, 2026-03-01). Pass an empty string to clear it",
+    ] = None,
+    repeat: Annotated[
+        str | None,
+        "New recurrence rule: an interval (+1d, +2w) or a 5-field cron expression "
+        "('0 9 * * 1'). Pass an empty string to stop the series",
+    ] = None,
+    repeat_start: Annotated[str | None, "New earliest occurrence; an empty string clears the bound"] = None,
+    repeat_end: Annotated[str | None, "New last occurrence; an empty string clears the bound"] = None,
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
@@ -539,6 +566,10 @@ async def beads_update_issue(
         acceptance_criteria=acceptance_criteria,
         notes=notes,
         external_ref=external_ref,
+        due=due,
+        repeat=repeat,
+        repeat_start=repeat_start,
+        repeat_end=repeat_end,
     )
     return await client.update(params)
 

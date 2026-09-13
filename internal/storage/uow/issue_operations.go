@@ -234,6 +234,18 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 				return publicops.UpdateResult{}, "", err
 			}
 		}
+		// Recurrence parity with the classic update funnel
+		// (issueops.updateIssueInTx): stopping a series clears its bounds, a
+		// pattern with no start anchors on the due date, and the triple the
+		// update would LAND validates against the same rule every create path
+		// applies — over the same-transaction row, so a refusal writes
+		// nothing. Without this, a daemon or proxied PATCH could land a
+		// recurrence shape no create would have accepted.
+		storageissueops.ClearRecurrenceBoundsOnStop(spec.Fields)
+		storageissueops.AnchorRecurrenceUpdate(before, spec.Fields)
+		if err := storageissueops.ValidateRecurrenceUpdate(before, spec.Fields); err != nil {
+			return publicops.UpdateResult{}, "", validationError(err)
+		}
 		// ActorMatches (not a verbatim compare, ga-v2k49): a holder re-claiming
 		// under a respelled identity is a real CAS win one layer down (domain/db's
 		// Claim already canonicalizes), so this bookkeeping must recognize it as
@@ -311,6 +323,9 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 	setField(fields, "external_ref", patch.ExternalRef)
 	setField(fields, "due_at", patch.DueAt)
 	setField(fields, "defer_until", patch.DeferUntil)
+	setField(fields, "repeat_pattern", patch.RepeatPattern)
+	setField(fields, "repeat_start", patch.RepeatStart)
+	setField(fields, "repeat_end", patch.RepeatEnd)
 	if patch.Notes.Set && patch.AppendNotes.Set {
 		return domain.UpdateSpec{}, validationError(fmt.Errorf("update: notes and append notes cannot both be set"))
 	}

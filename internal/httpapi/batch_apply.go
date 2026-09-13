@@ -61,7 +61,8 @@ var (
 		"acceptance_criteria", "assignee", "defer_until", "description", "design",
 		"due_at", "ephemeral", "estimated_minutes", "external_ref", "id",
 		"issue_type", "key", "labels", "metadata", "metadata_refs", "no_history",
-		"notes", "owner", "priority", "sender", "status", "title",
+		"notes", "owner", "priority", "repeat_end", "repeat_pattern",
+		"repeat_start", "sender", "status", "title",
 	}
 	applyUpdateItemMembers = []string{
 		"expected_assignee", "expected_status", "expected_version",
@@ -71,7 +72,7 @@ var (
 		"acceptance_criteria", "append_notes", "assignee", "defer_until",
 		"description", "design", "due_at", "estimated_minutes", "external_ref",
 		"issue_type", "labels", "metadata", "notes", "owner", "priority",
-		"status", "title",
+		"repeat_end", "repeat_pattern", "repeat_start", "status", "title",
 	}
 	applyLabelPatchMembers    = []string{"add", "remove", "replace"}
 	applyMetadataPatchMembers = []string{"merge", "replace", "set", "unset"}
@@ -97,6 +98,10 @@ var (
 		"external_ref":      true,
 		"due_at":            true,
 		"defer_until":       true,
+		// repeat_pattern is Field[string]: an EMPTY STRING stops the series,
+		// so a clear needs no null and none is accepted.
+		"repeat_start": true,
+		"repeat_end":   true,
 	}
 )
 
@@ -359,6 +364,9 @@ func applyCreateItem(prefix string, encoded json.RawMessage, raw map[string]json
 		EstimatedMinutes:   wire.EstimatedMinutes,
 		ExternalRef:        wire.ExternalRef,
 		DueAt:              wire.DueAt,
+		RepeatPattern:      derefString(wire.RepeatPattern),
+		RepeatStart:        wire.RepeatStart,
+		RepeatEnd:          wire.RepeatEnd,
 		DeferUntil:         wire.DeferUntil,
 		Sender:             derefString(wire.Sender),
 		Metadata:           wire.Metadata,
@@ -572,6 +580,15 @@ func applyPatch(prefix string, encoded json.RawMessage, raw map[string]json.RawM
 	}
 	if set("due_at") {
 		patch.DueAt = issueops.Field[*time.Time]{Set: true, Value: wire.DueAt}
+	}
+	if set("repeat_pattern") {
+		patch.RepeatPattern = issueops.Field[string]{Set: true, Value: derefString(wire.RepeatPattern)}
+	}
+	if set("repeat_start") {
+		patch.RepeatStart = issueops.Field[*time.Time]{Set: true, Value: wire.RepeatStart}
+	}
+	if set("repeat_end") {
+		patch.RepeatEnd = issueops.Field[*time.Time]{Set: true, Value: wire.RepeatEnd}
 	}
 	if set("defer_until") {
 		patch.DeferUntil = issueops.Field[*time.Time]{Set: true, Value: wire.DeferUntil}

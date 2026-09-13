@@ -290,6 +290,9 @@ pointless).`,
 				updates["due_at"] = t
 			}
 		}
+		if err := applyRecurrenceUpdateFlags(cmd, updates); err != nil {
+			return err
+		}
 		if cmd.Flags().Changed("defer") {
 			deferStr, _ := cmd.Flags().GetString("defer")
 			if deferStr == "" {
@@ -712,6 +715,15 @@ func buildUpdatePatch(updates map[string]interface{}) (issueops.IssuePatch, erro
 			patch.DueAt, ok = optionalTimeField(value)
 		case "defer_until":
 			patch.DeferUntil, ok = optionalTimeField(value)
+		case "repeat_pattern":
+			var pattern issueops.Field[string]
+			if pattern, ok = stringField(value); ok {
+				patch.RepeatPattern = pattern
+			}
+		case "repeat_start":
+			patch.RepeatStart, ok = optionalTimeField(value)
+		case "repeat_end":
+			patch.RepeatEnd, ok = optionalTimeField(value)
 		case "add_labels":
 			patch.Labels.Add, ok = value.([]string)
 		case "remove_labels":
@@ -1011,6 +1023,7 @@ func init() {
 	//   --defer=+1h         Hidden from bd ready for 1 hour
 	//   --defer=""          Clear defer (show in bd ready immediately)
 	updateCmd.Flags().String("due", "", "Due date/time (empty to clear). Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
+	registerRecurrenceUpdateFlags(updateCmd)
 	updateCmd.Flags().String("defer", "", "Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open")
 	// Gate fields (bd-z6kw)
 	updateCmd.Flags().String("await-id", "", "Set gate await_id (e.g., GitHub run ID for gh:run gates)")

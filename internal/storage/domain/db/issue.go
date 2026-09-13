@@ -45,6 +45,7 @@ var allowedUpdateFields = map[string]struct{}{
 	"source_repo": {}, "sender": {}, "wisp": {}, "wisp_type": {}, "no_history": {}, "pinned": {},
 	"mol_type": {}, "event_kind": {}, "actor": {}, "target": {}, "payload": {},
 	"due_at": {}, "defer_until": {}, "await_id": {}, "waiters": {},
+	"repeat_pattern": {}, "repeat_start": {}, "repeat_end": {},
 	"metadata": {},
 }
 
@@ -145,6 +146,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// unrecognized keys, so a surviving override would reach the field
 	// allowlist and be refused by name.
 	forceClosePolicy := issueops.PopForceClosePolicy(updates)
+	issueops.ClearRecurrenceBoundsOnStop(updates)
 
 	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
 	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed
@@ -211,9 +213,18 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if len(updates) == 0 {
 		return nil
 	}
+	// Recurrence parity with issueops.updateIssueInTx: an update that gives a
+	// bead a pattern records the series' anchor, and the triple the update
+	// would LAND validates against the same rule every create path applies,
+	// over the row this transaction read, so a refusal writes nothing.
+	issueops.AnchorRecurrenceUpdate(oldIssue, updates)
+	if err := issueops.ValidateRecurrenceUpdate(oldIssue, updates); err != nil {
+		return fmt.Errorf("db: Update %s: %w", id, err)
+	}
 	// A status that matched the row was already dropped as a no-op, so the
 	// lifecycle side effects below only fire on a real transition.
 	_, statusChanging := updates["status"]
+	crossing := false
 
 	// Close-policy parity with issueops.updateIssueInTx: a status that crosses
 	// into the done category is a close by another name and answers to close
@@ -221,9 +232,10 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// work. The wrap keeps the sentinels matchable, so a caller distinguishes
 	// these refusals here exactly as it does on the close path.
 	if statusChanging {
-		crossing, err := issueops.CrossesIntoDoneCategoryInTx(ctx, r.runner, oldIssue.Status, updates)
-		if err != nil {
-			return fmt.Errorf("db: Update %s: %w", id, err)
+		var cerr error
+		crossing, cerr = issueops.CrossesIntoDoneCategoryInTx(ctx, r.runner, oldIssue.Status, updates)
+		if cerr != nil {
+			return fmt.Errorf("db: Update %s: %w", id, cerr)
 		}
 		if crossing {
 			if _, err := issueops.EnforceClosePolicyInTx(ctx, r.runner, id, forceClosePolicy); err != nil {
@@ -301,6 +313,16 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		Actor:   actor,
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
+	}
+
+	// Spawn parity with issueops.updateIssueInTx: a status update that closes
+	// a recurring bead is a close by another name, so it files the successor
+	// inside this transaction. The unit-of-work commit is DOLT_COMMIT('-Am'),
+	// which stages every table the spawn wrote.
+	if crossing {
+		if _, err := issueops.SpawnRecurrenceInTx(ctx, r.runner, id, actor); err != nil {
+			return fmt.Errorf("db: Update %s: spawn recurrence: %w", id, err)
+		}
 	}
 
 	if statusChanging {
@@ -768,7 +790,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			mol_type, work_type, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
-			due_at, defer_until, metadata,
+			due_at, defer_until, repeat_pattern, repeat_start, repeat_end, metadata,
 			row_lock, storage_class
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
@@ -779,7 +801,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?,
+			?, ?, ?, ?, ?, ?,
 			?, ?
 		)
 		ON DUPLICATE KEY UPDATE
@@ -801,6 +823,9 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			source_repo = VALUES(source_repo),
 			close_reason = VALUES(close_reason),
 			metadata = VALUES(metadata),
+			repeat_pattern = VALUES(repeat_pattern),
+			repeat_start = VALUES(repeat_start),
+			repeat_end = VALUES(repeat_end),
 			row_lock = VALUES(row_lock)
 	`, table),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
@@ -811,7 +836,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		string(issue.MolType), string(issue.WorkType), issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
-		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
+		issue.DueAt, issue.DeferUntil, issue.RepeatPattern, issue.RepeatStart, issue.RepeatEnd, jsonMetadata(issue.Metadata),
 		issueops.FreshRowLock(), nullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {
@@ -881,6 +906,7 @@ func formatJSONStringArray(items []string) string {
 
 var timestampUpdateFields = map[string]struct{}{
 	"started_at": {}, "closed_at": {}, "due_at": {}, "defer_until": {},
+	"repeat_start": {}, "repeat_end": {},
 }
 
 func normalizeUpdateValue(key string, value any) any {

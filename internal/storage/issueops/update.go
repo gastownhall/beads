@@ -26,6 +26,7 @@ func IsAllowedUpdateField(key string) bool {
 		"mol_type":       true,
 		"event_category": true, "event_actor": true, "event_target": true, "event_payload": true,
 		"due_at": true, "defer_until": true, "await_id": true, "waiters": true,
+		"repeat_pattern": true, "repeat_start": true, "repeat_end": true,
 		"metadata": true,
 	}
 	return allowed[key]
@@ -327,6 +328,11 @@ type UpdateResult struct {
 	Changed          bool
 	IssueRowsChanged bool
 	WispRowsChanged  bool
+	// Spawned reports the successor a status change into the done category
+	// filed for a recurring bead — the same spawn `bd close` performs, reached
+	// here because a status update is a close by another name. Its
+	// ChangedTables must be unioned into whatever the caller stages.
+	Spawned SpawnResult
 }
 
 // UpdateIssueInTx performs the full update SQL logic within a transaction.
@@ -352,6 +358,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// it does not recognize, so a surviving override would reach the field
 	// allowlist and be refused by name.
 	forceClosePolicy := PopForceClosePolicy(updates)
+	ClearRecurrenceBoundsOnStop(updates)
 
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
@@ -414,6 +421,14 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	if err := ValidateScalarUpdates(ctx, tx, updates); err != nil {
+		return nil, err
+	}
+	// An update that gives a bead a pattern records the series' anchor, and
+	// the triple the update would LAND validates against the same rule every
+	// create path applies — over the row this transaction read, so a refusal
+	// writes nothing.
+	AnchorRecurrenceUpdate(oldIssue, updates)
+	if err := ValidateRecurrenceUpdate(oldIssue, updates); err != nil {
 		return nil, err
 	}
 
@@ -507,6 +522,18 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	updateResult := &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp, WispRowsChanged: isWisp}
+	// A status update that crosses into the done category is a close by
+	// another name, so it files the successor exactly as `bd close` does.
+	if crossing {
+		spawned, err := SpawnRecurrenceInTx(ctx, tx, id, actor)
+		if err != nil {
+			return nil, err
+		}
+		updateResult.Spawned = spawned
+		if spawned.ID != "" {
+			updateResult.IssueRowsChanged = true
+		}
+	}
 	if rawStatus, hasStatus := updates["status"]; hasStatus {
 		var newStatus string
 		switch v := rawStatus.(type) {
@@ -699,6 +726,12 @@ func issueFieldMatches(issue *types.Issue, key string, value interface{}) (bool,
 		return matchesTimePointer(issue.DueAt, value), nil
 	case "defer_until":
 		return matchesTimePointer(issue.DeferUntil, value), nil
+	case "repeat_pattern":
+		return matchesString(issue.RepeatPattern, value), nil
+	case "repeat_start":
+		return matchesTimePointer(issue.RepeatStart, value), nil
+	case "repeat_end":
+		return matchesTimePointer(issue.RepeatEnd, value), nil
 	case "close_reason":
 		return matchesString(issue.CloseReason, value), nil
 	case "closed_by_session":

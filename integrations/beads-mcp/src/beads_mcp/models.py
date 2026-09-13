@@ -142,6 +142,10 @@ class IssueBase(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependency_count: int = 0
     dependent_count: int = 0
+    due_at: datetime | None = None
+    repeat_pattern: str | None = None
+    repeat_start: datetime | None = None
+    repeat_end: datetime | None = None
 
     @field_validator("priority")
     @classmethod
@@ -187,6 +191,10 @@ class CreateIssueParams(BaseModel):
     labels: list[str] = Field(default_factory=list)
     id: str | None = None
     deps: list[str] = Field(default_factory=list)
+    due: str | None = None
+    repeat: str | None = None
+    repeat_start: str | None = None
+    repeat_end: str | None = None
 
 
 class UpdateIssueParams(BaseModel):
@@ -202,6 +210,10 @@ class UpdateIssueParams(BaseModel):
     acceptance_criteria: str | None = None
     notes: str | None = None
     external_ref: str | None = None
+    due: str | None = None
+    repeat: str | None = None
+    repeat_start: str | None = None
+    repeat_end: str | None = None
 
 
 class ClaimIssueParams(BaseModel):

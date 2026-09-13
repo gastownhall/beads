@@ -6295,6 +6295,24 @@ components:
         defer_until:
           type: string
           format: date-time
+        repeat_pattern:
+          type: string
+          description: >-
+            Recurrence rule: an interval (`+1w`) or a five-field cron
+            expression (`0 9 * * 1`). Empty means the bead does not repeat.
+            Closing a recurring bead spawns its next instance.
+        repeat_start:
+          type: string
+          format: date-time
+          description: >-
+            Earliest occurrence of the series, and the anchor the pattern is
+            stepped from. Absent means unbounded.
+        repeat_end:
+          type: string
+          format: date-time
+          description: >-
+            Last occurrence of the series; it stops once the next occurrence
+            would fall after it. Absent means unbounded.
         external_ref:
           type: string
         source_system:
@@ -6445,6 +6463,9 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        repeat_pattern: { type: string }
+        repeat_start: { type: string, format: date-time }
+        repeat_end: { type: string, format: date-time }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }
@@ -6534,6 +6555,9 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        repeat_pattern: { type: string }
+        repeat_start: { type: string, format: date-time }
+        repeat_end: { type: string, format: date-time }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }
@@ -6701,6 +6725,9 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        repeat_pattern: { type: string }
+        repeat_start: { type: string, format: date-time }
+        repeat_end: { type: string, format: date-time }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }
@@ -6787,6 +6814,9 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        repeat_pattern: { type: string }
+        repeat_start: { type: string, format: date-time }
+        repeat_end: { type: string, format: date-time }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }
@@ -8870,6 +8900,25 @@ components:
           type: string
           format: date-time
           description: RFC 3339. The issue is hidden from ready work until then.
+        repeat_pattern:
+          type: string
+          maxLength: 255
+          description: >-
+            Recurrence rule: an interval (`+1w`) or a five-field cron
+            expression (`0 9 * * 1`). Empty means the bead does not repeat.
+            Closing a recurring bead spawns its next instance.
+        repeat_start:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339. Earliest occurrence, and the anchor the pattern is
+            stepped from. Requires `repeat_pattern`.
+        repeat_end:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339. Last occurrence; the series stops after it. Requires
+            `repeat_pattern`.
         sender:
           type: string
           maxLength: 255
@@ -9114,6 +9163,23 @@ components:
           format: date-time
           nullable: true
           description: 'RFC 3339. Explicit `null` CLEARS the deferral.'
+        repeat_pattern:
+          type: string
+          maxLength: 255
+          description: >-
+            Recurrence rule: an interval (`+1w`) or a five-field cron
+            expression (`0 9 * * 1`). An EMPTY STRING stops the series, so
+            this member is not nullable.
+        repeat_start:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'RFC 3339. Explicit `null` CLEARS the bound.'
+        repeat_end:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'RFC 3339. Explicit `null` CLEARS the bound.'
         metadata:
           $ref: '#/components/schemas/ApplyMetadataPatch'
 
@@ -10493,6 +10559,23 @@ components:
           format: date-time
           nullable: true
           description: 'RFC 3339. Explicit `null` CLEARS the deferral.'
+        repeat_pattern:
+          type: string
+          maxLength: 255
+          description: >-
+            Recurrence rule: an interval (`+1w`) or a five-field cron
+            expression (`0 9 * * 1`). An EMPTY STRING stops the series, so
+            this member is not nullable.
+        repeat_start:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'RFC 3339. Explicit `null` CLEARS the bound.'
+        repeat_end:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'RFC 3339. Explicit `null` CLEARS the bound.'
         metadata:
           $ref: '#/components/schemas/ApplyMetadataPatch'
 
@@ -10666,6 +10749,25 @@ components:
           description: >-
             RFC 3339. The issue is hidden from ready work until then. Not
             nullable, for `estimated_minutes`' reason.
+        repeat_pattern:
+          type: string
+          maxLength: 255
+          description: >-
+            Recurrence rule: an interval (`+1w`) or a five-field cron
+            expression (`0 9 * * 1`). Empty means the bead does not repeat.
+            Closing a recurring bead spawns its next instance.
+        repeat_start:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339. Earliest occurrence, and the anchor the pattern is
+            stepped from. Requires `repeat_pattern`.
+        repeat_end:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339. Last occurrence; the series stops after it. Requires
+            `repeat_pattern`.
         sender:
           type: string
           maxLength: 255
