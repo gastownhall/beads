@@ -56,6 +56,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concept, themes are labels here, and `--label theme:x` is the native way to
   say it.
 
+
+- **`bd` gains an opt-in label vocabulary registry, with `open`/`warn`/`enforce`
+  modes on writes** ([#6010](https://github.com/gastownhall/beads/pull/6010)).
+  A project that wants a curated label set can declare it -- `bd label define
+  backend --description "Server-side work"`, `bd label undefine`, `bd label
+  defined` to list the registry with in-use counts -- without changing
+  anything else: writing a label outside the registry is still accepted
+  silently by default (`bd config set labels.vocabulary open`, the existing
+  behavior). `warn` prints the undefined label on stderr, with a
+  case-insensitive spelling suggestion when one exists; `enforce` refuses the
+  write, naming `bd label define` as the remedy. The check judges what a
+  write would actually LAND -- `--add-label X --remove-label X` passes under
+  `enforce` even when `X` is undefined, because removal wins and `X` never
+  reaches the issue -- and it never runs on `bd import`/JSONL replay, so
+  `enforce` cannot block a migration or a restore from a backup. Two read
+  failures (config unreadable, registry unreadable) deliberately fail OPEN
+  rather than lock every label write in the workspace on a storage fault.
+
+  **The check has two layers, and they do not cover every writer the same
+  way.** `bd create`, `bd update --add-label`/`--set-labels`, and `bd label
+  add` (an update patch under the hood) all land through the one guarded
+  mutation transaction shared by every backend, direct or proxied, and that
+  transaction re-verifies `enforce` on its own before committing -- for
+  those three, the CLI's pre-check is early feedback, not the only thing
+  standing between an undefined label and the database. `bd label
+  propagate` and `bd tag` write through a lower-level path that never
+  enters that transaction, so for those two the pre-check IS the only
+  enforcement there is. `bd cook --persist` goes further still: it runs no
+  vocabulary check at all, in any mode, so a cooked formula's labels always
+  land exactly as written. This is documented, deliberate scope -- closing
+  it means moving `bd cook`, `bd label propagate` and `bd tag` onto the
+  guarded verb, tracked as follow-up work, not shipped here.
+
+- **`bd doctor` gains a `Label Vocabulary` check**
+  ([#6010](https://github.com/gastownhall/beads/pull/6010)). It reports
+  undefined labels currently in use (when `labels.vocabulary` is `warn` or
+  `enforce`) and case-variant label clusters in use across the whole
+  workspace (`Backend` and `backend` both on different issues), regardless
+  of mode -- the registry cannot itself prevent a clash that already exists
+  on issues written before it did. Neither finding is auto-fixable: today
+  reconciling a case-variant cluster means removing the stray-case label and
+  re-adding the canonical spelling by hand on each issue, since there is no
+  dedicated rename command yet.
+
+
 ### Changed
 
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed

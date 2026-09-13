@@ -95,6 +95,14 @@ func (o *issueOperations) Create(ctx context.Context, request publicops.CreateRe
 		if attempt.Issue != nil && !attempt.Issue.Ephemeral && !attempt.Issue.NoHistory && attempt.Issue.WispType != "" {
 			attempt.Issue.Ephemeral = true
 		}
+		// Vocabulary enforcement (bda-yxac): judge the labels the CALLER named,
+		// before anything is written. Inherit-from-parent resolves below this
+		// verb, over labels that are already workspace state.
+		if attempt.Issue != nil {
+			if err := checkLabelVocabularyForGuardedWrite(ctx, uw, attempt.Issue.Labels); err != nil {
+				return publicops.CreateResult{}, "", err
+			}
+		}
 		params, useWisp, err := createParams(attempt)
 		if err != nil {
 			return publicops.CreateResult{}, "", validationError(err)
@@ -233,6 +241,14 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 			if err := authorizeAssigneeTransfer(ctx, uw, before, attempt); err != nil {
 				return publicops.UpdateResult{}, "", err
 			}
+		}
+		// Vocabulary enforcement (bda-yxac): refuse before ApplyUpdate runs -
+		// a refused patch must leave the row (and any claim) untouched.
+		// Candidates are what the patch would WRITE (removal wins).
+		if err := checkLabelVocabularyForGuardedWrite(ctx, uw, storageissueops.GuardedLabelPatchCandidates(
+			attempt.Patch.Labels.Replace.Set, attempt.Patch.Labels.Replace.Value,
+			attempt.Patch.Labels.Add, attempt.Patch.Labels.Remove)); err != nil {
+			return publicops.UpdateResult{}, "", err
 		}
 		// ActorMatches (not a verbatim compare, ga-v2k49): a holder re-claiming
 		// under a respelled identity is a real CAS win one layer down (domain/db's

@@ -66,6 +66,12 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
 		issue.Ephemeral = true
 	}
+	// Vocabulary enforcement (bda-yxac): judge only the labels the CALLER
+	// named. Labels inherited from the parent below are already stored, so a
+	// legacy parent label must not fail its child's create under enforce.
+	if err := checkLabelVocabularyForGuardedWriteInTx(ctx, tx, issue.Labels); err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
 	if attempt.InheritLabelsFromParent && attempt.ParentID != "" {
 		labels, err := GetLabelsInTx(ctx, tx, "", attempt.ParentID)
 		if err != nil {
@@ -138,6 +144,14 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		return publicops.UpdateResult{}, nil, err
 	}
 	if err := ValidateMetadataPatch(attempt.Patch.Metadata); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	// Vocabulary enforcement (bda-yxac): refuse before ANY mutation - the
+	// claim below advances the row, and a refused patch must leave it
+	// untouched. Candidates are what the patch would WRITE (removal wins).
+	if err := checkLabelVocabularyForGuardedWriteInTx(ctx, tx, GuardedLabelPatchCandidates(
+		attempt.Patch.Labels.Replace.Set, attempt.Patch.Labels.Replace.Value,
+		attempt.Patch.Labels.Add, attempt.Patch.Labels.Remove)); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
 	// The plane restriction is resolved HERE, inside the update's own

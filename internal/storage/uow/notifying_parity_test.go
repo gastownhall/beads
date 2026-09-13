@@ -108,6 +108,9 @@ func TestNotifyingUOWWrapsEveryMutatingUseCase(t *testing.T) {
 			"SwitchDatabase": "DDL against the connection, not a write to any bead",
 			"ConfigUseCase": "workspace settings and metadata, not beads: the DoltStorage chain's " +
 				"WorkspaceConfig role passes through undecorated for the same reason (hook_workspace_config.go)",
+			"LabelVocabularyUseCase": "the vocabulary registry is workspace-level label metadata, not a " +
+				"bead mutation: Define/Undefine change no issue, and the DoltStorage chain carries no " +
+				"vocabulary role in hook_decorator.go, so there is no hook to buffer (bda-xfk3)",
 			"DoltRemoteUseCase": "Dolt remotes are repository plumbing; no bead changes and no event to name",
 			"RawSQLUseCase": "the raw escape hatch executes statements this layer cannot read, so it " +
 				"cannot say which bead changed; the DoltStorage chain fires nothing for raw access either",
