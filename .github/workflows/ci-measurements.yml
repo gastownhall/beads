@@ -128,7 +128,7 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "macos short go test" -- go test -v -race -short -skip '^TestEmbedded' ./...
+          ci_time "macos short go test" -- go test -tags=gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
 
   macos-candidates:
     name: Measure macOS no-short candidates
@@ -493,7 +493,7 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "build cmd/bd subprocess binary" -- go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd ./cmd/bd
+          ci_time "build cmd/bd subprocess binary" -- go build -tags gms_pure_go -o artifacts/bd ./cmd/bd
 
       - name: Upload prebuilt bd
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -661,7 +661,7 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "build candidate binary" -- go build -o /tmp/bd-candidate ./cmd/bd
+          ci_time "build candidate binary" -- go build -tags gms_pure_go -o /tmp/bd-candidate ./cmd/bd
           export CANDIDATE_BIN=/tmp/bd-candidate
           if [[ -z "$SMOKE_VERSION" ]]; then
             SMOKE_VERSION="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName')"
@@ -757,4 +757,3 @@ jobs:
           path: artifacts/
           retention-days: 7
           if-no-files-found: ignore
-
