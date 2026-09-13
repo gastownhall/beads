@@ -25,6 +25,11 @@ const (
 	OwnerBD       Owner = "bd"
 )
 
+// JournalName is the handoff journal's fixed file name. It lives in the
+// workspace's .beads directory, which is where the Gas City lifecycle
+// projection reads it from; see engdocs/design/ownership-handoff-contract.md.
+const JournalName = "ownership-handoff.json"
+
 // Phase is a durable checkpoint in the handoff journal.
 type Phase string
 
@@ -34,6 +39,14 @@ const (
 	PhaseOldOwnerStopped  Phase = "old_owner_stopped"
 	PhaseVerified         Phase = "verified"
 	PhaseCommitted        Phase = "committed"
+	// PhaseRollbackStarted records that the legacy owner was stopped and the
+	// handoff is compensating before any GC-managed process can be restarted.
+	PhaseRollbackStarted Phase = "rollback_started"
+	// PhaseLegacyConfigRestored is the sole journal phase in which GC may
+	// start again. The provider checkpoints it only after restoring the exact
+	// captured workspace controls.
+	PhaseLegacyConfigRestored Phase = "legacy_config_restored"
+	PhaseRolledBack           Phase = "rolled_back"
 )
 
 // Endpoint identifies the local server endpoint. Exactly one of Port or
@@ -65,9 +78,27 @@ type Request struct {
 
 // Snapshot contains provider metadata captured before mutation.
 type Snapshot struct {
-	Metadata []byte `json:"metadata,omitempty"`
-	Config   []byte `json:"config,omitempty"`
-	Sentinel string `json:"sentinel,omitempty"`
+	Metadata                 []byte `json:"metadata,omitempty"`
+	Config                   []byte `json:"config,omitempty"`
+	WorkspaceMetadata        []byte `json:"workspace_metadata,omitempty"`
+	WorkspaceConfig          []byte `json:"workspace_config,omitempty"`
+	WorkspacePort            []byte `json:"workspace_port,omitempty"`
+	WorkspaceMetadataPresent bool   `json:"workspace_metadata_present,omitempty"`
+	WorkspaceConfigPresent   bool   `json:"workspace_config_present,omitempty"`
+	WorkspacePortPresent     bool   `json:"workspace_port_present,omitempty"`
+	WorkspaceMetadataMode    uint32 `json:"workspace_metadata_mode,omitempty"`
+	WorkspaceConfigMode      uint32 `json:"workspace_config_mode,omitempty"`
+	WorkspacePortMode        uint32 `json:"workspace_port_mode,omitempty"`
+	Sentinel                 string `json:"sentinel,omitempty"`
+	TargetPID                int    `json:"target_pid,omitempty"`
+	TargetBirth              string `json:"target_birth,omitempty"`
+	TargetDataDir            string `json:"target_data_dir,omitempty"`
+	TargetLaunchID           string `json:"target_launch_id,omitempty"`
+	TargetLaunchConfig       string `json:"target_launch_config,omitempty"`
+	TargetLaunchExecutable   string `json:"target_launch_executable,omitempty"`
+	SentinelIssue            string `json:"sentinel_issue,omitempty"`
+	SentinelEdgeFrom         string `json:"sentinel_edge_from,omitempty"`
+	SentinelEdgeTo           string `json:"sentinel_edge_to,omitempty"`
 }
 
 // Journal is the atomically persisted handoff state.
@@ -135,6 +166,13 @@ type Hooks struct {
 	// failure path must be able to leave the scope untouched. Re-running it
 	// against an already-configured target must succeed.
 	Configure func(context.Context, Request, Snapshot) error
+	// ConfigureMutates declares that a successful Configure durably stages
+	// bd-owned state — a replacement server, its launch config — before the
+	// PhaseTargetConfigured checkpoint can be written. It keeps a journal-save
+	// failure immediately after Configure truthful, without assuming that every
+	// provider's Configure changes anything. It says nothing about the
+	// legacy-owned scope, which Configure still must not touch.
+	ConfigureMutates bool
 	// StopLegacy stops the legacy owner. It must refuse unless it can
 	// positively identify the process as the legacy owner; it must never kill an
 	// unknown process. An already-absent legacy owner is success: the refusal
@@ -142,9 +180,14 @@ type Hooks struct {
 	// after a stop that was durable but uncheckpointed must not wedge the
 	// handoff.
 	StopLegacy func(context.Context, Request, Snapshot) error
-	// Verify confirms the bd-owned target serves the scope. It is read-only and
-	// re-runnable.
-	Verify func(context.Context, Request, Snapshot) error
+	// Verify confirms the bd-owned target serves the scope. It is read-only
+	// with respect to the scope and re-runnable, but it may enrich the durable
+	// snapshot with the target identity it proved: the checkpoint callback
+	// persists an intermediate snapshot, and the returned snapshot is made
+	// durable before the run advances to PhaseVerified. Commit and any later
+	// retry therefore read that identity from the journal rather than from a
+	// process-local side channel.
+	Verify func(context.Context, Request, Snapshot, func(Snapshot) error) (Snapshot, error)
 	// Commit retires the legacy owner's artifacts and transfers authority.
 	Commit func(context.Context, Request, Snapshot) error
 	// CommitReplay is an optional idempotent recovery operation for a commit
@@ -154,6 +197,23 @@ type Hooks struct {
 	// this explicit provider guarantee, Execute refuses to guess or invoke
 	// Commit a second time.
 	CommitReplay func(context.Context, Request, Snapshot) error
+	// RestartLegacy hands the legacy owner back its scope. It is invoked only
+	// by a Rollback implementation, and only after that implementation has
+	// restored the captured workspace controls and durably checkpointed
+	// PhaseLegacyConfigRestored: a legacy owner restarted before that
+	// checkpoint could outlive the journal that knows it exists.
+	RestartLegacy func(context.Context, Request, Snapshot) error
+	// Rollback compensates a failure that happened after StopLegacy. It is
+	// deliberately absent from the success path: authority to restart the
+	// legacy owner exists only once the legacy owner has positively stopped.
+	// The checkpoint callback persists provider milestones — today only
+	// PhaseLegacyConfigRestored — before any restarted process can exist, and
+	// the returned snapshot is made durable with PhaseRolledBack.
+	//
+	// A provider that does not implement it keeps the older fenced behavior:
+	// the failure is journaled, legacy-gc stays the recorded owner, and the
+	// operator reconciles by hand.
+	Rollback func(context.Context, Request, Snapshot, Phase, func(Phase, Snapshot) error) (Snapshot, error)
 }
 
 // Provider resolves the provider-owned lifecycle hooks for a handoff. The
@@ -410,7 +470,8 @@ func validateJournal(j Journal) error {
 		return errors.New("handoff journal has unknown owner")
 	}
 	switch j.Phase {
-	case PhasePrepared, PhaseTargetConfigured, PhaseOldOwnerStopped, PhaseVerified, PhaseCommitted:
+	case PhasePrepared, PhaseTargetConfigured, PhaseOldOwnerStopped, PhaseVerified, PhaseCommitted,
+		PhaseRollbackStarted, PhaseLegacyConfigRestored, PhaseRolledBack:
 	default:
 		return errors.New("handoff journal has unknown phase")
 	}
@@ -431,6 +492,122 @@ func validateJournal(j Journal) error {
 	}
 	if j.LegacyStopInProgress && j.Phase != PhaseTargetConfigured {
 		return errors.New("handoff journal has a stop checkpoint in an invalid phase")
+	}
+	return nil
+}
+
+// CheckNormalOpen permits ordinary bd store initialization only when no
+// ownership-handoff journal exists or the journal durably transfers authority
+// to bd for this exact physical workspace. A pending, malformed, symlinked, or
+// foreign journal is a lifecycle fence, not a hint to disable auto-start: even
+// a read command must not open, migrate, or adopt a process while the explicit
+// handoff command owns the transition.
+func CheckNormalOpen(beadsDir string) error {
+	if beadsDir == "" {
+		return nil
+	}
+	clean := filepath.Clean(beadsDir)
+	journalPath := filepath.Join(clean, JournalName)
+	if _, err := os.Lstat(journalPath); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return CodedError{Code: "invalid_journal", Err: fmt.Errorf("stat ownership handoff journal: %w", err)}
+	}
+	physicalBeadsDir, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return CodedError{Code: "invalid_journal", Err: fmt.Errorf("resolve ownership handoff workspace: %w", err)}
+	}
+	root := filepath.Dir(physicalBeadsDir)
+	journalPath = filepath.Join(physicalBeadsDir, JournalName)
+	if err := validateJournalPath(root, journalPath); err != nil {
+		return CodedError{Code: "invalid_journal", Err: err}
+	}
+	journal, err := Load(journalPath)
+	if err != nil {
+		return CodedError{Code: "invalid_journal", Err: err}
+	}
+	if journal.Request.Root != root || journal.Request.CityRoot != root || journal.Request.Owner != OwnerLegacyGC {
+		return CodedError{Code: "invalid_journal", Err: errors.New("ownership handoff journal does not belong to this workspace")}
+	}
+	if err := ValidateRequest(journal.Request); err != nil {
+		return CodedError{Code: "invalid_journal", Err: fmt.Errorf("ownership handoff journal request is invalid: %w", err)}
+	}
+	switch journal.Phase {
+	case PhaseCommitted:
+		if err := validateCommittedNormalOpen(physicalBeadsDir, journal); err != nil {
+			return CodedError{Code: "invalid_journal", Err: err}
+		}
+		return nil
+	case PhaseRolledBack:
+		if journal.Owner != OwnerLegacyGC || !journal.SnapshotCaptured || !journal.MutationOccurred || journal.CommitHookInProgress {
+			return CodedError{Code: "invalid_journal", Err: errors.New("rolled-back ownership handoff journal is incomplete")}
+		}
+		token, err := snapshotIdentityToken(journal.Request, journal.Snapshot)
+		if err != nil || token != journal.Snapshot.Sentinel {
+			return CodedError{Code: "invalid_journal", Err: errors.New("rolled-back ownership handoff journal has invalid legacy identity proof")}
+		}
+		if err := validateRestoredWorkspaceArtifacts(physicalBeadsDir, journal.Snapshot); err != nil {
+			return CodedError{Code: "invalid_journal", Err: err}
+		}
+		return nil
+	default:
+		return CodedError{Code: "lifecycle_busy", Err: fmt.Errorf("ownership handoff is %s; resume or roll back the explicit handoff before using bd", journal.Phase)}
+	}
+}
+
+// validateCommittedNormalOpen keeps bd's admission proof aligned with the GC
+// lifecycle projection. A committed record is an authority boundary, so its
+// process checkpoint, nonce-bound launch identity, and legacy inspect proof
+// must bind this physical workspace before ordinary store opening is allowed.
+func validateCommittedNormalOpen(beadsDir string, journal Journal) error {
+	if journal.Owner != OwnerBD || !journal.SnapshotCaptured || !journal.MutationOccurred || !journal.CommitHookRan || journal.CommitHookInProgress {
+		return errors.New("committed ownership handoff journal is incomplete")
+	}
+	s := journal.Snapshot
+	if s.TargetPID <= 0 || strings.TrimSpace(s.TargetBirth) == "" || filepath.Clean(s.TargetDataDir) != filepath.Join(beadsDir, "dolt") {
+		return errors.New("committed ownership handoff journal has invalid direct target identity")
+	}
+	if len(s.TargetLaunchID) != 32 || strings.Trim(s.TargetLaunchID, "0123456789abcdef") != "" ||
+		s.TargetLaunchConfig != filepath.Join(beadsDir, "dolt-handoff-"+s.TargetLaunchID+".yaml") ||
+		!filepath.IsAbs(s.TargetLaunchExecutable) || filepath.Clean(s.TargetLaunchExecutable) != s.TargetLaunchExecutable {
+		return errors.New("committed ownership handoff journal has invalid strict launch identity")
+	}
+	token, err := snapshotIdentityToken(journal.Request, s)
+	if err != nil || token != s.Sentinel {
+		return errors.New("committed ownership handoff journal has invalid legacy identity proof")
+	}
+	return nil
+}
+
+func validateRestoredWorkspaceArtifacts(beadsDir string, snapshot Snapshot) error {
+	for _, artifact := range []struct {
+		name    string
+		data    []byte
+		present bool
+		mode    uint32
+	}{
+		{"metadata.json", snapshot.WorkspaceMetadata, snapshot.WorkspaceMetadataPresent, snapshot.WorkspaceMetadataMode},
+		{"config.yaml", snapshot.WorkspaceConfig, snapshot.WorkspaceConfigPresent, snapshot.WorkspaceConfigMode},
+		{"dolt-server.port", snapshot.WorkspacePort, snapshot.WorkspacePortPresent, snapshot.WorkspacePortMode},
+	} {
+		path := filepath.Join(beadsDir, artifact.name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			if artifact.present {
+				return fmt.Errorf("rolled-back ownership handoff is missing restored %s", artifact.name)
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stat restored %s: %w", artifact.name, err)
+		}
+		if !artifact.present || !info.Mode().IsRegular() || uint32(info.Mode().Perm()) != artifact.mode {
+			return fmt.Errorf("rolled-back ownership handoff has drifted %s", artifact.name)
+		}
+		data, err := os.ReadFile(path) // #nosec G304 -- artifact name is fixed and Lstat above requires a regular file
+		if err != nil || string(data) != string(artifact.data) {
+			return fmt.Errorf("rolled-back ownership handoff has changed %s", artifact.name)
+		}
 	}
 	return nil
 }
@@ -539,6 +716,12 @@ func Run(ctx context.Context, r Request, journalPath string, provider Provider, 
 	}
 	if dryRun {
 		if existing != nil {
+			if existing.Phase == PhaseCommitted {
+				if err := validateCommittedNormalOpen(filepath.Join(r.Root, ".beads"), *existing); err != nil {
+					existing.ErrorCode = "invalid_journal"
+					return result(*existing, false), CodedError{Code: "invalid_journal", Err: err}
+				}
+			}
 			return result(*existing, false), nil
 		}
 		return requestResult(r, ""), nil
@@ -591,13 +774,41 @@ func Run(ctx context.Context, r Request, journalPath string, provider Provider, 
 		}
 		return requestResult(r, code), fmt.Errorf("resolve ownership handoff provider: %w", err)
 	}
+	if existing != nil && existing.Phase == PhaseRolledBack {
+		// A rolled-back journal is terminal for its own generation: the legacy
+		// owner is running again under restored controls, so this run starts a
+		// fresh handoff rather than resuming a compensated one. Archiving it
+		// forces a new provider inspect; reusing the old token would make the
+		// restarted GC process look like the one that was stopped.
+		if err := archiveRolledBackJournal(journalPath, *existing); err != nil {
+			return result(*existing, mutationOccurred(*existing)), fmt.Errorf("archive rolled-back handoff journal: %w", err)
+		}
+	}
 	return newRun(r, journalPath, hooks).run(ctx)
+}
+
+func archiveRolledBackJournal(path string, journal Journal) error {
+	stamp := journal.UpdatedAt.UTC()
+	if stamp.IsZero() {
+		stamp = time.Now().UTC()
+	}
+	archive := fmt.Sprintf("%s.rolled-back-%d", path, stamp.UnixNano())
+	if _, err := os.Lstat(archive); err == nil {
+		return errors.New("rolled-back handoff archive already exists")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(path, archive); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 func mutationOccurred(j Journal) bool {
 	return j.MutationOccurred || j.Phase == PhaseOldOwnerStopped || j.Phase == PhaseVerified ||
-		j.Phase == PhaseCommitted || j.CommitHookRan || j.CommitHookInProgress ||
-		j.LegacyStopInProgress
+		j.Phase == PhaseCommitted || j.Phase == PhaseRollbackStarted ||
+		j.Phase == PhaseLegacyConfigRestored || j.Phase == PhaseRolledBack ||
+		j.CommitHookRan || j.CommitHookInProgress || j.LegacyStopInProgress
 }
 
 func reportedMutation(err error) (bool, bool) {
@@ -628,7 +839,7 @@ func stableErrorCode(code, fallback string) string {
 		"commit_recovery_failed", "journal_save_failed", "protocol_version", "unsupported_scope",
 		"managed_owner_missing", "state_missing", "process_missing", "process_unowned",
 		"endpoint_unreachable", "port_conflict", "identity_changed", "lifecycle_busy", "data_lock_held",
-		"stop_failed":
+		"stop_failed", "rollback_unavailable", "rollback_failed", "unsupported_platform":
 		return code
 	default:
 		return fallback
@@ -637,7 +848,10 @@ func stableErrorCode(code, fallback string) string {
 
 func snapshotCaptured(j Journal) bool {
 	return j.SnapshotCaptured || len(j.Snapshot.Metadata) != 0 ||
-		len(j.Snapshot.Config) != 0 || j.Snapshot.Sentinel != ""
+		len(j.Snapshot.Config) != 0 || len(j.Snapshot.WorkspaceMetadata) != 0 ||
+		len(j.Snapshot.WorkspaceConfig) != 0 || j.Snapshot.WorkspaceMetadataPresent ||
+		j.Snapshot.WorkspaceConfigPresent || j.Snapshot.WorkspacePortPresent ||
+		j.Snapshot.Sentinel != ""
 }
 
 func journalSaveError(j Journal, saveErr error) (Result, error) {
@@ -724,7 +938,7 @@ func newRun(r Request, journalPath string, h Hooks) *handoffRun {
 // that journal left off.
 func (x *handoffRun) run(ctx context.Context) (Result, error) {
 	steps := []func(context.Context) *stepOutcome{
-		x.adopt, x.stepSnapshot, x.stepConfigure, x.stepStopLegacy, x.stepVerify, x.stepCommit,
+		x.adopt, x.resumeRollback, x.stepSnapshot, x.stepConfigure, x.stepStopLegacy, x.stepVerify, x.stepCommit,
 	}
 	for _, step := range steps {
 		if out := step(ctx); out != nil {
@@ -769,11 +983,21 @@ func (x *handoffRun) advance(p Phase) *stepOutcome {
 // provider refused rather than only which step was running; code is the
 // fallback for every error that does not name one.
 func (x *handoffRun) fail(code string, err error) *stepOutcome {
+	if out := x.record(code, err); out != nil {
+		return out
+	}
+	return done(result(x.j, mutationOccurred(x.j)), err)
+}
+
+// record makes a typed refusal durable without ending the run, so a
+// compensating rollback starts from a journal that already names its cause. A
+// non-nil outcome means the journal could not be written, which is terminal.
+func (x *handoffRun) record(code string, err error) *stepOutcome {
 	x.j.ErrorCode, x.j.Error, x.j.UpdatedAt = handoffErrorCode(err, code), err.Error(), time.Now().UTC()
 	if saveErr := x.save(); saveErr != nil {
 		return done(journalSaveError(x.j, errors.Join(err, saveErr)))
 	}
-	return done(result(x.j, mutationOccurred(x.j)), err)
+	return nil
 }
 
 func (x *handoffRun) clearError() {
@@ -809,6 +1033,12 @@ func (x *handoffRun) stepConfigure(ctx context.Context) *stepOutcome {
 	}
 	if err := x.hooks.Configure(ctx, x.j.Request, x.j.Snapshot); err != nil {
 		return x.fail("target_configure_failed", err)
+	}
+	if x.hooks.ConfigureMutates {
+		// Configure has durably staged bd-owned state, so a failure to write
+		// the checkpoint below must not claim an untouched workspace. The
+		// retry stays in PhasePrepared and re-proves the staged artifacts.
+		x.j.MutationOccurred = true
 	}
 	return x.advance(PhaseTargetConfigured)
 }
@@ -851,6 +1081,14 @@ func (x *handoffRun) stepStopLegacy(ctx context.Context) *stepOutcome {
 			if mutates || reservedNow {
 				x.j.LegacyStopInProgress = mutates
 			}
+			if mutates {
+				// The provider positively observed a stop that changed the
+				// legacy owner and then failed its own follow-up check. The
+				// scope cannot be assumed served any more, so compensate now
+				// rather than journal a refusal that claims it is still
+				// pre-stop and leave the city with nothing running.
+				return x.rollback(ctx, err)
+			}
 		}
 		return x.fail("owner_stop_failed", err)
 	}
@@ -866,9 +1104,18 @@ func (x *handoffRun) stepVerify(ctx context.Context) *stepOutcome {
 	if x.hooks.Verify == nil {
 		return x.fail("verify_unavailable", errors.New("verify hook is required"))
 	}
-	if err := x.hooks.Verify(ctx, x.j.Request, x.j.Snapshot); err != nil {
-		return x.fail("verification_failed", err)
+	checkpoint := func(s Snapshot) error {
+		x.j.Snapshot, x.j.SnapshotCaptured, x.j.UpdatedAt = s, true, time.Now().UTC()
+		return x.save()
 	}
+	verified, err := x.hooks.Verify(ctx, x.j.Request, x.j.Snapshot, checkpoint)
+	if err != nil {
+		// The legacy owner is already stopped, so a scope whose replacement
+		// cannot be proven has no owner at all. Compensate instead of leaving
+		// it that way.
+		return x.rollback(ctx, fmt.Errorf("verify target: %w", err))
+	}
+	x.j.Snapshot = verified
 	return x.advance(PhaseVerified)
 }
 
@@ -898,7 +1145,7 @@ func (x *handoffRun) replayAmbiguousCommit(ctx context.Context) *stepOutcome {
 		return x.fail("commit_recovery_required", errors.New(commitRecoveryMessage(x.j)))
 	}
 	if err := x.hooks.CommitReplay(ctx, x.j.Request, x.j.Snapshot); err != nil {
-		return x.fail("commit_recovery_failed", err)
+		return x.rollback(ctx, fmt.Errorf("recover commit: %w", err))
 	}
 	return x.recordCommitRan()
 }
@@ -938,7 +1185,13 @@ func (x *handoffRun) invokeCommit(ctx context.Context) *stepOutcome {
 		return done(journalSaveError(x.j, err))
 	}
 	if err := x.hooks.Commit(ctx, x.j.Request, x.j.Snapshot); err != nil {
-		return x.fail("commit_failed", err)
+		// Record the cause before compensating: commitRecoveryMessage reads it
+		// back, and a rollback that loses it leaves the operator with the
+		// symptom and not the failure.
+		if out := x.record("commit_failed", err); out != nil {
+			return out
+		}
+		return x.rollback(ctx, fmt.Errorf("commit ownership handoff: %w", err))
 	}
 	return x.recordCommitRan()
 }
@@ -954,4 +1207,71 @@ func (x *handoffRun) recordCommitRan() *stepOutcome {
 		return done(journalSaveError(x.j, err))
 	}
 	return nil
+}
+
+// resumeRollback re-enters compensation for a journal that recorded one and
+// then lost the process driving it. A rolled-back journal is terminal for its
+// own generation; Run archives it before a fresh handoff, so reaching one here
+// means the archive lost a race and this attempt must not resume it.
+func (x *handoffRun) resumeRollback(ctx context.Context) *stepOutcome {
+	switch x.j.Phase {
+	case PhaseRollbackStarted, PhaseLegacyConfigRestored:
+		return x.rollback(ctx, errors.New("resuming a post-stop ownership handoff rollback"))
+	case PhaseRolledBack:
+		return done(result(x.j, mutationOccurred(x.j)), errors.New("handoff was rolled back; begin a fresh handoff after a new inspect"))
+	}
+	return nil
+}
+
+// rollback compensates a failure that happened after the legacy owner was
+// stopped, so the scope ends the run with an owner. It returns the original
+// cause: a completed rollback is still a failed handoff.
+func (x *handoffRun) rollback(ctx context.Context, cause error) *stepOutcome {
+	if x.hooks.Rollback == nil {
+		// The package cannot infer how to restart a legacy owner. Keep the
+		// fenced refusal for providers that do not implement compensation. A
+		// resumed transition can fail for a more precise coded reason than the
+		// phase it is resuming, so the journal's stored code is only the
+		// fallback for a cause that names none.
+		code := handoffErrorCode(cause, "")
+		if code == "" {
+			code = x.j.ErrorCode
+		}
+		if code == "" {
+			code = "verification_failed"
+		}
+		return x.fail(code, cause)
+	}
+	if x.j.Phase != PhaseRollbackStarted && x.j.Phase != PhaseLegacyConfigRestored {
+		// These reservations describe the abandoned bd commit, never a
+		// rollback, so retire them before a crash can load the rollback
+		// checkpoint and read them as one.
+		x.j.CommitHookInProgress = false
+		x.j.CommitHookRan = false
+		// The stop reservation is a PhaseTargetConfigured concept and cannot
+		// survive into a rollback phase. Compensation only happens after a stop
+		// that did take effect, so record that mutation explicitly instead.
+		x.j.LegacyStopInProgress = false
+		x.j.MutationOccurred = true
+		x.j.Phase = PhaseRollbackStarted
+		if out := x.record("rollback_failed", cause); out != nil {
+			return out
+		}
+	}
+	checkpoint := func(phase Phase, snapshot Snapshot) error {
+		if phase != PhaseLegacyConfigRestored {
+			return errors.New("rollback provider attempted an invalid checkpoint phase")
+		}
+		x.j.Phase, x.j.Snapshot, x.j.SnapshotCaptured, x.j.UpdatedAt = phase, snapshot, true, time.Now().UTC()
+		return x.save()
+	}
+	snapshot, err := x.hooks.Rollback(ctx, x.j.Request, x.j.Snapshot, x.j.Phase, checkpoint)
+	if err != nil {
+		return x.fail(handoffErrorCode(err, "rollback_failed"), fmt.Errorf("rollback ownership handoff: %w", err))
+	}
+	x.j.Snapshot, x.j.Phase, x.j.Owner = snapshot, PhaseRolledBack, OwnerLegacyGC
+	if out := x.record("rollback_failed", cause); out != nil {
+		return out
+	}
+	return done(result(x.j, true), cause)
 }

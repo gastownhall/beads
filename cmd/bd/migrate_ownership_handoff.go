@@ -40,14 +40,14 @@ type ownershipHandoffOutput struct {
 // ownershipHandoffProvider invokes only the explicit GC handoff protocol. It
 // resolves GC_BIN after request/journal validation and while the journal lock
 // is held; absent or untrusted binaries fail closed without process probing.
-var ownershipHandoffProvider ownershiphandoff.Provider = ownershiphandoff.NewGCProviderFromEnv()
+var ownershipHandoffProvider ownershiphandoff.Provider = directHandoffProvider{legacy: ownershiphandoff.NewGCProviderFromEnv()}
 
 var ownershipHandoffCmd = &cobra.Command{
 	Use:   "ownership-handoff",
 	Short: "Explicitly hand a legacy local Dolt owner to bd",
 	Long: `Explicitly hand a legacy local Dolt owner to bd.
 
-The handoff is journaled at <root>/ownership-handoff.json and always resumes
+The handoff is journaled at <root>/.beads/ownership-handoff.json and always resumes
 from the last durable checkpoint that journal records, so re-running the same
 command after a failure or a crash is the retry: there is no separate resume
 mode and no flag to ask for one. A committed journal replays as a no-op, and a
@@ -56,13 +56,12 @@ journal belonging to a different identity is refused rather than resumed.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Annotations: map[string]string{
-		skipStoreAnnotation:       "1",
-		skipLegacyGuardAnnotation: "1",
+		skipStoreAnnotation:        "1",
+		skipLegacyGuardAnnotation:  "1",
+		skipHandoffFenceAnnotation: "1",
 	},
 	RunE: runOwnershipHandoffCommand,
 }
-
-const ownershipHandoffJournalName = "ownership-handoff.json"
 
 func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 	root, _ := cmd.Flags().GetString("root")
@@ -96,20 +95,43 @@ func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 		Endpoint:  ownershiphandoff.Endpoint{Host: host, Port: port, Socket: socket},
 		Owner:     ownershiphandoff.OwnerLegacyGC,
 	}
+	canonicalJournal := filepath.Join(root, ".beads", ownershiphandoff.JournalName)
 	if journal == "" {
-		journal = filepath.Join(root, ownershipHandoffJournalName)
+		journal = canonicalJournal
 	}
 	// An empty or non-canonical city root is refused by ValidateRequest, before
 	// Run touches a journal or opens a provider, so the front door does not
 	// carry a second copy of that check with its own wording.
-	if journal != filepath.Join(root, ownershipHandoffJournalName) {
-		err := errors.New("journal must be the canonical <root>/ownership-handoff.json path")
+	if journal != canonicalJournal {
+		err := errors.New("journal must be the canonical <root>/.beads/ownership-handoff.json path")
 		result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
 			CityRoot: cityRoot, Root: root, Database: database, Workspace: workspace, Endpoint: request.Endpoint, ErrorCode: "invalid_journal"}
 		if outputErr := writeOwnershipHandoffOutput(result, err); outputErr != nil {
 			return outputErr
 		}
 		return &exitError{Code: 1}
+	}
+	if err := ownershiphandoff.ValidateRequest(request); err != nil {
+		result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
+			CityRoot: cityRoot, Root: root, Database: database, Workspace: workspace, Endpoint: request.Endpoint, ErrorCode: "invalid_request"}
+		if outputErr := writeOwnershipHandoffOutput(result, err); outputErr != nil {
+			return outputErr
+		}
+		return &exitError{Code: 1}
+	}
+	var release func() error
+	if !dryRun {
+		gates, gateErr := acquireExclusiveWorkspaceGates(getRootContext(), filepath.Join(root, ".beads"), "bd ownership handoff")
+		if gateErr != nil {
+			result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
+				CityRoot: cityRoot, Root: root, Database: database, Workspace: workspace, Endpoint: request.Endpoint, ErrorCode: "lifecycle_busy"}
+			if outputErr := writeOwnershipHandoffOutput(result, gateErr); outputErr != nil {
+				return outputErr
+			}
+			return &exitError{Code: 1}
+		}
+		release = gates.Release
+		defer func() { _ = release() }()
 	}
 	result, err := ownershiphandoff.Run(getRootContext(), request, journal, ownershipHandoffProvider, dryRun)
 	if outputErr := writeOwnershipHandoffOutput(result, err); outputErr != nil {
@@ -161,7 +183,7 @@ func init() {
 	ownershipHandoffCmd.Flags().String("host", "127.0.0.1", "Loopback host for the legacy server")
 	ownershipHandoffCmd.Flags().Int("port", 3307, "Port for the legacy loopback server")
 	ownershipHandoffCmd.Flags().String("socket", "", "Unix socket beneath --root (alternative to --host/--port)")
-	ownershipHandoffCmd.Flags().String("journal", "", "Handoff journal path (only canonical <root>/ownership-handoff.json is accepted)")
+	ownershipHandoffCmd.Flags().String("journal", "", "Handoff journal path (only canonical <root>/.beads/ownership-handoff.json is accepted)")
 	ownershipHandoffCmd.Flags().Bool("dry-run", false, "Validate identity without opening a provider or mutating state")
 	migrateCmd.AddCommand(ownershipHandoffCmd)
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/ownershiphandoff"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -161,6 +162,13 @@ const skipStoreAnnotation = "bd:skip_store"
 // front door that needs it.
 const skipLegacyGuardAnnotation = "bd:skip_legacy_guard"
 
+// skipHandoffFenceAnnotation, when set to "1" on a command, exempts that
+// command from the ownership-handoff fence. Like skipLegacyGuardAnnotation it
+// is honored leaf-only: the fence exists so an uncommitted transfer cannot be
+// raced by an ordinary open, and only the explicit transfer front door is
+// entitled to run against a pending journal.
+const skipHandoffFenceAnnotation = "bd:skip_handoff_fence"
+
 // commandOptsOutOfStore reports whether cmd or any of its ancestors carries the
 // skipStoreAnnotation set to "1". The whole ancestor chain is walked, so
 // annotating a command exempts that command and every subcommand beneath it.
@@ -174,6 +182,35 @@ func commandOptsOutOfStore(cmd *cobra.Command) bool {
 		}
 	}
 	return false
+}
+
+// guardNormalOwnershipHandoff admits the one explicit transfer command while
+// fencing every ordinary command for a workspace whose handoff journal is not
+// durably committed to bd. Callers hold the workspace gates before invoking it
+// so a handoff cannot appear between the journal read and a store/lifecycle
+// operation.
+func guardNormalOwnershipHandoff(cmd *cobra.Command, beadsDir string) error {
+	if cmd.Annotations[skipHandoffFenceAnnotation] == "1" {
+		return nil
+	}
+	return ownershiphandoff.CheckNormalOpen(beadsDir)
+}
+
+// isSkipStoreHandoffLifecycleCommand identifies the no-store commands which
+// can still alter server ownership. Maintenance commands such as init and
+// migrate take their own exclusive gate and must not acquire a nested shared
+// gate in PersistentPreRunE.
+func isSkipStoreHandoffLifecycleCommand(cmd *cobra.Command) bool {
+	if cmd == doctorCmd {
+		// Doctor skips ordinary store construction but performs version and
+		// maintenance probes directly, so it must share the same admission
+		// fence as no-store Dolt lifecycle commands.
+		return true
+	}
+	if cmd == nil || cmd.Parent() != doltCmd {
+		return false
+	}
+	return cmd.Name() == "start" || cmd.Name() == "stop"
 }
 
 // readOnlyCommands lists commands that only read from the database.
@@ -1280,21 +1317,54 @@ var rootCmd = &cobra.Command{
 					return err
 				}
 			}
+			if cmd == doctorCmd && len(args) > 0 {
+				// Doctor accepts an explicit workspace from an unrelated cwd. Gate
+				// that target before doctor can perform its direct maintenance opens.
+				if target := beads.FindBeadsDirFrom(args[0]); target != "" {
+					beadsDir = target
+				}
+			}
 			if beadsDir == "" {
 				beadsDir = beads.FindBeadsDir()
 			}
-			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
-				isMigrationCommand := false
-				for current := cmd; current != nil; current = current.Parent() {
-					if current.Name() == "migrate" {
-						isMigrationCommand = true
-						break
+			// A historical doctor target needs its own read-only diagnostic, so
+			// classify it before creating the shared handoff-gate inode. Doctor's
+			// normal legacy exemption remains in guardLegacyNoStoreCommand: its
+			// RunE prints the diagnostic after this pre-run phase.
+			doctorLegacyWorkspace := cmd == doctorCmd && isLegacyUpgradeRefusal(guardLegacyUpgradeWorkspace(beadsDir))
+			// Historical workspaces must refuse without creating a lifecycle gate
+			// inode. Once that pre-existing read-only guard admits the command,
+			// `bd dolt start` and `bd dolt stop` take the shared handoff fence
+			// before their journal admission and any listener side effect.
+			// Explicit maintenance commands retain their own exclusive gates and
+			// never self-contend on a nested hold.
+			lifecycleCommand := beadsDir != "" && !doctorLegacyWorkspace && isSkipStoreHandoffLifecycleCommand(cmd)
+			if lifecycleCommand {
+				if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
+					return HandleError("%v", err)
+				}
+				if err := acquireHandoffFenceWorkspaceGates(rootCtx, beadsDir); err != nil {
+					return err
+				}
+				if err := guardNormalOwnershipHandoff(cmd, beadsDir); err != nil {
+					releaseWorkspaceGates()
+					return HandleErrorRespectJSON("%v", err)
+				}
+			}
+			if !lifecycleCommand {
+				if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
+					isMigrationCommand := false
+					for current := cmd; current != nil; current = current.Parent() {
+						if current.Name() == "migrate" {
+							isMigrationCommand = true
+							break
+						}
 					}
+					if isMigrationCommand {
+						return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
+					}
+					return HandleError("%v", err)
 				}
-				if isMigrationCommand {
-					return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
-				}
-				return HandleError("%v", err)
 			}
 			if _, err := getDoltAutoCommitMode(); err != nil {
 				return HandleError("%v", err)
@@ -1466,6 +1536,13 @@ var rootCmd = &cobra.Command{
 				releaseWorkspaceGates()
 			}
 		}()
+		// Read the handoff journal only after taking the same gates which the
+		// explicit transfer holds exclusively. This closes the interval where a
+		// pending journal could appear after admission but before a normal store
+		// open or auto-start.
+		if err := guardNormalOwnershipHandoff(cmd, beadsDir); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		if _, err := getDoltAutoCommitMode(); err != nil {
 			return HandleError("%v", err)
 		}

@@ -135,6 +135,12 @@ var constructionExemptions = map[string]string{
 	"config_apply.go:applyRemote":      "reconciles the Dolt remote configuration, not beads: workspace state a replay consumer has no bead to apply it to",
 	"config_drift.go:checkRemoteDrift": "reads the Dolt remote configuration to report drift; no bead mutation",
 
+	// Direct handoff uses these read-only probes to compare an issue/dependency
+	// sentinel before publishing ownership. Both opens set ReadOnly and the
+	// handoff probe restriction, so neither can mutate a bead.
+	"migrate_ownership_handoff_direct.go:captureHandoffSentinel":    "read-only direct-handoff sentinel probe; the store refuses writes",
+	"migrate_ownership_handoff_direct.go:verifyDirectHandoffTarget": "read-only direct-handoff target proof; the store refuses writes",
+
 	// bd doctor's CHECKS: read-only inspection of workspace and bead state.
 	// They report, they never write.
 	//

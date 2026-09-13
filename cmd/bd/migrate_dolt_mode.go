@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/ownershiphandoff"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -569,6 +570,13 @@ func acquireMigrateGates(beadsDir string, shared bool, reason string) (func(), e
 		return nil, HandleErrorWithHint(
 			fmt.Sprintf("cannot migrate while other bd activity holds this workspace: %v", err),
 			"wait for running bd commands to finish, then retry")
+	}
+	// Mode migration changes the server lifecycle and artifacts. Inspect the
+	// handoff journal only after the same exclusive hold the handoff uses;
+	// an earlier read would leave a TOCTOU window before mutation.
+	if err := ownershiphandoff.CheckNormalOpen(beadsDir); err != nil {
+		_ = h.Release()
+		return nil, HandleError("Dolt mode migration is fenced by ownership handoff: %v", err)
 	}
 	return func() { _ = h.Release() }, nil
 }

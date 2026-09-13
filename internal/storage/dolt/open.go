@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/ownershiphandoff"
 )
 
 // ServerMode is re-exported from doltserver for convenience.
@@ -40,12 +42,34 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 		cfg.AutoStart = false
 		return
 	}
+	if !handoffJournalPermitsAutoStart(beadsDir) {
+		cfg.AutoStart = false
+		return
+	}
 	autoStartCfg := config.GetString("dolt.auto-start")
 	if autoStartCfg == "" {
 		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
 	}
 	mode := doltserver.ResolveServerMode(beadsDir)
 	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
+}
+
+// handoffJournalPermitsAutoStart fences normal bd opens while a GC-to-bd
+// transfer is incomplete. The explicit handoff command never opens through
+// this path; its target probe supplies DisableAutoStart and starts only after
+// it has acquired the handoff gates.
+func handoffJournalPermitsAutoStart(beadsDir string) bool {
+	journal, err := ownershiphandoff.Load(filepath.Join(beadsDir, ownershiphandoff.JournalName))
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err != nil || journal.Phase != ownershiphandoff.PhaseCommitted || journal.Owner != ownershiphandoff.OwnerBD {
+		return false
+	}
+	// Keep this early auto-start admission identical to normal store opening:
+	// a syntactically committed journal is not authority without its complete
+	// durable target and legacy identity proofs.
+	return ownershiphandoff.CheckNormalOpen(beadsDir) == nil
 }
 
 // ApplyResolvedServerPort fills cfg's server port from doltserver's
@@ -109,6 +133,9 @@ func NewFromConfig(ctx context.Context, beadsDir string) (*DoltStore, error) {
 // `bd doctor` that should behave the same way as normal top-level CLI commands
 // while still honoring externally managed server mode.
 func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Config) (*DoltStore, error) {
+	if err := checkNormalOwnershipHandoffOpen(beadsDir, cfg); err != nil {
+		return nil, err
+	}
 	fileCfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
@@ -139,6 +166,9 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 // NewFromConfigWithOptions creates a DoltStore with options from metadata.json.
 // Options in cfg override those from the config file. Pass nil for default options.
 func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config) (*DoltStore, error) {
+	if err := checkNormalOwnershipHandoffOpen(beadsDir, cfg); err != nil {
+		return nil, err
+	}
 	fileCfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
@@ -189,6 +219,19 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	}
 
 	return New(ctx, cfg)
+}
+
+func checkNormalOwnershipHandoffOpen(beadsDir string, cfg *Config) error {
+	if cfg != nil && cfg.OwnershipHandoffProbe {
+		if !cfg.ReadOnly || !cfg.DisableAutoStart {
+			return fmt.Errorf("ownership handoff probe requires read-only and disabled auto-start")
+		}
+		return nil
+	}
+	if err := ownershiphandoff.CheckNormalOpen(beadsDir); err != nil {
+		return fmt.Errorf("ownership handoff blocks normal store open: %w", err)
+	}
+	return nil
 }
 
 // resolveAutoStart computes the effective AutoStart value, respecting a

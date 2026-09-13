@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/ownershiphandoff"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
@@ -304,10 +305,39 @@ func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string,
 	if err != nil {
 		return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", err)
 	}
+	// Init can replace the workspace after this exclusive hold is acquired.
+	// Read the handoff journal while still holding it, so a pending transfer
+	// cannot appear between admission and the first destructive preflight.
+	if err := ownershiphandoff.CheckNormalOpen(beadsDir); err != nil {
+		return nil, errors.Join(fmt.Errorf("bd init is fenced by ownership handoff: %w", err), h.Release())
+	}
 	if preflight != nil {
 		if err := preflight(); err != nil {
 			return nil, errors.Join(err, h.Release())
 		}
 	}
 	return h, nil
+}
+
+// acquireHandoffFenceWorkspaceGates obtains the shared ownership fence for
+// skip-store Dolt lifecycle commands. Unlike ordinary store admission it never
+// fails open: an unreadable gate would make a pending journal vulnerable to a
+// new listener before the journal can be checked under the shared hold.
+func acquireHandoffFenceWorkspaceGates(ctx context.Context, beadsDir string) error {
+	if _, err := os.Stat(beadsDir); err != nil {
+		return HandleErrorRespectJSON("ownership handoff workspace gate: %v", err)
+	}
+	gates, err := buildWorkspaceGateSet(beadsDir)
+	if err != nil {
+		return HandleErrorRespectJSON("ownership handoff workspace gate: %v", err)
+	}
+	h, err := workspacegate.AcquireAll(ctx, workspacegate.Shared, workspacegate.Options{}, gates...)
+	if err != nil {
+		if errors.Is(err, workspacegate.ErrBusy) {
+			return HandleErrorRespectJSON("a maintenance operation is running on this workspace; retry when it completes: %v", err)
+		}
+		return HandleErrorRespectJSON("ownership handoff workspace gate: %v", err)
+	}
+	workspaceGateHandle = h
+	return nil
 }

@@ -456,6 +456,12 @@ type Config struct {
 	// defaults would enable it. Diagnostic paths use this to stay read-only.
 	DisableAutoStart bool
 
+	// OwnershipHandoffProbe is reserved for the explicit journaled handoff's
+	// read-only target proof. It may bypass the ordinary handoff admission
+	// fence only together with both ReadOnly and DisableAutoStart, so no normal
+	// caller can use it to create, adopt, or mutate a target during transfer.
+	OwnershipHandoffProbe bool
+
 	// MaxOpenConns overrides the connection pool size (0 = default 10).
 	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
 	MaxOpenConns int
