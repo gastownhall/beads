@@ -23,10 +23,13 @@ type ContainerProvider struct {
 
 // NewContainerProvider starts a Dolt container and returns a provider.
 func NewContainerProvider() (*ContainerProvider, error) {
-	checkRyukEnabled()
 	if state := checkDolt(); state != doltReady {
 		return nil, fmt.Errorf("cannot create container provider: %s", state)
 	}
+	// After checkDolt, matching the other two entry points: a box with no
+	// container runtime should report "dolt not ready" and skip, not be killed
+	// over a reaper it was never going to use.
+	checkRyukEnabled()
 
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()

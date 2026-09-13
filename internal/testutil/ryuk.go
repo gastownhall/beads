@@ -61,8 +61,10 @@ var ryukCheckOnce sync.Once
 // close (be-ovg86). Callers therefore get no say in the matter. This is
 // test-harness-only code; nothing in a shipped binary reaches it.
 //
-// TestRyukDisabled_SwallowingCallerStillDies pins the behavior end-to-end
-// through the swallowing caller shape.
+// Every call site runs this after checkDolt(), so a box with no container
+// runtime still skips cleanly instead of being killed over a reaper it was
+// never going to use. TestRyukDisabled_SwallowingCallerStillDies pins the
+// behavior end-to-end through the swallowing caller shape.
 func checkRyukEnabled() {
 	ryukCheckOnce.Do(func() {
 		allowUnreaped := os.Getenv("BEADS_ALLOW_UNREAPED_TESTCONTAINERS") == "1"
