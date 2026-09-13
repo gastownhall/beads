@@ -39,6 +39,10 @@ type Conflict struct {
 type RemoteInfo struct {
 	Name string `json:"name"` // Remote name (e.g., "town-beta")
 	URL  string `json:"url"`  // Remote URL (e.g., "dolthub://org/repo")
+	// Ref is the git ref a git-backed remote keeps its Dolt data on, when the
+	// remote was added with one. Empty means DefaultGitDataRef; always empty
+	// for remotes that are not git-backed.
+	Ref string `json:"ref,omitempty"`
 }
 
 // SyncStatus describes the synchronization state with a peer.

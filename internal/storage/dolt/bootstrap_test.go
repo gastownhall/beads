@@ -19,7 +19,7 @@ func TestBootstrapCloneCmdEnvIsGuarded(t *testing.T) {
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("GIT_CURL_VERBOSE", "1")
 
-	cmd := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"))
+	cmd := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"), "")
 	if cmd.Env == nil {
 		t.Fatal("bootstrapCloneCmd() left cmd.Env nil; the clone would inherit stderr-directed git tracing")
 	}
@@ -155,15 +155,35 @@ func TestBootstrapFromRemoteWithDB_PreservesPreExistingCloneTarget(t *testing.T)
 
 func TestDoltCloneArgs(t *testing.T) {
 	t.Setenv("DOLT_REMOTE_USER", "")
-	got := doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	got := doltCloneArgs("https://example.com/repo", "/tmp/clone", "")
 	want := []string{"clone", "https://example.com/repo", "/tmp/clone"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
 	}
 
 	t.Setenv("DOLT_REMOTE_USER", "alice")
-	got = doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	got = doltCloneArgs("https://example.com/repo", "/tmp/clone", "")
 	want = []string{"clone", "--user", "alice", "https://example.com/repo", "/tmp/clone"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
+	}
+}
+
+// A git data ref reaches `dolt clone` as --ref, verbatim, whether it is a
+// branch under refs/heads/ or a ref elsewhere in the namespace.
+func TestDoltCloneArgsWithRef(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "")
+	for _, ref := range []string{"refs/heads/issue-data", "refs/dolt/units/team-12542"} {
+		got := doltCloneArgs("git+https://example.com/repo.git", "/tmp/clone", ref)
+		want := []string{"clone", "--ref", ref, "git+https://example.com/repo.git", "/tmp/clone"}
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("doltCloneArgs(ref=%q) = %q, want %q", ref, got, want)
+		}
+	}
+
+	t.Setenv("DOLT_REMOTE_USER", "alice")
+	got := doltCloneArgs("git+https://example.com/repo.git", "/tmp/clone", " refs/heads/issue-data ")
+	want := []string{"clone", "--user", "alice", "--ref", "refs/heads/issue-data", "git+https://example.com/repo.git", "/tmp/clone"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
 	}
