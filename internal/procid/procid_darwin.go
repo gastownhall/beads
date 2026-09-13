@@ -21,6 +21,14 @@ type Handle struct {
 	token Token
 }
 
+// SupportsKernelBoundHandle reports whether strict signaling is kernel-bound.
+func SupportsKernelBoundHandle() bool { return false }
+
+// OpenStrict refuses because Darwin has no kernel-bound process handle here.
+func OpenStrict(pid int, tok Token) (*Handle, error) {
+	return nil, errors.New("procid: kernel-bound strict signaling is unavailable on darwin")
+}
+
 func Capture(pid int) (Token, error) {
 	proc, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {

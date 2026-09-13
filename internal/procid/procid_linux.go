@@ -21,6 +21,44 @@ var (
 	pidfdOpen  = unix.PidfdOpen
 )
 
+// SupportsKernelBoundHandle reports whether this kernel supports pidfds for
+// the current process. Strict ownership transfer refuses before mutation when
+// this proof-and-signal primitive is unavailable.
+func SupportsKernelBoundHandle() bool {
+	tok, err := Capture(os.Getpid())
+	if err != nil {
+		return false
+	}
+	handle, err := OpenStrict(os.Getpid(), tok)
+	if err != nil {
+		return false
+	}
+	defer handle.Close() //nolint:errcheck // capability probe owns this fd
+	// Signal zero performs permission/seccomp validation without changing the
+	// process. Opening a pidfd alone is insufficient when pidfd_send_signal is
+	// denied by the runtime policy.
+	return handle.Signal(syscall.Signal(0)) == nil
+}
+
+// OpenStrict opens only a kernel-bound pidfd handle; unlike Open it never
+// falls back to verify-then-raw-PID signaling.
+func OpenStrict(pid int, tok Token) (*Handle, error) {
+	fd, err := pidfdOpen(pid, 0)
+	if err != nil {
+		return nil, fmt.Errorf("procid: strict pidfd open %d: %w", pid, err)
+	}
+	match, verifyErr := Verify(pid, tok)
+	if verifyErr != nil {
+		_ = unix.Close(fd)
+		return nil, verifyErr
+	}
+	if !match {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("procid: process %d does not match token", pid)
+	}
+	return &Handle{pid: pid, token: tok, pidfd: fd}, nil
+}
+
 // Handle identifies a process through a pidfd when the running kernel supports
 // it. On older kernels without pidfds, it falls back to verify, signal, verify;
 // that fallback retains a small PID-reuse race.

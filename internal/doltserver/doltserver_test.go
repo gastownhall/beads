@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -421,6 +422,27 @@ func TestReclaimPortAvailable(t *testing.T) {
 	}
 	if adoptPID != 0 {
 		t.Errorf("expected adoptPID=0 for free port, got %d", adoptPID)
+	}
+}
+
+func TestStartWithOptionsRequireFreshRefusesListenerUnderStartLock(t *testing.T) {
+	beadsDir := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := writePortFile(beadsDir, port); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := StartWithOptions(beadsDir, StartOptions{RequireFresh: true})
+	if state != nil || !errors.Is(err, ErrFreshStartRequired) {
+		t.Fatalf("strict start state=%+v err=%v, want fresh-listener refusal", state, err)
+	}
+	if _, err := os.Stat(pidPath(beadsDir)); !os.IsNotExist(err) {
+		t.Fatalf("strict start recorded or adopted listener: pid file err=%v", err)
 	}
 }
 
@@ -2665,4 +2687,88 @@ func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
 			t.Errorf("with backend=sqlite, externalNonLocalhostHost should be false (backend gate precedes host inference); got ok=true host=%q", host)
 		}
 	})
+}
+
+func TestStrictConfigArgMatchesRequiresExactArgv(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "dolt-handoff-0123456789abcdef0123456789abcdef.yaml")
+	executable := "/usr/local/bin/dolt"
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"exact", []string{executable, "sql-server", "--config", configPath}, true},
+		{"suffix", []string{executable, "sql-server", "--config", configPath + ".evil"}, false},
+		{"duplicate", []string{executable, "sql-server", "--config", configPath, "--config", configPath}, false},
+		{"extra flag", []string{executable, "--prof", "cpu", "sql-server", "--config", configPath}, false},
+		{"extra positional", []string{executable, "sql-server", "--config", configPath, "other"}, false},
+		{"wrong argv0", []string{"dolt", "sql-server", "--config", configPath}, false},
+		{"missing subcommand", []string{executable, "--config", configPath}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strictConfigArgMatches(tc.args, executable, configPath); got != tc.want {
+				t.Fatalf("strictConfigArgMatches(%q) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWriteStrictLaunchConfigDoesNotReplaceOrFollowExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dolt-handoff-0123456789abcdef0123456789abcdef.yaml")
+	body := []byte("listener:\n  port: 4321\n")
+	if err := writeStrictLaunchConfig(path, body); err != nil {
+		t.Fatalf("write fresh strict config: %v", err)
+	}
+	if err := writeStrictLaunchConfig(path, body); err != nil {
+		t.Fatalf("reuse matching strict config: %v", err)
+	}
+	if err := writeStrictLaunchConfig(path, []byte("different")); !errors.Is(err, ErrFreshStartRequired) {
+		t.Fatalf("replace strict config error=%v, want ErrFreshStartRequired", err)
+	}
+	link := filepath.Join(dir, "dolt-handoff-fedcba9876543210fedcba9876543210.yaml")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStrictLaunchConfig(link, body); err == nil {
+		t.Fatal("strict config followed symlink")
+	}
+}
+
+func TestValidateStrictLaunchOptionsRequires128BitIntent(t *testing.T) {
+	beadsDir := t.TempDir()
+	id := "0123456789abcdef0123456789abcdef"
+	options := StartOptions{RequireFresh: true, LaunchID: id, ConfigPath: filepath.Join(beadsDir, "dolt-handoff-"+id+".yaml"), Executable: filepath.Join(beadsDir, "dolt"), ExpectedHost: "127.0.0.1", ExpectedPort: 3307}
+	if err := validateStrictLaunchOptions(beadsDir, options); err != nil {
+		t.Fatalf("valid strict options: %v", err)
+	}
+	options.LaunchID = "0123"
+	if err := validateStrictLaunchOptions(beadsDir, options); err == nil {
+		t.Fatal("short strict ID accepted")
+	}
+}
+
+func TestStartWithOptionsRecoverOnlyAbsentChildNeverSpawns(t *testing.T) {
+	beadsDir := t.TempDir()
+	id := "0123456789abcdef0123456789abcdef"
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doltBin, err = filepath.EvalSymlinks(doltBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := StartOptions{RequireFresh: true, RecoverOnly: true, RequireReady: true,
+		LaunchID: id, ConfigPath: filepath.Join(beadsDir, "dolt-handoff-"+id+".yaml"), Executable: doltBin,
+		ExpectedHost: "127.0.0.1", ExpectedPort: 3307}
+	state, err := StartWithOptions(beadsDir, opts)
+	if state != nil || !errors.Is(err, ErrStrictLaunchNotFound) {
+		t.Fatalf("absent recover-only state=%+v err=%v, want ErrStrictLaunchNotFound", state, err)
+	}
+	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir), opts.ConfigPath} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("recover-only absent child created %s: %v", path, statErr)
+		}
+	}
 }
