@@ -4,11 +4,13 @@ package doltserver_test
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,6 +19,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
 )
@@ -496,5 +499,193 @@ func TestLifecycle_PIDReuseDetection(t *testing.T) {
 	// Verify stale state files were cleaned up.
 	if integration.FileExists(corruptor.PIDFilePath()) {
 		t.Error("PID file not cleaned up after detecting non-dolt PID")
+	}
+}
+
+// setupStrictLifecycleTestDir is setupLifecycleTestDir with every symlink
+// resolved. Strict launch options are validated against the physical workspace
+// path, and t.TempDir() sits under /var -> /private/var on macOS, so a raw temp
+// dir makes these tests pass on Linux and fail on macOS for reasons unrelated
+// to the behavior under test.
+func setupStrictLifecycleTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(setupLifecycleTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestLifecycle_StrictLaunchRecoversCrashAfterSpawnBeforeJournalCheckpoint
+// proves the crash window before the child has written PID or port state. The
+// retry may recover exactly that nonce-bound child and must not spawn or adopt
+// another listener.
+func TestLifecycle_StrictLaunchRecoversCrashAfterSpawnBeforeJournalCheckpoint(t *testing.T) {
+	if !doltserver.SupportsStrictLaunchRecovery() {
+		t.Skip("platform cannot prove strict launch recovery")
+	}
+	beadsDir := setupStrictLifecycleTestDir(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doltBin, err = filepath.EvalSymlinks(doltBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "0123456789abcdef0123456789abcdef"
+	opts := doltserver.StartOptions{
+		RequireFresh: true,
+		LaunchID:     id,
+		ConfigPath:   filepath.Join(beadsDir, "dolt-handoff-"+id+".yaml"),
+		Executable:   doltBin,
+		ExpectedHost: "127.0.0.1",
+		ExpectedPort: port,
+	}
+	var spawnedPID int
+	opts.AfterSpawn = func(pid int) error {
+		spawnedPID = pid
+		return errors.New("simulate caller crash before PID checkpoint")
+	}
+	first, err := doltserver.StartWithOptions(beadsDir, opts)
+	if first != nil || err == nil || spawnedPID <= 0 {
+		t.Fatalf("strict crash-window start state=%+v pid=%d err=%v, want spawned child without state", first, spawnedPID, err)
+	}
+	stopped := false
+	defer func() {
+		if stopped {
+			return
+		}
+		if err := doltserver.Stop(beadsDir); err != nil {
+			t.Logf("strict cleanup: %v", err)
+		}
+	}()
+	if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PIDFileName)); !os.IsNotExist(err) {
+		t.Fatalf("crash-window start wrote PID checkpoint: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PortFileName)); !os.IsNotExist(err) {
+		t.Fatalf("crash-window start wrote port checkpoint: %v", err)
+	}
+	opts.AfterSpawn = nil
+	second, err := doltserver.StartWithOptions(beadsDir, opts)
+	if err != nil {
+		t.Fatalf("strict replay: %v", err)
+	}
+	if second.PID != spawnedPID || second.Port != port {
+		t.Fatalf("strict replay state=%+v, want spawned child pid=%d port=%d", second, spawnedPID, port)
+	}
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("stop recovered child: %v", err)
+	}
+	stopped = true
+	waitForPortClosed(t, port, 5*time.Second)
+}
+
+// TestLifecycle_StrictRecoverOnlyFindsStoppedPrelistenChild proves that a
+// caller can recover an exact nonce child before it has bound the endpoint or
+// written lifecycle state, then retire it through a process-birth handle.
+func TestLifecycle_StrictRecoverOnlyFindsStoppedPrelistenChild(t *testing.T) {
+	if !doltserver.SupportsStrictLaunchRecovery() {
+		t.Skip("platform cannot prove strict launch recovery")
+	}
+	beadsDir := setupStrictLifecycleTestDir(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doltBin, err = filepath.EvalSymlinks(doltBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "fedcba9876543210fedcba9876543210"
+	spawnedPID := 0
+	opts := doltserver.StartOptions{RequireFresh: true, LaunchID: id,
+		ConfigPath: filepath.Join(beadsDir, "dolt-handoff-"+id+".yaml"), Executable: doltBin,
+		ExpectedHost: "127.0.0.1", ExpectedPort: port,
+		AfterSpawn: func(pid int) error {
+			spawnedPID = pid
+			if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+				return err
+			}
+			return errors.New("simulate caller crash before pre-listen checkpoint")
+		},
+	}
+	if state, err := doltserver.StartWithOptions(beadsDir, opts); state != nil || err == nil || spawnedPID <= 0 {
+		t.Fatalf("strict paused launch state=%+v pid=%d err=%v, want uncheckpointed child", state, spawnedPID, err)
+	}
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 100*time.Millisecond); err == nil {
+		_ = conn.Close()
+		t.Fatal("paused child unexpectedly bound handoff endpoint")
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PIDFileName)); !os.IsNotExist(err) {
+		t.Fatalf("paused child wrote PID state: %v", err)
+	}
+	// Commit replay requires a ready endpoint. A paused nonce child must not be
+	// treated as ready, and the ready-only lookup must never launch another.
+	t.Setenv("BEADS_DOLT_READY_TIMEOUT", "1")
+	opts.AfterSpawn, opts.RecoverOnly, opts.RequireReady = nil, true, true
+	if state, err := doltserver.StartWithOptions(beadsDir, opts); state != nil || err == nil {
+		t.Fatalf("ready-only paused lookup state=%+v err=%v, want refusal", state, err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PIDFileName)); !os.IsNotExist(err) {
+		t.Fatalf("ready-only lookup wrote PID state: %v", err)
+	}
+	// A foreign listener on the requested endpoint also cannot turn the paused
+	// nonce child into a commit-ready target.
+	foreign, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, err := doltserver.StartWithOptions(beadsDir, opts); state != nil || err == nil {
+		_ = foreign.Close()
+		t.Fatalf("ready-only foreign holder state=%+v err=%v, want refusal", state, err)
+	}
+	if err := foreign.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts.AfterSpawn, opts.RecoverOnly, opts.RequireReady = nil, true, false
+	state, err := doltserver.StartWithOptions(beadsDir, opts)
+	if err != nil || state == nil || state.PID != spawnedPID {
+		t.Fatalf("recover-only strict child state=%+v err=%v, want pid %d", state, err, spawnedPID)
+	}
+	birth, err := procid.Capture(spawnedPID)
+	if err != nil {
+		t.Fatalf("capture recovered prelisten child: %v", err)
+	}
+	handle, err := procid.Open(spawnedPID, birth)
+	if err != nil {
+		t.Fatalf("open recovered prelisten child: %v", err)
+	}
+	defer handle.Close() //nolint:errcheck // test cleanup handle
+	if err := handle.Kill(); err != nil {
+		t.Fatalf("retire recovered prelisten child: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		alive, verifyErr := procid.Verify(spawnedPID, birth)
+		if verifyErr != nil || !alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered prelisten child did not exit")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
