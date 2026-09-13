@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -153,4 +154,42 @@ func TestPrintConfigSideEffects(t *testing.T) {
 		{Message: "no command hint"},
 		{Message: "with command", Command: "bd apply"},
 	})
+}
+
+func TestCheckConfigSetSideEffects_SyncRemoteRef(t *testing.T) {
+	effects := checkConfigSetSideEffects("sync.remote-ref", "refs/dolt/units/team-12542")
+	if len(effects) != 1 {
+		t.Fatalf("expected 1 effect, got %d", len(effects))
+	}
+	if !strings.Contains(effects[0].Message, "refs/dolt/units/team-12542") || !strings.Contains(effects[0].Command, "--ref refs/dolt/units/team-12542") {
+		t.Fatalf("effect should name the ref and the re-add command: %+v", effects[0])
+	}
+}
+
+// Setting the key to the empty value or to refs/dolt/data pins the default
+// in this file, which is not an unset: the hint says the default is read
+// here even when a user-global sync.remote-ref is configured.
+func TestCheckConfigSetSideEffects_SyncRemoteRefDefault(t *testing.T) {
+	for _, value := range []string{"", "refs/dolt/data"} {
+		effects := checkConfigSetSideEffects("sync.remote-ref", value)
+		if len(effects) != 1 {
+			t.Fatalf("value %q: expected 1 effect, got %d", value, len(effects))
+		}
+		if !strings.Contains(effects[0].Message, "set to the default") || !strings.Contains(effects[0].Message, "user-global") || strings.Contains(effects[0].Message, "removed") {
+			t.Fatalf("value %q: effect should describe pinning the default, not an unset: %+v", value, effects[0])
+		}
+	}
+}
+
+func TestCheckConfigUnsetSideEffects_SyncRemoteRef(t *testing.T) {
+	effects := checkConfigUnsetSideEffects("sync.remote-ref")
+	if len(effects) != 1 || !strings.Contains(effects[0].Message, "refs/dolt/data") {
+		t.Fatalf("expected one effect naming the default ref, got %+v", effects)
+	}
+	// Unset removes this file's value only: a sync.remote-ref configured
+	// elsewhere (the user-global config.yaml) is what bootstrap and init read
+	// next, so the hint must not promise the default outright.
+	if !strings.Contains(effects[0].Message, "next configured sync.remote-ref") {
+		t.Fatalf("effect should describe the configuration fallback, got %+v", effects[0])
+	}
 }

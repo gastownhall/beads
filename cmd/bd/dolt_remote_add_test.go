@@ -26,6 +26,15 @@ func (f *fakeDoltRemoteAddStore) AddRemote(ctx context.Context, name, url string
 	return nil
 }
 
+func (f *fakeDoltRemoteAddStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	if ref == "" {
+		return f.AddRemote(ctx, name, url)
+	}
+	f.calls = append(f.calls, "add "+name+" "+url+" "+ref)
+	f.remotes = append(f.remotes, storage.RemoteInfo{Name: name, URL: url, Ref: ref})
+	return nil
+}
+
 func (f *fakeDoltRemoteAddStore) RemoveRemote(ctx context.Context, name string) error {
 	f.calls = append(f.calls, "remove "+name)
 	filtered := f.remotes[:0]

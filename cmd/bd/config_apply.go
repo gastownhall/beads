@@ -235,21 +235,50 @@ type originRemoteEvidence interface {
 // take after the window, instead of blind-adding over an invisible remote.
 // A failed listing returns the error — it is never evidence of "no remote".
 func currentOriginRemoteURL(ctx context.Context, st originRemoteEvidence) (string, error) {
+	current, err := currentOriginRemote(ctx, st)
+	return current.URL, err
+}
+
+// currentOriginRemote is currentOriginRemoteURL with the remote's git data
+// ref, so a replacement can keep it. A missing origin is the zero value.
+func currentOriginRemote(ctx context.Context, st originRemoteEvidence) (storage.RemoteInfo, error) {
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
-		return "", err
+		return storage.RemoteInfo{}, err
 	}
 	for _, r := range remotes {
 		if r.Name == "origin" {
-			return r.URL, nil
+			return r, nil
 		}
 	}
 	for _, r := range st.PersistedRemoteInfos() {
 		if r.Name == "origin" {
-			return r.URL, nil
+			return r, nil
 		}
 	}
-	return "", nil
+	return storage.RemoteInfo{}, nil
+}
+
+// originRemoteWriter is the store surface replaceOriginRemote needs.
+type originRemoteWriter interface {
+	RemoveRemote(ctx context.Context, name string) error
+	AddRemoteWithRef(ctx context.Context, name, url, ref string) error
+}
+
+// replaceOriginRemote moves origin from current to newURL, keeping the git
+// data ref current lives on when newURL can carry one. removed reports
+// whether the old remote was taken down: a failed add restores it on its own
+// URL and ref before returning the error.
+func replaceOriginRemote(ctx context.Context, st originRemoteWriter, current storage.RemoteInfo, newURL string) (ref string, removed bool, err error) {
+	ref, _ = refForAdoptedRemote(newURL, current.Ref)
+	if err := st.RemoveRemote(ctx, "origin"); err != nil {
+		return "", false, err
+	}
+	if err := st.AddRemoteWithRef(ctx, "origin", newURL, ref); err != nil {
+		_ = st.AddRemoteWithRef(ctx, "origin", current.URL, current.Ref)
+		return "", true, err
+	}
+	return ref, true, nil
 }
 
 func applyRemote(drifted bool, dryRun bool) ApplyResult {
@@ -295,7 +324,8 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	}
 	defer func() { _ = st.Close() }()
 
-	currentURL, err := currentOriginRemoteURL(ctx, st)
+	current, err := currentOriginRemote(ctx, st)
+	currentURL := current.URL
 	if err != nil {
 		return ApplyResult{
 			Check:   "remote",
@@ -332,7 +362,10 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	}
 
 	if currentURL == "" {
-		if err := st.AddRemote(ctx, "origin", federationRemote); err != nil {
+		// A fresh origin follows sync.remote-ref like every other path that
+		// creates one (init, bootstrap, push-time adoption).
+		ref := syncRemoteRefForURL(federationRemote)
+		if err := st.AddRemoteWithRef(ctx, "origin", federationRemote, ref); err != nil {
 			return ApplyResult{
 				Check:   "remote",
 				Action:  "add_remote",
@@ -345,7 +378,7 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 			Check:   "remote",
 			Action:  "add_remote",
 			Status:  applyStatusApplied,
-			Message: fmt.Sprintf("Added Dolt origin remote: %s", federationRemote),
+			Message: fmt.Sprintf("Added Dolt origin remote: %s", describeAppliedRemote(federationRemote, ref)),
 		}
 	}
 
@@ -359,7 +392,8 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	}
 
 	oldURL := currentURL
-	if err := st.RemoveRemote(ctx, "origin"); err != nil {
+	ref, removed, err := replaceOriginRemote(ctx, st, current, federationRemote)
+	if err != nil && !removed {
 		return ApplyResult{
 			Check:   "remote",
 			Action:  "update_remote",
@@ -368,9 +402,7 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 			Error:   err.Error(),
 		}
 	}
-
-	if err := st.AddRemote(ctx, "origin", federationRemote); err != nil {
-		_ = st.AddRemote(ctx, "origin", oldURL)
+	if err != nil {
 		return ApplyResult{
 			Check:   "remote",
 			Action:  "update_remote",
@@ -384,8 +416,17 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 		Check:   "remote",
 		Action:  "update_remote",
 		Status:  applyStatusApplied,
-		Message: fmt.Sprintf("Updated Dolt origin remote from %s to %s", oldURL, federationRemote),
+		Message: fmt.Sprintf("Updated Dolt origin remote from %s to %s", describeAppliedRemote(oldURL, current.Ref), describeAppliedRemote(federationRemote, ref)),
 	}
+}
+
+// describeAppliedRemote renders a remote URL with its git data ref when one
+// is set.
+func describeAppliedRemote(url, ref string) string {
+	if ref == "" {
+		return url
+	}
+	return url + " (ref " + ref + ")"
 }
 
 // applyServer starts the Dolt server if config says it should be running but it isn't.
