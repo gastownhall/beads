@@ -26,6 +26,138 @@ func validRequest(t *testing.T) Request {
 	return Request{CityRoot: root, Root: root, Database: "beads", Workspace: "ws-1", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
 }
 
+// loadArchivedRollback reads the terminal journal a completed rollback leaves
+// behind. The compensation archives it as its last act, so the live path is
+// empty and the audit record is the archive.
+func loadArchivedRollback(t *testing.T, path string) Journal {
+	t.Helper()
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("live journal at %s survived a completed rollback: %v", path, err)
+	}
+	archives, err := filepath.Glob(path + ".rolled-back-*")
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("archives=%v err=%v, want one archived rollback", archives, err)
+	}
+	journal, err := Load(archives[0])
+	if err != nil {
+		t.Fatalf("load %s: %v", archives[0], err)
+	}
+	return journal
+}
+
+func validGCMetadata(t *testing.T, r Request, token string) []byte {
+	t.Helper()
+	b, err := json.Marshal(gcHandoffResponse{SchemaVersion: 1, Operation: "handoff-inspect", Result: "eligible", Owner: OwnerLegacyGC,
+		Identity: gcHandoffIdentity{CityRoot: r.CityRoot, ScopeRoot: r.Root, Database: r.Database, Workspace: r.Workspace, Endpoint: r.Endpoint,
+			DataDir: filepath.Join(r.Root, ".beads", "dolt"), ConfigFile: filepath.Join(r.Root, ".gc", "dolt.yaml"), PID: 7, StartIdentity: "birth", StartTimeTicks: 1, PortHolderPID: 7},
+		IdentityToken: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestCheckNormalOpenFencesPendingAndInvalidJournals(t *testing.T) {
+	r := validRequest(t)
+	beadsDir := filepath.Join(r.Root, ".beads")
+	if err := os.Mkdir(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "ownership-handoff.json")
+	write := func(phase Phase, owner Owner, request Request) {
+		t.Helper()
+		journal := Journal{Request: request, Phase: phase, Owner: owner}
+		if phase == PhaseCommitted && owner == OwnerBD {
+			journal.SnapshotCaptured = true
+			journal.MutationOccurred = true
+			journal.CommitHookRan = true
+			journal.Snapshot = Snapshot{TargetPID: 123, TargetBirth: "birth", TargetDataDir: filepath.Join(beadsDir, "dolt"),
+				TargetLaunchID: "0123456789abcdef0123456789abcdef", TargetLaunchConfig: filepath.Join(beadsDir, "dolt-handoff-0123456789abcdef0123456789abcdef.yaml"), TargetLaunchExecutable: "/usr/bin/dolt",
+				Sentinel: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Metadata: validGCMetadata(t, r, "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")}
+		}
+		if err := save(path, journal); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := CheckNormalOpen(beadsDir); err != nil {
+		t.Fatalf("no journal blocked normal open: %v", err)
+	}
+	write(PhaseTargetConfigured, OwnerLegacyGC, r)
+	if err := CheckNormalOpen(beadsDir); err == nil || handoffErrorCode(err, "") != "lifecycle_busy" {
+		t.Fatalf("pending journal error=%v, want typed lifecycle_busy", err)
+	}
+	write(PhaseCommitted, OwnerBD, r)
+	if err := CheckNormalOpen(beadsDir); err != nil {
+		t.Fatalf("committed bd journal blocked normal open: %v", err)
+	}
+	truncated := Journal{Request: r, Phase: PhaseCommitted, Owner: OwnerBD, SnapshotCaptured: true, MutationOccurred: true, CommitHookRan: true,
+		Snapshot: Snapshot{TargetPID: 123, TargetBirth: "birth", TargetDataDir: filepath.Join(beadsDir, "dolt")}}
+	if err := save(path, truncated); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckNormalOpen(beadsDir); err == nil || handoffErrorCode(err, "") != "invalid_journal" {
+		t.Fatalf("truncated committed journal error=%v, want typed invalid_journal", err)
+	}
+	write(PhaseCommitted, OwnerBD, r)
+	valid, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Journal){
+		"foreign target directory": func(j *Journal) { j.Snapshot.TargetDataDir = filepath.Join(r.Root, "other") },
+		"malformed nonce":          func(j *Journal) { j.Snapshot.TargetLaunchID = "not-a-nonce" },
+		"foreign nonce config":     func(j *Journal) { j.Snapshot.TargetLaunchConfig = filepath.Join(r.Root, "outside.yaml") },
+		"relative executable":      func(j *Journal) { j.Snapshot.TargetLaunchExecutable = "dolt" },
+		"invalid legacy proof":     func(j *Journal) { j.Snapshot.Metadata = []byte(`{}`) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := valid
+			mutate(&bad)
+			if err := save(path, bad); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckNormalOpen(beadsDir); err == nil || handoffErrorCode(err, "") != "invalid_journal" {
+				t.Fatalf("malformed committed journal error=%v, want typed invalid_journal", err)
+			}
+		})
+	}
+	if err := save(path, valid); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack := valid
+	rolledBack.Phase, rolledBack.Owner, rolledBack.CommitHookRan, rolledBack.CommitHookInProgress = PhaseRolledBack, OwnerLegacyGC, false, false
+	if err := save(path, rolledBack); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckNormalOpen(beadsDir); err != nil {
+		t.Fatalf("valid rolled-back journal blocked normal open: %v", err)
+	}
+	// Rollback restarts GC, producing a fresh process-birth token. Its
+	// authenticated inspect snapshot must replace the stopped-owner proof.
+	refreshed := rolledBack
+	const refreshedToken = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	refreshed.Snapshot.Sentinel = refreshedToken
+	refreshed.Snapshot.Metadata = validGCMetadata(t, r, refreshedToken)
+	if err := save(path, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckNormalOpen(beadsDir); err != nil {
+		t.Fatalf("fresh restarted rolled-back proof blocked normal open: %v", err)
+	}
+	wrong := r
+	wrong.Root = filepath.Join(r.Root, "other")
+	write(PhaseCommitted, OwnerBD, wrong)
+	if err := CheckNormalOpen(beadsDir); err == nil || handoffErrorCode(err, "") != "invalid_journal" {
+		t.Fatalf("foreign journal error=%v, want typed invalid_journal", err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckNormalOpen(beadsDir); err == nil || handoffErrorCode(err, "") != "invalid_journal" {
+		t.Fatalf("malformed journal error=%v, want typed invalid_journal", err)
+	}
+}
+
 func TestValidateRejectsSymlinkRootAndExternalEndpoint(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -276,11 +408,20 @@ func TestExecutePersistsPhasesAndCommittedReplayIsNoop(t *testing.T) {
 	path := filepath.Join(r.Root, "handoff.json")
 	var calls int
 	h := Hooks{
-		Snapshot:   func(context.Context, Request) (Snapshot, error) { calls++; return Snapshot{Sentinel: "s"}, nil },
+		Snapshot: func(context.Context, Request) (Snapshot, error) {
+			calls++
+			const token = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+			return Snapshot{TargetPID: 9, TargetBirth: "birth", TargetDataDir: filepath.Join(r.Root, ".beads", "dolt"),
+				TargetLaunchID: "0123456789abcdef0123456789abcdef", TargetLaunchConfig: filepath.Join(r.Root, ".beads", "dolt-handoff-0123456789abcdef0123456789abcdef.yaml"), TargetLaunchExecutable: "/usr/bin/dolt",
+				Sentinel: token, Metadata: validGCMetadata(t, r, token)}, nil
+		},
 		Configure:  func(context.Context, Request, Snapshot) error { calls++; return nil },
 		StopLegacy: func(context.Context, Request, Snapshot) error { calls++; return nil },
-		Verify:     func(context.Context, Request, Snapshot) error { calls++; return nil },
-		Commit:     func(context.Context, Request, Snapshot) error { calls++; return nil },
+		Verify: func(_ context.Context, _ Request, snapshot Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+			calls++
+			return snapshot, nil
+		},
+		Commit: func(context.Context, Request, Snapshot) error { calls++; return nil },
 	}
 	got, err := Execute(context.Background(), r, path, h, false)
 	if err != nil || got.Phase != PhaseCommitted || !got.Mutates {
@@ -290,6 +431,34 @@ func TestExecutePersistsPhasesAndCommittedReplayIsNoop(t *testing.T) {
 	got, err = Execute(context.Background(), r, path, h, false)
 	if err != nil || got.Phase != PhaseCommitted || calls != before {
 		t.Fatalf("replay result=%+v calls %d->%d err=%v", got, before, calls, err)
+	}
+}
+
+func TestVerifyCheckpointsTargetIdentityBeforeCommit(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	h := Hooks{
+		Snapshot:   func(context.Context, Request) (Snapshot, error) { return Snapshot{Sentinel: "legacy"}, nil },
+		Configure:  func(context.Context, Request, Snapshot) error { return nil },
+		StopLegacy: func(context.Context, Request, Snapshot) error { return nil },
+		Verify: func(_ context.Context, _ Request, snapshot Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+			snapshot.TargetPID = 42
+			snapshot.TargetBirth = "birth"
+			return snapshot, nil
+		},
+		Commit: func(_ context.Context, _ Request, snapshot Snapshot) error {
+			if snapshot.TargetPID != 42 || snapshot.TargetBirth != "birth" {
+				t.Fatalf("commit snapshot=%+v, want checkpointed target identity", snapshot)
+			}
+			return nil
+		},
+	}
+	if _, err := Execute(context.Background(), r, path, h, false); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := Load(path)
+	if err != nil || journal.Snapshot.TargetPID != 42 || journal.Snapshot.TargetBirth != "birth" {
+		t.Fatalf("journal=%+v err=%v, want persisted target identity", journal, err)
 	}
 }
 
@@ -310,9 +479,9 @@ func TestExecuteHookOrderIsExact(t *testing.T) {
 			order = append(order, "stop")
 			return nil
 		},
-		Verify: func(context.Context, Request, Snapshot) error {
+		Verify: func(_ context.Context, _ Request, snapshot Snapshot, _ func(Snapshot) error) (Snapshot, error) {
 			order = append(order, "verify")
-			return nil
+			return snapshot, nil
 		},
 		Commit: func(context.Context, Request, Snapshot) error {
 			order = append(order, "commit")
@@ -353,7 +522,9 @@ func TestConfigureRetryPreservesDurableSnapshot(t *testing.T) {
 		return nil
 	}
 	second.StopLegacy = func(context.Context, Request, Snapshot) error { return nil }
-	second.Verify = func(context.Context, Request, Snapshot) error { return nil }
+	second.Verify = func(_ context.Context, _ Request, snapshot Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+		return snapshot, nil
+	}
 	second.Commit = func(context.Context, Request, Snapshot) error { return nil }
 	if _, err := Execute(context.Background(), r, path, second, false); err != nil {
 		t.Fatal(err)
@@ -373,8 +544,10 @@ func TestStaleEmptyLockIsRecovered(t *testing.T) {
 		Snapshot:   func(context.Context, Request) (Snapshot, error) { return Snapshot{}, nil },
 		Configure:  func(context.Context, Request, Snapshot) error { return nil },
 		StopLegacy: func(context.Context, Request, Snapshot) error { return nil },
-		Verify:     func(context.Context, Request, Snapshot) error { return nil },
-		Commit:     func(context.Context, Request, Snapshot) error { return nil },
+		Verify: func(_ context.Context, _ Request, snapshot Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+			return snapshot, nil
+		},
+		Commit: func(context.Context, Request, Snapshot) error { return nil },
 	}
 	got, err := Execute(context.Background(), r, path, h, false)
 	if err != nil || got.Phase != PhaseCommitted {
@@ -408,7 +581,9 @@ func TestVerifyFailureReportsMutation(t *testing.T) {
 		Snapshot:   func(context.Context, Request) (Snapshot, error) { return Snapshot{}, nil },
 		Configure:  func(context.Context, Request, Snapshot) error { return nil },
 		StopLegacy: func(context.Context, Request, Snapshot) error { return nil },
-		Verify:     func(context.Context, Request, Snapshot) error { return os.ErrClosed },
+		Verify: func(context.Context, Request, Snapshot, func(Snapshot) error) (Snapshot, error) {
+			return Snapshot{}, os.ErrClosed
+		},
 	}
 	got, err := Execute(context.Background(), r, path, h, false)
 	if err == nil || !got.Mutates || got.Phase != PhaseOldOwnerStopped {
@@ -469,7 +644,9 @@ func TestCommitErrorDoesNotRetryNonIdempotently(t *testing.T) {
 		Snapshot:   func(context.Context, Request) (Snapshot, error) { return Snapshot{}, nil },
 		Configure:  func(context.Context, Request, Snapshot) error { return nil },
 		StopLegacy: func(context.Context, Request, Snapshot) error { return nil },
-		Verify:     func(context.Context, Request, Snapshot) error { return nil },
+		Verify: func(_ context.Context, _ Request, snapshot Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+			return snapshot, nil
+		},
 		Commit: func(context.Context, Request, Snapshot) error {
 			calls++
 			return os.ErrPermission
@@ -682,6 +859,12 @@ func TestStopFailureReportsMutation(t *testing.T) {
 	}
 }
 
+// passingVerify is the do-nothing Verify hook: it keeps the snapshot it was
+// given and proves nothing, for tests whose subject is another phase.
+func passingVerify(_ context.Context, _ Request, s Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+	return s, nil
+}
+
 // TestStopRetryAfterUncheckpointedStopSucceeds covers the crash window between
 // a successful StopLegacy and its checkpoint: the retry re-invokes the hook
 // against an already-absent legacy owner, which the contract defines as
@@ -701,7 +884,7 @@ func TestStopRetryAfterUncheckpointedStopSucceeds(t *testing.T) {
 	stops := 0
 	h := Hooks{
 		StopLegacy: func(context.Context, Request, Snapshot) error { stops++; return nil },
-		Verify:     func(context.Context, Request, Snapshot) error { return nil },
+		Verify:     passingVerify,
 		Commit:     func(context.Context, Request, Snapshot) error { return nil },
 	}
 	got, execErr := Execute(context.Background(), r, path, h, false)
@@ -711,6 +894,47 @@ func TestStopRetryAfterUncheckpointedStopSucceeds(t *testing.T) {
 	final, loadErr := Load(path)
 	if loadErr != nil || final.LegacyStopInProgress {
 		t.Fatalf("journal=%+v err=%v, want the stop reservation retired", final, loadErr)
+	}
+}
+
+// TestStopResumeSettlesWhenProviderReportsAbsentLegacyOwner is the resume the
+// Gas City responder actually produces. It cannot call a process it never
+// signaled "stopped", so it refuses — but it refuses *because the owner is
+// gone*, which is the state the stop exists to reach. The refusal therefore
+// settles the reserved stop instead of wedging the journal at
+// target_configured with the legacy server already down and no way forward.
+func TestStopResumeSettlesWhenProviderReportsAbsentLegacyOwner(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	killedMidStop := Journal{Request: r, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+		LegacyStopInProgress: true, Phase: PhaseTargetConfigured, Owner: OwnerLegacyGC}
+	b, err := json.Marshal(killedMidStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stops, rollbacks := 0, 0
+	h := Hooks{
+		StopLegacy: func(context.Context, Request, Snapshot) error {
+			stops++
+			return withAbsentLegacyOwner(CodedError{Code: "process_missing", Err: errors.New("GC handoff stop refused")}, false)
+		},
+		Verify: passingVerify,
+		Commit: func(context.Context, Request, Snapshot) error { return nil },
+		Rollback: func(context.Context, Request, Snapshot, Phase, func(Phase, Snapshot) error) (Snapshot, error) {
+			rollbacks++
+			return Snapshot{}, nil
+		},
+	}
+	got, execErr := Execute(context.Background(), r, path, h, false)
+	if execErr != nil || got.Phase != PhaseCommitted || stops != 1 || rollbacks != 0 {
+		t.Fatalf("absent-owner resume result=%+v err=%v stops=%d rollbacks=%d", got, execErr, stops, rollbacks)
+	}
+	final, loadErr := Load(path)
+	if loadErr != nil || final.LegacyStopInProgress || !final.MutationOccurred {
+		t.Fatalf("journal=%+v err=%v, want the reservation retired and the mutation recorded", final, loadErr)
 	}
 }
 
@@ -802,7 +1026,10 @@ func TestDryRunReportsMidFlightJournalPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := false
-	h := Hooks{Verify: func(context.Context, Request, Snapshot) error { called = true; return nil }}
+	h := Hooks{Verify: func(_ context.Context, _ Request, s Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+		called = true
+		return s, nil
+	}}
 	got, execErr := Execute(context.Background(), r, path, h, true)
 	if execErr != nil || called || got.Mutates || got.Phase != PhaseOldOwnerStopped {
 		t.Fatalf("dry run result=%+v err=%v called=%v, want the journal's real phase", got, execErr, called)
@@ -870,7 +1097,7 @@ func TestCommitRecoveryMessageDoesNotAccumulate(t *testing.T) {
 		Snapshot:   func(context.Context, Request) (Snapshot, error) { return Snapshot{}, nil },
 		Configure:  func(context.Context, Request, Snapshot) error { return nil },
 		StopLegacy: func(context.Context, Request, Snapshot) error { return nil },
-		Verify:     func(context.Context, Request, Snapshot) error { return nil },
+		Verify:     passingVerify,
 		Commit:     func(context.Context, Request, Snapshot) error { return os.ErrPermission },
 	}
 	var lastErr error
@@ -899,5 +1126,212 @@ func TestJournalSaveErrorIsTypedAndTruthful(t *testing.T) {
 	got, err := journalSaveError(j, os.ErrPermission)
 	if err == nil || got.ErrorCode != "journal_save_failed" || !got.Mutates {
 		t.Fatalf("journal save failure result=%+v err=%v", got, err)
+	}
+}
+
+func TestPostStopVerifyFailureRollsBackThroughDurableRestoreCheckpoint(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	var checkpoints []Phase
+	h := Hooks{
+		Snapshot: func(context.Context, Request) (Snapshot, error) {
+			return Snapshot{WorkspaceConfig: []byte("before")}, nil
+		},
+		Configure:  func(context.Context, Request, Snapshot) error { return nil },
+		StopLegacy: func(context.Context, Request, Snapshot) error { return nil },
+		Verify: func(context.Context, Request, Snapshot, func(Snapshot) error) (Snapshot, error) {
+			return Snapshot{}, errors.New("target failed")
+		},
+		Rollback: func(_ context.Context, _ Request, snapshot Snapshot, _ Phase, checkpoint func(Phase, Snapshot) error) (Snapshot, error) {
+			checkpoints = append(checkpoints, PhaseLegacyConfigRestored)
+			if err := checkpoint(PhaseLegacyConfigRestored, snapshot); err != nil {
+				return Snapshot{}, err
+			}
+			return snapshot, nil
+		},
+	}
+	got, err := Execute(context.Background(), r, path, h, false)
+	if err == nil || got.Phase != PhaseRolledBack || got.Owner != OwnerLegacyGC || !got.Mutates {
+		t.Fatalf("result=%+v err=%v, want durable rolled-back legacy owner", got, err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("restore checkpoints=%v, want one", checkpoints)
+	}
+	journal := loadArchivedRollback(t, path)
+	if journal.Phase != PhaseRolledBack || journal.Owner != OwnerLegacyGC {
+		t.Fatalf("journal=%+v, want an archived rolled_back legacy-gc record", journal)
+	}
+}
+
+func TestRollbackResumeUsesRestoredCheckpointWithoutRepeatingStop(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	seed := Journal{Request: r, Snapshot: Snapshot{WorkspaceConfig: []byte("before")}, SnapshotCaptured: true,
+		Phase: PhaseLegacyConfigRestored, Owner: OwnerLegacyGC, MutationOccurred: true}
+	if err := save(path, seed); err != nil {
+		t.Fatal(err)
+	}
+	stops := 0
+	var rollbackPhase Phase
+	h := Hooks{
+		StopLegacy: func(context.Context, Request, Snapshot) error { stops++; return nil },
+		Rollback: func(_ context.Context, _ Request, snapshot Snapshot, phase Phase, checkpoint func(Phase, Snapshot) error) (Snapshot, error) {
+			rollbackPhase = phase
+			return snapshot, nil
+		},
+	}
+	got, err := Execute(context.Background(), r, path, h, false)
+	if err == nil || got.Phase != PhaseRolledBack || stops != 0 || rollbackPhase != PhaseLegacyConfigRestored {
+		t.Fatalf("result=%+v err=%v stops=%d, want rollback-only resume", got, err, stops)
+	}
+}
+
+func TestCommitRecoveryFailureClearsCommitReservationBeforeRollbackCheckpoint(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	seed := Journal{Request: r, Snapshot: Snapshot{Sentinel: "s"}, SnapshotCaptured: true,
+		Phase: PhaseVerified, Owner: OwnerLegacyGC, MutationOccurred: true, CommitHookInProgress: true}
+	if err := save(path, seed); err != nil {
+		t.Fatal(err)
+	}
+	h := Hooks{
+		CommitReplay: func(context.Context, Request, Snapshot) error { return errors.New("unknown commit outcome") },
+		Rollback: func(_ context.Context, _ Request, snapshot Snapshot, _ Phase, checkpoint func(Phase, Snapshot) error) (Snapshot, error) {
+			if err := checkpoint(PhaseLegacyConfigRestored, snapshot); err != nil {
+				return Snapshot{}, err
+			}
+			return snapshot, nil
+		},
+	}
+	got, err := Execute(context.Background(), r, path, h, false)
+	if err == nil || got.Phase != PhaseRolledBack {
+		t.Fatalf("result=%+v err=%v, want rolled-back result", got, err)
+	}
+	journal := loadArchivedRollback(t, path)
+	if journal.CommitHookInProgress || journal.CommitHookRan || journal.Phase != PhaseRolledBack {
+		t.Fatalf("journal=%+v, want an archived rollback without commit reservation", journal)
+	}
+}
+
+func TestRolledBackJournalArchivesBeforeFreshProviderInspect(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	seed := Journal{Request: r, Snapshot: Snapshot{Sentinel: "old"}, SnapshotCaptured: true,
+		Phase: PhaseRolledBack, Owner: OwnerLegacyGC, MutationOccurred: true}
+	if err := save(path, seed); err != nil {
+		t.Fatal(err)
+	}
+	inspects := 0
+	h := Hooks{Snapshot: func(context.Context, Request) (Snapshot, error) {
+		inspects++
+		return Snapshot{}, errors.New("fresh inspect failed")
+	}}
+	got, err := Execute(context.Background(), r, path, h, false)
+	if err == nil || inspects != 1 || got.Phase != PhasePrepared {
+		t.Fatalf("result=%+v err=%v inspects=%d, want a new inspected generation", got, err, inspects)
+	}
+	archives, globErr := filepath.Glob(path + ".rolled-back-*")
+	if globErr != nil || len(archives) != 1 {
+		t.Fatalf("archives=%v err=%v, want retained rolled-back audit journal", archives, globErr)
+	}
+}
+
+func TestReportedMutatingStopErrorRollsBackAndRestores(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	var rollbacks int
+	h := Hooks{
+		Snapshot: func(context.Context, Request) (Snapshot, error) {
+			return Snapshot{WorkspaceConfig: []byte("before")}, nil
+		},
+		Configure: func(context.Context, Request, Snapshot) error { return nil },
+		StopLegacy: func(context.Context, Request, Snapshot) error {
+			return withReportedMutation(CodedError{Code: "identity_changed", Err: errors.New("stop completed but identity changed")}, true)
+		},
+		Rollback: func(_ context.Context, _ Request, snapshot Snapshot, phase Phase, checkpoint func(Phase, Snapshot) error) (Snapshot, error) {
+			rollbacks++
+			if phase != PhaseRollbackStarted {
+				t.Fatalf("rollback phase = %s, want rollback_started", phase)
+			}
+			if err := checkpoint(PhaseLegacyConfigRestored, snapshot); err != nil {
+				return Snapshot{}, err
+			}
+			return snapshot, nil
+		},
+	}
+	got, err := Execute(context.Background(), r, path, h, false)
+	if err == nil || got.Phase != PhaseRolledBack || !got.Mutates || got.ErrorCode != "identity_changed" {
+		t.Fatalf("result=%+v err=%v, want mutating stop compensation", got, err)
+	}
+	if rollbacks != 1 {
+		t.Fatalf("rollbacks=%d, want 1", rollbacks)
+	}
+	journal := loadArchivedRollback(t, path)
+	if journal.Phase != PhaseRolledBack || journal.Owner != OwnerLegacyGC {
+		t.Fatalf("journal=%+v, want an archived rolled_back legacy owner", journal)
+	}
+}
+
+func TestReportedNonMutatingStopErrorDoesNotRollback(t *testing.T) {
+	r := validRequest(t)
+	path := filepath.Join(r.Root, "handoff.json")
+	rollbacks := 0
+	h := Hooks{
+		Snapshot:  func(context.Context, Request) (Snapshot, error) { return Snapshot{}, nil },
+		Configure: func(context.Context, Request, Snapshot) error { return nil },
+		StopLegacy: func(context.Context, Request, Snapshot) error {
+			return withReportedMutation(CodedError{Code: "process_unowned", Err: errors.New("refused")}, false)
+		},
+		Rollback: func(context.Context, Request, Snapshot, Phase, func(Phase, Snapshot) error) (Snapshot, error) {
+			rollbacks++
+			return Snapshot{}, nil
+		},
+	}
+	got, err := Execute(context.Background(), r, path, h, false)
+	if err == nil || got.Phase != PhaseTargetConfigured || got.Mutates {
+		t.Fatalf("result=%+v err=%v, want non-mutating refusal", got, err)
+	}
+	if rollbacks != 0 {
+		t.Fatalf("rollbacks=%d, want 0", rollbacks)
+	}
+}
+
+func TestNormalOpenRejectsDirtyEligibleInspectProofForCommittedAndRolledBack(t *testing.T) {
+	r := validRequest(t)
+	beadsDir := filepath.Join(r.Root, ".beads")
+	if err := os.Mkdir(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "ownership-handoff.json")
+	const token = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for _, phase := range []Phase{PhaseCommitted, PhaseRolledBack} {
+		for _, corrupt := range []func(*gcHandoffResponse){
+			func(response *gcHandoffResponse) { response.Mutates = true },
+			func(response *gcHandoffResponse) { response.ErrorCode = "process_missing" },
+			func(response *gcHandoffResponse) { response.Identity.PortHolderPID = response.Identity.PID + 1 },
+		} {
+			metadata := validGCMetadata(t, r, token)
+			var response gcHandoffResponse
+			if err := json.Unmarshal(metadata, &response); err != nil {
+				t.Fatal(err)
+			}
+			corrupt(&response)
+			metadata, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal := Journal{Request: r, Snapshot: Snapshot{Metadata: metadata, Sentinel: token, TargetPID: 42, TargetBirth: "birth", TargetDataDir: filepath.Join(beadsDir, "dolt"), TargetLaunchID: "0123456789abcdef0123456789abcdef", TargetLaunchConfig: filepath.Join(beadsDir, "dolt-handoff-0123456789abcdef0123456789abcdef.yaml"), TargetLaunchExecutable: "/usr/bin/dolt"}, SnapshotCaptured: true, MutationOccurred: true, Phase: phase}
+			if phase == PhaseCommitted {
+				journal.Owner, journal.CommitHookRan = OwnerBD, true
+			} else {
+				journal.Owner = OwnerLegacyGC
+			}
+			if err := save(path, journal); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckNormalOpen(beadsDir); err == nil || handoffErrorCode(err, "") != "invalid_journal" {
+				t.Fatalf("%s corrupt inspect proof error=%v, want invalid_journal", phase, err)
+			}
+		}
 	}
 }

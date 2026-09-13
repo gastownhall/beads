@@ -1,12 +1,129 @@
 package dolt
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/ownershiphandoff"
 )
+
+func TestHandoffJournalPermitsAutoStartOnlyForCommittedBD(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "ownership-handoff.json")
+	write := func(phase ownershiphandoff.Phase, owner ownershiphandoff.Owner, requestRoot string) {
+		data, err := json.Marshal(ownershiphandoff.Journal{Request: ownershiphandoff.Request{Root: requestRoot, CityRoot: root, Database: "d", Workspace: "w", Endpoint: ownershiphandoff.Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: ownershiphandoff.OwnerLegacyGC}, Phase: phase, Owner: owner})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(ownershiphandoff.PhaseTargetConfigured, ownershiphandoff.OwnerLegacyGC, root)
+	if handoffJournalPermitsAutoStart(beadsDir) {
+		t.Fatal("pending handoff allowed auto-start")
+	}
+	write(ownershiphandoff.PhaseCommitted, ownershiphandoff.OwnerBD, root)
+	if handoffJournalPermitsAutoStart(beadsDir) {
+		t.Fatal("incomplete committed bd handoff allowed auto-start")
+	}
+	write(ownershiphandoff.PhaseCommitted, ownershiphandoff.OwnerBD, filepath.Join(root, "other"))
+	if handoffJournalPermitsAutoStart(beadsDir) {
+		t.Fatal("wrong-root handoff allowed auto-start")
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if handoffJournalPermitsAutoStart(beadsDir) {
+		t.Fatal("malformed handoff allowed auto-start")
+	}
+	request := ownershiphandoff.Request{Root: root, CityRoot: root, Database: "d", Workspace: "w", Endpoint: ownershiphandoff.Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: ownershiphandoff.OwnerLegacyGC}
+	identity := struct {
+		CityRoot  string `json:"city_root"`
+		ScopeRoot string `json:"scope_root"`
+		Database  string `json:"database"`
+		Workspace string `json:"workspace"`
+		Endpoint  struct {
+			Host   string `json:"host"`
+			Port   int    `json:"port"`
+			Socket string `json:"socket"`
+		} `json:"endpoint"`
+		DataDir        string `json:"data_dir"`
+		ConfigFile     string `json:"config_file"`
+		PID            int    `json:"pid"`
+		StartIdentity  string `json:"start_identity"`
+		StartTimeTicks int64  `json:"start_time_ticks"`
+		PortHolderPID  int    `json:"port_holder_pid"`
+	}{CityRoot: root, ScopeRoot: root, Database: "d", Workspace: "w", DataDir: filepath.Join(beadsDir, "dolt"), ConfigFile: filepath.Join(root, ".gc", "dolt.yaml"), PID: 7, StartIdentity: "birth", StartTimeTicks: 1, PortHolderPID: 7}
+	identity.Endpoint.Host, identity.Endpoint.Port = "127.0.0.1", 3307
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(identityJSON)
+	token := "sha256:" + hex.EncodeToString(sum[:])
+	metadata, err := json.Marshal(struct {
+		SchemaVersion int    `json:"schema_version"`
+		Operation     string `json:"operation"`
+		Result        string `json:"result"`
+		Owner         string `json:"owner"`
+		Mutates       bool   `json:"mutates"`
+		Identity      any    `json:"identity"`
+		IdentityToken string `json:"identity_token"`
+		ErrorCode     string `json:"error_code"`
+	}{SchemaVersion: 1, Operation: "handoff-inspect", Result: "eligible", Owner: "legacy-gc", Identity: identity, IdentityToken: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := ownershiphandoff.Journal{Request: request, Phase: ownershiphandoff.PhaseCommitted, Owner: ownershiphandoff.OwnerBD, SnapshotCaptured: true, MutationOccurred: true, CommitHookRan: true, Snapshot: ownershiphandoff.Snapshot{Metadata: metadata, Sentinel: token, TargetPID: 42, TargetBirth: "target-birth", TargetDataDir: filepath.Join(beadsDir, "dolt"), TargetLaunchID: "0123456789abcdef0123456789abcdef", TargetLaunchConfig: filepath.Join(beadsDir, "dolt-handoff-0123456789abcdef0123456789abcdef.yaml"), TargetLaunchExecutable: "/usr/bin/dolt"}}
+	data, err := json.Marshal(complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !handoffJournalPermitsAutoStart(beadsDir) {
+		t.Fatal("fully authenticated committed bd handoff did not allow auto-start")
+	}
+}
+
+func TestNormalStoreOpenFencesHandoffUnlessExplicitReadOnlyProbe(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal := ownershiphandoff.Journal{Request: ownershiphandoff.Request{CityRoot: root, Root: root, Database: "beads", Workspace: "w", Endpoint: ownershiphandoff.Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: ownershiphandoff.OwnerLegacyGC}, Phase: ownershiphandoff.PhaseTargetConfigured, Owner: ownershiphandoff.OwnerLegacyGC}
+	data, err := json.Marshal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "ownership-handoff.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = checkNormalOwnershipHandoffOpen(beadsDir, &Config{})
+	var coded interface{ HandoffErrorCode() string }
+	if err == nil || !errors.As(err, &coded) || coded.HandoffErrorCode() != "lifecycle_busy" {
+		t.Fatalf("ordinary open error=%v, want typed lifecycle_busy", err)
+	}
+	if err := checkNormalOwnershipHandoffOpen(beadsDir, &Config{OwnershipHandoffProbe: true, ReadOnly: true, DisableAutoStart: true}); err != nil {
+		t.Fatalf("explicit strict handoff probe blocked: %v", err)
+	}
+	if err := checkNormalOwnershipHandoffOpen(beadsDir, &Config{OwnershipHandoffProbe: true, ReadOnly: true}); err == nil {
+		t.Fatal("handoff probe without disabled auto-start was accepted")
+	}
+}
 
 func TestAutoStart_DisabledWithExternalMode(t *testing.T) {
 	t.Chdir(t.TempDir())

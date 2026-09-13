@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -284,4 +285,31 @@ func TestChokepointSharedExcludesMigrateExclusive(t *testing.T) {
 		t.Fatalf("migrate acquisition after shared release: %v", err)
 	}
 	release()
+}
+
+func TestAcquireInitMutationGateFencesPendingOwnershipHandoffAfterExclusiveHold(t *testing.T) {
+	resetGateTestEnv(t)
+	beadsDir := newGateTestWorkspace(t)
+	root := filepath.Dir(beadsDir)
+	journal := fmt.Sprintf(`{"request":{"city_root":%q,"root":%q,"database":"beads","workspace":"test","endpoint":{"host":"127.0.0.1","port":3307},"owner":"legacy-gc"},"phase":"target_configured","owner":"legacy-gc"}`, root, root)
+	if err := os.WriteFile(filepath.Join(beadsDir, "ownership-handoff.json"), []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if _, err := acquireInitMutationGate(context.Background(), beadsDir, filepath.Join(root, "dolt-data"), func() error { called = true; return nil }); err == nil {
+		t.Fatal("pending handoff admitted init mutation gate")
+	}
+	if called {
+		t.Fatal("init preflight ran after pending handoff admission")
+	}
+	if err := os.Remove(filepath.Join(beadsDir, "ownership-handoff.json")); err != nil {
+		t.Fatal(err)
+	}
+	h, err := acquireInitMutationGate(context.Background(), beadsDir, filepath.Join(root, "dolt-data"), nil)
+	if err != nil {
+		t.Fatalf("pending handoff refusal left exclusive gate held: %v", err)
+	}
+	if err := h.Release(); err != nil {
+		t.Fatal(err)
+	}
 }

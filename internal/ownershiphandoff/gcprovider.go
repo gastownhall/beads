@@ -19,7 +19,13 @@ import (
 
 const gcHandoffSchemaVersion = 1
 
-const defaultGCHandoffTimeout = 30 * time.Second
+// defaultGCHandoffTimeout exceeds GC's default 30-second managed-Dolt stop
+// grace and one-minute data-lock release window. A handoff-stop command has to
+// survive both plus runtime-state cleanup and JSON response emission; using
+// the exact same deadline as either lifecycle window turns a completed stop
+// into an ambiguous client timeout. Callers may still set a shorter explicit
+// timeout when they need a bounded failure test or operational deadline.
+const defaultGCHandoffTimeout = 2 * time.Minute
 
 const maxGCHandoffProtocolOutput = 1 << 20
 
@@ -142,8 +148,20 @@ func (p *GCProvider) OwnershipHandoffHooks(ctx context.Context, r Request) (Hook
 			if stopped.Operation != "handoff-stop" {
 				return CodedError{Code: "protocol_version", Err: errors.New("GC handoff stop returned an unexpected operation")}
 			}
-			if stopped.Result != "stopped" || !stopped.Mutates {
-				return withReportedMutation(responseError(stopped, "GC handoff stop refused"), stopped.Mutates)
+			if stopped.Result != "stopped" {
+				refusal := responseError(stopped, "GC handoff stop refused")
+				// process_missing is GC saying the managed process it would have
+				// signaled is not there. It reaches that answer only after
+				// proving the runtime state still names this scope's data
+				// directory and this request's port: a process that is present
+				// but different is identity_changed, process_unowned or
+				// port_conflict, and each of those stays an ordinary refusal.
+				// Report the absence so the caller can settle the stop rather
+				// than wedge on a stop that can never be reported again.
+				if stableErrorCode(stopped.ErrorCode, "") == "process_missing" {
+					return withAbsentLegacyOwner(refusal, stopped.Mutates)
+				}
+				return withReportedMutation(refusal, stopped.Mutates)
 			}
 			if err := validateGCIdentity(request, stopped); err != nil {
 				return withReportedMutation(err, stopped.Mutates)
@@ -151,16 +169,28 @@ func (p *GCProvider) OwnershipHandoffHooks(ctx context.Context, r Request) (Hook
 			if stopped.IdentityToken != identityToken {
 				return withReportedMutation(CodedError{Code: "identity_changed", Err: errors.New("GC handoff stop token changed")}, stopped.Mutates)
 			}
+			if !stopped.Mutates {
+				// A stop that changed nothing and still calls itself stopped is
+				// an idempotent no-op over the identity just validated: the
+				// owner was already gone when GC looked. That is the same
+				// settled absence as process_missing, not a completed stop this
+				// call performed, so it is reported rather than returned as
+				// success.
+				return withAbsentLegacyOwner(CodedError{Code: "process_missing", Err: errors.New("GC handoff stop reported a non-mutating stop")}, false)
+			}
 			return nil
 		},
-		Verify: func(verifyCtx context.Context, request Request, _ Snapshot) error {
-			return p.verifyStopped(verifyCtx, request)
+		Verify: func(verifyCtx context.Context, request Request, snapshot Snapshot, _ func(Snapshot) error) (Snapshot, error) {
+			return snapshot, p.verifyStopped(verifyCtx, request)
 		},
 		Commit: func(commitCtx context.Context, request Request, _ Snapshot) error {
 			return p.verifyStopped(commitCtx, request)
 		},
 		CommitReplay: func(commitCtx context.Context, request Request, _ Snapshot) error {
 			return p.verifyStopped(commitCtx, request)
+		},
+		RestartLegacy: func(restartCtx context.Context, request Request, _ Snapshot) error {
+			return p.restartManaged(restartCtx, request)
 		},
 	}, nil
 }
@@ -170,19 +200,35 @@ func (p *GCProvider) inspect(ctx context.Context, r Request) (gcHandoffResponse,
 	if err != nil {
 		return gcHandoffResponse{}, nil, err
 	}
-	if response.Operation != "handoff-inspect" {
-		return gcHandoffResponse{}, nil, CodedError{Code: "protocol_version", Err: errors.New("GC handoff inspect returned an unexpected operation")}
-	}
-	if response.Result != "eligible" {
-		return gcHandoffResponse{}, nil, responseError(response, "handoff inspect refused")
-	}
-	if err := validateGCIdentity(r, response); err != nil {
-		return gcHandoffResponse{}, nil, err
-	}
-	if err := validateIdentityToken(response.IdentityToken); err != nil {
+	if err := validateEligibleInspectResponse(r, response); err != nil {
 		return gcHandoffResponse{}, nil, err
 	}
 	return response, raw, nil
+}
+
+// validateEligibleInspectResponse admits only the clean inspect result that can
+// become a durable pre-stop snapshot. Post-stop verification deliberately uses
+// its own refusal semantics, where no listener holder is expected.
+func validateEligibleInspectResponse(r Request, response gcHandoffResponse) error {
+	if response.Operation != "handoff-inspect" {
+		return CodedError{Code: "protocol_version", Err: errors.New("GC handoff inspect returned an unexpected operation")}
+	}
+	if response.Result != "eligible" {
+		return responseError(response, "GC handoff inspect refused")
+	}
+	if response.Mutates || strings.TrimSpace(response.ErrorCode) != "" {
+		return CodedError{Code: "protocol_version", Err: errors.New("GC handoff inspect is not a clean eligible response")}
+	}
+	if err := validateGCIdentity(r, response); err != nil {
+		return err
+	}
+	if response.Identity.PortHolderPID != response.Identity.PID {
+		return CodedError{Code: "identity_changed", Err: errors.New("GC handoff inspect listener holder does not match its legacy process")}
+	}
+	if err := validateIdentityToken(response.IdentityToken); err != nil {
+		return err
+	}
+	return nil
 }
 
 func snapshotIdentityToken(r Request, snapshot Snapshot) (string, error) {
@@ -190,13 +236,7 @@ func snapshotIdentityToken(r Request, snapshot Snapshot) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if response.Operation != "handoff-inspect" || response.Result != "eligible" {
-		return "", CodedError{Code: "protocol_version", Err: errors.New("handoff snapshot is not an eligible inspect response")}
-	}
-	if err := validateGCIdentity(r, response); err != nil {
-		return "", err
-	}
-	if err := validateIdentityToken(response.IdentityToken); err != nil {
+	if err := validateEligibleInspectResponse(r, response); err != nil {
 		return "", err
 	}
 	if snapshot.Sentinel != response.IdentityToken {
@@ -220,6 +260,52 @@ func (p *GCProvider) verifyStopped(ctx context.Context, r Request) error {
 		return nil
 	}
 	return CodedError{Code: "verification_failed", Err: errors.New("GC handoff verification did not confirm the legacy owner stopped")}
+}
+
+// restartManaged invokes the existing GC managed-Dolt lifecycle command only
+// after a direct provider has restored and durably checkpointed the legacy
+// workspace controls. Its output is deliberately not interpreted as proof;
+// the caller must immediately perform a fresh handoff inspect.
+func (p *GCProvider) restartManaged(ctx context.Context, r Request) error {
+	if r.Endpoint.Socket != "" {
+		return CodedError{Code: "unsupported_scope", Err: errors.New("GC managed Dolt restart does not support unix handoff endpoints")}
+	}
+	timeout := p.timeout
+	if timeout <= 0 {
+		timeout = defaultGCHandoffTimeout
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	args := []string{"dolt-state", "start-managed", "--city", r.CityRoot, "--host", r.Endpoint.Host,
+		"--port", strconv.Itoa(r.Endpoint.Port), "--user", "root", "--log-level", "warning"}
+	cmd := exec.CommandContext(commandCtx, p.Binary, args...) // #nosec G204 -- Binary is validated by NewGCProvider.
+	configureGCHandoffCommand(cmd)
+	cmd.Env = scrubGCAmbientEnvironment(os.Environ())
+	stdout := &limitedBuffer{limit: maxGCHandoffProtocolOutput}
+	stderr := &limitedBuffer{limit: maxGCHandoffProtocolOutput}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Run(); err != nil {
+		return CodedError{Code: "rollback_failed", Err: protocolCommandError(commandCtx, err, stderr.String())}
+	}
+	return nil
+}
+
+// scrubGCAmbientEnvironment ensures a restored GC-managed start is governed
+// only by its restored city controls. A caller's Beads/Dolt endpoint override
+// could otherwise silently redirect the compensation start to another root.
+func scrubGCAmbientEnvironment(env []string) []string {
+	clean := make([]string, 0, len(env))
+	for _, item := range env {
+		name, _, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(name, "BEADS_") || strings.HasPrefix(name, "DOLT_") {
+			continue
+		}
+		clean = append(clean, item)
+	}
+	return clean
 }
 
 func (p *GCProvider) invoke(ctx context.Context, r Request, operation, token string) (gcHandoffResponse, []byte, error) {

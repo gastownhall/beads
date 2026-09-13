@@ -40,6 +40,7 @@ import (
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -360,8 +361,12 @@ type Config struct {
 
 // State holds runtime information about a managed server.
 type State struct {
-	Running bool   `json:"running"`
-	PID     int    `json:"pid"`
+	Running bool `json:"running"`
+	PID     int  `json:"pid"`
+	// Birth is populated only by strict handoff starts. It binds the returned
+	// PID to the process that matched the durable nonce while Start held its
+	// lifecycle lock; ordinary status queries intentionally leave it empty.
+	Birth   string `json:"-"`
 	Port    int    `json:"port"`
 	DataDir string `json:"data_dir"`
 }
@@ -1301,6 +1306,19 @@ func buildDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string)
 	return yaml.Marshal(yc)
 }
 
+func buildBasicDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string) ([]byte, error) {
+	logLevel := doltServerLogLevel
+	if debug {
+		logLevel = "debug"
+	}
+	yc := &servercfg.YAMLConfig{
+		LogLevelStr:    &logLevel,
+		ListenerConfig: servercfg.ListenerYAMLConfig{HostStr: &host, PortNumber: &port},
+		CfgDirStr:      &cfgDir,
+	}
+	return yaml.Marshal(yc)
+}
+
 // buildDoltServerArgsWithConfig is the --config counterpart to
 // buildDoltServerArgs. Dolt's sql-server subcommand ignores all other
 // command-line parameters when --config is present, so host/port/log-level
@@ -1319,9 +1337,171 @@ func buildDoltServerArgsWithConfig(configPath string, debug bool, profDir string
 
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
+// StartOptions narrows the behavior of a single server launch. The zero value
+// preserves Start's historical recovery and adoption behavior.
+type StartOptions struct {
+	// RequireFresh refuses a live listener while Start holds its exclusive
+	// lock. It is for ownership-transfer code which must never adopt or retire
+	// a process it did not launch in this transfer attempt.
+	RequireFresh bool
+	// LaunchID, ConfigPath, and Executable bind a RequireFresh launch to a
+	// durable handoff journal. ConfigPath is a unique absolute --config path;
+	// a retry may recover only a listener whose process identity proves those
+	// exact values. Ordinary Start leaves all three empty.
+	LaunchID     string
+	ConfigPath   string
+	Executable   string
+	ExpectedHost string
+	ExpectedPort int
+	// AfterSpawn is a narrow handoff test seam. Production callers leave it
+	// nil; it lets integration tests model a caller crash after exec and before
+	// the PID/port files are recorded.
+	AfterSpawn func(pid int) error
+	// RecoverOnly finds an existing nonce-bound handoff child but never spawns
+	// a replacement. It is used only by compensation for an uncheckpointed
+	// child after a crash-window verification failure.
+	RecoverOnly bool
+	// RequireReady strengthens RecoverOnly for commit replay without allowing
+	// a spawn or lifecycle-state write.
+	RequireReady bool
+}
+
+// ErrFreshStartRequired reports that a strict ownership-transfer launch found
+// a pre-existing listener and intentionally declined to adopt it.
+var ErrFreshStartRequired = errors.New("fresh dolt start required; refusing to adopt an existing listener")
+
+// ErrStrictLaunchNotFound reports that a recover-only strict lookup found no
+// nonce-bound child. It is distinct from an identity refusal so rollback can
+// prove the endpoint is free before restoring the legacy owner.
+var ErrStrictLaunchNotFound = errors.New("strict launch child not found")
+
+func validateStrictLaunchOptions(beadsDir string, options StartOptions) error {
+	if !options.RequireFresh {
+		if options.LaunchID != "" || options.ConfigPath != "" || options.Executable != "" || options.ExpectedHost != "" || options.ExpectedPort != 0 || options.RecoverOnly || options.RequireReady || options.AfterSpawn != nil {
+			return errors.New("strict launch identity requires RequireFresh")
+		}
+		return nil
+	}
+	if options.RecoverOnly && !options.RequireFresh {
+		return errors.New("strict recover-only requires RequireFresh")
+	}
+	if options.RequireReady && !options.RecoverOnly {
+		return errors.New("strict require-ready requires recover-only")
+	}
+	// RequireFresh without an identity is retained for a narrow caller that
+	// only wants the in-lock no-adoption behavior. A durable handoff supplies
+	// all three fields and receives crash-recovery proof as well.
+	if options.LaunchID == "" && options.ConfigPath == "" && options.Executable == "" {
+		return nil
+	}
+	if options.LaunchID == "" || options.ConfigPath == "" || options.Executable == "" {
+		return errors.New("strict launch identity is incomplete")
+	}
+	if len(options.LaunchID) != 32 {
+		return errors.New("strict launch ID must be 128 bits")
+	}
+	for _, ch := range options.LaunchID {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return errors.New("strict launch ID must be lowercase hexadecimal")
+		}
+	}
+	physicalBeadsDir, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		return fmt.Errorf("resolve strict launch workspace: %w", err)
+	}
+	wantConfig := filepath.Join(physicalBeadsDir, "dolt-handoff-"+options.LaunchID+".yaml")
+	if options.ConfigPath != wantConfig || !filepath.IsAbs(options.ConfigPath) || filepath.Clean(options.ConfigPath) != options.ConfigPath {
+		return errors.New("strict launch config path is not the canonical handoff path")
+	}
+	if !filepath.IsAbs(options.Executable) || filepath.Clean(options.Executable) != options.Executable {
+		return errors.New("strict launch executable is not canonical")
+	}
+	if options.ExpectedHost == "" || options.ExpectedPort < 1 || options.ExpectedPort > 65535 {
+		return errors.New("strict launch requires an explicit expected endpoint")
+	}
+	return nil
+}
+
+// writeStrictLaunchConfig creates the nonce-bound handoff config exactly once.
+// A retry may reuse only an identical regular file: replacing it would make a
+// surviving child no longer bindable to the durable launch intent.
+func writeStrictLaunchConfig(path string, contents []byte) error {
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			return fmt.Errorf("strict launch config is not a regular 0600 file")
+		}
+		existing, readErr := os.ReadFile(path) // #nosec G304 -- Lstat above requires the canonical strict-launch file to be regular 0600
+		if readErr != nil {
+			return fmt.Errorf("read strict launch config: %w", readErr)
+		}
+		if string(existing) != string(contents) {
+			return ErrFreshStartRequired
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat strict launch config: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".dolt-handoff-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create strict launch config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) //nolint:errcheck // no-op after rename
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod strict launch config: %w", err)
+	}
+	if _, err := tmp.Write(contents); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write strict launch config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync strict launch config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close strict launch config: %w", err)
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		if os.IsExist(err) {
+			return writeStrictLaunchConfig(path, contents)
+		}
+		return fmt.Errorf("install strict launch config: %w", err)
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		err = dir.Sync()
+		closeErr := dir.Close()
+		if err != nil {
+			return fmt.Errorf("sync strict launch config directory: %w", err)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close strict launch config directory: %w", closeErr)
+		}
+	} else {
+		return fmt.Errorf("open strict launch config directory: %w", err)
+	}
+	return nil
+}
+
+// Start explicitly starts a dolt sql-server for the project.
+// Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
+	return StartWithOptions(beadsDir, StartOptions{})
+}
+
+// StartWithOptions starts a Dolt SQL server with the supplied narrowly scoped
+// launch policy. Ordinary callers should use Start; RequireFresh exists only
+// for a journaled ownership transfer that has separately serialized its
+// lifecycle transition.
+func StartWithOptions(beadsDir string, options StartOptions) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
 	doltDir := ResolveDoltDir(beadsDir)
+	if err := validateStrictLaunchOptions(beadsDir, options); err != nil {
+		return nil, err
+	}
+	if options.RequireFresh && options.ExpectedPort != 0 {
+		cfg.Host, cfg.Port = options.ExpectedHost, options.ExpectedPort
+	}
 
 	// Acquire exclusive lock to prevent concurrent starts
 	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0600)
@@ -1338,13 +1518,20 @@ func Start(beadsDir string) (*State, error) {
 			}
 			defer func() { _ = lockfile.FlockUnlock(lockF) }()
 
-			// Lock acquired — check if server is now running
-			state, err := IsRunning(beadsDir)
-			if err != nil {
-				return nil, err
+			if options.RequireFresh {
+				if state, recoverErr := recoverStrictLaunchCandidate(beadsDir, cfg, options, doltDir); recoverErr != nil || state != nil {
+					return state, recoverErr
+				}
 			}
-			if state.Running {
-				return state, nil
+			if !options.RequireFresh {
+				// Ordinary Start retains its historical state-file recovery.
+				state, err := IsRunning(beadsDir)
+				if err != nil {
+					return nil, err
+				}
+				if state.Running {
+					return state, nil
+				}
 			}
 			// Still not running — fall through to start it ourselves
 		} else {
@@ -1353,10 +1540,29 @@ func Start(beadsDir string) (*State, error) {
 	} else {
 		defer func() { _ = lockfile.FlockUnlock(lockF) }()
 	}
+	if options.RequireFresh {
+		if state, recoverErr := recoverStrictLaunchCandidate(beadsDir, cfg, options, doltDir); recoverErr != nil || state != nil {
+			return state, recoverErr
+		}
+	}
 
-	// Re-check after acquiring lock (double-check pattern)
-	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
-		return state, nil
+	// Ordinary Start retains its historical state-file double check. Strict
+	// transfer Start never calls IsRunning: that helper can repair stale files
+	// and signal a raw PID, which is not a valid identity observation here.
+	if !options.RequireFresh {
+		if state, _ := IsRunning(beadsDir); state != nil && state.Running {
+			return state, nil
+		}
+	}
+
+	// Candidate recovery above is the sole strict listener proof. Do not use
+	// the legacy port fallback: it writes mutable state and can return a child
+	// before the ready/holder proof is complete.
+	if options.RecoverOnly {
+		return nil, ErrStrictLaunchNotFound
+	}
+	if cfg.Port > 0 && !isPortAvailable(cfg.Host, cfg.Port) {
+		return nil, fmt.Errorf("%w on port %d", ErrFreshStartRequired, cfg.Port)
 	}
 
 	// Clean up orphaned dolt sql-server processes INSIDE the lock.
@@ -1364,14 +1570,23 @@ func Start(beadsDir string) (*State, error) {
 	// kills a server that another process is in the middle of starting
 	// (PID file not yet written). Without this, concurrent bd processes
 	// can cause journal corruption (GH#2430).
-	if killed, killErr := KillStaleServers(beadsDir); killErr == nil && len(killed) > 0 {
-		fmt.Fprintf(os.Stderr, "Info: cleaned up %d orphaned dolt sql-server process(es)\n", len(killed))
+	if !options.RequireFresh {
+		if killed, killErr := KillStaleServers(beadsDir); killErr == nil && len(killed) > 0 {
+			fmt.Fprintf(os.Stderr, "Info: cleaned up %d orphaned dolt sql-server process(es)\n", len(killed))
+		}
 	}
 
 	// Ensure dolt binary exists
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
 		return nil, fmt.Errorf("dolt is not installed (not found in PATH)\n\nInstall from: https://docs.dolthub.com/introduction/installation")
+	}
+	if options.Executable != "" {
+		resolvedBin, resolveErr := filepath.EvalSymlinks(doltBin)
+		if resolveErr != nil || resolvedBin != options.Executable {
+			return nil, fmt.Errorf("%w: resolved executable changed", ErrFreshStartRequired)
+		}
+		doltBin = resolvedBin
 	}
 
 	// Prefer a generated YAML config (via --config) over plain CLI flags when
@@ -1397,6 +1612,11 @@ func Start(beadsDir string) (*State, error) {
 	// Debug mode: create the pprof output dir before exec, since dolt's
 	// --prof-path panics on a missing directory (see dolt/dolt.go runMain).
 	debug := IsDebugMode()
+	if options.RequireFresh {
+		// Strict recovery compares a fixed durable argv, so ambient profiling
+		// flags cannot participate in a handoff launch or its replay proof.
+		debug = false
+	}
 	var profDir string
 	if debug {
 		profDir = DebugProfileDir(beadsDir)
@@ -1428,7 +1648,7 @@ func Start(beadsDir string) (*State, error) {
 		// Start() outright rather than retry into a fresh unintended
 		// $data_dir/.doltcfg (see resolveCfgDir).
 		var cfgDir string
-		if useArchiveLevelConfig {
+		if useArchiveLevelConfig || options.ConfigPath != "" {
 			cfgDir, err = resolveCfgDir(doltDir)
 			if err != nil {
 				return nil, fmt.Errorf("resolving .doltcfg directory: %w", err)
@@ -1448,17 +1668,28 @@ func Start(beadsDir string) (*State, error) {
 		explicitPort := actualPort > 0
 
 		if explicitPort {
-			// Explicit port: check for conflicts and adopt existing servers.
-			adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
-			if reclaimErr != nil {
-				_ = logFile.Close()
-				return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
-			}
-			if adoptPID > 0 {
-				_ = logFile.Close()
-				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
-				_ = writePortFile(beadsDir, actualPort)
-				return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+			if options.RequireFresh {
+				// The locked availability probe above already established this
+				// endpoint was free. Keep this second check adjacent to launch in
+				// case a listener raced the setup work; strict mode must refuse it
+				// rather than reclaim or adopt it.
+				if !isPortAvailable(cfg.Host, actualPort) {
+					_ = logFile.Close()
+					return nil, fmt.Errorf("%w on port %d", ErrFreshStartRequired, actualPort)
+				}
+			} else {
+				// Explicit port: check for conflicts and adopt existing servers.
+				adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
+				if reclaimErr != nil {
+					_ = logFile.Close()
+					return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
+				}
+				if adoptPID > 0 {
+					_ = logFile.Close()
+					_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
+					_ = writePortFile(beadsDir, actualPort)
+					return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+				}
 			}
 		}
 
@@ -1481,8 +1712,11 @@ func Start(beadsDir string) (*State, error) {
 			}
 
 			var cmdArgs []string
-			if useArchiveLevelConfig {
+			if useArchiveLevelConfig || options.ConfigPath != "" {
 				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, debug, cfgDir)
+				if !useArchiveLevelConfig {
+					cfgBody, cfgErr = buildBasicDoltServerYAMLConfig(cfg.Host, actualPort, debug, cfgDir)
+				}
 				if cfgErr != nil {
 					lastErr = fmt.Errorf("rendering managed sql-server config: %w", cfgErr)
 					if !explicitPort {
@@ -1494,7 +1728,11 @@ func Start(beadsDir string) (*State, error) {
 				// below), so a relative configPath would resolve against the
 				// wrong directory (matches the sibling dbproxy/server path,
 				// which abs's its configPath in NewDoltServer).
-				absConfigPath, absErr := filepath.Abs(doltServerConfigPath(beadsDir))
+				configPath := doltServerConfigPath(beadsDir)
+				if options.ConfigPath != "" {
+					configPath = options.ConfigPath
+				}
+				absConfigPath, absErr := filepath.Abs(configPath)
 				if absErr != nil {
 					lastErr = fmt.Errorf("resolving managed sql-server config path: %w", absErr)
 					if !explicitPort {
@@ -1502,7 +1740,13 @@ func Start(beadsDir string) (*State, error) {
 					}
 					break
 				}
-				if werr := os.WriteFile(absConfigPath, cfgBody, 0600); werr != nil {
+				var werr error
+				if options.ConfigPath != "" {
+					werr = writeStrictLaunchConfig(absConfigPath, cfgBody)
+				} else {
+					werr = os.WriteFile(absConfigPath, cfgBody, 0600)
+				}
+				if werr != nil {
 					lastErr = fmt.Errorf("writing managed sql-server config: %w", werr)
 					if !explicitPort {
 						continue
@@ -1538,6 +1782,12 @@ func Start(beadsDir string) (*State, error) {
 
 			pid = cmd.Process.Pid
 			_ = cmd.Process.Release()
+			if options.AfterSpawn != nil {
+				if hookErr := options.AfterSpawn(pid); hookErr != nil {
+					lastErr = fmt.Errorf("strict launch interrupted after spawn: %w", hookErr)
+					break
+				}
+			}
 
 			// Quick check: did the process exit immediately (bind failure)?
 			// Give it a moment to fail on port bind before proceeding.
@@ -1573,14 +1823,18 @@ func Start(beadsDir string) (*State, error) {
 
 	// Write PID and port files
 	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0600); err != nil {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
+		if !options.RequireFresh {
+			if proc, findErr := os.FindProcess(pid); findErr == nil {
+				_ = proc.Kill()
+			}
 		}
 		return nil, fmt.Errorf("writing PID file: %w", err)
 	}
 	if err := writePortFile(beadsDir, actualPort); err != nil {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
+		if !options.RequireFresh {
+			if proc, findErr := os.FindProcess(pid); findErr == nil {
+				_ = proc.Kill()
+			}
 		}
 		_ = os.Remove(pidPath(beadsDir))
 		return nil, fmt.Errorf("writing port file: %w", err)
@@ -1588,8 +1842,10 @@ func Start(beadsDir string) (*State, error) {
 
 	// Wait for server to accept connections
 	if err := waitForReady(cfg.Host, actualPort, readyTimeout()); err != nil {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
+		if !options.RequireFresh {
+			if proc, findErr := os.FindProcess(pid); findErr == nil {
+				_ = proc.Kill()
+			}
 		}
 		_ = os.Remove(pidPath(beadsDir))
 		_ = os.Remove(portPath(beadsDir))
@@ -1601,12 +1857,100 @@ func Start(beadsDir string) (*State, error) {
 			pid, actualPort, err, logPath(beadsDir))
 	}
 
-	return &State{
+	if options.RequireFresh && findPIDOnPort(actualPort) != pid {
+		return nil, fmt.Errorf("%w: strict launch child does not own requested endpoint", ErrFreshStartRequired)
+	}
+	state := &State{
 		Running: true,
 		PID:     pid,
 		Port:    actualPort,
 		DataDir: doltDir,
-	}, nil
+	}
+	if options.RequireFresh {
+		return strictStateWithBirth(state, options, doltDir)
+	}
+	return state, nil
+}
+
+// strictStateWithBirth captures a process-birth token while the caller still
+// holds Start's lifecycle lock and the child positively matches the durable
+// executable/argv/cwd nonce proof. Returning a raw PID here would permit a
+// post-lock exit and PID reuse before the handoff journal checkpoint.
+func strictStateWithBirth(state *State, options StartOptions, doltDir string) (*State, error) {
+	if state == nil || !state.Running || state.PID <= 0 || !strictLaunchMatches(state.PID, options, doltDir) {
+		return nil, ErrFreshStartRequired
+	}
+	birth, err := procid.Capture(state.PID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: capture strict launch process identity: %v", ErrFreshStartRequired, err)
+	}
+	if !strictLaunchMatches(state.PID, options, doltDir) {
+		return nil, ErrFreshStartRequired
+	}
+	match, err := procid.Verify(state.PID, birth)
+	if err != nil || !match {
+		return nil, fmt.Errorf("%w: strict launch process identity changed", ErrFreshStartRequired)
+	}
+	copy := *state
+	copy.Birth = string(birth)
+	return &copy, nil
+}
+
+// recoverStrictLaunchCandidate finds a child from the durable strict launch
+// intent even before it owns the TCP port. This closes the spawn-to-port/PID
+// checkpoint crash window: only one exact executable/argv/cwd match may be
+// recovered while Start's lock is held; ambiguity and a live unready child
+// refuse rather than permit a second launch.
+func recoverStrictLaunchCandidate(beadsDir string, cfg *Config, options StartOptions, doltDir string) (*State, error) {
+	if !options.RequireFresh {
+		return nil, nil
+	}
+	if cfg.Port <= 0 {
+		return nil, fmt.Errorf("%w: strict launch requires an explicit port", ErrFreshStartRequired)
+	}
+	matches, err := strictLaunchCandidates(options, doltDir)
+	if err != nil {
+		return nil, fmt.Errorf("%w: inspect strict launch candidates: %v", ErrFreshStartRequired, err)
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("%w: multiple processes match strict launch intent", ErrFreshStartRequired)
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	pid := matches[0]
+	if options.RecoverOnly && !options.RequireReady {
+		// Compensation needs to capture and retire the exact nonce-bound child
+		// even when it is still between exec and listen. It never records this
+		// state as usable and never authorizes an ordinary start.
+		if !strictLaunchMatches(pid, options, doltDir) {
+			return nil, fmt.Errorf("%w: strict launch child identity changed", ErrFreshStartRequired)
+		}
+		return strictStateWithBirth(&State{Running: true, PID: pid, Port: cfg.Port, DataDir: doltDir}, options, doltDir)
+	}
+	if err := waitForReady(cfg.Host, cfg.Port, readyTimeout()); err != nil {
+		if !isProcessAlive(pid) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: strict launch child %d is not ready: %v", ErrFreshStartRequired, pid, err)
+	}
+	if holder := findPIDOnPort(cfg.Port); holder != pid || !strictLaunchMatches(pid, options, doltDir) {
+		return nil, fmt.Errorf("%w: strict launch child no longer owns its endpoint", ErrFreshStartRequired)
+	}
+	state, stateErr := strictStateWithBirth(&State{Running: true, PID: pid, Port: cfg.Port, DataDir: doltDir}, options, doltDir)
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	if options.RecoverOnly {
+		return state, nil
+	}
+	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		return nil, fmt.Errorf("record recovered strict dolt PID: %w", err)
+	}
+	if err := writePortFile(beadsDir, cfg.Port); err != nil {
+		return nil, fmt.Errorf("record recovered strict dolt port: %w", err)
+	}
+	return state, nil
 }
 
 // EnsureGlobalDatabase connects to the shared Dolt server and creates the
@@ -2096,4 +2440,20 @@ func IsPreV56DoltDir(doltDir string) bool {
 	markerPath := filepath.Join(doltDir, bdDoltMarker)
 	_, err := os.Stat(markerPath)
 	return os.IsNotExist(err)
+}
+
+// strictConfigArgMatches compares the full kernel argv. Strict starts disable
+// ambient debug flags, leaving one replayable executable/sql-server/config
+// shape and no unpersisted launch behavior.
+func strictConfigArgMatches(args []string, executable, configPath string) bool {
+	want := []string{executable, "sql-server", "--config", configPath}
+	if len(args) != len(want) {
+		return false
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
