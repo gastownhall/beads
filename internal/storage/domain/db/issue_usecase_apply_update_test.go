@@ -85,7 +85,7 @@ func (s *testSuite) iucClaimOpenAssignedCopy() {
 	s.seedOpenIssue("bd-iuc-cl-openassigned")
 	r := s.issueRepo()
 	s.Require().NoError(r.Update(s.Ctx(), "bd-iuc-cl-openassigned",
-		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}))
+		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}, false))
 
 	_, err := s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-openassigned", "bob")
 	s.Require().Error(err)

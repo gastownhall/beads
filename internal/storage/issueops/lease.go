@@ -398,6 +398,17 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 			// primary UPDATE's verbatim predicate above missed it. A real
 			// worker's heartbeat re-arms recovery — under actor's current
 			// spelling, which is what the next heartbeat's fast path will see.
+			//
+			// This is the only recovery path for a hand-doled claim (bd update
+			// -s in_progress -a X with no --claim flag) and, until PR #5349
+			// lands, the only one on the classic/wisps backend. On the
+			// proxied/domain backend, be-plv/PR #6501 adds a second, earlier
+			// path: the claim verb's own post-write check (domain/db/issue.go's
+			// IsClaim-gated re-arm) arms the lease inline, in the same
+			// transaction, instead of leaving a leaseless genuine holder to
+			// wait for their next heartbeat here. See ManageLeaseOnUpdate's doc
+			// (update.go) for why the two paths are complementary rather than
+			// overlapping authority over the same decision.
 			return UpsertLeaseInTx(ctx, tx, id, actor, now, leaseTTL(ctx))
 		}
 		return fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status)

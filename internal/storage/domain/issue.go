@@ -21,12 +21,6 @@ type InsertIssueOpts struct {
 
 type IssueTableOpts struct {
 	UseWispsTable bool
-	// IsClaim marks an update that rides the same transaction as the claim
-	// verb that produced the row's in_progress state (ExecuteUpdate's
-	// --claim path). It lets the repository's lease-clear decision re-arm
-	// the lease instead of deleting it when the update still leaves the
-	// issue in_progress with a live assignee (be-plv).
-	IsClaim bool
 }
 
 type ClaimRowResult struct {
@@ -47,7 +41,14 @@ type IssueSQLRepository interface {
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
 	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (changed bool, err error)
 	PromoteFromEphemeral(ctx context.Context, id, actor string) error
-	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
+	// Update writes updates to id's row. isClaim marks an update that rides the
+	// same transaction as the claim verb that produced the row's in_progress
+	// state (ExecuteUpdate's --claim path). It lets the repository's
+	// lease-clear decision re-arm the lease instead of deleting it when the
+	// update still leaves the issue in_progress with a live assignee (be-plv).
+	// It is a flag on this call, not a field on IssueTableOpts (opts), because
+	// opts routes ~20 other methods that have no claim notion of their own.
+	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts, isClaim bool) error
 	// CompareAndSetMetadataKey runs the SHARED compare-and-set body on this
 	// repository's transaction, which is how the unit-of-work provider reaches
 	// the same function the two store backends wrap. It takes no table option:
@@ -523,7 +524,7 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if err := u.validateIssueTypeUpdate(ctx, updates); err != nil {
 		return err
 	}
-	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp, IsClaim: isClaim})
+	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp}, isClaim)
 }
 
 // validateIssueTypeUpdate rejects an issue_type the configuration does not
@@ -1159,7 +1160,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: %w", node.Key, err)
 		}
 		updates := map[string]any{"metadata": metaJSON}
-		if err := u.issueRepo.Update(ctx, keyToID[node.Key], updates, actor, IssueTableOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.issueRepo.Update(ctx, keyToID[node.Key], updates, actor, IssueTableOpts{UseWispsTable: useWisp}, false); err != nil {
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: updating metadata refs: %w", node.Key, err)
 		}
 	}
@@ -1306,7 +1307,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 			continue
 		}
 		id := keyToID[plan.Nodes[i].Key]
-		if err := u.issueRepo.Update(ctx, id, map[string]any{"assignee": assignee}, actor, IssueTableOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.issueRepo.Update(ctx, id, map[string]any{"assignee": assignee}, actor, IssueTableOpts{UseWispsTable: useWisp}, false); err != nil {
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: defer assignee: %w", plan.Nodes[i].Key, err)
 		}
 	}

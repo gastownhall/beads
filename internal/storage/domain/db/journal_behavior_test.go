@@ -81,7 +81,7 @@ func (s *testSuite) TestEventsJournal_UOWPlumbing() {
 
 	s.Require().NoError(ir.Insert(ctx, newTestIssue("bd-mj-1", "t"), "actor", domain.InsertIssueOpts{}))
 	s.Require().NoError(ir.Insert(ctx, newTestIssue("bd-mj-2", "t"), "actor", domain.InsertIssueOpts{}))
-	s.Require().NoError(ir.Update(ctx, "bd-mj-1", map[string]any{"title": "renamed"}, "actor", domain.IssueTableOpts{}))
+	s.Require().NoError(ir.Update(ctx, "bd-mj-1", map[string]any{"title": "renamed"}, "actor", domain.IssueTableOpts{}, false))
 	s.Require().NoError(lr.Insert(ctx, "bd-mj-1", "urgent", "actor", domain.LabelOpts{}))
 	_, err := ir.Claim(ctx, "bd-mj-1", "worker", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -332,7 +332,7 @@ func (s *testSuite) TestEventsJournal_ReplayFromZeroReconstructsLiveSet() {
 	for _, id := range []string{"bd-rp-1", "bd-rp-2", "bd-rp-3", "bd-rp-4"} {
 		s.Require().NoError(ir.Insert(ctx, newTestIssue(id, "title "+id), "actor", domain.InsertIssueOpts{}))
 	}
-	s.Require().NoError(ir.Update(ctx, "bd-rp-1", map[string]any{"title": "edited"}, "actor", domain.IssueTableOpts{}))
+	s.Require().NoError(ir.Update(ctx, "bd-rp-1", map[string]any{"title": "edited"}, "actor", domain.IssueTableOpts{}, false))
 	s.Require().NoError(lr.Insert(ctx, "bd-rp-2", "urgent", "actor", domain.LabelOpts{}))
 	s.Require().NoError(dr.Insert(ctx, &types.Dependency{
 		IssueID: "bd-rp-3", DependsOnID: "bd-rp-4", Type: types.DepBlocks,

@@ -132,7 +132,7 @@ func (r *issueSQLRepositoryImpl) MovePersistence(ctx context.Context, id string,
 	return result.Changed, nil
 }
 
-func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates map[string]any, actor string, opts domain.IssueTableOpts) error {
+func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates map[string]any, actor string, opts domain.IssueTableOpts, isClaim bool) error {
 	if id == "" {
 		return errors.New("db: Update: id must not be empty")
 	}
@@ -283,19 +283,35 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 	}
 	if clearLease && !opts.UseWispsTable {
-		// opts.IsClaim marks an update riding the same transaction as the
+		// isClaim marks an update riding the same transaction as the
 		// claim verb that produced oldIssue's in_progress state (ExecuteUpdate's
-		// --claim path, e.g. `bd update --claim --assignee=X`). ManageLeaseOnUpdate
-		// above reads an assignee override as an ownership transfer and asks for
-		// the lease to be deleted, but here it's the claim verb's own lease being
-		// deleted microseconds after ClaimIssue/ClaimWisp granted it (be-plv). Read
-		// the row this transaction just wrote — rather than re-deriving status/
-		// assignee from the updates map, which would duplicate
-		// issueops.finalAssigneeIfStillClaimed's field-resolution switch — and
-		// re-arm instead of delete when the issue is still in_progress with a
-		// live assignee.
+		// --claim path, e.g. `bd update --claim --assignee=X`). The headline
+		// case is an ownership transfer (assignee: alice -> bob) — exactly what
+		// ManageLeaseOnUpdate's clear-only contract (issueops/update.go) is
+		// documented to clear for a generic update, since a hand-doled
+		// reassignment normally has nobody heartbeating it yet (bd-9hpgf,
+		// GH#4716). That default is wrong specifically here: it is the claim
+		// verb itself, not a generic update, choosing the live claim's final
+		// holder in the same atomic step, so the new holder gets a lease
+		// immediately rather than waiting on the heartbeat self-heal
+		// (issueops/lease.go's actorMatches branch) to notice a leaseless
+		// genuine holder on its next beat (be-plv). Read the row this
+		// transaction just wrote — rather than re-deriving status/assignee
+		// from the updates map — and re-arm for whoever it names as the final
+		// holder, in place of the delete ManageLeaseOnUpdate asked for, when
+		// that holder is literally in_progress with a live assignee.
+		//
+		// The literal types.StatusInProgress check is the whole scope: a
+		// claim-carrying update that instead moves status to a custom
+		// active-category status (e.g. `--claim --status=triaged`) still
+		// deletes, exactly like a revert to open, even though the actor never
+		// gave up ownership — see
+		// IsClaimCustomActiveStatusOverrideStillDeletesLease below. Widening
+		// "still claimed" to any active-category status, not just the literal
+		// in_progress the claim verb itself produces, is a separate decision
+		// this fix does not make.
 		holder, stillClaimed := "", false
-		if opts.IsClaim {
+		if isClaim {
 			freshIssue, ferr := r.Get(ctx, id, opts)
 			if ferr != nil {
 				return fmt.Errorf("db: Update %s: read updated issue for lease check: %w", id, ferr)

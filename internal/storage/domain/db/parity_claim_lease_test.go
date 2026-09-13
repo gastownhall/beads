@@ -14,15 +14,18 @@ package db
 // without paying for the full transaction-retry/history/provider machinery
 // each wrapper also carries.
 //
-// Two of the three cases are genuine agreement, proven by actually running
-// both backends against the same table shapes and comparing. The third,
-// claim + assignee override, is a characterization test: it pins a KNOWN,
-// CURRENT divergence rather than asserting equality. Classic drops the lease
-// on that case (a pre-existing bug, tracked by unmerged PR #5349, out of
-// scope for be-plv to fix or for this bead to reopen); domain re-arms it
-// (the be-plv fix, internal/storage/domain/issue.go's update()). Once #5349
-// merges and classic re-arms too, that third test should be rewritten into a
-// genuine equality assertion like its two siblings.
+// The first two tests below are genuine cross-backend agreement, proven by
+// actually running both backends against the same table shapes and
+// comparing. TestClaimOverrideArmsLeaseForFinalHolderOnDomain, the third, is
+// domain-only: it pins the be-plv fix's own behavior (claim + assignee
+// override re-arms the lease for the override target,
+// internal/storage/domain/issue.go's update()) without asserting or
+// characterizing anything about classic/wisps' independent handling of the
+// same case. Classic's own gap there is tracked by unmerged PR #5349 and is
+// out of scope for be-plv to fix or for this bead to characterize; see
+// steveyegge's review of #5349 for that backend's own ruling. Once #5349
+// lands, a fourth test can be added here asserting genuine parity, rather
+// than folding that assertion into this one.
 //
 // leaseRow queries the leases table by issue_id and does not fail on a
 // missing row: DELETE removes the row entirely (see ManageLeaseOnUpdate),
@@ -120,53 +123,30 @@ func (s *testSuite) TestParityClaimNoOverridePreservesLeaseOnBothBackends() {
 	s.Equal(classicHolder, domainHolder)
 }
 
-// TestParityClaimOverrideLeaseDivergesPendingPR5349 is a characterization
-// test, not a parity assertion: it pins the CURRENT, confirmed-divergent
-// behavior of `bd update <id> --claim --assignee=<other>` across backends.
+// TestClaimOverrideArmsLeaseForFinalHolderOnDomain pins the be-plv fix on the
+// domain/proxied backend only: `bd update <id> --claim --assignee=<other>`
+// must leave a live lease for the override target (bob), not the claiming
+// actor (alice) and not no lease at all. Before the fix, IssueUseCase.
+// ApplyUpdate's plain field-update path (ManageLeaseOnUpdate's clear-only
+// contract) deleted the lease outright, leaving a live claim with no lease
+// row. internal/storage/domain/issue.go's update() now reads the row back
+// post-write and calls issueops.UpsertLeaseInTx for whoever it names as the
+// final holder when that holder is still in_progress with a live assignee.
 //
-// Classic's issueops.ExecuteUpdate composes ClaimIssueInTx (arms alice's
-// lease) then the raw-map UpdateIssueInTx, whose issueops.ManageLeaseOnUpdate
-// only ever CLEARS lease columns by design (see its doc comment: leases are
-// armed only by the lease-aware verbs, never by a generic update) — so the
-// same-request override deletes unconditionally. Net effect: the row lands
-// exactly where the claim+override asked (status=in_progress,
-// assignee=bob), but with no leases row at all — a live claim with no
-// lease. That is a real, currently-shipping bug, tracked by unmerged PR
-// #5349, deliberately left alone here: ManageLeaseOnUpdate is a pinned
-// contract for be-plv and #5349 is not to be reopened or modified from this
-// bead.
-//
-// Domain's IssueUseCase.ApplyUpdate, after the be-plv fix, re-arms the lease
-// for the override target instead: internal/storage/domain/issue.go's
-// update() reads the row back post-write and calls issueops.UpsertLeaseInTx
-// when it is still in_progress with a live assignee.
-func (s *testSuite) TestParityClaimOverrideLeaseDivergesPendingPR5349() {
+// This is deliberately not a cross-backend comparison: classic/wisps'
+// independent handling of the same case is tracked by unmerged PR #5349 and
+// is out of scope for be-plv to fix or for this bead to characterize (see
+// steveyegge's review of #5349 for that backend's own ruling on the
+// equivalent fix). See the file header for how this fits alongside the two
+// genuine parity tests above.
+func (s *testSuite) TestClaimOverrideArmsLeaseForFinalHolderOnDomain() {
 	ctx := s.Ctx()
 	r := s.issueRepo()
-
-	classicID := "bd-parity-override-classic"
-	s.Require().NoError(r.Insert(ctx, newTestIssue(classicID, "x"), "tester", domain.InsertIssueOpts{}))
-	tx := s.beginClassicTx()
-	_, _, err := issueops.ExecuteUpdate(ctx, tx, publicops.UpdateRequest{
-		Actor:   "alice",
-		IssueID: classicID,
-		Claim:   true,
-		Patch:   publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "bob"}},
-	})
-	s.Require().NoError(err)
-	s.Require().NoError(tx.Commit())
-
-	classicOut, err := r.Get(ctx, classicID, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Equal(types.StatusInProgress, classicOut.Status)
-	s.Equal("bob", classicOut.Assignee)
-	_, classicHasLease := s.leaseRow(classicID)
-	s.False(classicHasLease, "KNOWN BUG pending PR #5349: classic drops the lease on claim+override, leaving a live claim with no lease row")
 
 	domainID := "bd-parity-override-domain"
 	s.Require().NoError(r.Insert(ctx, newTestIssue(domainID, "x"), "tester", domain.InsertIssueOpts{}))
 	uc := s.issueUseCase()
-	_, err = uc.ApplyUpdate(ctx, domainID, domain.UpdateSpec{
+	_, err := uc.ApplyUpdate(ctx, domainID, domain.UpdateSpec{
 		Claim:  true,
 		Fields: map[string]any{"assignee": "bob"},
 	}, "alice")
@@ -179,10 +159,4 @@ func (s *testSuite) TestParityClaimOverrideLeaseDivergesPendingPR5349() {
 	domainHolder, domainHasLease := s.leaseRow(domainID)
 	s.True(domainHasLease, "be-plv fix: domain must re-arm the lease for the override target")
 	s.Equal("bob", domainHolder)
-
-	// Spelled out so this breaks LOUDLY, not silently, the day #5349 lands:
-	// if classic starts re-arming too, this equality flips and this whole
-	// test should be rewritten into a genuine parity assertion like its two
-	// siblings above instead of continuing to assert a now-stale divergence.
-	s.NotEqual(classicHasLease, domainHasLease, "if this now fails, PR #5349 likely merged and closed the classic-side gap — rewrite this test into a parity assertion")
 }

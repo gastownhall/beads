@@ -59,6 +59,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("WithoutIsClaimOverrideStillDeletesLease", s.issueUpdateClaimOverrideWithoutFlagDeletesLease)
 		s.Run("IsClaimWithNoOverrideLeavesLeaseUntouched", s.issueUpdateClaimNoOverridePreservesLease)
 		s.Run("IsClaimStatusRevertStillDeletesLease", s.issueUpdateClaimStatusRevertDeletesLease)
+		s.Run("IsClaimCustomActiveStatusOverrideStillDeletesLease", s.issueUpdateClaimCustomActiveStatusOverrideDeletesLease)
 		s.Run("IsClaimOnWispNeverGrantsLease", s.issueUpdateClaimWispNeverGetsLease)
 	})
 	s.Run("Get", func() {
@@ -254,7 +255,7 @@ func (s *testSuite) issueRowVersionChangesOnUpdate() {
 	s.Require().NoError(err)
 	s.Require().NotZero(before.RowVersion)
 
-	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{}, false))
 	after, err := r.Get(s.Ctx(), "bd-rv-update", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.NotZero(after.RowVersion)
@@ -286,7 +287,7 @@ func (s *testSuite) wispRowVersionChangesOnUpdate() {
 	s.Require().NoError(err)
 	s.Require().NotZero(before.RowVersion)
 
-	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-wisp-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{UseWispsTable: true}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-wisp-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{UseWispsTable: true}, false))
 	after, err := r.Get(s.Ctx(), "bd-rv-wisp-update", domain.IssueTableOpts{UseWispsTable: true})
 	s.Require().NoError(err)
 	s.NotZero(after.RowVersion)
@@ -303,7 +304,7 @@ func (s *testSuite) issueUpdateAllowedFields() {
 		"description": "new desc",
 		"assignee":    "bob",
 	}
-	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-1", updates, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-1", updates, "tester", domain.IssueTableOpts{}, false))
 
 	out, err := r.Get(s.Ctx(), "bd-upd-1", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -317,14 +318,14 @@ func (s *testSuite) issueUpdateRejectsUnknownFields() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-upd-bad", "x"), "tester", domain.InsertIssueOpts{}))
 
-	err := r.Update(s.Ctx(), "bd-upd-bad", map[string]any{"id": "rename-attempt"}, "tester", domain.IssueTableOpts{})
+	err := r.Update(s.Ctx(), "bd-upd-bad", map[string]any{"id": "rename-attempt"}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "not allowed")
 }
 
 func (s *testSuite) issueUpdateMissingID() {
 	r := s.issueRepo()
-	err := r.Update(s.Ctx(), "bd-does-not-exist", map[string]any{"title": "x"}, "tester", domain.IssueTableOpts{})
+	err := r.Update(s.Ctx(), "bd-does-not-exist", map[string]any{"title": "x"}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.True(errors.Is(err, sql.ErrNoRows), "expected sql.ErrNoRows, got %v", err)
 }
@@ -332,7 +333,7 @@ func (s *testSuite) issueUpdateMissingID() {
 func (s *testSuite) issueUpdateEmpty() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-upd-empty", "x"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-empty", nil, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-empty", nil, "tester", domain.IssueTableOpts{}, false))
 }
 
 func (s *testSuite) issueUpdateStatusType() {
@@ -341,7 +342,7 @@ func (s *testSuite) issueUpdateStatusType() {
 	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-status", map[string]any{
 		"status":     types.StatusInProgress,
 		"issue_type": types.TypeBug,
-	}, "tester", domain.IssueTableOpts{}))
+	}, "tester", domain.IssueTableOpts{}, false))
 
 	out, err := r.Get(s.Ctx(), "bd-upd-status", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -357,7 +358,7 @@ func (s *testSuite) issueUpdateNormalizesTimestamp() {
 	s.Require().NoError(err)
 	due := time.Date(2030, 6, 15, 10, 0, 0, 0, tz)
 
-	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-tz", map[string]any{"due_at": due}, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-tz", map[string]any{"due_at": due}, "tester", domain.IssueTableOpts{}, false))
 
 	out, err := r.Get(s.Ctx(), "bd-upd-tz", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -434,7 +435,7 @@ func (s *testSuite) issueWispUpdate() {
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-iss-wisp-upd",
 		map[string]any{"title": "after"}, "tester",
-		domain.IssueTableOpts{UseWispsTable: true},
+		domain.IssueTableOpts{UseWispsTable: true}, false,
 	))
 
 	out, err := r.Get(s.Ctx(), "bd-iss-wisp-upd", domain.IssueTableOpts{UseWispsTable: true})
@@ -624,7 +625,7 @@ func (s *testSuite) issueNextCounterIDEmptyPrefix() {
 func (s *testSuite) issueUpdateMissingIDWithStatus() {
 	r := s.issueRepo()
 	err := r.Update(s.Ctx(), "bd-status-missing",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{})
+		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.True(errors.Is(err, sql.ErrNoRows), "expected sql.ErrNoRows, got %v", err)
 }
@@ -676,7 +677,7 @@ func (s *testSuite) issueClaimPreservesStartedAt() {
 	originalStart := *first.StartedAt
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-sa",
-		map[string]any{"status": string(types.StatusOpen)}, "tester", domain.IssueTableOpts{}))
+		map[string]any{"status": string(types.StatusOpen)}, "tester", domain.IssueTableOpts{}, false))
 
 	res2, err := r.Claim(s.Ctx(), "bd-claim-sa", "alice", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -775,7 +776,7 @@ func (s *testSuite) issueClaimStampsLease() {
 }
 
 // issueUpdateClaimReArmsLease is the be-plv regression test: an update that
-// rides the same transaction as a claim (IssueTableOpts.IsClaim) and carries
+// rides the same transaction as a claim (Update's isClaim parameter) and carries
 // an assignee override must re-arm the lease for the new holder rather than
 // deleting it, so `bd update <id> --claim --assignee=X` leaves a live claim
 // with a lease row instead of stranding one bd reclaim would later steal from
@@ -789,7 +790,7 @@ func (s *testSuite) issueUpdateClaimReArmsLease() {
 	s.Require().True(claimRes.Updated)
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-rearm",
-		map[string]any{"assignee": "bob"}, "alice", domain.IssueTableOpts{IsClaim: true}))
+		map[string]any{"assignee": "bob"}, "alice", domain.IssueTableOpts{}, true))
 
 	out, err := r.Get(s.Ctx(), "bd-claim-rearm", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -808,10 +809,10 @@ func (s *testSuite) issueUpdateClaimReArmsLease() {
 }
 
 // issueUpdateClaimOverrideWithoutFlagDeletesLease pins the pre-existing
-// behavior for every caller that does not set IsClaim (all call sites through
-// the public UpdateIssue/UpdateWisp interface methods, unchanged by be-plv):
-// a plain assignee override on a claimed issue still deletes the lease
-// exactly as before. IsClaim is opt-in and must not regress this.
+// behavior for every caller that does not pass isClaim=true (all call sites
+// through the public UpdateIssue/UpdateWisp interface methods, unchanged by
+// be-plv): a plain assignee override on a claimed issue still deletes the
+// lease exactly as before. isClaim is opt-in and must not regress this.
 func (s *testSuite) issueUpdateClaimOverrideWithoutFlagDeletesLease() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-noflag", "x"), "tester", domain.InsertIssueOpts{}))
@@ -821,19 +822,19 @@ func (s *testSuite) issueUpdateClaimOverrideWithoutFlagDeletesLease() {
 	s.Require().True(claimRes.Updated)
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-noflag",
-		map[string]any{"assignee": "bob"}, "alice", domain.IssueTableOpts{}))
+		map[string]any{"assignee": "bob"}, "alice", domain.IssueTableOpts{}, false))
 
 	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-claim-noflag").Scan(&count))
-	s.Equal(0, count, "without IsClaim, an assignee override must still delete the lease exactly as before be-plv")
+	s.Equal(0, count, "without isClaim, an assignee override must still delete the lease exactly as before be-plv")
 }
 
 // issueUpdateClaimNoOverridePreservesLease: a claim-carrying update whose
 // Fields map touches neither status nor assignee never reaches the lease
 // clause at all (issueops.ManageLeaseOnUpdate returns false when neither key
 // is present), so the lease alice already holds from the claim must survive
-// completely untouched, regardless of IsClaim.
+// completely untouched, regardless of isClaim.
 func (s *testSuite) issueUpdateClaimNoOverridePreservesLease() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-nooverride", "x"), "tester", domain.InsertIssueOpts{}))
@@ -848,7 +849,7 @@ func (s *testSuite) issueUpdateClaimNoOverridePreservesLease() {
 	s.Require().True(before.Valid)
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-nooverride",
-		map[string]any{"title": "after claim"}, "alice", domain.IssueTableOpts{IsClaim: true}))
+		map[string]any{"title": "after claim"}, "alice", domain.IssueTableOpts{}, true))
 
 	var (
 		holder sql.NullString
@@ -867,7 +868,7 @@ func (s *testSuite) issueUpdateClaimNoOverridePreservesLease() {
 // status away from in_progress but does not touch assignee still reaches the
 // lease-clear branch (sameClaim is false once newStatus != in_progress, even
 // though newAssignee defaults unchanged from oldIssue.Assignee since no
-// "assignee" key is present). The repository's IsClaim branch must read back
+// "assignee" key is present). The repository's isClaim branch must read back
 // the reverted status and fall through to delete, not re-arm, even though the
 // row is still (momentarily) assigned to the actor at the column level.
 func (s *testSuite) issueUpdateClaimStatusRevertDeletesLease() {
@@ -879,7 +880,7 @@ func (s *testSuite) issueUpdateClaimStatusRevertDeletesLease() {
 	s.Require().True(claimRes.Updated)
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-revert",
-		map[string]any{"status": string(types.StatusOpen)}, "alice", domain.IssueTableOpts{IsClaim: true}))
+		map[string]any{"status": string(types.StatusOpen)}, "alice", domain.IssueTableOpts{}, true))
 
 	out, err := r.Get(s.Ctx(), "bd-claim-revert", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -892,10 +893,53 @@ func (s *testSuite) issueUpdateClaimStatusRevertDeletesLease() {
 	s.Equal(0, count, "a status revert away from in_progress must delete the lease even under IsClaim, since the issue is no longer a live claim")
 }
 
+// issueUpdateClaimCustomActiveStatusOverrideDeletesLease pins the fix's
+// scope boundary (PR #6501 review point 7): the re-arm added by
+// issueUpdateClaimReArmsLease is keyed on the freshly-written row being
+// literally types.StatusInProgress, not on any active-category status. A
+// claim-carrying update that overrides status to a custom active-category
+// status (rather than assignee) leaves the actor as holder -- the strongest
+// claim to a lease of any case in this group, since the actor opted in and
+// never gave up ownership -- but still deletes the lease, exactly like
+// issueUpdateClaimStatusRevertDeletesLease's revert-to-open case. This is
+// deliberate, not an oversight: expanding the invariant to "any
+// active-category status" would require the same owner ruling PR #5349 is
+// waiting on (see the comment above), so today's narrower shape is pinned
+// as-is rather than silently widened.
+func (s *testSuite) issueUpdateClaimCustomActiveStatusOverrideDeletesLease() {
+	_, err := s.db.ExecContext(s.Ctx(),
+		"INSERT INTO custom_statuses (name, category) VALUES ('triaged', 'active')")
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.db.ExecContext(s.Ctx(), "DELETE FROM custom_statuses WHERE name = 'triaged'")
+		s.Require().NoError(err)
+	}()
+
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-customactive", "x"), "tester", domain.InsertIssueOpts{}))
+
+	claimRes, err := r.Claim(s.Ctx(), "bd-claim-customactive", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(claimRes.Updated)
+
+	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-customactive",
+		map[string]any{"status": "triaged"}, "alice", domain.IssueTableOpts{}, true))
+
+	out, err := r.Get(s.Ctx(), "bd-claim-customactive", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(types.Status("triaged"), out.Status)
+	s.Equal("alice", out.Assignee, "status override alone does not touch the assignee column")
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-claim-customactive").Scan(&count))
+	s.Equal(0, count, "a claim-carrying status override to a custom active-category status still deletes the lease: the re-arm invariant is scoped to literal StatusInProgress, not any active-category status (PR #6501 point 7)")
+}
+
 // issueUpdateClaimWispNeverGetsLease: wisps are never leased
 // (issueops.UpsertLeaseInTx's documented invariant), and the repository's
-// IsClaim branch is gated behind !opts.UseWispsTable, so a wisp update
-// carrying IsClaim and an assignee change must never create a leases row.
+// isClaim branch is gated behind !opts.UseWispsTable, so a wisp update
+// carrying isClaim=true and an assignee change must never create a leases row.
 func (s *testSuite) issueUpdateClaimWispNeverGetsLease() {
 	r := s.issueRepo()
 	wisp := newTestIssue("bd-claim-wisp", "x")
@@ -907,7 +951,7 @@ func (s *testSuite) issueUpdateClaimWispNeverGetsLease() {
 	s.Require().True(claimRes.Updated)
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-wisp",
-		map[string]any{"assignee": "bob"}, "alice", domain.IssueTableOpts{UseWispsTable: true, IsClaim: true}))
+		map[string]any{"assignee": "bob"}, "alice", domain.IssueTableOpts{UseWispsTable: true}, true))
 
 	out, err := r.Get(s.Ctx(), "bd-claim-wisp", domain.IssueTableOpts{UseWispsTable: true})
 	s.Require().NoError(err)
@@ -916,7 +960,7 @@ func (s *testSuite) issueUpdateClaimWispNeverGetsLease() {
 	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-claim-wisp").Scan(&count))
-	s.Equal(0, count, "wisps must never get a leases row, IsClaim included")
+	s.Equal(0, count, "wisps must never get a leases row, isClaim included")
 }
 
 // setClaimPools configures claim.pools for a subtest and returns a cleanup
