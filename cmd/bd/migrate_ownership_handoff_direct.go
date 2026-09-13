@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -267,6 +268,13 @@ func (p directHandoffProvider) OwnershipHandoffHooks(ctx context.Context, reques
 			if err := restoreHandoffArtifacts(beadsDir, s); err != nil {
 				return s, err
 			}
+			// The byte-exact restore is provable exactly here, before the
+			// restart below hands config.yaml back to a legacy owner that
+			// canonicalises it. The checkpoint is that proof made durable:
+			// nothing after this point may demand those bytes again.
+			if err := ownershiphandoff.ValidateRestoredWorkspaceArtifacts(beadsDir, s); err != nil {
+				return s, ownershiphandoff.CodedError{Code: "rollback_failed", Err: err}
+			}
 			if err := checkpoint(ownershiphandoff.PhaseLegacyConfigRestored, s); err != nil {
 				return s, err
 			}
@@ -294,7 +302,7 @@ func verifyRestoredLegacyOwner(ctx context.Context, beadsDir string, request own
 	if err != nil {
 		return snapshot, err
 	}
-	if err := requireHandoffConfig(beadsDir, snapshot, nil); err != nil {
+	if err := requireRestartedLegacyControls(beadsDir, request, snapshot); err != nil {
 		return snapshot, err
 	}
 	if err := verifyRestoredSentinel(ctx, beadsDir, snapshot, request); err != nil {
@@ -666,6 +674,54 @@ func requireHandoffPort(beadsDir string, snapshot ownershiphandoff.Snapshot, por
 	}
 	if !present || mode != 0o600 || string(data) != strconv.Itoa(port) {
 		return ownershiphandoff.CodedError{Code: "identity_changed", Err: errors.New("workspace port artifact drifted during ownership handoff")}
+	}
+	return nil
+}
+
+// requireRestartedLegacyControls is the post-restart half of the restored-control
+// proof, and it deliberately does not repeat the byte-exact one.
+//
+// The rollback proves the captured bytes are back immediately after it writes
+// them, and the legacy_config_restored checkpoint records that moment. Its very
+// next step is asking the legacy owner to start again, and that owner
+// canonicalises the config of a scope it has just taken back — GC merges its own
+// bead vocabulary into types.custom. Re-comparing those bytes afterwards refuses
+// every rollback the legacy owner completes, so what is required here is the
+// controls that decide who owns the scope, not the whole file: metadata.json and
+// the published port byte for byte, because nothing rewrites them, and every
+// dolt/gc control the captured config carried still holding its captured value.
+// Anything the restarted owner adds is its own.
+func requireRestartedLegacyControls(beadsDir string, request ownershiphandoff.Request, snapshot ownershiphandoff.Snapshot) error {
+	if err := requireHandoffArtifact(filepath.Join(beadsDir, "metadata.json"), snapshot.WorkspaceMetadata, snapshot.WorkspaceMetadataPresent, snapshot.WorkspaceMetadataMode); err != nil {
+		return err
+	}
+	if err := requireHandoffPort(beadsDir, snapshot, request.Endpoint.Port); err != nil {
+		return err
+	}
+	current, present, mode, err := readHandoffArtifact(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		return ownershiphandoff.CodedError{Code: "identity_changed", Err: err}
+	}
+	if present != snapshot.WorkspaceConfigPresent || (present && mode != snapshot.WorkspaceConfigMode) {
+		return ownershiphandoff.CodedError{Code: "identity_changed", Err: errors.New("restored workspace config is not the file the rollback put back")}
+	}
+	if !present {
+		return nil
+	}
+	captured, restored := map[string]any{}, map[string]any{}
+	if err := yaml.Unmarshal(snapshot.WorkspaceConfig, &captured); err != nil {
+		return ownershiphandoff.CodedError{Code: "identity_changed", Err: fmt.Errorf("parse captured config.yaml: %w", err)}
+	}
+	if err := yaml.Unmarshal(current, &restored); err != nil {
+		return ownershiphandoff.CodedError{Code: "identity_changed", Err: fmt.Errorf("parse restored config.yaml: %w", err)}
+	}
+	for key, want := range captured {
+		if !strings.HasPrefix(key, "dolt.") && !strings.HasPrefix(key, "gc.") {
+			continue
+		}
+		if got, ok := restored[key]; !ok || !reflect.DeepEqual(got, want) {
+			return ownershiphandoff.CodedError{Code: "identity_changed", Err: fmt.Errorf("restored workspace config no longer carries the captured %s control", key)}
+		}
 	}
 	return nil
 }

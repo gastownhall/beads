@@ -147,7 +147,10 @@ the two answers to agree.
 While the journal is neither `committed` nor `rolled_back`, `CheckNormalOpen`
 fences ordinary bd commands out of the workspace: the explicit transfer owns
 the transition, and a read that auto-started a server would race it. Only the
-transfer front door carries the `bd:skip_handoff_fence` annotation.
+transfer front door carries the `bd:skip_handoff_fence` annotation. A completed
+rollback leaves no journal at all — see below — so the fence a workspace can be
+left behind is `legacy_config_restored`: the compensation did not finish, and
+the operator resumes or rolls it back before using bd.
 
 ## Compensation
 
@@ -159,9 +162,30 @@ rollback restores the captured workspace controls byte-exactly, checkpoints
 started again — restarts it, re-inspects it, and records `rolled_back` with the
 fresh inspect proof. The restart happens after the checkpoint on purpose: a
 legacy process started before it could outlive the journal that knows it
-exists. A rolled-back journal is terminal for its generation; a later handoff
-archives it as `.rolled-back-<unixnano>` and takes a new inspect, because
-reusing the old token would make the restarted process look like the stopped
-one. A provider without a `Rollback` hook keeps the older behaviour: the
+exists.
+
+Byte-exactness decides that the restore happened; it is not a lifetime. The
+restart the rollback asks for is the legacy owner taking the city back, and that
+owner canonicalises the city's config — Gas City merges its own bead vocabulary
+into `types.custom`, which the journal's snapshot predates by construction. So
+the comparison runs where it is still true, immediately after the files are
+written, and the `legacy_config_restored` checkpoint is that proof made durable.
+After the restart, `verifyRestoredLegacyOwner` requires `metadata.json` and the
+published port byte for byte — nothing rewrites those — and of `config.yaml`
+only that it is the restored regular file whose captured `dolt`/`gc` controls
+still hold their captured values. Everything else in it belongs to the owner
+that is running again.
+
+A rolled-back journal is terminal for its generation, so the rollback archives
+it as `.rolled-back-<unixnano>` as its last act and the scope goes back to the
+ordinary rules with no journal at all. Leaving it live would fence every bd
+command in the workspace behind a comparison against bytes the restart it just
+performed is entitled to rewrite. `CheckNormalOpen` still admits a live
+`rolled_back` journal — one an older bd wrote, or one whose archive lost a race
+— by re-proving the restored artifacts once and archiving it then; artifacts
+that never matched prove nothing and stay refused. A later handoff that finds
+one archives it and takes a new inspect, because reusing the old token would
+make the restarted process look like the stopped one. A provider without a
+`Rollback` hook keeps the older behaviour: the
 failure is journaled, `legacy-gc` stays the recorded owner, and an operator
 reconciles by hand.

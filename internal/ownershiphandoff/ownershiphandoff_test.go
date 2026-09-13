@@ -26,6 +26,25 @@ func validRequest(t *testing.T) Request {
 	return Request{CityRoot: root, Root: root, Database: "beads", Workspace: "ws-1", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
 }
 
+// loadArchivedRollback reads the terminal journal a completed rollback leaves
+// behind. The compensation archives it as its last act, so the live path is
+// empty and the audit record is the archive.
+func loadArchivedRollback(t *testing.T, path string) Journal {
+	t.Helper()
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("live journal at %s survived a completed rollback: %v", path, err)
+	}
+	archives, err := filepath.Glob(path + ".rolled-back-*")
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("archives=%v err=%v, want one archived rollback", archives, err)
+	}
+	journal, err := Load(archives[0])
+	if err != nil {
+		t.Fatalf("load %s: %v", archives[0], err)
+	}
+	return journal
+}
+
 func validGCMetadata(t *testing.T, r Request, token string) []byte {
 	t.Helper()
 	b, err := json.Marshal(gcHandoffResponse{SchemaVersion: 1, Operation: "handoff-inspect", Result: "eligible", Owner: OwnerLegacyGC,
@@ -1138,9 +1157,9 @@ func TestPostStopVerifyFailureRollsBackThroughDurableRestoreCheckpoint(t *testin
 	if len(checkpoints) != 1 {
 		t.Fatalf("restore checkpoints=%v, want one", checkpoints)
 	}
-	journal, loadErr := Load(path)
-	if loadErr != nil || journal.Phase != PhaseRolledBack || journal.Owner != OwnerLegacyGC {
-		t.Fatalf("journal=%+v err=%v, want rolled_back legacy-gc", journal, loadErr)
+	journal := loadArchivedRollback(t, path)
+	if journal.Phase != PhaseRolledBack || journal.Owner != OwnerLegacyGC {
+		t.Fatalf("journal=%+v, want an archived rolled_back legacy-gc record", journal)
 	}
 }
 
@@ -1188,9 +1207,9 @@ func TestCommitRecoveryFailureClearsCommitReservationBeforeRollbackCheckpoint(t 
 	if err == nil || got.Phase != PhaseRolledBack {
 		t.Fatalf("result=%+v err=%v, want rolled-back result", got, err)
 	}
-	journal, loadErr := Load(path)
-	if loadErr != nil || journal.CommitHookInProgress || journal.CommitHookRan || journal.Phase != PhaseRolledBack {
-		t.Fatalf("journal=%+v err=%v, want loadable rollback without commit reservation", journal, loadErr)
+	journal := loadArchivedRollback(t, path)
+	if journal.CommitHookInProgress || journal.CommitHookRan || journal.Phase != PhaseRolledBack {
+		t.Fatalf("journal=%+v, want an archived rollback without commit reservation", journal)
 	}
 }
 
@@ -1247,9 +1266,9 @@ func TestReportedMutatingStopErrorRollsBackAndRestores(t *testing.T) {
 	if rollbacks != 1 {
 		t.Fatalf("rollbacks=%d, want 1", rollbacks)
 	}
-	journal, loadErr := Load(path)
-	if loadErr != nil || journal.Phase != PhaseRolledBack || journal.Owner != OwnerLegacyGC {
-		t.Fatalf("journal=%+v load=%v, want rolled_back legacy owner", journal, loadErr)
+	journal := loadArchivedRollback(t, path)
+	if journal.Phase != PhaseRolledBack || journal.Owner != OwnerLegacyGC {
+		t.Fatalf("journal=%+v, want an archived rolled_back legacy owner", journal)
 	}
 }
 

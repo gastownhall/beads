@@ -578,9 +578,20 @@ func CheckNormalOpen(beadsDir string) error {
 		if err != nil || token != journal.Snapshot.Sentinel {
 			return CodedError{Code: "invalid_journal", Err: errors.New("rolled-back ownership handoff journal has invalid legacy identity proof")}
 		}
-		if err := validateRestoredWorkspaceArtifacts(physicalBeadsDir, journal.Snapshot); err != nil {
+		// A rolled-back journal a rollback of this build produced has already
+		// been archived by the run that wrote it, so reaching here means an
+		// older bd wrote it or the archive lost a race. Re-prove the restore
+		// once and archive it: the byte-exact comparison is how the rollback is
+		// known to have completed, and it is true only until the restarted
+		// legacy owner canonicalises config.yaml, which is that owner's
+		// ordinary upgrade behavior and not drift. An artifact set that never
+		// matched proves nothing and stays refused.
+		if err := ValidateRestoredWorkspaceArtifacts(physicalBeadsDir, journal.Snapshot); err != nil {
 			return CodedError{Code: "invalid_journal", Err: err}
 		}
+		// A workspace this process cannot write does not un-prove what the
+		// comparison above just proved, so the open is admitted either way.
+		_ = archiveRolledBackJournal(journalPath, journal)
 		return nil
 	default:
 		return CodedError{Code: "lifecycle_busy", Err: fmt.Errorf("ownership handoff is %s; resume or roll back the explicit handoff before using bd", journal.Phase)}
@@ -611,7 +622,13 @@ func validateCommittedNormalOpen(beadsDir string, journal Journal) error {
 	return nil
 }
 
-func validateRestoredWorkspaceArtifacts(beadsDir string, snapshot Snapshot) error {
+// ValidateRestoredWorkspaceArtifacts reports whether the three legacy control
+// files are byte for byte the ones the snapshot captured. It is the proof that
+// a rollback put the workspace back, and it is only true at the moment of the
+// restore: the restart the rollback performs next hands config.yaml back to the
+// legacy owner, which canonicalises it. Callers must treat a match as a
+// one-time admission and record it, never as a standing invariant.
+func ValidateRestoredWorkspaceArtifacts(beadsDir string, snapshot Snapshot) error {
 	for _, artifact := range []struct {
 		name    string
 		data    []byte
@@ -811,7 +828,9 @@ func Run(ctx context.Context, r Request, journalPath string, provider Provider, 
 		// owner is running again under restored controls, so this run starts a
 		// fresh handoff rather than resuming a compensated one. Archiving it
 		// forces a new provider inspect; reusing the old token would make the
-		// restarted GC process look like the one that was stopped.
+		// restarted GC process look like the one that was stopped. The rollback
+		// that produces one archives it itself, so this arm only catches a
+		// journal an older bd left behind or an archive that lost a race.
 		if err := archiveRolledBackJournal(journalPath, *existing); err != nil {
 			return result(*existing, mutationOccurred(*existing)), fmt.Errorf("archive rolled-back handoff journal: %w", err)
 		}
@@ -825,12 +844,25 @@ func archiveRolledBackJournal(path string, journal Journal) error {
 		stamp = time.Now().UTC()
 	}
 	archive := fmt.Sprintf("%s.rolled-back-%d", path, stamp.UnixNano())
+	// The name is derived from the journal, so a concurrent reader admitting
+	// the same rollback picks the same one. An archive that already exists with
+	// the live journal gone is this rename having happened, not a collision;
+	// with the journal still there it is ambiguous and must not be clobbered.
 	if _, err := os.Lstat(archive); err == nil {
+		if _, liveErr := os.Lstat(path); os.IsNotExist(liveErr) {
+			return nil
+		}
 		return errors.New("rolled-back handoff archive already exists")
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.Rename(path, archive); err != nil {
+		// The journal went away between the check above and here, which only a
+		// concurrent admission of the same rollback does. There is nothing left
+		// to archive and nothing to refuse.
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	return syncDir(filepath.Dir(path))
@@ -1322,6 +1354,15 @@ func (x *handoffRun) rollback(ctx context.Context, cause error) *stepOutcome {
 	x.j.Snapshot, x.j.Phase, x.j.Owner = snapshot, PhaseRolledBack, OwnerLegacyGC
 	if out := x.record("rollback_failed", cause); out != nil {
 		return out
+	}
+	// The compensation is complete and the legacy owner is running again under
+	// its own restored controls, so the scope is legacy-owned by the ordinary
+	// rules from here. Archive the terminal journal now rather than on some
+	// later handoff: while it is live, every bd command in the workspace is
+	// fenced behind a byte-exact comparison against a config.yaml the restart
+	// this rollback just performed is entitled to rewrite.
+	if err := archiveRolledBackJournal(x.journalPath, x.j); err != nil {
+		return done(result(x.j, true), errors.Join(cause, fmt.Errorf("archive rolled-back handoff journal: %w", err)))
 	}
 	return done(result(x.j, true), cause)
 }
