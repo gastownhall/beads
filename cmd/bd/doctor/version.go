@@ -253,13 +253,23 @@ func fetchLatestGitHubRelease() (string, error) {
 	return version, nil
 }
 
+// stripVersionPrefix drops the canonical "v" a Go module version carries
+// ("v1.2.3", or the pseudo-version a build stamped from `go install
+// module@version` reports). bd writes its own main.Version into
+// .local_version, so a build stamped that way used to fail its own tracking
+// check, and read as major 0 in comparisons (GH#6152). Versions without the
+// prefix are unchanged.
+func stripVersionPrefix(version string) string {
+	return strings.TrimPrefix(strings.TrimSpace(version), "v")
+}
+
 // CompareVersions compares two semantic version strings.
 // Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
 // Handles versions like "0.20.1", "1.2.3", etc.
 func CompareVersions(v1, v2 string) int {
 	// Split versions into parts
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
+	parts1 := strings.Split(stripVersionPrefix(v1), ".")
+	parts2 := strings.Split(stripVersionPrefix(v2), ".")
 
 	// Compare each part
 	maxLen := len(parts1)
@@ -291,6 +301,7 @@ func CompareVersions(v1, v2 string) int {
 
 // IsValidSemver checks if a version string is valid semver-like format (X.Y.Z)
 func IsValidSemver(version string) bool {
+	version = stripVersionPrefix(version)
 	if version == "" {
 		return false
 	}
@@ -321,7 +332,7 @@ func IsValidSemver(version string) bool {
 // ParseVersionParts parses version string into numeric parts
 // Returns [major, minor, patch, ...] or empty slice on error
 func ParseVersionParts(version string) []int {
-	parts := strings.Split(version, ".")
+	parts := strings.Split(stripVersionPrefix(version), ".")
 	result := make([]int, 0, len(parts))
 
 	for _, part := range parts {
