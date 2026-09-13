@@ -110,9 +110,11 @@ func matchesKnownCommand(cmd *cobra.Command, insight string) (string, bool) {
 // `bd remember <bare-slug>` (no --key): a bare slug naming an EXISTING memory
 // is recalled instead of stored; a bare slug naming nothing is refused. The
 // caller only invokes it when memoryKeyFlag == "" and the insight round-trips
-// through memoryapi.DeriveKey unchanged, having already read the key.
-func rememberBareKeyPath(key, insight, existing string) error {
-	if existing != "" {
+// through memoryapi.DeriveKey unchanged, having already read the key. As in
+// printRecallResult, presence is found (row existence), never existing != "":
+// a bare slug naming a memory stored as the empty string recalls it.
+func rememberBareKeyPath(key, insight, existing string, found bool) error {
+	if found {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"key":    key,
@@ -323,7 +325,7 @@ Examples:
 			if err != nil {
 				return HandleErrorRespectJSON("recalling memory: %v", err)
 			}
-			return rememberBareKeyPath(derived, insight, recalled.Value)
+			return rememberBareKeyPath(derived, insight, recalled.Value, recalled.Found)
 		}
 
 		result, err := memories.Remember(rootCtx, memoryops.RememberRequest{Key: memoryKeyFlag, Content: insight})

@@ -156,3 +156,42 @@ func TestPrintRecallResult(t *testing.T) {
 		}
 	})
 }
+
+// TestRememberBareKeyPath guards the same presence rule on the
+// `bd remember <bare-slug>` read path: a bare slug naming a memory stored as
+// the empty string recalls it, and only a slug naming nothing is refused.
+func TestRememberBareKeyPath(t *testing.T) {
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = savedJSONOutput }()
+
+	t.Run("found with empty value recalls it", func(t *testing.T) {
+		var err error
+		out := captureStdout(t, func() error {
+			err = rememberBareKeyPath("empty-key", "empty-key", "", true)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var body map[string]interface{}
+		if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &body); uerr != nil {
+			t.Fatalf("unmarshal %q: %v", out, uerr)
+		}
+		if body["action"] != "recalled" || body["found"] != true || body["value"] != "" {
+			t.Errorf("body = %v, want action recalled, found true, empty value", body)
+		}
+	})
+
+	t.Run("not found is refused", func(t *testing.T) {
+		var err error
+		captureStdout(t, func() error {
+			err = rememberBareKeyPath("gone", "gone", "", false)
+			return nil
+		})
+		ee, ok := err.(*exitError)
+		if !ok || ee.Code != 1 {
+			t.Errorf("err = %v, want *exitError{Code: 1}", err)
+		}
+	})
+}
