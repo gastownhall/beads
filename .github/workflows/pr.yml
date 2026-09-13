@@ -517,6 +517,11 @@ jobs:
         shell: bash
         run: go test -tags gms_pure_go -count=1 -run '^(TestCleanEnvUsesHostKeySemantics|TestBenchmarkCommandBuildersStripDoltEnvOverrides)$' ./scripts/repro-dolt-prod-timeouts
 
+      - name: Check shared environment key semantics
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: bash scripts/ci/test-windows-env-helpers.sh
+
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
     name: Check for .beads changes

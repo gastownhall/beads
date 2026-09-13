@@ -157,16 +157,7 @@ func deleteGitDoltDataRefs(ctx context.Context, gitURL string, refs []string) er
 // hooks disabled via GIT_CONFIG_PARAMETERS, preserving any parameters the
 // caller already set (mirrors applyNoGitHooksToCmd in internal/storage/dolt).
 func envWithNoGitHooks() []string {
-	base := os.Environ()
-	merged := githooksenv.AppendParameter(githooksenv.Extract(base), githooksenv.NoHooksParam)
-	env := make([]string, 0, len(base)+1)
-	prefix := githooksenv.ParametersEnv + "="
-	for _, e := range base {
-		if !strings.HasPrefix(e, prefix) {
-			env = append(env, e)
-		}
-	}
-	return append(env, prefix+merged)
+	return githooksenv.DisabledEnv(os.Environ())
 }
 
 // clearDoltFileStore removes the contents of a native Dolt file-store
