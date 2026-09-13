@@ -134,12 +134,16 @@ type MixedCycleEdge struct {
 // dependency edges from the given tables on tx into graph, tagging each edge
 // scheduling or not. It is the edge set behind
 // issueops.DetectCyclesRequest.IncludeTracks: wide enough to see a molecule
-// root's `tracks` edge back to its own entry step, while a cycle made
-// ENTIRELY of tracks edges is excluded downstream — ordinary convoy topology
-// loops constantly through tracks alone, and reporting every one of those
-// loops is the "thousands of cycles" regression a previous change to the
-// plain (blocks-only) walk caused and had to revert; this widened walk must
-// not reintroduce it under a different name.
+// root's `tracks` edge back to its own entry step. Every edge keeps its stored
+// direction, issue_id -> depends_on_id, exactly as in the blocks-only graph.
+//
+// CanonicalMixedCyclePaths turns this graph into a report that holds every
+// cycle the default blocks-only walk finds on the same rows, plus cycles that
+// need a tracks edge to close. A cycle made ENTIRELY of tracks edges is never
+// reported: ordinary convoy topology loops constantly through tracks alone,
+// and reporting every one of those loops is the "thousands of cycles"
+// regression a previous change to the plain (blocks-only) walk caused and had
+// to revert; this widened walk must not reintroduce it under a different name.
 //
 //nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
 func AppendMixedCycleGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]MixedCycleEdge) error {

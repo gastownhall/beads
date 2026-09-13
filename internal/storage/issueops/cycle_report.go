@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"context"
+	"fmt"
 	"slices"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -81,25 +82,41 @@ func CanonicalCyclePaths(graph map[string][]string) [][]string {
 	return cycles
 }
 
-// CanonicalMixedCyclePaths finds one qualifying cycle per strongly connected
-// component in a graph that also carries `tracks` edges
-// (MixedCycleEdge.Scheduling false). A component qualifies only when it
-// contains a scheduling edge: every internal edge of a strongly connected
-// component lies on a cycle, so choosing one such edge and a stable return
-// path cannot miss a mixed cycle merely because a tracks-only back edge was
-// visited first.
+// CanonicalMixedCyclePaths reports the qualifying cycles of a graph that also
+// carries `tracks` edges (MixedCycleEdge.Scheduling false). A cycle qualifies
+// only when at least one of its edges is a scheduling edge.
 //
-// Requiring a scheduling edge avoids the "thousands of cycles" regression
-// AppendMixedCycleGraphInTx documents: ordinary convoy/tracking topology loops
-// constantly through tracks alone, and none of those loops is a deadlock.
-// WITH the requirement, the shape this exists for — a molecule root that
-// blocks-depends (transitively) on its own entry step, which tracks-depends
-// back to the root — is reported.
+// THE REPORT IS THE UNION, deduplicated by canonical rotation, of two sets:
 //
-// Nodes, adjacency lists, components, the chosen scheduling edge, and its
-// return path are all ordered. The answer therefore depends only on the graph,
-// not Go map or SQL row order.
-func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) [][]string {
+//  1. CanonicalCyclePaths over the scheduling edges alone, which is exactly
+//     the report the default request produces on the same data.
+//  2. For every scheduling edge from -> to whose endpoints share a strongly
+//     connected component of the mixed graph, the cycle that edge closes with
+//     the shortest return path from `to` back to `from` over edges of either
+//     kind (closeMixedCycle).
+//
+// Set 1 makes the widened report a SUPERSET of the default report. Set 2 alone
+// would not: the default walk records the depth-first tree path behind each
+// back edge, which need not be the shortest return path of any edge on it. And
+// sampling one cycle per component instead would drop real deadlocks, because
+// tracks edges can fuse separate blocks-only deadlocks into one component.
+//
+// Set 2 finds the cycles that need a tracks edge, the shape this exists for: a
+// molecule root that blocks-depends (transitively) on its own entry step,
+// which tracks-depends back to the root. Every internal edge of a strongly
+// connected component lies on a cycle, so each such scheduling edge closes one,
+// and a scheduling edge outside every component lies on no cycle at all.
+//
+// BOUND: at most one cycle per scheduling edge inside a component plus one per
+// default-walk cycle, so never more than twice the distinct scheduling edges. A
+// cycle made only of tracks edges is never reported, which keeps out the
+// "thousands of cycles" regression AppendMixedCycleGraphInTx documents.
+//
+// Nodes, adjacency lists, components, and return paths are all ordered, so the
+// answer depends only on the graph, not on Go map or SQL row order. The error
+// is a broken internal invariant (see closeMixedCycle), never a property of
+// the data.
+func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) ([][]string, error) {
 	adjacency := make(map[string][]MixedCycleEdge, len(graph))
 	nodeSet := make(map[string]struct{}, len(graph))
 	for node, edges := range graph {
@@ -122,48 +139,55 @@ func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) [][]string {
 	}
 	nodes := make([]string, 0, len(nodeSet))
 	plain := make(map[string][]string, len(nodeSet))
+	schedulingOnly := make(map[string][]string, len(nodeSet))
 	for node := range nodeSet {
 		nodes = append(nodes, node)
 		for _, edge := range adjacency[node] {
 			plain[node] = append(plain[node], edge.To)
+			if edge.Scheduling {
+				schedulingOnly[node] = append(schedulingOnly[node], edge.To)
+			}
 		}
 	}
 	slices.Sort(nodes)
 
-	var cycles [][]string
+	cycles := CanonicalCyclePaths(schedulingOnly)
 	for _, component := range mixedStronglyConnectedComponents(adjacency, nodes) {
 		members := make(map[string]bool, len(component))
 		for _, node := range component {
 			members[node] = true
 		}
-
-		var from, to string
-		found := false
-		for _, node := range component {
-			for _, edge := range adjacency[node] {
-				if edge.Scheduling && members[edge.To] {
-					from, to = node, edge.To
-					found = true
-					break
+		for _, from := range component {
+			for _, edge := range adjacency[from] {
+				if !edge.Scheduling || !members[edge.To] {
+					continue
 				}
+				cycle, err := closeMixedCycle(plain, from, edge.To)
+				if err != nil {
+					return nil, err
+				}
+				cycles = append(cycles, cycle)
 			}
-			if found {
-				break
-			}
 		}
-		if !found {
-			continue
-		}
-
-		returnPath := reachPath(plain, to, from)
-		if len(returnPath) == 0 {
-			panic("mixed cycle component has no return path")
-		}
-		cycle := append([]string{from}, returnPath[:len(returnPath)-1]...)
-		cycles = append(cycles, rotateToLowest(cycle))
 	}
 	slices.SortFunc(cycles, slices.Compare)
-	return cycles
+	return slices.CompactFunc(cycles, slices.Equal), nil
+}
+
+// closeMixedCycle returns the canonical cycle the edge from -> to closes: from,
+// followed by the shortest path in graph from `to` back to `from`.
+//
+// The caller passes only edges inside one strongly connected component, so a
+// return path always exists. When it does not, the invariant is broken, and
+// that is returned as an error rather than a panic: the caller is a read that
+// `bd dep cycles --include-tracks` runs, and a crash there would hide every
+// other cycle behind a stack trace.
+func closeMixedCycle(graph map[string][]string, from, to string) ([]string, error) {
+	returnPath := reachPath(graph, to, from)
+	if len(returnPath) == 0 {
+		return nil, fmt.Errorf("mixed cycle graph: edge %s -> %s lies in a strongly connected component but has no return path", from, to)
+	}
+	return rotateToLowest(append([]string{from}, returnPath[:len(returnPath)-1]...)), nil
 }
 
 // mixedStronglyConnectedComponents returns Tarjan components with both their
@@ -292,9 +316,11 @@ func DetectCycleReportInTx(ctx context.Context, tx DBTX, req publicops.DetectCyc
 		if err := AppendMixedCycleGraphInTx(ctx, tx, cycleDetectionTables(), graph); err != nil {
 			return publicops.CycleReport{}, err
 		}
-		return publicops.CycleReport{
-			Cycles: BuildCycles(CanonicalMixedCyclePaths(graph), hydrate),
-		}, nil
+		paths, err := CanonicalMixedCyclePaths(graph)
+		if err != nil {
+			return publicops.CycleReport{}, err
+		}
+		return publicops.CycleReport{Cycles: BuildCycles(paths, hydrate)}, nil
 	}
 
 	graph := make(map[string][]string)
