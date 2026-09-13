@@ -34,7 +34,7 @@ Configuration is stored in .beads/config.yaml under the 'repos' section:
 
 Examples:
   bd repo add ~/beads-planning       # Add planning repo
-  bd repo add ../other-repo          # Add relative path repo
+  bd repo add ../other-repo          # Relative path, stored as absolute
   bd repo list                       # Show all configured repos
   bd repo remove ~/beads-planning    # Remove by path
   bd repo sync                       # Sync from all configured repos`,
@@ -46,7 +46,10 @@ var repoAddCmd = &cobra.Command{
 	Long: `Add a repository path to the repos.additional list in config.yaml.
 
 The path should point to a directory containing a .beads folder.
-Paths can be absolute or relative (they are stored as-is).
+
+A relative path is resolved against the current directory and stored as an
+absolute path, so later commands run from anywhere resolve the same repository.
+Absolute paths and "~/"-prefixed paths are stored verbatim.
 
 This modifies .beads/config.yaml, which is version-controlled and
 shared across all clones of this repository.`,
@@ -69,18 +72,21 @@ shared across all clones of this repository.`,
 		if remotecache.IsRemoteURL(repoPath) {
 			fmt.Fprintf(os.Stderr, "Adding remote repository: %s\n", repoPath)
 		} else {
-			expandedPath := repoPath
-			if len(repoPath) > 0 && repoPath[0] == '~' {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					expandedPath = filepath.Join(home, repoPath[1:])
-				}
-			}
+			expandedPath := expandRepoTilde(repoPath)
 
 			beadsDir := filepath.Join(expandedPath, ".beads")
 			if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 				return HandleError("no beads workspace found at %s", expandedPath)
 			}
+
+			// The existence check above proves the path resolves *now*, from
+			// this cwd. Canonicalize before persisting so it still resolves
+			// later, from anywhere (be-d0t).
+			normalized, err := normalizeRepoPathForStorage(repoPath)
+			if err != nil {
+				return HandleError("failed to resolve repository path %s: %v", repoPath, err)
+			}
+			repoPath = normalized
 		}
 
 		configPath, err := config.FindConfigYAMLPath()
@@ -111,8 +117,11 @@ var repoRemoveCmd = &cobra.Command{
 	Short: "Remove a repository from sync configuration",
 	Long: `Remove a repository path from the repos.additional list in config.yaml.
 
-The path must exactly match what was added (e.g., if you added "~/foo",
-you must remove "~/foo", not "/home/user/foo").
+The path is matched against the configured entries verbatim first, then in the
+same canonical form 'bd repo add' stores (a relative path resolved against the
+current directory). So "~/foo" removes the entry added as "~/foo", and
+"../other-repo" removes the absolute entry it was stored as, provided you run
+both commands from the same directory.
 
 This command also removes any previously-hydrated issues from the database
 that came from the removed repository.`,
@@ -136,6 +145,17 @@ that came from the removed repository.`,
 			return HandleError("%v", err)
 		}
 
+		// Resolve the configured entry before deleting anything: issues and the
+		// mtime cache are keyed by the string stored in config.yaml, which is
+		// the canonical form 'bd repo add' persists rather than the argument as
+		// typed. Looking the config up first also means a missing config.yaml
+		// fails before the destructive delete rather than after it.
+		configPath, err := config.FindConfigYAMLPath()
+		if err != nil {
+			return HandleError("failed to find config.yaml: %v", err)
+		}
+		repoPath = resolveConfiguredRepoPath(configPath, repoPath)
+
 		ctx := rootCtx
 
 		deletedCount, err := store.DeleteIssuesBySourceRepo(ctx, repoPath)
@@ -145,11 +165,6 @@ that came from the removed repository.`,
 
 		if err := store.ClearRepoMtime(ctx, repoPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to clear mtime cache: %v\n", err)
-		}
-
-		configPath, err := config.FindConfigYAMLPath()
-		if err != nil {
-			return HandleError("failed to find config.yaml: %v", err)
 		}
 
 		if err := config.RemoveRepo(configPath, repoPath); err != nil {
@@ -329,13 +344,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			}
 
 			// Local path: expand tilde
-			expandedPath := repoPath
-			if len(repoPath) > 0 && repoPath[0] == '~' {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					expandedPath = filepath.Join(home, repoPath[1:])
-				}
-			}
+			expandedPath := expandRepoTilde(repoPath)
 
 			// Resolve to absolute path for consistent mtime caching
 			absPath, err := filepath.Abs(expandedPath)
@@ -483,4 +492,86 @@ func init() {
 	repoSyncCmd.Flags().Bool("verbose", false, "Show detailed sync progress")
 
 	rootCmd.AddCommand(repoCmd)
+}
+
+// expandRepoTilde expands a leading '~' in a `bd repo` path to the user's home
+// directory. It is the expansion every consumer of repos.additional already
+// performs (repo sync here, ResolveBeadsDirForRepo in the doctor checks), kept
+// in one place so add-time and use-time agree on what a stored entry means.
+//
+// A path that does not begin with '~', or a home directory that cannot be
+// determined, is returned unchanged.
+func expandRepoTilde(repoPath string) string {
+	if len(repoPath) == 0 || repoPath[0] != '~' {
+		return repoPath
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return repoPath
+	}
+	return filepath.Join(home, repoPath[1:])
+}
+
+// normalizeRepoPathForStorage canonicalizes a local repository path for
+// persistence in .beads/config.yaml.
+//
+// Remote URLs and '~'-prefixed paths are returned verbatim: the first is not a
+// filesystem path, and the second is anchored to the user's home directory
+// rather than to a working directory, so it stays portable across clones of the
+// shared config. Anything else that is not already absolute is cwd-relative and
+// is resolved against the current directory.
+//
+// Storing a relative path as typed is the be-d0t defect: the entry names a
+// directory relative to the cwd of whoever ran `bd repo add`, so every later
+// resolution — `bd repo sync` from a subdirectory, `bd doctor` from anywhere —
+// points somewhere else, or nowhere. The existence check performed at add time
+// says nothing about resolution at use time, because the two happen from
+// different directories.
+func normalizeRepoPathForStorage(repoPath string) (string, error) {
+	if remotecache.IsRemoteURL(repoPath) {
+		return repoPath, nil
+	}
+	if repoPath == "" || repoPath[0] == '~' || filepath.IsAbs(repoPath) {
+		return repoPath, nil
+	}
+	abs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// resolveConfiguredRepoPath maps a user-supplied `bd repo remove` argument onto
+// the entry actually stored in config.yaml.
+//
+// A verbatim match wins, so an entry added before paths were canonicalized (or
+// added as "~/foo") is still removable by the string it is stored under. Failing
+// that, the argument is canonicalized the way `bd repo add` would store it, so
+// `bd repo remove ../other-repo` matches the absolute entry that
+// `bd repo add ../other-repo` wrote from the same directory.
+//
+// The argument is returned unchanged when neither form is configured; the caller
+// reports the resulting "repository not found" against what the user typed.
+func resolveConfiguredRepoPath(configPath, repoPath string) string {
+	repos, err := config.ListRepos(configPath)
+	if err != nil || repos == nil {
+		return repoPath
+	}
+
+	for _, existing := range repos.Additional {
+		if existing == repoPath {
+			return repoPath
+		}
+	}
+
+	normalized, err := normalizeRepoPathForStorage(repoPath)
+	if err != nil || normalized == repoPath {
+		return repoPath
+	}
+	for _, existing := range repos.Additional {
+		if existing == normalized {
+			return normalized
+		}
+	}
+	return repoPath
 }
