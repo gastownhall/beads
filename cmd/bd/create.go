@@ -261,6 +261,21 @@ var createCmd = &cobra.Command{
 			dueAt = &t
 		}
 
+		repeat, err := gatherRecurrenceFlags(cmd)
+		if err != nil {
+			return err
+		}
+		// A --repeat with no --due dates the first instance from the rule
+		// itself, so a recurring bead never needs a redundant --due restating
+		// what the pattern already says.
+		firstDue, err := firstOccurrenceDue(repeat, dueAt, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if firstDue != nil {
+			dueAt = firstDue
+		}
+
 		var deferUntil *time.Time
 		deferStr, _ := cmd.Flags().GetString("defer")
 		if deferStr != "" {
@@ -390,6 +405,9 @@ var createCmd = &cobra.Command{
 				InitialStatus:      statusFlag,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
+				RepeatPattern:      repeat.pattern,
+				RepeatStart:        repeat.start,
+				RepeatEnd:          repeat.end,
 				Metadata:           metadata,
 				EventKind:          eventCategory,
 				Actor:              eventActor,
@@ -563,6 +581,9 @@ var createCmd = &cobra.Command{
 			InitialStatus:      statusFlag,
 			DueAt:              dueAt,
 			DeferUntil:         deferUntil,
+			RepeatPattern:      repeat.pattern,
+			RepeatStart:        repeat.start,
+			RepeatEnd:          repeat.end,
 			Metadata:           metadata,
 		})
 
@@ -704,6 +725,9 @@ type createIssueParams struct {
 	InitialStatus      string
 	DueAt              *time.Time
 	DeferUntil         *time.Time
+	RepeatPattern      string
+	RepeatStart        *time.Time
+	RepeatEnd          *time.Time
 	Metadata           json.RawMessage
 }
 
@@ -800,6 +824,9 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		Payload:            params.Payload,
 		DueAt:              params.DueAt,
 		DeferUntil:         params.DeferUntil,
+		RepeatPattern:      params.RepeatPattern,
+		RepeatStart:        params.RepeatStart,
+		RepeatEnd:          params.RepeatEnd,
 		Metadata:           params.Metadata,
 	}
 }
@@ -941,6 +968,7 @@ func init() {
 	//   --defer=tomorrow    Hidden until tomorrow
 	createCmd.Flags().String("due", "", "Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
 	createCmd.Flags().String("defer", "", "Defer until date (issue hidden from bd ready until then). Same formats as --due")
+	registerRecurrenceFlags(createCmd)
 	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)

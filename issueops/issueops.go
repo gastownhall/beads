@@ -138,6 +138,12 @@ type IssuePatch struct {
 	ExternalRef      Field[*string]
 	DueAt            Field[*time.Time]
 	DeferUntil       Field[*time.Time]
+	// RepeatPattern sets the recurrence rule; a set empty value stops the
+	// series without touching the bead's own due date. RepeatStart and
+	// RepeatEnd bound it; a set nil clears the bound.
+	RepeatPattern Field[string]
+	RepeatStart   Field[*time.Time]
+	RepeatEnd     Field[*time.Time]
 	// Persistence selects the complete persistence state. It is unchanged when
 	// unset; a set value must be a known PersistenceMode. A same current mode is
 	// a representation-preserving no-op. Every aggregate move is atomic.

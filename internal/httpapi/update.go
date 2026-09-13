@@ -42,6 +42,7 @@ var (
 		"notes", "append_notes", "priority", "issue_type", "status",
 		"assignee", "parent_id", "labels", "add_labels", "remove_labels", "metadata",
 		"estimated_minutes", "external_ref", "due_at", "defer_until",
+		"repeat_pattern", "repeat_start", "repeat_end",
 	}
 	// nullablePatchMembers is the closed set on which explicit `null` CLEARS
 	// rather than refuses. They are exactly the members the role models as
@@ -51,6 +52,10 @@ var (
 		"external_ref":      true,
 		"due_at":            true,
 		"defer_until":       true,
+		// repeat_pattern is Field[string], not Field[*string]: an EMPTY STRING
+		// stops the series, so a clear needs no null and none is accepted.
+		"repeat_start": true,
+		"repeat_end":   true,
 	}
 )
 

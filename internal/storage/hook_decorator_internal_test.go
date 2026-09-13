@@ -304,6 +304,8 @@ func TestCloneIssueForHookCoversReferenceFields(t *testing.T) {
 		"ClosedAt":          {},
 		"DueAt":             {},
 		"DeferUntil":        {},
+		"RepeatStart":       {},
+		"RepeatEnd":         {},
 		"LeaseExpiresAt":    {},
 		"HeartbeatAt":       {},
 		"ExternalRef":       {},

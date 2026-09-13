@@ -99,6 +99,20 @@ type Issue struct {
 	DueAt      *time.Time `json:"due_at,omitempty"`      // When this issue should be completed
 	DeferUntil *time.Time `json:"defer_until,omitempty"` // Hide from bd ready until this time
 
+	// ===== Recurrence =====
+	// RepeatPattern, when set, makes the bead recurring: closing it spawns the
+	// next instance (see issueops.SpawnRecurrenceInTx). The pattern is an
+	// interval ("+1w") or a five-field cron expression ("0 9 * * 1") — see
+	// timeparsing.ParseRepeat.
+	//
+	// RepeatStart and RepeatEnd bound the series. Occurrences before
+	// RepeatStart are skipped; the series stops once the next occurrence would
+	// fall after RepeatEnd. Both are optional and independent: an unbounded
+	// series leaves them nil.
+	RepeatPattern string     `json:"repeat_pattern,omitempty"`
+	RepeatStart   *time.Time `json:"repeat_start,omitempty"`
+	RepeatEnd     *time.Time `json:"repeat_end,omitempty"`
+
 	// ===== External Integration =====
 	ExternalRef  *string `json:"external_ref,omitempty"`  // e.g., "gh-9", "jira-ABC"
 	SourceSystem string  `json:"source_system,omitempty"` // Adapter/system that created this issue (federation)
@@ -429,6 +443,9 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 		return err
 	}
 	if err := CheckFieldLen("owner", i.Owner); err != nil {
+		return err
+	}
+	if err := i.ValidateRecurrence(); err != nil {
 		return err
 	}
 	return nil
@@ -1623,6 +1640,10 @@ const (
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"
+	// EventRecurrenceSpawned records that closing a recurring bead created its
+	// next instance. It is written on the CLOSED bead — old_value is its own
+	// id, new_value the successor's — so a series reads forward from any link.
+	EventRecurrenceSpawned EventType = "recurrence_spawned"
 )
 
 // ProvenanceEvent is one entry in the append-only provenance log: a typed

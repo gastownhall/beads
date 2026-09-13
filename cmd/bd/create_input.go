@@ -54,6 +54,7 @@ type createInput struct {
 	eventPayload       string
 	dueAt              *time.Time
 	deferUntil         *time.Time
+	repeat             recurrenceFlags
 	metadata           json.RawMessage
 	metadataSet        bool
 	estimatedMinutes   *int
@@ -240,6 +241,22 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 		in.dueAt = &t
 	}
 
+	repeat, err := gatherRecurrenceFlags(cmd)
+	if err != nil {
+		return in, err
+	}
+	in.repeat = repeat
+	// A --repeat with no --due dates the first instance from the rule itself,
+	// so a recurring bead never needs a redundant --due restating what the
+	// pattern already says.
+	firstDue, err := firstOccurrenceDue(repeat, in.dueAt, time.Now().UTC())
+	if err != nil {
+		return in, err
+	}
+	if firstDue != nil {
+		in.dueAt = firstDue
+	}
+
 	if deferStr, _ := cmd.Flags().GetString("defer"); deferStr != "" {
 		t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 		if err != nil {
@@ -307,6 +324,7 @@ var singleIssueOnlyFlags = []string{
 	"labels", "label", "skills", "context",
 	"event-category", "event-actor", "event-target", "event-payload",
 	"due", "defer",
+	"repeat", "repeat-start", "repeat-end",
 	"metadata", "estimate", "wisp-type",
 }
 

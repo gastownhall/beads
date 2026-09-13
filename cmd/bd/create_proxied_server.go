@@ -237,6 +237,9 @@ func buildCreateIssueFromInput(in createInput) *types.Issue {
 		InitialStatus:      in.status,
 		DueAt:              in.dueAt,
 		DeferUntil:         in.deferUntil,
+		RepeatPattern:      in.repeat.pattern,
+		RepeatStart:        in.repeat.start,
+		RepeatEnd:          in.repeat.end,
 		Metadata:           in.metadata,
 	})
 }
