@@ -55,7 +55,45 @@ func ExecuteAddComment(ctx context.Context, tx *sql.Tx, request publicops.AddCom
 	}
 	tables := ChangedTables{}
 	tables.Add(commentTable)
+	if commentTable == "comments" {
+		tables.Add("issues")
+	}
 	return publicops.AddCommentResult{Comment: comment}, tables, nil
+}
+
+// ValidateDeleteCommentRequest applies the exact-id rules shared by all
+// Commenter implementations.
+func ValidateDeleteCommentRequest(request publicops.DeleteCommentRequest) error {
+	if request.IssueID == "" {
+		return fmt.Errorf("%w: delete comment requires an issue ID", storage.ErrValidation)
+	}
+	if request.CommentID == "" {
+		return fmt.Errorf("%w: delete comment requires a comment ID", storage.ErrValidation)
+	}
+	return nil
+}
+
+// DeleteCommentCommitMessage is the history entry for deleting one comment.
+func DeleteCommentCommitMessage(issueID, commentID string) string {
+	return "bd: delete comment " + issueID + " " + commentID
+}
+
+// ExecuteDeleteComment removes one comment in tx and reports the durable tables
+// changed by the operation.
+func ExecuteDeleteComment(ctx context.Context, tx *sql.Tx, request publicops.DeleteCommentRequest) (publicops.DeleteCommentResult, ChangedTables, error) {
+	comment, err := DeleteIssueCommentInTx(ctx, tx, request.IssueID, request.CommentID, request.Actor)
+	if err != nil {
+		return publicops.DeleteCommentResult{}, nil, err
+	}
+	isWisp := IsActiveWispInTx(ctx, tx, request.IssueID)
+	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
+	commentTable := "comments"
+	if isWisp {
+		commentTable = "wisp_comments"
+	}
+	tables := ChangedTables{}
+	tables.Add(commentTable, eventTable, issueTable)
+	return publicops.DeleteCommentResult{Comment: comment}, tables, nil
 }
 
 // resolveCommentPlaneInTx names the comment table the anchor's thread lives in,
