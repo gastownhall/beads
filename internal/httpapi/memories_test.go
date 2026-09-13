@@ -279,41 +279,54 @@ func TestGetMemoryAnswersTheStoredValue(t *testing.T) {
 }
 
 // TestGetMemoryAnswersAMissWithA404 is the deliberate divergence from the
-// settings surface's no-404 doctrine.
-//
-// Both legs are the SAME answer from the role — Found false — and both are a
-// 404: a row stored as the empty string is a miss here because the storage seam
-// cannot tell it from an absent row, and the wire does not claim to see what
-// the role cannot. `GET /v0/beads/memories` enumerating such a row is the one
-// way a client tells them apart.
+// settings surface's no-404 doctrine: a key nothing stored is Found false from
+// the role, and the wire reports a 404 rather than the settings plane's silent
+// "(not set)" 200.
 func TestGetMemoryAnswersAMissWithA404(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		result memoryops.RecallResult
-	}{
-		{name: "nothing stored", result: memoryops.RecallResult{Key: "gone"}},
-		{name: "stored as the empty string", result: memoryops.RecallResult{Key: "gone", Value: ""}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := newTestServer(t, rolesConfig(Config{Memories: &roleMemories{recalled: tc.result}}))
+	ts := newTestServer(t, rolesConfig(Config{Memories: &roleMemories{
+		recalled: memoryops.RecallResult{Key: "gone"},
+	}}))
 
-			resp := ts.get(t, memoriesPath+"/gone")
-			if resp.StatusCode != http.StatusNotFound {
-				t.Fatalf("status = %d, want 404: %s", resp.StatusCode, readAll(t, resp))
-			}
-			body := decodeBody(t, resp)
-			if got := body["code"]; got != string(CodeNotFound) {
-				t.Errorf("code = %v, want %q", got, CodeNotFound)
-			}
-			if body["request_id"] == nil {
-				t.Error("no request_id on the problem body")
-			}
-			// The detail is about the MEMORY plane. Reusing the issue-id
-			// sentence would tell a client its memory key was an issue id.
-			if got, _ := body["detail"].(string); !strings.Contains(got, "memory") {
-				t.Errorf("detail = %q, want it to name the memory plane", got)
-			}
-		})
+	resp := ts.get(t, memoriesPath+"/gone")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if got := body["code"]; got != string(CodeNotFound) {
+		t.Errorf("code = %v, want %q", got, CodeNotFound)
+	}
+	if body["request_id"] == nil {
+		t.Error("no request_id on the problem body")
+	}
+	// The detail is about the MEMORY plane. Reusing the issue-id sentence
+	// would tell a client its memory key was an issue id.
+	if got, _ := body["detail"].(string); !strings.Contains(got, "memory") {
+		t.Errorf("detail = %q, want it to name the memory plane", got)
+	}
+}
+
+// TestGetMemoryAnswersAnEmptyValueWith200 pins bd-5963's fix: presence comes
+// from the role's Found (row existence), never from Value != "". A row
+// written out of band with an empty value is a real row — the same one
+// `GET /v0/beads/memories` already enumerates — so this door answers 200 with
+// an empty value rather than the 404 it used to share with an absent key.
+func TestGetMemoryAnswersAnEmptyValueWith200(t *testing.T) {
+	memories := &roleMemories{recalled: memoryops.RecallResult{
+		Key: "gone", Value: "", Found: true,
+	}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.get(t, memoriesPath+"/gone")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+
+	body := decodeBody(t, resp)
+	if got := body["key"]; got != "gone" {
+		t.Errorf("key = %v, want %q", got, "gone")
+	}
+	if got := body["value"]; got != "" {
+		t.Errorf("value = %v, want \"\"", got)
 	}
 }
 
