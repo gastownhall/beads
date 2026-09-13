@@ -23,27 +23,35 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 	return sqlbuild.BuildReadyWorkOrder(policy, "sort_created", "sort_priority")
 }
 
-// buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
-// needs (children of deferred parents, parent descendants), then delegates
-// the clause text to sqlbuild so both stacks share ready semantics. Unlike
-// the classic stack, ORDER BY and LIMIT are applied at the UNION outer query.
-func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, filter types.WorkFilter, tables filterTables) (*readyWorkPredicates, error) {
+// readyWorkInputs computes the ID sets every plane's ready-work WHERE clause
+// shares — children of deferred parents and the parent's transitive
+// descendants — once per request. Both are walks, and the descendant one is
+// the dominant cost of `bd ready --parent`; computing them inside the
+// per-plane predicate build ran each of them twice per call.
+func (r *issueSQLRepositoryImpl) readyWorkInputs(ctx context.Context, filter types.WorkFilter) (sqlbuild.ReadyWorkWhereInputs, error) {
 	var inputs sqlbuild.ReadyWorkWhereInputs
 	if !filter.IncludeDeferred {
 		deferredChildIDs, dcErr := r.getChildrenOfDeferredParents(ctx)
 		if dcErr != nil {
-			return nil, fmt.Errorf("get ready work: compute deferred parent children: %w", dcErr)
+			return inputs, fmt.Errorf("get ready work: compute deferred parent children: %w", dcErr)
 		}
 		inputs.DeferredChildIDs = deferredChildIDs
 	}
 	if filter.ParentID != nil {
 		descendantIDs, descErr := r.getDescendantIDs(ctx, *filter.ParentID, 0)
 		if descErr != nil {
-			return nil, fmt.Errorf("get parent descendants: %w", descErr)
+			return inputs, fmt.Errorf("get parent descendants: %w", descErr)
 		}
 		inputs.ParentDescendantIDs = descendantIDs
 	}
+	return inputs, nil
+}
 
+// buildReadyWorkPredicates delegates the clause text for one plane to sqlbuild
+// so both stacks share ready semantics, from inputs computed once by
+// readyWorkInputs. Unlike the classic stack, ORDER BY and LIMIT are applied at
+// the UNION outer query.
+func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(filter types.WorkFilter, tables filterTables, inputs sqlbuild.ReadyWorkWhereInputs) (*readyWorkPredicates, error) {
 	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
 	if err != nil {
 		return nil, err

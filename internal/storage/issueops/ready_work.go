@@ -24,6 +24,10 @@ type readyWorkPredicates struct {
 	limitSQL         string
 	args             []interface{}
 	deferredChildIDs []string
+	// parentDescendantIDs is the ParentID walk computed once here and reused
+	// by the wisp leg; GetDescendantIDsInTx is the dominant cost of
+	// `bd ready --parent` and ran once per leg before be-qfm.
+	parentDescendantIDs []string
 }
 
 func readyWorkPageSize(limit int) int {
@@ -64,6 +68,7 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		}
 		inputs.ParentDescendantIDs = descendantIDs
 	}
+	parentDescendantIDs := inputs.ParentDescendantIDs
 
 	whereSQL, whereArgs, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
 	if err != nil {
@@ -87,6 +92,8 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		limitSQL:         limitSQL,
 		args:             args,
 		deferredChildIDs: inputs.DeferredChildIDs,
+
+		parentDescendantIDs: parentDescendantIDs,
 	}, nil
 }
 
@@ -129,7 +136,7 @@ func GetReadyWorkInTx(
 		}
 	}
 
-	wisps, wErr := getReadyWispsInTx(ctx, tx, filter, preds.deferredChildIDs)
+	wisps, wErr := getReadyWispsInTx(ctx, tx, filter, preds.deferredChildIDs, preds.parentDescendantIDs)
 	if wErr != nil {
 		return nil, wErr
 	}
@@ -166,7 +173,7 @@ func mergeReadyWisps(ordered []*types.Issue, wisps []*types.Issue, filter types.
 	return kept
 }
 
-func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, deferredChildIDs []string) ([]*types.Issue, error) {
+func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, deferredChildIDs, parentDescendantIDs []string) ([]*types.Issue, error) {
 	empty, err := wispsTableEmptyOrMissingInTx(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("search wisps (ready work): probe: %w", err)
@@ -185,7 +192,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 			}
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs)
+		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs, parentDescendantIDs)
 	}
 
 	pageSize := readyWorkPageSize(filter.Limit)
@@ -207,7 +214,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		if err != nil {
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs)
+		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs, parentDescendantIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -352,7 +359,7 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 	return wispFilter
 }
 
-func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string) ([]*types.Issue, error) {
+func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs, parentDescendantIDs []string) ([]*types.Issue, error) {
 	if len(wisps) == 0 {
 		return wisps, nil
 	}
@@ -365,12 +372,8 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 	excluded := make(map[string]struct{})
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		descendantIDs, err := GetDescendantIDsInTx(ctx, tx, parentID, 0)
-		if err != nil {
-			return nil, fmt.Errorf("get wisp parent descendants: %w", err)
-		}
-		descendantSet := make(map[string]struct{}, len(descendantIDs))
-		for _, id := range descendantIDs {
+		descendantSet := make(map[string]struct{}, len(parentDescendantIDs))
+		for _, id := range parentDescendantIDs {
 			descendantSet[id] = struct{}{}
 		}
 		parentedSet, err := getParentedIDSetInTx(ctx, tx, wispIDs)
