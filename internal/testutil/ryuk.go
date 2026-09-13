@@ -30,10 +30,10 @@ func checkRyukDisabled(home string, disabled, allowUnreaped bool) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"testcontainers Ryuk reaper is disabled for $HOME=%s (via %s/.testcontainers.properties "+
+		"testcontainers Ryuk reaper is disabled (via %s/.testcontainers.properties "+
 			"or the TESTCONTAINERS_RYUK_DISABLED env var) — a killed test run will leak its "+
 			"containers permanently; set BEADS_ALLOW_UNREAPED_TESTCONTAINERS=1 to proceed anyway",
-		home, home,
+		home,
 	)
 }
 
