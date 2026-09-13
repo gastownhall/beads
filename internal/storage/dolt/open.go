@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/ownershiphandoffv2"
 )
 
 // ServerMode is re-exported from doltserver for convenience.
@@ -37,6 +37,13 @@ const (
 // asks the user to run `bd dolt start`.
 func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	if cfg.DisableAutoStart {
+		cfg.AutoStart = false
+		return
+	}
+	// An ownership handoff in flight owns this workspace's server lifecycle.
+	// Auto-starting one underneath it would make bd the second process deciding
+	// what server this scope should have.
+	if checkOwnershipHandoffFence(beadsDir) != nil {
 		cfg.AutoStart = false
 		return
 	}
@@ -120,6 +127,10 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 		return nil, err
 	}
 
+	if err := checkOwnershipHandoffFence(beadsDir); err != nil {
+		return nil, err
+	}
+
 	// Apply central server config as defaults for any server fields not
 	// set in the per-project metadata.json. This eliminates the need to
 	// duplicate host/port/user across 30+ project configs.
@@ -147,6 +158,10 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 		fileCfg = configfile.DefaultConfig()
 	}
 	if err := requireDoltBackend(fileCfg, beadsDir); err != nil {
+		return nil, err
+	}
+
+	if err := checkOwnershipHandoffFence(beadsDir); err != nil {
 		return nil, err
 	}
 
@@ -213,36 +228,22 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 // to suppress auto-start should use one of the environment-variable or
 // config-file overrides above.
 func resolveAutoStart(current bool, doltAutoStartCfg string, mode ServerMode) bool {
-	if os.Getenv("BEADS_TEST_MODE") == "1" {
-		return false
-	}
-	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
-		return false
-	}
-	// When the server is externally managed, never auto-start.
-	// The user has configured a specific server — if it's down, error out
-	// rather than silently starting a different server from .beads/dolt/.
-	if mode == ServerModeExternal {
-		return false
-	}
-	// Config.yaml explicit opt-out takes precedence over caller-provided
-	// current=true. Without this, ApplyCLIAutoStart (which passes current=true)
-	// and bootstrap paths (which hardcode AutoStart=true) would ignore the
-	// user's dolt.auto-start: false setting, spawning rogue dolt servers that
-	// overwrite port files and cause DB lock conflicts.
-	if strings.EqualFold(doltAutoStartCfg, "false") || doltAutoStartCfg == "0" || strings.EqualFold(doltAutoStartCfg, "off") {
-		return false
-	}
-	// Caller option wins over default.
-	if current {
-		return true
-	}
-	// Default: auto-start for standalone users.
-	return true
+	return doltserver.ResolveAutoStart(current, doltAutoStartCfg, mode)
 }
 
 // GetBackendFromConfig returns the backend type from metadata.json.
 // Returns "dolt" if no config exists or backend is not specified.
+// checkOwnershipHandoffFence refuses ordinary store use while an explicit
+// ownership handoff owns the transition. A journal that has durably settled —
+// committed to bd, or rolled back and archived — admits normally, as does a
+// workspace with no journal at all.
+func checkOwnershipHandoffFence(beadsDir string) error {
+	if err := ownershiphandoffv2.CheckNormalOpen(beadsDir); err != nil {
+		return fmt.Errorf("ownership handoff blocks normal store open: %w", err)
+	}
+	return nil
+}
+
 func GetBackendFromConfig(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
