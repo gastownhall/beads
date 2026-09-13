@@ -479,8 +479,14 @@ func TestEmbeddedList(t *testing.T) {
 	})
 
 	t.Run("overdue", func(t *testing.T) {
+		// The ready reads above ran the due sweep, which pushes an arrived
+		// deadline forward (issueops.DueMissGrace) so it keeps nagging; the
+		// seeded overdue task is therefore no longer overdue here. Seed a
+		// fresh one that no ready read has touched.
+		pastDue := time.Now().Add(-48 * time.Hour).Format("2006-01-02")
+		overdue := bdCreate(t, bd, dir, "Still overdue", "--type", "task", "--priority", "1", "--due", pastDue)
 		issues := bdListJSON(t, bd, dir, "--overdue")
-		if !containsID(issues, seed.overdueTask) {
+		if !containsID(issues, overdue.ID) {
 			t.Error("overdue task should appear with --overdue")
 		}
 		for _, issue := range issues {
