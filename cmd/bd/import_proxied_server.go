@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -45,7 +46,7 @@ func proxiedImporter() (publicops.Importer, error) {
 //     its own read (reporting StaleSkippedIDs and keeping stale rows' aux data
 //     out of the batch), and RejectStaleUpserts re-checks updated_at inside
 //     the write transaction, closing the same race the classic path closes.
-func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, labelDefs []labelDefinitionRecord, source string) error {
 	if uowProvider == nil {
 		return fmt.Errorf("proxied-server UOW provider not initialized")
 	}
@@ -76,6 +77,7 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 
 	if importDryRun {
 		result.Memories = len(memories)
+		result.LabelDefinitions = len(labelDefs)
 		result.Skipped = dedupHits
 
 		classification, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*ImportResult, error) {
@@ -123,6 +125,18 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		})
 	}
 
+	definitionEntries := make([]publicops.ImportLabelDefinition, 0, len(labelDefs))
+	for _, def := range labelDefs {
+		entry := publicops.ImportLabelDefinition{Label: def.Label}
+		if def.Description != nil {
+			entry.Description = *def.Description
+		}
+		if def.CreatedBy != nil {
+			entry.Actor = *def.CreatedBy
+		}
+		definitionEntries = append(definitionEntries, entry)
+	}
+
 	importer, err := proxiedImporter()
 	if err != nil {
 		return err
@@ -136,6 +150,7 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		Actor:                getActorWithGit(),
 		Issues:               issues,
 		Memories:             memoryEntries,
+		LabelDefinitions:     definitionEntries,
 		AllowStale:           importAllowStale,
 		SkipPrefixValidation: true,
 		SyncIssuePrefix:      config.GetString("issue-prefix"),
@@ -145,6 +160,10 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		return fmt.Errorf("import failed: %w", err)
 	}
 	result.Memories = batch.MemoriesImported
+	result.LabelDefinitions = batch.LabelDefinitionsImported
+	for _, w := range batch.LabelDefinitionWarnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 
 	if len(issues) > 0 {
 		staleRejectedSet := make(map[string]struct{}, len(batch.StaleRejectedIDs))

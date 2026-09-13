@@ -56,6 +56,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concept, themes are labels here, and `--label theme:x` is the native way to
   say it.
 
+- **Storage for an opt-in curated label vocabulary**
+  ([#6008](https://github.com/gastownhall/beads/pull/6008)). A new
+  `label_definitions` table (migration 0067) holds a workspace-shared list of
+  label names, with a `label_folded` UNIQUE constraint so two case-variant
+  spellings of one word can never both land. The table is inert on its own:
+  nothing in this change consults it when a label is written, and a workspace
+  that never populates it behaves exactly as before. The `bd label define` /
+  `undefine` / `defined` verbs and the `labels.vocabulary` enforcement knob
+  that give it meaning land separately; what is usable here is the interchange
+  path below.
+
+- **`bd export` and `bd import` gain a third `_type` value,
+  `"label-definition"`**
+  ([#6008](https://github.com/gastownhall/beads/pull/6008)). Definitions are
+  emitted whenever the registry is non-empty, including from a bare
+  `bd export` with no flags: they are shared workspace policy rather than
+  agent context, so no flag gates them and none suppresses them. `bd import`
+  applies them define-if-absent, keeping an existing definition and warning
+  on stderr for a case-insensitive collision rather than failing the import.
+  Consumers of the JSONL interchange must dispatch on `_type` instead of
+  unmarshalling every line as an issue -- a reader that does not sees a
+  titleless issue. See `docs/reference/json-schema.md`.
+
+
 ### Changed
 
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
@@ -182,6 +206,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was a widening — but any stored `--` spelling that is NOT a gascity slash
   encoding changes equivalence class silently, with no error to notice. Longer
   or mixed runs, `__` and `---` included, are unaffected and still collapse.
+
+- **Out-of-tree backends: `storage.DoltStorage` composes a new
+  `LabelVocabularyStore` interface**
+  ([#6008](https://github.com/gastownhall/beads/pull/6008)). Its three
+  methods -- `DefineLabel`, `UndefineLabel`, `ListLabelDefinitions` -- are now
+  required of anything satisfying `DoltStorage`, and `backend.LabelDefinition`
+  is a new exported type alias. Per `backend/backend.go`, adding a required
+  method to the engine interface is a breaking change for out-of-tree
+  implementations; this is that call-out. In-tree, both `DoltStore` and
+  `EmbeddedDoltStore` implement them.
+
 
 ### Fixed
 
