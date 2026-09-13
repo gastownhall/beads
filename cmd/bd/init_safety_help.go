@@ -25,7 +25,8 @@ source is ambiguous, bd init refuses.
 FLAG SURFACE
 
   bd init                       Mint a new identity. Bootstraps from
-                                origin if it has refs/dolt/data.
+                                origin if it has Dolt data on refs/dolt/data
+                                (or on sync.remote-ref, when set).
 
   bd init --reinit-local        Re-initialize local .beads/ over existing
                                 local data. Does NOT authorize discarding
