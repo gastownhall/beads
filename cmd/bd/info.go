@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -58,11 +59,12 @@ Examples:
 		}
 
 		absDBPath := absoluteDBPath()
-
-		info := map[string]interface{}{
-			"database_path": absDBPath,
-			"mode":          "direct",
+		beadsDir := selectedDoltBeadsDir()
+		cfg, err := loadDoltBackendConfig(beadsDir)
+		if err != nil {
+			return HandleError("cannot resolve database topology for bd info: %v", err)
 		}
+		info := buildDirectInfo(absDBPath, cfg)
 
 		if store != nil {
 			ctx := rootCtx
@@ -100,6 +102,34 @@ Examples:
 
 		return renderInfo(info, schemaFlag, absDBPath)
 	},
+}
+
+func buildDirectInfo(absDBPath string, cfg *configfile.Config) map[string]interface{} {
+	info := map[string]interface{}{
+		"database_path": absDBPath,
+		// Keep mode for JSON compatibility; it describes CLI access, not the
+		// Dolt deployment topology. New consumers should use access_mode.
+		"mode":        "direct",
+		"access_mode": "direct",
+	}
+	if cfg == nil || cfg.GetBackend() != configfile.BackendDolt {
+		return info
+	}
+
+	doltMode := cfg.GetDoltMode()
+	info["dolt_mode"] = doltMode
+	switch {
+	case doltMode == configfile.DoltModeEmbedded:
+		info["transport"] = "embedded"
+	case cfg.GetDoltServerSocket() != "":
+		info["transport"] = "unix_socket"
+		info["socket"] = cfg.GetDoltServerSocket()
+	default:
+		info["transport"] = "tcp"
+		info["host"] = cfg.GetDoltServerHost()
+		info["port"] = cfg.GetDoltServerPort()
+	}
+	return info
 }
 
 func absoluteDBPath() string {
@@ -145,12 +175,24 @@ func renderInfo(info map[string]interface{}, schemaFlag bool, absDBPath string) 
 		return outputJSON(info)
 	}
 
-	mode, _ := info["mode"].(string)
+	accessMode, _ := info["access_mode"].(string)
+	if accessMode == "" {
+		accessMode, _ = info["mode"].(string)
+	}
 
 	fmt.Println("\nBeads Database Information")
 	fmt.Println("===========================")
 	fmt.Printf("Database: %s\n", absDBPath)
-	fmt.Printf("Mode: %s\n", mode)
+	fmt.Printf("Access mode: %s\n", accessMode)
+	if doltMode, ok := info["dolt_mode"].(string); ok && doltMode != "" {
+		fmt.Printf("Dolt mode: %s\n", doltMode)
+	}
+	if transport, ok := info["transport"].(string); ok && transport != "" {
+		fmt.Printf("Transport: %s\n", transport)
+	}
+	if socket, ok := info["socket"].(string); ok && socket != "" {
+		fmt.Printf("Socket: %s\n", socket)
+	}
 
 	if count, ok := info["issue_count"].(int); ok {
 		fmt.Printf("\nIssue Count: %d\n", count)
