@@ -35,6 +35,15 @@ type DetectCyclesRequest struct {
 	// edges — the closing edge included — is a blocks/conditional-blocks
 	// edge; tracks edges may only complete a path, never make one up alone.
 	//
+	// IT ONLY ADDS TO THE ANSWER. Every cycle the default request reports on
+	// the same data is also in this report, so turning the option on never
+	// hides a blocks-only deadlock, even where tracks edges join separate
+	// deadlocks into one tangle. On top of those, each blocks/conditional-blocks
+	// edge that lies on any cycle of the widened graph adds at most one more:
+	// that edge, closed by its shortest return path over either edge type. The
+	// report therefore holds at most twice as many cycles as there are
+	// blocks/conditional-blocks edges.
+	//
 	// Default false: the base walk this type's doc above describes is
 	// unchanged.
 	IncludeTracks bool `json:"include_tracks,omitempty"`
@@ -100,19 +109,22 @@ type CycleReport struct {
 	// graph is acyclic.
 	//
 	// ITS LENGTH IS THE TOTAL FOUND BY THE SELECTED WALK, and that is the point
-	// of carrying unhydratable
-	// members rather than dropping them: a cycle nothing can describe is still
-	// counted here, so "found N cycles" cannot shrink because a row went
-	// missing. There is no separate count field, because there is no cycle this
-	// slice omits.
+	// of carrying unhydratable members rather than dropping them: a cycle
+	// nothing can describe is still counted here, so "found N cycles" cannot
+	// shrink because a row went missing. There is no separate count field,
+	// because there is no cycle this slice omits.
 	//
 	// IT IS NOT PROMISED TO BE EVERY SIMPLE CYCLE IN THE GRAPH. Enumerating
 	// those is exponential in the worst case. The default detector records one
-	// cycle per back edge of a depth-first walk, while IncludeTracks records one
-	// qualifying cycle per strongly connected component. Two cycles sharing
-	// every node but one edge may therefore be reported as one. What IS promised
-	// is that the slice is empty exactly when the selected walk has no qualifying
-	// cycle, and that the same graph and request always yield the same slice.
+	// cycle per back edge of a depth-first walk, so a cycle whose edges the walk
+	// already crossed on another cycle can go unreported: given a -> b -> c -> a
+	// plus the chord a -> c, it reports a-b-c and not a-c. IncludeTracks reports
+	// a superset of the default report on the same data: all of those cycles,
+	// plus, for each blocks/conditional-blocks edge on a cycle of the widened
+	// graph, the cycle that edge closes by its shortest return path (a-c
+	// included, in the example). What IS promised is that the slice is empty
+	// exactly when the selected walk has no qualifying cycle, and that the same
+	// graph and request always yield the same slice.
 	Cycles []Cycle `json:"cycles"`
 }
 

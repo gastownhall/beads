@@ -1565,10 +1565,11 @@ func init() {
 	depListCmd.Flags().String("direction", "down", "Direction: 'down' (dependencies), 'up' (dependents)")
 	depListCmd.Flags().StringP("type", "t", "", "Filter by dependency type (e.g., tracks, blocks, parent-child)")
 
-	// Widens the walk, never narrows it: a cycle is still reported only when it
-	// contains a blocks/conditional-blocks edge, so ordinary tracks-only convoy
-	// topology stays silent. See issueops.DetectCyclesRequest.IncludeTracks.
-	depCyclesCmd.Flags().Bool("include-tracks", false, "Also walk 'tracks' edges, reporting a cycle only when it also contains a blocks/conditional-blocks edge (diagnostic for molecule-root deadlocks hidden by tracks-only propagation)")
+	// Widens the report, never narrows it: every cycle the default walk finds is
+	// kept, and cycles that close through tracks edges are added. A loop made
+	// only of tracks edges is still not reported, so ordinary convoy topology
+	// stays silent. See issueops.DetectCyclesRequest.IncludeTracks.
+	depCyclesCmd.Flags().Bool("include-tracks", false, "Also walk 'tracks' edges: reports every cycle the default walk finds plus cycles that close through a tracks edge, never a loop made only of tracks edges (diagnostic for molecule-root deadlocks hidden by tracks-only propagation)")
 
 	// Issue ID completions for dep subcommands
 	depAddCmd.ValidArgsFunction = issueIDCompletion

@@ -214,7 +214,7 @@ func TestCanonicalMixedCyclePathsIgnoresAPureTracksLoop(t *testing.T) {
 		"b": {{To: "c"}},
 		"c": {{To: "a"}},
 	}
-	if got := CanonicalMixedCyclePaths(graph); len(got) != 0 {
+	if got := mustMixedCyclePaths(t, graph); len(got) != 0 {
 		t.Errorf("pure-tracks loop reported %v, want no cycles: tracks-only convoy topology is not a deadlock", got)
 	}
 }
@@ -230,7 +230,7 @@ func TestCanonicalMixedCyclePathsFindsTheMoleculeRootShape(t *testing.T) {
 		"root": {{To: "step", Scheduling: true}},
 		"step": {{To: "root"}}, // tracks edge closing the loop
 	}
-	got := CanonicalMixedCyclePaths(graph)
+	got := mustMixedCyclePaths(t, graph)
 	want := [][]string{{"root", "step"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cycles = %v, want %v: a blocks edge plus a closing tracks edge is exactly the deadlock this option surfaces", got, want)
@@ -252,7 +252,7 @@ func TestCanonicalMixedCyclePathsFindsASchedulingCycleAfterATracksOnlyBackEdge(t
 		"c": {{To: "b"}},
 	}
 
-	got := CanonicalMixedCyclePaths(graph)
+	got := mustMixedCyclePaths(t, graph)
 	want := [][]string{{"a", "c", "b"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cycles = %v, want %v: a tracks-only back edge must not hide a different cycle containing a scheduling edge", got, want)
@@ -266,7 +266,7 @@ func TestCanonicalMixedCyclePathsStillFindsAPureSchedulingCycle(t *testing.T) {
 		"a": {{To: "b", Scheduling: true}},
 		"b": {{To: "a", Scheduling: true}},
 	}
-	got := CanonicalMixedCyclePaths(graph)
+	got := mustMixedCyclePaths(t, graph)
 	want := [][]string{{"a", "b"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cycles = %v, want %v", got, want)
@@ -283,7 +283,7 @@ func TestCanonicalMixedCyclePathsAcceptsASchedulingEdgeAnywhereOnTheLoop(t *test
 		"b": {{To: "c", Scheduling: true}}, // blocks, in the middle of the loop
 		"c": {{To: "a"}},                   // tracks, closes the loop
 	}
-	got := CanonicalMixedCyclePaths(graph)
+	got := mustMixedCyclePaths(t, graph)
 	want := [][]string{{"a", "b", "c"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cycles = %v, want %v: a scheduling edge anywhere on the loop must qualify it, not only the closing edge", got, want)
@@ -294,13 +294,13 @@ func TestCanonicalMixedCyclePathsAcceptsASchedulingEdgeAnywhereOnTheLoop(t *test
 // TestCanonicalCyclePathsFindsSelfLoopsAndReportsNoneForAnAcyclicGraph for the
 // mixed graph: a self-loop qualifies exactly when its own edge is scheduling.
 func TestCanonicalMixedCyclePathsSelfLoop(t *testing.T) {
-	if got := CanonicalMixedCyclePaths(map[string][]MixedCycleEdge{"a": {{To: "a", Scheduling: true}}}); !reflect.DeepEqual(got, [][]string{{"a"}}) {
+	if got := mustMixedCyclePaths(t, map[string][]MixedCycleEdge{"a": {{To: "a", Scheduling: true}}}); !reflect.DeepEqual(got, [][]string{{"a"}}) {
 		t.Errorf("blocking self-loop = %v, want [[a]]", got)
 	}
-	if got := CanonicalMixedCyclePaths(map[string][]MixedCycleEdge{"a": {{To: "a"}}}); len(got) != 0 {
+	if got := mustMixedCyclePaths(t, map[string][]MixedCycleEdge{"a": {{To: "a"}}}); len(got) != 0 {
 		t.Errorf("tracks-only self-loop = %v, want no cycles", got)
 	}
-	if got := CanonicalMixedCyclePaths(nil); len(got) != 0 {
+	if got := mustMixedCyclePaths(t, nil); len(got) != 0 {
 		t.Errorf("empty graph produced %v, want no cycles", got)
 	}
 }
@@ -315,10 +315,179 @@ func TestCanonicalMixedCyclePathsCollapsesParallelEdgesByOringScheduling(t *test
 		"a": {{To: "b"}, {To: "b", Scheduling: true}},
 		"b": {{To: "a"}},
 	}
-	got := CanonicalMixedCyclePaths(graph)
+	got := mustMixedCyclePaths(t, graph)
 	want := [][]string{{"a", "b"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cycles = %v, want %v: a duplicated edge where either copy is scheduling must count as scheduling", got, want)
+	}
+}
+
+// mustMixedCyclePaths runs CanonicalMixedCyclePaths and fails the test on its
+// error, which only a broken internal invariant can produce.
+func mustMixedCyclePaths(t *testing.T, graph map[string][]MixedCycleEdge) [][]string {
+	t.Helper()
+	paths, err := CanonicalMixedCyclePaths(graph)
+	if err != nil {
+		t.Fatalf("CanonicalMixedCyclePaths: %v", err)
+	}
+	return paths
+}
+
+// TestCloseMixedCycleReportsAMissingReturnPathAsAnError pins the invariant
+// breach as an error rather than a panic. CanonicalMixedCyclePaths cannot
+// reach it (it only closes edges inside a strongly connected component), so the
+// helper is exercised directly with an edge that has no way back.
+func TestCloseMixedCycleReportsAMissingReturnPathAsAnError(t *testing.T) {
+	cycle, err := closeMixedCycle(map[string][]string{"a": {"b"}}, "a", "b")
+	if err == nil {
+		t.Fatalf("closeMixedCycle = %v, nil error; want an error: b cannot reach a", cycle)
+	}
+	if cycle != nil {
+		t.Errorf("closeMixedCycle returned %v alongside its error, want nil", cycle)
+	}
+
+	cycle, err = closeMixedCycle(map[string][]string{"a": {"c"}, "c": {"b"}, "b": {"a"}}, "c", "b")
+	if err != nil {
+		t.Fatalf("closeMixedCycle on a real cycle: %v", err)
+	}
+	if want := []string{"a", "c", "b"}; !slices.Equal(cycle, want) {
+		t.Errorf("closeMixedCycle = %v, want %v: the edge, then its return path, rotated to the lowest id", cycle, want)
+	}
+}
+
+// TestCanonicalMixedCyclePathsKeepsDeadlocksATracksEdgeFuses is the #6148
+// review reproduction. a<->b and c<->d are two separate blocks deadlocks; the
+// tracks edges b->c and d->a fuse them into ONE strongly connected component.
+// A widening option must not shrink the answer: both deadlocks the default
+// walk reports are still reported.
+func TestCanonicalMixedCyclePathsKeepsDeadlocksATracksEdgeFuses(t *testing.T) {
+	plain := map[string][]string{"a": {"b"}, "b": {"a"}, "c": {"d"}, "d": {"c"}}
+	mixed := map[string][]MixedCycleEdge{
+		"a": {{To: "b", Scheduling: true}},
+		"b": {{To: "a", Scheduling: true}, {To: "c"}},
+		"c": {{To: "d", Scheduling: true}},
+		"d": {{To: "c", Scheduling: true}, {To: "a"}},
+	}
+	want := CanonicalCyclePaths(plain)
+	if !reflect.DeepEqual(want, [][]string{{"a", "b"}, {"c", "d"}}) {
+		t.Fatalf("default walk = %v, want [[a b] [c d]]: the fixture no longer says what this test claims", want)
+	}
+	got := mustMixedCyclePaths(t, mixed)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("widened = %v, want %v: tracks edges fusing two deadlocks into one component must not drop either", got, want)
+	}
+}
+
+// TestCanonicalMixedCyclePathsReportsTheChordTheDefaultWalkMisses pins the
+// example CycleReport.Cycles documents. On a -> b -> c -> a plus the chord
+// a -> c, the default walk crosses a -> c after c is finished and reports only
+// a-b-c. The widened report keeps a-b-c and adds a-c, which the chord closes by
+// its shortest return path, even with no tracks edge in the graph.
+func TestCanonicalMixedCyclePathsReportsTheChordTheDefaultWalkMisses(t *testing.T) {
+	if got, want := CanonicalCyclePaths(map[string][]string{"a": {"b", "c"}, "b": {"c"}, "c": {"a"}}), [][]string{{"a", "b", "c"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("default walk = %v, want %v: the documented example no longer holds", got, want)
+	}
+	got := mustMixedCyclePaths(t, map[string][]MixedCycleEdge{
+		"a": {{To: "b", Scheduling: true}, {To: "c", Scheduling: true}},
+		"b": {{To: "c", Scheduling: true}},
+		"c": {{To: "a", Scheduling: true}},
+	})
+	if want := [][]string{{"a", "b", "c"}, {"a", "c"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("widened = %v, want %v", got, want)
+	}
+}
+
+// TestCanonicalMixedCyclePathsIsASupersetOfTheDefaultReport checks the
+// widening promise over generated graphs rather than one fixture: on the same
+// data, every cycle CanonicalCyclePaths reports on the scheduling edges alone
+// is also in the widened report. Each widened cycle must also be a real cycle
+// carrying a scheduling edge, stay within the documented size bound, and not
+// move when the edge rows arrive in a different order.
+func TestCanonicalMixedCyclePathsIsASupersetOfTheDefaultReport(t *testing.T) {
+	type rawEdge struct {
+		from, to   string
+		scheduling bool
+	}
+	ids := []string{"a", "b", "c", "d", "e", "f"}
+	rng := rand.New(rand.NewSource(6148))
+	widenedBeyondDefault := 0
+	for trial := range 600 {
+		n := 2 + rng.Intn(len(ids)-1)
+		edges := make([]rawEdge, 0, 3*n)
+		for range rng.Intn(3 * n) {
+			edges = append(edges, rawEdge{ids[rng.Intn(n)], ids[rng.Intn(n)], rng.Intn(2) == 0})
+		}
+
+		build := func(order []rawEdge) (map[string][]string, map[string][]MixedCycleEdge) {
+			plain := map[string][]string{}
+			mixed := map[string][]MixedCycleEdge{}
+			for _, e := range order {
+				mixed[e.from] = append(mixed[e.from], MixedCycleEdge{To: e.to, Scheduling: e.scheduling})
+				if e.scheduling {
+					plain[e.from] = append(plain[e.from], e.to)
+				}
+			}
+			return plain, mixed
+		}
+		plain, mixed := build(edges)
+		want := CanonicalCyclePaths(plain)
+		got := mustMixedCyclePaths(t, mixed)
+
+		for _, cycle := range want {
+			if !slices.ContainsFunc(got, func(c []string) bool { return slices.Equal(c, cycle) }) {
+				t.Fatalf("trial %d, edges %v: default cycle %v is missing from the widened report %v (default report %v)",
+					trial, edges, cycle, got, want)
+			}
+		}
+
+		scheduling := map[[2]string]bool{}
+		for _, e := range edges {
+			key := [2]string{e.from, e.to}
+			scheduling[key] = scheduling[key] || e.scheduling
+		}
+		schedulingEdges := 0
+		for _, isScheduling := range scheduling {
+			if isScheduling {
+				schedulingEdges++
+			}
+		}
+		if bound := schedulingEdges + len(want); len(got) > bound {
+			t.Fatalf("trial %d, edges %v: widened report has %d cycles, above the bound %d (scheduling edges + default cycles)",
+				trial, edges, len(got), bound)
+		}
+		if len(got) < len(want) {
+			t.Fatalf("trial %d: widened report %v is smaller than the default %v", trial, got, want)
+		}
+		if len(got) > len(want) && len(want) > 0 {
+			widenedBeyondDefault++
+		}
+		for _, cycle := range got {
+			if len(slices.Compact(slices.Sorted(slices.Values(cycle)))) != len(cycle) {
+				t.Fatalf("trial %d, edges %v: widened cycle %v repeats a member", trial, edges, cycle)
+			}
+			hasScheduling := false
+			for i, from := range cycle {
+				isScheduling, ok := scheduling[[2]string{from, cycle[(i+1)%len(cycle)]}]
+				if !ok {
+					t.Fatalf("trial %d, edges %v: widened cycle %v uses %s -> %s, which is not an edge",
+						trial, edges, cycle, from, cycle[(i+1)%len(cycle)])
+				}
+				hasScheduling = hasScheduling || isScheduling
+			}
+			if !hasScheduling {
+				t.Fatalf("trial %d, edges %v: widened cycle %v is made only of tracks edges", trial, edges, cycle)
+			}
+		}
+
+		shuffled := slices.Clone(edges)
+		rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+		_, reordered := build(shuffled)
+		if again := mustMixedCyclePaths(t, reordered); !reflect.DeepEqual(again, got) {
+			t.Fatalf("trial %d: the same edges in another order produced %v, want %v", trial, again, got)
+		}
+	}
+	if widenedBeyondDefault == 0 {
+		t.Fatal("no generated graph had a widened report larger than a non-empty default one; the generator is not exercising mixed cycles")
 	}
 }
 
@@ -349,7 +518,7 @@ func TestCanonicalMixedCyclePathsIsIndependentOfMapOrder(t *testing.T) {
 			graph[edge.from] = append(graph[edge.from], MixedCycleEdge{To: edge.to, Scheduling: edge.scheduling})
 		}
 
-		got := CanonicalMixedCyclePaths(graph)
+		got := mustMixedCyclePaths(t, graph)
 		if attempt == 0 {
 			first = got
 			continue
