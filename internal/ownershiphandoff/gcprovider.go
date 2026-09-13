@@ -23,6 +23,10 @@ const defaultGCHandoffTimeout = 30 * time.Second
 
 const maxGCHandoffProtocolOutput = 1 << 20
 
+// gcHandoffPipeDrainDelay bounds how long a killed protocol command may hold
+// the inherited output pipes open before Wait gives up on them.
+const gcHandoffPipeDrainDelay = 100 * time.Millisecond
+
 // GCProvider invokes the explicit hidden Gas City handoff protocol. The
 // binary path must be absolute, canonical, and executable; no PATH lookup or
 // process-state fallback is permitted.
@@ -265,18 +269,30 @@ func protocolCommandError(ctx context.Context, runErr error, stderr string) erro
 	return fmt.Errorf("GC handoff protocol command failed: %w", runErr)
 }
 
+// limitedBuffer collects bounded protocol output. bytes.Buffer is a field
+// rather than an embedded type deliberately: embedding promotes ReadFrom, and
+// io.Copy prefers an io.ReaderFrom destination, so os/exec would fill the
+// buffer without ever calling Write and the limit would not apply at all.
 type limitedBuffer struct {
-	bytes.Buffer
+	buf   bytes.Buffer
 	limit int
 }
 
+// Write rejects a write that would only partially fit rather than truncating
+// it, so the effective cap depends on where the pipe happens to chunk. That is
+// fail-closed — output is refused at or before the limit, never accepted past
+// it — and the caller only ever reports that the command overran.
 func (b *limitedBuffer) Write(p []byte) (int, error) {
-	remaining := b.limit - b.Len()
+	remaining := b.limit - b.buf.Len()
 	if remaining <= 0 || len(p) > remaining {
 		return 0, errors.New("GC handoff protocol output exceeds limit")
 	}
-	return b.Buffer.Write(p)
+	return b.buf.Write(p)
 }
+
+func (b *limitedBuffer) Bytes() []byte { return b.buf.Bytes() }
+
+func (b *limitedBuffer) String() string { return b.buf.String() }
 
 func decodeGCResponse(raw []byte) (gcHandoffResponse, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))

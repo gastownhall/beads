@@ -83,9 +83,15 @@ func TestGCProviderRejectsUntrustedBinary(t *testing.T) {
 	}
 }
 
+// TestGCProviderCanonicalizesSymlinkedAncestor pins the EvalSymlinks step in
+// canonicalGCExecutable. Both directories come from canonicalTestDir: where the
+// temp root is itself reached through a symlink (macOS resolves /var to
+// /private/var, and any TMPDIR may be), a raw t.TempDir() makes this assertion
+// compare two already-divergent paths, so the test fails whether or not the
+// provider canonicalises — which is how the fence ended up unguarded.
 func TestGCProviderCanonicalizesSymlinkedAncestor(t *testing.T) {
-	physical := t.TempDir()
-	link := filepath.Join(t.TempDir(), "gc-bin-dir")
+	physical := canonicalTestDir(t)
+	link := filepath.Join(canonicalTestDir(t), "gc-bin-dir")
 	if err := os.Symlink(physical, link); err != nil {
 		t.Fatal(err)
 	}
@@ -415,6 +421,17 @@ func TestGCProviderResumeAfterStoppedOwnerDoesNotReinspectSnapshot(t *testing.T)
 	}
 }
 
+// TestGCProviderTimeoutKillsPipeHoldingDescendant pins the Setpgid plus
+// kill-the-process-group cancel in gcprovider_command_unix.go: an expired
+// protocol command must take the whole group with it, or a descendant holding
+// the inherited stdout pipe outlives the deadline.
+//
+// The deadline is gated on the fixture's pid file appearing rather than on a
+// fixed wall clock. A short provider timeout races /bin/sh startup, so the fake
+// was regularly killed before it had forked the descendant this test is about,
+// and the test then failed reading the pid file whether or not the fence was
+// intact. The provider timeout stays as a generous backstop so a fixture that
+// never becomes ready fails rather than hangs.
 func TestGCProviderTimeoutKillsPipeHoldingDescendant(t *testing.T) {
 	city := canonicalTestDir(t)
 	scope := filepath.Join(city, "scope")
@@ -431,33 +448,145 @@ func TestGCProviderTimeoutKillsPipeHoldingDescendant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider.(*GCProvider).timeout = 10 * time.Millisecond
+	provider.(*GCProvider).timeout = defaultGCHandoffTimeout
 	request := Request{CityRoot: city, Root: scope, Database: "beads", Workspace: "ws", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
-	started := time.Now()
+	hooks, err := provider.OwnershipHandoffHooks(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan descendantReady, 1)
+	go func() {
+		ready <- awaitDescendant(pidPath, 10*time.Second)
+		cancel()
+	}()
+	if _, err := hooks.Snapshot(ctx, request); err == nil {
+		t.Fatal("provider accepted an expired protocol command")
+	}
+	returned := time.Now()
+	descendant := <-ready
+	if descendant.pid <= 0 {
+		t.Fatalf("fixture never recorded a pipe-holding descendant at %s", pidPath)
+	}
+	if elapsed := returned.Sub(descendant.at); elapsed > 500*time.Millisecond {
+		t.Fatalf("expired command returned %s after its deadline, want bounded pipe drain", elapsed)
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for processAlive(descendant.pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processAlive(descendant.pid) {
+		t.Fatalf("pipe-holding descendant %d survived timeout", descendant.pid)
+	}
+}
+
+// descendantReady reports the fixture's pipe-holding descendant and the moment
+// it became observable, which is when the command's deadline is released.
+type descendantReady struct {
+	pid int
+	at  time.Time
+}
+
+// awaitDescendant polls for a fully written pid file. It requires a parseable
+// positive pid, so a shell redirect caught mid-write is retried rather than
+// read as a failure.
+func awaitDescendant(path string, timeout time.Duration) descendantReady {
+	deadline := time.Now().Add(timeout)
+	for {
+		if raw, err := os.ReadFile(path); err == nil { //nolint:gosec // test fixture path
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && pid > 0 {
+				return descendantReady{pid: pid, at: time.Now()}
+			}
+		}
+		if time.Now().After(deadline) {
+			return descendantReady{at: time.Now()}
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestGCProviderRejectsOversizedProtocolOutput pins maxGCHandoffProtocolOutput
+// itself, not just the plumbing: the fake answers a well-formed, decodable
+// response whose only fault is size, so raising the cap makes this succeed. The
+// oversized width is stated here as a literal rather than derived from the
+// constant, or raising the constant would merely make the fixture slower.
+func TestGCProviderRejectsOversizedProtocolOutput(t *testing.T) {
+	const documentedCap = 1 << 20
+	if maxGCHandoffProtocolOutput != documentedCap {
+		t.Fatalf("output cap = %d, want the documented %d bytes", maxGCHandoffProtocolOutput, documentedCap)
+	}
+	city := canonicalTestDir(t)
+	scope := filepath.Join(city, "scope")
+	if err := os.Mkdir(scope, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeGCProtocol(t)
+	t.Setenv("GC_HANDOFF_LOG", filepath.Join(city, "gc.log"))
+	t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(city, "gc.err"))
+	t.Setenv("GC_HANDOFF_PAD", strconv.Itoa(documentedCap+1024))
+	request := Request{CityRoot: city, Root: scope, Database: "beads", Workspace: "ws", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
+	provider, err := NewGCProvider(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
 	hooks, err := provider.OwnershipHandoffHooks(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := hooks.Snapshot(context.Background(), request); err == nil {
-		t.Fatal("provider accepted a timed-out protocol command")
+		t.Fatalf("provider accepted a response larger than the %d byte output cap", documentedCap)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("timed-out command returned after %s, want bounded pipe drain", elapsed)
+	// The same response under the cap must still be accepted, so the test fails
+	// on the size rule rather than on the padding itself.
+	t.Setenv("GC_HANDOFF_PAD", "1024")
+	if _, err := hooks.Snapshot(context.Background(), request); err != nil {
+		t.Fatalf("provider refused a padded but in-bounds response: %v", err)
 	}
-	rawPID, err := os.ReadFile(pidPath)
+}
+
+// TestGCProviderStopRejectsForeignSnapshotSentinel pins the sentinel match in
+// snapshotIdentityToken. The journal's snapshot metadata and its sentinel are
+// two durable fields that a tampered or truncated journal can disagree on;
+// without the match, the stop would proceed on a token the snapshot never
+// witnessed.
+func TestGCProviderStopRejectsForeignSnapshotSentinel(t *testing.T) {
+	city := canonicalTestDir(t)
+	scope := filepath.Join(city, "scope")
+	if err := os.Mkdir(scope, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := fakeGCProtocol(t)
+	t.Setenv("GC_HANDOFF_LOG", filepath.Join(city, "gc.log"))
+	t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(city, "gc.err"))
+	request := Request{CityRoot: city, Root: scope, Database: "beads", Workspace: "ws", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
+	provider, err := NewGCProvider(binary)
 	if err != nil {
-		t.Fatalf("read descendant pid: %v", err)
+		t.Fatal(err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	hooks, err := provider.OwnershipHandoffHooks(context.Background(), request)
 	if err != nil {
-		t.Fatalf("parse descendant pid %q: %v", rawPID, err)
+		t.Fatal(err)
 	}
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for processAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	snapshot, err := hooks.Snapshot(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if processAlive(pid) {
-		t.Fatalf("pipe-holding descendant %d survived timeout", pid)
+	if snapshot.Sentinel != fakeHandoffToken {
+		t.Fatalf("snapshot sentinel = %q, want the inspected identity token", snapshot.Sentinel)
+	}
+	forged := Snapshot{Metadata: snapshot.Metadata,
+		Sentinel: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
+	err = hooks.StopLegacy(context.Background(), request, forged)
+	if handoffErrorCode(err, "") != "identity_changed" {
+		t.Fatalf("stop with a mismatched sentinel returned %v, want identity_changed", err)
+	}
+	log, readErr := os.ReadFile(filepath.Join(city, "gc.log"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := strings.TrimSpace(string(log)); got != "handoff-inspect" {
+		t.Fatalf("protocol operations=%q, want the stop refused before it was invoked", got)
 	}
 }
 
@@ -580,7 +709,13 @@ else
 fi
 if [ -n "$GC_HANDOFF_DATABASE" ]; then database="$GC_HANDOFF_DATABASE"; fi
 if [ -n "$GC_HANDOFF_TOKEN" ]; then token="$GC_HANDOFF_TOKEN"; else token="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; fi
-printf '{"schema_version":1,"operation":"%s","result":"%s","owner":"legacy-gc","mutates":%s,"identity":{"city_root":"%s","scope_root":"%s","database":"%s","workspace":"%s","endpoint":%s,"data_dir":"%s/.gc/data","config_file":"%s/.gc/config","pid":%s,"start_identity":"fake","start_time_ticks":1,"port_holder_pid":%s},"identity_token":"%s","error_code":"%s"}\n' "$operation" "$result" "$mutates" "$city" "$scope" "$database" "$workspace" "$endpoint" "$city" "$city" "$$" "$$" "$token" "$error_code"
+# GC_HANDOFF_PAD inflates an otherwise valid response past the output cap.
+if [ -n "$GC_HANDOFF_PAD" ]; then
+  start_identity=$(head -c "$GC_HANDOFF_PAD" /dev/zero | tr '\0' 'x')
+else
+  start_identity=fake
+fi
+printf '{"schema_version":1,"operation":"%s","result":"%s","owner":"legacy-gc","mutates":%s,"identity":{"city_root":"%s","scope_root":"%s","database":"%s","workspace":"%s","endpoint":%s,"data_dir":"%s/.gc/data","config_file":"%s/.gc/config","pid":%s,"start_identity":"%s","start_time_ticks":1,"port_holder_pid":%s},"identity_token":"%s","error_code":"%s"}\n' "$operation" "$result" "$mutates" "$city" "$scope" "$database" "$workspace" "$endpoint" "$city" "$city" "$$" "$start_identity" "$$" "$token" "$error_code"
 `
 	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
 		t.Fatal(err)

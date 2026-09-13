@@ -6,10 +6,7 @@ import (
 	"errors"
 	"os/exec"
 	"syscall"
-	"time"
 )
-
-const gcHandoffPipeDrainDelay = 100 * time.Millisecond
 
 func configureGCHandoffCommand(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
