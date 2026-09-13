@@ -727,7 +727,9 @@ func (s *EmbeddedDoltStore) BackupRemove(ctx context.Context, name string) error
 
 // BackupDatabase registers dir as a file:// Dolt backup remote and syncs
 // the database to it. The dir must exist locally. This preserves full Dolt
-// commit history.
+// commit history. It stays directory-only on purpose: backup to a remote URL
+// goes through BackupAdd and BackupSync, while RestoreDatabase accepts a
+// directory or a URL.
 func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -765,19 +767,11 @@ func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) erro
 	})
 }
 
-// RestoreDatabase restores the database from a Dolt backup at dir.
-// The dir must exist locally and contain a valid Dolt backup.
+// RestoreDatabase restores the database from a local backup directory or a
+// backup URL accepted by DOLT_BACKUP (see versioncontrolops.ResolveBackupSource).
 // When force is true, an existing database is overwritten.
-func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup source does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup source is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, source string, force bool) error {
+	backupURL, err := versioncontrolops.ResolveBackupSource(source)
 	if err != nil {
 		return err
 	}
