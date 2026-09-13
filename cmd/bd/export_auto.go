@@ -130,8 +130,8 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	if !allowEmptyOverwrite {
 		if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, fullPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
-			return nil
+			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL %s: %v\n", fullPath, err)
+			return fmt.Errorf("auto-export skipped: failed to check existing JSONL %s: %w", fullPath, err)
 		} else if skip {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
 			return nil
@@ -139,8 +139,8 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	}
 	if !allowEmptyOverwrite {
 		if missingIDs, err := missingJSONLIssueIDsInStore(ctx, fullPath, state.LastDiffAnchor); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
-			return nil
+			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL %s against local store: %v\n", fullPath, err)
+			return fmt.Errorf("auto-export skipped: failed to compare existing JSONL %s against local store: %w", fullPath, err)
 		} else if len(missingIDs) > 0 {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, len(missingIDs), strings.Join(sampleStrings(missingIDs, 5), ", "))
 			return nil

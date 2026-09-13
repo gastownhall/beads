@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
@@ -408,6 +409,96 @@ func TestMaybeAutoExportFallsBackToHeadCommit(t *testing.T) {
 
 	if fake.currentCommitCalls != 1 {
 		t.Fatalf("GetCurrentCommit calls = %d, want 1 (fallback when StateHasher is absent)", fake.currentCommitCalls)
+	}
+}
+
+func TestMaybeAutoExportFailsWhenExistingJSONLIsInvalid(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	store = &fakeStateHashStore{stateHash: "changed-state"}
+
+	dir := autoExportTestDir(t)
+	path := filepath.Join(dir, ".beads", "issues.jsonl")
+	conflictMarkers := "<<<<<<< HEAD\n{\"id\":\"bd-main\"}\n=======\n{\"id\":\"bd-branch\"}\n>>>>>>> branch\n"
+	if err := os.WriteFile(path, []byte(conflictMarkers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := maybeAutoExport(context.Background(), false)
+	if err == nil {
+		t.Fatal("maybeAutoExport succeeded with an invalid existing JSONL file")
+	}
+	if !strings.Contains(err.Error(), "failed to check existing JSONL") {
+		t.Fatalf("maybeAutoExport error = %q, want existing JSONL check context", err)
+	}
+}
+
+func TestMaybeAutoExport_WorktreeRedirectWarningUsesResolvedPath(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	store = &fakeStateHashStore{stateHash: "changed-state"}
+
+	mainRepo := filepath.Join(t.TempDir(), "main")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit(mainRepo, "init", "-q")
+	runGit(mainRepo, "config", "user.email", "test@example.com")
+	runGit(mainRepo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(mainRepo, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(mainRepo, "add", "README.md")
+	runGit(mainRepo, "commit", "-qm", "initial")
+
+	mainBeadsDir := filepath.Join(mainRepo, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "metadata.json"), []byte(`{"database":"beads","backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	worktree := filepath.Join(filepath.Dir(mainRepo), "worktree")
+	runGit(mainRepo, "worktree", "add", "-q", "-b", "redirect-test", worktree)
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", mainRepo, "worktree", "remove", "--force", worktree).Run()
+	})
+	worktreeBeadsDir := filepath.Join(worktree, ".beads")
+	if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeBeadsDir, "redirect"), []byte(mainBeadsDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(mainBeadsDir, "issues.jsonl")
+	if err := os.WriteFile(path, []byte("<<<<<<< HEAD\n=======\n>>>>>>> branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(worktree)
+	t.Setenv("BEADS_DIR", "")
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+
+	var err error
+	stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err == nil {
+		t.Fatal("maybeAutoExport succeeded with an invalid redirected JSONL file")
+	}
+	if !strings.Contains(stderr, path) {
+		t.Fatalf("warning path = %q, want resolved checked path %q", stderr, path)
 	}
 }
 
