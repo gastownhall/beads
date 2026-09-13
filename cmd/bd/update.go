@@ -984,7 +984,21 @@ func init() {
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
 	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
-	updateCmd.Flags().StringSlice("add-label", nil, "Add labels (repeatable)")
+	// -l is the shorthand for --add-label, matching `bd create -l`.
+	//
+	// WHY: `bd create` registers labels as StringSliceP("labels", "l", ...), so
+	// `bd create -l foo` works. `bd update -l foo` did not, and cobra's response
+	// to an unknown shorthand is to print usage and exit 1. That is a correct
+	// failure, but it is a SILENT one to any caller that does not check the exit
+	// code — and callers copying the `create` form have no reason to expect the
+	// flag to differ. In one deployment this caused issues to be believed
+	// labeled when they were not, for as long as it took someone to check the
+	// label by hand.
+	//
+	// Additive rather than a rename: --add-label keeps working unchanged.
+	// -l maps to ADD (not set) because add is the non-destructive reading and
+	// matches what `create -l` does on a new issue.
+	updateCmd.Flags().StringSliceP("add-label", "l", nil, "Add labels (repeatable); -l matches `bd create -l`")
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
