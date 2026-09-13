@@ -51,7 +51,7 @@ const IssueBaseColumns = `id, content_hash, title, description, design, acceptan
 	       await_type, await_id, timeout_ns, waiters,
 	       mol_type,
 	       event_kind, actor, target, payload,
-	       due_at, defer_until,
+	       due_at, defer_until, due_missed,
 	       work_type, source_system, metadata, row_lock, storage_class`
 
 // IssueBaseColumnsLite is IssueBaseColumns minus the heavy TEXT columns
@@ -69,7 +69,7 @@ const IssueBaseColumnsLite = `id, content_hash, title,
 	       await_type, await_id, timeout_ns,
 	       mol_type,
 	       event_kind, actor, target,
-	       due_at, defer_until,
+	       due_at, defer_until, due_missed,
 	       work_type, source_system, metadata, row_lock, storage_class`
 
 // LeaseSelectColumns is the lease overlay for full issue hydration. Leases

@@ -99,6 +99,14 @@ type Issue struct {
 	DueAt      *time.Time `json:"due_at,omitempty"`      // When this issue should be completed
 	DeferUntil *time.Time `json:"defer_until,omitempty"` // Hide from bd ready until this time
 
+	// DueMissed counts how many times DueAt has ARRIVED with the work still
+	// open. The due sweep is its only writer; nothing sets it by hand, and no
+	// create or update path may declare it. It is what makes a repeated miss
+	// legible — a deadline rescheduled forever at the same priority is a nag,
+	// not an escalation — and what the single priority raise at
+	// issueops.DueMissEscalateAt stands on.
+	DueMissed int `json:"due_missed,omitempty"`
+
 	// ===== External Integration =====
 	ExternalRef  *string `json:"external_ref,omitempty"`  // e.g., "gh-9", "jira-ABC"
 	SourceSystem string  `json:"source_system,omitempty"` // Adapter/system that created this issue (federation)
@@ -1623,6 +1631,11 @@ const (
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"
+	// EventDue records that a bead's due date arrived with the work still
+	// open. It is the rail an external watcher consumes to learn that work
+	// came due, in the same shape as every other audit event: old_value is
+	// the due date that fired, new_value the one the sweep rescheduled it to.
+	EventDue EventType = "due"
 )
 
 // ProvenanceEvent is one entry in the append-only provenance log: a typed

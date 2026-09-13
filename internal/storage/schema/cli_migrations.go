@@ -138,6 +138,13 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// Replays over a database that never synced the wisp tables must use
 		// the frozen source text instead -- see cliSubstituteAssumesWispTables.
 		return cliMigration0067AddVersionedBeadsSchema
+	case "0068_add_due_missed.up.sql":
+		// Direct DDL for the same reason as 0060: the source migration's
+		// PREPARE guards are what make the raw .up.sql idempotent on replay,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. A fresh bundle runs
+		// the whole main series in order, so both planes exist here and
+		// neither carries due_missed yet.
+		return cliMigration0068AddDueMissed
 	default:
 		return sqlText
 	}
@@ -173,6 +180,10 @@ func cliSubstituteAssumesWispTables(name string) bool {
 	case "0067_add_versioned_beads_schema.up.sql":
 		// cliMigration0067AddVersionedBeadsSchema drops the source's
 		// @wisps_cr_needs_add table-exists guard and ALTERs wisps directly.
+		return true
+	case "0068_add_due_missed.up.sql":
+		// cliMigration0068AddDueMissed drops the source's @has_wisps guard
+		// and ALTERs wisps directly.
 		return true
 	default:
 		return false
@@ -217,6 +228,9 @@ ALTER TABLE wisps DROP COLUMN heartbeat_at;`
 
 const cliMigration0060AddStorageClass = `ALTER TABLE issues ADD COLUMN storage_class VARCHAR(16);
 ALTER TABLE wisps ADD COLUMN storage_class VARCHAR(16);`
+
+const cliMigration0068AddDueMissed = `ALTER TABLE issues ADD COLUMN due_missed INT NOT NULL DEFAULT 0;
+ALTER TABLE wisps ADD COLUMN due_missed INT NOT NULL DEFAULT 0;`
 
 const cliMigration0065WidenWispCommentsText = `ALTER TABLE wisp_comments MODIFY COLUMN text LONGTEXT NOT NULL;`
 const cliMigration0066AddEventsJournalActor = `ALTER TABLE bd_events_journal ADD COLUMN actor VARCHAR(255) NOT NULL DEFAULT '';`

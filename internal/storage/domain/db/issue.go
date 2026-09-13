@@ -768,7 +768,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			mol_type, work_type, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
-			due_at, defer_until, metadata,
+			due_at, defer_until, due_missed, metadata,
 			row_lock, storage_class
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
@@ -779,7 +779,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?,
+			?, ?, ?, ?,
 			?, ?
 		)
 		ON DUPLICATE KEY UPDATE
@@ -801,6 +801,11 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			source_repo = VALUES(source_repo),
 			close_reason = VALUES(close_reason),
 			metadata = VALUES(metadata),
+			-- due_missed is deliberately absent, exactly as due_at is: both are
+			-- state the local due sweep maintains by WATCHING this bead, and an
+			-- importer carrying a stale count would erase escalation history
+			-- the sweep earned. A first insert still carries the value; only an
+			-- update of a row this workspace already has keeps the local one.
 			row_lock = VALUES(row_lock)
 	`, table),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
@@ -811,7 +816,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		string(issue.MolType), string(issue.WorkType), issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
-		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
+		issue.DueAt, issue.DeferUntil, issue.DueMissed, jsonMetadata(issue.Metadata),
 		issueops.FreshRowLock(), nullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {

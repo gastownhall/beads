@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the beads due sweep on a fixed cadence
+Documentation=https://github.com/gastownhall/beads/blob/main/contrib/systemd/README.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+# A laptop that was asleep at the appointed minute still owes the sweep. Without
+# this, every missed tick is simply gone and a deadline that arrived overnight
+# waits for the next boot plus a full interval before anyone hears about it.
+Persistent=true
+
+# Sweeps across several workspaces (or several machines reading one remote)
+# otherwise align on the same instant forever.
+RandomizedDelaySec=30
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

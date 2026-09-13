@@ -47,56 +47,46 @@ func (s *DoltStore) SearchIssuesWithCounts(ctx context.Context, query string, fi
 	return result, err
 }
 
-// wakeExpiredDefers runs the lazy defer-wake sweep (issueops.WakeExpiredDefersInTx)
-// in its own write transaction before a ready-work read. Advisory by contract:
-// a ready listing must never fail because the sweep could not run, so every
-// error is swallowed here — silently for the expected shapes (read-only store,
-// open write circuit, closed store), with a stderr warning otherwise. It runs
+// runScheduledSweeps runs the lazy time-based sweeps
+// (issueops.RunScheduledSweepsInTx: defer wake + due trigger) in their own
+// write transaction before a ready-work read. Advisory by contract: a ready
+// listing must never fail because a sweep could not run, so every error is
+// swallowed here — silently for the expected shapes (read-only store, open
+// write circuit, closed store), with a stderr warning otherwise. It runs
 // OUTSIDE the read tx below because withReadTx unconditionally rolls back (and
 // may retry its body on the read-only justification).
-func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
+//
+// The body lives on RunScheduledSweeps (due_sweep.go), which `bd due sweep`
+// and the external clock call directly; this is that same pass with its
+// result discarded and its error reduced to a warning.
+func (s *DoltStore) runScheduledSweeps(ctx context.Context) {
 	if s.readOnly {
 		return
 	}
-	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
-		return s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
-			woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
-			if err != nil {
-				return nil, "", err
-			}
-			if len(woke.Issues) == 0 {
-				// Wisp-only wakes persist with the SQL commit but mint no
-				// version commit: wisp tables are dolt_ignored.
-				return nil, "", nil
-			}
-			tables := issueops.ChangedTables{}
-			tables.Add("issues", "events")
-			return tables, issueops.WakeDefersCommitMessage(len(woke.Issues)), nil
-		})
-	})
-	if err != nil && !errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrStoreClosed) {
-		warnDeferWakeSweepSkipped(err)
+	if _, err := s.RunScheduledSweeps(ctx); err != nil &&
+		!errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrStoreClosed) {
+		warnScheduledSweepSkipped(err)
 	}
 }
 
-// deferWakeAccessDeniedOnce rate-limits the access-denied advisory to one
+// scheduledSweepAccessDeniedOnce rate-limits the access-denied advisory to one
 // warning per process: a read-only-privileged SQL user hits it on every
 // ready-front read, and repeating a configuration fact on each `bd ready`
 // is noise, not signal.
-var deferWakeAccessDeniedOnce sync.Once
+var scheduledSweepAccessDeniedOnce sync.Once
 
-func warnDeferWakeSweepSkipped(err error) {
+func warnScheduledSweepSkipped(err error) {
 	if dberrors.IsAccessDenied(err) {
-		deferWakeAccessDeniedOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped (SQL user lacks write privileges; expired defers will not auto-wake from this client): %v\n", err)
+		scheduledSweepAccessDeniedOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "warning: scheduled sweep skipped (SQL user lacks write privileges; expired defers will not auto-wake and due beads will not fire from this client): %v\n", err)
 		})
 		return
 	}
-	fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped: %v\n", err)
+	fmt.Fprintf(os.Stderr, "warning: scheduled sweep skipped: %v\n", err)
 }
 
 func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
-	s.wakeExpiredDefers(ctx)
+	s.runScheduledSweeps(ctx)
 	var result []*types.Issue
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
@@ -107,7 +97,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 }
 
 func (s *DoltStore) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
-	s.wakeExpiredDefers(ctx)
+	s.runScheduledSweeps(ctx)
 	var result []*types.IssueWithCounts
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
@@ -122,7 +112,7 @@ func (s *DoltStore) GetReadyWorkWithCounts(ctx context.Context, filter types.Wor
 // cheap indexed COUNT(*)s instead of re-running the counts mega-query. Backs the
 // storage.ReadyWorkCounter capability.
 func (s *DoltStore) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
-	s.wakeExpiredDefers(ctx)
+	s.runScheduledSweeps(ctx)
 	var n int
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
