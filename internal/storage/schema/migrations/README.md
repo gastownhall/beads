@@ -4,15 +4,41 @@ Migration files here are **frozen once merged** (`scripts/check-migration-hygien
 check C): editing one forks fresh clones from upgraded clones through the
 recorded content hash. A migration that FAILS on drifted databases cannot be
 fixed forward with a new migration either, because the failing file aborts the
-pass before any higher version runs. The escape hatch is a **pre-migration
-repair** in Go, keyed to the pending version — see the header of
-`../migration_repairs.go` and the `preMigrationRepairs` registry.
+pass before any higher version runs.
+
+There are two narrow Go escape hatches, selected by what must change:
+
+- Use a **pre-migration repair**, keyed to the pending source/version, when the
+  database's existing state must be normalized before the frozen SQL can run.
+  See the header of `../migration_repairs.go` and the
+  `preMigrationRepairs` registry.
+- Use an **execution adapter** when the frozen migration's semantics stay the
+  same but its runtime SQL needs a reviewed operational aid, such as runtime
+  indexes or a bounded execution plan. See
+  `../migration_execution_adapter.go`. An adapter must match the
+  exact source, version, filename, and SHA-256; fail closed on any drift; modify
+  only runtime execution; and leave the embedded bytes and recorded
+  content hash unchanged. Cover it with structural/wiring tests, a real-Dolt
+  semantic differential, interruption/retry convergence, and a stated,
+  repeatable production-shaped measurement.
 
 ## Measured Dolt behaviours
 
 These were measured against real Dolt (2.1.2 and 2.2.3) and confirmed against
 Dolt/GMS source while fixing migration 0058. Each one has already cost a
 redesign; they are recorded here so the next author does not re-derive them.
+
+**Migration 0059 needs its exact-hash linear execution adapter.** On a
+production-shaped schema-v58 clone (285 issues, 11,654 wisps, and 14,146 wisp
+dependencies), the frozen recursive SQL was still running after two hours. An
+index-only execution copy preserved the exact output but took 517 seconds. The
+version/name/SHA-pinned Go graph adapter completed the full v58-to-v66 pass in
+8 seconds and produced byte-for-byte identical issue and wisp blocked-state
+hashes. It uses no helper DDL because pinned Dolt 2.2.0 panicked while indexing
+a temporary table; bounded in-memory graph evaluation plus transactional,
+sorted issue updates is the retry-safe path. See upstream issue #6520 and the
+real-Dolt differential/retry tests in
+`internal/storage/embeddeddolt/migrate_0059_execution_adapter_test.go`.
 
 **DDL is not transactional across statements.** Each DDL statement implicitly
 commits, so `START TRANSACTION` … `ALTER` … `ROLLBACK` leaves the table altered.
