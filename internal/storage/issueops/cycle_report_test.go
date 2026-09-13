@@ -1,6 +1,7 @@
 package issueops
 
 import (
+	"fmt"
 	"maps"
 	"math/rand"
 	"reflect"
@@ -335,18 +336,22 @@ func mustMixedCyclePaths(t *testing.T, graph map[string][]MixedCycleEdge) [][]st
 
 // TestCloseMixedCycleReportsAMissingReturnPathAsAnError pins the invariant
 // breach as an error rather than a panic. CanonicalMixedCyclePaths cannot
-// reach it (it only closes edges inside a strongly connected component), so the
-// helper is exercised directly with an edge that has no way back.
+// reach it (it only closes edges inside a strongly connected component, from a
+// tree rooted at the edge's target), so the helper is exercised directly: once
+// with an edge that has no way back, and once with a tree rooted elsewhere,
+// where the climb must stop instead of looping at the wrong root.
 func TestCloseMixedCycleReportsAMissingReturnPathAsAnError(t *testing.T) {
-	cycle, err := closeMixedCycle(map[string][]string{"a": {"b"}}, "a", "b")
-	if err == nil {
-		t.Fatalf("closeMixedCycle = %v, nil error; want an error: b cannot reach a", cycle)
+	everyone := map[string]bool{"a": true, "b": true, "c": true}
+	oneWay := map[string][]string{"a": {"b"}}
+	if cycle, err := closeMixedCycle(shortestPathTree(oneWay, everyone, "b"), "a", "b"); err == nil || cycle != nil {
+		t.Fatalf("closeMixedCycle = %v, %v; want nil and an error: b cannot reach a", cycle, err)
 	}
-	if cycle != nil {
-		t.Errorf("closeMixedCycle returned %v alongside its error, want nil", cycle)
+	if cycle, err := closeMixedCycle(shortestPathTree(oneWay, everyone, "a"), "a", "b"); err == nil || cycle != nil {
+		t.Fatalf("closeMixedCycle from a tree rooted at a = %v, %v; want nil and an error", cycle, err)
 	}
 
-	cycle, err = closeMixedCycle(map[string][]string{"a": {"c"}, "c": {"b"}, "b": {"a"}}, "c", "b")
+	triangle := map[string][]string{"a": {"c"}, "c": {"b"}, "b": {"a"}}
+	cycle, err := closeMixedCycle(shortestPathTree(triangle, everyone, "b"), "c", "b")
 	if err != nil {
 		t.Fatalf("closeMixedCycle on a real cycle: %v", err)
 	}
@@ -529,5 +534,93 @@ func TestCanonicalMixedCyclePathsIsIndependentOfMapOrder(t *testing.T) {
 	}
 	if len(first) == 0 {
 		t.Fatal("the fixture graph has qualifying cycles; the detector found none")
+	}
+}
+
+// TestShortestPathTreeClosesEachEdgeAsAPerEdgeSearchDid pins the shared search
+// to the answer it replaced. Over generated graphs, every edge inside a strongly
+// connected component is closed from one tree per target, confined to the
+// component, and compared with reachPath run from scratch for that one edge over
+// the whole graph. Ties between equally short return paths must break the same
+// way too, or the report would change.
+func TestShortestPathTreeClosesEachEdgeAsAPerEdgeSearchDid(t *testing.T) {
+	ids := []string{"a", "b", "c", "d", "e", "f", "g"}
+	rng := rand.New(rand.NewSource(61482))
+	closedEdges := 0
+	for trial := range 400 {
+		n := 2 + rng.Intn(len(ids)-1)
+		// The normalization CanonicalMixedCyclePaths applies: sorted,
+		// deduplicated targets, and every target is a node.
+		plain := map[string][]string{}
+		nodeSet := map[string]bool{}
+		for range rng.Intn(3 * n) {
+			from, to := ids[rng.Intn(n)], ids[rng.Intn(n)]
+			plain[from] = append(plain[from], to)
+			nodeSet[from], nodeSet[to] = true, true
+		}
+		adjacency := map[string][]MixedCycleEdge{}
+		for from, targets := range plain {
+			slices.Sort(targets)
+			plain[from] = slices.Compact(targets)
+			for _, to := range plain[from] {
+				adjacency[from] = append(adjacency[from], MixedCycleEdge{To: to, Scheduling: true})
+			}
+		}
+
+		for _, component := range mixedStronglyConnectedComponents(adjacency, slices.Sorted(maps.Keys(nodeSet))) {
+			members := map[string]bool{}
+			for _, node := range component {
+				members[node] = true
+			}
+			for _, to := range component {
+				tree := shortestPathTree(plain, members, to)
+				for _, from := range component {
+					if !slices.Contains(plain[from], to) {
+						continue
+					}
+					got, err := closeMixedCycle(tree, from, to)
+					if err != nil {
+						t.Fatalf("trial %d, graph %v: edge %s -> %s: %v", trial, plain, from, to, err)
+					}
+					back := reachPath(plain, to, from)
+					want := rotateToLowest(append([]string{from}, back[:len(back)-1]...))
+					if !slices.Equal(got, want) {
+						t.Fatalf("trial %d, graph %v: edge %s -> %s closes as %v, a per-edge search gave %v",
+							trial, plain, from, to, got, want)
+					}
+					closedEdges++
+				}
+			}
+		}
+	}
+	if closedEdges == 0 {
+		t.Fatal("no generated graph had an edge inside a component; the generator is not exercising the search")
+	}
+}
+
+// BenchmarkCanonicalMixedCyclePathsDenseTangle is the worst case a review of
+// #6148 named: a blocks edge i -> j for every pair of n issues with i < j, and
+// one tracks edge from the last issue back to the first, which makes all n a
+// single strongly connected component. It holds n(n-1)/2 scheduling edges but
+// only n-1 distinct edge targets.
+func BenchmarkCanonicalMixedCyclePathsDenseTangle(b *testing.B) {
+	const n = 80
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("n%03d", i)
+	}
+	graph := make(map[string][]MixedCycleEdge, n)
+	for i := range n {
+		for j := i + 1; j < n; j++ {
+			graph[ids[i]] = append(graph[ids[i]], MixedCycleEdge{To: ids[j], Scheduling: true})
+		}
+	}
+	graph[ids[n-1]] = append(graph[ids[n-1]], MixedCycleEdge{To: ids[0]})
+
+	b.ResetTimer()
+	for range b.N {
+		if _, err := CanonicalMixedCyclePaths(graph); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

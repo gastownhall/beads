@@ -112,6 +112,11 @@ func CanonicalCyclePaths(graph map[string][]string) [][]string {
 // cycle made only of tracks edges is never reported, which keeps out the
 // "thousands of cycles" regression AppendMixedCycleGraphInTx documents.
 //
+// COST: one breadth-first search per distinct scheduling-edge target inside a
+// component, confined to that component, and shared by every edge into that
+// target. On a component of V nodes and E edges that is O(V(V+E)). A search per
+// edge was O(E(V+E)), and on a dense tangle E grows with the square of V.
+//
 // Nodes, adjacency lists, components, and return paths are all ordered, so the
 // answer depends only on the graph, not on Go map or SQL row order. The error
 // is a broken internal invariant (see closeMixedCycle), never a property of
@@ -153,41 +158,106 @@ func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) ([][]string, er
 
 	cycles := CanonicalCyclePaths(schedulingOnly)
 	for _, component := range mixedStronglyConnectedComponents(adjacency, nodes) {
-		members := make(map[string]bool, len(component))
-		for _, node := range component {
-			members[node] = true
+		closed, err := closeComponentSchedulingEdges(adjacency, plain, component)
+		if err != nil {
+			return nil, err
 		}
-		for _, from := range component {
-			for _, edge := range adjacency[from] {
-				if !edge.Scheduling || !members[edge.To] {
-					continue
-				}
-				cycle, err := closeMixedCycle(plain, from, edge.To)
-				if err != nil {
-					return nil, err
-				}
-				cycles = append(cycles, cycle)
-			}
-		}
+		cycles = append(cycles, closed...)
 	}
 	slices.SortFunc(cycles, slices.Compare)
 	return slices.CompactFunc(cycles, slices.Equal), nil
 }
 
-// closeMixedCycle returns the canonical cycle the edge from -> to closes: from,
-// followed by the shortest path in graph from `to` back to `from`.
+// closeComponentSchedulingEdges closes every scheduling edge inside one strongly
+// connected component, which is set 2 of CanonicalMixedCyclePaths.
 //
-// The caller passes only edges inside one strongly connected component, so a
-// return path always exists. When it does not, the invariant is broken, and
-// that is returned as an error rather than a panic: the caller is a read that
-// `bd dep cycles --include-tracks` runs, and a crash there would hide every
-// other cycle behind a stack trace.
-func closeMixedCycle(graph map[string][]string, from, to string) ([]string, error) {
-	returnPath := reachPath(graph, to, from)
-	if len(returnPath) == 0 {
-		return nil, fmt.Errorf("mixed cycle graph: edge %s -> %s lies in a strongly connected component but has no return path", from, to)
+// The edges are grouped by target, so one shortestPathTree rooted at a target
+// closes every edge into it. Only one tree is held at a time.
+func closeComponentSchedulingEdges(adjacency map[string][]MixedCycleEdge, plain map[string][]string, component []string) ([][]string, error) {
+	members := make(map[string]bool, len(component))
+	for _, node := range component {
+		members[node] = true
 	}
-	return rotateToLowest(append([]string{from}, returnPath[:len(returnPath)-1]...)), nil
+	sources := make(map[string][]string, len(component))
+	for _, from := range component {
+		for _, edge := range adjacency[from] {
+			if edge.Scheduling && members[edge.To] {
+				sources[edge.To] = append(sources[edge.To], from)
+			}
+		}
+	}
+
+	var cycles [][]string
+	for _, to := range component {
+		if len(sources[to]) == 0 {
+			continue
+		}
+		tree := shortestPathTree(plain, members, to)
+		for _, from := range sources[to] {
+			cycle, err := closeMixedCycle(tree, from, to)
+			if err != nil {
+				return nil, err
+			}
+			cycles = append(cycles, cycle)
+		}
+	}
+	return cycles, nil
+}
+
+// shortestPathTree is the breadth-first tree over graph from start, confined to
+// members: tree[n] is the node before n on a shortest path from start, and
+// tree[start] is start. Neighbors are taken in their stored order, so the path
+// to any node is the one reachPath returns for the same start and goal. The
+// search runs past the first goal so that every goal can share it.
+//
+// Confining the search to a strongly connected component loses no path between
+// two of its members. A node that start reaches, and that reaches back into the
+// component, is itself in the component, so a search that leaves the component
+// never comes back to it.
+func shortestPathTree(graph map[string][]string, members map[string]bool, start string) map[string]string {
+	tree := map[string]string{start: start}
+	queue := []string{start}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		for _, next := range graph[node] {
+			if _, seen := tree[next]; seen || !members[next] {
+				continue
+			}
+			tree[next] = node
+			queue = append(queue, next)
+		}
+	}
+	return tree
+}
+
+// closeMixedCycle returns the canonical cycle the edge from -> to closes: from,
+// followed by the shortest path from `to` back to `from`, read out of tree, the
+// shortestPathTree rooted at `to`.
+//
+// The caller passes only edges inside one strongly connected component, with
+// the tree rooted at the edge's target, so the tree always reaches `from`. When
+// it does not, or the climb ends at a different root, the invariant is broken,
+// and that is returned as an error rather than a panic: the caller is a read
+// that `bd dep cycles --include-tracks` runs, and a crash there would hide every
+// other cycle behind a stack trace.
+func closeMixedCycle(tree map[string]string, from, to string) ([]string, error) {
+	// Climbing from `from` to the root gives the return path backwards.
+	backwards := []string{from}
+	for at := from; at != to; {
+		parent, reached := tree[at]
+		if !reached || parent == at {
+			return nil, fmt.Errorf("mixed cycle graph: edge %s -> %s lies in a strongly connected component but has no return path", from, to)
+		}
+		at = parent
+		backwards = append(backwards, at)
+	}
+	cycle := make([]string, 0, len(backwards))
+	cycle = append(cycle, from)
+	for i := len(backwards) - 1; i > 0; i-- {
+		cycle = append(cycle, backwards[i])
+	}
+	return rotateToLowest(cycle), nil
 }
 
 // mixedStronglyConnectedComponents returns Tarjan components with both their
