@@ -112,8 +112,9 @@ func outputDotFormat(out io.Writer, issues []*types.Issue, depsByIssueID map[str
 }
 
 func outputFormattedList(out io.Writer, issues []*types.Issue, depsByIssueID map[string][]*types.Dependency, formatStr string) error {
+	formatKeyword := strings.ToLower(formatStr)
 	// Handle special 'dot' format (Graphviz output)
-	if formatStr == "dot" {
+	if formatKeyword == "dot" {
 		return outputDotFormat(out, issues, depsByIssueID)
 	}
 	w := &graphExportWriter{out: out}
@@ -124,7 +125,7 @@ func outputFormattedList(out io.Writer, issues []*types.Issue, depsByIssueID map
 	}
 
 	// Check if it's a preset
-	templateStr, isPreset := presets[formatStr]
+	templateStr, isPreset := presets[formatKeyword]
 	if !isPreset {
 		templateStr = formatStr
 	}

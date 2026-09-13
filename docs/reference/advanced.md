@@ -5,6 +5,14 @@ description: Advanced bd operations for renaming issues and prefixes, merging du
 
 Advanced beads functionality.
 
+## List output formats
+
+The `bd list --format` keywords `json`, `dot`, and `digraph` are case-insensitive.
+For example, `--format DOT` selects Graphviz output and `--format DIGRAPH` selects
+the dependency-edge preset. This means the bare string `DIGRAPH` is no longer a
+literal custom template. To emit that literal for each edge, use the Go template
+`--format '{{"DIGRAPH"}}'`. Other custom templates retain their original case.
+
 ## Issue Rename
 
 Rename issues while preserving references:
