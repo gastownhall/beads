@@ -4,10 +4,14 @@
 **Deployer:** beads/deployer
 **Bead (deploy):** be-gftj8
 **Source bead:** be-193q1 — status closed, verdict `pass`. Reviewer notes confirm: gofmt/go vet/full-module build clean, golangci-lint on changed packages (`internal/storage/domain/...`) = 0 issues, full OWASP-Top-10-style security walk (9 categories, all none/n-a, one non-blocking minor: a doc-comment staleness nit outside the touched-file scope), and all 3 "Please verify" items independently re-verified from source rather than taken on the builder's word. `uncovered_criteria: none`.
-**Source commit:** `1f018bc1b268e8b44c255090a3d1ddcc4882ef2d` — fix(domain): green — proxied/domain path deletes lease it just armed on claim+assignee override (refs be-plv)
+**Source commit (as originally reviewed by be-193q1):** `1f018bc1b268e8b44c255090a3d1ddcc4882ef2d` — fix(domain): green — proxied/domain path deletes lease it just armed on claim+assignee override (refs be-plv)
   - Parent/RED: `9a50af9b91120cf24b6f0ee557125ab8c73acdbe` — test(domain): red — same title (refs be-plv). Confirmed compile-fails against pre-fix code.
   - Both SHAs independently re-verified via `git rev-parse --verify --quiet "<sha>^{commit}"` — both resolve.
-  - Base: `origin/main` @ `a690b0a8c4d1ddc4f0bd9bf767499625dd71bc96`. Re-confirmed via fresh `git fetch origin main` immediately before writing this gate: `origin/main` tip and `merge-base(HEAD, origin/main)` are identical — origin/main has not moved since be-193q1's review.
+  - Base (as originally reviewed): `origin/main` @ `a690b0a8c4d1ddc4f0bd9bf767499625dd71bc96`.
+
+**Correction — post-review rebase (be-1shoq, PR #6501 review point 9, 2026-09-12):** bee-ghosttrack's review correctly flagged that `origin/main` had advanced since the assertions above were written; independently verified as **6 commits** (`git rev-list --count $(git merge-base <pre-rebase-HEAD> origin/main)..origin/main` = 6). The two SHAs above are now stale identities: rebasing `deploy/be-gftj8-gate` onto current `origin/main` rewrote them to `4cf77dcb5250ea67e4d4dd9d81b21c3b09749199` (RED) and `ce89b8213b21eb1e252bd78e4590dabd82867ee5` (GREEN) — same content, same `be-plv` authorship, new parents. Rebase re-verified clean (`git merge-tree` reported no conflicts; `origin/main`'s only touch to `internal/storage/domain/db/issue.go` since the old base was an unrelated `GetByIDs`-batching commit, `91aeeb054`, outside the `Update`/`clearLease` region this PR touches).
+  - **New base:** `origin/main` @ `f56632adcfabed7da6ed0aabe4e760066b472c46` (merge-base(HEAD, origin/main) re-confirmed identical to this tip at time of writing).
+  - **New tip, addressing the review's other 8 points (be-1shoq):** RED `7364d2141e5550d8b09d5783f75cafe62bd1d021` (test(domain): red — claim+assignee override must arm lease via ApplyUpdate) / GREEN `8e37018a4e72994a60d2807d6153ddd2ffd5f870` (fix(domain): green — address PR #6501 review points 1,3-8, refs be-1shoq).
 **Branch:** `deploy/be-gftj8-gate`
 **Push target:** `headfork` (`quad341/beads-sec003-contrib`) — pushed and independently re-verified: `git ls-remote headfork refs/heads/deploy/be-gftj8-gate` returns `517c6d1c267ee54a24be17e55c1bf09fd4f8bf4a`, matching local `HEAD` exactly.
 **PR:** [gastownhall/beads#6501](https://github.com/gastownhall/beads/pull/6501) — `quad341:deploy/be-gftj8-gate` → `gastownhall:main`. Verified via `gh pr view 6501`: `state=OPEN`, `mergeable=MERGEABLE`, `author=quad341` (our own account — not an external contributor, no human-hold triggered).
@@ -26,7 +30,7 @@
 | 3c | CI-config-diff live-run | N/A | Diff touches no `.github/` or `scripts/ci/` files (`git diff --name-only origin/main...HEAD` confirms) |
 | 4 | Zero open HIGH | PASS | Reviewer's OWASP walk: 9 categories, all none/n-a, one non-blocking minor (doc-comment staleness nit, out of touched-file scope), no HIGH findings |
 | 5 | Clean git status | PASS | `git status --short` clean on `deploy/be-gftj8-gate` at SHA `1f018bc1b2` |
-| 6 | No merge conflicts with BASE_REF | PASS | `origin/main` unchanged since review; merge-base == origin/main tip; no conflict possible |
+| 6 | No merge conflicts with BASE_REF | PASS | **Corrected post-rebase (be-1shoq, review point 9):** `origin/main` had in fact advanced 6 commits since this gate's original writing (review point 9, correctly flagged); branch rebased onto current `origin/main` @ `f56632adcfabed7da6ed0aabe4e760066b472c46`, re-verified clean — no conflicts. See Source-commit correction above for detail. |
 | 7 | Single feature theme/ancestry scope | PASS | 4 files, +384/-13, all on-theme for the claim+assignee-override lease-deletion fix; `assert_deploy_ancestry_scope` confirmed both commits cite `be-plv` |
 
 **Diffstat** (`git diff --stat origin/main...HEAD`):
@@ -70,6 +74,17 @@ First attempt reported `EXIT_CODE=2`; root-caused to a shared, unscoped `/tmp/be
 **waiver_ref:** none — no waiver needed; the two policy/lint findings are cleanly attributed to pre-existing, non-diff-owned conditions with clause-3 proof and zero path overlap, and the full-suite test lane itself has zero failures at all.
 
 **uncovered_criteria:** none
+
+## User-visible behavior change (be-1shoq, PR #6501 review point 2)
+
+bee-ghosttrack's review flagged a real disclosure gap, accepted here (the proposed remedy — an `ActorMatches` gate — is declined; see the PR #6501 reply for why).
+
+On the proxied/domain backend, `bd update <id> --claim --assignee=<other>` against an **OPEN** issue now leaves a `DefaultLeaseTTL` (5 minutes, `internal/storage/issueops/lease.go:26`) lease held by the override target (`<other>`), not the claiming actor. Previously this same command deleted the lease outright, leaving a live `in_progress` claim with no lease row.
+
+- **Practical effect:** if `<other>` never heartbeats, `bd reclaim` now reverts the assignment after the lease TTL plus grace period elapses — where previously the hold was durable (no lease row to expire).
+- **Bound:** this only affects claiming an *open* issue on another actor's behalf. On an already-claimed issue, the same command fails outright with "already claimed" (`cmd/bd/update_proxied_integration_test.go:110`) before any lease logic runs.
+- **Trade-off, and why the old behavior was worse:** without a lease row, the same claim is instead *permanently* unreclaimable — `ReclaimExpiredLeasesInTx`'s candidate query inner-joins `leases` (`internal/storage/issueops/lease.go:~688-693`), so a claim with no lease row is invisible to reclaim forever, not just until TTL. A time-bounded reclaim window is the safer failure mode of the two.
+- **Parity note:** this is the domain/proxied backend catching up to the invariant PR #5349 (unmerged, owner-approved) establishes for the classic/wisps backend — `TestClaimWithAssigneeOverrideArmsLeaseForFinalHolder` pins the identical re-arm-for-override-target behavior there. Adopting the reviewer's proposed `ActorMatches` gate on this PR alone would make the two backends diverge in the opposite direction instead of closing the gap.
 
 ## Merge authority
 
