@@ -148,13 +148,25 @@ type Artifact struct {
 // server before the transfer and re-read through the replacement after. They
 // prove the replacement serves the same scope, not merely a scope.
 type Sentinels struct {
-	FirstIssueID      string `json:"first_issue_id"`
-	FirstIssueFound   bool   `json:"first_issue_found"`
+	FirstIssue  string `json:"first_issue"`
+	IssuesState string `json:"issues_state"`
+	// FirstDependency and DependenciesState mirror the issue pair. The state is
+	// three-valued — missing, empty, present — because "the table is not there"
+	// and "the table is there and has no rows" are different facts about a
+	// database, and collapsing them would let an unrelated empty database
+	// compare equal to this one on everything but the head hash.
 	FirstDependency   string `json:"first_dependency"`
-	FirstDepFound     bool   `json:"first_dependency_found"`
+	DependenciesState string `json:"dependencies_state"`
 	HeadHash          string `json:"head_hash"`
 	DatabaseSelection string `json:"database_selection"`
 }
+
+// Table states for the sentinel pairs.
+const (
+	TableMissing = "missing"
+	TableEmpty   = "empty"
+	TablePresent = "present"
+)
 
 // Snapshot is everything bd must be able to put back. Every key the commit
 // write set touches is represented here, either as whole-file bytes or as the
