@@ -21,9 +21,7 @@ func TestRepairWorktreeBeadsPermissions(t *testing.T) {
 		t.Fatalf("chmod .beads: %v", err)
 	}
 
-	saveJSON := jsonOutput
-	jsonOutput = true // suppress stderr from repair helper
-	t.Cleanup(func() { jsonOutput = saveJSON })
+	pinJSONOutput(t, true) // suppress stderr from repair helper
 
 	repairWorktreeBeadsPermissions(worktreePath)
 
@@ -93,7 +91,5 @@ func TestRepairWorktreeBeadsPermissionsRejectsNonDirectory(t *testing.T) {
 
 func suppressRepairOutput(t *testing.T) {
 	t.Helper()
-	saveJSON := jsonOutput
-	jsonOutput = true
-	t.Cleanup(func() { jsonOutput = saveJSON })
+	pinJSONOutput(t, true)
 }

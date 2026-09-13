@@ -382,12 +382,10 @@ func TestADOSyncMissingProject(t *testing.T) {
 // TestADOStatusTextOutput verifies the ado status command text output.
 func TestADOStatusTextOutput(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	t.Setenv("AZURE_DEVOPS_PAT", "abcdefghij")
@@ -423,12 +421,10 @@ func TestADOStatusTextOutput(t *testing.T) {
 // TestADOStatusUnconfigured verifies the status command output when not configured.
 func TestADOStatusUnconfigured(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	t.Setenv("AZURE_DEVOPS_PAT", "")
@@ -458,12 +454,10 @@ func TestADOStatusUnconfigured(t *testing.T) {
 // TestADOStatusJSONConfigured verifies JSON output for a configured status.
 func TestADOStatusJSONConfigured(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	t.Setenv("AZURE_DEVOPS_PAT", "test-pat-1234")
@@ -504,12 +498,10 @@ func TestADOStatusJSONConfigured(t *testing.T) {
 // TestADOStatusJSONUnconfigured verifies JSON output when not configured.
 func TestADOStatusJSONUnconfigured(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	t.Setenv("AZURE_DEVOPS_PAT", "")
@@ -543,12 +535,10 @@ func TestADOStatusJSONUnconfigured(t *testing.T) {
 // TestADOStatusWithCustomURL verifies status output includes custom URL.
 func TestADOStatusWithCustomURL(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	t.Setenv("AZURE_DEVOPS_PAT", "test-pat-1234")
@@ -574,12 +564,10 @@ func TestADOStatusWithCustomURL(t *testing.T) {
 // TestADOProjectsWithMockServer tests ado projects using a mock HTTP server.
 func TestADOProjectsWithMockServer(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	// Mock ADO projects endpoint
@@ -631,12 +619,10 @@ func TestADOProjectsWithMockServer(t *testing.T) {
 // TestADOProjectsJSONOutput tests ado projects JSON output with mock server.
 func TestADOProjectsJSONOutput(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -692,12 +678,10 @@ func TestADOProjectsJSONOutput(t *testing.T) {
 // TestADOProjectsEmptyList tests ado projects with no projects found.
 func TestADOProjectsEmptyList(t *testing.T) {
 	oldDBPath, oldStore := dbPath, store
-	oldJSON := jsonOutput
 	dbPath, store = "", nil
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	t.Cleanup(func() {
 		dbPath, store = oldDBPath, oldStore
-		jsonOutput = oldJSON
 	})
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

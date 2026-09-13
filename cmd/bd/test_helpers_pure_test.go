@@ -140,8 +140,21 @@ type savedGlobals struct {
 	exportIncludeMemories bool
 }
 
+// pinJSONOutput owns the global JSON mode for a test and restores it through
+// t.Cleanup. Tests that inspect output must select their mode explicitly;
+// saveAndRestoreGlobals does not include this separate flag.
+// A fixture that leaves it set can pass alone and break a later text test in
+// a full run, so each fixture must own restoration even when its mode matches.
+func pinJSONOutput(t *testing.T, on bool) {
+	t.Helper()
+	restore := jsonOutput
+	jsonOutput = on
+	t.Cleanup(func() { jsonOutput = restore })
+}
+
 // saveAndRestoreGlobals snapshots all commonly-mutated package-level globals
 // and registers a t.Cleanup() to restore them when the test completes.
+// Set and restore the separate JSON output mode with pinJSONOutput(t, on).
 // This replaces the fragile manual save/defer pattern:
 //
 //	oldDBPath := dbPath

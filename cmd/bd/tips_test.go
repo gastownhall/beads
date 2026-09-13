@@ -49,8 +49,7 @@ func resetTipTestState(t *testing.T) {
 	originalRandWasInitialized := originalRand != nil
 	tipRand = nil
 	tipRandOnce = sync.Once{}
-	originalJSONOutput := jsonOutput
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	originalQuietFlag := quietFlag
 	quietFlag = false
 	originalDoltAutoCommit := doltAutoCommit
@@ -73,7 +72,6 @@ func resetTipTestState(t *testing.T) {
 		if originalRandWasInitialized {
 			tipRandOnce.Do(func() {})
 		}
-		jsonOutput = originalJSONOutput
 		quietFlag = originalQuietFlag
 		doltAutoCommit = originalDoltAutoCommit
 		commandDidWriteTipMetadata = originalDidWrite
@@ -352,12 +350,12 @@ func TestMaybeShowTip_RespectsFlags(t *testing.T) {
 	store := &tipMetadataRecorder{values: map[string]string{}}
 
 	// Test 1: Should not show in JSON mode
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	output := captureStdout(t, func() error { maybeShowTip(store); return nil })
 	if output != "" || tipRand != nil || len(store.readKeys) != 0 || len(store.writes) != 0 {
 		t.Fatalf("JSON mode output=%q rand=%v reads=%v writes=%v", output, tipRand, store.readKeys, store.writes)
 	}
-	jsonOutput = false
+	pinJSONOutput(t, false)
 
 	// Test 2: Should not show in quiet mode
 	quietFlag = true

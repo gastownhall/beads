@@ -339,11 +339,11 @@ func TestWhereCommand_UsesConfigPrefixFromSelectedDB(t *testing.T) {
 	initConfigForTest(t)
 
 	originalCmdCtx := cmdCtx
-	originalJSONOutput := jsonOutput
+	// Pin the current value so t.Cleanup owns its restoration.
+	pinJSONOutput(t, jsonOutput)
 	originalRootCtx := rootCtx
 	defer func() {
 		cmdCtx = originalCmdCtx
-		jsonOutput = originalJSONOutput
 		rootCtx = originalRootCtx
 	}()
 
@@ -383,7 +383,7 @@ func TestWhereCommand_UsesConfigPrefixFromSelectedDB(t *testing.T) {
 		dbFlag.Changed = originalFlagChanged
 	})
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	rootCtx = context.Background()
 
 	output := captureStdout(t, func() error {

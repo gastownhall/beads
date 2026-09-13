@@ -248,11 +248,11 @@ func newParityEnv(t *testing.T) *parityEnv {
 	raw := newTestStore(t, filepath.Join(beadsDir, "beads.db"))
 	ps := newParityStore(raw)
 
-	savedCtx, savedJSON, savedActor := rootCtx, jsonOutput, actor
+	savedCtx, savedActor := rootCtx, actor
 	savedQuiet, savedReadonly := quietFlag, readonlyMode
 	savedNewOps := newIssueOperations
 	t.Cleanup(func() {
-		rootCtx, jsonOutput, actor = savedCtx, savedJSON, savedActor
+		rootCtx, actor = savedCtx, savedActor
 		quietFlag, readonlyMode = savedQuiet, savedReadonly
 		newIssueOperations = savedNewOps
 	})
@@ -273,7 +273,7 @@ func newParityEnv(t *testing.T) *parityEnv {
 
 	store = ps
 	rootCtx = context.Background()
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	actor = "parity-actor"
 	quietFlag = true
 	readonlyMode = false
@@ -625,7 +625,7 @@ func assertRecentUTCTimestamp(t *testing.T, label, value string) {
 // cmd/bd/output.go:68-99 (wrapWithSchemaVersion).
 func TestParityCreateJSONShape(t *testing.T) {
 	env := newParityEnv(t)
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	env.setFlags(createCmd, map[string]string{
 		"description": "parity body",
@@ -702,7 +702,7 @@ func TestParityCreateJSONShape(t *testing.T) {
 // timestamps here is the predicted failure mode of the facade rewire.
 func TestParityCreateJSONTimestamps(t *testing.T) {
 	env := newParityEnv(t)
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	env.setFlags(createCmd, map[string]string{"description": "timestamps"})
 	res := env.run(createCmd, "Create timestamps")
@@ -803,7 +803,7 @@ func TestParityCreateWithDepsOmitsDependenciesKey(t *testing.T) {
 	env := newParityEnv(t)
 	target := env.seed("test-dep1", "Dependency target", nil)
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	env.setFlags(createCmd, map[string]string{
 		"description": "with deps",
 		"deps":        "blocked-by:" + target.ID,
@@ -947,7 +947,7 @@ func TestParityCreateMissingDepTargetIsFatal(t *testing.T) {
 // Source: cmd/bd/errors.go:91-97 and :57-84.
 func TestParityCreateJSONErrorShape(t *testing.T) {
 	env := newParityEnv(t)
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	env.setFlags(createCmd, map[string]string{
 		"description": "bad deps",
@@ -982,7 +982,7 @@ func TestParityUpdateJSONShape(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-upd1", "Update json shape", nil)
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	env.setFlags(updateCmd, map[string]string{"priority": "0"})
 	res := env.run(updateCmd, "test-upd1")
 	if res.exitCode != 0 {
@@ -1242,7 +1242,7 @@ func TestParityUpdateJSONFailureReport(t *testing.T) {
 		i.Assignee = "someone-else"
 	})
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	env.setFlags(updateCmd, map[string]string{
 		"if-assignee": "not-the-holder",
 		"priority":    "1",
@@ -1479,7 +1479,7 @@ func TestParityCloseJSONShape(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-cls1", "Close json shape", nil)
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	env.setFlags(closeCmd, map[string]string{"reason": "done here"})
 	res := env.run(closeCmd, "test-cls1")
 	if res.exitCode != 0 {
@@ -1686,7 +1686,7 @@ func TestParityReopenJSONShape(t *testing.T) {
 		i.Status = types.StatusClosed
 	})
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	env.setFlags(reopenCmd, map[string]string{"reason": "back to work"})
 	res := env.run(reopenCmd, "test-rop1")
 	if res.exitCode != 0 {

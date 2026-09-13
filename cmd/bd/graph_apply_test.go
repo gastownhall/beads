@@ -573,9 +573,7 @@ func TestEmitGraphApplyDryRun_JSON(t *testing.T) {
 		},
 	}
 
-	oldJSON := jsonOutput
-	jsonOutput = true
-	defer func() { jsonOutput = oldJSON }()
+	pinJSONOutput(t, true)
 
 	out := captureStdout(t, func() error {
 		emitGraphApplyDryRun(plan, GraphApplyOptions{})
@@ -628,9 +626,7 @@ func TestCreateIssuesFromGraph_DryRunDoesNotPersist(t *testing.T) {
 	store = nil
 	defer func() { store = oldStore }()
 
-	oldJSON := jsonOutput
-	jsonOutput = true
-	defer func() { jsonOutput = oldJSON }()
+	pinJSONOutput(t, true)
 
 	planJSON := `{
 		"nodes": [
