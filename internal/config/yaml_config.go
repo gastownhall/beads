@@ -51,6 +51,7 @@ var YamlOnlyKeys = map[string]bool{
 
 	// Sync settings
 	"sync.remote":     true, // Primary: any Dolt-compatible remote URL
+	"sync.remote-ref": true, // Git ref holding the Dolt data of a git-backed sync.remote (default refs/dolt/data)
 	"sync.git-remote": true, // Deprecated: falls back from sync.remote
 	"sync.require_confirmation_on_mass_delete": true,
 
@@ -876,6 +877,10 @@ func isDuration(s string) bool {
 // Returns an error if the value is invalid for the given key.
 func validateYamlConfigValue(key, value string) error {
 	switch key {
+	case "sync.remote-ref":
+		if err := ValidateGitDataRef(value); err != nil {
+			return fmt.Errorf("sync.remote-ref %w", err)
+		}
 	case "hierarchy.max-depth":
 		// Must be a positive integer >= 1 (GH#995)
 		depth, err := strconv.Atoi(value)

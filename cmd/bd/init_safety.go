@@ -16,7 +16,10 @@ package main
 // values and other friction-bearing arguments live in `bd help init-safety`
 // and `docs/recovery/init-safety.md` only.
 
-import "fmt"
+import (
+	"fmt"
+	"github.com/steveyegge/beads/internal/storage"
+)
 
 // Exit codes for init-safety refusals. Stable values so CI scripts can
 // branch on them without grep'ing stderr.
@@ -173,7 +176,7 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 // complete destructive invocation — the ADR invariant bars runtime error
 // output from constructing a copy-pasteable override.
 func refusalMessageDivergence() string {
-	return `bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
+	return `bd init refuses: remote 'origin' already has Dolt history (` + storage.EffectiveGitDataRef(resolveSyncRemoteRef()) + `).
 
   Why: this init mode would create or reuse local history instead of
        adopting the remote. --force / --reinit-local bypasses only the

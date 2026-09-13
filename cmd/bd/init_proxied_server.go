@@ -399,7 +399,7 @@ func configureProxiedInitDoltRemote(ctx context.Context, provider uow.UnitOfWork
 				return "", nil
 			}
 		}
-		if err := uw.DoltRemoteUseCase().CreateRemote(ctx, "origin", remoteURL); err != nil {
+		if err := uw.DoltRemoteUseCase().CreateRemoteWithRef(ctx, "origin", remoteURL, syncRemoteRefForURL(remoteURL)); err != nil {
 			return "", fmt.Errorf("create remote origin: %w", err)
 		}
 		return "", nil
