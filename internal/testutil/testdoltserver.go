@@ -138,6 +138,10 @@ func isDoltRepoImageCached() bool {
 
 // startDoltContainer starts the singleton Dolt container.
 func startDoltContainer() error {
+	if err := checkRyukEnabled(); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
 
@@ -263,6 +267,9 @@ func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
 	t.Helper()
 	if state := checkDolt(); state != doltReady {
 		t.Skipf("skipping test: %s", state)
+	}
+	if err := checkRyukEnabled(); err != nil {
+		t.Fatalf("%v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
