@@ -431,6 +431,9 @@ jobs:
         id: nix_help
         run: |
           nix run .#default -- --help > help.txt
+      - name: Run the tracked hook shims against real timeout implementations
+        run: |
+          nix build .#checks.x86_64-linux.hook-timeout-backends -L
       - name: Verify help text
         if: steps.nix_help.outcome == 'success'
         run: |
