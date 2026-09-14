@@ -112,6 +112,11 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
+// treeCycleMarker is appended to a tree line whose issue is already an
+// ancestor on the current path. It mirrors the "(shown above)" arm of
+// bd dep tree and names the command that reports the cycle itself.
+const treeCycleMarker = "(cycle: shown above; run bd dep cycles)"
+
 // printPrettyTree recursively prints the issue tree.
 // Children are ordered by dependency then priority when dr != nil (--deps), else
 // by priority (P0 first) for intuitive reading. When dr is set, each node's
@@ -127,7 +132,9 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 // walk allocates until the host swaps (GH#5887). A child already on the path
 // is printed once with a marker and not descended. The set is scoped to the
 // path, not the whole walk, so a node reachable through two parents still
-// renders under both; only a true ancestor counts as a cycle.
+// renders under both; only a true ancestor counts as a cycle. Like the
+// "(shown above)" arm of bd dep tree, the marked line carries no --deps
+// annotations: they were printed with the node's first appearance.
 func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, onPath map[string]bool) {
 	children := childrenMap[parentID]
 
@@ -160,11 +167,6 @@ func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string,
 		delete(onPath, child.ID)
 	}
 }
-
-// treeCycleMarker is appended to a tree line whose issue is already an
-// ancestor on the current path. It mirrors the "(shown above)" arm of
-// bd dep tree and names the command that reports the cycle itself.
-const treeCycleMarker = "(cycle: shown above; run bd dep cycles)"
 
 // displayPrettyList displays issues in pretty tree format (GH#654)
 // Uses buildIssueTree which only supports dotted ID hierarchy
