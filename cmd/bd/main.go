@@ -80,6 +80,26 @@ type envSnapshotValue struct {
 
 var changeDirEnvSnapshot map[string]envSnapshotValue
 
+// beadsDirFromCaller is BEADS_DIR as the process INHERITED it, captured at
+// package initialization — which the language guarantees runs before main, and
+// therefore before any bd code exports a BEADS_DIR of its own.
+//
+// Reading os.Getenv("BEADS_DIR") later is a different question, and the wrong
+// one for anything that needs to know what the CALLER asked for. By the time a
+// command's RunE runs, bd has usually exported one itself:
+//
+//   - the root PersistentPreRunE resolves a beads dir for every no-DB command
+//     and exports it (selectedNoDBBeadsDir -> prepareSelectedNoDBContext ->
+//     prepareSelectedCommandContext), and that resolution bottoms out in
+//     beads.FindBeadsDir(), which accepts any ancestor .beads/ carrying so much
+//     as a config.yaml — including the legacy user-level ~/.beads/config.yaml;
+//   - `bd -C <dir>` exports one too (applyChangeDirSelection), which names a
+//     beads dir without moving the working directory.
+//
+// Neither is the caller saying "use this". Consult this snapshot, not the live
+// environment, when the answer must mean caller intent (GH#4635).
+var beadsDirFromCaller = os.Getenv("BEADS_DIR")
+
 var (
 	noColorFlag       bool
 	sandboxMode       bool

@@ -24,6 +24,7 @@ See also: `bd help init-safety`, and
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
+- [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 
 ---
@@ -199,6 +200,86 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## init-home-refused
+
+**Exit code:** `13` (`ExitHomeDirRefused`)
+
+**Symptom**
+
+```
+bd init refuses: /Users/you is your home directory, and it is not a git repository.
+  Why: init would 'git init' your home directory and scaffold agent files
+       into it ...
+```
+
+**Why this happens**
+
+`bd init` in a directory that is not yet a git repository creates one, then
+writes agent scaffolding next to it: `CLAUDE.md`, `AGENTS.md`, `.gitignore`,
+`.claude/`, `.codex/`, `.agents/`. Run in your home directory, that turns
+everything you own into one git working tree and overwrites whatever agent
+files you already keep there. A project is virtually never the home directory
+itself, so `bd init` refuses rather than ask.
+
+The refusal is deliberately narrow. It fires only when **all** of these hold:
+
+- the working directory is exactly your home directory (a subdirectory of home
+  is an ordinary project and is never refused);
+- your home directory is not already a git repository — if you deliberately
+  track your dotfiles, nothing changes;
+- you did not name a beads directory yourself.
+
+`--force` and `--reinit-local` do **not** override it. They bypass the local
+data-safety guard, which is a different question from "is this the right
+directory".
+
+**Recovery paths**
+
+Pick the one that matches your intent.
+
+*You meant to initialize a project.* This is almost always the case — the
+working directory was simply not what you thought:
+
+```bash
+cd ~/some-project
+bd init
+```
+
+*You want a beads workspace whose data lives somewhere else, with no
+scaffolding in your home directory.* Name the beads directory explicitly:
+
+```bash
+BEADS_DIR=~/workspaces/notes/.beads bd init
+```
+
+Note this is a **different** init, not the refused one with the guard lifted:
+an explicit `BEADS_DIR` makes `bd init` skip both the `git init` and the
+working-directory-local `.beads`, so nothing is written into your home
+directory at all. That is the point — but if you wanted the scaffolding, this
+will not produce it.
+
+*You really do want your home directory tracked by git and scaffolded.* Make it
+a git repository first, deliberately, and the guard stands aside:
+
+```bash
+cd ~
+git init
+bd init
+```
+
+**How to detect this in a script**
+
+The refusal exits `13` and prints to stderr, so branch on the code rather than
+the text:
+
+```bash
+bd init || case $? in
+  13) echo "wrong directory — cd into the project first" ;;
+esac
+```
 
 ---
 
