@@ -13,17 +13,24 @@ import (
 // wrote and whether it returned before the deadline.
 //
 // It exists for tests whose failure mode is "never returns": the reader stops
-// after captureLimit bytes, so a runaway writer blocks on the full pipe instead of
-// growing a buffer until the host swaps, and os.Stdout is restored before the
-// function returns, so a failing test does not leave the package's stdout
-// redirected for every later test (the leak that poisoned earlier attempts at
-// this guard). On deadline the writer goroutine is left parked on the pipe.
+// after captureLimit bytes, so a runaway writer blocks on the full pipe instead
+// of growing a buffer until the host swaps, and os.Stdout is restored before
+// the function returns, so a failing test does not leave the package's stdout
+// redirected for every later test. On deadline the writer goroutine is left
+// parked on the pipe.
+//
+// Two consequences of that design, both confined to the regression case:
+// fn must write less than captureLimit bytes, since larger legitimate output
+// would block on the pipe and read as a hang (the fixtures here print a
+// handful of lines); and if fn is still running at the deadline, restoring
+// os.Stdout races with its next read of that variable, so go test -race
+// reports a data race next to the failure it already produces.
 // parkedCaptures keeps the pipe ends of every timed-out capture reachable for
 // the life of the test binary. The runaway writer is parked on the full pipe;
 // if the read end were garbage-collected its finalizer would close it, the
 // parked write would fail with EPIPE, and the writer's next Printf would
 // resolve os.Stdout afresh and resume against the real stdout or the next
-// test's capture.
+// test's capture. It only grows when a test fails, by two descriptors.
 var parkedCaptures []*os.File
 
 const (
