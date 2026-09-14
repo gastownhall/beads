@@ -46,7 +46,11 @@ func CheckNormalOpen(beadsDir string) error {
 		return coded(CodeJournalUnreadable, err)
 	}
 	root := filepath.Dir(physical)
-	if j.Request.Root != root {
+	// samePath, not string equality: the journal records whatever spelling the
+	// caller used, and this side has just been resolved. Comparing the two
+	// as strings decides a committed journal belongs to a different workspace
+	// and refuses every ordinary command here — see P7 in paths.go.
+	if !samePath(j.Request.Root, root) {
 		return codedf(CodeJournalUnreadable,
 			"ownership handoff journal names root %q but sits in %q", j.Request.Root, root)
 	}

@@ -57,7 +57,7 @@ func (x *run) prepare() error {
 	// A data dir outside the workspace is a shared or relocated server. Taking
 	// it over would transfer a scope other workspaces are also using, which is
 	// not what this verb means.
-	if !strings.HasPrefix(dataDir, x.req.Root+string(filepath.Separator)) {
+	if !pathUnder(dataDir, x.req.Root) || samePath(dataDir, x.req.Root) {
 		e.record("data_dir_present", GateSkipped)
 		return x.fail(codedf(CodeUnsupportedScope,
 			"workspace data dir %s is outside %s; only a workspace-local server can be taken over",
