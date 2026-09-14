@@ -154,6 +154,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode still fails closed there — a repo-local auto-start is a different
   database, not a port refresh — but now says so in its own words.
 
+- **`bd mol pour` and `bd mol wisp` now reject a `--var` name the proto cannot
+  consume, instead of dropping it silently.** An unusable name was accepted and
+  ignored, which turned a typo in an optional var into a conditional step that
+  quietly never appeared, or a defaulted var that quietly kept its default -
+  with a successful exit and no output to suggest otherwise. A name is accepted
+  if any proto being poured declares it, references it as a `{{handlebar}}`, or
+  references it from a step `condition`; the last of those matters because
+  conditions are consumed before the cook, so a var that decides which steps
+  get poured leaves no trace in the cooked subgraph. Anything left over cannot
+  affect the pour, so it is reported: `unknown variables: has_spke (available:
+  has_spike, story)`. A var belonging to an `--attach` proto still passes, as
+  do a proto's documentation handlebars. Out of scope for now: `bd mol bond
+  --var` and `bd mol seed --var` go through `formula.ValidateProvidedVars`,
+  which only iterates declared vars, so they still drop an unknown name
+  silently. Also fixed alongside: the missing-var hint printed `--var =<value>`
+  when there was no missing var to name.
+
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica
   is by construction never reclaimed here, so the audit was not a one-off: it
