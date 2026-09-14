@@ -66,7 +66,8 @@ const hookTimeoutSeconds = 300
 //   - Helper argv is separated with -- so user input cannot become an option.
 //   - If no compatible helper exists, the direct fallback is explicitly
 //     unbounded rather than silently pretending to enforce a deadline.
-//   - Only GNU coreutils timeout implementations are selected; Windows
+//   - Only GNU coreutils timeout and uutils coreutils timeout (same command
+//     line, same exit 124; GH#5541) are selected, by --version banner; Windows
 //     timeout.exe has the same name but an incompatible command line (GH#5503).
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
@@ -91,7 +92,7 @@ func generateHookSection(hookName string) string {
 		"    if command -v \"$_bd_timeout_candidate\" >/dev/null 2>&1; then\n" +
 		"      if _bd_timeout_version=\"$(\"$_bd_timeout_candidate\" --version 2>/dev/null)\"; then\n" +
 		"        case \"$_bd_timeout_version\" in\n" +
-		"          \"timeout (GNU coreutils) \"*) _bd_timeout_command=$_bd_timeout_candidate; break ;;\n" +
+		"          \"timeout (GNU coreutils) \"*|\"timeout (uutils coreutils) \"*) _bd_timeout_command=$_bd_timeout_candidate; break ;;\n" +
 		"        esac\n" +
 		"      fi\n" +
 		"    fi\n" +
