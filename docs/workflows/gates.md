@@ -90,7 +90,9 @@ repo = "org/downstream-repo"   # check gh:run against this repo, not the current
 `repo` accepts a `{{var}}` placeholder (e.g. `repo = "{{gate_repo}}"`); for a
 formula persisted with `bd cook --persist`, the placeholder is substituted
 when the proto is later poured with `bd mol pour --var gate_repo=...`, the
-same as `title`, `description`, and `await_id`.
+same as every other var-bearing step field (`title`, `description`, `design`,
+`acceptance_criteria`, `notes`, `assignee`, `labels`, `await_id`, and the
+string values inside `metadata`).
 
 `bd gate discover` (auto-discovery of a `gh:run` gate's run ID) requires a
 workflow name hint (`await_id`/`id`, not left blank) for a gate targeting
