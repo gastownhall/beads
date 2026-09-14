@@ -2987,10 +2987,12 @@ variables for authentication.
 Use --remote to pull from a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').
 
-Use --auth to select how bd authenticates with the git remote. The default
-(`auto`) tries the gh CLI (for github.com), then the glab CLI (for GitLab),
-and finally OAuth if a client_id is configured. PAT-based auth is no longer
-recommended; run `bd github-sync migrate` to switch from stored tokens.
+Use --auth to select how bd authenticates git-protocol remotes
+(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
+then the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Non-git Dolt
+remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+See 'bd github-sync'.
 
 ```
 bd dolt pull [flags]
@@ -2999,7 +3001,7 @@ bd dolt pull [flags]
 **Flags:**
 
 ```
-      --auth string     Authentication provider for git remote: gh, glab, oauth, pat, or auto (default: auto)
+      --auth string     Auth provider for remote git operations: gh, glab, oauth, pat, or auto (default "auto")
       --remote string   Pull from a specific named remote instead of the default
 ```
 
@@ -3017,10 +3019,12 @@ uncommitted changes in its working set).
 Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').
 
-Use --auth to select how bd authenticates with the git remote. The default
-(`auto`) tries the gh CLI (for github.com), then the glab CLI (for GitLab),
-and finally OAuth if a client_id is configured. PAT-based auth is no longer
-recommended; run `bd github-sync migrate` to switch from stored tokens.
+Use --auth to select how bd authenticates git-protocol remotes
+(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
+then the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Non-git Dolt
+remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+See 'bd github-sync'.
 
 ```
 bd dolt push [flags]
@@ -3029,7 +3033,7 @@ bd dolt push [flags]
 **Flags:**
 
 ```
-      --auth string     Authentication provider for git remote: gh, glab, oauth, pat, or auto (default: auto)
+      --auth string     Auth provider for remote git operations: gh, glab, oauth, pat, or auto (default "auto")
       --force           Force push (overwrite remote changes)
       --remote string   Push to a specific named remote instead of the default
 ```
@@ -5789,7 +5793,6 @@ Commands:
 - `bd github-sync status` — Show which auth provider is available for the host
 - `bd github-sync login --provider gh|glab|oauth --host <host>` — Authenticate using the chosen provider
 - `bd github-sync logout --provider gh|glab|oauth --host <host>` — Remove stored credentials
-- `bd github-sync migrate [--remove]` — Detect PATs in bd config and show how to switch
 
 **Global flags:**
 
@@ -5805,18 +5808,19 @@ Commands:
 bd github-sync status
 bd github-sync login --provider gh --host github.com
 bd github-sync login --provider oauth --host github.com
-bd github-sync migrate --remove
 ```
 
 **Configuration:**
 
-OAuth requires a client ID (optionally a client secret) registered with the host.
-Set these in `config.yaml` or environment variables:
+OAuth requires a client ID (and, for providers whose refresh flow needs one, a
+client secret) registered with the host. Client IDs may live in `config.yaml`
+or environment variables; client secrets are read from the environment only —
+secrets do not belong in beads config:
 
 - `github.client_id` / `BD_GITHUB_CLIENT_ID`
-- `github.client_secret` / `BD_GITHUB_CLIENT_SECRET`
+- `BD_GITHUB_CLIENT_SECRET` (env only)
 - `gitlab.client_id` / `BD_GITLAB_CLIENT_ID`
-- `gitlab.client_secret` / `BD_GITLAB_CLIENT_SECRET`
+- `BD_GITLAB_CLIENT_SECRET` (env only)
 
 For GitHub Enterprise or self-managed GitLab, set the host explicitly with
 `--host` and configure the matching `client_id`.

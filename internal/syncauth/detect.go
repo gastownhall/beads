@@ -47,29 +47,6 @@ func HostFromRemoteURL(raw string) (string, error) {
 	return host, nil
 }
 
-// IsGitRemoteURL reports whether raw looks like a git remote URL.
-// Non-git Dolt remotes such as dolthub://, s3://, az://, gs://, or mem://
-// return false. Dolt's git-protocol wrappers (git+https://, git+http://,
-// git+file://, git+ssh://, and git://) are treated as git remotes.
-func IsGitRemoteURL(raw string) bool {
-	if raw == "" {
-		return false
-	}
-	if !strings.Contains(raw, "://") {
-		// scp-like git@host:path or a bare host; treat as git remote.
-		return true
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https", "ssh", "git", "git+ssh", "git+https", "git+http", "git+file":
-		return true
-	}
-	return false
-}
-
 // hostProvider guesses the provider from a host name.
 func hostProvider(host string) Provider {
 	switch {

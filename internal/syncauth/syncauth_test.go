@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,35 +42,6 @@ func TestHostFromRemoteURL(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("HostFromRemoteURL(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestIsGitRemoteURL(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"https://github.com/steveyegge/beads.git", true},
-		{"git+https://github.com/steveyegge/beads.git", true},
-		{"git+http://gitlab.example.com/group/project.git", true},
-		{"ssh://git@github.com/steveyegge/beads.git", true},
-		{"git@github.com:steveyegge/beads.git", true},
-		{"https://gitlab.com/group/project.git", true},
-		{"git://github.com/steveyegge/beads.git", true},
-		{"dolthub://org/repo", false},
-		{"s3://bucket/repo", false},
-		{"az://account/repo", false},
-		{"gs://bucket/repo", false},
-		{"mem://repo", false},
-		{"", false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			if got := IsGitRemoteURL(tc.in); got != tc.want {
-				t.Fatalf("IsGitRemoteURL(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -222,6 +194,31 @@ func TestResolveAutoFallsBackToOAuth(t *testing.T) {
 	}
 }
 
+// Auto must not fail closed: with no gh/glab login and no client_id, auto
+// returns nil so the caller can run git with its own configured helpers
+// (osxkeychain, `gh auth setup-git`, credential-manager, ...).
+func TestResolveAutoNoProviderReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	kr := NewMemoryKeyring()
+
+	old := run
+	defer func() { run = old }()
+
+	run = func(_ context.Context, _ string, _ ...string) ([]byte, []byte, error) {
+		return nil, nil, fmt.Errorf("not installed")
+	}
+
+	for _, host := range []string{"github.com", "gitlab.com", "git.example.com"} {
+		a, err := ResolveAuto(ctx, host, Config{Host: host}, kr)
+		if err != nil {
+			t.Fatalf("ResolveAuto(%q) err = %v, want nil (auto must not fail closed)", host, err)
+		}
+		if a != nil {
+			t.Fatalf("ResolveAuto(%q) = %v, want nil", host, a.Name())
+		}
+	}
+}
+
 func TestWithAuthSetsAndRestoresEnv(t *testing.T) {
 	const env = "GIT_CONFIG_PARAMETERS"
 	prev := os.Getenv(env)
@@ -250,6 +247,66 @@ func TestWithAuthSetsAndRestoresEnv(t *testing.T) {
 
 	if os.Getenv(env) != "" {
 		t.Fatalf("GIT_CONFIG_PARAMETERS not restored")
+	}
+}
+
+// WithAuth(nil) runs fn without touching the environment — the auto
+// fall-through path.
+func TestWithAuthNilAuthLeavesEnvAlone(t *testing.T) {
+	const env = "GIT_CONFIG_PARAMETERS"
+	prev, had := os.LookupEnv(env)
+	defer func() {
+		if had {
+			_ = os.Setenv(env, prev)
+		} else {
+			_ = os.Unsetenv(env)
+		}
+	}()
+	_ = os.Unsetenv(env)
+
+	called := false
+	err := WithAuth(context.Background(), "github.com", nil, func() error {
+		called = true
+		if os.Getenv(env) != "" {
+			return fmt.Errorf("GIT_CONFIG_PARAMETERS set by nil Auth: %q", os.Getenv(env))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithAuth(nil) failed: %v", err)
+	}
+	if !called {
+		t.Fatal("WithAuth(nil) did not run fn")
+	}
+}
+
+// Proves a real git process sees the injected credential helper, and that the
+// GIT_CONFIG_PARAMETERS quoting survives a bd executable path containing
+// spaces (the oauth helper value is `!<exe> github-sync git-credential`).
+func TestWithAuthGitReadsCredentialHelper(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+
+	exe := filepath.Join(t.TempDir(), "dir with space", "bd")
+	a := newOAuthAuth(Config{Host: "github.com", ClientID: "client", Exe: exe}, NewMemoryKeyring())
+
+	var helper string
+	err := WithAuth(context.Background(), "github.com", a, func() error {
+		out, err := exec.Command("git", "config", "--get", "credential.https://github.com.helper").Output() // #nosec G204 -- fixed args
+		if err != nil {
+			return fmt.Errorf("git config --get: %w", err)
+		}
+		helper = strings.TrimSpace(string(out))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithAuth: %v", err)
+	}
+
+	want := "!" + exe + " github-sync git-credential"
+	if helper != want {
+		t.Fatalf("credential helper = %q, want %q", helper, want)
 	}
 }
 

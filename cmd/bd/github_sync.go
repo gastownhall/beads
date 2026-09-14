@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/syncauth"
 )
 
@@ -17,7 +16,6 @@ var (
 	githubSyncAuthProvider string
 	githubSyncAuthHost     string
 	githubSyncAuthDryRun   bool
-	githubSyncAuthRemove   bool
 )
 
 var githubSyncAuthCmd = &cobra.Command{
@@ -31,9 +29,8 @@ bd prefers the official gh and glab CLIs because they store credentials in
 the OS keyring. If neither CLI is available, bd can perform an OAuth device
 flow and store the token in the OS keyring itself.
 
-Run 'bd github-sync status' to see which authentication methods are available,
-'bd github-sync login --provider gh' (or glab/oauth) to authenticate, and
-'bd github-sync migrate --from-pat' to move away from PATs stored in config.`,
+Run 'bd github-sync status' to see which authentication methods are available
+and 'bd github-sync login --provider gh' (or glab/oauth) to authenticate.`,
 	RunE: runGitHubSyncStatus,
 }
 
@@ -60,14 +57,6 @@ var githubSyncStatusCmd = &cobra.Command{
 	RunE:  runGitHubSyncStatus,
 }
 
-var githubSyncMigrateCmd = &cobra.Command{
-	Use:   "migrate",
-	Short: "Migrate away from PAT-based auth",
-	Long: `Detect GitHub/GitLab personal access tokens stored in bd config and
-help migrate to gh, glab, or OAuth.`,
-	RunE: runGitHubSyncMigrate,
-}
-
 var gitCredentialCmd = &cobra.Command{
 	Use:    "git-credential",
 	Short:  "git credential helper for bd OAuth tokens",
@@ -78,21 +67,15 @@ var gitCredentialCmd = &cobra.Command{
 }
 
 func init() {
-	for _, c := range []*cobra.Command{githubSyncAuthCmd, githubSyncLoginCmd, githubSyncLogoutCmd, githubSyncStatusCmd, githubSyncMigrateCmd} {
+	for _, c := range []*cobra.Command{githubSyncAuthCmd, githubSyncLoginCmd, githubSyncLogoutCmd, githubSyncStatusCmd} {
 		c.Flags().StringVar(&githubSyncAuthProvider, "provider", "auto", "Authentication provider: gh, glab, oauth, or auto")
 		c.Flags().StringVar(&githubSyncAuthHost, "host", "", "Git host (default: inferred from remote, or github.com for login)")
-	}
-
-	for _, c := range []*cobra.Command{githubSyncAuthCmd, githubSyncLoginCmd, githubSyncLogoutCmd, githubSyncStatusCmd, githubSyncMigrateCmd} {
 		c.Flags().BoolVar(&githubSyncAuthDryRun, "dry-run", false, "Show what would happen without making changes")
 	}
-
-	githubSyncMigrateCmd.Flags().BoolVar(&githubSyncAuthRemove, "remove", false, "Remove PAT entries from config during migration")
 
 	githubSyncAuthCmd.AddCommand(githubSyncLoginCmd)
 	githubSyncAuthCmd.AddCommand(githubSyncLogoutCmd)
 	githubSyncAuthCmd.AddCommand(githubSyncStatusCmd)
-	githubSyncAuthCmd.AddCommand(githubSyncMigrateCmd)
 	githubSyncAuthCmd.AddCommand(gitCredentialCmd)
 
 	rootCmd.AddCommand(githubSyncAuthCmd)
@@ -109,15 +92,11 @@ func runGitHubSyncStatus(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
+	// A nil Auth means auto found no provider; status reports unauthenticated
+	// rather than exiting with an error.
 	a, err := resolveSyncAuth(ctx, cfg)
 	if err != nil {
-		if errors.Is(err, syncauth.ErrNoAuth) {
-			// No provider is available; status should report unauthenticated
-			// rather than exit with an error.
-			a = nil
-		} else {
-			return HandleError("%v", err)
-		}
+		return HandleError("%v", err)
 	}
 
 	ok := false
@@ -223,73 +202,6 @@ func runGitHubSyncLogout(cmd *cobra.Command, args []string) error {
 	}
 }
 
-func runGitHubSyncMigrate(cmd *cobra.Command, args []string) error {
-	patKeys := patConfigKeys()
-	found := findPATKeys(patKeys)
-
-	if len(found) == 0 {
-		fmt.Println("No PATs found in bd config.")
-		return nil
-	}
-
-	fmt.Println("PATs detected in bd config:")
-	for _, key := range found {
-		fmt.Printf("  - %s\n", key)
-	}
-
-	if githubSyncAuthRemove {
-		return removePATKeys(found)
-	}
-
-	printMigrationHelp()
-	return nil
-}
-
-func patConfigKeys() []string {
-	return []string{"github.token", "gitlab.token"}
-}
-
-func findPATKeys(keys []string) []string {
-	found := []string{}
-	for _, key := range keys {
-		if config.GetString(key) != "" {
-			found = append(found, key)
-		}
-	}
-	return found
-}
-
-func removePATKeys(keys []string) error {
-	if githubSyncAuthDryRun {
-		fmt.Println("Would remove PAT entries from config.")
-		return nil
-	}
-
-	beadsDir := beads.FindBeadsDir()
-	for _, key := range keys {
-		if err := clearConfigValue(key, beadsDir); err != nil {
-			return HandleError("save config: %v", err)
-		}
-	}
-	fmt.Println("PAT entries cleared from config.")
-	return nil
-}
-
-func clearConfigValue(key, beadsDir string) error {
-	if beadsDir != "" {
-		return config.SaveConfigValue(key, "", beadsDir)
-	}
-	config.Set(key, "")
-	return nil
-}
-
-func printMigrationHelp() {
-	fmt.Println("Re-run with --remove to clear them, then authenticate with one of:")
-	fmt.Println("  bd github-sync login --provider gh --host github.com")
-	fmt.Println("  bd github-sync login --provider glab --host gitlab.com")
-	fmt.Println("  bd github-sync login --provider oauth --host <host>")
-}
-
 func runCLIAuthLogin(name, host string) error {
 	path, err := exec.LookPath(name)
 	if err != nil {
@@ -393,7 +305,7 @@ func inferRemoteHost(ctx context.Context) string {
 	if err != nil || len(remotes) == 0 {
 		return ""
 	}
-	if !syncauth.IsGitRemoteURL(remotes[0].URL) {
+	if !doltutil.IsGitProtocolURL(remotes[0].URL) {
 		return ""
 	}
 	host, err := syncauth.HostFromRemoteURL(remotes[0].URL)
@@ -417,18 +329,14 @@ func clientIDForHost(host string) string {
 	return config.GetString("gitlab.client_id")
 }
 
+// clientSecretForHost reads the OAuth client secret from the environment only.
+// Secrets are deliberately not read from beads config — putting them there is
+// the pattern this feature exists to remove.
 func clientSecretForHost(host string) string {
-	host = syncauth.NormalizeHost(host)
-	if syncauth.IsGitHubHost(host) {
-		if v := os.Getenv("BD_GITHUB_CLIENT_SECRET"); v != "" {
-			return v
-		}
-		return config.GetString("github.client_secret")
+	if syncauth.IsGitHubHost(syncauth.NormalizeHost(host)) {
+		return os.Getenv("BD_GITHUB_CLIENT_SECRET")
 	}
-	if v := os.Getenv("BD_GITLAB_CLIENT_SECRET"); v != "" {
-		return v
-	}
-	return config.GetString("gitlab.client_secret")
+	return os.Getenv("BD_GITLAB_CLIENT_SECRET")
 }
 
 func oauthScopesForHost(host string) []string {

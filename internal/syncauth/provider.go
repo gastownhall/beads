@@ -37,6 +37,9 @@ func NewWithKeyring(cfg Config, kr Keyring) (Auth, error) {
 
 // ResolveAuto picks the best available provider for the host.
 // Priority: gh for GitHub hosts, glab for GitLab hosts, then OAuth if configured.
+// It returns (nil, nil) when no provider is detected; callers should run the
+// git operation unmodified so git's own configured credential helpers apply.
+// Auto never fails closed — an explicit provider is what makes auth required.
 func ResolveAuto(ctx context.Context, host string, cfg Config, kr Keyring) (Auth, error) {
 	if kr == nil {
 		kr = DefaultKeyring()
@@ -80,7 +83,10 @@ func ResolveAuto(ctx context.Context, host string, cfg Config, kr Keyring) (Auth
 		}
 	}
 
-	return nil, fmt.Errorf("%w: no gh/glab login and no OAuth client_id configured for %s", ErrNoAuth, host)
+	// No provider detected. This is not an error: the remote may be
+	// public, or the user's own git credential setup (osxkeychain,
+	// `gh auth setup-git`, credential-manager) may already cover it.
+	return nil, nil
 }
 
 func tryDetect(ctx context.Context, a Auth) (Auth, error) {
@@ -170,7 +176,12 @@ func SetEnv(host string, a Auth) (func(), error) {
 }
 
 // WithAuth runs fn with the git credential helper environment set for host.
+// A nil Auth runs fn unmodified — ResolveAuto returns nil when no provider is
+// detected, in which case git's own configured credential helpers still apply.
 func WithAuth(ctx context.Context, host string, a Auth, fn func() error) error {
+	if a == nil {
+		return fn()
+	}
 	cleanup, err := SetEnv(host, a)
 	if err != nil {
 		return err
