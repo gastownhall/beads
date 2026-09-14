@@ -161,7 +161,7 @@ func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
 	beadsDir = resolveSymlinks(beadsDir)
 
 	t.Run("named by BEADS_DIR is redirected", func(t *testing.T) {
-		t.Setenv("BEADS_DIR", beadsDir)
+		stubCallerBeadsDir(t, beadsDir)
 
 		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
 		if err != nil {
@@ -176,7 +176,13 @@ func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
 	})
 
 	t.Run("found by the CWD walk is not redirected", func(t *testing.T) {
-		t.Setenv("BEADS_DIR", "")
+		stubCallerBeadsDir(t, "")
+		// The live environment says otherwise, which is the whole point: bd
+		// exports a BEADS_DIR for itself before resolving (context_cmd.go
+		// calls prepareSelectedNoDBContext immediately beforehand), so a
+		// walk-found workspace has one in the env by the time this runs. Only
+		// the caller's own value counts.
+		t.Setenv("BEADS_DIR", beadsDir)
 
 		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
 		if err != nil {
@@ -188,7 +194,7 @@ func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
 	})
 
 	t.Run("BEADS_DIR naming a different directory is not this one", func(t *testing.T) {
-		t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "elsewhere", ".beads"))
+		stubCallerBeadsDir(t, filepath.Join(t.TempDir(), "elsewhere", ".beads"))
 
 		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
 		if err != nil {
@@ -198,4 +204,15 @@ func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
 			t.Error("IsRedirected = true, but BEADS_DIR does not name the directory that was resolved")
 		}
 	})
+}
+
+// stubCallerBeadsDir sets what the context resolver sees as the caller's own
+// BEADS_DIR. The real value is captured at package initialization from the
+// inherited environment, so t.Setenv cannot move it — which is precisely why
+// the snapshot exists, and therefore why it has to be stubbed here.
+func stubCallerBeadsDir(t *testing.T, dir string) {
+	t.Helper()
+	orig := beadsDirFromCaller
+	beadsDirFromCaller = dir
+	t.Cleanup(func() { beadsDirFromCaller = orig })
 }

@@ -173,23 +173,53 @@ func recoverNoGit(rc *RepoContext, err error) (*RepoContext, error) {
 		// "BEADS_DIR implies contributor (external repo mode)" promises.
 		//
 		// This mirrors FindBeadsDir's step 1, the same condition that chose
-		// the directory. A .beads found by the CWD walk instead leaves the
-		// field false, as it should.
-		IsRedirected: beadsDirNamedByEnv(noRoot.BeadsDir),
+		// the directory — but asked of the CALLER's environment, not the live
+		// one bd has already written to. A .beads found by the working
+		// directory walk leaves the field false, as it should.
+		//
+		// A redirect file cannot reach here to be missed: buildRepoContext
+		// checks GetRedirectInfo() at step 3, and a redirect sends it down the
+		// isExternal branch that never asks git for a root. So by construction
+		// the only redirect this branch can be looking at is a caller-named
+		// BEADS_DIR.
+		IsRedirected: beadsDirNamedByCaller(noRoot.BeadsDir),
 		// IsWorktree stays false: git.IsWorktree() needs a repository, and
 		// there is none.
 	}, nil
 }
 
-// beadsDirNamedByEnv reports whether BEADS_DIR is set and resolves to beadsDir,
-// i.e. whether FindBeadsDir picked this directory via its step 1 rather than by
-// walking up from the working directory.
-func beadsDirNamedByEnv(beadsDir string) bool {
-	env := os.Getenv("BEADS_DIR")
-	if env == "" || beadsDir == "" {
+// beadsDirFromCaller is BEADS_DIR as the process INHERITED it, captured at
+// package initialization — which the language guarantees runs before main, and
+// so before any bd code exports a BEADS_DIR of its own.
+//
+// Reading the live environment instead is a different question and the wrong
+// one, because bd routinely answers it for itself first: `bd context` calls
+// prepareSelectedNoDBContext immediately before resolving (cmd/bd/
+// context_cmd.go), the root PersistentPreRunE does the same for every no-DB
+// command, and both end in os.Setenv("BEADS_DIR", <whatever discovery just
+// found>). A workspace found by walking up from the working directory would
+// therefore look like one the caller had named.
+//
+// This is the same snapshot, for the same reason, as beadsDirFromCaller in
+// package main (GH#4635) — provenance has to be captured before the process
+// starts overwriting the evidence.
+//
+// A package var so tests can stub it.
+var beadsDirFromCaller = os.Getenv("BEADS_DIR")
+
+// beadsDirNamedByCaller reports whether the caller's own BEADS_DIR names
+// beadsDir — i.e. whether FindBeadsDir picked this directory via its step 1
+// because the caller said so, rather than by walking up from the working
+// directory.
+//
+// It resolves the caller's value the same way FindBeadsDir does
+// (canonicalize, then follow a redirect file), so the comparison answers "is
+// this the directory they named" rather than "is the string equal".
+func beadsDirNamedByCaller(beadsDir string) bool {
+	if beadsDirFromCaller == "" || beadsDir == "" {
 		return false
 	}
-	return FollowRedirect(canonicalizeBeadsDirPath(env)) == beadsDir
+	return FollowRedirect(canonicalizeBeadsDirPath(beadsDirFromCaller)) == beadsDir
 }
 
 // buildRepoContext constructs the RepoContext by resolving all paths.
