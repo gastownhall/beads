@@ -1,4 +1,4 @@
-//go:build unix
+//go:build integration && !windows
 
 package ownershiphandoffv2
 
