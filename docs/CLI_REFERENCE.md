@@ -138,6 +138,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd dolt stop](#bd-dolt-stop) — Stop the Dolt SQL server for this project
   - [bd dolt test](#bd-dolt-test) — Test connection to Dolt server
 - [bd forget](#bd-forget) — Remove a persistent memory
+- [bd github-sync](#bd-github-sync) — Manage secure GitHub/GitLab authentication for Dolt sync
 - [bd hooks](#bd-hooks) — Manage git hooks for beads integration
   - [bd hooks install](#bd-hooks-install) — Install bd git hooks
   - [bd hooks list](#bd-hooks-list) — List installed git hooks status
@@ -2986,6 +2987,13 @@ variables for authentication.
 Use --remote to pull from a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').
 
+Use --auth to select how bd authenticates git-protocol remotes
+(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
+then the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Non-git Dolt
+remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+See 'bd github-sync'.
+
 ```
 bd dolt pull [flags]
 ```
@@ -2993,6 +3001,7 @@ bd dolt pull [flags]
 **Flags:**
 
 ```
+      --auth string     Auth provider for remote git operations: gh, glab, oauth, pat, or auto (default "auto")
       --remote string   Pull from a specific named remote instead of the default
 ```
 
@@ -3010,6 +3019,13 @@ uncommitted changes in its working set).
 Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').
 
+Use --auth to select how bd authenticates git-protocol remotes
+(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
+then the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Non-git Dolt
+remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+See 'bd github-sync'.
+
 ```
 bd dolt push [flags]
 ```
@@ -3017,6 +3033,7 @@ bd dolt push [flags]
 **Flags:**
 
 ```
+      --auth string     Auth provider for remote git operations: gh, glab, oauth, pat, or auto (default "auto")
       --force           Force push (overwrite remote changes)
       --remote string   Push to a specific named remote instead of the default
 ```
@@ -5759,6 +5776,54 @@ bd github sync [flags]
       --pull-only       Only pull issues from GitHub
       --push-only       Only push issues to GitHub
 ```
+
+### bd github-sync
+
+Manage secure GitHub/GitLab authentication for `bd dolt push` and `bd dolt pull`.
+
+bd prefers the official `gh` (GitHub) and `glab` (GitLab) CLIs because they
+store credentials in the OS keyring. If neither CLI is available, bd can run an
+OAuth device flow and store the token in the OS keyring.
+
+```
+bd github-sync <command> [flags]
+```
+
+Commands:
+- `bd github-sync status` — Show which auth provider is available for the host
+- `bd github-sync login --provider gh|glab|oauth --host <host>` — Authenticate using the chosen provider
+- `bd github-sync logout --provider gh|glab|oauth --host <host>` — Remove stored credentials
+
+**Global flags:**
+
+```
+      --dry-run            Show what would happen without making changes
+      --host string        Git host (default: inferred from Dolt remote, or github.com for login)
+      --provider string    Authentication provider: gh, glab, oauth, or auto (default: auto)
+```
+
+**Examples:**
+
+```
+bd github-sync status
+bd github-sync login --provider gh --host github.com
+bd github-sync login --provider oauth --host github.com
+```
+
+**Configuration:**
+
+OAuth requires a client ID (and, for providers whose refresh flow needs one, a
+client secret) registered with the host. Client IDs may live in `config.yaml`
+or environment variables; client secrets are read from the environment only —
+secrets do not belong in beads config:
+
+- `github.client_id` / `BD_GITHUB_CLIENT_ID`
+- `BD_GITHUB_CLIENT_SECRET` (env only)
+- `gitlab.client_id` / `BD_GITLAB_CLIENT_ID`
+- `BD_GITLAB_CLIENT_SECRET` (env only)
+
+For GitHub Enterprise or self-managed GitLab, set the host explicitly with
+`--host` and configure the matching `client_id`.
 
 ### bd gitlab
 
