@@ -73,19 +73,25 @@ checks and fixes server-gated until the driver interface covers them.
 
 ## GitHub/GitLab Sync Authentication
 
-`bd dolt push` and `bd dolt pull` now authenticate with GitHub/GitLab remotes via
-the `gh`/`glab` CLIs or an OAuth device flow. Do not store PATs in beads
-config; `github.token` and `gitlab.token` are treated as deprecated.
+`bd dolt push` and `bd dolt pull` authenticate git-protocol remotes
+(`git+https://`, `git+ssh://`, `git://`, `git+file://`) via the `gh`/`glab`
+CLIs or an OAuth device flow, injected per-command through
+`GIT_CONFIG_PARAMETERS`. Non-git Dolt remotes (`https://` DoltHub/remotesapi,
+`dolthub://`, Hosted Dolt) are never wrapped. With `--auth auto` and no
+detected provider, bd injects nothing so git's own configured credential
+helpers still apply. Do not store sync PATs in beads config; `github.token`
+and `gitlab.token` remain the issue-tracker bridge credentials (`bd github`,
+`bd gitlab`) and are unrelated to dolt sync.
 
-Migration steps for existing PAT-based sync:
 1. Run `bd github-sync status` to see the detected provider.
 2. Log in with `bd github-sync login --provider gh --host github.com` or
    `bd github-sync login --provider oauth --host github.com`.
-3. Remove old PAT config: `bd github-sync migrate --remove`.
-4. Use `bd dolt push --auth auto` (or `gh`/`glab`/`oauth`) for explicit control.
+3. Use `bd dolt push --auth auto` (or `gh`/`glab`/`oauth`) for explicit control.
 
-OAuth setup needs `github.client_id`/`github.client_secret` (or GitLab
-equivalents) in config or `BD_GITHUB_CLIENT_ID`/`BD_GITLAB_CLIENT_ID` env vars.
+OAuth setup needs `github.client_id`/`gitlab.client_id` in config or
+`BD_GITHUB_CLIENT_ID`/`BD_GITLAB_CLIENT_ID` env vars. Client secrets are
+read from `BD_GITHUB_CLIENT_SECRET`/`BD_GITLAB_CLIENT_SECRET` env only —
+never from config.
 
 ## Agent Warning: Interactive Commands
 

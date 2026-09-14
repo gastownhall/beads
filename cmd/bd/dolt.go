@@ -526,7 +526,14 @@ Use --force to overwrite remote changes (e.g., when the remote has
 uncommitted changes in its working set).
 
 Use --remote to push to a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').`,
+The remote must already exist (see 'bd dolt remote add').
+
+Use --auth to select how bd authenticates git-protocol remotes
+(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
+then the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Non-git Dolt
+remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+See 'bd github-sync'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.GetBool("no-push") {
 			fmt.Println("skipping push: rig is local-only (no-push: true)")
@@ -626,7 +633,14 @@ Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
 aborting the pull for manual resolution. Embedded storage only (#4992); on
 server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-reports conflicts.`,
+reports conflicts.
+
+Use --auth to select how bd authenticates git-protocol remotes
+(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
+then the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Non-git Dolt
+remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+See 'bd github-sync'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			if jsonOutput {
@@ -1798,7 +1812,9 @@ func isTimeoutError(err error) bool {
 
 // withRemoteAuth runs fn with GIT_CONFIG_PARAMETERS configured for the
 // requested (or auto-detected) authentication provider. It is a no-op when
-// the remote URL is not a git-protocol host (e.g. DoltHub or Azure).
+// the remote URL is not a git-protocol remote (e.g. DoltHub, Hosted Dolt, or
+// Azure). Under --auth auto with no detected provider, fn runs unmodified so
+// git's own configured credential helpers still apply.
 func withRemoteAuth(ctx context.Context, cmd *cobra.Command, st storage.DoltStorage, remote string, fn func() error) error {
 	host, err := remoteHost(ctx, st, remote)
 	if err != nil {
@@ -1837,7 +1853,7 @@ func remoteHost(ctx context.Context, st storage.DoltStorage, remote string) (str
 	if remote != "" {
 		for _, r := range remotes {
 			if r.Name == remote {
-				if !syncauth.IsGitRemoteURL(r.URL) {
+				if !doltutil.IsGitProtocolURL(r.URL) {
 					return "", nil
 				}
 				host, _ := syncauth.HostFromRemoteURL(r.URL)
@@ -1850,7 +1866,7 @@ func remoteHost(ctx context.Context, st storage.DoltStorage, remote string) (str
 	if len(remotes) == 0 {
 		return "", nil
 	}
-	if !syncauth.IsGitRemoteURL(remotes[0].URL) {
+	if !doltutil.IsGitProtocolURL(remotes[0].URL) {
 		return "", nil
 	}
 	host, _ := syncauth.HostFromRemoteURL(remotes[0].URL)
