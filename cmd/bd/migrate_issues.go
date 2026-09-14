@@ -632,9 +632,11 @@ func init() {
 
 	migrateIssuesCmd.Flags().String("from", "", "Source repository (required)")
 	migrateIssuesCmd.Flags().String("to", "", "Destination repository (required)")
-	migrateIssuesCmd.Flags().String("status", "", "Filter by status (open/closed/all)")
+	// One status and one type: executeMigrateIssues builds types.Status /
+	// types.IssueType from the raw string.
+	addOnceFilterFlag(migrateIssuesCmd, "status", "", "", "Filter by status (open/closed/all)", nil)
 	migrateIssuesCmd.Flags().Int("priority", -1, "Filter by priority (0-4)")
-	migrateIssuesCmd.Flags().String("type", "", "Filter by issue type (bug/feature/task/epic/chore/decision)")
+	addOnceFilterFlag(migrateIssuesCmd, "type", "", "", "Filter by issue type (bug/feature/task/epic/chore/decision)", nil)
 	migrateIssuesCmd.Flags().StringSlice("label", nil, "Filter by labels (can specify multiple)")
 	migrateIssuesCmd.Flags().StringSlice("id", nil, "Specific issue IDs to migrate (can specify multiple)")
 	migrateIssuesCmd.Flags().String("ids-file", "", "File containing issue IDs (one per line)")

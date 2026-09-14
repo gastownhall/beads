@@ -196,14 +196,17 @@ func init() {
 	gitlabSyncCmd.Flags().BoolVar(&gitlabPreferNewer, "prefer-newer", false, "On conflict, use most recent version (default)")
 
 	// Filter flags (override config defaults)
-	gitlabSyncCmd.Flags().StringVar(&gitlabFilterLabel, "label", "", "Filter by labels (comma-separated, AND logic)")
+	// --label and --type are comma-separated sets downstream (the GitLab
+	// filter ANDs the labels; parseTypeList splits the types), so repeats
+	// union. --assignee is one username.
+	addUnionFilterFlag(gitlabSyncCmd, "label", "", "", "Filter by labels (comma-separated or repeated, AND logic)", &gitlabFilterLabel)
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterProject, "project", "", "Filter to issues from this project ID (group mode)")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterMilestone, "milestone", "", "Filter by milestone title")
-	gitlabSyncCmd.Flags().StringVar(&gitlabFilterAssignee, "assignee", "", "Filter by assignee username")
+	addOnceFilterFlag(gitlabSyncCmd, "assignee", "", "", "Filter by assignee username", &gitlabFilterAssignee)
 	registerSelectiveSyncFlags(gitlabSyncCmd)
 
 	// Type filtering flags
-	gitlabSyncCmd.Flags().StringVar(&gitlabTypeFilter, "type", "", "Only sync these issue types (comma-separated, e.g. 'epic,feature,task')")
+	addUnionFilterFlag(gitlabSyncCmd, "type", "", "", "Only sync these issue types (comma-separated or repeated, e.g. 'epic,feature,task')", &gitlabTypeFilter)
 	gitlabSyncCmd.Flags().StringVar(&gitlabExcludeTypes, "exclude-type", "", "Exclude these issue types from sync (comma-separated)")
 	gitlabSyncCmd.Flags().BoolVar(&gitlabNoEphemeral, "no-ephemeral", true, "Exclude ephemeral/wisp issues from push (default: true)")
 

@@ -99,7 +99,10 @@ func displayStaleIssues(issues []*types.Issue, days int) {
 }
 func init() {
 	staleCmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
-	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked|deferred)")
+	// One status: the RunE validates against a four-name whitelist, so a
+	// joined value would be refused by name-lookup rather than by flag, which
+	// is a loud error pointing at the wrong thing.
+	addOnceFilterFlag(staleCmd, "status", "s", "", "Filter by status (open|in_progress|blocked|deferred)", nil)
 	staleCmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
 	staleCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	staleCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")

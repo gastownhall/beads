@@ -62,7 +62,8 @@ Examples:
 func init() {
 	findDuplicatesCmd.Flags().String("method", "mechanical", "Detection method: mechanical, ai")
 	findDuplicatesCmd.Flags().Float64("threshold", 0.5, "Similarity threshold (0.0-1.0, lower = more results)")
-	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
+	// One status: the filter takes types.Status(status).
+	addOnceFilterFlag(findDuplicatesCmd, "status", "s", "", "Filter by status (default: non-closed)", nil)
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.

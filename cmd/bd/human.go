@@ -493,7 +493,9 @@ func init() {
 	humanCmd.AddCommand(humanStatsCmd)
 
 	// Add flags for subcommands
-	humanListCmd.Flags().StringP("status", "s", "", "Filter by status (open, closed, etc.; comma-separated for multiple, 'all' for every status)")
+	// Routed through workapi.BuildListFilter, which splits the selector on
+	// commas, so a repeat unions.
+	addUnionFilterFlag(humanListCmd, "status", "s", "", "Filter by status (open, closed, etc.; comma-separated or repeated for multiple, 'all' for every status)", nil)
 	humanRespondCmd.Flags().StringP("response", "r", "", "Response text")
 	registerTextSourceFlags(humanRespondCmd, "response text", "response")
 	humanDismissCmd.Flags().StringP("reason", "", "", "Reason for dismissal (optional)")
