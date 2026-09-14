@@ -149,6 +149,14 @@ func testHookProcessBackendSelection(t *testing.T) {
 			wantHelper: "helper=gtimeout",
 		},
 		{
+			name: "uutils coreutils timeout is selected like GNU",
+			fixtures: []hookProcessFixture{
+				{name: "timeout", body: strings.Replace(hookProcessGNUTimeoutStub, "(GNU coreutils) 9.99", "(uutils coreutils) 0.10.0", 1)},
+				{name: "gtimeout", body: hookProcessGNUGtimeoutStub},
+			},
+			wantHelper: "helper=timeout",
+		},
+		{
 			name: "nonzero GNU-looking probe yields to gtimeout",
 			fixtures: []hookProcessFixture{
 				{name: "timeout", body: hookProcessFailedGNUProbeStub},

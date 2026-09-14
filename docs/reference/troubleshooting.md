@@ -535,8 +535,9 @@ export BEADS_HOOK_TIMEOUT=600  # 10 minutes (in seconds)
 
 The value must be a positive whole number of seconds. Invalid values and zero
 warn and fall back to 300 seconds. Beads accepts `timeout` or `gtimeout` only
-when a successful version probe identifies GNU coreutils; native Windows
-`timeout.exe` is not compatible. If neither GNU timeout nor Perl is available,
+when a successful version probe identifies GNU coreutils or uutils coreutils;
+native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
+nor Perl is available,
 the hook warns that it is running directly without a deadline.
 
 GNU timeout sends `TERM`; on POSIX hosts, Perl's alarm applies to the direct
