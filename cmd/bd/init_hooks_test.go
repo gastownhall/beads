@@ -275,12 +275,22 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 				t.Fatalf("tracked hook missing %q", hookSectionEndLine())
 			}
 			end := begin + relativeEnd + len(endMarker)
-
-			if got, want := tracked[begin:end], generateHookSection(hookName); got != want {
-				t.Fatalf("tracked managed section drifted from generator\nwant:\n%s\ngot:\n%s", want, got)
-			}
 			if strings.Count(tracked, hookSectionBeginPrefix) != 1 || strings.Count(tracked, hookSectionEndPrefix) != 1 {
 				t.Fatal("tracked hook must contain exactly one managed section")
+			}
+			got, want := tracked[begin:end], generateHookSection(hookName)
+			if os.Getenv("BD_UPDATE_GOLDEN") == "1" {
+				if got == want {
+					return
+				}
+				if err := os.WriteFile(path, []byte(tracked[:begin]+want+tracked[end:]), 0o755); err != nil {
+					t.Fatalf("write tracked hook: %v", err)
+				}
+				t.Logf("regenerated managed section in %s", path)
+				return
+			}
+			if got != want {
+				t.Fatalf("tracked managed section drifted from generator (regenerate with `make githooks-regen`)\nwant:\n%s\ngot:\n%s", want, got)
 			}
 		})
 	}
