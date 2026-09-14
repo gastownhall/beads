@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -208,6 +209,25 @@ func (x *run) configure() error {
 	}
 	e := x.evidence()
 	dataDir := x.dataDir()
+
+	// Before anything is reserved or written: can this platform launch a server
+	// whose identity bd will be able to prove and retire later? Only Linux can
+	// (pidfd); darwin and Windows cannot bind a crash-window listener to a
+	// durable launch intent at all. Discovering that after reserving the launch
+	// leaves a reservation behind for a spawn that was never possible, so it is
+	// checked here, where refusing costs nothing.
+	//
+	// This refuses rather than degrading. A replacement bd cannot prove it
+	// started is one rollback cannot safely stop, and an ownership transfer
+	// whose undo does not work is worse than one that never began.
+	if !doltserver.SupportsStrictLaunchRecovery() {
+		e.record("strict_launch_supported", GateUnavailable)
+		e.note("strict_launch", "this platform cannot bind a launched server to a durable launch intent")
+		return x.fail(codedf(CodeTargetLaunchFailed,
+			"ownership transfer needs a launch identity this platform cannot provide (%s); "+
+				"the replacement could be started but not later proven or retired", runtime.GOOS), &e)
+	}
+	e.record("strict_launch_supported", GatePassed)
 
 	// A crash between reserving the launch and recording its identity leaves an
 	// orphan holding the data dir. Retire it by its durable nonce before trying

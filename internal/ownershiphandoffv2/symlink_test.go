@@ -145,15 +145,22 @@ func TestResumeThroughASymlinkIsNotAnIdentityConflict(t *testing.T) {
 		Endpoint:  Endpoint{Host: "127.0.0.1", Port: 3307},
 		BDVersion: "test",
 	}
-	result, err := Run(context.Background(), VerbLegacyGone, opts)
+	// commit is the verb to probe adoption with: it reaches the journal through
+	// the same load-and-compare path as every other verb, then refuses on phase
+	// order alone. A verb that touches the endpoint would make the outcome
+	// depend on whether anything happens to be listening on this machine, which
+	// is not what this test is about.
+	result, err := Run(context.Background(), VerbCommit, opts)
 	if code := ErrorCode(err); code == CodeIdentityConflict {
 		t.Fatalf("resuming through a symlinked path was refused as a different scope: %v", err)
+	} else if code != CodePhaseOrder {
+		t.Fatalf("commit against a prepared journal returned %q, want %q (err: %v)",
+			code, CodePhaseOrder, err)
 	}
-	// It will refuse for a real reason — nothing is listening on 3307 here —
-	// but the journal must have been adopted, not rejected.
 	if result.Phase != PhasePrepared {
-		t.Fatalf("the journal was not adopted through the symlink: phase %q", result.Phase)
+		t.Fatalf("the refusal moved the phase to %q", result.Phase)
 	}
+	// Adoption: the journal's spelling has been converged onto the resolved one.
 	if result.Request.Root != physical {
 		t.Fatalf("the request root is %q, want the resolved %q", result.Request.Root, physical)
 	}
