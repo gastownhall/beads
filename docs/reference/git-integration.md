@@ -130,9 +130,10 @@ hooks {
 
 The hook shim applies a soft deadline to `bd hooks run` when a compatible
 helper is available. It
-uses `timeout` or `gtimeout` only after a successful GNU coreutils identity
-probe, avoiding the incompatible `timeout.exe` that native Windows can place
-on `PATH`. GNU timeout sends `TERM` at the configured deadline. On POSIX hosts,
+uses `timeout` or `gtimeout` only after a successful identity probe for GNU
+coreutils or uutils coreutils (same command line, same exit status), avoiding
+the incompatible `timeout.exe` that native Windows can place on `PATH`. The
+coreutils helper sends `TERM` at the configured deadline. On POSIX hosts,
 the Perl fallback uses `SIGALRM` on the direct `bd` process at the deadline.
 Git for Windows Perl does not guarantee that alarm across `exec`, so GNU
 coreutils is the preferred deadline backend there.
