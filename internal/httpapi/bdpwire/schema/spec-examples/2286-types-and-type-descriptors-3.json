@@ -1,0 +1,18 @@
+{
+  "id": "https://work.example/types/assigned-to",
+  "name": "Assigned To",
+  "description": "Associates a work item with the person responsible for it.",
+  "describes": "link",
+  "conformsTo": [],
+  "propertiesSchema": "https://work.example/schemas/assigned-to-properties-v1",
+  "source": {
+    "conformsTo": [
+      "https://work.example/types/issue"
+    ]
+  },
+  "target": {
+    "conformsTo": [
+      "https://people.example/types/person"
+    ]
+  }
+}

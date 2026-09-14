@@ -65,3 +65,64 @@ type ErrUnsupported struct {
 func (e *ErrUnsupported) Error() string {
 	return fmt.Sprintf("operation %q not supported by the %s backend", e.Op, e.Backend)
 }
+
+// THE AUTHORITY VOCABULARY. The bead graph is single-authority: one workspace
+// holds a Scope, asserts a store-owned witness inside every transaction, and
+// refuses everything else (engdocs/BDP_GRAPH_ARCHITECTURE.md §2b, A1/A7/A9).
+// The refusals below are what that assertion says when it fails, and they are
+// declared here rather than in graphops because none of them names a graph
+// concept: "you are not the authority", "the state you recorded is gone",
+// "the state moved under you", "the remote moved, sync first", "committed but
+// not published", "too big", "not served yet" are things any plane with a
+// witness, a publication step, or a size bound would say. The four refusals
+// that DO name the plane — no Scope, a Scope exists, a Scope URL reused, a
+// path in a gone state — stay in graphops, by the test in this file's doc.
+//
+// Nothing here says HOW a caller recovers; the graph verbs do. A sentinel is
+// the classification, and the message is for a human reading a log.
+
+// ErrNotAuthority reports that this workspace is not the authority for the
+// thing it was asked to serve or mutate: no witness, a witness bound to another
+// installation, a stale (authority_id, epoch), a lease another holder owns, or
+// a substrate that cannot hold authority at all (an embedded or registered
+// backend workspace in v0). Replication, restore and copy confer nothing; the
+// remedies are explicit and operator-driven.
+var ErrNotAuthority = errors.New("not the authority for this Scope")
+
+// ErrStateRewound reports that the witness names a ledger head the store no
+// longer contains — the shape a restore to an older state leaves behind. It is
+// distinct from ErrNotAuthority because the remedy is different: the workspace
+// IS the authority and must show continuity (a ledger snapshot) or rotate.
+var ErrStateRewound = errors.New("state rewound: the recorded ledger head is no longer in the store")
+
+// ErrStateChanged reports that the graph-state version observed inside a
+// transaction differs from the one the witness recorded. The body that sees it
+// stops without validating in its held transaction; the accessor validates the
+// delta on its own, advances the witness, and retries once. A caller that sees
+// it after that retry is looking at a refused delta.
+var ErrStateChanged = errors.New("state changed under the recorded version")
+
+// ErrSyncRequired reports a publication whose remote moved on another plane
+// only (issue-plane divergence with no graph delta): the local commit is kept,
+// nothing is undone, and the caller pulls before retrying. Hazard R vocabulary,
+// deferred under A9 but part of the closed set so a client can classify it.
+var ErrSyncRequired = errors.New("sync required: the remote moved outside the graph")
+
+// ErrUnpublished reports a mutation that committed locally but whose
+// publication failed for a reason other than a race: the commit stands, the
+// witness carries the unpublished marker, and the next attempt retries the
+// publication. Hazard R vocabulary, deferred under A9.
+var ErrUnpublished = errors.New("committed locally but not yet published")
+
+// ErrRepresentationTooLarge reports a value — a properties document, a
+// descriptor, a request body — larger than the bound the serving surface
+// advertises. The bound itself belongs to the surface (the store's value limit,
+// the handler's body limit), not to this sentinel.
+var ErrRepresentationTooLarge = errors.New("representation too large")
+
+// ErrNotServedYet reports a surface that exists in the contract but is not yet
+// served on this route — a collection read on the client route before the
+// cursor ADR, a Scope that has not been minted and is being asked for through a
+// door that never mints. It is the capability-level "not now" that
+// ErrUnsupported's "not by this backend" is not.
+var ErrNotServedYet = errors.New("not served yet")
