@@ -569,16 +569,27 @@ var configUnsetCmd = &cobra.Command{
 		key := args[0]
 
 		if config.IsYamlOnlyKey(key) {
-			location := "config.yaml"
+			file := "config.yaml"
+			var changed bool
 			var unsetErr error
 			if config.IsUserGlobalKey(key) {
-				unsetErr = config.UnsetUserYamlConfig(key)
-				location = config.UserConfigYamlDisplayPath()
+				changed, unsetErr = config.UnsetUserYamlConfig(key)
+				file = config.UserConfigYamlDisplayPath()
 			} else {
-				unsetErr = config.UnsetYamlConfig(key)
+				changed, unsetErr = config.UnsetYamlConfig(key)
 			}
 			if unsetErr != nil {
 				return HandleError("unsetting config: %v", unsetErr)
+			}
+
+			// The location is a report of the write, not a guess made before
+			// it: an absent file or a key that was never written there is a
+			// no-op, and saying "Unset <key> (in config.yaml)" over a file
+			// that never held it is the untrustworthy message this command's
+			// fix set out to remove.
+			location := ""
+			if changed {
+				location = file
 			}
 
 			if jsonOutput {
@@ -588,8 +599,10 @@ var configUnsetCmd = &cobra.Command{
 				}); err != nil {
 					return err
 				}
-			} else {
+			} else if changed {
 				fmt.Printf("Unset %s (in %s)\n", key, location)
+			} else {
+				fmt.Printf("%s was not set in %s\n", key, file)
 			}
 			printConfigSideEffects(checkConfigUnsetSideEffects(key))
 			return nil
@@ -623,14 +636,33 @@ var configUnsetCmd = &cobra.Command{
 		}
 		noteDirectConfigWrite()
 
+		// Clear the config.yaml layer unconditionally and report what the
+		// write actually did. Pre-checking with GetYamlConfig would read
+		// viper's *merged* value - SetDefault values and AutomaticEnv
+		// included - so a key with a non-empty default (no-hooks, json,
+		// events-journal-retain-days, ...) looked present in config.yaml even
+		// in a workspace with no config.yaml at all. That produced a more
+		// specific false claim than the message this fix removed, and, with no
+		// project config.yaml, failed the command after the database row was
+		// already gone.
+		location := "database"
+		yamlCleared, err := config.UnsetYamlConfig(result.Key)
+		if err != nil {
+			return HandleError("deleting config from config.yaml: %v", err)
+		}
+		if yamlCleared {
+			location = "database, config.yaml"
+		}
+
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
-				"key": result.Key,
+				"key":      result.Key,
+				"location": location,
 			}); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("Unset %s\n", result.Key)
+			fmt.Printf("Unset %s (in %s)\n", result.Key, location)
 		}
 		printConfigSideEffects(checkConfigUnsetSideEffects(result.Key))
 		return nil
