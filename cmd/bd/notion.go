@@ -139,7 +139,7 @@ func init() {
 	notionSyncCmd.Flags().BoolVar(&notionPreferLocal, "prefer-local", false, "On conflict, keep the local beads version")
 	notionSyncCmd.Flags().BoolVar(&notionPreferNotion, "prefer-notion", false, "On conflict, use the Notion version")
 	notionSyncCmd.Flags().BoolVar(&notionCreateOnly, "create-only", false, "Only create missing remote pages, do not update existing ones")
-	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, or all")
+	addOnceFilterFlag(notionSyncCmd, "state", "", "all", "Issue state to sync: open, closed, or all", &notionSyncState)
 	registerSelectiveSyncFlags(notionSyncCmd)
 
 	notionCmd.AddCommand(

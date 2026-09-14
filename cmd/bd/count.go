@@ -252,14 +252,20 @@ func init() {
 // real command and into the next test.
 func registerCountFlags(cmd *cobra.Command) {
 	// Filter flags (same as list command)
-	cmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
+	// --status/--type/--assignee refuse a repeat rather than unioning it:
+	// issueops.CountRequest documents each as ONE value and not a
+	// comma-separated OR set, so a joined value would match nothing and count
+	// 0 — a clean-looking answer over an empty set, which is the defect.
+	addOnceFilterFlag(cmd, "status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed; one value). Note: dependency-blocked issues use 'bd blocked'", nil)
 	cmd.Flags().IntP("priority", "p", 0, "Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)")
-	cmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	cmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
+	addOnceFilterFlag(cmd, "assignee", "a", "", "Filter by assignee", nil)
+	addOnceFilterFlag(cmd, "type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)", nil)
 	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 	cmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
-	cmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated)")
+	// --id IS a set downstream (CountRequest.IDFilter splits on comma), so a
+	// repeat unions into exactly the comma form.
+	addUnionFilterFlag(cmd, "id", "", "", "Filter by specific issue IDs (comma-separated or repeated)", nil)
 
 	// Pattern matching
 	cmd.Flags().String("title-contains", "", "Filter by title substring")

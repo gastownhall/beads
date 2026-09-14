@@ -762,7 +762,8 @@ func fixIntegerFields(m map[string]interface{}) {
 }
 
 func init() {
-	formulaListCmd.Flags().String("type", "", "Filter by type (workflow, expansion, aspect, convoy)")
+	// One formula kind.
+	addOnceFilterFlag(formulaListCmd, "type", "", "", "Filter by type (workflow, expansion, aspect, convoy)", nil)
 	formulaConvertCmd.Flags().BoolVar(&convertAll, "all", false, "Convert all JSON formulas")
 	formulaConvertCmd.Flags().BoolVar(&convertDelete, "delete", false, "Delete JSON file after conversion")
 	formulaConvertCmd.Flags().BoolVar(&convertStdout, "stdout", false, "Print TOML to stdout instead of file")

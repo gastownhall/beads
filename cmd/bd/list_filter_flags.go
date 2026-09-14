@@ -15,14 +15,28 @@ import (
 // do not inherit the previous command's filter.
 type unionStringFlag struct {
 	value string
+	// def is the flag's declared default. Setting the empty string restores
+	// it rather than clearing to "", so a reset cannot turn a default like
+	// `--state all` into "no statuses". For the list flags def is "" and the
+	// two are the same thing.
+	def string
+	// set records whether a parse has supplied a value yet, so the FIRST
+	// occurrence replaces the default instead of unioning with it.
+	set bool
+	// dest, when non-nil, mirrors the parsed value into a caller's string —
+	// the StringVar registration shape, kept so those call sites read the
+	// variable they always read.
+	dest *string
 }
 
 func (f *unionStringFlag) Set(s string) error {
 	switch {
 	case s == "":
-		f.value = ""
-	case f.value == "":
+		f.value = f.def
+		f.set = false
+	case !f.set:
 		f.value = s
+		f.set = true
 	default:
 		for _, tok := range strings.Split(s, ",") {
 			if !slicesContains(strings.Split(f.value, ","), tok) {
@@ -30,7 +44,17 @@ func (f *unionStringFlag) Set(s string) error {
 			}
 		}
 	}
+	f.mirror()
 	return nil
+}
+
+// reset returns the value to its declared default, as Set("") does.
+func (f *unionStringFlag) reset() { _ = f.Set("") }
+
+func (f *unionStringFlag) mirror() {
+	if f.dest != nil {
+		*f.dest = f.value
+	}
 }
 
 func slicesContains(list []string, want string) bool {
@@ -56,13 +80,16 @@ func (f *unionStringFlag) Type() string { return "string" }
 type onceStringFlag struct {
 	name  string
 	value string
+	def   string
 	set   bool
+	dest  *string
 }
 
 func (f *onceStringFlag) Set(s string) error {
 	if s == "" {
-		f.value = ""
+		f.value = f.def
 		f.set = false
+		f.mirror()
 		return nil
 	}
 	if f.set {
@@ -70,7 +97,17 @@ func (f *onceStringFlag) Set(s string) error {
 	}
 	f.set = true
 	f.value = s
+	f.mirror()
 	return nil
+}
+
+// reset returns the value to its declared default, as Set("") does.
+func (f *onceStringFlag) reset() { _ = f.Set("") }
+
+func (f *onceStringFlag) mirror() {
+	if f.dest != nil {
+		*f.dest = f.value
+	}
 }
 
 func (f *onceStringFlag) String() string { return f.value }

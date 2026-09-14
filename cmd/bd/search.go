@@ -358,9 +358,13 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 
 func init() {
 	searchCmd.Flags().String("query", "", "Search query (alternative to positional argument)")
-	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'")
-	searchCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	searchCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
+	// workapi.ApplyStatusFilter takes a comma-separated OR set, so a repeated
+	// --status unions into it.
+	addUnionFilterFlag(searchCmd, "status", "s", "", "Filter by stored status (comma-separated or repeated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'", nil)
+	// --assignee and --type are one exact match apiece; joining them would
+	// match nobody and return an empty result that reads as a clean answer.
+	addOnceFilterFlag(searchCmd, "assignee", "a", "", "Filter by assignee", nil)
+	addOnceFilterFlag(searchCmd, "type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)", nil)
 	searchCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	searchCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 	searchCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50)")

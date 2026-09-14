@@ -185,6 +185,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The same silent last-value-wins is gone from every other filter flag**
+  (follow-up to [#5739](https://github.com/gastownhall/beads/pull/5739)). The
+  `bd list` fix above left the identical wart on 26 filter flags across 16 other
+  commands: `bd count`, `bd search`, `bd human list`, `bd stale`, `bd dep tree`,
+  `bd dep list`, `bd find-duplicates`, `bd lint`, `bd ready`, `bd formula list`,
+  `bd mol wisp list`, `bd migrate issues`, and the `bd gitlab/jira/linear/notion
+  sync` filters. Each is now the value type its downstream shape permits, and
+  the choice is not uniform across a flag name:
+
+  - repeats UNION where the downstream already takes a comma-separated set —
+    `bd search --status`, `bd human list --status`, `bd count --id`,
+    `bd gitlab sync --label`/`--type`.
+  - repeats REFUSE where the filter is one value all the way down. Notably
+    `bd count --status` is in this group, not the union group: `CountRequest`
+    documents its status as ONE stored status and not an OR set, so joining two
+    would match nothing and count 0 — a clean-looking answer over an empty set,
+    which is the defect wearing a different hat.
+
+  Single-flag and comma-form spellings are unchanged everywhere. The invariant
+  is now derived rather than listed: a test walks the command tree and fails on
+  any `--status`/`--state`/`--id`/`--type`/`--assignee`/`--label` still
+  registered as a plain string, so a new filter flag cannot reintroduce the
+  silence without saying which kind it is. Value-setting flags of the same name
+  (`bd create --type`, `bd update --status`) are unaffected: last-one-wins is
+  the shell's own override idiom on a setter and narrows nothing.
+
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —
