@@ -39,6 +39,14 @@ func (x *run) rollback() error {
 		if err := x.stopTarget(&e); err != nil {
 			return x.fail(err, &e)
 		}
+		// A process that has exited has not necessarily had its file locks
+		// reaped yet, and the caller restarts its own server into this data dir
+		// the moment rollback returns. Returning into that window hands the
+		// caller a Dolt server that cannot open its own storage, which looks
+		// like data loss and is not.
+		if err := x.waitForDataDirRelease(&e); err != nil {
+			return x.fail(err, &e)
+		}
 	} else {
 		e.record("target_stopped", GateSkipped)
 		e.note("target_stop", "no launch was ever reserved")
@@ -97,6 +105,39 @@ func (x *run) stopTarget(e *Evidence) error {
 	e.note("target_stop", fmt.Sprintf("stopped pid %d by its captured identity (%s)", target.PID, binding))
 	x.j.Reservations.TargetLaunch = ""
 	return x.save()
+}
+
+// dataDirReleaseTimeout bounds the wait for the stopped replacement's file
+// locks to be reaped. It is short because the process is already gone: this is
+// waiting on the kernel, not on a shutdown.
+const dataDirReleaseTimeout = 30 * time.Second
+
+// waitForDataDirRelease blocks until nothing holds the workspace's Dolt storage,
+// or the wait times out. A platform that cannot answer the question is recorded
+// unavailable and does not block the rollback: an unanswerable probe is not
+// evidence that the lock is held.
+func (x *run) waitForDataDirRelease(e *Evidence) error {
+	deadline := time.Now().Add(dataDirReleaseTimeout)
+	for {
+		locked, ok, detail := dataDirLocked(x.dataDir())
+		if !ok {
+			e.record("data_dir_released", GateUnavailable)
+			e.note("data_dir_release", detail)
+			return nil
+		}
+		if !locked {
+			e.record("data_dir_released", GatePassed)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			e.record("data_dir_released", GateSkipped)
+			e.note("data_dir_release", detail)
+			return codedf(CodeDataDirLocked,
+				"the replacement was stopped but the data dir is still locked after %s: %s",
+				dataDirReleaseTimeout, detail)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // undoDataDirInit removes exactly what `dolt init` created, and only when bd

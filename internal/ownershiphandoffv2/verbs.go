@@ -128,6 +128,11 @@ func Run(ctx context.Context, verb string, opts Options) (Result, error) {
 		if err := sameScope(j.Request, req); err != nil {
 			return resultOf(j, err), err
 		}
+		// Same workspace, possibly a different spelling of it. Adopt the
+		// resolved one so the journal converges on a single form (P7): the next
+		// save persists it, and every reader after that — including an older
+		// build, and the caller's projection — sees the path bd actually used.
+		j.Request.Root = req.Root
 	} else {
 		if verb != VerbPrepare {
 			err := codedf(CodePhaseOrder, "no ownership handoff journal for %s; run prepare first", req.Root)
@@ -223,7 +228,10 @@ func (x *run) beadsDir() string { return BeadsDir(x.req.Root) }
 // dolt_data_dir in metadata.json moves it, and the replacement server is
 // launched against whatever this returns — so a gate that looked somewhere else
 // would be proving things about a directory nobody is serving.
-func (x *run) dataDir() string { return doltserver.ResolveDoltDir(x.beadsDir()) }
+// It is canonicalised on the way out (P7) so the path bd journals as
+// target.data_dir, the path it binds a process to, and the path it later
+// diffs a rollback against are all the same spelling.
+func (x *run) dataDir() string { return canonicalPath(doltserver.ResolveDoltDir(x.beadsDir())) }
 
 // reserve records an intent to mutate, durably, before the mutation happens.
 func (x *run) reserve(name, state string) error {
@@ -263,7 +271,10 @@ func loadExisting(path string) (Journal, bool, error) {
 // snapshot and reservations of a scope it never observed.
 func sameScope(have, want Request) error {
 	switch {
-	case have.Root != want.Root:
+	// Path equality, not string equality (P7): a caller that reached the
+	// workspace through a symlink at one phase and directly at the next is
+	// resuming the same handoff, not starting a conflicting one.
+	case !samePath(have.Root, want.Root):
 		return codedf(CodeIdentityConflict, "journal is for root %q, not %q", have.Root, want.Root)
 	case have.Database != want.Database:
 		return codedf(CodeIdentityConflict, "journal is for database %q, not %q", have.Database, want.Database)
@@ -283,9 +294,11 @@ func buildRequest(opts Options) (Request, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return Request{}, codedf(CodeInvalidRequest, "--root %q must be an absolute, cleaned path", root)
 	}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
+	// P7: the root is recorded resolved, so every later comparison has one
+	// spelling to compare against. Best-effort — a root that does not resolve
+	// is a root that does not exist, and the gates below say so more usefully
+	// than a path error would.
+	root = canonicalPath(root)
 	if opts.Database == "" {
 		return Request{}, coded(CodeInvalidRequest, errors.New("--database is required"))
 	}
@@ -378,5 +391,8 @@ func status(req Request) (Result, error) {
 	if !existed {
 		return Result{SchemaVersion: SchemaVersion, Request: req, Owner: OwnerLegacy}, nil
 	}
+	// Report the resolved root without writing it: status never mutates, but it
+	// should not report a spelling that every other verb has normalised away.
+	j.Request.Root = canonicalPath(j.Request.Root)
 	return resultOf(j, nil), nil
 }

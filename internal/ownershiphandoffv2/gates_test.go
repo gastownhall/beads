@@ -67,7 +67,7 @@ func TestUndeterminedPortHolderYieldsDistinctUnresolvedReason(t *testing.T) {
 	stubPortHolder(t, func(int, string) (int, string, doltserver.PortHolderOutcome) {
 		return 0, "", doltserver.PortHolderUndetermined
 	})
-	undetermined := captureInstance(Endpoint{Host: "127.0.0.1", Port: 1}, t.TempDir())
+	undetermined := captureInstance(Endpoint{Host: "127.0.0.1", Port: 1}, canonicalTempDir(t))
 	if undetermined.Resolved {
 		t.Fatal("an undetermined lookup produced a resolved instance")
 	}
@@ -78,7 +78,7 @@ func TestUndeterminedPortHolderYieldsDistinctUnresolvedReason(t *testing.T) {
 	stubPortHolder(t, func(int, string) (int, string, doltserver.PortHolderOutcome) {
 		return 0, "", doltserver.PortHolderNoHolder
 	})
-	absent := captureInstance(Endpoint{Host: "127.0.0.1", Port: 1}, t.TempDir())
+	absent := captureInstance(Endpoint{Host: "127.0.0.1", Port: 1}, canonicalTempDir(t))
 	if absent.Resolved {
 		t.Fatal("a no-holder lookup produced a resolved instance")
 	}
@@ -109,7 +109,7 @@ func TestUnsupportedBirthIdentityMakesTheDisproofGateUnavailable(t *testing.T) {
 		stubPortHolder(t, func(int, string) (int, string, doltserver.PortHolderOutcome) {
 			return 4242, "fd-lock", doltserver.PortHolderHeld
 		})
-		inst := captureInstance(Endpoint{Host: "127.0.0.1", Port: 1}, t.TempDir())
+		inst := captureInstance(Endpoint{Host: "127.0.0.1", Port: 1}, canonicalTempDir(t))
 		if inst.Resolved {
 			t.Fatal("captured a birth identity on a platform that has none")
 		}
@@ -130,7 +130,7 @@ func TestUnresolvedInstanceMakesTheDisproofGateUnavailable(t *testing.T) {
 }
 
 func TestDataDirLockedDetectsAHeldNomsLock(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	nomsDir := filepath.Join(dir, "scope_db", ".dolt", "noms")
 	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -164,7 +164,7 @@ func TestDataDirLockedDetectsAHeldNomsLock(t *testing.T) {
 func TestFenceAdmitsOnlySettledJournals(t *testing.T) {
 	for _, phase := range everyPhase {
 		t.Run(string(phase), func(t *testing.T) {
-			root := t.TempDir()
+			root := canonicalTempDir(t)
 			beadsDir := BeadsDir(root)
 			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
@@ -202,7 +202,7 @@ func TestFenceAdmitsOnlySettledJournals(t *testing.T) {
 }
 
 func TestFenceAdmitsAWorkspaceWithNoJournal(t *testing.T) {
-	beadsDir := BeadsDir(t.TempDir())
+	beadsDir := BeadsDir(canonicalTempDir(t))
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestFenceAdmitsAWorkspaceWithNoJournal(t *testing.T) {
 // A v1 journal reaching the fence is refused with the version code, not
 // silently admitted and not reported as generic corruption.
 func TestFenceRefusesAV1Journal(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	beadsDir := BeadsDir(root)
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -230,7 +230,7 @@ func TestFenceRefusesAV1Journal(t *testing.T) {
 }
 
 func TestArtifactCaptureRestoreIsByteAndModeExact(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("dolt:\n  port: 3307\n"), 0o640); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -258,7 +258,7 @@ func TestArtifactCaptureRestoreIsByteAndModeExact(t *testing.T) {
 // whatever is there now. Getting this wrong leaves bd's own lifecycle files
 // behind in a workspace that never had any.
 func TestRestoringAnAbsentArtifactRemovesTheFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, "dolt-server.pid")
 	captured, err := captureArtifact(path)
 	if err != nil {
@@ -279,7 +279,7 @@ func TestRestoringAnAbsentArtifactRemovesTheFile(t *testing.T) {
 }
 
 func TestBuildRequestRefusesNonLoopbackAndMalformedInput(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	cases := []struct {
 		name string
 		opts Options

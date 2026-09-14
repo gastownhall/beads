@@ -37,11 +37,13 @@ type fixture struct {
 	stopped    bool
 }
 
+// requireDolt is the named wrapper this package's integration boundary goes
+// through. It is an environment check, not a testing.Short() skip: repo policy
+// reserves testing.Short() for true runtime, stress and large-fixture skips
+// (scripts/check-testing-short.sh), and an integration boundary is none of
+// those. Same shape as internal/storage/dbproxy/server's requireDolt.
 func requireDolt(t *testing.T) string {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("integration test needs a real dolt sql-server")
-	}
 	bin, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skipf("dolt is not on PATH: %v", err)

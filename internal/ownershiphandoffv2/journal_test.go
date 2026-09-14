@@ -50,7 +50,7 @@ func journalAt(t *testing.T, root string, phase Phase) Journal {
 func TestSaveStampsSchemaVersionAtEveryPhase(t *testing.T) {
 	for _, phase := range everyPhase {
 		t.Run(string(phase), func(t *testing.T) {
-			dir := t.TempDir()
+			dir := canonicalTempDir(t)
 			path := filepath.Join(dir, JournalName)
 			j := journalAt(t, dir, phase)
 			// Deliberately zero: save is the single place that stamps it, and no
@@ -94,7 +94,7 @@ func TestSaveStampsSchemaVersionAtEveryPhase(t *testing.T) {
 // code rather than read under this package's phase vocabulary: the phase names
 // overlap but old_owner_stopped means the opposite thing about the target.
 func TestLoadRefusesV1Journal(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, JournalName)
 	v1 := `{
   "request": {"root": "` + dir + `", "database": "scope_db", "workspace": "w",
@@ -116,7 +116,7 @@ func TestLoadRefusesV1Journal(t *testing.T) {
 }
 
 func TestLoadRefusesFutureSchemaVersion(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, JournalName)
 	future := `{"schema_version": 99, "phase": "prepared", "owner": "legacy-gc",
 	            "request": {"root": "` + dir + `"}}`
@@ -139,7 +139,7 @@ func TestMergedSentinelMapsToUnsupportedJournalVersion(t *testing.T) {
 }
 
 func TestValidateRejectsImpossibleStates(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	cases := []struct {
 		name  string
 		mutue func(*Journal)
@@ -173,7 +173,7 @@ func TestValidateRejectsImpossibleStates(t *testing.T) {
 }
 
 func TestArchiveRolledBackJournalIsIdempotent(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, JournalName)
 	j := journalAt(t, dir, PhaseRolledBack)
 	j.UpdatedAt = time.Date(2026, 9, 13, 0, 0, 0, 12345, time.UTC)
@@ -203,7 +203,7 @@ func TestArchiveRolledBackJournalIsIdempotent(t *testing.T) {
 }
 
 func TestJournalLockIsExclusive(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	path := filepath.Join(dir, JournalName)
 	first, err := lockJournal(path)
 	if err != nil {
