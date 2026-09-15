@@ -150,10 +150,7 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(post.autoClosedMol.ID, post.autoClosedMol.Title))
 		}
 		if len(post.unblocked) > 0 {
-			fmt.Printf("\nNewly unblocked:\n")
-			for _, issue := range post.unblocked {
-				fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
-			}
+			printNewlyUnblocked(post.unblocked)
 		}
 		if post.continueResult != nil {
 			PrintContinueResult(post.continueResult)
