@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
@@ -125,9 +126,8 @@ func TestPersistInitSyncRemoteExplicitRemoteWritesTargetDir(t *testing.T) {
 	}
 
 	callerConfig := filepath.Join(callerBeadsDir, "config.yaml")
-	if err := os.WriteFile(callerConfig, []byte("sync.remote: git+ssh://git@example.com/wrong/repo.git\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	const callerRemote = "git+ssh://git@example.com/wrong/repo.git"
+	seedSyncRemote(t, callerBeadsDir, callerRemote)
 	targetConfig := filepath.Join(targetBeadsDir, "config.yaml")
 	if err := os.WriteFile(targetConfig, []byte("# Beads Config\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -161,6 +161,12 @@ func TestPersistInitSyncRemoteExplicitRemoteWritesTargetDir(t *testing.T) {
 	}
 	if strings.Contains(string(callerBytes), remote) {
 		t.Fatalf("caller config.yaml was modified instead of target:\n%s", callerBytes)
+	}
+	// Stronger than the absence above: the caller still resolves to what it had.
+	// A write that landed somewhere unreadable would satisfy "does not contain
+	// the new remote" while having quietly destroyed the old one.
+	if got := config.GetStringFromDir(callerBeadsDir, "sync.remote"); got != callerRemote {
+		t.Fatalf("caller sync.remote = %q, want it untouched at %q:\n%s", got, callerRemote, callerBytes)
 	}
 }
 
