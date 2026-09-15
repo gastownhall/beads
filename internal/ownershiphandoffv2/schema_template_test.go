@@ -4,6 +4,7 @@ package ownershiphandoffv2
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -158,29 +159,24 @@ func migrateAndSeed(port int) error {
 	}
 	defer db.Close() //nolint:errcheck // test cleanup
 
-	// Migrations and seeding get separate budgets. Sharing one meant ~100
-	// migrations against a real sql-server on a loaded machine consumed it and
-	// the first INSERT died on a deadline that had nothing to do with it.
-	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 45*time.Minute)
-	defer cancelMigrate()
-	conn, err := db.Conn(migrateCtx)
-	if err != nil {
-		return fmt.Errorf("pin connection: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck // test cleanup
-	if _, err := schema.MigrateUpWithLock(migrateCtx, conn, templateDatabase); err != nil {
-		return fmt.Errorf("apply bd's schema migrations: %w", err)
+	// Migrations and seeding get separate budgets, and the migration's pinned
+	// connection is RELEASED before seeding starts. openScope caps the pool at
+	// one connection — MigrateUpWithLock needs a pinned one because its
+	// GET_LOCK lives on that connection — so holding it across the inserts
+	// deadlocks the seed against the migration that already finished.
+	if err := runMigrations(db); err != nil {
+		return err
 	}
 
 	// A row in each sentinel table, through the real columns: `issues.id`, and
 	// `dependencies.issue_id` with the split target the schema actually has.
 	stmts := []string{
-		"INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at) " +
-			"VALUES ('bd-0001', 'first', 'open', 2, 'task', NOW(), NOW())",
-		"INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at) " +
-			"VALUES ('bd-0002', 'second', 'open', 2, 'task', NOW(), NOW())",
-		"INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_by) " +
-			"VALUES ('bd-0001', 'bd-0002', 'blocks', 'handoff-test')",
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at) " +
+			"VALUES ('bd-0001', 'first', '', '', '', '', 'open', 2, 'task', NOW(), NOW())",
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at) " +
+			"VALUES ('bd-0002', 'second', '', '', '', '', 'open', 2, 'task', NOW(), NOW())",
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_by) " +
+			"VALUES ('11111111-2222-3333-4444-555555555555', 'bd-0001', 'bd-0002', 'blocks', 'handoff-test')",
 		"CALL DOLT_COMMIT('-Am', 'seed the scope', '--author', 'bd handoff test <handoff@example.invalid>')",
 	}
 	for _, stmt := range stmts {
@@ -190,6 +186,22 @@ func migrateAndSeed(port int) error {
 		if execErr != nil {
 			return fmt.Errorf("seed %q: %w", stmt, execErr)
 		}
+	}
+	return nil
+}
+
+// runMigrations applies bd's schema to the template, on a pinned connection it
+// gives back before returning.
+func runMigrations(db *sql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("pin connection: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck // test cleanup
+	if _, err := schema.MigrateUpWithLock(ctx, conn, templateDatabase); err != nil {
+		return fmt.Errorf("apply bd's schema migrations: %w", err)
 	}
 	return nil
 }
