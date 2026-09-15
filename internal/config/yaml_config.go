@@ -768,15 +768,25 @@ func updateNestedYamlKey(content, key, value string) (string, bool, error) {
 		return "", false, err
 	}
 	if len(root.Content) == 0 {
-		return "", false, nil
+		// An empty or comment-only document has no mapping to nest into. Make
+		// one: falling through to the flat writer here is what produced a key
+		// literally named "dolt.host", which GetStringFromDir — splitting on the
+		// dot and looking for a nested mapping — can never read back.
+		root.Kind = yaml.DocumentNode
+		root.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
 	}
 	mapping := root.Content[0]
 	if mapping.Kind != yaml.MappingNode {
 		return "", false, nil
 	}
 
-	if findMappingChild(mapping, key) != -1 {
-		return "", false, nil
+	// A flat key of this exact name is the unreadable shape, whether an older
+	// bd wrote it or the file arrived that way. Migrate it: drop the flat entry
+	// and write the value nested, so the round trip holds from here on. Only the
+	// key being written is touched — a dotted key this call does not own is
+	// someone else's and stays exactly as they wrote it.
+	if idx := findMappingChild(mapping, key); idx != -1 {
+		mapping.Content = append(mapping.Content[:idx], mapping.Content[idx+2:]...)
 	}
 
 	leaf, ok := findOrCreateNestedScalar(mapping, parts)
