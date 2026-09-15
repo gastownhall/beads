@@ -143,7 +143,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	}
 
 	logPath := filepath.Join(p.rootDir, LogFileName)
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- logPath is derived from operator-supplied config, not untrusted request input
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o660) //nolint:gosec // trusted-group log; path derives from operator config
 	if err != nil {
 		return fmt.Errorf("open proxy log %q: %w", logPath, err)
 	}

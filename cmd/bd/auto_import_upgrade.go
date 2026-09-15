@@ -59,7 +59,7 @@ func writeAutoImportStamp(beadsDir string, info os.FileInfo) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(autoImportStampPath(beadsDir), data, 0o600)
+	_ = os.WriteFile(autoImportStampPath(beadsDir), data, 0o660)
 }
 
 // maybeAutoImportJSONL checks whether the database is empty and the configured

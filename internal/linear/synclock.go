@@ -39,7 +39,7 @@ func AcquireSyncLock(beadsDir string, wait bool) (*SyncLock, error) {
 		return nil, fmt.Errorf("creating beads directory: %w", err)
 	}
 
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- lockPath is constrained to the beads directory.
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0660) //nolint:gosec // trusted-group lock; path is constrained to the beads directory
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}

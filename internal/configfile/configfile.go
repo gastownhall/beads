@@ -168,7 +168,7 @@ func (c *Config) Save(beadsDir string) error {
 	// concurrent Load can observe an empty or partial metadata.json and feed
 	// store selection a corrupt config. Rename within the same directory is
 	// atomic, so readers see either the old or the new file, never a torn one.
-	if err := writeFileAtomic(configPath, data, 0o600); err != nil {
+	if err := writeFileAtomic(configPath, data, 0o660); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 

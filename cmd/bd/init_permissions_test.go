@@ -50,7 +50,7 @@ func buildBDForInitPermissionTests(t *testing.T) string {
 
 // TestInitRepairsPermissiveBeadsDir is the init-path regression test for
 // GH#3391: a pre-existing .beads/ directory with permissive bits
-// (e.g. 0755 from a permissive umask) must be repaired to 0700 during
+// (e.g. 0755 from a permissive umask) must be repaired to 0770 during
 // bd init.
 //
 // The test creates a real git repo with a pre-existing .beads/ at 0755,
@@ -97,25 +97,25 @@ func TestInitRepairsPermissiveBeadsDir(t *testing.T) {
 		t.Fatalf("Stat(.beads) after init: %v", err)
 	}
 	perm := info.Mode().Perm()
-	if perm != 0700 {
-		t.Errorf(".beads permissions after init = %04o, want 0700", perm)
+	if perm != 0770 {
+		t.Errorf(".beads permissions after init = %04o, want 0770", perm)
 	}
 
 	// Assert: the fix was announced on stderr.
-	if !strings.Contains(stderr.String(), "Fixed .beads permissions to 0700") {
+	if !strings.Contains(stderr.String(), "Fixed .beads permissions to 0770") {
 		t.Errorf("expected permission-fix message on stderr, got:\n%s", stderr.String())
 	}
 }
 
 // TestInitPreservesSecureBeadsDir verifies that bd init does NOT touch a
-// .beads/ directory that already has secure permissions (0700).
+// .beads/ directory that already has secure permissions (0770).
 func TestInitPreservesSecureBeadsDir(t *testing.T) {
 	bdBin := buildBDForInitPermissionTests(t)
 
 	repoDir := newGitRepo(t)
 
 	beadsDir := filepath.Join(repoDir, ".beads")
-	if err := os.Mkdir(beadsDir, 0700); err != nil {
+	if err := os.Mkdir(beadsDir, 0770); err != nil {
 		t.Fatalf("failed to create .beads: %v", err)
 	}
 
@@ -126,14 +126,14 @@ func TestInitPreservesSecureBeadsDir(t *testing.T) {
 	cmd.Stderr = &stderr
 	_ = cmd.Run()
 
-	// Permissions should remain 0700.
+	// Permissions should remain 0770.
 	info, err := os.Stat(beadsDir)
 	if err != nil {
 		t.Fatalf("Stat(.beads) after init: %v", err)
 	}
 	perm := info.Mode().Perm()
-	if perm != 0700 {
-		t.Errorf(".beads permissions after init = %04o, want 0700", perm)
+	if perm != 0770 {
+		t.Errorf(".beads permissions after init = %04o, want 0770", perm)
 	}
 
 	// No fix message expected.

@@ -64,7 +64,7 @@ func writeUserConfigBootstrap(path string) error {
 		return fmt.Errorf("ensure user config: mkdir %s: %w", filepath.Dir(path), err)
 	}
 	body := []byte("metrics:\n  disabled: false\n  endpoint: " + DefaultEndpoint + "\n")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // path is from config.UserConfigYamlPath
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o660) //nolint:gosec // path is from config.UserConfigYamlPath
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return EnsureUserConfigDefaults()

@@ -133,7 +133,7 @@ func TestSecret_WriteReadAndRotate(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(filepath.Join(root, SecretFileName))
 		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+		assert.Equal(t, os.FileMode(0o660), info.Mode().Perm())
 	}
 
 	second, err := WriteSecret(root)

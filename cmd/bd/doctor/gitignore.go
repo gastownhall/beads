@@ -198,7 +198,7 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 
 	if info, err := os.Stat(gitignorePath); err == nil {
 		if info.Mode().Perm()&0200 == 0 {
-			if err := os.Chmod(gitignorePath, 0600); err != nil {
+			if err := os.Chmod(gitignorePath, 0660); err != nil {
 				return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 			}
 		}
@@ -215,13 +215,13 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		newContent += pattern + "\n"
 	}
 
-	if err := os.WriteFile(gitignorePath, []byte(newContent), 0600); err != nil {
+	if err := os.WriteFile(gitignorePath, []byte(newContent), 0660); err != nil {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
 	// Tighten permissions on pre-existing files: os.WriteFile's mode argument
-	// only applies at creation, and the file may predate the 0600 policy.
-	if err := os.Chmod(gitignorePath, 0600); err != nil {
+	// only applies at creation, and the file may predate the 0660 policy.
+	if err := os.Chmod(gitignorePath, 0660); err != nil {
 		return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 	}
 
@@ -253,19 +253,19 @@ func writeGitignoreTemplate(gitignorePath string) error {
 	// If file exists and is read-only, fix permissions first
 	if info, err := os.Stat(gitignorePath); err == nil {
 		if info.Mode().Perm()&0200 == 0 { // No write permission for owner
-			if err := os.Chmod(gitignorePath, 0600); err != nil {
+			if err := os.Chmod(gitignorePath, 0660); err != nil {
 				return err
 			}
 		}
 	}
 
 	// Write canonical template with secure file permissions
-	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0660); err != nil {
 		return err
 	}
 
 	// Ensure permissions are set correctly (some systems respect umask)
-	if err := os.Chmod(gitignorePath, 0600); err != nil {
+	if err := os.Chmod(gitignorePath, 0660); err != nil {
 		return err
 	}
 

@@ -73,7 +73,7 @@ func SetLastTouchedID(issueID string) {
 
 	lastTouchedPath := filepath.Join(beadsDir, lastTouchedFile)
 	// Write with restrictive permissions (local-only state)
-	if err := os.WriteFile(lastTouchedPath, []byte(issueID+"\n"), 0600); err != nil {
+	if err := os.WriteFile(lastTouchedPath, []byte(issueID+"\n"), 0660); err != nil {
 		return
 	}
 	// Always advance mtime, even when the same ID is rewritten, so file-watch

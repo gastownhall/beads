@@ -279,9 +279,9 @@ func TestPermissions_EdgeCases(t *testing.T) {
 			t.Fatalf("failed to stat actual .beads: %v", err)
 		}
 
-		// Should still have 0755, not 0700
-		if info.Mode().Perm() == 0700 {
-			t.Error("symlinked directory permissions should not be changed to 0700")
+		// Should still have 0755, not 0770
+		if info.Mode().Perm() == 0770 {
+			t.Error("symlinked directory permissions should not be changed to 0770")
 		}
 	})
 
@@ -312,9 +312,9 @@ func TestPermissions_EdgeCases(t *testing.T) {
 			t.Fatalf("failed to stat actual db: %v", err)
 		}
 
-		// Should still have 0644, not 0600
-		if info.Mode().Perm() == 0600 {
-			t.Error("symlinked database permissions should not be changed to 0600")
+		// Should still have 0644, not 0660
+		if info.Mode().Perm() == 0660 {
+			t.Error("symlinked database permissions should not be changed to 0660")
 		}
 	})
 
@@ -333,14 +333,14 @@ func TestPermissions_EdgeCases(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Verify permissions were fixed to 0700
+		// Verify permissions were fixed to 0770
 		info, err := os.Stat(beadsDir)
 		if err != nil {
 			t.Fatalf("failed to stat .beads: %v", err)
 		}
 
-		if info.Mode().Perm() != 0700 {
-			t.Errorf("expected permissions 0700, got %o", info.Mode().Perm())
+		if info.Mode().Perm() != 0770 {
+			t.Errorf("expected permissions 0770, got %o", info.Mode().Perm())
 		}
 	})
 
@@ -357,14 +357,14 @@ func TestPermissions_EdgeCases(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Verify permissions were fixed to 0600
+		// Verify permissions were fixed to 0660
 		info, err := os.Stat(dbPath)
 		if err != nil {
 			t.Fatalf("failed to stat db: %v", err)
 		}
 
-		if info.Mode().Perm() != 0600 {
-			t.Errorf("expected permissions 0600, got %o", info.Mode().Perm())
+		if info.Mode().Perm() != 0660 {
+			t.Errorf("expected permissions 0660, got %o", info.Mode().Perm())
 		}
 	})
 

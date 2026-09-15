@@ -14,7 +14,7 @@ import (
 // the detached send-metrics child. The ID is already an app-scoped HMAC of the
 // platform machine ID (machineid.ProtectedID), not the raw machine ID, so the
 // cache stores nothing more sensitive than what every telemetry event carries;
-// it is still written 0600 like the rest of our per-user state.
+// it is still written 0660 like the rest of our trusted-group state.
 const machineIDCacheName = "machine-id"
 
 // maxMachineIDLen bounds what the cache read will accept. ProtectedID today is
@@ -66,7 +66,7 @@ func readCachedMachineID(path string) string {
 // the cache is a pure optimization and the caller already holds a usable ID.
 func writeMachineIDCache(path, id string) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o770); err != nil {
 		return
 	}
 	tmp, err := os.CreateTemp(dir, machineIDCacheName+".tmp-*")
@@ -74,7 +74,7 @@ func writeMachineIDCache(path, id string) {
 		return
 	}
 	name := tmp.Name()
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(0o660); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(name)
 		return

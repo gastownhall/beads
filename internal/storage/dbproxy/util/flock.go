@@ -20,15 +20,15 @@ type Lock struct {
 }
 
 // TryLock attempts to acquire a non-blocking exclusive flock on lockPath.
-// The parent directory is created (mode 0700) if it does not exist. On
+// The parent directory is created (mode 0770) if it does not exist. On
 // contention returns an error that satisfies lockfile.IsLocked, so callers
 // can detect "another holder is alive" and produce their own contextual
 // error message.
 func TryLock(lockPath string) (*Lock, error) {
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0770); err != nil {
 		return nil, fmt.Errorf("util: creating lock directory: %w", err)
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // lockPath comes from caller-derived dirs, not user input
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0660) //nolint:gosec // lockPath comes from caller-derived dirs, not user input
 	if err != nil {
 		return nil, fmt.Errorf("util: opening lock file: %w", err)
 	}

@@ -202,12 +202,10 @@ func ForWorkspace(beadsDir string) (Gate, error) { return forDir(beadsDir) }
 // same gate file, which is the point: a workspace-level gate alone cannot
 // stop workspace B from restarting the server workspace A is draining.
 //
-// Cross-user shared roots are unsupported: the gate file is created 0o600
-// (see Acquire), so a second OS user attempting to gate a shared root such
-// as ~/.beads/shared-server/dolt hits EACCES on the sibling gate file, not
-// a graceful degradation. Do not widen the mode to 0o666 to work around
-// this without an explicit owner decision — that would let any local user
-// release or corrupt another user's gate.
+// Cross-user shared roots are supported: the gate file is created 0o660
+// (see Acquire), so members of the root's trusted group can participate in
+// the same lock protocol. Do not widen the mode to 0o666 — that would let
+// any local user interfere with another user's gate.
 //
 // Derived invariant for an in-.beads physical root (e.g.
 // .beads/embeddeddolt): the gate file for that root lives beside it,
@@ -387,7 +385,7 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	}
 	deadline := time.Now().Add(opts.Wait)
 
-	f, err := os.OpenFile(g.path, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(g.path, os.O_CREATE|os.O_RDWR, 0o660) //nolint:gosec // trusted-group coordination file
 	if err != nil {
 		return nil, fmt.Errorf("workspacegate: open gate %s: %w", g.path, err)
 	}
@@ -458,7 +456,7 @@ func (g Gate) writeInfo(reason string) {
 	}
 	tmp := fmt.Sprintf("%s.%d.tmp", g.infoPath(), os.Getpid())
 	_ = os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path derives from the gate location this package computed, not request input; the preceding os.Remove clears a pre-planted file, and O_EXCL closes the remove-then-open window so a symlink replanted in between is refused rather than followed
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o660) //nolint:gosec // G304: path derives from the gate location this package computed, not request input; the preceding os.Remove clears a pre-planted file, and O_EXCL closes the remove-then-open window so a symlink replanted in between is refused rather than followed
 	if err != nil {
 		return
 	}
@@ -575,7 +573,7 @@ func (g Gate) ExclusiveHolder() (held bool, info *Info, err error) {
 	// O_RDONLY: this is a read-only probe (flock does not require a
 	// writable descriptor), and it widens reach — a gate file owned by
 	// another user with no write permission for us is still probeable.
-	f, err := os.OpenFile(g.path, os.O_RDONLY, 0o600)
+	f, err := os.OpenFile(g.path, os.O_RDONLY, 0o660) //nolint:gosec // mode applies only if a race creates the trusted-group gate
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No gate file: nothing has ever gated here.

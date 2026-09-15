@@ -331,7 +331,7 @@ if err := store.SetMetadata(ctx, "last_import_hash", hash); err != nil {
 Setting file permissions is typically **Pattern B** because the file was already written:
 
 ```go
-if err := os.Chmod(jsonlPath, 0600); err != nil {
+if err := os.Chmod(jsonlPath, 0660); err != nil {
     fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
 }
 ```

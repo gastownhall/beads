@@ -185,15 +185,15 @@ func installGitHooks() error {
 	preCommitContent = strings.ReplaceAll(preCommitContent, "\r\n", "\n")
 	postMergeContent = strings.ReplaceAll(postMergeContent, "\r\n", "\n")
 
-	// Write pre-commit hook (executable scripts need 0700)
+	// Write pre-commit hook (executable scripts need 0770)
 	// #nosec G306 - git hooks must be executable
-	if err := os.WriteFile(preCommitPath, []byte(preCommitContent), 0700); err != nil {
+	if err := os.WriteFile(preCommitPath, []byte(preCommitContent), 0770); err != nil {
 		return fmt.Errorf("failed to write pre-commit hook: %w", err)
 	}
 
-	// Write post-merge hook (executable scripts need 0700)
+	// Write post-merge hook (executable scripts need 0770)
 	// #nosec G306 - git hooks must be executable
-	if err := os.WriteFile(postMergePath, []byte(postMergeContent), 0700); err != nil {
+	if err := os.WriteFile(postMergePath, []byte(postMergeContent), 0770); err != nil {
 		return fmt.Errorf("failed to write post-merge hook: %w", err)
 	}
 

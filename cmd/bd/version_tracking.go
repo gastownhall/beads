@@ -92,7 +92,7 @@ func readLocalVersion(path string) string {
 // may be a release candidate, a build carrying metadata, or a Go pseudo-version.
 // Readers must accept every shape this can write; see classifyVersionWitness.
 func writeLocalVersion(path, version string) error {
-	return os.WriteFile(path, []byte(version+"\n"), 0600)
+	return os.WriteFile(path, []byte(version+"\n"), 0660)
 }
 
 // getVersionsSince returns all version changes since the given version.

@@ -32,7 +32,7 @@ import (
 //     UNGATED. The gate is cooperative; a normal `bd list` must never brick
 //     an existing deployment because its network mount cannot flock. Note
 //     the honest reading of fail-open: it means "not DETECTABLY contended",
-//     not "not contended" — e.g. EACCES on another OS user's 0600 gate file
+//     not "not contended" — e.g. EACCES on a gate file outside the trusted group
 //     beside a cross-user shared root lands here and proceeds ungated even
 //     though that user may be mid-maintenance (workspacegate documents
 //     cross-user shared roots as unsupported).

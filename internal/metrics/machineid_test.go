@@ -35,7 +35,7 @@ func TestCachedMachineIDReusesCacheWithoutRecomputing(t *testing.T) {
 
 // TestCachedMachineIDComputesAndPersistsOnMiss exercises the cold path: no
 // cache file, so the ID is computed once and written to ~/.beads/machine-id
-// (0600) for every later invocation to reuse.
+// (0660) for every later invocation to reuse.
 func TestCachedMachineIDComputesAndPersistsOnMiss(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -70,8 +70,8 @@ func TestCachedMachineIDComputesAndPersistsOnMiss(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat cache: %v", err)
 		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			t.Errorf("cache perms = %o, want 0600", perm)
+		if perm := fi.Mode().Perm(); perm != 0o660 {
+			t.Errorf("cache perms = %o, want 0660", perm)
 		}
 	}
 

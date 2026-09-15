@@ -1226,7 +1226,7 @@ func saveSyncState(beadsDir string, state *syncState) {
 		debug.Logf("sync: failed to marshal sync state: %v\n", err)
 		return
 	}
-	if err := atomicfile.WriteFile(path, data, 0o600); err != nil {
+	if err := atomicfile.WriteFile(path, data, 0o660); err != nil {
 		debug.Logf("sync: failed to save sync state: %v\n", err)
 	}
 }

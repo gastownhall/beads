@@ -74,7 +74,7 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 		oldKey, oldErr := os.ReadFile(oldKeyPath) //nolint:gosec // G304: oldKeyPath is derived from trusted dbPath
 		if oldErr == nil && len(oldKey) == 32 {
 			// Write to new location, then remove old file
-			if writeErr := os.WriteFile(keyPath, oldKey, 0600); writeErr == nil {
+			if writeErr := os.WriteFile(keyPath, oldKey, 0660); writeErr == nil {
 				_ = os.Remove(oldKeyPath)
 			}
 			s.credentialKey = oldKey
@@ -93,13 +93,13 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 		return fmt.Errorf("failed to migrate credential keys: %w", err)
 	}
 
-	// Write key file with owner-only permissions (0600).
+	// Write key file with owner-and-group permissions (0660).
 	// Ensure the directory exists first — when connecting to an external
 	// server without having run `bd init`, .beads/ may not exist yet (GH#2641).
-	if err := os.MkdirAll(s.beadsDir, 0700); err != nil {
+	if err := os.MkdirAll(s.beadsDir, 0770); err != nil {
 		return fmt.Errorf("failed to create beads directory %s: %w", s.beadsDir, err)
 	}
-	if err := os.WriteFile(keyPath, key, 0600); err != nil {
+	if err := os.WriteFile(keyPath, key, 0660); err != nil {
 		return fmt.Errorf("failed to write credential key file: %w", err)
 	}
 

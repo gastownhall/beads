@@ -262,7 +262,7 @@ func TestPermissionsWithWrongPermissions_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() == 0700 {
+		if info.Mode().Perm() == 0770 {
 			t.Skip("permissions already correct")
 		}
 
@@ -277,8 +277,8 @@ func TestPermissionsWithWrongPermissions_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0700 {
-			t.Errorf("expected permissions 0700, got %04o", info.Mode().Perm())
+		if info.Mode().Perm() != 0770 {
+			t.Errorf("expected permissions 0770, got %04o", info.Mode().Perm())
 		}
 	})
 
@@ -311,8 +311,8 @@ func TestPermissionsWithWrongPermissions_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0600 {
-			t.Errorf("expected permissions 0600, got %04o", info.Mode().Perm())
+		if info.Mode().Perm() != 0660 {
+			t.Errorf("expected permissions 0660, got %04o", info.Mode().Perm())
 		}
 	})
 
@@ -344,8 +344,8 @@ func TestPermissionsWithWrongPermissions_E2E(t *testing.T) {
 		if perms&0400 == 0 {
 			t.Error("database should have read permission for owner")
 		}
-		if perms != 0600 {
-			t.Errorf("expected permissions 0600, got %04o", perms)
+		if perms != 0660 {
+			t.Errorf("expected permissions 0660, got %04o", perms)
 		}
 	})
 
@@ -383,8 +383,8 @@ func TestPermissionsWithWrongPermissions_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0700 {
-			t.Errorf("expected permissions 0700, got %04o", info.Mode().Perm())
+		if info.Mode().Perm() != 0770 {
+			t.Errorf("expected permissions 0770, got %04o", info.Mode().Perm())
 		}
 	})
 
@@ -412,16 +412,16 @@ func TestPermissionsWithWrongPermissions_E2E(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if dirInfo.Mode().Perm() != 0700 {
-			t.Errorf("expected directory permissions 0700, got %04o", dirInfo.Mode().Perm())
+		if dirInfo.Mode().Perm() != 0770 {
+			t.Errorf("expected directory permissions 0770, got %04o", dirInfo.Mode().Perm())
 		}
 
 		dbInfo, err := os.Stat(dbPath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if dbInfo.Mode().Perm() != 0600 {
-			t.Errorf("expected database permissions 0600, got %04o", dbInfo.Mode().Perm())
+		if dbInfo.Mode().Perm() != 0660 {
+			t.Errorf("expected database permissions 0660, got %04o", dbInfo.Mode().Perm())
 		}
 	})
 }

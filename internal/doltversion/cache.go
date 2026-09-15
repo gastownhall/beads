@@ -197,7 +197,7 @@ func writeCacheEntry(cachePath string, entry probeCacheFile) {
 		return
 	}
 	dir := filepath.Dir(cachePath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o770); err != nil {
 		return
 	}
 	tmp, err := os.CreateTemp(dir, filepath.Base(cachePath)+".tmp-*")

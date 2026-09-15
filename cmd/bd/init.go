@@ -1019,7 +1019,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		useLocalBeads := !hasExplicitBeadsDir || filepath.Clean(initDBDirAbs) == filepath.Clean(beadsDirAbs)
 
 		if useLocalBeads {
-			// Create .beads directory with owner-only permissions (0700).
+			// Create .beads directory with owner-and-group permissions (0770).
 			if err := os.MkdirAll(beadsDir, config.BeadsDirPerm); err != nil {
 				if os.IsPermission(err) {
 					if runtime.GOOS == "windows" {

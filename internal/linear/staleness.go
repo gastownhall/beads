@@ -21,7 +21,7 @@ func WriteLastPullTimestamp(beadsDir string) error {
 	}
 	path := filepath.Join(beadsDir, lastPullFileName)
 	ts := time.Now().UTC().Format(time.RFC3339)
-	return os.WriteFile(path, []byte(ts+"\n"), 0600)
+	return os.WriteFile(path, []byte(ts+"\n"), 0660)
 }
 
 // ReadLastPullTimestamp reads the last pull timestamp from .beads/last_pull.

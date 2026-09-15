@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
@@ -37,10 +38,11 @@ func Permissions(path string) error {
 		return nil // Symlink permissions are not meaningful on Unix
 	}
 
-	// Ensure .beads directory has exactly 0700 permissions (owner rwx only)
-	expectedDirMode := os.FileMode(0700)
+	// Ensure .beads directory has owner-and-group permissions and no world access.
+	expectedDirMode := config.BeadsDirPerm
 	if info.Mode().Perm() != expectedDirMode {
-		if err := os.Chmod(beadsDir, expectedDirMode); err != nil {
+		mode := expectedDirMode | (info.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky))
+		if err := os.Chmod(beadsDir, mode); err != nil {
 			return fmt.Errorf("failed to fix .beads directory permissions: %w", err)
 		}
 	}
@@ -62,16 +64,17 @@ func Permissions(path string) error {
 		}
 
 		if dbInfo.IsDir() {
-			// Dolt backend: database is a directory, ensure 0700 (owner rwx)
-			expectedDirMode := os.FileMode(0700)
+			// Dolt backend: database is a directory, ensure owner-and-group access.
+			expectedDirMode := config.BeadsDirPerm
 			if dbInfo.Mode().Perm() != expectedDirMode {
-				if err := os.Chmod(dbPath, expectedDirMode); err != nil {
+				mode := expectedDirMode | (dbInfo.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky))
+				if err := os.Chmod(dbPath, mode); err != nil {
 					return fmt.Errorf("failed to fix database directory permissions: %w", err)
 				}
 			}
 		} else {
-			// SQLite backend: database is a file, ensure 0600 (owner rw)
-			expectedFileMode := os.FileMode(0600)
+			// SQLite backend: database is a file, ensure owner-and-group access.
+			expectedFileMode := config.BeadsFilePerm
 			if dbInfo.Mode().Perm() != expectedFileMode {
 				if err := os.Chmod(dbPath, expectedFileMode); err != nil {
 					return fmt.Errorf("failed to fix database permissions: %w", err)

@@ -280,7 +280,7 @@ if orphaned, err := checkOrphanedDeps(ctx, store); err != nil {
 
 **sync.go:720-722, 740-743, 750-752, 760-762**
 ```go
-if err := os.Chmod(jsonlPath, 0600); err != nil {
+if err := os.Chmod(jsonlPath, 0660); err != nil {
     // Non-fatal warning
     fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
 }
@@ -444,7 +444,7 @@ for _, label := range labels {
 ### 3. File Permission Changes
 **sync.go:724-727**
 ```go
-if err := os.Chmod(jsonlPath, 0600); err != nil {
+if err := os.Chmod(jsonlPath, 0660); err != nil {
     // Non-fatal warning
     fmt.Fprintf(os.Stderr, "Warning: failed to set file permissions: %v\n", err)
 }

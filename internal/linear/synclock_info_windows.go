@@ -95,7 +95,7 @@ func publishSyncLockInfo(primary *os.File, path string) (syncLockMetadata, error
 }
 
 func publishSyncLockInfoWithOps(path string, ops syncLockWindowsOps) syncLockMetadata {
-	sidecar, err := ops.openFile(path, os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- path is constrained to the beads directory.
+	sidecar, err := ops.openFile(path, os.O_CREATE|os.O_RDWR, 0660) // #nosec G304 -- path is constrained to the beads directory.
 	if err != nil {
 		return syncLockMetadata{}
 	}

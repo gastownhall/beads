@@ -86,7 +86,7 @@ func EnsureFile() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0770); err != nil {
 		return "", fmt.Errorf("failed to create .beads directory: %w", err)
 	}
 	if ensureFileBeforeCreateHook != nil {

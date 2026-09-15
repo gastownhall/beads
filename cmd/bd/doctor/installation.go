@@ -44,7 +44,7 @@ func CheckPermissions(path string) DoctorCheck {
 
 	// Check if .beads/ is writable
 	testFile := filepath.Join(beadsDir, ".doctor-test-write")
-	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+	if err := os.WriteFile(testFile, []byte("test"), 0660); err != nil {
 		return DoctorCheck{
 			Name:    "Permissions",
 			Status:  StatusError,
@@ -98,7 +98,7 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 
 	// Check if .beads/ is writable
 	testFile := filepath.Join(beadsDir, ".doctor-test-write")
-	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+	if err := os.WriteFile(testFile, []byte("test"), 0660); err != nil {
 		return DoctorCheck{
 			Name:    "Permissions",
 			Status:  StatusError,

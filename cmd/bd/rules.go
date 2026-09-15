@@ -801,7 +801,7 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 			if !dryRun {
 				outName := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
 				outPath := filepath.Join(rulesPath, outName)
-				if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
+				if err := os.WriteFile(outPath, []byte(merged), 0o660); err != nil {
 					fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", outPath, err)
 					continue
 				}
@@ -883,7 +883,7 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 
 	if !dryRun {
 		outPath := filepath.Join(rulesPath, outName)
-		if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
+		if err := os.WriteFile(outPath, []byte(merged), 0o660); err != nil {
 			return HandleErrorRespectJSON("write merged file: %v", err)
 		}
 		for _, rf := range groupRules {

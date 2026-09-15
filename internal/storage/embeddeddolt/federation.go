@@ -48,7 +48,7 @@ func (s *EmbeddedDoltStore) ensureCredentialKey() error {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return fmt.Errorf("generate credential key: %w", err)
 	}
-	if err := os.WriteFile(keyPath, key, 0600); err != nil {
+	if err := os.WriteFile(keyPath, key, 0660); err != nil {
 		return fmt.Errorf("write credential key: %w", err)
 	}
 

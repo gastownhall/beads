@@ -353,7 +353,7 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 		return
 	}
 	tmp := cb.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	if err := os.WriteFile(tmp, data, 0660); err != nil {
 		return
 	}
 	_ = os.Rename(tmp, cb.filePath)

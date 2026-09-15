@@ -2394,7 +2394,7 @@ func logDoltConfigChange(beadsDir, key, value string) {
 	}
 	entry := fmt.Sprintf("%s actor=%s key=%s value=%s beads_dir=%s\n",
 		time.Now().UTC().Format(time.RFC3339), actor, key, value, beadsDir)
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0660)
 	if err != nil {
 		return // best effort
 	}
