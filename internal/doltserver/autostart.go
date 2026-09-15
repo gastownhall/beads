@@ -55,18 +55,24 @@ func ResolveAutoStart(current bool, doltAutoStartCfg string, mode ServerMode) bo
 	return true
 }
 
-// ResolveAutoStartForDir answers "would bd auto-start a server for this
-// workspace?" using the same precedence the CLI path uses: the process-global
-// dolt.auto-start value if one is loaded, otherwise the one in beadsDir's own
-// config.yaml, resolved against beadsDir's server mode.
+// ResolveAutoStartForDir answers "would bd auto-start a server for THIS
+// workspace?", reading beadsDir's own config.yaml first and falling back to the
+// process-global value only when that file says nothing.
 //
-// It exists for callers that must ask about a specific workspace rather than
-// the ambient one — IsAutoStartDisabled reads only process-global config, so it
-// cannot answer for a root the current process was not launched in.
+// The precedence is deliberately the opposite of ApplyCLIAutoStart's. That one
+// answers for the ambient workspace, where the global value and the file are
+// normally the same thing. This one answers for a named directory, and the
+// process-global value is a snapshot taken when the process started — so a
+// caller that has just WRITTEN the file would otherwise be told what the file
+// used to say. A workspace whose owner set `dolt.auto-start: false` before
+// handing it over reads as false forever, no matter what is written to it.
+//
+// Environment overrides still win, inside ResolveAutoStart: they are statements
+// about this process, not about a directory.
 func ResolveAutoStartForDir(beadsDir string) bool {
-	autoStartCfg := config.GetString("dolt.auto-start")
+	autoStartCfg := config.GetStringFromDir(beadsDir, "dolt.auto-start")
 	if autoStartCfg == "" {
-		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
+		autoStartCfg = config.GetString("dolt.auto-start")
 	}
 	return ResolveAutoStart(true, autoStartCfg, ResolveServerMode(beadsDir))
 }

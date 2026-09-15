@@ -111,9 +111,16 @@ func readSentinels(ctx context.Context, db *sql.DB, database string) (Sentinels,
 	}
 	s.FirstIssue = issueID.String
 
+	// `dependencies` is issue_id plus a split target: depends_on_issue_id,
+	// depends_on_wisp_id or depends_on_external, exactly one of which is set
+	// (migration 0002, split by 0041; the old depends_on_id went in 0044/0045).
+	// COALESCE over the three is the edge, whichever kind it is.
 	var edge sql.NullString
 	s.DependenciesState, err = scanSentinel(ctx, db,
-		"SELECT CONCAT(from_id, '->', to_id) FROM dependencies ORDER BY from_id, to_id LIMIT 1", &edge)
+		"SELECT CONCAT(issue_id, '->', "+
+			"COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external, '')) "+
+			"FROM dependencies "+
+			"ORDER BY issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external LIMIT 1", &edge)
 	if err != nil {
 		return s, fmt.Errorf("read dependency sentinel: %w", err)
 	}
@@ -137,6 +144,14 @@ func scanSentinel(ctx context.Context, db *sql.DB, query string, dest *sql.NullS
 		return TableEmpty, nil
 	case isMissingTable(err):
 		return TableMissing, nil
+	case isMissingColumn(err):
+		// The table is there but not in the shape this sentinel reads — an
+		// older workspace, or a schema this bd is newer than. That is a fact
+		// about the database, and both ends of the transfer read the SAME
+		// database, so both record it identically and the comparison still
+		// works. Killing the transfer over it would refuse to hand off a
+		// workspace whose data is fine; the head hash still carries the proof.
+		return TableUnreadable, nil
 	default:
 		return "", err
 	}
@@ -150,6 +165,20 @@ func isMissingTable(err error) bool {
 		return mysqlErr.Number == 1146
 	}
 	return false
+}
+
+// isMissingColumn recognizes a column this sentinel names that the table does
+// not have. MySQL says 1054 (ER_BAD_FIELD_ERROR); Dolt reports the same
+// condition as a generic 1105 whose text names the column, so both are matched.
+func isMissingColumn(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	if mysqlErr.Number == 1054 {
+		return true
+	}
+	return mysqlErr.Number == 1105 && strings.Contains(mysqlErr.Message, "could not be found")
 }
 
 // sentinelsEqual compares two captures. The database selection is excluded on

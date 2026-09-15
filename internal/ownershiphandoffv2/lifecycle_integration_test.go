@@ -89,21 +89,11 @@ func newFixture(t *testing.T) *fixture {
 	t.Setenv("BEADS_TEST_MODE", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "")
 
-	f.doltInit(filepath.Join(f.dataDir, f.database))
+	copyTree(t, schemaTemplate(t), f.dataDir)
 	f.legacyPort = f.freePort()
 	f.writeMetadata(f.legacyPort)
 	f.startLegacy()
-	f.seedSchema()
 	return f
-}
-
-func (f *fixture) doltInit(dir string) {
-	f.t.Helper()
-	cmd := exec.Command("dolt", "init", "--name", "bd handoff test", "--email", "handoff@example.invalid")
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		f.t.Fatalf("dolt init in %s: %v\n%s", dir, err, out)
-	}
 }
 
 func (f *fixture) freePort() int {
@@ -187,29 +177,6 @@ func (f *fixture) stopLegacy() {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// seedSchema gives the database the two tables the sentinels read, plus a row,
-// so "the replacement serves the same data" is a claim with content.
-func (f *fixture) seedSchema() {
-	f.t.Helper()
-	db, err := openScope("127.0.0.1", f.legacyPort, f.database)
-	if err != nil {
-		f.t.Fatalf("connect to legacy: %v", err)
-	}
-	defer db.Close() //nolint:errcheck // test cleanup
-	stmts := []string{
-		"CREATE TABLE IF NOT EXISTS issues (id VARCHAR(64) PRIMARY KEY, title VARCHAR(255))",
-		"CREATE TABLE IF NOT EXISTS dependencies (from_id VARCHAR(64), to_id VARCHAR(64), PRIMARY KEY (from_id, to_id))",
-		"INSERT INTO issues (id, title) VALUES ('bd-0001', 'first')",
-		"INSERT INTO dependencies (from_id, to_id) VALUES ('bd-0001', 'bd-0002')",
-		"CALL DOLT_COMMIT('-Am', 'seed the scope', '--author', 'bd handoff test <handoff@example.invalid>')",
-	}
-	for _, stmt := range stmts {
-		if _, err := db.ExecContext(context.Background(), stmt); err != nil {
-			f.t.Fatalf("seed %q: %v", stmt, err)
-		}
 	}
 }
 

@@ -224,17 +224,32 @@ func (x *run) rollbackFinish() error {
 	}
 	e.record("artifacts_still_restored", GatePassed)
 
-	// (iii) config.yaml still POINTS at the endpoint that answered. Not
-	// byte-exactness: the caller's restart canonicalises config.yaml, which is
-	// its ordinary behavior and explicitly licensed after R1.
-	host, port := configuredEndpoint(beadsDir)
-	if host != x.req.Endpoint.Host || port != strconv.Itoa(x.req.Endpoint.Port) {
+	// (iii) config.yaml still POINTS at the endpoint that answered — but only if
+	// it ever did. Not byte-exactness: the caller's restart canonicalises
+	// config.yaml, which is its ordinary behavior and explicitly licensed after
+	// R1.
+	//
+	// A caller that records its endpoint somewhere other than config.yaml is not
+	// a caller that has failed to come back. Gas City's managed cities are
+	// exactly this: the endpoint lives in the caller's own runtime state and its
+	// canonical resolver deliberately blanks dolt.host/dolt.port, so demanding
+	// them here refuses a rollback that was correct, on a workspace whose server
+	// is answering, forever. Whether this gate has anything to check is a fact
+	// about the workspace, recorded at prepare before anything moved.
+	switch {
+	case !x.j.Snapshot.ConfigHadEndpoint:
 		e.record("config_points_at_legacy", GateSkipped)
-		return x.fail(codedf(CodeLegacyNotBack,
-			"config.yaml resolves to %s:%s, not the endpoint that answered (%s)",
-			host, port, x.req.Endpoint), &e)
+		e.note("config_endpoint", "config.yaml carried no dolt.host/dolt.port at prepare; the caller resolves its own endpoint")
+	default:
+		host, port := configuredEndpoint(beadsDir)
+		if host != x.req.Endpoint.Host || port != strconv.Itoa(x.req.Endpoint.Port) {
+			e.record("config_points_at_legacy", GateSkipped)
+			return x.fail(codedf(CodeLegacyNotBack,
+				"config.yaml resolves to %s:%s, not the endpoint that answered (%s)",
+				host, port, x.req.Endpoint), &e)
+		}
+		e.record("config_points_at_legacy", GatePassed)
 	}
-	e.record("config_points_at_legacy", GatePassed)
 
 	// (iv) identity, not liveness. Something answering is not the same as a
 	// stable process bound to this workspace that is neither bd's replacement

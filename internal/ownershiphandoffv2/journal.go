@@ -151,10 +151,11 @@ type Sentinels struct {
 	FirstIssue  string `json:"first_issue"`
 	IssuesState string `json:"issues_state"`
 	// FirstDependency and DependenciesState mirror the issue pair. The state is
-	// three-valued — missing, empty, present — because "the table is not there"
-	// and "the table is there and has no rows" are different facts about a
-	// database, and collapsing them would let an unrelated empty database
-	// compare equal to this one on everything but the head hash.
+	// four-valued — missing, empty, present, unreadable — because "the table is
+	// not there", "it is there and has no rows" and "it is there in a shape this
+	// sentinel cannot read" are different facts about a database, and collapsing
+	// them would let an unrelated empty database compare equal to this one on
+	// everything but the head hash.
 	FirstDependency   string `json:"first_dependency"`
 	DependenciesState string `json:"dependencies_state"`
 	HeadHash          string `json:"head_hash"`
@@ -166,6 +167,10 @@ const (
 	TableMissing = "missing"
 	TableEmpty   = "empty"
 	TablePresent = "present"
+	// TableUnreadable is a table that exists but not in the shape the sentinel
+	// reads. Recorded rather than raised: both ends read the same database, so
+	// both see it, and the comparison still means what it means.
+	TableUnreadable = "unreadable"
 )
 
 // Snapshot is everything bd must be able to put back. Every key the commit
@@ -177,6 +182,15 @@ type Snapshot struct {
 	PortFile      Artifact `json:"port_file"`
 	PIDFile       Artifact `json:"pid_file"`
 	DataDirIsDolt bool     `json:"data_dir_is_dolt"`
+
+	// ConfigHadEndpoint records whether config.yaml carried a resolvable
+	// dolt.host/dolt.port at prepare. rollback-finish's (iii) asks whether
+	// config.yaml still points at the endpoint that answered, which is only a
+	// question when it pointed anywhere to begin with: a caller that keeps its
+	// endpoint in its own runtime state rather than in config.yaml has not
+	// failed to come back, and demanding one there would refuse a correct
+	// rollback forever.
+	ConfigHadEndpoint bool `json:"config_had_endpoint"`
 
 	// MetadataDoltServerPort is the metadata.json dolt_server_port as found at
 	// prepare. Recorded separately from the file bytes because clearing it is
