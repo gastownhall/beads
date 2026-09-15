@@ -139,3 +139,59 @@ func TestUndottedKeysAreUnaffected(t *testing.T) {
 		t.Fatalf("node_id reads back as %q\n%s", got, body)
 	}
 }
+
+// Writing a dotted key nested and then being unable to unset it is the same
+// round-trip break in the other direction: UnsetYamlConfig comments out the
+// line matching the key, and its pattern only ever matched a FLAT
+// `sync.remote:` line. Once the writer nests, an unset silently does nothing
+// and the value stays live — which for sync.remote means bd keeps a remote the
+// operator asked it to forget.
+func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
+	cases := []struct {
+		name string
+		seed string
+	}{
+		{name: "nested", seed: "sync:\n    remote: \"file:///origin.git\"\n"},
+		{name: "nested among siblings", seed: "sync:\n    branch: beads-sync\n    remote: \"file:///origin.git\"\n"},
+		{name: "legacy flat", seed: "sync.remote: \"file:///origin.git\"\n"},
+		{name: "nested with other sections", seed: "dolt:\n    port: 3307\nsync:\n    remote: \"file:///origin.git\"\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.seed), 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			t.Setenv("BEADS_DIR", dir)
+			if err := UnsetYamlConfig("sync.remote"); err != nil {
+				t.Fatalf("UnsetYamlConfig: %v", err)
+			}
+
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if got := GetStringFromDir(dir, "sync.remote"); got != "" {
+				t.Errorf("sync.remote still reads back as %q after unset:\n%s", got, body)
+			}
+			// The key is preserved as documentation, which is this function's
+			// stated contract, so it must still be visible — commented.
+			if !strings.Contains(string(body), "remote:") {
+				t.Errorf("unset removed the key instead of commenting it out:\n%s", body)
+			}
+			// A sibling under the same section is none of the unset's business.
+			if tc.name == "nested among siblings" {
+				if got := GetStringFromDir(dir, "sync.branch"); got != "beads-sync" {
+					t.Errorf("unset took a sibling with it: sync.branch = %q\n%s", got, body)
+				}
+			}
+			if tc.name == "nested with other sections" {
+				if got := GetStringFromDir(dir, "dolt.port"); got != "3307" {
+					t.Errorf("unset touched an unrelated section: dolt.port = %q\n%s", got, body)
+				}
+			}
+		})
+	}
+}

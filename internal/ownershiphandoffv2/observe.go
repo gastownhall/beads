@@ -48,6 +48,12 @@ var (
 	// resolvePortHolder is the port-holder lookup behind a seam, so a test can
 	// present the undetermined outcome on a box whose /proc works fine.
 	resolvePortHolder = doltserver.ResolvePortHolderInDir
+	// supportsStrictLaunch is the launch-identity capability behind a seam. It
+	// is false on darwin and Windows and true on Linux, and the difference
+	// decides whether configure may spawn anything at all — so the refusal has
+	// to be testable on the platform that does support it, which is the only
+	// one CI runs the integration suite on.
+	supportsStrictLaunch = doltserver.SupportsStrictLaunchRecovery
 )
 
 // reasonPortHolderUndetermined is the recorded reason for an instance bd could

@@ -220,7 +220,7 @@ func (x *run) configure() error {
 	// This refuses rather than degrading. A replacement bd cannot prove it
 	// started is one rollback cannot safely stop, and an ownership transfer
 	// whose undo does not work is worse than one that never began.
-	if !doltserver.SupportsStrictLaunchRecovery() {
+	if !supportsStrictLaunch() {
 		e.record("strict_launch_supported", GateUnavailable)
 		e.note("strict_launch", "this platform cannot bind a launched server to a durable launch intent")
 		return x.fail(codedf(CodeTargetLaunchFailed,
@@ -471,7 +471,7 @@ func (x *run) assertOwnedAfterWrite() string {
 // durable nonce is a candidate, and only its captured birth authorizes a
 // signal.
 func (x *run) retireOrphanTarget(e *Evidence) error {
-	if !doltserver.SupportsStrictLaunchRecovery() {
+	if !supportsStrictLaunch() {
 		e.record("orphan_retired", GateUnavailable)
 		e.note("orphan_recovery", "this platform cannot bind a crash-window listener to its launch intent")
 		return codedf(CodeTargetLaunchFailed,
