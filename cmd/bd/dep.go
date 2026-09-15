@@ -107,6 +107,25 @@ func resolveIDForMutation(ctx context.Context, localStore storage.DoltStorage, i
 	return result.ResolvedID, s, func() { result.Close() }, nil
 }
 
+// resolveUnresolvedDepTarget decides what to do when a dep add target could
+// not be resolved locally or via cross-store routing (resolveIDWithRouting's
+// error). The previous heuristic compared bd ID prefixes between source and
+// target and silently accepted any differently-prefixed string as a raw
+// external reference — writing unresolvable bd IDs into depends_on_external
+// and misreading "type:id" positional args (e.g. "discovered-from:ga-x") as
+// a foreign-store ID, since ExtractPrefix stops at the first "-" (be-gmdx5).
+// A target that fails resolution must now be a well-formed
+// "external:<project>:<capability>" reference, or it is rejected by name.
+func resolveUnresolvedDepTarget(dependsOnArg string, resolveErr error) (string, error) {
+	if IsExternalRef(dependsOnArg) {
+		if err := validateExternalRef(dependsOnArg); err != nil {
+			return "", err
+		}
+		return dependsOnArg, nil
+	}
+	return "", fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
+}
+
 // isChildOf returns true if childID is a hierarchical child of parentID.
 // For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
 func isChildOf(childID, parentID string) bool {
@@ -382,12 +401,9 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(fromID)
-				tgtPrefix := types.ExtractPrefix(dependsOnArg)
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = dependsOnArg
-				} else {
-					return HandleErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
+				toID, err = resolveUnresolvedDepTarget(dependsOnArg, err)
+				if err != nil {
+					return HandleErrorRespectJSON("%v", err)
 				}
 			} else {
 				defer toCleanup()
