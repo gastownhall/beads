@@ -17,6 +17,14 @@ type Handle struct {
 	token   Token
 }
 
+// SupportsKernelBoundHandle reports whether strict signaling is kernel-bound.
+func SupportsKernelBoundHandle() bool { return false }
+
+// OpenStrict refuses because this strict handoff path is unavailable here.
+func OpenStrict(pid int, tok Token) (*Handle, error) {
+	return nil, errors.New("procid: kernel-bound strict signaling is unavailable on windows")
+}
+
 // errProcessExited marks a process which is terminated but whose PID is still
 // resolvable because some handle (ours or a third party's, such as Task
 // Manager or an antivirus scanner) keeps the process object alive. Treating
