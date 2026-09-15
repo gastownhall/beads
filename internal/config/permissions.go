@@ -20,16 +20,17 @@ func EnsureBeadsDir(path string) error {
 	return os.MkdirAll(path, BeadsDirPerm)
 }
 
-// CheckBeadsDirPermissions warns to stderr if the .beads directory has
-// group or world-accessible permissions. The check is non-fatal.
+// CheckBeadsDirPermissions warns to stderr if the .beads directory is
+// world-accessible. Group access may be intentional on a trusted host.
+// The check is non-fatal.
 func CheckBeadsDirPermissions(path string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return // directory doesn't exist yet
 	}
 	perm := info.Mode().Perm()
-	if perm&0077 != 0 {
-		fmt.Fprintf(os.Stderr, "Warning: %s has permissions %04o (recommended: 0700). Run: chmod 700 %s\n", path, perm, path)
+	if perm&0007 != 0 {
+		fmt.Fprintf(os.Stderr, "Warning: %s has world-accessible permissions %04o. Run: chmod o-rwx %s\n", path, perm, path)
 	}
 }
 

@@ -74,6 +74,30 @@ func TestCheckBeadsDirPermissions_Secure(t *testing.T) {
 	}
 }
 
+func TestCheckBeadsDirPermissions_TrustedGroup(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(dir, 0770); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0770); err != nil {
+		t.Fatal(err)
+	}
+	// Capture stderr
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	CheckBeadsDirPermissions(dir)
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	if buf.Len() != 0 {
+		t.Errorf("expected no warning for 0770 dir, got: %s", buf.String())
+	}
+}
+
 func TestCheckBeadsDirPermissions_Permissive(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -90,7 +114,7 @@ func TestCheckBeadsDirPermissions_Permissive(t *testing.T) {
 	os.Stderr = old
 	var buf bytes.Buffer
 	buf.ReadFrom(r)
-	want := fmt.Sprintf("Warning: %s has permissions 0755 (recommended: 0700). Run: chmod 700 %s\n", dir, dir)
+	want := fmt.Sprintf("Warning: %s has world-accessible permissions 0755. Run: chmod o-rwx %s\n", dir, dir)
 	if buf.String() != want {
 		t.Errorf("warning = %q, want %q", buf.String(), want)
 	}

@@ -50,7 +50,7 @@ bd stores issue data locally in a Dolt database (`.beads/dolt/`), which is gitig
 - Do not store sensitive information (passwords, API keys, secrets) in issue descriptions or metadata
 - Issue data is committed to git and will be visible to anyone with repository access
 - bd does not encrypt data at rest (it's a local development tool)
-- The `.beads/` directory contains server state files (PID, port) and should have restrictive permissions (0700) to prevent other local users from tampering with process lifecycle
+- The `.beads/` directory contains server state files (PID, port) and defaults to restrictive permissions (0700). Deliberate group access treats every member of that Unix group as trusted; world access remains unsafe because it lets unrelated local users tamper with process lifecycle.
 
 ### Git Workflow Security
 
