@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -47,6 +49,10 @@ type doltSQLProvider struct {
 	// non-mutating preview (--dry-run, --inspect). The open creates no
 	// database and applies no migration; see providerOptions.preview.
 	preview bool
+	// readOnly: the command that opened this provider only reads. Unlike
+	// preview it still bootstraps and migrates normally — it only changes what
+	// happens when the migration gate REFUSES; see providerOptions.readOnly.
+	readOnly bool
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
@@ -108,11 +114,25 @@ type providerOptions struct {
 	// the same contract embeddeddolt.OpenForPreviewCommand gives the embedded
 	// path.
 	preview bool
+	// readOnly opens for a command that only reads (bd list, show, …). It is
+	// deliberately weaker than preview: the open still creates and migrates as
+	// usual, because a read command on a fresh or behind workspace has always
+	// been served by the ordinary open. It changes exactly one thing — when
+	// the shared-store migration gate refuses, the open warns and attaches to
+	// the database at its current schema instead of failing, so reads keep
+	// working through the upgrade window. That is the same warn-and-continue
+	// contract embeddeddolt gives its read-only-command intent.
+	readOnly bool
 }
 
 // WithPreview opens the provider for a non-mutating preview command.
 func WithPreview() ProviderOption {
 	return func(o *providerOptions) { o.preview = true }
+}
+
+// WithReadOnly opens the provider for a command that only reads.
+func WithReadOnly() ProviderOption {
+	return func(o *providerOptions) { o.readOnly = true }
 }
 
 func applyProviderOptions(opts []ProviderOption) providerOptions {
@@ -238,9 +258,65 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 	}
 	if _, err := schema.MigrateUpWithLock(ctx, conn, database,
 		schema.WithDatabaseSelector(selectProbeDatabase),
-		schema.WithLockedPreparation(p.serverEndpoint, preparer.prepare)); err != nil {
+		schema.WithLockedPreparation(p.serverEndpoint, preparer.prepare),
+		// This provider serves a shared database by definition — an external
+		// or proxied sql-server, or `bd serve`'s own daemon — so the same
+		// refusal server mode gets applies here (gastownhall/beads#5920,
+		// #5043). Passing it as a lock option rather than calling the gate
+		// before MigrateUpWithLock is what keeps the steady-state open free:
+		// the converged fast path returns before the lock, and the gate, are
+		// ever reached. Preparation has already CREATEd and USEd the
+		// database by the time it runs, so a fresh bootstrap reads version 0
+		// and passes.
+		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
+			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, nil)
+		})); err != nil {
+		var gateErr *schema.RemoteMigrateGateError
+		if errors.As(err, &gateErr) {
+			if p.readOnly {
+				return readThroughRefusedMigration(ctx, conn, database, gateErr)
+			}
+			// Explicit, though classifyInitSchemaError would reach the same
+			// verdict: a refusal must never be retried, because the retry
+			// would be an attempt to perform the migration it just refused.
+			return backoff.Permanent(gateErr)
+		}
 		return classifyInitSchemaError(err)
 	}
+	return nil
+}
+
+// readThroughRefusedMigration serves a read command from a database the
+// migration gate refused to migrate: warn, attach at the current schema, and
+// carry on. Writes remain refused (they open without WithReadOnly), so the
+// database cannot be quietly written at a schema this binary believes is
+// behind.
+//
+// This mirrors what embedded mode has done since bd-578h9.5 for its
+// read-only-command intent. Without it, extending the gate to the proxied path
+// would newly brick every read on a workspace waiting for its operator to
+// consent — which is the opposite of the contract the gate's own message
+// promises ("read commands keep working against the current schema").
+// It is a free function rather than a provider method on purpose: it needs no
+// provider state, and the parity test that enumerates doltSQLProvider's method
+// set as the capability surface a caller can reach through a
+// UnitOfWorkProvider would otherwise demand the notifying wrapper answer a
+// startup helper.
+func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database string, gateErr *schema.RemoteMigrateGateError) error {
+	if err := db.NewDDLSQLRepository(conn).UseDatabase(ctx, database); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: switching to database: %w", err)
+		}
+		// The gate refused AND the database cannot even be attached: report
+		// the refusal, which is the actionable half.
+		return backoff.Permanent(gateErr)
+	}
+	fmt.Fprintf(os.Stderr,
+		"Warning: %[1]v\n"+
+			"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
+			"  Writes are blocked until the schema is reconciled. Run '%[3]s'\n"+
+			"  once every client of this server is upgraded.\n",
+		gateErr, gateErr.CurrentVersion, schema.SharedConsentCommand)
 	return nil
 }
 
@@ -255,9 +331,15 @@ func (p *doltSQLProvider) verifyTeamServerSchema(ctx context.Context, conn *sql.
 		if isSerializationError(err) {
 			return fmt.Errorf("uow: switching to database: %w", err)
 		}
-		return backoff.Permanent(fmt.Errorf(
-			"uow: database %q not found — the schema is managed by beads-team-server; ask your operator to run 'bts init' first: %w",
-			database, err))
+		return backoff.Permanent(classifyUseDatabaseError(err, database, teamServerUseDatabaseRemedy))
+	}
+	// A USE that returns no error is not proof the session moved: see
+	// assertSessionDatabase.
+	if err := assertSessionDatabase(ctx, conn, database); err != nil {
+		if isSerializationError(err) {
+			return err
+		}
+		return backoff.Permanent(err)
 	}
 	if err := checkTeamServerSchema(ctx, conn, database); err != nil {
 		if isSerializationError(err) {
@@ -284,11 +366,102 @@ func (p *doltSQLProvider) attachPreviewDatabase(ctx context.Context, conn *sql.C
 		if isSerializationError(err) {
 			return fmt.Errorf("uow: switching to database: %w", err)
 		}
-		return backoff.Permanent(fmt.Errorf(
-			"uow: database %q not found — preview commands (--dry-run, --inspect) never create or migrate a database; run the command without the preview flag first: %w",
-			database, err))
+		return backoff.Permanent(classifyUseDatabaseError(err, database, previewUseDatabaseRemedy))
 	}
 	return nil
+}
+
+// useDatabaseRemedy carries the advice classifyUseDatabaseError appends to the
+// two failure shapes whose remedy depends on which open path asked: a database
+// the server says is absent, and a failure it could not classify at all. Denial
+// needs no variant — a refused credential is refused the same way everywhere,
+// and only the server administrator can change that.
+type useDatabaseRemedy struct {
+	// missing is appended when the server reports the database does not exist.
+	missing string
+	// unclassified is appended when the driver error is neither a denial nor an
+	// absence, so the message must not claim to know which.
+	unclassified string
+}
+
+var (
+	// teamServerUseDatabaseRemedy: the schema on this path is owned by the team
+	// server, so bd never creates the database — an absent one is a
+	// provisioning request, not something a retry can fix.
+	teamServerUseDatabaseRemedy = useDatabaseRemedy{
+		missing:      "it must be provisioned on the server; ask the server administrator to create it, then re-run init",
+		unclassified: "the schema is managed by beads-team-server; ask your operator to run 'bts init' first",
+	}
+	// previewUseDatabaseRemedy: a preview open promised not to mutate anything,
+	// so it neither creates nor migrates where the ordinary open would. That
+	// answers both shapes, so both fields carry it.
+	previewUseDatabaseRemedy = useDatabaseRemedy{
+		missing:      previewRemedyText,
+		unclassified: previewRemedyText,
+	}
+)
+
+const previewRemedyText = "preview commands (--dry-run, --inspect) never create or migrate a database; run the command without the preview flag first"
+
+// classifyUseDatabaseError describes a failed USE using only what the server
+// actually said. The old wording called every failure "database %q not found",
+// including the access-denied errors a scoped credential gets — which sent
+// operators off to provision a database that already existed and only needed a
+// grant. A server hides existence from a credential it has not granted the
+// database (see isDatabaseNotFoundError), so on a denial bd must name both
+// possibilities instead of picking one.
+func classifyUseDatabaseError(err error, database string, remedy useDatabaseRemedy) error {
+	switch {
+	case isAccessDeniedError(err):
+		return fmt.Errorf(
+			"uow: access to database %q was denied for this credential — either the database is not provisioned on the server or this credential has not been granted access to it; ask the server administrator to provision the database and grant access: %w",
+			database, err)
+	case isDatabaseNotFoundError(err):
+		return fmt.Errorf("uow: database %q does not exist on the server — %s: %w", database, remedy.missing, err)
+	default:
+		return fmt.Errorf("uow: could not switch to database %q — %s: %w", database, remedy.unclassified, err)
+	}
+}
+
+// rowQuerier is the subset of *sql.Conn, *sql.DB, and *sql.Tx that
+// assertSessionDatabase needs, so the assertion can be tested against a stub.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// assertSessionDatabase verifies the server actually placed this session on the
+// database bd asked for.
+//
+// A front door that scopes connections by credential — a gateway, a proxy that
+// rewrites routing — can accept a foreign database name in the handshake or a
+// USE for it and serve its own database anyway. Nothing later on the open path
+// notices: bd's identity reads are unqualified, so they return the SESSION's
+// database while bd attributes them to the REQUESTED one. That is how
+// `bd init --database=<other>` ends up reporting a prefix conflict against a
+// database it never reached, and — with no --prefix to disagree — how a
+// workspace silently adopts another project's identity and then reads and
+// writes that project's data.
+//
+// Schema names compare case-insensitively, matching MySQL. A NULL or empty
+// answer means the session is on no database at all, which is the same
+// not-provisioned-or-not-granted situation classifyUseDatabaseError describes.
+func assertSessionDatabase(ctx context.Context, q rowQuerier, want string) error {
+	var current sql.NullString
+	if err := q.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&current); err != nil {
+		return fmt.Errorf("uow: reading the session database after selecting %q: %w", want, err)
+	}
+	switch {
+	case !current.Valid || current.String == "":
+		return fmt.Errorf(
+			"uow: the server left this session on no database after selecting %q — either the database is not provisioned on the server or this credential has not been granted access to it; ask the server administrator to provision the database and grant access",
+			want)
+	case strings.EqualFold(current.String, want):
+		return nil
+	default:
+		return fmt.Errorf(
+			"uow: the server connected this session to database %q, not the requested %q — this credential appears to be scoped to %q. The requested database is not provisioned for this credential; ask the server administrator to provision it on the server (and grant this credential access), or re-run init without --database to use the provisioned one",
+			current.String, want, current.String)
+	}
 }
 
 // bootstrapPreparer carries the sticky fresh-bootstrap state across the backoff
@@ -351,6 +524,14 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 				err:       fmt.Errorf("uow: creating database: %w", err),
 				retryable: true,
 			}
+		case isAccessDeniedError(err):
+			// A server that provisions databases itself denies CREATE to the
+			// credentials it hands out. Say so instead of surfacing the raw
+			// driver error, and do not retry or fall back: bd must not go
+			// looking for another way to create a database it was refused.
+			return nil, &bootstrapPreparationError{err: fmt.Errorf(
+				"uow: creating database %q was denied for this credential — this server provisions databases server-side; ask the server administrator to provision it, then re-run init: %w",
+				b.database, err)}
 		default:
 			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
 		}
@@ -471,6 +652,18 @@ func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff
 	}, backoff.WithContext(bo, ctx))
 }
 
+// assertSessionDatabaseOnPool runs assertSessionDatabase on a connection pinned
+// out of pool. A pool hands out a different connection per call, so the
+// assertion has to name the connection it is asserting about.
+func assertSessionDatabaseOnPool(ctx context.Context, pool *sql.DB, want string) error {
+	conn, err := pool.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("uow: pin connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	return assertSessionDatabase(ctx, conn, want)
+}
+
 // openDB opens dsn and waits out a server that is still coming up, retrying
 // transient ping failures for up to 30s (#6003).
 func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
@@ -527,6 +720,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 			teamServer:        teamServer,
 			expectedProjectID: expectedProjectID,
 			preview:           opts.preview,
+			readOnly:          opts.readOnly,
 		}
 	}
 
@@ -609,6 +803,15 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
+	}
+
+	// This pool names the database in the MySQL handshake and never issues a
+	// USE, so nothing has yet checked that the server honored the name. Every
+	// unqualified read the caller makes — project identity above all — belongs
+	// to whatever database this session actually landed on, so assert it once
+	// here, on a pinned connection, before handing the pool out.
+	if err := assertSessionDatabaseOnPool(ctx, dbConn, database); err != nil {
+		return nil, errors.Join(err, dbConn.Close())
 	}
 
 	return newProvider(dbConn), nil

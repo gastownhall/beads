@@ -9,6 +9,7 @@ import (
 	"hash"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -80,8 +81,10 @@ type Issue struct {
 	// row_lock is random per write, so generic Issue serialization would break
 	// stable list/export round-trips. The detail-view DTO projects it explicitly
 	// as `revision` for guarded clients (IssueDetails.Revision, set by
-	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}); Go
-	// consumers read RowVersion directly.
+	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}) — as a
+	// decimal STRING, via RevisionToken, because the full int64 range does not
+	// survive a JSON number in a JavaScript consumer. Go consumers read
+	// RowVersion directly and never see the string.
 	//
 	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
 	// generic update path, but NOT on direct-UPDATE paths that rewrite text
@@ -1186,12 +1189,44 @@ type IssueDetails struct {
 	// from a legacy migration-0054 row, so the projection lives beside the
 	// field and not at each caller.
 	//
-	// NO omitempty. A guarded write that expects 0 matches an un-mutated
+	// IT IS A STRING ON THE WIRE, holding the token's decimal spelling
+	// (RevisionToken). The token is drawn from the FULL int64 range, and a JSON
+	// number past 2^53 does not survive a JavaScript consumer: it reads back a
+	// rounded value, echoes that as its guard, and earns a 409 for a row nobody
+	// touched. A string round-trips exactly in every JSON consumer, which is
+	// what an equality-only opaque token needs, and it leaves a future backend
+	// free to mint a token that is not an int64 at all.
+	//
+	// NO omitempty. A guarded write that expects "0" matches an un-mutated
 	// legacy row and misses any current one, which is correct CAS; omitting
 	// the member would leave that client unable to read the value it must
 	// send, and would make an absent field mean either "legacy-zero" or "this
-	// producer has no token".
-	Revision int64 `json:"revision"`
+	// producer has no token". The legacy migration-0054 value is the string
+	// "0", not the empty string.
+	Revision string `json:"revision"`
+}
+
+// RevisionToken renders an optimistic-concurrency token for the wire.
+//
+// This and ParseRevisionToken are the ONE spelling of the encoding. The token
+// is int64 everywhere inside bd — the row_lock column, Issue.RowVersion, the
+// ExpectedVersion guard on the issueops requests — and a decimal string
+// everywhere on the wire, because it is opaque and equality-only and a JSON
+// number loses the top bits in a JavaScript consumer. Keeping the conversion in
+// one pair of functions is what keeps "0" meaning the legacy row rather than
+// an absent value.
+func RevisionToken(v int64) string {
+	return strconv.FormatInt(v, 10)
+}
+
+// ParseRevisionToken reads a wire revision token back to the internal int64.
+//
+// It accepts exactly what RevisionToken emits. A caller must echo the token a
+// response carried rather than compose one, so anything else is a client that
+// invented a value, and reporting that as a parse failure is more useful than
+// guessing at it.
+func ParseRevisionToken(s string) (int64, error) {
+	return strconv.ParseInt(s, 10, 64)
 }
 
 // NewIssueDetails starts a detail view of issue with the wire-visible revision
@@ -1202,7 +1237,7 @@ type IssueDetails struct {
 // literal would publish a silently wrong token that nothing can distinguish
 // from a right one. The caller fills in labels, edges and counts afterwards.
 func NewIssueDetails(issue Issue) *IssueDetails {
-	return &IssueDetails{Issue: issue, Revision: issue.RowVersion}
+	return &IssueDetails{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
 }
 
 // DependencyType categorizes the relationship

@@ -91,6 +91,27 @@ func TestInitSchemaOnDBWithRetryAndGate_GateErrorClassification(t *testing.T) {
 		}
 	})
 
+	t.Run("shared-store refusal is permanent, not retried", func(t *testing.T) {
+		// The classification keys on the error TYPE, so the new #5920 decision
+		// inherits it — pinned explicitly because retrying this particular
+		// refusal would mean retrying it into the migration it just refused.
+		calls := 0
+		gate := func(context.Context, *sql.DB) error {
+			calls++
+			return &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+				Decision: "shared-no-remote",
+			}
+		}
+		_, err := initSchemaOnDBWithRetryAndGate(ctx, db, gate)
+		if !schema.IsRemoteMigrateGateError(err) {
+			t.Fatalf("err = %T (%v), want *schema.RemoteMigrateGateError", err, err)
+		}
+		if calls != 1 {
+			t.Fatalf("gate calls = %d, want 1 (a shared-store refusal must not be retried)", calls)
+		}
+	})
+
 	t.Run("non-retryable probe error is permanent", func(t *testing.T) {
 		calls := 0
 		gate := func(context.Context, *sql.DB) error {

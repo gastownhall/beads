@@ -67,7 +67,7 @@ func TestMigration0067AddsVersionedBeadsSchema(t *testing.T) {
 		"ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1",
 		// Shape parity with issues, identical type. Nothing reads or writes
 		// this column in any phase — see the migration header's asymmetry
-		// note and ignored/0026.
+		// note and ignored/0027.
 		"ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1",
 		// Both ALTERs are INFORMATION_SCHEMA-guarded so a raw replay no-ops.
 		"COLUMN_NAME = 'current_revision'",
@@ -184,7 +184,7 @@ func TestMigration0067AddsVersionedBeadsSchemaThroughDoltCLI(t *testing.T) {
 	// current_revision on BOTH planes. issues.current_revision is the
 	// fast-path CAS column later phases read and write; wisps.current_revision
 	// is shape parity only (nothing ever reads or writes it — see the
-	// migration header and ignored/0026), and it is asserted here for exactly
+	// migration header and ignored/0027), and it is asserted here for exactly
 	// the reason the parity oracle exists: the two planes share
 	// column-list-shaped code paths, so the shape obligation is real even
 	// where the semantics are not. Same type on both, or

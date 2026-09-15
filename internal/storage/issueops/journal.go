@@ -302,10 +302,13 @@ func recordBlockedJournalChanges(
 // journaling is disabled.
 //
 // actor is the acting identity that performed the mutation, as resolved for
-// the audit-events table; "" when the mutation path genuinely has none
-// (derived maintenance, actorless delete plumbing). It is an explicit
-// parameter, not ambient context, so a new call site cannot compile without
-// deciding attribution.
+// the audit-events table; "" when the mutation path genuinely has none —
+// derived is_blocked maintenance, and the system surfaces with no request
+// behind them (storage.DeleteIssue, gc and molecule cleanup, `bd repo
+// remove`). A user-initiated delete is NOT one of those: its rows, cascade
+// included, carry the requesting actor. It is an explicit parameter, not
+// ambient context, so a new call site cannot compile without deciding
+// attribution.
 func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) error {
 	if !journalEnabled(ctx, tx) {
 		return nil
