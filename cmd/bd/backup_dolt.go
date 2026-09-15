@@ -182,13 +182,11 @@ Run 'bd backup init <path>' first to configure a destination.`,
 }
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
-// Filesystem paths get resolved to absolute and prefixed with file://
-// URLs (https://, http://) are passed through as-is.
+// Recognized backup URLs (versioncontrolops.IsBackupURL) pass through unchanged;
+// anything else is treated as a filesystem path, resolved to absolute and
+// prefixed with file://.
 func resolveDoltBackupURL(raw string) string {
-	// DoltHub or other remote URLs — pass through
-	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") ||
-		strings.HasPrefix(raw, "file://") || strings.HasPrefix(raw, "aws://") ||
-		strings.HasPrefix(raw, "gs://") {
+	if versioncontrolops.IsBackupURL(raw) {
 		return raw
 	}
 
