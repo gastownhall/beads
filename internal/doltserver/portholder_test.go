@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // A port this process is listening on must resolve to this process. The whole
@@ -212,5 +214,70 @@ func TestResolveAutoStartForDirAnswersPerWorkspace(t *testing.T) {
 	// And the two directories disagree in the same process, which is the point.
 	if !ResolveAutoStartForDir(owned) {
 		t.Error("the external workspace changed the answer for an unrelated one")
+	}
+}
+
+// A per-directory answer must come from that directory's file, not from the
+// process-global snapshot taken when bd started.
+//
+// The ownership handoff's commit writes dolt.auto-start into the workspace and
+// then asks this function whether bd's own resolvers agree. A workspace whose
+// previous owner had set `dolt.auto-start: false` — which is exactly what a
+// caller managing the server itself does — loaded that value into the process
+// at startup. Consulting it first meant commit read what the file USED to say,
+// refused itself, and the transfer could never complete on the one workspace
+// shape it exists for.
+func TestResolveAutoStartForDirPrefersTheDirectorysOwnConfig(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"),
+		[]byte("dolt:\n    auto-start: true\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Stand in for a process that loaded "false" at startup.
+	config.Set("dolt.auto-start", "false")
+	t.Cleanup(func() { config.Set("dolt.auto-start", "") })
+
+	if !ResolveAutoStartForDir(dir) {
+		t.Fatal("the directory says true and the process-global snapshot says false; the directory must win")
+	}
+
+	// And the fallback still works: a directory that says nothing defers to the
+	// ambient value rather than inventing one. Only assertable when this test
+	// binary actually has process-global config loaded — config.Set is a no-op
+	// before the config package is initialised, and asserting against a value
+	// that was never set would be asserting nothing.
+	if config.GetString("dolt.auto-start") != "false" {
+		t.Skip("process-global config is not loaded here; the fallback leg is unobservable")
+	}
+	silent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(silent, "config.yaml"), []byte("# nothing here\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if ResolveAutoStartForDir(silent) {
+		t.Error("a directory with no opinion ignored the ambient opt-out")
+	}
+}
+
+// An environment opt-out is a statement about this process and still wins over
+// any file.
+func TestResolveAutoStartForDirHonoursTheEnvironmentOptOut(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"),
+		[]byte("dolt:\n    auto-start: true\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if ResolveAutoStartForDir(dir) {
+		t.Fatal("BEADS_DOLT_AUTO_START=0 was overridden by a workspace file")
 	}
 }

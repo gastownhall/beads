@@ -545,3 +545,107 @@ func TestHeldDataDirLockRefusesLegacyGone(t *testing.T) {
 	release()
 	f.mustRun(VerbLegacyGone)
 }
+
+// R2 (iii) asks whether config.yaml still points at the endpoint that answered.
+// That is only a question when config.yaml pointed anywhere to begin with.
+//
+// A Gas City managed city does not: it records its endpoint in the caller's own
+// runtime state, and its canonical resolver deliberately blanks dolt.host and
+// dolt.port — `gc.endpoint_origin: managed_city` means exactly "the endpoint is
+// the caller's to resolve". Demanding one here refused a correct rollback, on a
+// workspace whose server was answering, permanently. The gate is now recorded
+// skipped when the snapshot saw no endpoint at prepare, and (i), (ii) and (iv)
+// carry it.
+func TestRollbackFinishAdmitsACallerThatKeepsItsEndpointElsewhere(t *testing.T) {
+	f := newFixture(t)
+	t.Cleanup(f.stopTargetIfRunning)
+
+	// The workspace shape under test: no dolt.host/dolt.port anywhere in
+	// config.yaml, which is how the fixture starts.
+	if host, port := configuredEndpoint(f.beadsDir); host != "" || port != "" {
+		t.Fatalf("fixture already carries an endpoint in config.yaml (%s:%s)", host, port)
+	}
+
+	f.mustRun(VerbPrepare)
+	if f.journal().Snapshot.ConfigHadEndpoint {
+		t.Fatal("prepare recorded an endpoint config.yaml does not have")
+	}
+
+	f.stopLegacy()
+	f.mustRun(VerbLegacyGone)
+	f.mustRun(VerbConfigure)
+	f.mustRun(VerbRollback)
+
+	// The caller restarts its own server, and still records its endpoint
+	// somewhere bd cannot see.
+	f.startLegacy()
+
+	finished := f.mustRun(VerbRollbackFinish)
+	if finished.Phase != PhaseRolledBack {
+		t.Fatalf("rollback-finish left phase %s", finished.Phase)
+	}
+	evidence := finished.Evidence[string(PhaseRolledBack)]
+	if got := evidence.Gates["config_points_at_legacy"]; got != GateSkipped {
+		t.Errorf("gate config_points_at_legacy is %q, want %q", got, GateSkipped)
+	}
+	// The gates that carry the decision must have actually passed — a skipped
+	// (iii) must not become a way to admit a rollback nothing checked.
+	for _, gate := range []string{"legacy_answers", "artifacts_still_restored"} {
+		if got := evidence.Gates[gate]; got != GatePassed {
+			t.Errorf("gate %s is %q, want %q", gate, got, GatePassed)
+		}
+	}
+	if _, err := os.Lstat(JournalPath(f.root)); !os.IsNotExist(err) {
+		t.Fatal("rollback-finish did not archive the journal")
+	}
+}
+
+// The mirror: a workspace that DOES carry an endpoint is still held to it, so
+// the skip is scoped to the shape that needs it rather than being a hole.
+func TestRollbackFinishStillChecksAConfigThatCarriesAnEndpoint(t *testing.T) {
+	f := newFixture(t)
+	t.Cleanup(f.stopTargetIfRunning)
+
+	// Give the workspace the shape a bd-initialised one has, before prepare.
+	if err := ensureConfigYAML(f.beadsDir); err != nil {
+		t.Fatalf("seed config.yaml: %v", err)
+	}
+	for key, value := range map[string]string{
+		"dolt.host": "127.0.0.1",
+		"dolt.port": strconv.Itoa(f.legacyPort),
+	} {
+		if err := config.SetYamlConfigInDir(f.beadsDir, key, value); err != nil {
+			t.Fatalf("seed config.yaml %s: %v", key, err)
+		}
+	}
+
+	f.mustRun(VerbPrepare)
+	if !f.journal().Snapshot.ConfigHadEndpoint {
+		t.Fatal("prepare did not record the endpoint config.yaml carries")
+	}
+	f.stopLegacy()
+	f.mustRun(VerbLegacyGone)
+	f.mustRun(VerbConfigure)
+	f.mustRun(VerbRollback)
+	f.startLegacy()
+
+	// Point config.yaml somewhere else entirely: (iii) must refuse.
+	if err := config.SetYamlConfigInDir(f.beadsDir, "dolt.port", "1"); err != nil {
+		t.Fatalf("misdirect config.yaml: %v", err)
+	}
+	result, err := f.run(VerbRollbackFinish)
+	if ErrorCode(err) != CodeLegacyNotBack {
+		t.Fatalf("rollback-finish returned %q, want %q (err: %v)", ErrorCode(err), CodeLegacyNotBack, err)
+	}
+	if result.Phase != PhaseLegacyConfigRestored {
+		t.Fatalf("a refusal moved the phase to %s", result.Phase)
+	}
+
+	// Put it back and it settles, which proves the gate tracks the file.
+	if err := config.SetYamlConfigInDir(f.beadsDir, "dolt.port", strconv.Itoa(f.legacyPort)); err != nil {
+		t.Fatalf("restore config.yaml: %v", err)
+	}
+	if finished := f.mustRun(VerbRollbackFinish); finished.Phase != PhaseRolledBack {
+		t.Fatalf("rollback-finish left phase %s", finished.Phase)
+	}
+}

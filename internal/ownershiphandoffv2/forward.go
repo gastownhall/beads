@@ -255,6 +255,11 @@ func (x *run) configure() error {
 		e.note("data_dir_init", "already a dolt root; bd created nothing")
 	}
 
+	// P7 covers executables too. The strict launch re-resolves the binary with
+	// EvalSymlinks and compares it to what was journaled, so journaling an
+	// unresolved path makes every launch refuse "resolved executable changed"
+	// wherever dolt is reached through a symlink — which is every package
+	// manager that installs into a versioned directory and links it onto PATH.
 	executable, err := exec.LookPath("dolt")
 	if err != nil {
 		return x.fail(codedf(CodeTargetLaunchFailed, "locate dolt: %v", err), &e)
@@ -262,6 +267,7 @@ func (x *run) configure() error {
 	if executable, err = filepath.Abs(executable); err != nil {
 		return x.fail(codedf(CodeTargetLaunchFailed, "resolve dolt path: %v", err), &e)
 	}
+	executable = canonicalPath(executable)
 
 	launchID, err := newLaunchID()
 	if err != nil {
