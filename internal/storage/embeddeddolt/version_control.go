@@ -392,6 +392,50 @@ func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error
 	return int(changed), nil
 }
 
+// CountStatusBlockedDrift reports how many issues/wisps carry the manually-set
+// status='blocked' despite having no open 'blocks' dependency left — the
+// blocker closed, or none was ever recorded. Read-only: it never mutates
+// state. This is the embedded path of the mode-independent detector
+// (be-ntbxt); see DoltStore.CountStatusBlockedDrift.
+func (s *EmbeddedDoltStore) CountStatusBlockedDrift(ctx context.Context) (int, error) {
+	var n int64
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var e error
+		n, e = issueops.CountStatusBlockedDriftInTx(ctx, tx)
+		return e
+	})
+	return int(n), err
+}
+
+// FixStatusBlockedDrift returns every row CountStatusBlockedDrift would report
+// to status='open' and commits the repair, so the fleet-stranded issues in
+// be-ntbxt reappear in 'bd ready' without a manual 'bd update --status open'.
+// It never touches is_blocked — that column is separately derived and
+// repaired by RecomputeAllBlocked. This is the embedded path of the
+// mode-independent repair (be-ntbxt); see DoltStore.FixStatusBlockedDrift.
+func (s *EmbeddedDoltStore) FixStatusBlockedDrift(ctx context.Context) (int, error) {
+	var changed int64
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var e error
+		changed, e = issueops.FixStatusBlockedDriftInTx(ctx, tx)
+		return e
+	}); err != nil {
+		return 0, err
+	}
+	if changed > 0 {
+		// Stage only issues, matching the is_blocked repair: this derives from
+		// the graph and must not sweep an unrelated dirty working set into its
+		// commit (wisps are dolt_ignore'd, same as the is_blocked repair).
+		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return stageAndCommitAfterSQLCommit(ctx, db,
+				map[string]bool{"issues": true}, "bd: fix status=blocked drift", commitAuthor)
+		}); err != nil {
+			return int(changed), err
+		}
+	}
+	return int(changed), nil
+}
+
 func (s *EmbeddedDoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {
 	var conflicts []storage.Conflict
 	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {

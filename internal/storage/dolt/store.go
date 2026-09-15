@@ -4667,6 +4667,59 @@ func blockedRecomputeStagedTableList() []string {
 	return tables
 }
 
+// CountStatusBlockedDrift reports how many issues/wisps carry the manually-set
+// status='blocked' despite having no open 'blocks' dependency left — the
+// blocker closed, or none was ever recorded. Read-only: it never mutates
+// state. See storage.StatusBlockedDriftRecomputer (be-ntbxt).
+func (s *DoltStore) CountStatusBlockedDrift(ctx context.Context) (int, error) {
+	var n int64
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin status=blocked drift count: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		n, err = issueops.CountStatusBlockedDriftInTx(ctx, tx)
+		return err
+	})
+	return int(n), err
+}
+
+// FixStatusBlockedDrift returns every row CountStatusBlockedDrift would report
+// to status='open' and commits the repair, so the fleet-stranded issues in
+// be-ntbxt reappear in 'bd ready' without a manual 'bd update --status open'.
+// It never touches is_blocked — that column is separately derived and
+// repaired by RecomputeAllBlocked.
+func (s *DoltStore) FixStatusBlockedDrift(ctx context.Context) (int, error) {
+	var changed int64
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin status=blocked drift fix: %w", err)
+		}
+		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		defer clearJournalScope()
+		changed, err = issueops.FixStatusBlockedDriftInTx(ctx, tx)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := s.commitSQLTx(ctx, "commit status=blocked drift fix", tx); err != nil {
+			return err
+		}
+		if changed > 0 {
+			// Stage only issues: like the is_blocked repair, this derives from
+			// the graph and must not sweep an unrelated dirty working set into
+			// its commit (wisps are dolt_ignore'd, same as the is_blocked repair).
+			if err := s.doltAddAndCommit(ctx, []string{"issues"}, "bd: fix status=blocked drift"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return int(changed), err
+}
+
 // recomputeBlockedTx runs the post-merge is_blocked recompute in its own
 // transaction. Like RecomputeAllBlocked it runs on a long-timeout connection:
 // a heavy merge scopes the recompute over a large diff, and a pool-deadline
