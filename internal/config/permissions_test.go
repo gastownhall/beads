@@ -75,26 +75,37 @@ func TestCheckBeadsDirPermissions_Secure(t *testing.T) {
 }
 
 func TestCheckBeadsDirPermissions_TrustedGroup(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), ".beads")
-	if err := os.MkdirAll(dir, 0770); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"0770", 0770},
+		{"2770", 0770 | os.ModeSetgid},
 	}
-	if err := os.Chmod(dir, 0770); err != nil {
-		t.Fatal(err)
-	}
-	// Capture stderr
-	old := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(dir, 0770); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, tt.mode); err != nil {
+				t.Fatal(err)
+			}
+			// Capture stderr
+			old := os.Stderr
+			r, w, _ := os.Pipe()
+			os.Stderr = w
 
-	CheckBeadsDirPermissions(dir)
+			CheckBeadsDirPermissions(dir)
 
-	w.Close()
-	os.Stderr = old
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	if buf.Len() != 0 {
-		t.Errorf("expected no warning for 0770 dir, got: %s", buf.String())
+			w.Close()
+			os.Stderr = old
+			var buf bytes.Buffer
+			buf.ReadFrom(r)
+			if buf.Len() != 0 {
+				t.Errorf("expected no warning for %s dir, got: %s", tt.name, buf.String())
+			}
+		})
 	}
 }
 
