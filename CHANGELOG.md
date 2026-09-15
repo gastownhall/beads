@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `bd migrate ownership-handoff <phase>` transfers a locally managed, loopback
+  Dolt server's lifecycle to bd, one journaled phase at a time
+  (`prepare`, `legacy-gone`, `configure`, `verify`, `commit`, plus `rollback`,
+  `rollback-finish` and `status`). The caller drives the sequence and keeps
+  ownership of its own server; bd owns the journal, the replacement server, the
+  fences and the rollback, calls nothing back, and starts nothing but `dolt`.
+  Every phase is idempotent, every gate is bd's own observation, and every
+  mutation outside the journal is reserved in it first, so an interrupted
+  transfer is resumable rather than ambiguous. `--json` emits one result object
+  per invocation; exit status is zero exactly when the journal reached the
+  requested phase.
+
+  An ownership handoff in flight fences ordinary store opens for that workspace
+  until it commits or finishes rolling back — between those points the scope has
+  no settled owner, and a second process deciding what server it should have is
+  the failure this prevents.
+
+  The journal is `schema_version: 2`. A journal without the field is refused with
+  `unsupported_journal_version` rather than read under an older phase vocabulary,
+  because the phase names overlap but `old_owner_stopped` means the opposite
+  thing about the replacement server under each.
+
 ## [1.3.0] - 2026-08-28
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery

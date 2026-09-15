@@ -24,6 +24,12 @@ type Handle struct{}
 
 func Capture(pid int) (Token, error) { return "", ErrUnsupported }
 
+// SupportsKernelBoundHandle reports whether strict signaling is kernel-bound.
+func SupportsKernelBoundHandle() bool { return false }
+
+// OpenStrict refuses on platforms without process-birth support.
+func OpenStrict(pid int, tok Token) (*Handle, error) { return nil, ErrUnsupported }
+
 func Verify(pid int, tok Token) (bool, error) { return false, ErrUnsupported }
 
 func Open(pid int, tok Token) (*Handle, error) { return nil, ErrUnsupported }

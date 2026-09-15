@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -421,6 +422,27 @@ func TestReclaimPortAvailable(t *testing.T) {
 	}
 	if adoptPID != 0 {
 		t.Errorf("expected adoptPID=0 for free port, got %d", adoptPID)
+	}
+}
+
+func TestStartWithOptionsRequireFreshRefusesListenerUnderStartLock(t *testing.T) {
+	beadsDir := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := writePortFile(beadsDir, port); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := StartWithOptions(beadsDir, StartOptions{RequireFresh: true})
+	if state != nil || !errors.Is(err, ErrFreshStartRequired) {
+		t.Fatalf("strict start state=%+v err=%v, want fresh-listener refusal", state, err)
+	}
+	if _, err := os.Stat(pidPath(beadsDir)); !os.IsNotExist(err) {
+		t.Fatalf("strict start recorded or adopted listener: pid file err=%v", err)
 	}
 }
 
@@ -2665,4 +2687,161 @@ func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
 			t.Errorf("with backend=sqlite, externalNonLocalhostHost should be false (backend gate precedes host inference); got ok=true host=%q", host)
 		}
 	})
+}
+
+// TestStartOrdinaryDoesNotRefuseBusyPort pins that the strict launch policy
+// stays strict-only. Ordinary Start must keep reaching its historical
+// reclaim/adopt path when the configured port is already bound; refusing with
+// ErrFreshStartRequired here would break autostart against a live server whose
+// PID file was lost.
+func TestStartOrdinaryDoesNotRefuseBusyPort(t *testing.T) {
+	beadsDir := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := writePortFile(beadsDir, port); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Start(beadsDir)
+	if errors.Is(err, ErrFreshStartRequired) {
+		t.Fatalf("ordinary Start refused a busy port with the strict-only error: %v", err)
+	}
+}
+
+func TestStrictConfigArgMatchesRequiresExactArgv(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "dolt-handoff-0123456789abcdef0123456789abcdef.yaml")
+	executable := "/usr/local/bin/dolt"
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"exact", []string{executable, "sql-server", "--config", configPath}, true},
+		{"suffix", []string{executable, "sql-server", "--config", configPath + ".evil"}, false},
+		{"duplicate", []string{executable, "sql-server", "--config", configPath, "--config", configPath}, false},
+		{"extra flag", []string{executable, "--prof", "cpu", "sql-server", "--config", configPath}, false},
+		{"extra positional", []string{executable, "sql-server", "--config", configPath, "other"}, false},
+		{"wrong argv0", []string{"dolt", "sql-server", "--config", configPath}, false},
+		{"missing subcommand", []string{executable, "--config", configPath}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strictConfigArgMatches(tc.args, executable, configPath); got != tc.want {
+				t.Fatalf("strictConfigArgMatches(%q) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWriteStrictLaunchConfigDoesNotReplaceOrFollowExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dolt-handoff-0123456789abcdef0123456789abcdef.yaml")
+	body := []byte("listener:\n  port: 4321\n")
+	if err := writeStrictLaunchConfig(path, body); err != nil {
+		t.Fatalf("write fresh strict config: %v", err)
+	}
+	if err := writeStrictLaunchConfig(path, body); err != nil {
+		t.Fatalf("reuse matching strict config: %v", err)
+	}
+	if err := writeStrictLaunchConfig(path, []byte("different")); !errors.Is(err, ErrFreshStartRequired) {
+		t.Fatalf("replace strict config error=%v, want ErrFreshStartRequired", err)
+	}
+	link := filepath.Join(dir, "dolt-handoff-fedcba9876543210fedcba9876543210.yaml")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStrictLaunchConfig(link, body); err == nil {
+		t.Fatal("strict config followed symlink")
+	}
+}
+
+// canonicalTempDir returns a t.TempDir() with every symlink resolved. Strict
+// launch options are validated against the physical workspace path, and
+// t.TempDir() sits under /var -> /private/var on macOS, so a raw temp dir makes
+// these tests pass on Linux and fail on macOS for reasons unrelated to the
+// behavior under test.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestValidateStrictLaunchOptionsRequires128BitIntent(t *testing.T) {
+	beadsDir := canonicalTempDir(t)
+	id := "0123456789abcdef0123456789abcdef"
+	options := StartOptions{RequireFresh: true, LaunchID: id, ConfigPath: filepath.Join(beadsDir, "dolt-handoff-"+id+".yaml"), Executable: filepath.Join(beadsDir, "dolt"), ExpectedHost: "127.0.0.1", ExpectedPort: 3307}
+	if err := validateStrictLaunchOptions(beadsDir, options); err != nil {
+		t.Fatalf("valid strict options: %v", err)
+	}
+	options.LaunchID = "0123"
+	if err := validateStrictLaunchOptions(beadsDir, options); err == nil {
+		t.Fatal("short strict ID accepted")
+	}
+}
+
+// TestValidateStrictLaunchOptionsResolvesSymlinkedWorkspace pins the
+// EvalSymlinks call in validateStrictLaunchOptions. The config path a strict
+// launch is bound to has to be the PHYSICAL one, because recovery compares it
+// against /proc argv, which reports the path the kernel resolved. Dropping the
+// resolution would accept the symlinked spelling and reject the physical one,
+// so both directions are asserted here.
+func TestValidateStrictLaunchOptionsResolvesSymlinkedWorkspace(t *testing.T) {
+	physical := filepath.Join(canonicalTempDir(t), "workspace")
+	if err := os.Mkdir(physical, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(canonicalTempDir(t), "link")
+	if err := os.Symlink(physical, link); err != nil {
+		t.Fatal(err)
+	}
+	id := "0123456789abcdef0123456789abcdef"
+	options := StartOptions{RequireFresh: true, LaunchID: id, Executable: filepath.Join(physical, "dolt"),
+		ExpectedHost: "127.0.0.1", ExpectedPort: 3307}
+
+	options.ConfigPath = filepath.Join(link, "dolt-handoff-"+id+".yaml")
+	if err := validateStrictLaunchOptions(link, options); err == nil {
+		t.Fatal("symlinked config path accepted; strict launch must bind the physical path")
+	}
+
+	options.ConfigPath = filepath.Join(physical, "dolt-handoff-"+id+".yaml")
+	if err := validateStrictLaunchOptions(link, options); err != nil {
+		t.Fatalf("physical config path rejected through a symlinked workspace: %v", err)
+	}
+}
+
+func TestStartWithOptionsRecoverOnlyAbsentChildNeverSpawns(t *testing.T) {
+	// "No child found" is only distinguishable from "cannot look" where the
+	// platform can enumerate launch candidates. Elsewhere strictLaunchCandidates
+	// refuses, and recover-only correctly reports ErrFreshStartRequired instead.
+	if !SupportsStrictLaunchRecovery() {
+		t.Skip("platform cannot prove strict launch recovery")
+	}
+	beadsDir := canonicalTempDir(t)
+	id := "0123456789abcdef0123456789abcdef"
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt binary not installed")
+	}
+	doltBin, err = filepath.EvalSymlinks(doltBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := StartOptions{RequireFresh: true, RecoverOnly: true, RequireReady: true,
+		LaunchID: id, ConfigPath: filepath.Join(beadsDir, "dolt-handoff-"+id+".yaml"), Executable: doltBin,
+		ExpectedHost: "127.0.0.1", ExpectedPort: 3307}
+	state, err := StartWithOptions(beadsDir, opts)
+	if state != nil || !errors.Is(err, ErrStrictLaunchNotFound) {
+		t.Fatalf("absent recover-only state=%+v err=%v, want ErrStrictLaunchNotFound", state, err)
+	}
+	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir), opts.ConfigPath} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("recover-only absent child created %s: %v", path, statErr)
+		}
+	}
 }
