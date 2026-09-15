@@ -115,8 +115,8 @@ func TestPermissions_SkipsSymlinkedDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if beadsInfo.Mode().Perm() != 0700 {
-		t.Errorf("Expected .beads to have 0700 permissions, got %o", beadsInfo.Mode().Perm())
+	if beadsInfo.Mode().Perm() != 0770 {
+		t.Errorf("Expected .beads to have 0770 permissions, got %o", beadsInfo.Mode().Perm())
 	}
 
 	// Verify target database permissions were NOT changed (it's a symlink)
@@ -157,22 +157,22 @@ func TestPermissions_FixesRegularFiles(t *testing.T) {
 		t.Fatalf("Permissions() failed: %v", err)
 	}
 
-	// Verify .beads directory now has 0700
+	// Verify .beads directory now has 0770
 	beadsInfo, err := os.Stat(beadsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if beadsInfo.Mode().Perm() != 0700 {
-		t.Errorf("Expected .beads to have 0700 permissions, got %o", beadsInfo.Mode().Perm())
+	if beadsInfo.Mode().Perm() != 0770 {
+		t.Errorf("Expected .beads to have 0770 permissions, got %o", beadsInfo.Mode().Perm())
 	}
 
-	// Verify database now has at least 0600 (read/write for owner)
+	// Verify database now has at least 0660 (read/write for owner and group)
 	dbInfo, err := os.Stat(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dbInfo.Mode().Perm()&0600 != 0600 {
-		t.Errorf("Expected database to have at least 0600 permissions, got %o", dbInfo.Mode().Perm())
+	if dbInfo.Mode().Perm()&0660 != 0660 {
+		t.Errorf("Expected database to have at least 0660 permissions, got %o", dbInfo.Mode().Perm())
 	}
 }
 
@@ -192,8 +192,8 @@ func TestPermissions_FixesSharedWorktreeBeadsDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sharedInfo.Mode().Perm() != 0700 {
-		t.Errorf("Expected shared .beads to have 0700 permissions, got %o", sharedInfo.Mode().Perm())
+	if sharedInfo.Mode().Perm() != 0770 {
+		t.Errorf("Expected shared .beads to have 0770 permissions, got %o", sharedInfo.Mode().Perm())
 	}
 	if _, err := os.Stat(filepath.Join(worktreeDir, ".beads")); !os.IsNotExist(err) {
 		t.Fatalf("expected no worktree-local .beads directory, got err=%v", err)

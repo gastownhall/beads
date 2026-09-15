@@ -476,7 +476,7 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 		}
 	}
 
-	logFile, err := os.OpenFile(opts.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: logFilePath is caller-derived (workspace path), not user-request input
+	logFile, err := os.OpenFile(opts.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o660) //nolint:gosec // G304: logFilePath is caller-derived (workspace path), not user-request input
 	if err != nil {
 		return nil, fmt.Errorf("open log file %q: %w", opts.LogFilePath, err)
 	}
@@ -973,7 +973,7 @@ func advanceStopEpoch(rootDir string) error {
 	epoch := strconv.FormatInt(time.Now().UnixNano(), 10) +
 		"-" + strconv.Itoa(os.Getpid()) +
 		"-" + strconv.FormatUint(stopEpochSequence.Add(1), 10)
-	if err := atomicfile.WriteFile(filepath.Join(rootDir, stopEpochFileName), []byte(epoch+"\n"), 0o600); err != nil {
+	if err := atomicfile.WriteFile(filepath.Join(rootDir, stopEpochFileName), []byte(epoch+"\n"), 0o660); err != nil {
 		return err
 	}
 	return nil
@@ -992,7 +992,7 @@ func writeSpawnMarker(rootDir string, marker spawnMarker) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicfile.WriteFile(filepath.Join(rootDir, spawnMarkerFileName), data, 0o600); err != nil {
+	if err := atomicfile.WriteFile(filepath.Join(rootDir, spawnMarkerFileName), data, 0o660); err != nil {
 		return fmt.Errorf("write spawn marker: %w", err)
 	}
 	return nil

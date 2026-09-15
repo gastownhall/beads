@@ -23,7 +23,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "schemagen: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(*outPath, src, 0600); err != nil {
+	if err := os.WriteFile(*outPath, src, 0660); err != nil { //nolint:gosec // trusted-group generated output
 		fmt.Fprintf(os.Stderr, "schemagen: write %s: %v\n", *outPath, err)
 		os.Exit(1)
 	}

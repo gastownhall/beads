@@ -148,7 +148,7 @@ func SetReposInYAML(configPath string, repos *ReposConfig) error {
 	}
 
 	// Write back to file
-	if err := os.WriteFile(configPath, []byte(buf.String()), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte(buf.String()), 0660); err != nil { //nolint:gosec // trusted-group config
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 

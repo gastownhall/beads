@@ -236,7 +236,7 @@ func (c *Cache) acquireLock(ctx context.Context, remoteURL string) (*os.File, er
 	}
 
 	// #nosec G304 - controlled path
-	f, err := os.OpenFile(lp, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(lp, os.O_CREATE|os.O_RDWR, 0o660) //nolint:gosec // trusted-group cache lock
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +296,7 @@ func (c *Cache) writeMeta(remoteURL string, meta *CacheMeta) {
 		debug.Logf("remotecache: failed to marshal meta for %s: %v\n", remoteURL, err)
 		return
 	}
-	if err := os.WriteFile(c.metaPath(remoteURL), data, 0o600); err != nil {
+	if err := os.WriteFile(c.metaPath(remoteURL), data, 0o660); err != nil { //nolint:gosec // trusted-group cache metadata
 		debug.Logf("remotecache: failed to write meta for %s: %v\n", remoteURL, err)
 	}
 }

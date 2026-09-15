@@ -45,7 +45,7 @@ func WriteSecret(rootDir string) (string, error) {
 		return "", fmt.Errorf("identity: generate proxy secret: %w", err)
 	}
 	secret := hex.EncodeToString(raw)
-	if err := atomicfile.WriteFile(filepath.Join(rootDir, SecretFileName), []byte(secret+"\n"), 0o600); err != nil {
+	if err := atomicfile.WriteFile(filepath.Join(rootDir, SecretFileName), []byte(secret+"\n"), 0o660); err != nil {
 		return "", fmt.Errorf("identity: write proxy secret: %w", err)
 	}
 	return secret, nil

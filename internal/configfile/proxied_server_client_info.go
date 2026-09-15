@@ -48,7 +48,7 @@ func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo)
 		return fmt.Errorf("marshaling %s: %w", ProxiedServerClientInfoFileName, err)
 	}
 	path := ProxiedServerClientInfoPath(beadsDir)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := os.WriteFile(path, data, 0o660); err != nil { //nolint:gosec // trusted-group server state
 		return fmt.Errorf("writing %s: %w", ProxiedServerClientInfoFileName, err)
 	}
 	return nil

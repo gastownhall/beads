@@ -656,7 +656,7 @@ func SaveConfigValue(key string, value interface{}, beadsDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	return os.WriteFile(configPath, out, 0o600)
+	return os.WriteFile(configPath, out, 0o660)
 }
 
 // setNestedKey sets a value in a nested map using a dot-separated key path.

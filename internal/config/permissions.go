@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	// BeadsDirPerm is the permission mode for .beads/ directories (owner-only).
-	BeadsDirPerm fs.FileMode = 0700
-	// BeadsFilePerm is the permission mode for state files inside .beads/ (owner-only).
-	BeadsFilePerm fs.FileMode = 0600
+	// BeadsDirPerm is the permission mode for .beads/ directories (owner and group).
+	BeadsDirPerm fs.FileMode = 0770
+	// BeadsFilePerm is the permission mode for state files inside .beads/ (owner and group).
+	BeadsFilePerm fs.FileMode = 0660
 )
 
 // EnsureBeadsDir creates the .beads directory with secure permissions.
@@ -20,21 +20,23 @@ func EnsureBeadsDir(path string) error {
 	return os.MkdirAll(path, BeadsDirPerm)
 }
 
-// CheckBeadsDirPermissions warns to stderr if the .beads directory has
-// group or world-accessible permissions. The check is non-fatal.
+// CheckBeadsDirPermissions warns to stderr if the .beads directory is
+// world-accessible. Group access may be intentional on a trusted host.
+// The check is non-fatal.
 func CheckBeadsDirPermissions(path string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return // directory doesn't exist yet
 	}
 	perm := info.Mode().Perm()
-	if perm&0077 != 0 {
-		fmt.Fprintf(os.Stderr, "Warning: %s has permissions %04o (recommended: 0700). Run: chmod 700 %s\n", path, perm, path)
+	if perm&0007 != 0 {
+		fmt.Fprintf(os.Stderr, "Warning: %s has world-accessible permissions %04o. Run: chmod o-rwx %s\n", path, perm, path)
 	}
 }
 
-// FixBeadsDirPermissions sets the .beads directory to BeadsDirPerm when it
-// has group or world-accessible bits. Returns true if permissions changed.
+// FixBeadsDirPermissions sets the .beads directory to BeadsDirPerm when its
+// owner/group/world permissions differ. Existing special bits, such as setgid,
+// are preserved. Returns true if permissions changed.
 func FixBeadsDirPermissions(path string) (bool, error) {
 	return fixBeadsDirPermissions(path, openBeadsDirHandle)
 }
@@ -59,9 +61,8 @@ func fixBeadsDirPermissions(path string, openDir func(string) (beadsDirHandle, e
 	if !info.IsDir() {
 		return false, fmt.Errorf("refusing to chmod %s: path is not a directory", path)
 	}
-	perm := info.Mode().Perm()
-	if perm&0077 == 0 {
-		return false, nil // no group or world-accessible bits
+	if info.Mode().Perm() == BeadsDirPerm {
+		return false, nil
 	}
 
 	dir, err := openDir(path)
@@ -77,7 +78,8 @@ func fixBeadsDirPermissions(path string, openDir func(string) (beadsDirHandle, e
 	if !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
 		return false, fmt.Errorf("refusing to chmod %s: path changed during permission repair", path)
 	}
-	if err := dir.Chmod(BeadsDirPerm); err != nil {
+	mode := BeadsDirPerm | (info.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky))
+	if err := dir.Chmod(mode); err != nil {
 		return false, fmt.Errorf("failed to chmod %s to %04o: %w", path, BeadsDirPerm, err)
 	}
 	return true, nil

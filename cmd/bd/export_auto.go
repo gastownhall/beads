@@ -825,7 +825,7 @@ func saveExportAutoState(beadsDir string, state *exportAutoState) {
 	// file. An empty state looks like "no prior commit" to the rest of
 	// the pipeline, which forces a full export on a repo where the
 	// incremental path would otherwise fire.
-	if err := atomicfile.WriteFile(path, data, 0o600); err != nil {
+	if err := atomicfile.WriteFile(path, data, 0o660); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export: failed to save state: %v\n", err)
 	}
 }

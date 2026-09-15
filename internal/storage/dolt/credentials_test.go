@@ -375,8 +375,8 @@ func TestCredentialKeyFileGeneration(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		t.Log("skipping POSIX mode-bit check on Windows")
-	} else if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("key file permissions = %o, want 0600", perm)
+	} else if perm := info.Mode().Perm(); perm != 0660 {
+		t.Errorf("key file permissions = %o, want 0660", perm)
 	}
 
 	// Reading the key file should return the same key

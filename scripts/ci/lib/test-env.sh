@@ -34,15 +34,27 @@ beads_test_env_enter() {
         fi
     fi
 
-    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root"
+    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
     export USERPROFILE="$root/home"
     export XDG_CONFIG_HOME="$root/xdg-config"
     export DOLT_ROOT_PATH="$root/dolt-root"
+    # Keep t.TempDir and subprocess scratch paths below the isolated root too.
+    # Otherwise a host-level ancestor such as /home/agent/.beads can be found
+    # while tests intentionally walk upward from a temporary workspace.
+    export TMPDIR="$root/tmp"
+    export GOTMPDIR="$root/tmp"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
+    # The checkout may intentionally be owned by another member of the same
+    # trusted group. Keep Git's ownership check enabled everywhere else while
+    # allowing builds and tests to inspect this exact repository after HOME is
+    # isolated from the developer's global safe.directory configuration.
+    if [[ -n "${REPO_ROOT:-}" ]]; then
+        git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "$REPO_ROOT"
+    fi
     export BEADS_TEST_IGNORE_REPO_CONFIG=1
     if [[ "${BEADS_TEST_ENV_RUN_DOLT:-0}" != "1" ]]; then
         beads_test_env_add_skip "dolt"

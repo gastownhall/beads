@@ -61,8 +61,8 @@ func agentHookMarkerPath(base, sessionKey, workspaceKey string) string {
 // writeAgentHookMarker creates the marker directory and writes the one-shot
 // refresh marker file.
 func writeAgentHookMarker(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o770); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte("1\n"), 0o600) // #nosec G306 -- user-private cache marker
+	return os.WriteFile(path, []byte("1\n"), 0o660) // #nosec G306 -- trusted-group cache marker
 }

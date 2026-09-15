@@ -892,7 +892,7 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 	}
 
 	// Create hooks directory if it doesn't exist.
-	// Directories inside .beads/ use BeadsDirPerm (0700); git-managed hook
+	// Directories inside .beads/ use BeadsDirPerm (0770); git-managed hook
 	// dirs (.git/hooks, .beads-hooks) use 0755 so git can execute them.
 	hooksDirPerm := os.FileMode(0755)
 	if beadsHooks {
@@ -1815,7 +1815,7 @@ func runPrepareCommitMsgHook(args []string) int {
 	sb.WriteString(fmt.Sprintf("Executed-By: %s\n", actor))
 
 	// Write back
-	if err := os.WriteFile(msgFile, []byte(sb.String()), 0600); err != nil { // Restrict permissions per gosec G306
+	if err := os.WriteFile(msgFile, []byte(sb.String()), 0660); err != nil { // Restrict permissions to owner and group per gosec G306
 		fmt.Fprintf(os.Stderr, "Warning: could not write commit message: %v\n", err)
 	}
 

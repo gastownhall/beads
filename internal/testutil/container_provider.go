@@ -65,7 +65,7 @@ func (p *ContainerProvider) Port() int {
 // so that bd subprocesses can discover it via DefaultConfig / readPortFile.
 func (p *ContainerProvider) WritePortFile(serverDir string) error {
 	portPath := filepath.Join(serverDir, "dolt-server.port")
-	return os.WriteFile(portPath, []byte(strconv.Itoa(p.port)), 0600)
+	return os.WriteFile(portPath, []byte(strconv.Itoa(p.port)), 0660)
 }
 
 // Stop terminates the container.

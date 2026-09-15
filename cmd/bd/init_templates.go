@@ -17,7 +17,7 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 	}
 
 	body := renderInitConfigYAML(prefix, noDbMode)
-	if err := os.WriteFile(configYamlPath, body, 0600); err != nil {
+	if err := os.WriteFile(configYamlPath, body, 0660); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 

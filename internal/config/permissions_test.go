@@ -12,11 +12,11 @@ import (
 )
 
 func TestBeadsDirPermConstants(t *testing.T) {
-	if BeadsDirPerm != 0700 {
-		t.Errorf("BeadsDirPerm = %04o, want 0700", BeadsDirPerm)
+	if BeadsDirPerm != 0770 {
+		t.Errorf("BeadsDirPerm = %04o, want 0770", BeadsDirPerm)
 	}
-	if BeadsFilePerm != 0600 {
-		t.Errorf("BeadsFilePerm = %04o, want 0600", BeadsFilePerm)
+	if BeadsFilePerm != 0660 {
+		t.Errorf("BeadsFilePerm = %04o, want 0660", BeadsFilePerm)
 	}
 }
 
@@ -74,6 +74,41 @@ func TestCheckBeadsDirPermissions_Secure(t *testing.T) {
 	}
 }
 
+func TestCheckBeadsDirPermissions_TrustedGroup(t *testing.T) {
+	tests := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"0770", 0770},
+		{"2770", 0770 | os.ModeSetgid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(dir, 0770); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, tt.mode); err != nil {
+				t.Fatal(err)
+			}
+			// Capture stderr
+			old := os.Stderr
+			r, w, _ := os.Pipe()
+			os.Stderr = w
+
+			CheckBeadsDirPermissions(dir)
+
+			w.Close()
+			os.Stderr = old
+			var buf bytes.Buffer
+			buf.ReadFrom(r)
+			if buf.Len() != 0 {
+				t.Errorf("expected no warning for %s dir, got: %s", tt.name, buf.String())
+			}
+		})
+	}
+}
+
 func TestCheckBeadsDirPermissions_Permissive(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -90,7 +125,7 @@ func TestCheckBeadsDirPermissions_Permissive(t *testing.T) {
 	os.Stderr = old
 	var buf bytes.Buffer
 	buf.ReadFrom(r)
-	want := fmt.Sprintf("Warning: %s has permissions 0755 (recommended: 0700). Run: chmod 700 %s\n", dir, dir)
+	want := fmt.Sprintf("Warning: %s has world-accessible permissions 0755. Run: chmod o-rwx %s\n", dir, dir)
 	if buf.String() != want {
 		t.Errorf("warning = %q, want %q", buf.String(), want)
 	}
@@ -121,12 +156,12 @@ func TestFixBeadsDirPermissions(t *testing.T) {
 		wantFixed bool
 		wantPerm  os.FileMode
 	}{
-		{"world_readable_0755", 0755, true, 0700},
-		{"world_writable_0777", 0777, true, 0700},
-		{"world_only_0707", 0707, true, 0700},
-		{"group_only_0770", 0770, true, 0700},
-		{"already_secure_0700", 0700, false, 0700},
-		{"owner_only_0600", 0600, false, 0600},
+		{"world_readable_0755", 0755, true, 0770},
+		{"world_writable_0777", 0777, true, 0770},
+		{"world_only_0707", 0707, true, 0770},
+		{"already_shared_0770", 0770, false, 0770},
+		{"owner_only_0700", 0700, true, 0770},
+		{"missing_owner_execute_0670", 0670, true, 0770},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -155,6 +190,31 @@ func TestFixBeadsDirPermissions(t *testing.T) {
 				t.Errorf("permissions after fix = %04o, want %04o", got, tt.wantPerm)
 			}
 		})
+	}
+}
+
+func TestFixBeadsDirPermissions_PreservesSetgid(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0700|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := FixBeadsDirPermissions(dir)
+	if err != nil {
+		t.Fatalf("FixBeadsDirPermissions() error = %v", err)
+	}
+	if !fixed {
+		t.Fatal("expected permissions to be fixed")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode()&(os.ModePerm|os.ModeSetgid), BeadsDirPerm|os.ModeSetgid; got != want {
+		t.Errorf("directory mode = %v, want %v", got, want)
 	}
 }
 

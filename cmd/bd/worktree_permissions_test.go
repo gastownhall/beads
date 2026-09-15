@@ -9,7 +9,7 @@ import (
 )
 
 // TestRepairWorktreeBeadsPermissions is the regression for GH#3593: after worktree
-// creation, permissive .beads/ (e.g. 0755 from checkout + umask) must be repaired to 0700.
+// creation, permissive .beads/ (e.g. 0755 from checkout + umask) must be repaired to 0770.
 func TestRepairWorktreeBeadsPermissions(t *testing.T) {
 	tmp := t.TempDir()
 	worktreePath := filepath.Join(tmp, "demo-wt")
@@ -31,8 +31,8 @@ func TestRepairWorktreeBeadsPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat .beads: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o700 {
-		t.Fatalf(".beads permissions = %04o, want 0700", got)
+	if got := info.Mode().Perm(); got != 0o770 {
+		t.Fatalf(".beads permissions = %04o, want 0770", got)
 	}
 }
 

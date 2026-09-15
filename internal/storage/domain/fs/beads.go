@@ -92,7 +92,7 @@ func (r *beadsDirFSRepositoryImpl) WriteBeadsGitignore(ctx context.Context) erro
 	// #nosec G304 -- path joined under bound beadsDir
 	existing, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		if werr := os.WriteFile(path, []byte(r.templates.BeadsGitignore), 0600); werr != nil {
+		if werr := os.WriteFile(path, []byte(r.templates.BeadsGitignore), 0660); werr != nil {
 			return fmt.Errorf("fs: WriteBeadsGitignore: %w", werr)
 		}
 		return nil
@@ -112,7 +112,7 @@ func (r *beadsDirFSRepositoryImpl) WriteBeadsGitignore(ctx context.Context) erro
 		content += "\n"
 	}
 	content += "\n# Added by bd (missing required patterns)\n" + strings.Join(missing, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0660); err != nil {
 		return fmt.Errorf("fs: WriteBeadsGitignore: %w", err)
 	}
 	return nil
@@ -222,7 +222,7 @@ func (r *beadsDirFSRepositoryImpl) WriteReadme(ctx context.Context) error {
 
 func (r *beadsDirFSRepositoryImpl) WriteMetadataJSON(ctx context.Context, content []byte) error {
 	path := filepath.Join(r.beadsDir, "metadata.json")
-	if err := os.WriteFile(path, content, 0600); err != nil {
+	if err := os.WriteFile(path, content, 0660); err != nil {
 		return fmt.Errorf("fs: WriteMetadataJSON: %w", err)
 	}
 	return nil
@@ -243,7 +243,7 @@ func (r *beadsDirFSRepositoryImpl) ReadMetadataJSON(ctx context.Context) ([]byte
 
 func (r *beadsDirFSRepositoryImpl) WriteConfigYAML(ctx context.Context, content []byte) error {
 	path := filepath.Join(r.beadsDir, "config.yaml")
-	if err := os.WriteFile(path, content, 0600); err != nil {
+	if err := os.WriteFile(path, content, 0660); err != nil {
 		return fmt.Errorf("fs: WriteConfigYAML: %w", err)
 	}
 	return nil

@@ -36,7 +36,7 @@ func backupDir() (string, error) {
 			fmt.Fprintf(os.Stderr, "Warning: backup.git-repo %s is not a git repo, falling back to .beads/backup\n", gitRepo)
 		} else {
 			dir := filepath.Join(gitRepo, "backup")
-			if err := os.MkdirAll(dir, 0700); err != nil {
+			if err := os.MkdirAll(dir, 0770); err != nil {
 				return "", fmt.Errorf("failed to create backup dir in git-repo: %w", err)
 			}
 			return dir, nil
@@ -47,7 +47,7 @@ func backupDir() (string, error) {
 		return "", fmt.Errorf("%s; %s", activeWorkspaceNotFoundError(), diagHint())
 	}
 	dir := filepath.Join(beadsDir, "backup")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0770); err != nil {
 		return "", fmt.Errorf("failed to create backup directory: %w", err)
 	}
 	return dir, nil

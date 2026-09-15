@@ -225,7 +225,7 @@ func acquireBootstrapLock(lockPath string, timeout time.Duration) (*os.File, err
 
 	// Create lock file
 	// #nosec G304 - controlled path
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0660)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lock file: %w", err)
 	}

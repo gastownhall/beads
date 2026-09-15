@@ -586,7 +586,7 @@ password=officePassword
 readable by group or others (mirrors ssh behavior). Set permissions with:
 
 ```bash
-chmod 600 ~/.config/beads/credentials
+chmod 660 ~/.config/beads/credentials
 ```
 
 ## Dolt Version Control

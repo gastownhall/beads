@@ -216,7 +216,7 @@ func copyFile(from, to string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: to is inside Export's private sealing directory.
+	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o660) //nolint:gosec // G304: to is inside Export's private sealing directory.
 	if err != nil {
 		return err
 	}

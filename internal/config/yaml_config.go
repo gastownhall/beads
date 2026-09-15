@@ -473,10 +473,10 @@ func UnsetUserYamlConfig(key string) error {
 
 	newContent := commentOutYamlKey(string(content), normalizedKey)
 
-	// Preserve the owner-private 0600 posture every other user-global writer
+	// Preserve the owner-and-group 0660 posture every other user-global writer
 	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
 	// rewriting at 0644 would relax this shared user config to world-readable.
-	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
+	if err := os.WriteFile(configPath, []byte(newContent), 0o660); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
 		return fmt.Errorf("failed to write user config.yaml: %w", err)
 	}
 
@@ -495,7 +495,7 @@ func SetUserYamlConfig(key, value string) error {
 		return fmt.Errorf("failed to create user config directory: %w", err)
 	}
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		if err := os.WriteFile(configPath, []byte{}, 0o600); err != nil {
+		if err := os.WriteFile(configPath, []byte{}, 0o660); err != nil { //nolint:gosec // trusted-group config
 			return fmt.Errorf("failed to create user config.yaml: %w", err)
 		}
 	} else if err != nil {
@@ -522,7 +522,7 @@ func setYamlConfigAtPath(configPath, key, value string) error {
 	}
 
 	// Write back
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := os.WriteFile(configPath, []byte(newContent), 0660); err != nil { //nolint:gosec // configPath is validated
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
@@ -557,7 +557,7 @@ func UnsetYamlConfig(key string) error {
 
 	newContent := commentOutYamlKey(string(content), normalizedKey)
 
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := os.WriteFile(configPath, []byte(newContent), 0660); err != nil { //nolint:gosec // configPath is validated
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 

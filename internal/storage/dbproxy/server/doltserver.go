@@ -92,7 +92,7 @@ func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAli
 		if err != nil {
 			return nil, errors.New("server: NewDoltServer: failed to determine absolute path of logFilePath")
 		}
-		logFile, err = os.OpenFile(absLogFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // logFilePath is caller-derived, not user-request input
+		logFile, err = os.OpenFile(absLogFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o660) //nolint:gosec // logFilePath is caller-derived, not user-request input
 		if err != nil {
 			return nil, fmt.Errorf("server: NewDoltServer: open log %q: %w", logFilePath, err)
 		}

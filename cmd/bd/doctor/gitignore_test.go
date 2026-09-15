@@ -23,7 +23,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 		hadOldContent bool // pre-existing local content must survive (bd-kaaz3)
 	}{
 		{
-			name: "creates new file with 0600 permissions",
+			name: "creates new file with 0660 permissions",
 			setupFunc: func(t *testing.T, tmpDir string) {
 				// Create .beads directory but no .gitignore
 				beadsDir := filepath.Join(tmpDir, ".beads")
@@ -31,7 +31,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			expectedPerms: 0600,
+			expectedPerms: 0660,
 			expectError:   false,
 		},
 		{
@@ -47,7 +47,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			expectedPerms: 0600,
+			expectedPerms: 0660,
 			expectError:   false,
 			hadOldContent: true,
 		},
@@ -64,7 +64,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			expectedPerms: 0600,
+			expectedPerms: 0660,
 			expectError:   false,
 			hadOldContent: true,
 		},
@@ -126,9 +126,9 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 				t.Errorf("Expected permissions %o, got %o", tt.expectedPerms, actualPerms)
 			}
 
-			// Verify permissions are not too permissive (0600 or less)
-			if actualPerms&0177 != 0 { // Check group and other permissions
-				t.Errorf("File has too-permissive permissions: %o (group/other should be 0)", actualPerms)
+			// Verify permissions match the trusted-group policy.
+			if actualPerms&0007 != 0 { // Check other permissions
+				t.Errorf("File has too-permissive permissions: %o (other should be 0)", actualPerms)
 			}
 
 			// Verify content: a fresh file gets the full template; a
@@ -265,17 +265,17 @@ func TestFixGitignore_DoesNotLoosenPermissions(t *testing.T) {
 	}
 	afterPerms := afterInfo.Mode().Perm()
 
-	// Verify permissions are still secure (0600 or less)
-	if afterPerms&0177 != 0 {
+	// Verify permissions are still secure for the trusted group.
+	if afterPerms&0007 != 0 {
 		t.Errorf("File has too-permissive permissions after fix: %o", afterPerms)
 	}
 
-	// Document that we replace with 0600 (which is more permissive than 0400 but still secure)
-	if afterPerms != 0600 {
-		t.Errorf("Expected 0600 permissions, got %o", afterPerms)
+	// Document that we replace with the owner-and-group mode.
+	if afterPerms != 0660 {
+		t.Errorf("Expected 0660 permissions, got %o", afterPerms)
 	}
 
-	t.Logf("Permissions changed from %o to %o (both secure, 0600 is standard)", beforePerms, afterPerms)
+	t.Logf("Permissions changed from %o to %o (0660 is the trusted-group standard)", beforePerms, afterPerms)
 }
 
 func TestCheckGitignore(t *testing.T) {
@@ -721,8 +721,8 @@ func TestFixGitignore_Symlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to stat target file: %v", err)
 	}
-	if targetInfo.Mode().Perm() != 0600 {
-		t.Errorf("Expected target file permissions 0600, got %o", targetInfo.Mode().Perm())
+	if targetInfo.Mode().Perm() != 0660 {
+		t.Errorf("Expected target file permissions 0660, got %o", targetInfo.Mode().Perm())
 	}
 }
 

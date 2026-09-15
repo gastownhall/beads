@@ -158,7 +158,7 @@ func touchFlushMarker(dir string) {
 		return
 	}
 	// Marker doesn't exist yet (or Chtimes failed): (re)create it.
-	_ = os.WriteFile(path, nil, 0o600)
+	_ = os.WriteFile(path, nil, 0o660) //nolint:gosec // trusted-group metrics state
 }
 
 func MaybeSpawnFlusher() {

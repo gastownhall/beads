@@ -25,7 +25,7 @@ func NewStateCorruptor(t *testing.T, beadsDir string) *StateCorruptor {
 func (c *StateCorruptor) WriteStalePID(pid int) {
 	c.t.Helper()
 	path := filepath.Join(c.BeadsDir, "dolt-server.pid")
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0660); err != nil {
 		c.t.Fatalf("WriteStalePID: %v", err)
 	}
 }
@@ -34,7 +34,7 @@ func (c *StateCorruptor) WriteStalePID(pid int) {
 func (c *StateCorruptor) WriteStalePort(port int) {
 	c.t.Helper()
 	path := filepath.Join(c.BeadsDir, "dolt-server.port")
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", port)), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", port)), 0660); err != nil {
 		c.t.Fatalf("WriteStalePort: %v", err)
 	}
 }
@@ -43,7 +43,7 @@ func (c *StateCorruptor) WriteStalePort(port int) {
 func (c *StateCorruptor) WriteCorruptPID() {
 	c.t.Helper()
 	path := filepath.Join(c.BeadsDir, "dolt-server.pid")
-	if err := os.WriteFile(path, []byte("not-a-pid"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("not-a-pid"), 0660); err != nil {
 		c.t.Fatalf("WriteCorruptPID: %v", err)
 	}
 }
@@ -52,7 +52,7 @@ func (c *StateCorruptor) WriteCorruptPID() {
 func (c *StateCorruptor) WriteTruncatedMetadata() {
 	c.t.Helper()
 	path := filepath.Join(c.BeadsDir, "metadata.json")
-	if err := os.WriteFile(path, []byte(`{"backend": "dolt", "dolt_da`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"backend": "dolt", "dolt_da`), 0660); err != nil {
 		c.t.Fatalf("WriteTruncatedMetadata: %v", err)
 	}
 }
@@ -68,11 +68,11 @@ func (c *StateCorruptor) WritePortZero() {
 func (c *StateCorruptor) CreateOrphanNomsLock(doltDataDir string) {
 	c.t.Helper()
 	nomsDir := filepath.Join(doltDataDir, "noms")
-	if err := os.MkdirAll(nomsDir, 0700); err != nil {
+	if err := os.MkdirAll(nomsDir, 0770); err != nil {
 		c.t.Fatalf("CreateOrphanNomsLock: mkdir: %v", err)
 	}
 	lockPath := filepath.Join(nomsDir, "LOCK")
-	if err := os.WriteFile(lockPath, nil, 0600); err != nil {
+	if err := os.WriteFile(lockPath, nil, 0660); err != nil {
 		c.t.Fatalf("CreateOrphanNomsLock: write: %v", err)
 	}
 }

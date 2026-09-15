@@ -30,6 +30,8 @@ const (
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
 // function closes both the *sql.DB and the underlying connector.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
+	configureDoltTempFilePermissions()
+
 	dsn := buildDSN(dir, database)
 
 	cfg, err := doltembed.ParseDSN(dsn)

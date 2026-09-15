@@ -507,20 +507,27 @@ linters:
         linters:
           - gosec
         text: "G304"
-      # G302/G306: Directory/file permissions 0700/0750 are acceptable
+      # G301/G302/G306: trusted-group modes intentionally exceed gosec's
+      # owner-only thresholds. Permission modes are reviewed as a project
+      # policy and covered by permission-focused tests.
       - linters:
           - gosec
-        text: "G302.*0700|G301.*0750"
+        text: "G301.*0750|G302.*0600|G306.*0600"
       # G302/G306: JSONL files and error logs need 0644 for debugging/sharing
       - path: 'cmd/bd/setup\.go|internal/git/worktree\.go'
         linters:
           - gosec
         text: "G306"
-      # G306: Git hooks must be executable (0700)
-      - path: 'cmd/bd/init\.go'
+      # G306: Git hooks must be executable by the trusted group (0770)
+      - path: 'cmd/bd/init(_git_hooks)?\.go'
         linters:
           - gosec
-        text: "G306.*0700"
+        text: "G306"
+      # G304: user-selected profiling destinations are explicit output paths.
+      - path: 'cmd/bd/main\.go'
+        linters:
+          - gosec
+        text: "G304"
       # G204: Subprocess launched with variable — all subprocess args are from
       # trusted internal sources (git commands, config values, validated IDs)
       - linters:

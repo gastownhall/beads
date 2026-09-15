@@ -508,7 +508,7 @@ func writePortFile(beadsDir string, port int) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(0o660); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -594,7 +594,7 @@ func RestorePortFile(beadsDir string, snap PortFileSnapshot) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(0o660); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -1230,7 +1230,7 @@ func Start(beadsDir string) (*State, error) {
 	doltDir := ResolveDoltDir(beadsDir)
 
 	// Acquire exclusive lock to prevent concurrent starts
-	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0600)
+	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0660) //nolint:gosec // trusted-group server lock
 	if err != nil {
 		return nil, fmt.Errorf("creating lock file: %w", err)
 	}
@@ -1342,7 +1342,7 @@ func Start(beadsDir string) (*State, error) {
 		}
 
 		// Open log file
-		logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
+		logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0660) //nolint:gosec // G304: logPath derives from user-configured beadsDir
 		if err != nil {
 			return nil, fmt.Errorf("opening log file: %w", err)
 		}
@@ -1362,7 +1362,7 @@ func Start(beadsDir string) (*State, error) {
 			}
 			if adoptPID > 0 {
 				_ = logFile.Close()
-				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
+				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0660)
 				_ = writePortFile(beadsDir, actualPort)
 				return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
 			}
@@ -1408,7 +1408,7 @@ func Start(beadsDir string) (*State, error) {
 					}
 					break
 				}
-				if werr := os.WriteFile(absConfigPath, cfgBody, 0600); werr != nil {
+				if werr := os.WriteFile(absConfigPath, cfgBody, 0660); werr != nil {
 					lastErr = fmt.Errorf("writing managed sql-server config: %w", werr)
 					if !explicitPort {
 						continue
@@ -1478,7 +1478,7 @@ func Start(beadsDir string) (*State, error) {
 	}
 
 	// Write PID and port files
-	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0600); err != nil {
+	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0660); err != nil {
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
 			_ = proc.Kill()
 		}
@@ -1917,7 +1917,7 @@ func MarkDoltDirCompatible(doltDir string) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("checking dolt compatibility marker %s: %w", markerPath, err)
 	}
-	if err := os.WriteFile(markerPath, []byte("ok\n"), 0600); err != nil {
+	if err := os.WriteFile(markerPath, []byte("ok\n"), 0660); err != nil {
 		return fmt.Errorf("writing dolt compatibility marker %s: %w", markerPath, err)
 	}
 	return nil
