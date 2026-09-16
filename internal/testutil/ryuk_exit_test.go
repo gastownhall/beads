@@ -213,10 +213,21 @@ func childEnv(overrides map[string]string) []string {
 // invocation, so checkDolt() reports doltReady and the guard downstream of it
 // is reachable. The guard fires before any real container call, so the stub
 // never has to emulate one.
+//
+// It then executes the stub once, here in the parent, and skips the test if
+// that fails. This is not belt-and-braces: t.TempDir() can land on a mount
+// with noexec, where the stub is written fine but cannot run, checkDolt()
+// reports doltNoDocker, and the child takes its WARN-and-exit-0 path — which
+// is indistinguishable at the assertion from the guard regression this test
+// exists to catch. Failing here, with the reason, beats a false accusation
+// downstream.
 func writeDockerStub(t *testing.T, dir string) {
 	t.Helper()
 	path := filepath.Join(dir, "docker")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("writing docker stub: %v", err)
+	}
+	if err := exec.Command(path).Run(); err != nil {
+		t.Skipf("docker stub at %s cannot be executed (noexec temp mount?): %v", path, err)
 	}
 }
