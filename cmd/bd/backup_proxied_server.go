@@ -316,16 +316,45 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	if err := withQuiescedProxiedProvider(ctx, beadsDir, database, root, func(ctx context.Context, conn *sql.Conn) error {
 		return versioncontrolops.BackupRestore(ctx, conn, backupURL, database, force)
 	}); err != nil {
-		return HandleErrorRespectJSON("restore failed: %v", err)
+		return HandleErrorRespectJSON("%s", proxiedRestoreFailureMessage(dir, false, err))
 	}
 
 	if err := withQuiescedProxiedProvider(ctx, beadsDir, database, root, func(ctx context.Context, conn *sql.Conn) error {
 		return reconcileRestoredProxiedWorkspace(ctx, conn, beadsDir, dir, force)
 	}); err != nil {
-		return HandleErrorRespectJSON("restored from %s, but the restored database did not reopen: %v", dir, err)
+		return HandleErrorRespectJSON("%s", proxiedRestoreFailureMessage(dir, true, err))
 	}
 
 	return nil
+}
+
+// proxiedRestoreFailureMessage renders what the operator is told when one of
+// the two quiesced steps fails.
+//
+// The distinction it makes is the only one that matters here: DID THE DATA COME
+// BACK. A teardown failure happens after the step succeeded, so saying "restore
+// failed" would be false, and the obvious response to it — run the restore
+// again — is the wrong one. Split out from the call sites so that judgement is
+// something a test can hold still (TestProxiedRestoreFailureMessage).
+//
+// afterReconcile distinguishes the two steps, because a teardown failure costs
+// the operator different follow-up work either side of the reconcile: before
+// it, the backup destination has not been re-registered yet.
+func proxiedRestoreFailureMessage(dir string, afterReconcile bool, err error) string {
+	var teardown *proxiedTeardownError
+	if errors.As(err, &teardown) {
+		if afterReconcile {
+			return fmt.Sprintf("restored from %s, but shutting the proxied server down afterwards failed: %v; "+
+				"the data is restored and reconciled — run 'bd dolt stop --force' before the next command", dir, teardown)
+		}
+		return fmt.Sprintf("restored from %s, but shutting the proxied server down afterwards failed: %v; "+
+			"the data is restored — run 'bd dolt stop --force', then 'bd backup init %s' to re-register the "+
+			"backup destination, which this run did not reach", dir, teardown, dir)
+	}
+	if afterReconcile {
+		return fmt.Sprintf("restored from %s, but the restored database did not reopen: %v", dir, err)
+	}
+	return fmt.Sprintf("restore failed: %v", err)
 }
 
 // quiesceProxiedTopology drops this process's provider and stops the proxy and
@@ -344,6 +373,17 @@ func quiesceProxiedTopology(ctx context.Context, root string) error {
 	return nil
 }
 
+// proxiedTeardownError marks a failure that happened AFTER the operation
+// succeeded, while putting the topology back down. It exists so the caller can
+// tell the two apart in what it prints. Flattening them is what made a restore
+// that completed and then failed to shut the proxy down report "restore
+// failed": the operator is told their data did not come back when it did, and
+// the obvious response — run the restore again — is the wrong one.
+type proxiedTeardownError struct{ err error }
+
+func (e *proxiedTeardownError) Error() string { return e.err.Error() }
+func (e *proxiedTeardownError) Unwrap() error { return e.err }
+
 // withQuiescedProxiedProvider relaunches the topology for one operation and
 // puts it back down afterwards, so each step either side of the replace runs on
 // a connection that was opened after it.
@@ -351,21 +391,27 @@ func quiesceProxiedTopology(ctx context.Context, root string) error {
 // The provider ADOPTS whatever identity the database carries: a restore is
 // precisely the operation after which the workspace's recorded project id and
 // the database's may legitimately differ, and asserting the old one would
-// refuse the connection that is supposed to reconcile them.
+// refuse the connection that is supposed to reconcile them. That makes this the
+// third caller of newProxiedServerUOWProviderAdopting; its doc comment is the
+// register of identity-assertion bypasses and names this one.
+//
+// A teardown failure is returned wrapped in *proxiedTeardownError, and only
+// when the operation itself succeeded — if the operation failed, that error is
+// the one that matters and the teardown failure is noise on top of it. Teardown
+// is attempted either way, so the topology never stays up on the error path.
 func withQuiescedProxiedProvider(ctx context.Context, beadsDir, database, root string, fn func(context.Context, *sql.Conn) error) (err error) {
 	provider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, database)
 	if err != nil {
 		return err
 	}
-	// Teardown always runs, and reports only when the operation itself did not
-	// already fail: a restore that failed and then also failed to shut down is
-	// still, to the operator, a restore that failed. Both are attempted either
-	// way so the topology does not stay up on the error path.
 	defer func() {
 		closeErr := provider.Close(ctx)
 		stopErr := proxy.Shutdown(root)
-		if err == nil {
-			err = errors.Join(closeErr, stopErr)
+		if err != nil {
+			return
+		}
+		if teardownErr := errors.Join(closeErr, stopErr); teardownErr != nil {
+			err = &proxiedTeardownError{err: teardownErr}
 		}
 	}()
 

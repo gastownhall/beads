@@ -196,17 +196,48 @@ func permitted(path string) capabilityRow {
 }
 
 // backupRefusal builds one backup-family row: honored where bd owns the Dolt
-// server's filesystem, refused by design everywhere else. The code stays
+// server, refused by design everywhere else. The code stays
 // proxy.backup.unsupported — consumers have been keying on it since 1.3.0 and
 // the refusal it names has not changed, only its reason and its scope — and the
 // message keeps the frozen "<path> is not supported in proxied-server mode"
-// prefix, with the locality explanation appended.
+// prefix, with the reason appended.
+//
+// The message leads with SERVER-GLOBAL STATE rather than with the filesystem,
+// because only the filesystem half is scheme-specific. `bd backup init` accepts
+// https/aws/gs as well as file:// (resolveDoltBackupURL) and the help text
+// recommends DoltHub; for those a server-side push over the network with the
+// server's own credentials is a coherent thing to ask for, and "the destination
+// is on the server's disk" says nothing about it. What is true of every scheme
+// is that `CALL DOLT_BACKUP('add', …)` registers the remote ON THE SERVER,
+// where it is global to every client of that server — one workspace's backup
+// decision silently becomes everyone's, which is the shape of the auto-backup
+// storm this command's own help text warns about.
+//
+// backupRemoteSchemeTracking is why these rows carry a Tracking item despite
+// being Reason=design: the outcome is settled, the remote-scheme CASE is not.
 func backupRefusal(path string) capabilityRow {
-	return refusedPath(path, "proxy.backup.unsupported", ProxyReasonDesign, "").
+	return refusedPath(path, "proxy.backup.unsupported", ProxyReasonDesign, backupRemoteSchemeTracking).
 		withMessage(path + " is not supported in proxied-server mode against a Dolt server bd does not own: " +
-			"a backup destination is resolved on the server's filesystem, not this client's").
+			"the backup remote is registered on the server, where it is global to every client, " +
+			"and a file:// destination names a filesystem this client cannot see").
 		honoredOn(ProxyTopologyManagedLocal)
 }
+
+// backupRemoteSchemeTracking records the one part of the backup refusal that is
+// a question rather than a verdict, so refusing the family off-host does not
+// silently foreclose it. A remote-scheme destination (DoltHub, aws://, gs://)
+// needs no filesystem bd can see — the server pushes it over the network from
+// its own environment, which is exactly the credential story S4 has to settle
+// for `dolt push` on these same topologies. Whether a per-client backup remote
+// on a shared server is ever acceptable is the open part; the plumbing is not.
+//
+// Note also that the DoltHub story is already half-built in DIRECT mode:
+// `bd backup init https://…` and `bd backup sync` work, but
+// `bd backup restore https://…` does not, because validateBackupRestoreDir
+// os.Stats its argument and rejects anything that is not an existing directory
+// on every topology. Pre-existing, not something this slice changed.
+const backupRemoteSchemeTracking = "open question, not a verdict: remote-scheme (DoltHub/aws/gs) backup on a server " +
+	"bd does not own — revisit with S4, which settles the same server-env credential question for dolt push"
 
 // proxyCapabilityRegistry is the whole path-keyed policy. Rows for permitted
 // paths are appended from proxyPermittedPaths by init.
@@ -221,22 +252,28 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// owns, so routing this family needed no proxy work at all — see
 	// backup_proxied_server.go.
 	//
-	// What it did need is the locality policy, which is the first genuinely
-	// topology-differentiated rule in this table. A backup destination is
-	// resolved by the SERVER: `CALL DOLT_BACKUP('add', name, 'file:///…')`
-	// names a path on the machine running dolt. On managed-local that machine
-	// and that user are this bd's own, because bd spawned the child; anywhere
-	// else the URL describes a filesystem bd cannot see, so the command would
-	// either fail at the point of use or, far worse, report success having
-	// written the backup somewhere the operator will never look for it.
+	// What it did need is the ownership policy, which is the first genuinely
+	// topology-differentiated rule in this table. A backup remote belongs to the
+	// SERVER, not to the client that asked for it: `CALL DOLT_BACKUP('add', …)`
+	// registers it in the server's own configuration, where it is global to
+	// every client connected to that server. On managed-local "every client" is
+	// this workspace, because bd spawned the child itself. Anywhere else one
+	// operator's backup decision silently becomes everyone's — the same shape as
+	// the auto-backup storm this command's help text already warns about, and
+	// the reason team-server is the sharpest case: bts owns the store.
 	//
-	// Hence: honored on managed-local, refused by design everywhere else. It is
-	// design and not a gap because no amount of plumbing on this side makes bd
-	// able to place a file on somebody else's host — a backup story for those
-	// shapes belongs to whoever runs the server. Team-server is the sharpest
-	// case: bts owns the store, and one client registering a server-side backup
-	// remote acts on every client's data (the same shape as the auto-backup
-	// storm this command's help text already warns about).
+	// A file:// destination adds a second, scheme-specific problem on top: it
+	// names a path on the machine running dolt, so off-host the command either
+	// fails at the point of use or, far worse, reports success having written
+	// the backup somewhere the operator will never look for it.
+	//
+	// Hence: honored on managed-local, refused by design everywhere else. The
+	// OUTCOME is design — server-global state is not something plumbing on this
+	// side can make per-client, and a backup story for those shapes belongs to
+	// whoever runs the server. The remote-scheme case (DoltHub, aws://, gs://,
+	// which resolveDoltBackupURL accepts and backup.go recommends) is the part
+	// that is a question rather than a verdict, and it is not silently
+	// foreclosed: see backupRemoteSchemeTracking, which every row below carries.
 	backupRefusal("backup").asParentGroup(),
 	backupRefusal("backup init"),
 	backupRefusal("backup sync"),

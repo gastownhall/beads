@@ -17,11 +17,14 @@ import (
 // S3: the backup family is honored on managed-local and refused BY DESIGN
 // against a Dolt server bd does not own.
 //
-// The refusal matters more than the capability. `CALL DOLT_BACKUP('add', name,
-// 'file:///…')` is executed by the server, which resolves that path on its own
-// filesystem — so honoring it here would either fail at the point of use or
-// write the backup to a directory on the server's host that the operator asking
-// for it will never look in. The second outcome is worse than any refusal.
+// The refusal matters more than the capability. `CALL DOLT_BACKUP('add', …)`
+// registers the remote on the server, where it is global to every client of
+// that server, so one workspace's backup decision becomes everyone's. With a
+// file:/// destination there is a second problem on top: the server resolves
+// that path on its own filesystem, so honoring it here would either fail at the
+// point of use or write the backup to a directory on the server's host that the
+// operator asking for it will never look in. The second outcome is worse than
+// any refusal.
 //
 // Named TestProxiedServer* so .github/scripts/proxied-test-shard.sh runs it in
 // the external lane, which is the only one with an external Dolt server.
@@ -80,7 +83,10 @@ func TestProxiedServerBackupRefusedOnExternalTopology(t *testing.T) {
 			if refusal.Reason != string(ProxyReasonDesign) {
 				t.Errorf("reason = %q, want design", refusal.Reason)
 			}
-			if !strings.Contains(refusal.Error, "a backup destination is resolved on the server's filesystem") {
+			// The reason has to be the one that is true of every destination
+			// scheme. "resolved on the server's filesystem" is a file://
+			// property, and `bd backup init` also takes https/aws/gs.
+			if !strings.Contains(refusal.Error, "the backup remote is registered on the server, where it is global to every client") {
 				t.Errorf("refusal message does not say why: %q", refusal.Error)
 			}
 

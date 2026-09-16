@@ -287,9 +287,12 @@ func TestProxyCapabilityRegistryReasonsAreAssignedIndividually(t *testing.T) {
 		"admin cleanup": true, "admin reset": true,
 		// The backup family's DEFAULT rule is the design refusal; managed-local
 		// overrides it to honored (TestProxiedBackupHonoredOnlyOnManagedLocal).
-		// It is design because a backup destination is resolved on the server's
-		// filesystem, and no plumbing on bd's side gives it a path on a host it
-		// does not own.
+		// It is design because a backup remote is registered on the SERVER,
+		// where it is global to every client of that server — true of every
+		// destination scheme, unlike the filesystem half, which is a file://
+		// property only. These rows carry a Tracking item anyway
+		// (backupRemoteSchemeTracking): the outcome is settled, the
+		// remote-scheme case is an open question and must not read as closed.
 		"backup": true, "backup init": true, "backup sync": true,
 		"backup remove": true, "backup status": true, "backup restore": true,
 	}
