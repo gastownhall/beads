@@ -3086,15 +3086,12 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	if cfg.GetBackend() != configfile.BackendDolt || !cfg.IsDoltServerMode() {
 		return nil
 	}
-	// project_id is written only by a real prior `bd init`, so a non-empty
-	// value is what separates recovery from a genuine fresh clone.
-	if cfg.ProjectID == "" {
-		return nil
-	}
 	host := cfg.GetDoltServerHost()
 	port := doltserver.DefaultConfig(beadsDir).Port
 	dbName := cfg.GetDoltDatabase()
+	doltPath := doltserver.ResolveDoltDir(beadsDir)
 
+	// TIER 1 (ADR-0004, engdocs/adr/0004-missing-database-guard-signal.md).
 	// Local data means data belonging to THIS project, which is what
 	// --reinit-local exists to override. Test for this project's own database
 	// directory, not the data directory that merely holds it: a Dolt data dir
@@ -3107,8 +3104,43 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	// Shared-server is the topology of the 2026-08-11 data loss, so that was
 	// the primary case going unguarded. Pinned by
 	// TestInitGuard_SharedServerMode_MissingServerDB_Refuses.
-	if info, err := os.Stat(filepath.Join(doltserver.ResolveDoltDir(beadsDir), dbName, ".dolt")); err == nil && info.IsDir() {
+	//
+	// This probe runs BEFORE the project_id check below, and unconditionally.
+	// It used to run after an early `return nil` on empty project_id, which
+	// made this guard — the safety net for --reinit-local/--force — weaker
+	// than the plain-`bd init` guard it backstops: a pre-GH#2372 workspace
+	// (no project_id) whose local database was lost was protected under
+	// `bd init` and waved straight through under --force.
+	if info, err := os.Stat(filepath.Join(doltPath, dbName, ".dolt")); err == nil && info.IsDir() {
 		return nil
+	}
+
+	// TIER 2 (ADR-0004). No local database for this project. project_id is
+	// written by a real prior `bd init`, so a non-empty value is what
+	// separates recovery from a genuine fresh clone. It is imperfect —
+	// .beads/metadata.json is git-tracked by default, so a clone inherits one
+	// it never earned — and that is accepted deliberately: absence of local
+	// state cannot distinguish "never initialized here" from "initialized
+	// here, storage since lost", and the second is the 2026-08-11 shape.
+	// --recreate-missing is the resolution path for both, and it returned nil
+	// at the top of this function.
+	if cfg.ProjectID == "" {
+		// Same coarse-directory permit condition checkExistingBeadsDataAt
+		// applies, so the two guards agree: allow only when NOTHING local
+		// exists. A data dir with no database in it still says this
+		// workspace touched local Dolt storage.
+		//
+		// Accepted asymmetry (ADR-0004): in owned mode doltPath is
+		// per-project and this is a meaningful second signal. In
+		// same-machine shared-server mode it is the machine-global
+		// ~/.beads/shared-server/dolt, true once ANY project has used the
+		// shared server, so this cell is more conservative there. That fails
+		// toward refuse, is resolved the same documented way, and affects a
+		// population that only shrinks — every successful init mints a
+		// project_id. Do not re-litigate it without reading the ADR.
+		if info, err := os.Stat(doltPath); err != nil || !info.IsDir() {
+			return nil
+		}
 	}
 
 	result := checkDatabaseOnServer(host, port, cfg.GetDoltServerUser(), cfg.GetDoltServerPassword(), dbName, cfg.GetDoltServerTLS())
