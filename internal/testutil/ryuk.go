@@ -37,9 +37,16 @@ func checkRyukDisabled(home string, disabled, allowUnreaped bool) error {
 	)
 }
 
-// ryukGuardExitCode is the process exit status checkRyukEnabled uses. Distinct
-// from go test's own failure status (1) so a Ryuk-disabled box is
-// distinguishable from an ordinary test failure in CI logs.
+// ryukGuardExitCode is the process exit status checkRyukEnabled uses.
+//
+// Read nothing diagnostic into the value. `go test` collapses the test
+// binary's status into its own, so a firing guard surfaces as `FATAL: ...`
+// followed by `FAIL <pkg>` with go test exiting 1 — the 2 never reaches the
+// log — and 2 is also the Go runtime's status for an unrecovered panic, so it
+// would not be distinctive even where it is visible. The line that identifies
+// this guard in a log is the "FATAL:" message, not the code. The subprocess
+// tests assert the code only because they exec the binary directly, where it
+// is observable.
 const ryukGuardExitCode = 2
 
 var ryukCheckOnce sync.Once
