@@ -197,3 +197,47 @@ func TestCursorHookUnsupportedEvent(t *testing.T) {
 		t.Fatal("expected error for unsupported event")
 	}
 }
+
+func TestCursorHookBeforeSubmitPromptRecordsSecretFreeReceipt(t *testing.T) {
+	origID := steeringOwningBeadID
+	origList := steeringCommentLister
+	origAdd := steeringCommentAdder
+	t.Cleanup(func() {
+		steeringOwningBeadID = origID
+		steeringCommentLister = origList
+		steeringCommentAdder = origAdd
+	})
+
+	steeringOwningBeadID = func() string { return "bd-own" }
+	var added []string
+	steeringCommentLister = func(context.Context, string) ([]string, error) { return append([]string{}, added...), nil }
+	steeringCommentAdder = func(_ context.Context, _ string, text string) error {
+		if strings.Contains(text, "SECRET-TOKEN") {
+			t.Fatalf("raw prompt leaked: %s", text)
+		}
+		added = append(added, text)
+		return nil
+	}
+
+	var out bytes.Buffer
+	input := `{"hook_event_name":"beforeSubmitPrompt","conversation_id":"conv-9","prompt":"do not store SECRET-TOKEN"}`
+	if err := runCursorHook(context.Background(), cursorHookBeforeSubmitPrompt, strings.NewReader(input), &out); err != nil {
+		t.Fatalf("beforeSubmitPrompt: %v", err)
+	}
+	var got cursorHookResponse
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
+	if got.Continue == nil || !*got.Continue {
+		t.Fatalf("expected continue=true, got %#v", got)
+	}
+	if len(added) != 1 {
+		t.Fatalf("added %d receipts, want 1", len(added))
+	}
+	if !strings.Contains(added[0], "provider: cursor") {
+		t.Fatalf("receipt missing provider:\n%s", added[0])
+	}
+	if !strings.Contains(added[0], "thread_id: conv-9") {
+		t.Fatalf("receipt missing thread:\n%s", added[0])
+	}
+}

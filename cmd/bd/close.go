@@ -36,7 +36,11 @@ the fallback anywhere, or =0 to disable it entirely.
 When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
 to the first ID, the second --reason to the second ID, regardless of where
-the flags appear in the command line.`,
+the flags appear in the command line.
+
+When steering.require_reconciliation_on_close is true, close refuses issues
+that still have unreconciled owner-steering receipts. Reconcile with a comment
+containing "Steering reconciliation", or pass --force.`,
 	// Refuse a missing ID in argument validation, before root's
 	// PersistentPreRunE can open the store, migrate, or auto-import
 	// (bd-m00pb); see updateCmd for the full rationale.
@@ -137,7 +141,7 @@ the flags appear in the command line.`,
 		// inside that transaction, and the engine's own is_blocked guard runs
 		// there too (GH#962), so there is no read-then-write TOCTOU window
 		// between the check and the close.
-		plan := closeDirectPreflight(results, resolvedIDs, reasons, force)
+		plan := closeDirectPreflight(ctx, results, resolvedIDs, reasons, force)
 		outcomes, claimedNext := closeDirectRun(opsCtx, closeDirectBatches(plan.items), len(resolvedIDs),
 			session, force, postCloseStore, closeClaimNextRequest(claimNext, continueFlag))
 

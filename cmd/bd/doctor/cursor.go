@@ -14,7 +14,8 @@ import (
 // CheckCursor reports whether beads-managed Cursor agent hooks are installed.
 // It mirrors CheckClaude: Go observes and reports; the agent/user decides. The
 // hooks (sessionStart/preCompact/postToolUse calling `bd cursor-hook`) are what
-// keep beads context alive across compaction in Cursor.
+// keep beads context alive across compaction in Cursor, and beforeSubmitPrompt
+// records a secret-free steering receipt on the owning Bead.
 // repoPath is the project root directory.
 func CheckCursor(repoPath string) DoctorCheck {
 	projectHooks := filepath.Join(repoPath, ".cursor", "hooks.json")
@@ -171,14 +172,14 @@ func CheckCursorHookCompleteness(repoPath string) DoctorCheck {
 		return DoctorCheck{
 			Name:    "Cursor Hook Completeness",
 			Status:  StatusOK,
-			Message: "All recovery hooks present (sessionStart, preCompact, postToolUse)",
+			Message: "All recovery hooks present (" + strings.Join(setup.CursorManagedHookEventNames(), ", ") + ")",
 		}
 	}
 	return DoctorCheck{
 		Name:    "Cursor Hook Completeness",
 		Status:  StatusWarning,
 		Message: "Missing hook event(s): " + strings.Join(missing, ", "),
-		Detail:  "sessionStart primes context; preCompact + postToolUse recover beads context after a compaction.",
+		Detail:  "sessionStart primes context; preCompact + postToolUse recover beads context after a compaction; beforeSubmitPrompt records a steering receipt.",
 		Fix:     "Run 'bd setup cursor' to reinstall the full hook set.",
 	}
 }

@@ -393,7 +393,7 @@ func TestInstallClaudeCleanupNullHooks(t *testing.T) {
 	if !ok {
 		t.Fatal("hooks section missing")
 	}
-	for _, event := range []string{"SessionStart"} {
+	for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
 		eventHooks, ok := hooks[event].([]interface{})
 		if !ok {
 			t.Errorf("%s should be an array, not nil or missing", event)
@@ -420,6 +420,8 @@ func TestInstallClaudeUsesPrimeForClaudeHooks(t *testing.T) {
 	for _, want := range []string{
 		`"command": "bd prime --hook-json"`,
 		`"SessionStart"`,
+		`"UserPromptSubmit"`,
+		`"command": "bd claude-hook UserPromptSubmit"`,
 	} {
 		if !strings.Contains(settingsJSON, want) {
 			t.Fatalf("settings missing %q:\n%s", want, settingsJSON)
@@ -1069,6 +1071,9 @@ func TestInstallClaudeSkipsHooksWhenPluginPresent(t *testing.T) {
 		if _, hasCompact := hooks["PreCompact"]; hasCompact {
 			t.Error("PreCompact hooks should not be written when plugin is present")
 		}
+		if _, hasPrompt := hooks["UserPromptSubmit"]; hasPrompt {
+			t.Error("UserPromptSubmit hooks should not be written when plugin is present")
+		}
 	}
 
 	// CLAUDE.md should still be installed
@@ -1091,6 +1096,9 @@ func TestInstallClaudeWritesHooksWithoutPlugin(t *testing.T) {
 	}
 	if !strings.Contains(out, "Registered SessionStart hook") {
 		t.Error("expected hooks to be registered without plugin")
+	}
+	if !strings.Contains(out, "Registered UserPromptSubmit hook") {
+		t.Error("expected UserPromptSubmit hook to be registered without plugin")
 	}
 }
 

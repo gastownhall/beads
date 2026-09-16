@@ -290,6 +290,10 @@ func Initialize() error {
 	// Create command defaults
 	v.SetDefault("create.require-description", false)
 
+	// Owner-steering receipts: close/handoff refuse unreconciled receipts when true.
+	// Default false so upstream installs stay compatible; projects opt in via yaml.
+	v.SetDefault("steering.require_reconciliation_on_close", false)
+
 	// Validation configuration defaults (bd-t7jq)
 	// Values: "warn" | "error" | "none"
 	// - "none": no validation (default, backwards compatible)

@@ -92,7 +92,8 @@ func TestCheckCursorHookCompleteness(t *testing.T) {
 		writeCursorHooksFile(t, repo, `{"version":1,"hooks":{
 			"sessionStart":[{"command":"bd cursor-hook sessionStart"}],
 			"preCompact":[{"command":"bd cursor-hook preCompact"}],
-			"postToolUse":[{"command":"bd cursor-hook postToolUse"}]
+			"postToolUse":[{"command":"bd cursor-hook postToolUse"}],
+			"beforeSubmitPrompt":[{"command":"bd cursor-hook beforeSubmitPrompt"}]
 		}}`)
 
 		dc := CheckCursorHookCompleteness(repo)

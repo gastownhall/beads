@@ -298,6 +298,9 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 		if addHookCommand(hooks, "SessionStart", command) {
 			_, _ = fmt.Fprintln(env.stdout, "✓ Registered SessionStart hook")
 		}
+		if addHookCommand(hooks, "UserPromptSubmit", "bd claude-hook UserPromptSubmit") {
+			_, _ = fmt.Fprintln(env.stdout, "✓ Registered UserPromptSubmit hook")
+		}
 	}
 
 	data, err := marshalSettings(settings)
@@ -323,6 +326,7 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 							removeHookCommand(legacyHooks, "SessionStart", v)
 							removeHookCommand(legacyHooks, "PreCompact", v)
 						}
+						removeHookCommand(legacyHooks, "UserPromptSubmit", "bd claude-hook UserPromptSubmit")
 						if migrated, marshalErr := marshalSettings(legacySettings); marshalErr == nil {
 							if writeErr := writeSettingsIfChanged(env, legacyPath, migrated); writeErr == nil {
 								_, _ = fmt.Fprintf(env.stdout, "✓ Migrated hooks from %s\n", legacyPath)
@@ -495,6 +499,7 @@ func removeClaude(env claudeEnv, global bool) error {
 				removeHookCommand(hooks, "SessionStart", v)
 				removeHookCommand(hooks, "PreCompact", v)
 			}
+			removeHookCommand(hooks, "UserPromptSubmit", "bd claude-hook UserPromptSubmit")
 
 			data, err = marshalSettings(settings)
 			if err != nil {
@@ -520,6 +525,7 @@ func removeClaude(env claudeEnv, global bool) error {
 						removeHookCommand(legacyHooks, "SessionStart", v)
 						removeHookCommand(legacyHooks, "PreCompact", v)
 					}
+					removeHookCommand(legacyHooks, "UserPromptSubmit", "bd claude-hook UserPromptSubmit")
 					if migrated, marshalErr := marshalSettings(legacySettings); marshalErr == nil {
 						_ = writeSettingsIfChanged(env, legacyPath, migrated)
 					}

@@ -17,7 +17,12 @@ editor integration uses), so it stays in sync as the workflow evolves. Because
 it is always applied, Cursor re-includes it every turn, including after a
 context compaction.
 
-Restart Cursor after installing so the rule loads.
+`bd setup cursor` also installs **`.cursor/hooks.json`** with Beads lifecycle
+hooks: `sessionStart` / `preCompact` / `postToolUse` recover `bd prime` after
+compaction, and `beforeSubmitPrompt` records a secret-free steering receipt on
+the owning Bead (`payload_sha256`, no raw prompt).
+
+Restart Cursor after installing so the rule and hooks load.
 
 ## Verifying it works
 
