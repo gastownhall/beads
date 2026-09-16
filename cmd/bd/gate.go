@@ -1226,10 +1226,16 @@ func checkBeadGate(ctx context.Context, st issueGetter, awaitID string) (bool, s
 	}
 	issue, err := st.GetIssue(ctx, targetID)
 	if err != nil {
+		// A bead that no longer exists can never close, so a gate awaiting it
+		// would stay pending forever. Resolve it. A transport or backend
+		// failure is a different thing entirely and must stay pending.
+		if gateProxiedNotFound(err) {
+			return true, fmt.Sprintf("awaited bead %s no longer exists (treated as resolved)", targetID)
+		}
 		return false, fmt.Sprintf("bead gate %q: %v", awaitID, err)
 	}
 	if issue == nil {
-		return false, fmt.Sprintf("bead gate %q: bead not found", awaitID)
+		return true, fmt.Sprintf("awaited bead %s no longer exists (treated as resolved)", targetID)
 	}
 	if issue.Status == types.StatusClosed {
 		return true, fmt.Sprintf("bead %s closed", targetID)
