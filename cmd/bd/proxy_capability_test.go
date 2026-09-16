@@ -81,7 +81,7 @@ func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
 		root.AddCommand(parent)
 		parent.AddCommand(child)
 		out := captureStdout(t, func() error {
-			_ = validateProxyMaintenanceBeforeProvider(child)
+			_ = validateProxyRegistryBeforeProvider(child)
 			return nil
 		})
 		if !strings.Contains(out, `"code":`) {
@@ -101,7 +101,7 @@ func TestProxyFormulaSwarmMergeSlotRefusals(t *testing.T) {
 			cmd.AddCommand(child)
 			cmd = child
 		}
-		err := validateProxyMaintenanceBeforeProvider(cmd)
+		err := validateProxyRegistryBeforeProvider(cmd)
 		if err == nil {
 			t.Fatalf("%s unexpectedly allowed", path)
 		}
@@ -139,7 +139,7 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 			if !ok || row.Code != tc.code || row.Message != tc.message || row.ExitCode != 1 || row.Mutates {
 				t.Fatalf("row = %#v, ok=%v", row, ok)
 			}
-			var typed *ProxyCapabilityError = &ProxyCapabilityError{Code: row.Code, Message: row.Message, ExitCode: row.ExitCode, Mutates: row.Mutates}
+			typed := proxyCapabilityErrorFor(row)
 			if typed.Code != tc.code || typed.Message != tc.message || typed.ExitCode != 1 || typed.Mutates {
 				t.Fatalf("typed refusal = %#v", typed)
 			}
@@ -162,7 +162,7 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 			oldDidWrite := commandDidWrite.Load()
 			commandDidWrite.Store(false)
 			t.Cleanup(func() { commandDidWrite.Store(oldDidWrite) })
-			out := captureStdout(t, func() error { _ = validateProxyMaintenanceBeforeProvider(cmd); return nil })
+			out := captureStdout(t, func() error { _ = validateProxyRegistryBeforeProvider(cmd); return nil })
 			var got map[string]any
 			if err := json.Unmarshal([]byte(out), &got); err != nil || got["code"] != tc.code || got["error"] != tc.message {
 				t.Fatalf("JSON refusal = %q (%v)", out, err)
@@ -181,8 +181,8 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 }
 
 func lookupProxyMaintenanceRuleForTest(path string) (proxyCapabilityRule, bool) {
-	rule, ok := proxyMaintenanceRefusals[path]
-	return rule, ok
+	row, ok := LookupCapabilityRow(path, "")
+	return row.Rule, ok
 }
 
 func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
@@ -199,7 +199,7 @@ func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
 	oldProvider := uowProvider
 	uowProvider = nil
 	t.Cleanup(func() { uowProvider = oldProvider })
-	err := validateProxyMaintenanceBeforeProvider(hooks)
+	err := validateProxyRegistryBeforeProvider(hooks)
 	if err == nil {
 		t.Fatal("expected typed maintenance refusal")
 	}
