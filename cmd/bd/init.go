@@ -2571,30 +2571,61 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 			return nil
 		}
 
-		// Check both the local directory AND server mode config.
-		// In server mode the local dolt/ directory may be empty — the database
-		// lives on the Dolt sql-server. Checking only the directory would miss
-		// server-mode installations.
+		// Check both the local database AND server mode config.
+		// In server mode the local dolt/ directory may hold no database for
+		// this project — the data lives on the Dolt sql-server. Checking only
+		// the directory would miss server-mode installations.
 		doltPath := doltserver.ResolveDoltDir(beadsDir)
+		dbName := cfg.GetDoltDatabase()
+
+		// Probe THIS PROJECT's database directory, not the Dolt data directory
+		// that merely holds it: a data dir contains one subdirectory per
+		// database, each with its own .dolt.
+		//
+		// Statting the data dir instead made the FR-010 branch below
+		// unreachable on every initialized workspace, because the data dir
+		// always exists there — shared-server mode MkdirAlls the
+		// machine-global one in SharedDoltDir(), per-project mode MkdirAlls it
+		// in ensureDoltInit. So the branch never ran, and both
+		// --recreate-missing opt-ins inside it were dead code: the escape
+		// hatch named by the flag help, `bd help init-safety`,
+		// docs/recovery/init-safety.md and the guard's own refusal text all
+		// pointed at a command that could not reach its own opt-in, leaving
+		// the operator circling between two refusals. Same probe, and the same
+		// reason, as guardMissingServerDatabaseAt. Pinned by
+		// TestInitGuard_ExistingProjectMissingServerDB_DataDirPresent_Refuses
+		// and TestInitGuard_RecreateMissing_ReachesOptIn_DataDirPresent.
+		//
+		// The data-dir stat does not go away, it stops being the gate: making
+		// the branch reachable also exposes states it used to shadow, and
+		// permitting those would be a new fail-open policy rather than a fix.
+		// The permit condition below keeps it to what the old probe already
+		// allowed, plus the explicit opt-in. Pinned by
+		// TestInitGuard_NoProjectID_DataDirPresent_StillBlocks.
+		localDatabaseExists := false
+		if info, err := os.Stat(filepath.Join(doltPath, dbName, ".dolt")); err == nil && info.IsDir() {
+			localDatabaseExists = true
+		}
+		// The data directory is still read, but only to keep this fix from
+		// widening what fails OPEN. See the permit condition below.
 		doltDirExists := false
 		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
 			doltDirExists = true
 		}
-		if doltDirExists || cfg.IsDoltServerMode() {
+		if localDatabaseExists || cfg.IsDoltServerMode() {
 			// For server mode, distinguish "DB exists" from "DB missing" (FR-010).
-			if cfg.IsDoltServerMode() && !doltDirExists {
+			if cfg.IsDoltServerMode() && !localDatabaseExists {
 				host := cfg.GetDoltServerHost()
 				port := doltserver.DefaultConfig(beadsDir).Port
-				dbName := cfg.GetDoltDatabase()
 				password := cfg.GetDoltServerPassword()
 				user := cfg.GetDoltServerUser()
 
-				// doltDirExists==false is ambiguous in server mode: it's the normal
-				// state both for a genuine fresh clone (GH#2433) and for an existing
-				// project whose server-side database was lost or is unreachable
-				// (be-5up5: 2026-08-11 fleet-wide data loss). project_id is only
-				// written by a real prior `bd init`, so a non-empty value here
-				// proves the latter — recovery, not a fresh clone.
+				// localDatabaseExists==false is ambiguous in server mode: it's the
+				// normal state both for a genuine fresh clone (GH#2433) and for an
+				// existing project whose server-side database was lost or is
+				// unreachable (be-5up5: 2026-08-11 fleet-wide data loss). project_id
+				// is written by a real prior `bd init`, so a non-empty value here is
+				// taken as the latter — recovery, not a fresh clone.
 				//
 				// Known limit: project_id was minted by GH#2372, so a workspace
 				// initialized before that carries none and is indistinguishable
@@ -2603,6 +2634,18 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				// would block legitimate first inits on every pre-GH#2372 clone,
 				// and this guard's job is to stop a silent recreate where we can
 				// PROVE prior initialization, not to guess where we cannot.
+				//
+				// Known limit, OPEN and tracked by be-5pjhd: project_id is a poor
+				// proof of prior LOCAL init, because .beads/metadata.json is
+				// git-tracked by default (see defaultGitignoreContent in
+				// cmd/bd/doctor/gitignore.go, which says so in as many words). A
+				// fresh clone therefore inherits one and is refused here with a
+				// recovery message. The failure is safe in the direction that
+				// matters — it never recreates a database silently — and the
+				// operator has a working, documented way through it now that
+				// --recreate-missing actually reaches its opt-in below. Choosing
+				// the replacement signal is a design decision with a different
+				// answer per server mode, so it is deliberately not made here.
 				existingProject := cfg.ProjectID != ""
 
 				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS())
@@ -2614,7 +2657,17 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 					// Fresh clone (GH#2433) or explicit --recreate-missing opt-in —
 					// there's no local database to protect. Allow init to proceed so
 					// the user can bootstrap (e.g. via --from-jsonl).
-					return nil
+					if initAllowRecreateMissing || !doltDirExists {
+						return nil
+					}
+					// Reached only with no project_id AND a local Dolt data
+					// directory present. The old data-dir probe blocked this
+					// state by never arriving here at all; it keeps being
+					// blocked, by the same message as before. Permitting it
+					// would be a new fail-open policy on workspaces that
+					// predate project_id (GH#2372) — exactly the population
+					// this guard exists for — and choosing the replacement
+					// signal is be-5pjhd's call, not this fix's.
 				}
 				if result.Reachable && result.Exists {
 					// Server up and DB exists — fall through to "already initialized" error.
@@ -2626,8 +2679,11 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 					// Fresh clone with committed metadata.json but no local dolt/
 					// directory, or explicit --recreate-missing opt-in — allow init
 					// to proceed so the user can bootstrap the database (e.g. via
-					// --from-jsonl).
-					return nil
+					// --from-jsonl). Same narrowing as the reachable-server branch
+					// above, for the same reason.
+					if initAllowRecreateMissing || !doltDirExists {
+						return nil
+					}
 				}
 			}
 
