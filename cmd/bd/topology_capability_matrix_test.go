@@ -101,12 +101,20 @@ type expectation struct {
 // two-class default is not enough. When a later slice makes managed-local
 // honor something external topologies still refuse, that lands as one
 // override entry, not new plumbing.
+//
+// notProbedOn withholds a command from named topologies, mapping each to the
+// reason. It is for a command that is unsafe to RUN there, which is a
+// different statement from an expectation and must not be written as one:
+// deliberatelyNotProbed already says this at whole-command granularity, and
+// this is the same idea one cell down. The reason is printed in the report, so
+// the gap stays visible instead of reading as coverage.
 type probe struct {
-	name     string
-	args     []string
-	direct   expectation
-	proxied  expectation
-	override map[string]expectation
+	name        string
+	args        []string
+	direct      expectation
+	proxied     expectation
+	override    map[string]expectation
+	notProbedOn map[string]string
 }
 
 func (p probe) want(topology string, class topologyClass) expectation {
@@ -192,6 +200,47 @@ var capabilityProbes = []probe{
 			outcome: outcomeWrongAnswer, substr: `"source": "default"`, absent: `"source": "database"`,
 			knownBad: "config_show.go collectDatabaseEntries swallows the proxied error and omits every DB-stored setting (design 1.5 / slice S6)",
 			reason:   reasonNA,
+		},
+	},
+
+	// --- dolt start: probed only where it cannot start anything -------------
+	{
+		// §3.5 proposes probing this against a shut-down proxy. It is probed
+		// on EMBEDDED only, because embedded is the single topology where the
+		// command cannot spawn a server: with no SQL server configured it
+		// short-circuits before it gets that far. On all four others it
+		// starts, or tries to start, a real sql-server — the notProbedOn
+		// reasons below say precisely what each one does, measured by running
+		// it there rather than reasoned about.
+		//
+		// `proxied` is deliberately left unset: both proxied topologies are
+		// withheld, so nothing reads it. Slice S1 turns the proxied hazard
+		// into a typed refusal; that slice fills this in and drops the two
+		// proxied entries below, which is the flip that proves it landed.
+		name: "dolt start",
+		args: []string{"dolt", "start"},
+		direct: expectation{
+			outcome: outcomeError,
+			substr:  "'bd dolt start' is not supported in embedded mode",
+			reason:  reasonNA,
+		},
+		notProbedOn: map[string]string{
+			topoDirectLocal: "starts a SECOND bd-managed sql-server over a workspace that ALREADY has one running, " +
+				"and reports success doing it (observed: \"Dolt server started (PID …, port …)\" at exit 0). It overwrites " +
+				"this workspace's .beads/dolt-server.pid with the new PID, so the first server is left with nothing " +
+				"pointing at it and `bd dolt stop` can no longer reach it. Probing it would make this matrix orphan a " +
+				"process on every run. This is a defect in its own right and is NOT the proxied hazard slice S1 fixes.",
+			topoDirectExternal: "tries to start a LOCAL sql-server on the EXTERNAL endpoint's own port — the workspace " +
+				"points at a server bd does not own, and the command does not check that before acting. It fails here only " +
+				"because the container already holds the port (observed: \"cannot start dolt server on port N: port N is " +
+				"busy but cannot identify the process\", exit 1). Safety by collision is not safety, and not something to " +
+				"build an assertion on.",
+			topoProxiedLocal: "spawns a SECOND, unmanaged dolt sql-server over the live proxy child's data directory — " +
+				"the default proxied root IS .beads/dolt (design 1.2). That server is recorded in no pidfile bd's own " +
+				"`dolt stop` reads, so teardown by recorded PID cannot be guaranteed and this matrix must not create one. " +
+				"Slice S1 makes it a typed refusal (proxy.dolt_start.conflict); probe it here then.",
+			topoProxiedTCP: "same hazard as proxied-local: a second, unmanaged sql-server over the proxied root, " +
+				"recorded in no pidfile this test could tear down by PID. Slice S1 makes it a typed refusal; probe it then.",
 		},
 	},
 
@@ -410,10 +459,10 @@ var capabilityProbes = []probe{
 // deliberatelyNotProbed records commands this matrix will not run, and why.
 // Leaving them undocumented would let a reader mistake absence for coverage.
 var deliberatelyNotProbed = map[string]string{
-	"dolt start": "running it under proxied config spawns a SECOND, unmanaged dolt sql-server over the live child's data dir " +
-		"(design 1.2). The hazard is the thing slice S1 fixes, and the second server is not recorded in any pidfile bd's own " +
-		"`dolt stop` will read, so the test could not guarantee teardown by recorded PID. Add the row as a typed-refusal " +
-		"assertion once S1 lands.",
+	// `dolt start` is no longer here: it is a probe row with per-topology
+	// notProbedOn reasons, which is strictly more informative than withholding
+	// the whole command. Embedded is probed; the other four carry their own
+	// measured reason.
 	"restore": "`bd restore` restores an ISSUE, not a backup; the backup verb is `bd backup restore`, which is already " +
 		"covered by the backup rows. Probing it adds a row that says nothing about the backup family.",
 	"backup restore": "would need a real backup destination to distinguish a topology refusal from a missing-backup error. " +
@@ -660,6 +709,9 @@ func runCapabilityMatrix(t *testing.T, topologies []topologySpec) {
 // table order within each group.
 func partitionProbes(all []probe, topology string, class topologyClass) (refusals, others []probe) {
 	for _, p := range all {
+		if _, withheld := p.notProbedOn[topology]; withheld {
+			continue
+		}
 		switch p.want(topology, class).outcome {
 		case outcomeRefusedTyped, outcomeRefusedUntyped:
 			refusals = append(refusals, p)
@@ -872,7 +924,14 @@ func reportMatrix(t *testing.T, topologies []topologySpec, results []cellResult,
 		for _, n := range names {
 			cell, ok := byProbe[p.name][n]
 			if !ok {
-				fmt.Fprintf(&b, " | %-*s", cellWidth, "(not exercised)")
+				// "not probed" and "not exercised" are different claims: the
+				// first is a decision recorded in the table, the second is a
+				// topology this run could not build.
+				label := "(not exercised)"
+				if _, withheld := p.notProbedOn[n]; withheld {
+					label = "(not probed)"
+				}
+				fmt.Fprintf(&b, " | %-*s", cellWidth, label)
 				continue
 			}
 			label := string(cell.outcome)
@@ -931,6 +990,18 @@ func reportMatrix(t *testing.T, topologies []topologySpec, results []cellResult,
 	sort.Strings(notProbed)
 	for _, k := range notProbed {
 		fmt.Fprintf(&b, "  %s — %s\n", k, deliberatelyNotProbed[k])
+	}
+	// The per-cell half of the same statement, so a "(not probed)" cell in the
+	// table above always has its reason printed underneath it.
+	for _, p := range capabilityProbes {
+		var withheld []string
+		for topology := range p.notProbedOn {
+			withheld = append(withheld, topology)
+		}
+		sort.Strings(withheld)
+		for _, topology := range withheld {
+			fmt.Fprintf(&b, "  %s on %s — %s\n", p.name, topology, p.notProbedOn[topology])
+		}
 	}
 
 	t.Log(b.String())
