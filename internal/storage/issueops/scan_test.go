@@ -230,3 +230,65 @@ func TestScanIssueFrom_PopulatesHeavyFields(t *testing.T) {
 		t.Errorf("ScanIssueFrom: Waiters = %v, want [\"a\"]", issue.Waiters)
 	}
 }
+
+// countingScanner records how many destination pointers a scan function asks
+// for, without needing a database. Scan itself is a no-op, so the caller's
+// post-scan mapping runs against zero-valued dests — harmless, and irrelevant
+// to the count this fixture exists to observe.
+type countingScanner struct{ dests int }
+
+func (c *countingScanner) Scan(dest ...any) error {
+	c.dests = len(dest)
+	return nil
+}
+
+// TestIssueSummaryColumnsMatchScanner ties IssueSummaryColumns to
+// ScanIssueSummaryFrom's dest list by count. The two are hand-synced and read
+// positionally, so a column added to one and not the other does not fail
+// loudly: the SELECT and the Scan disagree on width, and database/sql reports
+// it as a generic scan error from whichever query happens to run first, far
+// from the edit that caused it.
+//
+// This is the summary-projection counterpart of
+// TestIssueSelectColumns_LitePlusHeavyEqualsFull, which does the same job for
+// the lite projection.
+func TestIssueSummaryColumnsMatchScanner(t *testing.T) {
+	t.Parallel()
+
+	cols := parseSelectColumns(IssueSummaryColumns)
+
+	var scanner countingScanner
+	if _, err := ScanIssueSummaryFrom(&scanner); err != nil {
+		t.Fatalf("ScanIssueSummaryFrom with counting scanner: %v", err)
+	}
+
+	if scanner.dests != len(cols) {
+		t.Errorf("IssueSummaryColumns has %d columns but ScanIssueSummaryFrom scans %d dests.\n"+
+			"  columns: %v\n"+
+			"Action: add the column to both, in the same position — they are read positionally.",
+			len(cols), scanner.dests, cols)
+	}
+}
+
+// TestIssueSummaryColumnsAreRealIssueColumns pins every column in
+// IssueSummaryColumns to one that actually exists on the issues and wisps
+// tables, by requiring it to appear in IssueSelectColumns — the canonical full
+// list both tables are already queried with.
+//
+// Count parity alone cannot catch a typo: misspelling a column while adding
+// its dest keeps the widths equal and fails only at query time, against a real
+// database, as an opaque "unknown column" from whichever caller runs first.
+// Note this is a membership check, not an order check — unlike
+// IssueSelectColumnsLite, IssueSummaryColumns is deliberately not a
+// subsequence of the full list (see the const's doc comment).
+func TestIssueSummaryColumnsAreRealIssueColumns(t *testing.T) {
+	t.Parallel()
+
+	full := columnSet(parseSelectColumns(IssueSelectColumns))
+	for _, col := range parseSelectColumns(IssueSummaryColumns) {
+		if _, ok := full[col]; !ok {
+			t.Errorf("IssueSummaryColumns contains %q, which is not in IssueSelectColumns; "+
+				"either it is misspelled or it is not a column on the issues/wisps tables", col)
+		}
+	}
+}
