@@ -2635,17 +2635,20 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				// and this guard's job is to stop a silent recreate where we can
 				// PROVE prior initialization, not to guess where we cannot.
 				//
-				// Known limit, OPEN and tracked by be-5pjhd: project_id is a poor
-				// proof of prior LOCAL init, because .beads/metadata.json is
-				// git-tracked by default (see defaultGitignoreContent in
-				// cmd/bd/doctor/gitignore.go, which says so in as many words). A
-				// fresh clone therefore inherits one and is refused here with a
-				// recovery message. The failure is safe in the direction that
-				// matters — it never recreates a database silently — and the
-				// operator has a working, documented way through it now that
-				// --recreate-missing actually reaches its opt-in below. Choosing
-				// the replacement signal is a design decision with a different
-				// answer per server mode, so it is deliberately not made here.
+				// SETTLED by ADR-0004 (engdocs/adr/0004-missing-database-guard-signal.md).
+				// project_id is a weak proof of prior LOCAL init: .beads/metadata.json
+				// is git-tracked by default (see defaultGitignoreContent in
+				// cmd/bd/doctor/gitignore.go, which says so in as many words), so a
+				// fresh clone inherits one and is refused here with a recovery
+				// message. That is ACCEPTED, not a gap awaiting a fix: absence of
+				// local state cannot distinguish "never initialized here" from
+				// "initialized here, storage since lost", and the second is the
+				// shape of the 2026-08-11 loss. The failure direction is the safe
+				// one — it never recreates a database silently — and
+				// --recreate-missing is the permanent, documented resolution path,
+				// reachable since the probe fix above. Read the ADR before
+				// reopening this; the data-directory and local-marker alternatives
+				// are recorded there as rejected, with reasons.
 				existingProject := cfg.ProjectID != ""
 
 				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS())
