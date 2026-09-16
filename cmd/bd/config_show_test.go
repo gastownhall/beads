@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 // TestViperSourceLabel verifies source label formatting for different config sources.
@@ -432,5 +435,81 @@ func TestCollectViperEntriesMetricsUserGlobalProvenance(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), `"source":"config.yaml"`) {
 		t.Errorf("config show --json entry %s misattributes user-global value to project config.yaml", encoded)
+	}
+}
+
+func TestCollectGitConfigEntriesIgnoresInheritedRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	pinJSONOutput(t, false)
+	runGit := func(t *testing.T, repo string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = gitenv.ScrubRouting(os.Environ())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git %v: %v: %s", args, err, out)
+		}
+	}
+	for _, tc := range []struct {
+		name, local, global, want string
+	}{
+		{"repository", "maintainer", "", "maintainer"},
+		{"inline", "maintainer", "", "maintainer"},
+		{"default_global", "", "contributor", "contributor"},
+		{"absent", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, target, decoy := t.TempDir(), t.TempDir(), t.TempDir()
+			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+				t.Setenv(key, home)
+			}
+			if tc.global != "" {
+				if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\nrole = "+tc.global+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, repo := range []string{target, decoy} {
+				runGit(t, repo, "init", "--quiet")
+			}
+			runGit(t, decoy, "config", "beads.role", "decoy-role")
+			if tc.local != "" {
+				runGit(t, target, "config", "beads.role", tc.local)
+			}
+			t.Chdir(target)
+			poison := map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "beads.role", "GIT_CONFIG_VALUE_0": "injected-role"}
+			if tc.name == "repository" {
+				poison = map[string]string{"GIT_DIR": filepath.Join(decoy, ".git"), "GIT_WORK_TREE": decoy}
+			}
+			for key, value := range poison {
+				t.Setenv(key, value)
+			}
+			entries := collectGitConfigEntries()
+			wantGet := tc.want
+			if tc.want == "" {
+				wantGet = "beads.role (not set in git config)"
+				if len(entries) != 0 {
+					t.Errorf("absent role produced entries: %+v", entries)
+				}
+			} else if len(entries) != 1 || entries[0] != (configEntry{Key: "beads.role", Value: tc.want, Source: "git"}) {
+				t.Errorf("Git entries = %+v; want role=%q with source=git", entries, tc.want)
+			}
+			out := captureStdout(t, func() error { return configGetCmd.RunE(configGetCmd, []string{"beads.role"}) })
+			if strings.TrimSpace(out) != wantGet {
+				t.Errorf("config get = %q; want %q", out, wantGet)
+			}
+			for key, value := range poison {
+				if os.Getenv(key) != value {
+					t.Errorf("reader changed parent environment %s", key)
+				}
+			}
+		})
 	}
 }
