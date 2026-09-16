@@ -143,8 +143,8 @@ func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error)
 	if idx := strings.Index(dependsOnArg, ":"); idx >= 0 {
 		depType, target := dependsOnArg[:idx], dependsOnArg[idx+1:]
 		if depType != "" && target != "" {
-			return "", fmt.Errorf("invalid dependency target %q: %q is `bd create --deps` <type>:<id> syntax, not a target ID; use: bd dep add %s %s --type %s",
-				dependsOnArg, dependsOnArg, sourceID, target, depType)
+			return "", fmt.Errorf("invalid dependency target %q: that is `bd create --deps` <type>:<id> syntax, not a target ID; use: bd dep add %s %s --type %s",
+				dependsOnArg, sourceID, target, depType)
 		}
 		return "", fmt.Errorf("invalid dependency target %q: not a bd ID and not a well-formed external:<project>:<capability> reference", dependsOnArg)
 	}
