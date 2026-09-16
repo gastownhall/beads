@@ -3819,6 +3819,9 @@ func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, c
 
 func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
 	ctx, cancel := withCLIExecTimeout(ctx)
+	if len(args) > 0 && creds != nil && creds.username != "" {
+		args = append([]string{args[0], "--user", creds.username}, args[1:]...)
+	}
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
 	// CommandContext kills only the direct dolt child on expiry; a grandchild
 	// (e.g. a cloud credential helper) holding the inherited output pipes
