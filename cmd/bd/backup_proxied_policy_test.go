@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,65 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
 )
+
+// TestProxiedRestoreFailureMessage pins the one distinction the operator acts
+// on: whether the data came back. A teardown failure happens after the step
+// succeeded, so reporting it as "restore failed" is not a wording nit — it
+// tells someone whose database IS restored to restore it again.
+func TestProxiedRestoreFailureMessage(t *testing.T) {
+	boom := errors.New("proxy shutdown: connection refused")
+
+	for _, tc := range []struct {
+		name           string
+		afterReconcile bool
+		err            error
+		wantContains   []string
+		wantMissing    []string
+	}{
+		{
+			name: "restore itself failed",
+			err:  errors.New("DOLT_BACKUP: no such backup"),
+			// No claim that anything was restored.
+			wantContains: []string{"restore failed", "no such backup"},
+			wantMissing:  []string{"the data is restored"},
+		},
+		{
+			name:         "restore succeeded, teardown failed",
+			err:          &proxiedTeardownError{err: boom},
+			wantContains: []string{"the data is restored", "bd dolt stop --force", "bd backup init"},
+			wantMissing:  []string{"restore failed"},
+		},
+		{
+			name:           "reconcile failed for real",
+			afterReconcile: true,
+			err:            errors.New("open provider: schema is behind"),
+			wantContains:   []string{"the restored database did not reopen", "schema is behind"},
+			wantMissing:    []string{"restore failed"},
+		},
+		{
+			name:           "reconcile succeeded, teardown failed",
+			afterReconcile: true,
+			err:            &proxiedTeardownError{err: boom},
+			wantContains:   []string{"the data is restored and reconciled", "bd dolt stop --force"},
+			// Nothing left to re-register: the reconcile already ran.
+			wantMissing: []string{"restore failed", "bd backup init"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := proxiedRestoreFailureMessage("/tmp/backup", tc.afterReconcile, tc.err)
+			for _, want := range tc.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("message %q does not contain %q", got, want)
+				}
+			}
+			for _, unwanted := range tc.wantMissing {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("message %q must not contain %q", got, unwanted)
+				}
+			}
+		})
+	}
+}
 
 // backupFamilyPaths is every registry path the backup family owns. Keeping the
 // list in one place is what makes "the whole family moves together" an
