@@ -116,17 +116,18 @@ func (engineDepUC) AddDependencies(context.Context, []*types.Dependency, string,
 
 type engineUOW struct{ state *engineUOWState }
 
-func (u *engineUOW) Close(context.Context)                             {}
-func (u *engineUOW) Commit(context.Context, string) error              { u.state.commits++; return nil }
-func (u *engineUOW) SwitchDatabase(context.Context, string) error      { return nil }
-func (u *engineUOW) ConfigUseCase() domain.ConfigUseCase               { return &engineConfigUC{s: u.state} }
-func (u *engineUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase       { return nil }
-func (u *engineUOW) IssueUseCase() domain.IssueUseCase                 { return &engineIssueUC{s: u.state} }
-func (u *engineUOW) DependencyUseCase() domain.DependencyUseCase       { return engineDepUC{} }
-func (u *engineUOW) LabelUseCase() domain.LabelUseCase                 { return nil }
-func (u *engineUOW) CommentUseCase() domain.CommentUseCase             { return nil }
-func (u *engineUOW) RawSQLUseCase() domain.RawSQLUseCase               { return nil }
-func (u *engineUOW) EventsJournalUseCase() domain.EventsJournalUseCase { return nil }
+func (u *engineUOW) Close(context.Context)                                 {}
+func (u *engineUOW) Commit(context.Context, string) error                  { u.state.commits++; return nil }
+func (u *engineUOW) SwitchDatabase(context.Context, string) error          { return nil }
+func (u *engineUOW) ConfigUseCase() domain.ConfigUseCase                   { return &engineConfigUC{s: u.state} }
+func (u *engineUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase           { return nil }
+func (u *engineUOW) IssueUseCase() domain.IssueUseCase                     { return &engineIssueUC{s: u.state} }
+func (u *engineUOW) DependencyUseCase() domain.DependencyUseCase           { return engineDepUC{} }
+func (u *engineUOW) LabelUseCase() domain.LabelUseCase                     { return nil }
+func (u *engineUOW) CommentUseCase() domain.CommentUseCase                 { return nil }
+func (u *engineUOW) RawSQLUseCase() domain.RawSQLUseCase                   { return nil }
+func (u *engineUOW) EventsJournalUseCase() domain.EventsJournalUseCase     { return nil }
+func (u *engineUOW) LabelVocabularyUseCase() domain.LabelVocabularyUseCase { return nil }
 
 type engineUOWProvider struct{ state *engineUOWState }
 

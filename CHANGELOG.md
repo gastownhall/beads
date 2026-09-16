@@ -289,6 +289,29 @@ which dumps the entire release history.)
   the already-documented "a cursor pins a position, not a snapshot" caveat
   reached by a second route, not a new class of error — unchanged data never
   skips or repeats under either order.
+- **Storage for an opt-in curated label vocabulary**
+  ([#6008](https://github.com/gastownhall/beads/pull/6008)). A new
+  `label_definitions` table (migration 0068) holds a workspace-shared list of
+  label names, with a `label_folded` UNIQUE constraint so two case-variant
+  spellings of one word can never both land. The table is inert on its own:
+  nothing in this change consults it when a label is written, and a workspace
+  that never populates it behaves exactly as before. The `bd label define` /
+  `undefine` / `defined` verbs and the `labels.vocabulary` enforcement knob
+  that give it meaning land separately; what is usable here is the interchange
+  path below.
+
+- **`bd export` and `bd import` gain a third `_type` value,
+  `"label-definition"`**
+  ([#6008](https://github.com/gastownhall/beads/pull/6008)). Definitions are
+  emitted whenever the registry is non-empty, including from a bare
+  `bd export` with no flags: they are shared workspace policy rather than
+  agent context, so no flag gates them and none suppresses them. `bd import`
+  applies them define-if-absent, keeping an existing definition and warning
+  on stderr for a case-insensitive collision rather than failing the import.
+  Consumers of the JSONL interchange must dispatch on `_type` instead of
+  unmarshalling every line as an issue -- a reader that does not sees a
+  titleless issue. See `docs/reference/json-schema.md`.
+
 
 ### Changed
 
@@ -534,6 +557,16 @@ which dumps the entire release history.)
   the command. Agent rigs that set the cap globally must unset it for proxied
   `bd ready --claim`. Direct mode is unchanged, and a claim there still
   succeeds against a ready pool larger than the cap. (#6269)
+- **Out-of-tree backends: `storage.DoltStorage` composes a new
+  `LabelVocabularyStore` interface**
+  ([#6008](https://github.com/gastownhall/beads/pull/6008)). Its three
+  methods -- `DefineLabel`, `UndefineLabel`, `ListLabelDefinitions` -- are now
+  required of anything satisfying `DoltStorage`, and `backend.LabelDefinition`
+  is a new exported type alias. Per `backend/backend.go`, adding a required
+  method to the engine interface is a breaking change for out-of-tree
+  implementations; this is that call-out. In-tree, both `DoltStore` and
+  `EmbeddedDoltStore` implement them.
+
 
 ### Fixed
 
