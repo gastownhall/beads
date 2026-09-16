@@ -1097,3 +1097,74 @@ func TestInitGuard_RecreateMissing_ReachesOptIn_DataDirPresent(t *testing.T) {
 		t.Fatalf("bd init --recreate-missing must reach its opt-in and permit init when the configured database is gone; got:\n%v", err)
 	}
 }
+
+// TestInitGuard_NoProjectID_DataDirPresent_StillBlocks pins the narrowing that
+// keeps the finding-1 fix from widening what fails OPEN.
+//
+// A pre-GH#2372 workspace carries no project_id, so `existingProject` is false
+// and the FR-010 branch would otherwise permit init. Before the fix that branch
+// was simply never reached in this state — the data-dir stat sent every such
+// workspace to the "already initialized" refusal — so permitting it now would
+// be a NEW silent-empty-recreate path on exactly the installed base this guard
+// exists to protect. It stays blocked. Only an explicit --recreate-missing
+// opens it, which the companion test below asserts.
+func TestInitGuard_NoProjectID_DataDirPresent_StillBlocks(t *testing.T) {
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = false
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+	stripProjectID(t, beadsDir)
+
+	err := checkExistingBeadsDataAt(beadsDir, "myproject")
+	if err == nil {
+		t.Fatal("a workspace with a local Dolt data directory must not be permitted to " +
+			"silently recreate its missing database just because it predates project_id")
+	}
+}
+
+// TestInitGuard_NoProjectID_DataDirPresent_RecreateMissingAllows is the
+// positive control for the test above: the explicit per-invocation opt-in is
+// the one thing that opens that state, so the operator still has a documented
+// way forward rather than a dead end.
+func TestInitGuard_NoProjectID_DataDirPresent_RecreateMissingAllows(t *testing.T) {
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = true
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+	stripProjectID(t, beadsDir)
+
+	if err := checkExistingBeadsDataAt(beadsDir, "myproject"); err != nil {
+		t.Fatalf("--recreate-missing must still permit init for a pre-project_id workspace; got:\n%v", err)
+	}
+}
+
+// stripProjectID rewrites the fixture's metadata.json without project_id,
+// reproducing a workspace initialized before GH#2372 minted the field.
+func stripProjectID(t *testing.T, beadsDir string) {
+	t.Helper()
+	path := filepath.Join(beadsDir, "metadata.json")
+	raw, err := os.ReadFile(path) // #nosec G304 -- test fixture path
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatal(err)
+	}
+	delete(meta, "project_id")
+	out, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
