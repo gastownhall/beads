@@ -1843,7 +1843,7 @@ func LockPath(beadsDir string) string {
 // eligible for cleanup. Externally-managed servers are never killed.
 //
 // A process is considered "external" (never kill) when any of:
-//   - resolveServerModeIgnoringPortEnv() returns ServerModeExternal (explicit
+//   - ResolveServerModeIgnoringPortEnv() returns ServerModeExternal (explicit
 //     port/shared server declaration, embedded, etc.)
 //   - No PID file exists (beads has no record of starting a server)
 func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, string) bool, kill func(int) error) ([]int, error) {
@@ -1858,7 +1858,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 	// port/shared server/embedded configurations. Both indicate "not our
 	// server" (GH#2641).
 	//
-	// This deliberately uses resolveServerModeIgnoringPortEnv, not the public
+	// This deliberately uses ResolveServerModeIgnoringPortEnv, not the public
 	// ResolveServerMode: BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT are also set
 	// ambiently on multi-agent rigs purely to route bd's own client
 	// connections to a shared coordination server, which says nothing about
@@ -1866,7 +1866,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 	// here would make this guard skip orphan cleanup for a directory beads
 	// still owns, defeating the GH#2430 protection below for every process
 	// on such a rig.
-	if IsAutoStartDisabled() || resolveServerModeIgnoringPortEnv(beadsDir) == ServerModeExternal {
+	if IsAutoStartDisabled() || ResolveServerModeIgnoringPortEnv(beadsDir) == ServerModeExternal {
 		return nil, nil
 	}
 

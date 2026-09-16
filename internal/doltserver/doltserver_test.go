@@ -825,7 +825,7 @@ func TestKillStaleServersPreservesOtherRepoServers(t *testing.T) {
 }
 
 // TestKillStaleServersReapsOrphanUnderAmbientServerPort is the regression gate
-// for the resolveServerModeIgnoringPortEnv carve-out. killStaleServersForDir
+// for the ResolveServerModeIgnoringPortEnv carve-out. killStaleServersForDir
 // must keep reaping a same-repo orphan (GH#2430) even when an ambient
 // BEADS_DOLT_SERVER_PORT is set: without the carve-out the port var makes the
 // dir resolve external, the kill path treats the server as somebody else's and
