@@ -109,20 +109,52 @@ func resolveIDForMutation(ctx context.Context, localStore storage.DoltStorage, i
 
 // resolveUnresolvedDepTarget decides what to do when a dep add target could
 // not be resolved locally or via cross-store routing (resolveIDWithRouting's
-// error). The previous heuristic compared bd ID prefixes between source and
-// target and silently accepted any differently-prefixed string as a raw
-// external reference — writing unresolvable bd IDs into depends_on_external
-// and misreading "type:id" positional args (e.g. "discovered-from:ga-x") as
-// a foreign-store ID, since ExtractPrefix stops at the first "-" (be-gmdx5).
-// A target that fails resolution must now be a well-formed
-// "external:<project>:<capability>" reference, or it is rejected by name.
-func resolveUnresolvedDepTarget(dependsOnArg string, resolveErr error) (string, error) {
+// error). Three outcomes, in order:
+//
+//  1. An "external:" ref is validated and passed through, as before.
+//  2. Anything else containing ":" is refused by name. This is the bug in
+//     be-gmdx5: a "type:id" positional arg (e.g. "discovered-from:ga-x", the
+//     spec syntax `bd create --deps` accepts) was read as a foreign-store ID,
+//     because ExtractPrefix stops at the first "-" and so returns
+//     "discovered-". The type keyword was silently dropped (the edge defaulted
+//     to blocks) and the whole string was stored as a bogus external ref. No
+//     bd ID contains ":", and case 1 already took the only legal ":" shape, so
+//     anything left here is malformed regardless of prefix.
+//  3. A bare, differently-prefixed target is passed through unchanged. This is
+//     NOT malformed: issueops.IsExternalDepTarget defines a target "whose id
+//     prefix names ANOTHER REPOSITORY" as belonging in depends_on_external
+//     alongside "external:" refs, and calls that the single rule every backend
+//     classifies by (db.pickDepTargetColumn restates it). It is the multi-rig
+//     "add now, route later" shape — a gt- bead depending on a bd- bead whose
+//     rig is not in routes.jsonl yet — and dep remove (the ExtractPrefix
+//     fallback further down this file) still addresses such an edge. Refusing
+//     it here would make dep add reject an edge the store holds and dep remove
+//     can still delete.
+//
+// A same-prefix target that resolves nowhere is still an error, unchanged.
+func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error) (string, error) {
 	if IsExternalRef(dependsOnArg) {
 		if err := validateExternalRef(dependsOnArg); err != nil {
 			return "", err
 		}
 		return dependsOnArg, nil
 	}
+
+	if idx := strings.Index(dependsOnArg, ":"); idx >= 0 {
+		depType, target := dependsOnArg[:idx], dependsOnArg[idx+1:]
+		if depType != "" && target != "" {
+			return "", fmt.Errorf("invalid dependency target %q: %q is `bd create --deps` <type>:<id> syntax, not a target ID; use: bd dep add %s %s --type %s",
+				dependsOnArg, dependsOnArg, sourceID, target, depType)
+		}
+		return "", fmt.Errorf("invalid dependency target %q: not a bd ID and not a well-formed external:<project>:<capability> reference", dependsOnArg)
+	}
+
+	srcPrefix := types.ExtractPrefix(sourceID)
+	tgtPrefix := types.ExtractPrefix(dependsOnArg)
+	if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+		return dependsOnArg, nil
+	}
+
 	return "", fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
 }
 
@@ -401,7 +433,7 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				toID, err = resolveUnresolvedDepTarget(dependsOnArg, err)
+				toID, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
 				if err != nil {
 					return HandleErrorRespectJSON("%v", err)
 				}
