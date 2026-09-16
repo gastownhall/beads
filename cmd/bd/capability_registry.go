@@ -32,6 +32,17 @@ import (
 //	                           command with no route still fails at the store
 //	                           factory with proxy.store.unrouted.
 //
+// Permitting a path also COSTS something, and the cost is invisible from this
+// table: unless the command is on one of main.go's store-init skip lists, the
+// root pre-run opens the proxied provider before RunE runs — which starts the
+// proxy and its dolt child, creates the database and migrates the schema. For a
+// command that genuinely uses the store that is the point. For a store-free one
+// it is pure side effect, and on a workspace whose topology cannot be resolved
+// it turns a clean typed refusal into a provider-open error. So "this command
+// touches no store" is an argument for permitting it only once the command is
+// also off the store-init path; see the `migrate hooks` row. Nothing here
+// asserts that, and TestProxyCapabilityRegistryCoversCommandTree cannot see it.
+//
 // REASON is the load-bearing field. "design" means refusing is correct and is
 // expected to stay that way — the semantics are undefined or unsafe against a
 // backend that may be shared. "unimplemented" means the refusal is a capability
@@ -245,14 +256,43 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// Storage-format and workspace surgery against a store other clients may be
 	// holding open. `migrate schema` is the exception and is already routed:
 	// the provider open runs it under the migration gate.
+	//
+	// S7 MUST RE-EXAMINE THE ROWS BELOW PER TOPOLOGY. "A store other clients may
+	// be holding open" describes external and team-server workspaces; it does
+	// not describe managed-local, which is 1:1 and bd-owned — bd spawned the
+	// dolt child itself. A row cannot yet say "refused, except on managed-local"
+	// (S3's backup locality policy is the slice that adds per-topology rules),
+	// so the blanket refusal is the only thing this table can express today.
+	// These rows keep it because nobody has done the semantic work to narrow
+	// them, not because the work has been done and come out this way.
 	refusedPath("migrate", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
 	refusedPath("migrate sync", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
-	refusedPath("migrate hooks", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
+	// `migrate hooks` is the one row in this block the surgery rationale never
+	// described: it plans and applies GIT HOOK FILE migration (migrate_hooks.go
+	// -> doctor.PlanHookMigration) on the local filesystem and opens no store at
+	// all. It is refused for a structural reason instead — the command is wired
+	// into the store-opening path it does not need. It is on none of main.go's
+	// store-init skip lists, so permitting it makes the root pre-run open the
+	// proxied provider before RunE ever runs. Measured, not assumed: with this
+	// row flipped to permitted, `bd migrate hooks --dry-run` on a managed-local
+	// workspace started the proxy AND its dolt child (both pidfiles present) to
+	// print a hook plan, and on a workspace with an unreadable sidecar it exited
+	// 1 with "failed to open uow provider: corrupt proxied-server sidecar ..."
+	// where it had cleanly refused before. Trading a typed refusal for a
+	// connection error is not a lift. The honest fix is to take the command off
+	// the store path first, which is S7's job, not this slice's.
+	refusedPath("migrate hooks", "proxy.migrate.unsupported", ProxyReasonUnimplemented,
+		trackLongTail+" (specifically: put `migrate hooks` on main.go's store-init skip list, then permit it)"),
 	refusedPath("migrate issues", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
 	refusedPath("migrate-issues", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
 	refusedPath("migrate-personal", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
 
 	// --- destructive admin --------------------------------------------------
+	// Same topology-blind rationale as the migrate block above, and the same
+	// instruction to S7: "destructive against a possibly-shared store" is a
+	// claim about external and team-server shapes. On managed-local the store is
+	// this workspace's alone, and `bd admin reset` there is no more shared than
+	// it is in embedded mode, where it is honored. Re-examine per topology.
 	refusedPath("admin cleanup", "proxy.admin.unsupported", ProxyReasonDesign, ""),
 	refusedPath("admin reset", "proxy.admin.unsupported", ProxyReasonDesign, ""),
 	// --- issue compaction ---------------------------------------------------
