@@ -804,10 +804,17 @@ func TestInitGuard_SharedServerMode_MissingServerDB_Refuses(t *testing.T) {
 	serverMode = true
 	defer func() { serverMode = oldServerMode }()
 
-	// Shared-server mode, with HOME redirected so SharedDoltDir() resolves
-	// (and MkdirAlls) inside the test's own tree rather than the developer's.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	// Shared-server mode, redirected so SharedDoltDir() resolves (and
+	// MkdirAlls) inside the test's own tree rather than the developer's.
+	//
+	// Set BEADS_SHARED_SERVER_DIR, not HOME: SharedServerPath() reads that
+	// variable FIRST and only falls back to os.UserHomeDir(). Redirecting HOME
+	// alone left an ambient BEADS_SHARED_SERVER_DIR winning -- the pair then
+	// wrote into, and asserted against, the developer's real
+	// ~/.beads/shared-server/dolt, and _Refuses failed spuriously if a real
+	// "myproject" lived there. HOME is also a no-op on Windows, where
+	// os.UserHomeDir() reads %USERPROFILE%.
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(t.TempDir(), "shared-server"))
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	if !doltserver.IsSharedServerMode() {
 		t.Fatal("precondition: BEADS_DOLT_SHARED_SERVER=1 did not enable shared-server mode")
@@ -884,8 +891,8 @@ func TestInitGuard_SharedServerMode_PresentServerDB_Allows(t *testing.T) {
 	serverMode = true
 	defer func() { serverMode = oldServerMode }()
 
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	// BEADS_SHARED_SERVER_DIR, not HOME -- see _MissingServerDB_Refuses above.
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(t.TempDir(), "shared-server"))
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 
 	dataDir := t.TempDir()
