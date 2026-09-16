@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -619,6 +621,19 @@ A wisp is considered abandoned if:
     configured category, so only plain open (active) and closed (done) steps
     are age-reclaimable. If the blocked set or the custom-status list cannot be
     read, the GC aborts rather than risk reclaiming live steps.
+  - AND it carries no protected label.
+
+Protected labels (wisp.protected_labels, default "bd:protected") are never
+reclaimed, in ANY mode of this command — not by age, not by --all, not by
+--closed. Status protection cannot cover a write-once record such as a message
+or an escalation: an unread one sits in plain open status, which is
+age-reclaimable by design, so the longer it went unread the more certainly it
+was deleted. Label such records instead:
+
+  bd config set wisp.protected_labels bd:protected,my:message
+
+A configured value REPLACES the default (same rule as types.infra);
+--exclude-label ADDS to whatever is configured.
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
@@ -639,7 +654,8 @@ Examples:
   bd mol wisp gc --closed --force                   # Delete all closed wisps
   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
   bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
-  bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type`,
+  bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type
+  bd mol wisp gc --exclude-label my:message         # Also protect wisps labeled my:message`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runWispGC,
@@ -696,25 +712,112 @@ func protectedWispStatuses(ctx context.Context, r molReader) (map[types.Status]b
 	return protected, nil
 }
 
-// isProtectedWisp reports whether a wisp is live work that age-based GC must
-// never reclaim. A wisp is protected if it is explicitly pinned, if it is
-// blocked on an open dependency (blockedSet, derived from is_blocked), or if
-// its status falls in a protected category. Reclaiming any of these
-// mid-execution destroys active molecules (GH#4394).
+// protectedWispLabelsKey is the config key holding the labels that make a wisp
+// unreclaimable by `bd mol wisp gc`.
+const protectedWispLabelsKey = "wisp.protected_labels"
+
+// defaultProtectedWispLabels is the label set honored when nothing is
+// configured. It is deliberately a beads-native label rather than any
+// particular orchestrator's: which of an orchestration layer's records are
+// irreplaceable is that layer's policy, and the charter keeps that policy out
+// of core (engdocs/PROJECT_CHARTER.md, Orchestration Boundary). Core's job is
+// to provide the extension point and to fail closed on it.
+var defaultProtectedWispLabels = []string{"bd:protected"}
+
+// protectedWispLabels resolves the labels that make a wisp unreclaimable by
+// `bd mol wisp gc`, with the same precedence the infra-type set uses: the DB
+// config key wisp.protected_labels, then config.yaml, then the built-in
+// default. A configured value REPLACES the default rather than extending it,
+// matching types.infra.
+//
+// extra carries --exclude-label, which is additive: a caller naming a label on
+// the command line is asking for more protection than the workspace
+// configures, never less.
+//
+// Reading the config is required, not best-effort. This command deletes, so an
+// unreadable guard must abort it rather than silently under-protect — the same
+// contract protectedWispStatuses holds.
+func protectedWispLabels(ctx context.Context, r molReader, extra []string) (map[string]bool, error) {
+	value, err := r.GetConfig(ctx, protectedWispLabelsKey)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s for wisp gc: %w", protectedWispLabelsKey, err)
+	}
+	return resolveProtectedWispLabels(value, config.GetProtectedWispLabelsFromYAML(), extra), nil
+}
+
+// resolveProtectedWispLabels is protectedWispLabels' precedence rule with the
+// three sources already read, so it can be tested without a store: dbValue is
+// the raw comma-separated wisp.protected_labels config value, yaml is the
+// config.yaml fallback, and extra is --exclude-label.
+func resolveProtectedWispLabels(dbValue string, yaml, extra []string) map[string]bool {
+	labels := utils.NormalizeLabels(strings.Split(dbValue, ","))
+	if len(labels) == 0 {
+		labels = utils.NormalizeLabels(yaml)
+	}
+	if len(labels) == 0 {
+		labels = defaultProtectedWispLabels
+	}
+	set := make(map[string]bool, len(labels)+len(extra))
+	for _, l := range utils.NormalizeLabels(append(append([]string{}, labels...), extra...)) {
+		set[l] = true
+	}
+	return set
+}
+
+// wispGuard is everything `bd mol wisp gc` must consult before deleting a wisp.
+// It is a struct rather than three parameters so that adding a fourth kind of
+// protection cannot silently miss one of the call sites that filters candidates
+// (the age sweep, its cascade expansion, and the closed purge).
+type wispGuard struct {
+	blocked  map[string]bool
+	statuses map[types.Status]bool
+	labels   map[string]bool
+}
+
+// hasProtectedLabel reports whether the issue carries any protected label.
+func (g wispGuard) hasProtectedLabel(issue *types.Issue) bool {
+	for _, l := range issue.Labels {
+		if g.labels[l] {
+			return true
+		}
+	}
+	return false
+}
+
+// isProtectedWisp reports whether a wisp is live work or an irreplaceable
+// record that GC must never reclaim. A wisp is protected if it is explicitly
+// pinned, if it is blocked on an open dependency (blocked, derived from
+// is_blocked), if its status falls in a protected category, or if it carries a
+// protected label. Reclaiming any of the first three mid-execution destroys
+// active molecules (GH#4394).
+//
+// The label check exists because status protection cannot reach the records
+// that matter most. An orchestration layer that stores mail, escalations or
+// any other write-once record as an ephemeral bead leaves it in plain `open`
+// status for exactly as long as nobody has read it — and open is CategoryActive,
+// which is reclaimable by design. So the longer such a record went unread, the
+// more certainly age GC deleted it, and there is no status the layer could set
+// instead without lying about the record's state. A label is the only handle
+// that survives that, and it must be consulted on every candidate rather than
+// pushed into the search filter, because the cascade expansion below reaches
+// wisps the filter never saw.
 //
 // Named isProtectedWisp rather than isActiveWisp to avoid confusion with
 // (*DoltStore).isActiveWisp in internal/storage/dolt, which is in this same
 // delete path but means only "a row for this ID exists in the wisps table".
-func isProtectedWisp(issue *types.Issue, blockedSet map[string]bool, protectedStatuses map[types.Status]bool) bool {
+func isProtectedWisp(issue *types.Issue, g wispGuard) bool {
 	// The pinned flag is independent of the pinned status; the closed-purge
 	// branch of this same command already honors it (see runWispPurgeClosed).
 	if issue.Pinned {
 		return true
 	}
-	if blockedSet[issue.ID] {
+	if g.blocked[issue.ID] {
 		return true
 	}
-	return protectedStatuses[issue.Status]
+	if g.statuses[issue.Status] {
+		return true
+	}
+	return g.hasProtectedLabel(issue)
 }
 
 func runWispGC(cmd *cobra.Command, args []string) error {
@@ -735,6 +838,7 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	closedMode, _ := cmd.Flags().GetBool("closed")
 	force, _ := cmd.Flags().GetBool("force")
 	excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
+	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
 
 	ageThreshold := time.Hour
 	if ageStr != "" {
@@ -751,7 +855,7 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if usesProxiedServer() {
-		return runWispGCProxiedServer(rootCtx, dryRun, ageThreshold, cleanAll, closedMode, force, excludeTypes)
+		return runWispGCProxiedServer(rootCtx, dryRun, ageThreshold, cleanAll, closedMode, force, excludeTypes, excludeLabels)
 	}
 
 	if store == nil {
@@ -759,10 +863,10 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if closedMode {
-		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes, excludeLabels)
 	}
 
-	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
+	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes, excludeLabels)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
 	}
@@ -821,8 +925,11 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
+func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType, excludeLabels []string) ([]*types.Issue, error) {
 	ephemeralFlag := true
+	// SkipLabels stays unset deliberately: the guard below reads issue.Labels,
+	// and a lite/label-skipping projection would make every wisp look unlabeled
+	// — a silent, total loss of label protection with no error to notice.
 	filter := types.IssueFilter{
 		Ephemeral:    &ephemeralFlag,
 		ExcludeTypes: excludeTypes,
@@ -847,6 +954,13 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		return nil, err
 	}
 
+	protectedLabels, err := protectedWispLabels(ctx, r, excludeLabels)
+	if err != nil {
+		return nil, err
+	}
+
+	guard := wispGuard{blocked: blockedSet, statuses: protectedStatuses, labels: protectedLabels}
+
 	now := time.Now()
 	var abandoned []*types.Issue
 	for _, issue := range issues {
@@ -856,7 +970,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if issue.Status == types.StatusClosed && !cleanAll {
 			continue
 		}
-		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
+		if isProtectedWisp(issue, guard) {
 			continue
 		}
 		if now.Sub(issue.UpdatedAt) > ageThreshold {
@@ -891,7 +1005,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if r.IsInfraTypeCtx(ctx, child.IssueType) {
 					continue
 				}
-				if isProtectedWisp(child, blockedSet, protectedStatuses) {
+				if isProtectedWisp(child, guard) {
 					continue
 				}
 				abandoned = append(abandoned, child)
@@ -901,7 +1015,68 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	return abandoned, cascadeErr
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+// infraTypeReader is the one thing filterClosedPurgeCandidates needs from a
+// store. Narrowing the parameter keeps the filter testable without standing up
+// the whole molReader surface.
+type infraTypeReader interface {
+	IsInfraTypeCtx(ctx context.Context, t types.IssueType) bool
+}
+
+// closedPurgeSkips counts the closed wisps a purge declined to delete, by
+// reason. It is reported rather than merely applied: a guard that silently
+// removes rows is indistinguishable from having had nothing to delete, and the
+// operator needs to know that the purge left something behind and why.
+type closedPurgeSkips struct {
+	pinned  int
+	infra   int
+	labeled int
+}
+
+func (c closedPurgeSkips) report() {
+	if c.pinned > 0 {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", c.pinned)
+	}
+	if c.infra > 0 {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", c.infra)
+	}
+	if c.labeled > 0 {
+		fmt.Printf("Skipping %d wisp(s) carrying a protected label (%s)\n", c.labeled, protectedWispLabelsKey)
+	}
+}
+
+// filterClosedPurgeCandidates removes from a closed-wisp purge everything the
+// purge must not delete. It is shared by the direct and proxied-server paths so
+// the two cannot drift on which protections they honor — they already had two
+// hand-copied versions of the pinned/infra filter.
+//
+// Label protection applies here as well as to the age sweep on purpose: the
+// rule a caller has to remember is "wisp gc never reclaims a wisp carrying a
+// protected label", with no mode in which it does. A record whose whole point
+// is that it outlives the run that produced it is not made disposable by having
+// been closed, and `bd delete` remains available for deleting one on purpose.
+func filterClosedPurgeCandidates(ctx context.Context, r infraTypeReader, issues []*types.Issue, protectedLabels map[string]bool) ([]*types.Issue, closedPurgeSkips) {
+	guard := wispGuard{labels: protectedLabels}
+	var skips closedPurgeSkips
+	filtered := make([]*types.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Pinned {
+			skips.pinned++
+			continue
+		}
+		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
+			skips.infra++
+			continue
+		}
+		if guard.hasProtectedLabel(issue) {
+			skips.labeled++
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered, skips
+}
+
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType, excludeLabels []string) error {
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
 	filter := types.IssueFilter{
@@ -916,28 +1091,14 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		return HandleError("listing closed wisps: %v", err)
 	}
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
+	protectedLabels, err := protectedWispLabels(ctx, store, excludeLabels)
+	if err != nil {
+		return HandleError("%v", err)
 	}
-	closedIssues = filtered
 
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	closedIssues, skips := filterClosedPurgeCandidates(ctx, store, closedIssues, protectedLabels)
+	if !jsonOutput {
+		skips.report()
 	}
 
 	if len(closedIssues) == 0 {
@@ -1015,6 +1176,7 @@ func init() {
 	wispGCCmd.Flags().Bool("closed", false, "Delete all closed wisps (ignores --age threshold)")
 	wispGCCmd.Flags().BoolP("force", "f", false, "Actually delete (default: preview only)")
 	wispGCCmd.Flags().StringSlice("exclude-type", nil, "Exclude wisps of these types from GC (comma-separated, e.g., agent,rig)")
+	wispGCCmd.Flags().StringSlice("exclude-label", nil, "Additionally protect wisps carrying these labels (comma-separated); adds to wisp.protected_labels")
 
 	wispCmd.AddCommand(wispCreateCmd)
 	wispCmd.AddCommand(wispListCmd)
