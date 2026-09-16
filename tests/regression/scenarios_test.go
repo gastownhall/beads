@@ -1063,13 +1063,17 @@ func TestUndeferRoundTrip(t *testing.T) {
 // Notes overwrite vs append semantics
 // ---------------------------------------------------------------------------
 
-// TestNotesOverwriteSemantics verifies that --notes replaces existing notes
-// while --append-notes concatenates. Data loss risk if semantics drift.
+// TestNotesOverwriteSemantics verifies that a --notes write onto an issue with
+// no notes, and an --append-notes concatenation onto one that has notes, both
+// round-trip through export the way the baseline exports them. A --notes write
+// that WOULD discard existing notes is refused now, so that path is covered by
+// cmd/bd's TestEmbeddedUpdate/update_notes_overwrite_refused instead of being
+// compared against a baseline that still applies it.
 func TestNotesOverwriteSemantics(t *testing.T) {
 	compareExports(t, func(w *workspace) {
-		id := w.create("--title", "Notes overwrite test", "--type", "task",
-			"--notes", "Original notes content")
-		w.run("update", id, "--notes", "Completely replaced notes")
+		id := w.create("--title", "Notes overwrite test", "--type", "task")
+		w.run("update", id, "--notes", "First notes content")
+		w.run("update", id, "--append-notes", "Appended notes content")
 		w.run("update", id, "--title", "Notes overwrite test (updated)")
 	})
 }
