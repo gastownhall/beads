@@ -75,17 +75,21 @@ func runKVClearProxiedServer(ctx context.Context, key string) error {
 	return printKVClearResult(key)
 }
 
-func runKVListProxiedServer(ctx context.Context) error {
+func runKVListProxiedServer(ctx context.Context, prefix string) error {
 	if uowProvider == nil {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
 	allConfig, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string]string, error) {
-		return uw.ConfigUseCase().GetAllConfig(ctx)
+		cfg := uw.ConfigUseCase()
+		if pr, ok := cfg.(configPrefixReader); ok && prefix != "" {
+			return pr.GetConfigByPrefix(ctx, kvPrefix+prefix)
+		}
+		return cfg.GetAllConfig(ctx)
 	})
 	if err != nil {
 		return HandleErrorRespectJSON("listing keys: %v", err)
 	}
 
-	return printKVListResult(kvPairsFromConfig(allConfig))
+	return printKVListResult(kvPairsWithPrefix(allConfig, prefix))
 }

@@ -3,10 +3,21 @@ package domain
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// ConfigPrefixReader is the optional fast path for prefix-scoped config
+// reads (`bd kv list --prefix`): only the rows whose key starts with prefix
+// leave the database. It is deliberately NOT part of ConfigSQLRepository or
+// ConfigUseCase — existing implementations and test doubles keep compiling —
+// and callers discover it by type assertion, falling back to GetAllConfig
+// plus in-process filtering when the assertion misses.
+type ConfigPrefixReader interface {
+	GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error)
+}
 
 type ConfigSQLRepository interface {
 	GetMetadata(ctx context.Context, key string) (string, error)
@@ -225,6 +236,30 @@ func (u *configUseCaseImpl) GetAllConfig(ctx context.Context) (map[string]string
 	out, err := u.cfgRepo.GetAllConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("GetAllConfig: %w", err)
+	}
+	return out, nil
+}
+
+// GetConfigByPrefix implements ConfigPrefixReader on the use case, pushing
+// the prefix into SQL when the repository supports it and filtering the
+// GetAllConfig result in-process when it does not (same rows either way).
+func (u *configUseCaseImpl) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	if pr, ok := u.cfgRepo.(ConfigPrefixReader); ok {
+		out, err := pr.GetConfigByPrefix(ctx, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("GetConfigByPrefix: %w", err)
+		}
+		return out, nil
+	}
+	all, err := u.cfgRepo.GetAllConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetConfigByPrefix: %w", err)
+	}
+	out := make(map[string]string)
+	for k, v := range all {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = v
+		}
 	}
 	return out, nil
 }

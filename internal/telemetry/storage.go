@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -556,6 +557,33 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 	v, err := s.inner.GetAllConfig(ctx)
 	s.done(ctx, span, t, err)
 	return v, err
+}
+
+// GetConfigByPrefix forwards the domain.ConfigPrefixReader optional fast
+// path when the wrapped store provides it. When the inner store does not,
+// it falls back to instrumented GetAllConfig filtered in-process, so the
+// wrapper never hides the capability decision from callers asserting on it.
+func (s *InstrumentedStorage) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.config.prefix", prefix)}
+	if pr, ok := s.inner.(interface {
+		GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error)
+	}); ok {
+		ctx, span, t := s.op(ctx, "GetConfigByPrefix", attrs...)
+		v, err := pr.GetConfigByPrefix(ctx, prefix)
+		s.done(ctx, span, t, err, attrs...)
+		return v, err
+	}
+	all, err := s.GetAllConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string)
+	for k, v := range all {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = v
+		}
+	}
+	return out, nil
 }
 
 func (s *InstrumentedStorage) SetLocalMetadata(ctx context.Context, key, value string) error {
