@@ -42,6 +42,35 @@ func TestNewDoltStoreFromConfig_NoMetadata(t *testing.T) {
 	defer store.Close()
 }
 
+// TestEffectiveServerMode is a regression test for GH#6551: newDoltStoreFromConfig
+// and its read-only sibling openNonMutatingStoreFromConfig checked only
+// cfg.IsDoltServerMode(), which does not read dolt.shared-server from
+// config.yaml (deliberately, to avoid a circular import with doltserver).
+// A workspace with config.yaml but no metadata.json — the common shape of a
+// linked git worktree, since metadata.json is commonly gitignored as
+// machine-local state — left configfile.Load returning (nil, nil), so
+// BEADS_DOLT_SHARED_SERVER (or dolt.shared-server) was silently ignored on
+// these two paths even though cmd/bd/main.go's own resolution already
+// compensates for exactly this gap (GH#3817). effectiveServerMode centralizes
+// that compensation so the two paths cannot drift from main.go's again.
+func TestEffectiveServerMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	if effectiveServerMode(nil) {
+		t.Error("effectiveServerMode(nil) = true with no shared-server signal, want false")
+	}
+	if effectiveServerMode(&configfile.Config{}) {
+		t.Error("effectiveServerMode(cfg not naming server) = true with no shared-server signal, want false")
+	}
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	if !effectiveServerMode(nil) {
+		t.Error("effectiveServerMode(nil) = false under BEADS_DOLT_SHARED_SERVER=1, want true (GH#6551)")
+	}
+	if !effectiveServerMode(&configfile.Config{}) {
+		t.Error("effectiveServerMode(cfg not naming server) = false under BEADS_DOLT_SHARED_SERVER=1, want true (GH#6551)")
+	}
+}
+
 // TestEmbeddedOpen_EmptyDatabaseRejected verifies that embeddeddolt.Open fails
 // with a clear error when called with an empty database name, rather than
 // deferring to a confusing "no database selected" SQL error.
