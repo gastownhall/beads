@@ -133,6 +133,25 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 	return lock, nil
 }
 
+// effectiveServerMode reports whether cfg selects Dolt server-mode storage,
+// compensating for the same gap main.go's own resolution already
+// compensates for (see the comment on doltCfg.ServerMode in main.go):
+// configfile.IsDoltServerMode() deliberately does not read
+// dolt.shared-server from config.yaml, to avoid a circular import with the
+// doltserver package. A workspace (typically a linked git worktree) that
+// has config.yaml but no metadata.json otherwise falls through to the
+// embedded backend and silently creates a phantom database — GH#6551, the
+// same shape newDoltStoreFromConfig's caller in main.go was already fixed
+// for under GH#3817. Both newDoltStoreFromConfig and its read-only sibling
+// openNonMutatingStoreFromConfig had this gap independently; centralizing
+// the check here keeps them from drifting again.
+func effectiveServerMode(cfg *configfile.Config) bool {
+	if cfg != nil && cfg.IsDoltServerMode() {
+		return true
+	}
+	return doltserver.IsSharedServerMode()
+}
+
 // newDoltStoreFromConfig creates a storage backend from the beads directory's
 // persisted metadata.json configuration. Uses embedded Dolt by default;
 // connects to dolt sql-server when dolt_mode is "server".
@@ -170,7 +189,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 		// 		ProxiedServer: true,
 		// 	})
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(cfg) {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	database := configfile.DefaultDoltDatabase
