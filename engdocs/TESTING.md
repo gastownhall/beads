@@ -80,6 +80,8 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+The five-control Bead graph hygiene spike skips by default; set `BEADS_TEST_BEADGRAPH_HYGIENE=1` to run it explicitly with bash ≥ 4 and Git.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.

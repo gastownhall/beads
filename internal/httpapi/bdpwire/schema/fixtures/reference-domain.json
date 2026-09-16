@@ -1,0 +1,303 @@
+{
+  "beadTypes": [
+    {
+      "id": "https://work.example/types/tracked-item",
+      "name": "Tracked Item",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/work-item",
+      "name": "Work Item",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/task",
+      "name": "Task",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/bug",
+      "name": "Bug",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/feature",
+      "name": "Feature",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/chore",
+      "name": "Chore",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/epic",
+      "name": "Epic",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/decision",
+      "name": "Decision",
+      "describes": "bead"
+    }
+  ],
+  "linkTypes": [
+    {
+      "id": "https://work.example/types/relationship",
+      "name": "Relationship",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/dependency",
+      "name": "Dependency",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/blocks",
+      "name": "Blocks",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/relates",
+      "name": "Relates",
+      "describes": "link"
+    },
+    {
+      "id": "https://work.example/types/cites",
+      "name": "Cites",
+      "describes": "link"
+    }
+  ],
+  "propertiesSchemas": {
+    "https://work.example/types/tracked-item": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/work-item": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/task": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/bug": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/feature": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/chore": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/epic": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/decision": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/relationship": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/dependency": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/blocks": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/relates": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "https://work.example/types/cites": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "externalEndpointLinks": [
+    {
+      "localId": "links/external-target",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "beads/demo-f",
+      "target": {
+        "uri": "external:beads:mol-run-assignee",
+        "revision": "  Cited-9F2c — α/β (draft) Å\t"
+      },
+      "properties": {
+        "label": "opaque authored label",
+        "source": {
+          "ownedLinks": {
+            "*": ["opaque authored value"]
+          }
+        }
+      },
+      "attribution": {
+        "principal": "agent:reference-wildcard",
+        "status": "claimed"
+      }
+    },
+    {
+      "localId": "links/external-source",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "external:beads:mol-run-assignee",
+      "target": "beads/demo-f",
+      "properties": {}
+    },
+    {
+      "localId": "links/pinned-local",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "urn:external:pin-witness",
+      "target": {
+        "uri": "beads/demo-f",
+        "revision": "pin-a-r1 (as-written)"
+      },
+      "properties": {}
+    },
+    {
+      "localId": "links/ZZ-collation",
+      "type": "https://work.example/types/blocks",
+      "revision": "1",
+      "source": "urn:external:collation-witness",
+      "target": "beads/demo-f",
+      "properties": {}
+    }
+  ],
+  "typeDescriptors": [
+    {
+      "id": "https://work.example/types/tracked-item",
+      "name": "Tracked Item",
+      "describes": "bead",
+      "conformsTo": []
+    },
+    {
+      "id": "https://work.example/types/work-item",
+      "name": "Work Item",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/tracked-item"]
+    },
+    {
+      "id": "https://work.example/types/task",
+      "name": "Task",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/bug",
+      "name": "Bug",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/feature",
+      "name": "Feature",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"],
+      "ownsOutgoing": {
+        "*": {
+          "max": 8
+        }
+      }
+    },
+    {
+      "id": "https://work.example/types/chore",
+      "name": "Chore",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/epic",
+      "name": "Epic",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/decision",
+      "name": "Decision",
+      "describes": "bead",
+      "conformsTo": [],
+      "ownsOutgoing": {
+        "*": {
+          "max": 8
+        },
+        "https://work.example/types/cites": {
+          "label": "cites",
+          "max": 8
+        },
+        "https://work.example/types/relates": {
+          "max": 1
+        }
+      }
+    },
+    {
+      "id": "https://work.example/types/relationship",
+      "name": "Relationship",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/dependency",
+      "name": "Dependency",
+      "describes": "link",
+      "conformsTo": ["https://work.example/types/relationship"],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/blocks",
+      "name": "Blocks",
+      "describes": "link",
+      "conformsTo": ["https://work.example/types/dependency"],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/relates",
+      "name": "Relates",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/cites",
+      "name": "Cites",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    }
+  ]
+}
