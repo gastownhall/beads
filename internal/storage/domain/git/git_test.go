@@ -1,7 +1,9 @@
 package git
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -57,6 +59,61 @@ func (s *testSuite) TestConfig_RoundTrip() {
 	s.Require().NoError(err)
 	s.True(found)
 	s.Equal("maintainer", value)
+}
+
+func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
+	s.gitInit()
+	configPath := filepath.Join(s.tmpDir, ".git", "config")
+	original, err := os.ReadFile(configPath)
+	s.Require().NoError(err)
+	for _, tc := range []struct {
+		name, key string
+		exitCode  int
+	}{
+		{"malformed_config", "beads.role", 128},
+		{"invalid_key", "invalid", 1},
+		{"invalid_routing_boolean", "beads.role", 128},
+	} {
+		s.Run(tc.name, func() {
+			switch tc.name {
+			case "malformed_config":
+				s.Require().NoError(os.WriteFile(configPath, []byte("[broken\n"), 0600))
+				t := s.T()
+				t.Cleanup(func() {
+					if err := os.WriteFile(configPath, original, 0600); err != nil {
+						t.Errorf("restore repository config: %v", err)
+					}
+				})
+			case "invalid_routing_boolean":
+				s.T().Setenv("GIT_CONFIG_NOSYSTEM", "not-a-boolean")
+			}
+			value, found, err := s.repo.GetConfig(s.Ctx(), tc.key)
+			s.Require().Error(err)
+			s.False(found)
+			s.Empty(value)
+			var exitErr *exec.ExitError
+			s.Require().ErrorAs(err, &exitErr)
+			s.Equal(tc.exitCode, exitErr.ExitCode())
+			diagnostic := strings.TrimSpace(string(exitErr.Stderr))
+			s.Require().NotEmpty(diagnostic)
+			s.Contains(err.Error(), diagnostic)
+			if tc.name != "invalid_key" {
+				_, _, roleErr := domain.NewGitUseCase(s.tmpDir, s.repo).BeadsRole(s.Ctx())
+				s.Require().Error(roleErr)
+				s.ErrorAs(roleErr, &exitErr)
+			}
+		})
+	}
+}
+
+// Regression guard: pre-canceled contexts already propagated before the config fix.
+func (s *testSuite) TestConfig_CancellationIsNotMissing() {
+	ctx, cancel := context.WithCancel(s.Ctx())
+	cancel()
+	value, found, err := s.repo.GetConfig(ctx, "beads.role")
+	s.ErrorIs(err, context.Canceled)
+	s.False(found)
+	s.Empty(value)
 }
 
 func (s *testSuite) TestConfig_SetEmptyKeyErrors() {
