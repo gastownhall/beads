@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -20,6 +21,18 @@ func (t *pullTestTransaction) UpdateIssue(_ context.Context, _ string, updates m
 	if title, ok := updates["title"].(string); ok {
 		t.issue.Title = title
 	}
+	if description, ok := updates["description"].(string); ok {
+		t.issue.Description = description
+	}
+	if priority, ok := updates["priority"].(int); ok {
+		t.issue.Priority = priority
+	}
+	if issueType, ok := updates["issue_type"].(string); ok {
+		t.issue.IssueType = types.IssueType(issueType)
+	}
+	if assignee, ok := updates["assignee"].(string); ok {
+		t.issue.Assignee = assignee
+	}
 	if status, ok := updates["status"]; ok {
 		switch value := status.(type) {
 		case types.Status:
@@ -29,6 +42,15 @@ func (t *pullTestTransaction) UpdateIssue(_ context.Context, _ string, updates m
 		}
 	}
 	return nil
+}
+
+type localFieldMergingMapper struct {
+	*mockMapper
+	merge func(local, remote *types.Issue)
+}
+
+func (m *localFieldMergingMapper) MergeLocalFields(local, remote *types.Issue) {
+	m.merge(local, remote)
 }
 
 func (t *pullTestTransaction) ReopenIssueWithResult(_ context.Context, _ string, _ string, _ string) (bool, error) {
@@ -99,6 +121,15 @@ func (s *pullFailureStore) GetIssueByExternalRef(_ context.Context, ref string) 
 		}
 	}
 	return nil, nil
+}
+
+func (s *pullFailureStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	for _, issue := range s.issues {
+		if issue != nil && issue.ID == id {
+			return issue, nil
+		}
+	}
+	return nil, storage.ErrNotFound
 }
 
 func TestEngineSyncFailedPullIsNotPushed(t *testing.T) {
@@ -181,6 +212,112 @@ func TestEngineSyncFailedPullIsNotPushed(t *testing.T) {
 	}
 }
 
+func TestEnginePullPreservesLocalControlState(t *testing.T) {
+	tests := []struct {
+		name          string
+		localLabels   []string
+		localStatus   types.Status
+		localAssignee string
+		wantLabels    []string
+	}{
+		{
+			name:          "agent plan reservation",
+			localLabels:   []string{"agent-plan", "planner-intake", "old-product"},
+			localStatus:   types.StatusInProgress,
+			localAssignee: "planner@example.com",
+			wantLabels:    []string{"agent-plan", "planner-intake", "new-product"},
+		},
+		{
+			name:          "human gate",
+			localLabels:   []string{"human"},
+			localStatus:   types.StatusBlocked,
+			localAssignee: "operator@example.com",
+			wantLabels:    []string{"human", "new-product"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			extRef := "https://linear.app/team/issue/TEAM-3389"
+			local := &types.Issue{
+				ID:          "bd-linear-control",
+				Title:       "Local title",
+				Description: "Local description",
+				Status:      tt.localStatus,
+				IssueType:   types.TypeTask,
+				Priority:    2,
+				Assignee:    tt.localAssignee,
+				Labels:      append([]string(nil), tt.localLabels...),
+				ExternalRef: &extRef,
+				UpdatedAt:   time.Now().UTC().Add(-time.Hour),
+			}
+			store := &pullFailureStore{
+				pureTestStore: newPureTestStore(local),
+				tx:            &pullTestTransaction{issue: local},
+			}
+			mock := newMockTracker("linear")
+			mock.issues = []TrackerIssue{{
+				ID:          "TEAM-3389",
+				Identifier:  "TEAM-3389",
+				URL:         extRef,
+				Title:       "Linear title",
+				Description: "Linear description",
+				Priority:    1,
+				State:       types.StatusClosed,
+				Assignee:    "linear@example.com",
+				Labels:      []string{"new-product"},
+				UpdatedAt:   time.Now().UTC(),
+			}}
+			mock.fieldMapper = &localFieldMergingMapper{
+				mockMapper: &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+					return &IssueConversion{Issue: &types.Issue{
+						ID:          local.ID,
+						Title:       ti.Title,
+						Description: ti.Description,
+						Priority:    ti.Priority,
+						Status:      ti.State.(types.Status),
+						IssueType:   types.TypeTask,
+						Assignee:    ti.Assignee,
+						Labels:      append([]string(nil), ti.Labels...),
+					}}
+				},
+				},
+				merge: func(local, remote *types.Issue) {
+					for _, label := range local.Labels {
+						if label == "agent-plan" || label == "planner-intake" || label == "human" {
+							remote.Labels = append(remote.Labels, label)
+						}
+					}
+					remote.Status = local.Status
+					remote.Assignee = local.Assignee
+				},
+			}
+
+			result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Updated != 1 || result.PullStats.Errors != 0 {
+				t.Fatalf("PullStats = %+v, want one successful update", result.PullStats)
+			}
+			if local.Title != "Linear title" || local.Description != "Linear description" || local.Priority != 1 {
+				t.Fatalf("product fields did not sync: %+v", local)
+			}
+			if local.Status != tt.localStatus || local.Assignee != tt.localAssignee {
+				t.Fatalf("local controls changed: status=%q assignee=%q", local.Status, local.Assignee)
+			}
+			gotLabels := append([]string(nil), local.Labels...)
+			slices.Sort(gotLabels)
+			wantLabels := append([]string(nil), tt.wantLabels...)
+			slices.Sort(wantLabels)
+			if !slices.Equal(gotLabels, wantLabels) {
+				t.Fatalf("labels = %v, want %v", gotLabels, wantLabels)
+			}
+		})
+	}
+}
+
 func TestReimportIssuePreservesLabels(t *testing.T) {
 	ctx := context.Background()
 	local := &types.Issue{
@@ -214,5 +351,58 @@ func TestReimportIssuePreservesLabels(t *testing.T) {
 	}
 	if len(local.Labels) != 1 || local.Labels[0] != "keep-local-label" {
 		t.Fatalf("reimport changed local labels: %v", local.Labels)
+	}
+}
+
+func TestReimportIssuePreservesLocalControlState(t *testing.T) {
+	ctx := context.Background()
+	local := &types.Issue{
+		ID:          "reimport-control-state",
+		Title:       "local",
+		Description: "local description",
+		Status:      types.StatusInProgress,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		Assignee:    "planner@example.com",
+		Labels:      []string{"agent-plan", "planner-intake", "human"},
+	}
+	store := &pullFailureStore{
+		pureTestStore: newPureTestStore(local),
+		tx:            &pullTestTransaction{issue: local},
+	}
+	mock := newMockTracker("linear")
+	mock.issues = []TrackerIssue{{ID: "TEAM-3389", Identifier: "TEAM-3389", Title: "remote"}}
+	mock.fieldMapper = &localFieldMergingMapper{
+		mockMapper: &mockMapper{issueToBeads: func(*TrackerIssue) *IssueConversion {
+			return &IssueConversion{Issue: &types.Issue{
+				Title:       "remote",
+				Description: "remote description",
+				Status:      types.StatusClosed,
+				Priority:    1,
+				IssueType:   types.TypeTask,
+				Assignee:    "linear@example.com",
+				Labels:      []string{"remote-product"},
+			}}
+		}},
+		merge: func(local, remote *types.Issue) {
+			remote.Status = local.Status
+			remote.Assignee = local.Assignee
+		},
+	}
+
+	engine := NewEngine(mock, store, "sync")
+	engine.reimportIssue(ctx, Conflict{IssueID: local.ID, ExternalIdentifier: "TEAM-3389"})
+
+	if store.commits != 1 {
+		t.Fatalf("reimport transaction commits = %d, want 1", store.commits)
+	}
+	if local.Title != "remote" || local.Description != "remote description" || local.Priority != 1 {
+		t.Fatalf("product fields did not sync: %+v", local)
+	}
+	if local.Status != types.StatusInProgress || local.Assignee != "planner@example.com" {
+		t.Fatalf("reimport changed local controls: status=%q assignee=%q", local.Status, local.Assignee)
+	}
+	if !slices.Equal(local.Labels, []string{"agent-plan", "planner-intake", "human"}) {
+		t.Fatalf("reimport changed control labels: %v", local.Labels)
 	}
 }
