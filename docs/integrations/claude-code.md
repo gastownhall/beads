@@ -15,6 +15,7 @@ bd setup claude
 
 This installs:
 - **SessionStart hook** - Runs `bd prime --hook-json` when a session starts. SessionStart also fires after context compaction, so the same hook refreshes context automatically.
+- **UserPromptSubmit hook** - Runs `bd claude-hook UserPromptSubmit` so each prompt is recorded as a secret-free steering receipt on the owning Bead (`payload_sha256`, no raw prompt).
 - **CLAUDE.md pointer** - A minimal beads section in your project's `CLAUDE.md` (skipped if `CLAUDE.md` is a symlink).
 
 By default the hook is written to the project's `.claude/settings.json`. Variants:
@@ -39,6 +40,14 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
         "matcher": "",
         "hooks": [
           { "type": "command", "command": "bd prime --hook-json" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "bd claude-hook UserPromptSubmit" }
         ]
       }
     ]

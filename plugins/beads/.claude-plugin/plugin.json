@@ -39,6 +39,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bd claude-hook UserPromptSubmit"
+          }
+        ]
+      }
     ]
   }
 }

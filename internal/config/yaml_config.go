@@ -63,6 +63,10 @@ var YamlOnlyKeys = map[string]bool{
 	// Create command settings
 	"create.require-description": true,
 
+	// Owner-steering close gate (read by bd close after store open; yaml so
+	// projects can opt in without a DB round-trip at config-set time).
+	"steering.require_reconciliation_on_close": true,
+
 	// Prime memory-injection caps (read at session start, possibly before
 	// the database is reachable, so they must live in yaml)
 	"prime.max-memories":     true,

@@ -1146,6 +1146,7 @@ var rootCmd = &cobra.Command{
 			"completion",
 			"context", // reads config files directly, does not need DB open
 			"codex-hook",
+			"claude-hook",
 			"cursor-hook", // shells out to `bd prime`; never opens the store itself
 			// "doctor" opts out via skipStoreAnnotation on its Command literal.
 			"dolt", // bare "bd dolt" shows help only; subcommands handled below

@@ -23,7 +23,7 @@ const (
 // package consumes it via CursorManagedHookEventNames / CursorManagedHookEvents,
 // so the installer and diagnostics can't drift. Order matters for user-facing
 // messages (e.g. bd doctor hook completeness).
-var cursorManagedHookEvents = []string{"sessionStart", "preCompact", "postToolUse"}
+var cursorManagedHookEvents = []string{"sessionStart", "preCompact", "postToolUse", "beforeSubmitPrompt"}
 
 // cursorManagedHooks maps each managed Cursor lifecycle event to the command
 // that handles it (the hidden `bd cursor-hook <event>` command), so `bd` must be
@@ -140,7 +140,7 @@ func InstallCursor(global bool) error {
 		fmt.Printf("  Rules: %s\n", cursorRulesPath)
 	}
 	fmt.Printf("  Skill: %s\n", agentSkillPath(skillEnv.projectDir))
-	fmt.Printf("  Hooks: %s (sessionStart, preCompact, postToolUse)\n", hooksPath)
+	fmt.Printf("  Hooks: %s (%s)\n", hooksPath, strings.Join(cursorManagedHookEvents, ", "))
 	if global {
 		fmt.Println("\nGlobal hooks apply to every project. Cursor has no reliable file-based")
 		fmt.Println("global rules location, so add global rules via Cursor Settings → Rules")

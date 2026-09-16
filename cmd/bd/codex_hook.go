@@ -35,6 +35,7 @@ type codexHookInput struct {
 	HookEventName  string `json:"hook_event_name"`
 	Model          string `json:"model"`
 	Trigger        string `json:"trigger"`
+	Prompt         string `json:"prompt"`
 }
 
 type codexHookResponse struct {
@@ -82,7 +83,7 @@ func runCodexHook(ctx context.Context, event string, stdin io.Reader, stdout io.
 	case codexHookPostCompact:
 		return codexHookMarkNeedsRefresh(input)
 	case codexHookUserPromptSubmit:
-		return codexHookMaybeRefresh(ctx, input, stdout)
+		return codexHookHandleUserPromptSubmit(ctx, input, stdout)
 	default:
 		return fmt.Errorf("unsupported Codex hook event %q", event)
 	}
@@ -105,6 +106,15 @@ func codexHookPreCompactCheck(ctx context.Context, stdout io.Writer) error {
 
 func codexHookMarkNeedsRefresh(input codexHookInput) error {
 	return writeAgentHookMarker(codexHookRefreshMarkerPath(input))
+}
+
+func codexHookHandleUserPromptSubmit(ctx context.Context, input codexHookInput, stdout io.Writer) error {
+	_ = recordSteeringOnOwningBead(ctx, steeringReceipt{
+		Provider: "codex",
+		Event:    codexHookUserPromptSubmit,
+		ThreadID: input.SessionID,
+	}, input.Prompt)
+	return codexHookMaybeRefresh(ctx, input, stdout)
 }
 
 func codexHookMaybeRefresh(ctx context.Context, input codexHookInput, stdout io.Writer) error {

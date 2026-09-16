@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -47,10 +48,14 @@ type closeDirectPlan struct {
 // by hand. Keeping a copy here would be a second implementation of a rule the
 // role already states, and a read-then-write window besides — one that made
 // `bd close <child> <parent>` depend on argument order.
-func closeDirectPreflight(results []*RoutedResult, resolvedIDs, reasons []string, force bool) closeDirectPlan {
+func closeDirectPreflight(ctx context.Context, results []*RoutedResult, resolvedIDs, reasons []string, force bool) closeDirectPlan {
 	plan := closeDirectPlan{refusals: make([]string, len(resolvedIDs))}
 	for i, id := range resolvedIDs {
 		if refusal := closeDirectCheckOne(id, results[i].Issue, force); refusal != "" {
+			plan.refusals[i] = refusal
+			continue
+		}
+		if refusal := closeDirectSteeringCheck(ctx, results[i].Store, id, force); refusal != "" {
 			plan.refusals[i] = refusal
 			continue
 		}
@@ -93,6 +98,23 @@ func closeDirectCheckOne(id string, issue *types.Issue, force bool) string {
 		}
 	}
 
+	return ""
+}
+
+func closeDirectSteeringCheck(ctx context.Context, st storage.DoltStorage, id string, force bool) string {
+	if force || !config.GetBool(steeringRequireReconciliation) {
+		return ""
+	}
+	if st == nil {
+		return ""
+	}
+	comments, err := st.GetIssueComments(ctx, id)
+	if err != nil {
+		return fmt.Sprintf("cannot close %s: steering reconciliation check: %v", id, err)
+	}
+	if msg := refuseCloseForUnreconciledSteering(false, true, steeringCommentTexts(comments)); msg != "" {
+		return fmt.Sprintf("cannot close %s: %s", id, msg)
+	}
 	return ""
 }
 

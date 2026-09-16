@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -245,7 +246,7 @@ func closeProxiedRunPreflight(ctx context.Context, args, reasons []string, in cl
 // closeProxiedCheckOne returns one id's refusal, or "" and the resolved
 // pre-close issue.
 func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in closeProxiedInput) (string, *types.Issue) {
-	current, _, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+	current, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
 	if errors.Is(err, storage.ErrNotFound) {
 		return fmt.Sprintf("Issue %s not found", id), nil
 	}
@@ -275,6 +276,15 @@ func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in 
 	if !in.force {
 		if err := checkGateSatisfaction(current); err != nil {
 			return fmt.Sprintf("cannot close %s: %s", id, err), nil
+		}
+		if config.GetBool(steeringRequireReconciliation) {
+			details, err := workapi.BuildIssueDetails(ctx, workapi.NewUOWDetailSource(uw), current, isWisp, workapi.DetailOptions{IncludeComments: true})
+			if err != nil {
+				return fmt.Sprintf("cannot close %s: steering reconciliation check: %v", id, err), nil
+			}
+			if msg := refuseCloseForUnreconciledSteering(false, true, steeringCommentTexts(details.Comments)); msg != "" {
+				return fmt.Sprintf("cannot close %s: %s", id, msg), nil
+			}
 		}
 	}
 

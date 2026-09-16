@@ -16,9 +16,10 @@ import (
 // .cursor/hooks.json and the "hook_event_name" field Cursor sends on stdin.
 // See https://cursor.com/docs/hooks for the full lifecycle.
 const (
-	cursorHookSessionStart = "sessionStart"
-	cursorHookPreCompact   = "preCompact"
-	cursorHookPostToolUse  = "postToolUse"
+	cursorHookSessionStart       = "sessionStart"
+	cursorHookPreCompact         = "preCompact"
+	cursorHookPostToolUse        = "postToolUse"
+	cursorHookBeforeSubmitPrompt = "beforeSubmitPrompt"
 )
 
 // cursorHookMarkerDirOverride lets tests redirect the refresh-marker location.
@@ -42,6 +43,7 @@ type cursorHookInput struct {
 	CWD            string   `json:"cwd"`
 	Trigger        string   `json:"trigger"`
 	ToolName       string   `json:"tool_name"`
+	Prompt         string   `json:"prompt"`
 }
 
 // cursorHookResponse is the JSON we write to stdout. All fields are optional;
@@ -88,9 +90,24 @@ func runCursorHook(ctx context.Context, event string, stdin io.Reader, stdout io
 		return cursorHookHandlePreCompact(input, stdout)
 	case cursorHookPostToolUse:
 		return cursorHookHandlePostToolUse(ctx, input, stdout)
+	case cursorHookBeforeSubmitPrompt:
+		return cursorHookHandleBeforeSubmitPrompt(ctx, input, stdout)
 	default:
 		return fmt.Errorf("unsupported Cursor hook event %q", event)
 	}
+}
+
+// cursorHookHandleBeforeSubmitPrompt records a secret-free steering receipt
+// on the owning Bead, then allows the prompt. Cursor docs: continue + optional
+// user_message; the prompt text itself is never written to Beads.
+func cursorHookHandleBeforeSubmitPrompt(ctx context.Context, input cursorHookInput, stdout io.Writer) error {
+	cont := true
+	_ = recordSteeringOnOwningBead(ctx, steeringReceipt{
+		Provider: "cursor",
+		Event:    cursorHookBeforeSubmitPrompt,
+		ThreadID: firstNonEmpty(input.ConversationID, input.SessionID),
+	}, input.Prompt)
+	return json.NewEncoder(stdout).Encode(cursorHookResponse{Continue: &cont})
 }
 
 // cursorHookHandleSessionStart injects full `bd prime` output into the new
