@@ -420,7 +420,7 @@ func (s *DoltStore) deleteWispBatch(ctx context.Context, ids []string) (int, err
 }
 
 // deleteWispBatchTx deletes one batch of wisps inside its own transaction.
-// Keeping each transaction to ≤200 wisps (6 DELETE statements) ensures it
+// Keeping each transaction to ≤200 wisps (8 DELETE statements) ensures it
 // completes well within Dolt's 10 s write timeout.
 func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
