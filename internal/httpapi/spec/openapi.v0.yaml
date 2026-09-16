@@ -6302,6 +6302,12 @@ components:
         defer_until:
           type: string
           format: date-time
+        due_missed:
+          type: integer
+          description: >-
+            How many times `due_at` has arrived with the work still open. The
+            due sweep is the only writer; a caller cannot set it. At three
+            misses the bead's priority is raised once.
         external_ref:
           type: string
         source_system:
@@ -6452,6 +6458,7 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        due_missed: { type: integer }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }
@@ -6541,6 +6548,7 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        due_missed: { type: integer }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }
@@ -6710,6 +6718,7 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        due_missed: { type: integer }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }
@@ -6796,6 +6805,7 @@ components:
         lease_granted_node: { type: string }
         due_at: { type: string, format: date-time }
         defer_until: { type: string, format: date-time }
+        due_missed: { type: integer }
         external_ref: { type: string }
         source_system: { type: string }
         metadata: { type: object, additionalProperties: true }

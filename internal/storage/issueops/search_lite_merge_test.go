@@ -24,7 +24,7 @@ func liteColumnNames() []string {
 		"await_type", "await_id", "timeout_ns",
 		"mol_type",
 		"event_kind", "actor", "target",
-		"due_at", "defer_until",
+		"due_at", "defer_until", "due_missed",
 		"work_type", "source_system", "metadata", "row_lock", "storage_class",
 		"lease_expires_at", "heartbeat_at", "granted_node",
 	}
@@ -44,7 +44,7 @@ func liteMergeRow(id string, createdAt time.Time) []driver.Value {
 		nil, nil, nil, // await_type, await_id, timeout_ns
 		nil,           // mol_type
 		nil, nil, nil, // event_kind, actor, target
-		nil, nil, // due_at, defer_until
+		nil, nil, 0, // due_at, defer_until, due_missed
 		nil, nil, nil, 0, nil, // work_type, source_system, metadata, row_lock, storage_class
 		nil, nil, nil, // lease_expires_at, heartbeat_at, granted_node
 	}
