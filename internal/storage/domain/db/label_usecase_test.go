@@ -1,10 +1,21 @@
 package db
 
 import (
+	"errors"
+
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *testSuite) TestLabelUseCase() {
+	s.Run("RenameLabel", func() {
+		s.Run("EmptyOldLabelReturnsError", s.lucRenameLabelEmptyOld)
+		s.Run("EmptyNewLabelReturnsError", s.lucRenameLabelEmptyNew)
+		s.Run("SameNameRefused", s.lucRenameLabelSameName)
+		s.Run("EmitsOneRenamedEventPerIssue", s.lucRenameLabelEmitsRenamedEvent)
+		s.Run("MergesOnCollisionAcrossBothPlanes", s.lucRenameLabelMergesAcrossPlanes)
+	})
 	s.Run("RemoveLabel", func() {
 		s.Run("EmptyIDReturnsError", s.lucRemoveLabelEmptyID)
 		s.Run("EmptyLabelReturnsError", s.lucRemoveLabelEmptyLabel)
@@ -209,4 +220,109 @@ func (s *testSuite) lucSetWispLabelsDiffs() {
 	wispLabels, err := uc.GetWispLabels(s.Ctx(), "bd-lwc-swl")
 	s.Require().NoError(err)
 	s.Equal([]string{"add", "keep"}, wispLabels)
+}
+
+func (s *testSuite) lucRenameLabelEmptyOld() {
+	_, _, _, err := s.labelUseCase().RenameLabel(s.Ctx(), "", "new", "tester")
+	s.Require().Error(err)
+}
+
+func (s *testSuite) lucRenameLabelEmptyNew() {
+	_, _, _, err := s.labelUseCase().RenameLabel(s.Ctx(), "old", "", "tester")
+	s.Require().Error(err)
+}
+
+// lucRenameLabelSameName confirms the proxied-server route inherits the
+// storage layer's ErrRenameLabelSameName refusal (both routes reach
+// issueops.RenameLabelInTx) rather than wiping the label the way the merge
+// branch would if a self-rename fell through unrefused.
+func (s *testSuite) lucRenameLabelSameName() {
+	s.seedIssueRow("bd-luc-rn-same")
+	uc := s.labelUseCase()
+	s.Require().NoError(uc.AddLabel(s.Ctx(), "bd-luc-rn-same", "dup", "tester"))
+
+	_, _, _, err := uc.RenameLabel(s.Ctx(), "dup", "dup", "tester")
+	s.Require().Error(err)
+	s.Require().True(errors.Is(err, issueops.ErrRenameLabelSameName), "want ErrRenameLabelSameName, got %v", err)
+
+	labels, err := uc.GetLabels(s.Ctx(), "bd-luc-rn-same")
+	s.Require().NoError(err)
+	s.Equal([]string{"dup"}, labels, "self-rename must write nothing")
+}
+
+// lucRenameLabelEmitsRenamedEvent is the regression test for the divergence
+// finding: runLabelRenameProxiedServer used to fan a rename out into a
+// per-issue AddLabel + RemoveLabel pair, journaling label_added/label_removed
+// instead of one label_renamed. Assert both halves of the fix: the renamed
+// event exists with the right old/new values, and the two-event shape's rows
+// do not appear beyond the one label_added the initial seed itself produced.
+func (s *testSuite) lucRenameLabelEmitsRenamedEvent() {
+	s.seedIssueRow("bd-luc-rn-evt")
+	uc := s.labelUseCase()
+	s.Require().NoError(uc.AddLabel(s.Ctx(), "bd-luc-rn-evt", "old-name", "tester"))
+
+	renamed, merged, ids, err := uc.RenameLabel(s.Ctx(), "old-name", "new-name", "tester")
+	s.Require().NoError(err)
+	s.Equal(1, renamed)
+	s.Equal(0, merged)
+	s.Equal([]string{"bd-luc-rn-evt"}, ids)
+
+	labels, err := uc.GetLabels(s.Ctx(), "bd-luc-rn-evt")
+	s.Require().NoError(err)
+	s.Equal([]string{"new-name"}, labels)
+
+	var renamedCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND old_value = ? AND new_value = ?",
+		"bd-luc-rn-evt", string(types.EventLabelRenamed), "old-name", "new-name",
+	).Scan(&renamedCount))
+	s.Equal(1, renamedCount, "expected exactly one label_renamed event")
+
+	var addedCount, removedCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-luc-rn-evt", string(types.EventLabelAdded),
+	).Scan(&addedCount))
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-luc-rn-evt", string(types.EventLabelRemoved),
+	).Scan(&removedCount))
+	s.Equal(1, addedCount, "the only label_added row must be the initial seed's, not a second one from a rename-as-add")
+	s.Equal(0, removedCount, "rename must not journal label_removed (that was the pre-fix proxied shape)")
+}
+
+// lucRenameLabelMergesAcrossPlanes exercises the merge-on-collision path
+// across BOTH label planes in one rename, matching the direct route's
+// TestRenameLabel_Merge/TestRenameLabel_WispSwept coverage in
+// internal/storage/dolt/label_rename_test.go.
+func (s *testSuite) lucRenameLabelMergesAcrossPlanes() {
+	uc := s.labelUseCase()
+
+	s.seedIssueRow("bd-luc-rn-only-old")
+	s.Require().NoError(uc.AddLabel(s.Ctx(), "bd-luc-rn-only-old", "wip", "tester"))
+
+	s.seedIssueRow("bd-luc-rn-both")
+	s.Require().NoError(uc.AddLabel(s.Ctx(), "bd-luc-rn-both", "wip", "tester"))
+	s.Require().NoError(uc.AddLabel(s.Ctx(), "bd-luc-rn-both", "in-progress", "tester"))
+
+	s.seedWispRow("bd-luc-rn-wisp")
+	s.Require().NoError(uc.AddWispLabel(s.Ctx(), "bd-luc-rn-wisp", "wip", "tester"))
+
+	renamed, merged, ids, err := uc.RenameLabel(s.Ctx(), "wip", "in-progress", "tester")
+	s.Require().NoError(err)
+	s.Equal(3, renamed)
+	s.Equal(1, merged)
+	s.ElementsMatch([]string{"bd-luc-rn-only-old", "bd-luc-rn-both", "bd-luc-rn-wisp"}, ids)
+
+	labels, err := uc.GetLabels(s.Ctx(), "bd-luc-rn-only-old")
+	s.Require().NoError(err)
+	s.Equal([]string{"in-progress"}, labels)
+
+	labels, err = uc.GetLabels(s.Ctx(), "bd-luc-rn-both")
+	s.Require().NoError(err)
+	s.Equal([]string{"in-progress"}, labels, "no duplicate, no leftover wip")
+
+	wispLabels, err := uc.GetWispLabels(s.Ctx(), "bd-luc-rn-wisp")
+	s.Require().NoError(err)
+	s.Equal([]string{"in-progress"}, wispLabels)
 }

@@ -462,6 +462,249 @@ var labelPropagateCmd = &cobra.Command{
 	},
 }
 
+// labelRenamePreviewLimit caps how many issues a `--dry-run` blast-radius
+// preview names before collapsing the rest into a count.
+const labelRenamePreviewLimit = 10
+
+var labelRenameCmd = &cobra.Command{
+	Use:   "rename <old-label> <new-label>",
+	Short: "Rename a label across every issue and wisp that carries it",
+	Long: "Rename a label everywhere it appears. An issue that already carries " +
+		"the new label keeps it and drops the old one instead of erroring - a " +
+		"merge, reported honestly (the write path measures merged from what " +
+		"the insert actually affected, never from a snapshot check, so its " +
+		"count is correct under concurrent writes). Pass --dry-run to preview " +
+		"the blast radius (a count and the first issues) without writing " +
+		"anything; the preview's merged count is a plain snapshot intersection " +
+		"of two separate reads, so treat it as an estimate, not the number the " +
+		"rename itself will report.",
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		if !dryRun {
+			CheckReadonly("label rename")
+		}
+
+		evt := metrics.NewCommandEvent("label-rename")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		return runLabelRename(rootCtx, args, dryRun)
+	},
+}
+
+// validateLabelRename trims and checks the two rename arguments, returning
+// the trimmed labels or the refusal a caller should surface. It is a pure
+// function so the refusal rules are testable without a store.
+func validateLabelRename(rawOld, rawNew string) (oldLabel, newLabel string, err error) {
+	oldLabel = strings.TrimSpace(rawOld)
+	newLabel = strings.TrimSpace(rawNew)
+	if oldLabel == "" || newLabel == "" {
+		return "", "", fmt.Errorf("label cannot be empty")
+	}
+	if oldLabel == newLabel {
+		return "", "", fmt.Errorf("cannot rename label '%s' to itself", oldLabel)
+	}
+	// Same reserved-prefix refusal runLabelAdd and label propagate apply: a
+	// rename is effectively an add of newLabel, and touching oldLabel would
+	// let a caller strip a 'provides:' capability outside 'bd ship'.
+	for _, label := range [2]string{oldLabel, newLabel} {
+		if strings.HasPrefix(label, "provides:") {
+			return "", "", fmt.Errorf("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship' instead")
+		}
+	}
+	return oldLabel, newLabel, nil
+}
+
+func runLabelRename(ctx context.Context, args []string, dryRun bool) error {
+	oldLabel, newLabel, err := validateLabelRename(args[0], args[1])
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	warnLabelsContainingWhitespace([]string{oldLabel, newLabel})
+
+	if dryRun {
+		return runLabelRenameDryRun(ctx, oldLabel, newLabel)
+	}
+
+	var renamed, merged int
+	if usesProxiedServer() {
+		renamed, merged, err = runLabelRenameProxiedServer(ctx, oldLabel, newLabel)
+	} else {
+		renamed, merged, _, err = store.RenameLabel(ctx, oldLabel, newLabel, actor)
+	}
+	// Recorded from renamed>0 BEFORE the error check: a rename can commit its
+	// SQL side and still return a non-nil err (e.g. the Dolt publication step
+	// failing after the working-set write landed), and the caller's deferred
+	// commit needs to know a write happened either way.
+	if renamed > 0 {
+		commandDidWrite.Store(true)
+	}
+	if err != nil {
+		// The counts are assigned INSIDE the transaction closure on both
+		// routes (label_proxied_server.go RunTx, dolt/labels.go
+		// withRetryTx), so a Commit failure or retry exhaustion returns
+		// them still holding the rolled-back attempt's numbers - nothing
+		// landed. Only doltAddAndCommit failing after the SQL tx committed
+		// is a genuine partial, and renamed>0 cannot discriminate the two.
+		// Report an UPPER BOUND rather than assert a write that may not
+		// have happened; commandDidWrite above shares the premise but is
+		// fail-safe in the other direction, this message is not.
+		if renamed > 0 {
+			return HandleErrorRespectJSON("%s", labelRenamePartialFailureMessage(renamed, merged, err))
+		}
+		return HandleErrorRespectJSON("label rename: %v", err)
+	}
+	return reportLabelRename(oldLabel, newLabel, renamed, merged, jsonOutput)
+}
+
+// labelRenameCandidatesProxied is the read-only counterpart of
+// runLabelRenameProxiedServer, used only by --dry-run: two label searches, no
+// write. Kept separate from the write path so a dry-run can never reach a
+// uow.RunTx call.
+func labelRenameCandidatesProxied(ctx context.Context, oldLabel, newLabel string) (oldIssues, newIssues []*types.Issue, err error) {
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer uw.Close(ctx)
+
+	oldPage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Labels: []string{oldLabel}})
+	if err != nil {
+		return nil, nil, fmt.Errorf("searching issues with label %q: %w", oldLabel, err)
+	}
+	if len(oldPage.Items) == 0 {
+		return nil, nil, nil
+	}
+	newPage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Labels: []string{newLabel}})
+	if err != nil {
+		return nil, nil, fmt.Errorf("searching issues with label %q: %w", newLabel, err)
+	}
+	return oldPage.Items, newPage.Items, nil
+}
+
+func runLabelRenameDryRun(ctx context.Context, oldLabel, newLabel string) error {
+	var (
+		oldIssues, newIssues []*types.Issue
+		err                  error
+	)
+	if usesProxiedServer() {
+		oldIssues, newIssues, err = labelRenameCandidatesProxied(ctx, oldLabel, newLabel)
+	} else {
+		oldIssues, err = store.GetIssuesByLabel(ctx, oldLabel)
+		if err == nil {
+			newIssues, err = store.GetIssuesByLabel(ctx, newLabel)
+		}
+	}
+	if err != nil {
+		return HandleErrorRespectJSON("label rename --dry-run: %v", err)
+	}
+
+	// A preview-only snapshot intersection of two independent reads, NOT the
+	// write path's measured count: renameLabelInPlane derives merged from
+	// what its INSERT IGNORE actually affected, specifically to avoid the
+	// schedule-dependent count a check-then-insert shape used to produce
+	// under a concurrent AddLabel/RemoveLabel between the two reads (see the
+	// comment on that function). This dry-run has no insert to measure
+	// against, so it falls back to exactly that check-then-count shape - an
+	// acceptable estimate for a preview, but callers must not treat it as
+	// authoritative. The flag help and command Long text say so too.
+	alreadyNew := make(map[string]struct{}, len(newIssues))
+	for _, issue := range newIssues {
+		alreadyNew[issue.ID] = struct{}{}
+	}
+	merged := 0
+	for _, issue := range oldIssues {
+		if _, ok := alreadyNew[issue.ID]; ok {
+			merged++
+		}
+	}
+
+	if jsonOutput {
+		preview := make([]map[string]interface{}, 0, len(oldIssues))
+		for _, issue := range oldIssues {
+			preview = append(preview, map[string]interface{}{
+				"issue_id": issue.ID,
+				"title":    issue.Title,
+			})
+		}
+		return outputJSON(map[string]interface{}{
+			"dry_run":   true,
+			"old_label": oldLabel,
+			"new_label": newLabel,
+			"count":     len(oldIssues),
+			"merged":    merged,
+			"issues":    preview,
+		})
+	}
+
+	if len(oldIssues) == 0 {
+		fmt.Printf("No issues found with label '%s'\n", oldLabel)
+		return nil
+	}
+	fmt.Printf("Would rename label '%s' to '%s': %d issues", oldLabel, newLabel, len(oldIssues))
+	if merged > 0 {
+		fmt.Printf(" (%d already have '%s')", merged, newLabel)
+	}
+	fmt.Println()
+	limit := len(oldIssues)
+	if limit > labelRenamePreviewLimit {
+		limit = labelRenamePreviewLimit
+	}
+	for _, issue := range oldIssues[:limit] {
+		fmt.Printf("  %s %s\n", issue.ID, issue.Title)
+	}
+	if len(oldIssues) > limit {
+		fmt.Printf("  ... and %d more\n", len(oldIssues)-limit)
+	}
+	return nil
+}
+
+// labelRenamePartialFailureMessage phrases a failed rename as an UPPER BOUND.
+// Both routes assign the counts inside the transaction closure, so on a Commit
+// failure or retry exhaustion they still hold the rolled-back attempt's numbers
+// and nothing landed; only doltAddAndCommit failing after the SQL transaction
+// committed is a genuine partial, and renamed > 0 cannot tell the two apart.
+// Every number in the sentence is therefore hedged - a definite count here would
+// assert a write that may never have happened.
+func labelRenamePartialFailureMessage(renamed, merged int, err error) string {
+	return fmt.Sprintf("label rename: up to %d issue(s) (of which up to %d merged) may have been renamed before failing: %v",
+		renamed, merged, err)
+}
+
+// reportLabelRename prints what a (non-dry-run) rename landed: an honest
+// zero-issues no-op, or the count plus how many of those were merges.
+func reportLabelRename(oldLabel, newLabel string, renamed, merged int, jsonOut bool) error {
+	if jsonOut {
+		return outputJSON(map[string]interface{}{
+			"status":    "renamed",
+			"old_label": oldLabel,
+			"new_label": newLabel,
+			"renamed":   renamed,
+			"merged":    merged,
+		})
+	}
+	if renamed == 0 {
+		fmt.Printf("No issues found with label '%s'\n", oldLabel)
+		return nil
+	}
+	noun := "issue"
+	if renamed != 1 {
+		noun = "issues"
+	}
+	fmt.Printf("Renamed label '%s' to '%s': %d %s", oldLabel, newLabel, renamed, noun)
+	if merged > 0 {
+		fmt.Printf(" (%d already had '%s')", merged, newLabel)
+	}
+	fmt.Println()
+	return nil
+}
+
 func init() {
 	// Issue ID completions
 	labelAddCmd.ValidArgsFunction = issueIDCompletion
@@ -469,11 +712,14 @@ func init() {
 	labelListCmd.ValidArgsFunction = issueIDCompletion
 	labelPropagateCmd.ValidArgsFunction = issueIDCompletion
 
+	labelRenameCmd.Flags().Bool("dry-run", false, "Preview the blast radius without renaming anything (merged count is a snapshot intersection, not authoritative - see --help)")
+
 	labelCmd.AddCommand(labelAddCmd)
 	labelCmd.AddCommand(labelRemoveCmd)
 	labelCmd.AddCommand(labelListCmd)
 	labelCmd.AddCommand(labelListAllCmd)
 	labelCmd.AddCommand(labelPropagateCmd)
+	labelCmd.AddCommand(labelRenameCmd)
 	rootCmd.AddCommand(labelCmd)
 }
 
