@@ -2113,37 +2113,47 @@ var rootCmd = &cobra.Command{
 			_ = traceFile.Close() // Best effort cleanup
 		}
 
-		// Heap profiling: --mem-profile flag or BEADS_MEM_PROFILE env var.
-		// Runs a GC first by default; BEADS_MEM_PROFILE_NOGC=1 skips it to capture peak.
-		heapDest := memProfilePath
-		if heapDest == "" {
-			heapDest = os.Getenv("BEADS_MEM_PROFILE")
-		}
-		if heapDest != "" {
-			if os.Getenv("BEADS_MEM_PROFILE_NOGC") == "" {
-				runtime.GC()
-			}
-			if f, err := os.Create(heapDest); err == nil { // #nosec G304 -- user-supplied profiling path
-				_ = pprof.WriteHeapProfile(f)
-				_ = f.Close()
-			}
-		}
-		// Optional one-line MemStats summary: BEADS_MEM_STATS=/path/to/stats.txt
-		if statsDest := os.Getenv("BEADS_MEM_STATS"); statsDest != "" {
-			var ms runtime.MemStats
-			runtime.ReadMemStats(&ms)
-			if f, err := os.Create(statsDest); err == nil { // #nosec G304 -- user-supplied profiling path
-				fmt.Fprintf(f, "HeapAlloc=%d HeapSys=%d HeapInuse=%d HeapObjects=%d\n",
-					ms.HeapAlloc, ms.HeapSys, ms.HeapInuse, ms.HeapObjects)
-				_ = f.Close()
-			}
-		}
+		// Heap profiling / MemStats summary: --mem-profile flag or
+		// BEADS_MEM_PROFILE / BEADS_MEM_STATS env vars. See writeMemDiagnostics.
+		writeMemDiagnostics(memProfilePath)
 
 		// The signal context is canceled and cleared by the deferred hook
 		// registered at the top of this function, so that it also covers the
 		// early error returns above.
 		return nil
 	},
+}
+
+// writeMemDiagnostics honors the heap-profile and MemStats diagnostic knobs
+// (--mem-profile / BEADS_MEM_PROFILE / BEADS_MEM_PROFILE_NOGC / BEADS_MEM_STATS).
+// memProfileFlag is the --mem-profile flag value ("" if the caller has no
+// such flag, e.g. the send-metrics child, which calls this directly since its
+// Run exits before Cobra ever reaches PersistentPostRunE below).
+func writeMemDiagnostics(memProfileFlag string) {
+	// Runs a GC first by default; BEADS_MEM_PROFILE_NOGC=1 skips it to capture peak.
+	heapDest := memProfileFlag
+	if heapDest == "" {
+		heapDest = os.Getenv("BEADS_MEM_PROFILE")
+	}
+	if heapDest != "" {
+		if os.Getenv("BEADS_MEM_PROFILE_NOGC") == "" {
+			runtime.GC()
+		}
+		if f, err := os.Create(heapDest); err == nil { // #nosec G304 -- user-supplied profiling path
+			_ = pprof.WriteHeapProfile(f)
+			_ = f.Close()
+		}
+	}
+	// Optional one-line MemStats summary: BEADS_MEM_STATS=/path/to/stats.txt
+	if statsDest := os.Getenv("BEADS_MEM_STATS"); statsDest != "" {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		if f, err := os.Create(statsDest); err == nil { // #nosec G304 -- user-supplied profiling path
+			fmt.Fprintf(f, "HeapAlloc=%d HeapSys=%d HeapInuse=%d HeapObjects=%d\n",
+				ms.HeapAlloc, ms.HeapSys, ms.HeapInuse, ms.HeapObjects)
+			_ = f.Close()
+		}
+	}
 }
 
 func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
