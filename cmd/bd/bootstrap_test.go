@@ -1327,8 +1327,18 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 	// sync.remote must be persisted so subsequent fresh clones (and
 	// bootstrap retries) can rediscover the remote without re-probing
 	// origin refs.
-	if !strings.Contains(yaml, "sync.remote: ") && !strings.Contains(yaml, "sync-remote: ") {
-		t.Errorf("config.yaml does not contain sync.remote entry:\n%s", yaml)
+	//
+	// Asserted by READING it back rather than by matching a spelling. This used
+	// to require a literal `sync.remote: ` line, which is a key whose name
+	// contains a dot — the shape config.GetStringFromDir and viper can never
+	// find, because both split on the dot and walk nested mappings. The writer
+	// now nests (bd-zj95), so the old assertion passed for exactly as long as
+	// the value was unreadable and failed the moment it became readable. What
+	// bootstrap owes its caller is a remote that can be read back, so that is
+	// what this checks.
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != syncRemote {
+		t.Errorf("config.GetStringFromDir(%q, \"sync.remote\") = %q, want %q:\n%s",
+			beadsDir, got, syncRemote, yaml)
 	}
 	if !strings.Contains(yaml, syncRemote) {
 		t.Errorf("config.yaml does not contain sync remote URL %q:\n%s", syncRemote, yaml)
