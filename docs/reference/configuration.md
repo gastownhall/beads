@@ -120,6 +120,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `validation.on-sync` | — | `BD_VALIDATION_ON_SYNC` | `none` | Template validation before sync |
 | `validation.metadata.mode` | — | — | `none` | Metadata schema validation |
 | `hierarchy.max-depth` | — | — | `3` | Max hierarchical ID nesting depth |
+| `lease.ttl` | — | `BD_LEASE_TTL` | `5m` | Claim lease TTL before `bd reclaim` reverts a stale in_progress issue to ready (dead-worker recovery); widen this for a worker whose heartbeat cadence is slower than the default |
 | `backup.enabled` | — | `BD_BACKUP_ENABLED` | `false` | Enable periodic Dolt-native backup to `.beads/backup/` (see [below](#auto-backup)) |
 | `backup.interval` | — | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-backups |
 | `backup.git-push` | — | — | `false` | Auto-push backup repo |

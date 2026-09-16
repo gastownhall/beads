@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -76,6 +77,13 @@ var YamlOnlyKeys = map[string]bool{
 
 	// Hierarchy settings (GH#995)
 	"hierarchy.max-depth": true,
+
+	// Lease settings: EffectiveDefaultLeaseTTL reads this through viper
+	// (yaml/env) directly, not through the database — a DB-backed write
+	// would be silently unread on the claim/heartbeat hot path, exactly the
+	// GH#536 class this map exists to prevent (PR #5470 review R2,
+	// gastownhall/gascity ga-7uoua).
+	"lease.ttl": true,
 
 	// Backup settings (must be in yaml so GetValueSource can detect overrides)
 	"backup.enabled":  true,
@@ -915,6 +923,23 @@ func validateYamlConfigValue(key, value string) error {
 		}
 		if n < 0 {
 			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+	case "lease.ttl":
+		// Validated at write time so a typo (e.g. "4hrs" instead of "4h")
+		// is rejected here instead of silently parsing to zero later and
+		// falling back to the compiled default with no indication anything
+		// was wrong (PR #5470 review R1, gastownhall/gascity ga-7uoua).
+		//
+		// Trim before parsing: shell quoting or a .env line can leave
+		// surrounding whitespace (e.g. "lease.ttl: \" 4h \""), which
+		// time.ParseDuration rejects outright — that would fail this
+		// otherwise-plausible input at set-time (PR #5470 review R2).
+		d, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("lease.ttl must be a valid duration (e.g. \"5m\", \"4h\"), got %q: %w", value, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("lease.ttl must be positive, got %q", value)
 		}
 	}
 	return nil
