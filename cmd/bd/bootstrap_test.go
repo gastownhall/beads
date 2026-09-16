@@ -355,9 +355,7 @@ func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testi
 		t.Fatal(err)
 	}
 	const syncRemote = "http://myserver:7007/mydb"
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: "+syncRemote+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	seedSyncRemote(t, beadsDir, syncRemote)
 	t.Setenv("BEADS_DIR", beadsDir)
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	if err := config.Initialize(); err != nil {
@@ -407,9 +405,7 @@ func TestDetectBootstrapAction_ExistingEmbeddedDBWithSyncRemoteIsNoOp(t *testing
 		t.Fatal(err)
 	}
 	const syncRemote = "http://myserver:7007/mydb"
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: "+syncRemote+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	seedSyncRemote(t, beadsDir, syncRemote)
 	t.Setenv("BEADS_DIR", beadsDir)
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	if err := config.Initialize(); err != nil {
