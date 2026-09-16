@@ -39,6 +39,15 @@ func TestRyukExitChild(t *testing.T) {
 		// error, this would print the WARN and exit 0.
 		if err := EnsureDoltContainerForTestMain(); err != nil {
 			fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		} else {
+			// Reached only if the guard regressed to returning. The docker
+			// stub on PATH does NOT stop a container here: testcontainers-go
+			// speaks to the Docker API socket directly, not the CLI the stub
+			// shadows, so the call above really can start one — with Ryuk
+			// disabled, which means nothing would ever reap it. Terminate it
+			// explicitly so this regression test cannot leak the exact
+			// container the guard exists to prevent.
+			TerminateDoltContainer()
 		}
 		os.Exit(0)
 	case childGuard:
@@ -63,9 +72,17 @@ func TestRyukExitChild(t *testing.T) {
 // returning, and this test asserts the exit survives a caller that tries its
 // hardest to ignore it.
 //
-// Hermetic: a stub `docker` on PATH satisfies checkDolt() so the guard is
-// reachable, and the guard fires before dolt.Run, so no container runtime is
-// touched in either the passing or the failing case.
+// On the passing path — the guard working — no container runtime is touched:
+// the stub `docker` on PATH satisfies checkDolt() so the guard is reachable,
+// and the guard fires before dolt.Run.
+//
+// The failing path is NOT runtime-free, which is worth being explicit about
+// in a test whose whole subject is leaked containers. If the guard regresses
+// to returning, the child proceeds into dolt.Run, and testcontainers-go
+// reaches the Docker API socket directly rather than the `docker` CLI the
+// stub shadows — so a real container starts, on a box with Ryuk disabled.
+// childSwallow therefore calls TerminateDoltContainer() on the else branch;
+// without it, the regression test leaks precisely what it is testing for.
 func TestRyukDisabled_SwallowingCallerStillDies(t *testing.T) {
 	home := t.TempDir()
 	stubDir := t.TempDir()
