@@ -937,7 +937,31 @@ func TestInitGuard_SharedServerMode_PresentServerDB_Allows(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Give this project a database directory under the shared data dir, the
+	// way a real shared-mode install has one. Without it this test returned
+	// nil via the server check alone, so nothing pinned the local-database
+	// early return -- reverting that early return left this test green.
+	sharedDolt, err := doltserver.SharedDoltDir()
+	if err != nil {
+		t.Fatalf("SharedDoltDir: %v", err)
+	}
+	localDB := filepath.Join(sharedDolt, "myproject", ".dolt")
+	if err := os.MkdirAll(localDB, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if info, statErr := os.Stat(localDB); statErr != nil || !info.IsDir() {
+		t.Fatalf("precondition: %q must exist: %v", localDB, statErr)
+	}
+
 	if err := guardMissingServerDatabaseAt(beadsDir, "myproject"); err != nil {
 		t.Fatalf("database present on the shared server must NOT be refused, got: %v", err)
+	}
+
+	// Pin the early return specifically: with the server gone entirely, the
+	// local database directory alone must still keep the guard out of the way.
+	// This is the assertion that goes red if the early return is removed.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	if err := guardMissingServerDatabaseAt(beadsDir, "myproject"); err != nil {
+		t.Fatalf("this project's local database directory must satisfy the guard without reaching the server, got: %v", err)
 	}
 }
