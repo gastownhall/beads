@@ -289,6 +289,10 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	// for three aggregate joins on the most-run command in the tree.
 	textRequest := in.ListRequest
 	textRequest.SkipCounts = true
+	// No text rendering prints a comment body, so the per-row comment reads are
+	// not merely unused here, they are unpayable: SkipCounts above already
+	// zeroes the count this hydration would key on.
+	textRequest.IncludeComments = false
 	page, err := reader.List(ctx, textRequest)
 	if err != nil {
 		if capErr := handleMaxRowsError(err); capErr != nil {
@@ -446,6 +450,16 @@ func init() {
 
 	// Projection toggle. Like --skip-labels it trades data for bytes, and
 	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
+	// Hydration toggle, the list twin of `bd show --include-comments`. Like
+	// --skip-labels and --brief it changes what is HYDRATED and never which
+	// rows match. It costs a query per row that has comments, which is why it
+	// is opt-in on the most-run command in the tree.
+	listCmd.Flags().Bool("include-comments", false,
+		"Populate each row's comments field with full comment bodies in JSON output "+
+			"(--json only; costs one query per row that has comments). Without it, a row "+
+			"with comments carries comments_omitted=true, so an absent comments field is "+
+			"never mistaken for having none. Text output is unaffected either way.")
+
 	listCmd.Flags().Bool("brief", false,
 		"Omit the free-form text (description, design, acceptance criteria, notes, "+
 			"payload, waiters) from each row. Filters that read those fields, such as "+

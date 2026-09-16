@@ -218,7 +218,11 @@ func collectDependents(ctx context.Context, src DetailSource, id string, isWisp 
 	return out, nil
 }
 
-func collectComments(ctx context.Context, src DetailSource, id string, isWisp bool) ([]*types.Comment, error) {
+// collectComments takes the narrow CommentStreamer rather than the whole
+// DetailSource because it reads exactly one method, and because the list-page
+// hydration in list_comments.go calls the same body. DetailSource satisfies
+// CommentStreamer, so BuildIssueDetails passes its source unchanged.
+func collectComments(ctx context.Context, src CommentStreamer, id string, isWisp bool) ([]*types.Comment, error) {
 	iter, err := src.IterComments(ctx, id, isWisp)
 	if err != nil {
 		return nil, fmt.Errorf("iter comments %s: %w", id, err)

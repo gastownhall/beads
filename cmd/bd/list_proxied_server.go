@@ -92,6 +92,8 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 	// none.
 	textRequest := in.ListRequest
 	textRequest.SkipCounts = true
+	// And no comment hydration, for the reason the direct route drops it.
+	textRequest.IncludeComments = false
 	page, err := rd.List(ctx, textRequest)
 	if err != nil {
 		return err
