@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -281,6 +282,70 @@ func TestAddLabel(t *testing.T) {
 		}
 		if len(labels) != 1 {
 			t.Errorf("expected 1 label, got %v", labels)
+		}
+	})
+
+	// Regression for #5442: label mutations wrote the labels/wisp_labels row
+	// and an events row, but never touched the issue's updated_at column,
+	// so --updated-after filtering, stale-upsert rejection, and LWW merge
+	// were all blind to label-only churn.
+	t.Run("bumps_updated_at", func(t *testing.T) {
+		te := newTestEnv(t, "ua")
+		ctx := t.Context()
+
+		issue := &types.Issue{
+			ID:        "ua-touch",
+			Title:     "Label bumps updated_at",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if err := te.store.Commit(ctx, "create issue"); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+
+		before, err := te.store.GetIssue(ctx, "ua-touch")
+		if err != nil {
+			t.Fatalf("GetIssue (before add): %v", err)
+		}
+
+		// updated_at has second-level granularity (matches the issue's own
+		// repro, which sleeps between mutations for the same reason).
+		time.Sleep(1100 * time.Millisecond)
+
+		if err := te.store.AddLabel(ctx, "ua-touch", "alpha", "tester"); err != nil {
+			t.Fatalf("AddLabel: %v", err)
+		}
+		if err := te.store.Commit(ctx, "add label"); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+
+		afterAdd, err := te.store.GetIssue(ctx, "ua-touch")
+		if err != nil {
+			t.Fatalf("GetIssue (after add): %v", err)
+		}
+		if !afterAdd.UpdatedAt.After(before.UpdatedAt) {
+			t.Fatalf("AddLabel must bump updated_at (#5442): before=%v after=%v", before.UpdatedAt, afterAdd.UpdatedAt)
+		}
+
+		time.Sleep(1100 * time.Millisecond)
+
+		if err := te.store.RemoveLabel(ctx, "ua-touch", "alpha", "tester"); err != nil {
+			t.Fatalf("RemoveLabel: %v", err)
+		}
+		if err := te.store.Commit(ctx, "remove label"); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+
+		afterRemove, err := te.store.GetIssue(ctx, "ua-touch")
+		if err != nil {
+			t.Fatalf("GetIssue (after remove): %v", err)
+		}
+		if !afterRemove.UpdatedAt.After(afterAdd.UpdatedAt) {
+			t.Fatalf("RemoveLabel must bump updated_at (#5442): before=%v after=%v", afterAdd.UpdatedAt, afterRemove.UpdatedAt)
 		}
 	})
 }
