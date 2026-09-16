@@ -263,7 +263,12 @@ func TestProxyCapabilityRegistryReasonsAreAssignedIndividually(t *testing.T) {
 		"federation": true, "federation sync": true, "federation status": true,
 		"federation add-peer": true, "federation remove-peer": true, "federation list-peers": true,
 		"repo": true, "repo add": true, "repo remove": true, "repo list": true, "repo sync": true,
-		"migrate": true, "migrate sync": true, "migrate hooks": true, "migrate issues": true,
+		// `migrate hooks` is deliberately NOT here: it migrates git hook files
+		// and opens no store, so the surgery rationale the rest of this block
+		// rests on does not describe it. Its refusal is structural — the
+		// command is on none of main.go's store-init skip lists — which makes
+		// it unimplemented with a tracking item, not design.
+		"migrate": true, "migrate sync": true, "migrate issues": true,
 		"migrate-issues": true, "migrate-personal": true,
 		"admin cleanup": true, "admin reset": true,
 	}
