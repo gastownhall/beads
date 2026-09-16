@@ -284,10 +284,17 @@ because it authorizes the one thing this guard exists to prevent.
   repo whose server-side database does not exist yet therefore meets this
   refusal rather than a plain first init. It fails in the safe direction —
   nothing is created silently, and no existing data can be stranded — and
-  `--recreate-missing` above is the supported way through it. Replacing
-  `project_id` with a signal that is local to the workspace is tracked
-  separately; it needs a different answer in per-project and shared-server
-  mode.
+  `--recreate-missing` above is the supported way through it. This is settled,
+  not pending: `engdocs/adr/0004-missing-database-guard-signal.md` records why
+  no purely-local signal can replace `project_id` here (absence of local state
+  cannot tell "never initialized here" from "initialized here, storage since
+  lost"), and why `--recreate-missing` is the permanent resolution path rather
+  than a stopgap.
+- The guard applies equally to `bd init`, `bd init --reinit-local` and
+  `bd init --force`. If your workspace predates `project_id` and its local
+  Dolt storage is gone, all three refuse until you pass `--recreate-missing`;
+  a workspace with no local Dolt storage at all is treated as a fresh clone by
+  all three.
 - Server mode only, and shared-server mode counts as server mode — the guard
   tests for *this project's* database directory under the resolved Dolt data
   dir, not for the data dir itself, which in shared mode is the machine-global
