@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.1] - 2026-09-16
 
+### Changed
+
+- **`bd dolt status --json` changes shape on a proxied workspace**
+  ([#6580](https://github.com/gastownhall/beads/pull/6580)). It now emits
+  `{"mode": "proxied-server", "root": ..., "running": <proxy up>, "proxy_pid":
+  ..., "proxy_port": ..., "backend_managed": ..., "backend_running": ...,
+  "backend_pid": ..., "backend_port": ..., "backend_endpoint": ...,
+  "idle_timeout": ...}` instead of the always-false `{"running": false, "pid":
+  0, "port": 0}` — `pid` and `port` are gone, replaced by the `proxy_*` and
+  `backend_*` pairs. `running` no longer reports a bd-managed dolt PID file; it
+  describes the proxy, the endpoint every bd command connects through, so it is
+  now usually true where it used to be always false. `backend_managed` is false
+  on external proxied topologies, where the dolt server is not bd's process to
+  report on and `backend_endpoint` names it instead. Anything parsing the old
+  payload changes behaviour on upgrade. Direct-server, shared, embedded and
+  externally-managed workspaces keep the output they had.
+
+- **`bd config set <dotted.key>` deletes a flat top-level key of the same
+  literal name** ([#6578](https://github.com/gastownhall/beads/pull/6578)).
+  Dotted keys are now written as a nested mapping (see **Fixed** below for why),
+  and where the file already carried the flat spelling — a top-level key whose
+  *name* contains the dot, such as `dolt.host: "10.0.0.1"` — that entry is
+  removed and the value re-emitted under `dolt:`. Only the key being written is
+  touched; other dotted keys, including ones bd did not write, are left exactly
+  as they are.
+
+  `.beads/config.yaml` is not exclusively bd's, so this can be visible outside
+  bd: an external tool that both writes *and* reads flat dotted keys there will
+  stop seeing any value bd migrates this way. Any dotted key bd stores in
+  `config.yaml` rather than the database can collide; in practice that means
+  `dolt.*`, `export.auto`, and `backup.enabled`. If the other writer then
+  re-adds its flat key, the file carries both spellings and bd's own readers
+  disagree — Viper-backed reads (`bd config get`, and the `dolt.auto-start`
+  lookup on the store-open path) return the **flat** value, while
+  `GetStringFromDir` returns the **nested** one, so a `bd config set` can be
+  shadowed by a stale flat entry. Tracked as
+  [#6594](https://github.com/gastownhall/beads/issues/6594). Until that lands,
+  in a workspace whose config another tool maintains, let that tool own its
+  keys, or check `.beads/config.yaml` for a duplicated key after running
+  `bd config set`.
+
+- **Two `bd config set` writes that used to exit 0 now exit 1**
+  ([#6578](https://github.com/gastownhall/beads/pull/6578)), because both wrote
+  a value no reader could see: setting a dotted key under a parent that already
+  holds a scalar (`sync: enabled`, then `bd config set sync.remote`), and
+  setting one in a file whose top level is not a mapping. A script that
+  tolerated the old exit 0 now has to handle the failure.
+
 ### Fixed
 
 - **`bd dolt start` no longer puts a second sql-server over a proxied
@@ -28,15 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server: not running` while the proxy was serving CRUD — the wrong answer
   that sent operators to `bd dolt start` in the first place. It now reads the
   proxy's own records and reports the proxy and its dolt backend separately,
-  without starting either. **JSON output shape change**: on a proxied
-  workspace `bd dolt status --json` now emits
-  `{"mode": "proxied-server", "root": ..., "running": <proxy up>, "proxy_pid":
-  ..., "proxy_port": ..., "backend_managed": ..., "backend_running": ...,
-  "backend_pid": ..., "backend_port": ..., "idle_timeout": ...}` instead of
-  the always-false `{"running": false, "pid": 0, "port": 0}`. `running`
-  describes the proxy, the endpoint every bd command connects through;
-  `backend_managed` is false on external proxied topologies, where the dolt
-  server is not bd's process to report on.
+  without starting either. The `--json` payload changes shape to carry that —
+  see **Changed** above before parsing it.
 
 - **A dotted config key now round-trips: what `bd config set` writes,
   `bd config get` and bd's own readers find**
@@ -48,16 +89,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   walks nested mappings, so it does not. The value was set and invisible at the
   same time depending on which reader asked, and `bd init --remote` in a fresh
   workspace was the ordinary way in: the remote was recorded and then not found.
-  Dotted keys are written nested now, an existing flat spelling of the key being
-  written is migrated to the nested one, and `bd config unset` removes the
-  nested form — it only ever matched the flat spelling, so unsetting
+  Dotted keys are written nested now, and `bd config unset` removes the nested
+  form — it only ever matched the flat spelling, so unsetting
   `sync.remote` silently left the remote live. Keys the write does not own,
   including dotted ones somebody else put there, are left exactly as they are.
-
-  Two things that used to succeed now report an error instead, because both
-  produced a value no reader could see: setting a key under a parent that
-  already holds a value (`sync: enabled`, then `bd config set sync.remote`), and
-  setting one in a file whose top level is not a mapping.
+  Two consequences of the nested write — the flat-key migration and two new
+  failure exits — are under **Changed** above.
 
 ## [1.3.0] - 2026-09-15
 
