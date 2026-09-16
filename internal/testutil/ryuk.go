@@ -60,12 +60,15 @@ var ryukCheckOnce sync.Once
 // reports as a package-level FAIL.
 //
 // Exiting rather than returning is the whole point, and is deliberate. An
-// error here is swallowed by 13 of the 18 call sites that reach a
+// error here is swallowed by 14 of the 20 call sites that reach a
 // container-start path — 11 TestMains downgrade it to
-// "WARN: ..., skipping Dolt tests" and carry on green, and the two
-// NewContainerProvider callers t.Skipf on any error — which reproduces
-// exactly the "tests ran normally, nothing to see" mode this guard exists to
-// close (be-ovg86). Callers therefore get no say in the matter. This is
+// "WARN: ..., skipping Dolt tests" and carry on green, the sync.Once helper
+// at cmd/bd/proxied_shared_harness_test.go:26 stores it and t.Skipf's, and
+// the two NewContainerProvider callers t.Skipf on any error — which
+// reproduces exactly the "tests ran normally, nothing to see" mode this guard
+// exists to close (be-ovg86). The remaining 6 are loud already: five
+// RequireDoltContainer calls and StartIsolatedDoltContainerHandle, all
+// t.Fatalf. Callers therefore get no say in the matter. This is
 // test-harness-only code; nothing in a shipped binary reaches it.
 //
 // Every call site runs this after checkDolt(), so a box with no container

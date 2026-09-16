@@ -63,14 +63,15 @@ func TestRyukExitChild(t *testing.T) {
 // stderr and carries on green.
 //
 // This is the regression the guard exists to prevent. Returning an error from
-// checkRyukEnabled is not enough on its own — 13 of the 18 call sites that
+// checkRyukEnabled is not enough on its own — 14 of the 20 call sites that
 // reach a container-start path swallow it (11 TestMains take it as
-// "WARN: ..., skipping Dolt tests", and the two NewContainerProvider callers
-// t.Skipf on any error), so a Ryuk-disabled box got a green run with a warning
-// buried in the output. That is the same signal that went unnoticed for four
-// months (be-ovg86). The guard therefore exits the process rather than
-// returning, and this test asserts the exit survives a caller that tries its
-// hardest to ignore it.
+// "WARN: ..., skipping Dolt tests", the sync.Once helper at
+// cmd/bd/proxied_shared_harness_test.go:26 stores it and t.Skipf's, and the
+// two NewContainerProvider callers t.Skipf on any error), so a Ryuk-disabled
+// box got a green run with a warning buried in the output. That is the same
+// signal that went unnoticed for four months (be-ovg86). The guard therefore
+// exits the process rather than returning, and this test asserts the exit
+// survives a caller that tries its hardest to ignore it.
 //
 // On the passing path — the guard working — no container runtime is touched:
 // the stub `docker` on PATH satisfies checkDolt() so the guard is reachable,
