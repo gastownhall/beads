@@ -273,6 +273,15 @@ because it authorizes the one thing this guard exists to prevent.
 - The guard keys on `project_id`, which was introduced by GH#2372. A workspace
   initialized before that has no `project_id` and is indistinguishable from a
   fresh clone, so it **fails open** — `bd init` will still create the database.
+- The same `project_id` is inherited by a **fresh clone**, because
+  `.beads/metadata.json` is git-tracked by default. Cloning a beads-managed
+  repo whose server-side database does not exist yet therefore meets this
+  refusal rather than a plain first init. It fails in the safe direction —
+  nothing is created silently, and no existing data can be stranded — and
+  `--recreate-missing` above is the supported way through it. Replacing
+  `project_id` with a signal that is local to the workspace is tracked
+  separately; it needs a different answer in per-project and shared-server
+  mode.
 - Server mode only, and shared-server mode counts as server mode — the guard
   tests for *this project's* database directory under the resolved Dolt data
   dir, not for the data dir itself, which in shared mode is the machine-global
