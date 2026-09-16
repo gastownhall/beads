@@ -965,3 +965,135 @@ func TestInitGuard_SharedServerMode_PresentServerDB_Allows(t *testing.T) {
 		t.Fatalf("this project's local database directory must satisfy the guard without reaching the server, got: %v", err)
 	}
 }
+
+// startProjectServerModeGuardFixture builds the state a real server-mode
+// workspace is in after its server-side database is lost: a Dolt data
+// directory that exists (ensureDoltInit MkdirAlls it and runs `dolt init`
+// there at first init, and DROP DATABASE does not remove it), holding NO
+// subdirectory for this project's database, against a live server that does
+// not have the database either.
+//
+// The pre-existing _Refuses/_RecreateMissingAllows fixtures omit the data
+// directory entirely, which is why they passed while the guard was probing it:
+// their `!localDatabaseExists` was true for the wrong reason. Round-3 MAJOR-1 /
+// round-4 finding 1 is exactly the gap between those fixtures and this one.
+func startProjectServerModeGuardFixture(t *testing.T, dbName string) string {
+	t.Helper()
+	testutil.RequireDoltBinary(t)
+
+	// Per-project server mode, pinned rather than inherited: an ambient
+	// BEADS_DOLT_SHARED_SERVER or BEADS_DOLT_DATA_DIR would otherwise
+	// redirect ResolveDoltDir out of this test's tree (round-3 MINOR-2 is the
+	// same class of ambient-env leak, one variable over).
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	if doltserver.IsSharedServerMode() {
+		t.Fatal("precondition: this test requires per-project server mode")
+	}
+
+	dataDir := t.TempDir()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("FindFreePort: %v", err)
+	}
+	// #nosec G204 -- fixed args, no user input
+	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = serverCmd.Process.Kill()
+		_ = serverCmd.Wait()
+	})
+	if !testutil.WaitForServer(port, 15*time.Second) {
+		t.Fatal("dolt sql-server did not become ready within timeout")
+	}
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]interface{}{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": dbName,
+		"project_id":    "existing-0000-1111-2222-333344445555",
+	}
+	data, _ := json.Marshal(metadata)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The regression this pins: the DATA directory is present, the way it is
+	// on every initialized workspace...
+	doltDir := doltserver.ResolveDoltDir(beadsDir)
+	if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if info, statErr := os.Stat(doltDir); statErr != nil || !info.IsDir() {
+		t.Fatalf("precondition: dolt data dir %q must exist: %v", doltDir, statErr)
+	}
+	// ...while this project's own database directory is NOT.
+	if _, statErr := os.Stat(filepath.Join(doltDir, dbName, ".dolt")); statErr == nil {
+		t.Fatalf("precondition: data dir must NOT hold a %q database", dbName)
+	}
+	return beadsDir
+}
+
+// TestInitGuard_ExistingProjectMissingServerDB_DataDirPresent_Refuses is the
+// negative half of round-3 MAJOR-1. With the data directory present — the real
+// state of every initialized workspace — the guard must still reach the FR-010
+// missing-database branch and refuse, rather than falling through to the false
+// "already initialized" message.
+func TestInitGuard_ExistingProjectMissingServerDB_DataDirPresent_Refuses(t *testing.T) {
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = false
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+
+	err := checkExistingBeadsDataAt(beadsDir, "myproject")
+	if err == nil {
+		t.Fatal("existing project whose server-side database is gone must refuse init, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not found on server") {
+		t.Errorf("guard fell through to the wrong branch: expected the missing-database refusal, got:\n%v", err)
+	}
+	// The false message this replaces: alreadyInitialized() announces a
+	// database that is NOT there and routes the operator at --reinit-local,
+	// which recreates it empty. Match on its own distinguishing line -- the
+	// correct refusal above legitimately says "was already initialized",
+	// meaning the WORKSPACE was, which is the whole basis for refusing.
+	if strings.Contains(err.Error(), "Found existing Dolt database") {
+		t.Errorf("refusal must not announce a database that is gone, got:\n%v", err)
+	}
+}
+
+// TestInitGuard_RecreateMissing_ReachesOptIn_DataDirPresent is the blocker
+// itself: four surfaces (the --recreate-missing flag help, `bd help
+// init-safety`, docs/recovery/init-safety.md and the guard's own refusal text)
+// tell the operator to run `bd init --recreate-missing --prefix <p>`. With the
+// data directory present, that command could not reach its own opt-in and
+// exited 1 with the false "already initialized" message — so the documented
+// recovery was a dead end, and the only thing that worked (--reinit-local
+// --recreate-missing) is named nowhere.
+func TestInitGuard_RecreateMissing_ReachesOptIn_DataDirPresent(t *testing.T) {
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = true
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+
+	if err := checkExistingBeadsDataAt(beadsDir, "myproject"); err != nil {
+		t.Fatalf("bd init --recreate-missing must reach its opt-in and permit init when the configured database is gone; got:\n%v", err)
+	}
+}
