@@ -76,7 +76,7 @@ func TestProxyTransformCapabilityRows(t *testing.T) {
 					t.Fatalf("typed refusal = %#v", typed)
 				}
 			}
-			if err := validateProxyRegistryBeforeProvider(cmd); tc.outcome == ProxyOutcomeHonored && err != nil {
+			if err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); tc.outcome == ProxyOutcomeHonored && err != nil {
 				t.Fatalf("honored transform refused: %v", err)
 			}
 		})
@@ -86,11 +86,11 @@ func TestProxyTransformCapabilityRows(t *testing.T) {
 func TestProxyDuplicatesAutoMergeDryRunMatrix(t *testing.T) {
 	cmd := transformTestCommand("duplicates", "auto-merge", "dry-run")
 	_ = cmd.Flags().Set("auto-merge", "true")
-	if err := validateProxyRegistryBeforeProvider(cmd); err == nil {
+	if err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); err == nil {
 		t.Fatalf("non-dry auto-merge error = %v", err)
 	}
 	_ = cmd.Flags().Set("dry-run", "true")
-	if err := validateProxyRegistryBeforeProvider(cmd); err != nil {
+	if err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); err != nil {
 		t.Fatalf("dry-run auto-merge refused: %v", err)
 	}
 }
@@ -104,7 +104,7 @@ func TestProxyTransformRefusalRendering(t *testing.T) {
 	jsonOutput = false
 	var textErr string
 	stderr := captureStderr(t, func() {
-		err := validateProxyRegistryBeforeProvider(cmd)
+		err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 		if code, ok := exitCodeFromError(err); !ok || code != 1 {
 			t.Fatalf("exit = %v, want 1", err)
 		}
@@ -116,7 +116,7 @@ func TestProxyTransformRefusalRendering(t *testing.T) {
 
 	jsonOutput = true
 	stdout := captureStdout(t, func() error {
-		_ = validateProxyRegistryBeforeProvider(cmd)
+		_ = validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 		return nil
 	})
 	var envelope map[string]any
@@ -164,7 +164,7 @@ func TestProxyTransformRefusalHasNoProviderOrFileMutation(t *testing.T) {
 	t.Cleanup(func() { uowProvider = oldProvider })
 
 	cmd := transformTestCommand("supersede")
-	err := validateProxyRegistryBeforeProvider(cmd)
+	err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 	if err == nil {
 		t.Fatal("expected transform refusal")
 	}

@@ -72,8 +72,9 @@ const (
 // Tracking values name the plan-of-record work item for an unimplemented
 // refusal. These are the slices of the proxied-parity plan; a row gets a GitHub
 // issue or bead ID instead once one is filed for it.
+// S3 has no entry: it landed, and its rows carry Reason=design rather than a
+// tracking item.
 const (
-	trackBackup      = "proxied-parity S3 (backup/restore family)"
 	trackVersionCtl  = "proxied-parity S4 (dolt commit/push/pull/remote)"
 	trackSync        = "proxied-parity S5 (bd sync)"
 	trackDegradation = "proxied-parity S6 (doctor, config show, degradations)"
@@ -85,12 +86,40 @@ const (
 // empty for the bare path; a row keyed on an ArgSet wins over the bare row, which
 // is how `duplicates --auto-merge --dry-run` stays honored while
 // `duplicates --auto-merge` is refused.
+//
+// Topology overrides Rule on the proxied shapes named in it and is empty for
+// every row whose answer is the same everywhere — which is all of them but the
+// backup family. See honoredOn.
 type capabilityRow struct {
-	Path    string
-	ArgSet  string
-	Rule    proxyCapabilityRule
-	History HistoryCapabilityClass
-	Note    string
+	Path     string
+	ArgSet   string
+	Rule     proxyCapabilityRule
+	Topology map[ProxyTopology]proxyCapabilityRule
+	History  HistoryCapabilityClass
+	Note     string
+}
+
+// ruleFor resolves the row's policy on one proxied topology.
+func (r capabilityRow) ruleFor(topology ProxyTopology) proxyCapabilityRule {
+	if rule, ok := r.Topology[topology]; ok {
+		return rule
+	}
+	return r.Rule
+}
+
+// honoredOn narrows a refusal to the shapes where it is actually true: the row
+// goes on refusing everywhere except the topologies named here.
+//
+// The direction is deliberate. A row states its refusal first and then lists
+// the exceptions, so a shape nobody thought about — a new transport, or the
+// unknown a corrupt sidecar produces — inherits the refusal rather than the
+// exemption.
+func (r capabilityRow) honoredOn(topologies ...ProxyTopology) capabilityRow {
+	r.Topology = make(map[ProxyTopology]proxyCapabilityRule, len(topologies))
+	for _, topology := range topologies {
+		r.Topology[topology] = proxyCapabilityRule{Outcome: ProxyOutcomeHonored}
+	}
+	return r
 }
 
 // display renders the row's key the way its refusal message names it.
@@ -166,6 +195,19 @@ func permitted(path string) capabilityRow {
 	return capabilityRow{Path: path, Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}}
 }
 
+// backupRefusal builds one backup-family row: honored where bd owns the Dolt
+// server's filesystem, refused by design everywhere else. The code stays
+// proxy.backup.unsupported — consumers have been keying on it since 1.3.0 and
+// the refusal it names has not changed, only its reason and its scope — and the
+// message keeps the frozen "<path> is not supported in proxied-server mode"
+// prefix, with the locality explanation appended.
+func backupRefusal(path string) capabilityRow {
+	return refusedPath(path, "proxy.backup.unsupported", ProxyReasonDesign, "").
+		withMessage(path + " is not supported in proxied-server mode against a Dolt server bd does not own: " +
+			"a backup destination is resolved on the server's filesystem, not this client's").
+		honoredOn(ProxyTopologyManagedLocal)
+}
+
 // proxyCapabilityRegistry is the whole path-keyed policy. Rows for permitted
 // paths are appended from proxyPermittedPaths by init.
 var proxyCapabilityRegistry = []capabilityRow{
@@ -176,16 +218,31 @@ var proxyCapabilityRegistry = []capabilityRow{
 
 	// --- backup / restore ---------------------------------------------------
 	// CALL DOLT_BACKUP(...) is pure SQL over a connection proxied mode already
-	// owns, so this family is plumbing, not policy. Locality policy (file://
-	// URLs naming the server's filesystem on external topologies) is decided
-	// per topology when S3 lands.
-	refusedPath("backup", "proxy.backup.unsupported", ProxyReasonUnimplemented, trackBackup).
-		asParentGroup(),
-	refusedPath("backup init", "proxy.backup.unsupported", ProxyReasonUnimplemented, trackBackup),
-	refusedPath("backup sync", "proxy.backup.unsupported", ProxyReasonUnimplemented, trackBackup),
-	refusedPath("backup remove", "proxy.backup.unsupported", ProxyReasonUnimplemented, trackBackup),
-	refusedPath("backup status", "proxy.backup.unsupported", ProxyReasonUnimplemented, trackBackup),
-	refusedPath("backup restore", "proxy.backup.unsupported", ProxyReasonUnimplemented, trackBackup),
+	// owns, so routing this family needed no proxy work at all — see
+	// backup_proxied_server.go.
+	//
+	// What it did need is the locality policy, which is the first genuinely
+	// topology-differentiated rule in this table. A backup destination is
+	// resolved by the SERVER: `CALL DOLT_BACKUP('add', name, 'file:///…')`
+	// names a path on the machine running dolt. On managed-local that machine
+	// and that user are this bd's own, because bd spawned the child; anywhere
+	// else the URL describes a filesystem bd cannot see, so the command would
+	// either fail at the point of use or, far worse, report success having
+	// written the backup somewhere the operator will never look for it.
+	//
+	// Hence: honored on managed-local, refused by design everywhere else. It is
+	// design and not a gap because no amount of plumbing on this side makes bd
+	// able to place a file on somebody else's host — a backup story for those
+	// shapes belongs to whoever runs the server. Team-server is the sharpest
+	// case: bts owns the store, and one client registering a server-side backup
+	// remote acts on every client's data (the same shape as the auto-backup
+	// storm this command's help text already warns about).
+	backupRefusal("backup").asParentGroup(),
+	backupRefusal("backup init"),
+	backupRefusal("backup sync"),
+	backupRefusal("backup remove"),
+	backupRefusal("backup status"),
+	backupRefusal("backup restore"),
 
 	// --- version control over a shared history ------------------------------
 	// Refused by design: these mutate or traverse a history that several
@@ -515,7 +572,11 @@ func commandPolicyArgSet(cmd *cobra.Command) string {
 // front door: it rejects direct-only commands before migrations, auto-start or
 // provider construction, so a refusal leaves the workspace untouched. The
 // flag-keyed half is validateProxyCapabilitiesBeforeProvider.
-func validateProxyRegistryBeforeProvider(cmd *cobra.Command) error {
+//
+// topology is the workspace's proxied shape (resolveProxiedTopology). It is a
+// parameter rather than a lookup inside so the gate can be exercised for every
+// shape without a workspace on disk.
+func validateProxyRegistryBeforeProvider(cmd *cobra.Command, topology ProxyTopology) error {
 	if cmd == nil {
 		return nil
 	}
@@ -532,10 +593,14 @@ func validateProxyRegistryBeforeProvider(cmd *cobra.Command) error {
 		}
 	}
 	row, ok := capabilityRowFor(cmd)
-	if !ok || row.Rule.Outcome != ProxyOutcomeRefused {
+	if !ok {
 		return nil
 	}
-	return HandleProxyCapabilityError(proxyCapabilityErrorFor(row.Rule))
+	rule := row.ruleFor(topology)
+	if rule.Outcome != ProxyOutcomeRefused {
+		return nil
+	}
+	return HandleProxyCapabilityError(proxyCapabilityErrorFor(rule))
 }
 
 func proxyCapabilityErrorFor(rule proxyCapabilityRule) *ProxyCapabilityError {

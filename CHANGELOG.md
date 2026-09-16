@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd backup` works on a proxied-server workspace bd runs the Dolt server
+  for.** `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
+  over the proxied provider; before this, a proxied workspace — the default
+  topology since 1.3.0 — had no backup path at all. `bd backup restore` stops
+  the proxy and its Dolt child before replacing the database and leaves the
+  workspace quiescent, so the next command relaunches against the restored
+  data; it also now reports a JSON object under `--json`, where it previously
+  printed nothing.
+
+  The family stays **refused by design** on a proxied workspace pointed at a
+  Dolt server bd does not own (an external host, socket, or a beads-team-server
+  database), because `CALL DOLT_BACKUP('add', …, 'file:///…')` is executed by
+  the server and resolves that path on the server's filesystem. The refusal
+  keeps the `proxy.backup.unsupported` code and now carries `"reason":
+  "design"`; a backup story for those deployments belongs to whoever runs the
+  server.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every

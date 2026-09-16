@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func TestBackupStatusSizeErrorRespectsOutputMode(t *testing.T) {
@@ -159,25 +160,62 @@ func TestBackupStatusIncludesAvailableDatabaseSize(t *testing.T) {
 	})
 }
 
-func TestBackupStatusProxiedGuardDoesNotMeasureSize(t *testing.T) {
-	prepareBackupStatusTest(t)
-	proxiedServerMode = true
-	called := false
-	sizeDatabase := func(context.Context) (int64, bool, error) {
-		called = true
-		return 1, true, nil
-	}
+// TestBackupStatusProxiedGuardFollowsLocality replaces a test that asserted a
+// blanket proxied refusal. Since slice S3 the guard is scoped to locality: bd
+// owns the dolt process on a managed-local workspace and can honor the command
+// there, while an external one is still refused — and a refused command must
+// not go on to measure anything, because the directory it would measure belongs
+// to a server on another host.
+func TestBackupStatusProxiedGuardFollowsLocality(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		sidecar     string
+		wantMeasure bool
+	}{
+		{
+			name:        "external topology is refused without measuring",
+			sidecar:     `{"external":{"host":"db.example.com","port":3306}}`,
+			wantMeasure: false,
+		},
+		{
+			name:        "managed local is honored and measures",
+			sidecar:     `{}`,
+			wantMeasure: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := prepareBackupStatusTest(t)
+			proxiedServerMode = true
+			if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(tc.sidecar), 0o600); err != nil {
+				t.Fatalf("write proxied sidecar: %v", err)
+			}
 
-	cmd := newBackupStatusTestRoot(sizeDatabase)
-	cmd.SetArgs([]string{"backup", "status"})
-	_, _, err := executeBackupStatusCommand(t, cmd)
-	assertExitCode(t, err, 1)
-	if called {
-		t.Fatal("proxied-server guard called database size provider")
+			measured := false
+			sizeDatabase := func(context.Context) (int64, bool, error) {
+				measured = true
+				return 1, true, nil
+			}
+
+			cmd := newBackupStatusTestRoot(sizeDatabase)
+			cmd.SetArgs([]string{"backup", "status"})
+			_, _, err := executeBackupStatusCommand(t, cmd)
+			if tc.wantMeasure {
+				if err != nil {
+					t.Fatalf("backup status on managed-local: %v", err)
+				}
+			} else {
+				assertExitCode(t, err, 1)
+			}
+			if measured != tc.wantMeasure {
+				t.Fatalf("size provider called = %v, want %v", measured, tc.wantMeasure)
+			}
+		})
 	}
 }
 
-func prepareBackupStatusTest(t *testing.T) {
+// prepareBackupStatusTest builds a throwaway workspace and returns its .beads
+// directory, so a caller can drop workspace files (the proxied sidecar) into it.
+func prepareBackupStatusTest(t *testing.T) string {
 	t.Helper()
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -198,6 +236,7 @@ func prepareBackupStatusTest(t *testing.T) {
 		proxiedServerMode = oldProxiedServerMode
 		resetCommandContext()
 	})
+	return beadsDir
 }
 
 func newBackupStatusTestRoot(sizeDatabase backupSizeFunc) *cobra.Command {
