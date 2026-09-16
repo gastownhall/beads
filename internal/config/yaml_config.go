@@ -872,26 +872,73 @@ func scalarStyleFor(value string) yaml.Style {
 }
 
 func commentOutYamlKey(content, key string) string {
-	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
+	// The flat spelling first — a key literally named "sync.remote", which
+	// older files carry and which this function has always handled.
+	flatPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
+	// And the nested one, which is what the writer produces. Missing this half
+	// made an unset silently do nothing once the writer started nesting: the
+	// value stayed live, so bd kept a setting the operator had asked it to
+	// forget. Unset is the other direction of the same round-trip property as
+	// set and get, and all three have to agree on the shape.
+	segments := strings.Split(key, ".")
 
 	var result []string
+	// depth tracks how many segments of the key have been matched so far, and
+	// indents holds the indentation each was found at, so a key is only
+	// commented out when it is nested under its OWN parents rather than under
+	// some other section that happens to share a leaf name.
+	depth := 0
+	var indents []int
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := scanner.Text()
-		if keyPattern.MatchString(line) {
-			matches := keyPattern.FindStringSubmatch(line)
-			indent := ""
-			if len(matches) > 1 {
-				indent = matches[1]
-			}
-			// Comment out the line, preserving indentation
-			result = append(result, indent+"# "+strings.TrimLeft(line, " \t"))
-		} else {
-			result = append(result, line)
+
+		if matches := flatPattern.FindStringSubmatch(line); matches != nil {
+			result = append(result, matches[1]+"# "+strings.TrimLeft(line, " \t"))
+			continue
 		}
+
+		if len(segments) > 1 {
+			if name, indent, ok := yamlKeyOnLine(line); ok {
+				// Leaving a block: drop every segment matched at an indent at
+				// or deeper than this line's.
+				for depth > 0 && indent <= indents[depth-1] {
+					depth--
+					indents = indents[:depth]
+				}
+				if depth < len(segments) && name == segments[depth] {
+					if depth == len(segments)-1 {
+						result = append(result, strings.Repeat(" ", indent)+"# "+strings.TrimLeft(line, " \t"))
+						depth, indents = 0, nil
+						continue
+					}
+					indents = append(indents, indent)
+					depth++
+				}
+			}
+		}
+		result = append(result, line)
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// yamlKeyOnLine reports the key a mapping line declares and its indentation.
+// Comments, list items and blank lines declare nothing.
+func yamlKeyOnLine(line string) (name string, indent int, ok bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "- ") {
+		return "", 0, false
+	}
+	key, _, found := strings.Cut(trimmed, ":")
+	if !found {
+		return "", 0, false
+	}
+	key = strings.TrimSpace(key)
+	if key == "" || strings.ContainsAny(key, " \t") {
+		return "", 0, false
+	}
+	return key, len(line) - len(trimmed), true
 }
 
 // formatYamlValue formats a value appropriately for YAML.
