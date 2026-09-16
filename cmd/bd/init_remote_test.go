@@ -170,6 +170,50 @@ func TestPersistInitSyncRemoteExplicitRemoteWritesTargetDir(t *testing.T) {
 	}
 }
 
+// `bd init --remote` runs createConfigYaml and then immediately writes
+// sync.remote into what it just created. That template is comments and nothing
+// else, which is the one document shape yaml.v3 parses to no nodes at all — so a
+// writer that round-trips a node tree has nothing to write back but the key it
+// added, and the operator's first commit after init carries a config.yaml with
+// its entire documentation deleted. It is git-tracked, so they see it.
+//
+// This runs the real pair in the real order rather than asserting on a replica
+// of the template, so it stays true if either side moves.
+func TestInitPersistingSyncRemoteKeepsTheConfigTemplate(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := createConfigYaml(beadsDir, false, ""); err != nil {
+		t.Fatalf("createConfigYaml: %v", err)
+	}
+	template, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const remote = "git+ssh://git@example.com/right/repo.git"
+	if err := persistInitSyncRemote(beadsDir, remote, remote, false, true, false); err != nil {
+		t.Fatalf("persistInitSyncRemote: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(template), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.Contains(string(body), line) {
+			t.Errorf("init dropped a line of its own config template: %q\ngot:\n%s", line, body)
+		}
+	}
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != remote {
+		t.Errorf("sync.remote = %q, want %q\n%s", got, remote, body)
+	}
+}
+
 func TestInitTimeCloneConfigExternalDefaultsAreSelfContained(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
