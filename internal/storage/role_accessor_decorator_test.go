@@ -383,6 +383,9 @@ func (*roleAccessorSentinel) VerifyIdentity(context.Context, issueops.VerifyIden
 func (*roleAccessorSentinel) AddComment(context.Context, issueops.AddCommentRequest) (issueops.AddCommentResult, error) {
 	return issueops.AddCommentResult{}, nil
 }
+func (*roleAccessorSentinel) DeleteComment(context.Context, issueops.DeleteCommentRequest) (issueops.DeleteCommentResult, error) {
+	return issueops.DeleteCommentResult{}, nil
+}
 func (*roleAccessorSentinel) ClaimNext(context.Context, issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
 	return issueops.ClaimNextResult{}, nil
 }

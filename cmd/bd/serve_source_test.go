@@ -554,6 +554,10 @@ func (*serveStubCommenter) AddComment(context.Context, issueops.AddCommentReques
 	return issueops.AddCommentResult{}, errors.ErrUnsupported
 }
 
+func (*serveStubCommenter) DeleteComment(context.Context, issueops.DeleteCommentRequest) (issueops.DeleteCommentResult, error) {
+	return issueops.DeleteCommentResult{}, errors.ErrUnsupported
+}
+
 // serveStubRelations is the neighbor role's stand-in, ErrUnsupported like every
 // stub here.
 type serveStubRelations struct{}
