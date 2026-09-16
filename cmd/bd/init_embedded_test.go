@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -1432,5 +1433,84 @@ func TestInitGateBusyClassifiedAsLockContention(t *testing.T) {
 
 	if !isEmbeddedLockOutput(loserOutput) {
 		t.Fatalf("gate-busy loser output not classified as lock contention: %q", loserOutput)
+	}
+}
+
+func TestEmbeddedInitRoleRouting(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	// Serial: newInitRoleFixture owns CWD and environment for each child.
+	for _, tc := range []struct{ name, initial, flag, want string }{
+		{"explicit", "maintainer", "contributor", "contributor"},
+		{"default", "", "", "maintainer"},
+		{"retained", "contributor", "", "contributor"},
+		{"fork", "", "", "contributor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, decoy, home := newInitRoleFixture(t)
+			if tc.initial != "" {
+				initRoleFixtureGit(t, target, "config", "--local", "beads.role", tc.initial)
+			}
+			global := filepath.Join(home, ".gitconfig")
+			initRoleFixtureGit(t, target, "config", "--file", global, "user.name", "Embedded Init Fixture")
+			initRoleFixtureGit(t, target, "config", "--file", global, "user.email", "embedded@example.invalid")
+			t.Setenv("GIT_DIR", filepath.Join(home, "missing.git"))
+			if isGitRepo() {
+				t.Fatal("invalid routing must refuse the inherited repository probe")
+			}
+			preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), global)
+			beadsDir := filepath.Join(target, ".beads")
+			if tc.name == "fork" {
+				initRoleFixtureGit(t, target, "remote", "add", "upstream", filepath.Join(home, "upstream.git"))
+				if err := os.MkdirAll(beadsDir, 0750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# owned fork configuration\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{"init", "--prefix", "rolefixture", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents"}
+			if tc.flag != "" {
+				args = append(args, "--role", tc.flag)
+			}
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = target
+			env := bdEnv(home)
+			for _, key := range []string{"BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+				env = envWithout(env, key)
+			}
+			// Explicit storage selection bypasses the separate early git-init guard.
+			cmd.Env = append(env, "BEADS_DIR="+beadsDir, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("embedded init failed: %v\n%s", err, out)
+			}
+			cfg, err := configfile.Load(beadsDir)
+			if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt || cfg.DoltMode != configfile.DoltModeEmbedded {
+				t.Fatalf("init must persist embedded metadata: %+v, %v", cfg, err)
+			}
+			if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt", "rolefixture", ".dolt")); err != nil || !info.IsDir() {
+				t.Fatalf("embedded database directory missing: %v", err)
+			}
+			if got := initRoleFixtureGit(t, target, "config", "--local", "--get", "beads.role"); got != tc.want {
+				t.Errorf("embedded init target role = %q, want %q", got, tc.want)
+			}
+			if tc.name == "fork" {
+				planning := filepath.Join(home, ".beads-planning")
+				if got := initRoleFixtureGit(t, planning, "rev-parse", "--is-inside-work-tree"); got != "true" {
+					t.Errorf("planning Git repository missing: %q", got)
+				}
+				// Read the stored value; config get reads this key's YAML/default source.
+				routing := readBack(t, beadsDir, "rolefixture", "routing.contributor", false)
+				if filepath.Clean(routing) != filepath.Clean(planning) {
+					t.Errorf("persisted contributor routing = %q; want %q", routing, planning)
+				}
+				repos, err := config.GetReposFromYAML(filepath.Join(beadsDir, "config.yaml"))
+				if err != nil || len(repos.Additional) != 1 || filepath.Clean(repos.Additional[0]) != filepath.Clean(planning) {
+					t.Errorf("planning repo in config.yaml = %+v, %v", repos, err)
+				}
+			}
+		})
 	}
 }

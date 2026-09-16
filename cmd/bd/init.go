@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
@@ -1861,7 +1862,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// - Interactive terminal (stdin is TTY) and not --non-interactive
 		// - No explicit --contributor or --team flag provided
 		// - No explicit --role flag provided
-		if isGitRepo() && !contributor && !team && roleFlag == "" && !nonInteractive && shouldPromptForRole() {
+		if isInitRoleGitRepo(ctx) && !contributor && !team && roleFlag == "" && !nonInteractive && shouldPromptForRole() {
 			promptedContributor, err := promptContributorMode()
 			if err != nil {
 				if isCanceled(err) {
@@ -1876,7 +1877,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			} else if promptedContributor {
 				contributor = true // Triggers contributor wizard below
 			}
-		} else if isGitRepo() && !contributor && !team {
+		} else if isInitRoleGitRepo(ctx) && !contributor && !team {
 			// If prompt was skipped (non-interactive or CI environment),
 			// ensure beads.role is set to avoid "not configured" warning
 			// during diagnostics. Use --role flag if provided, otherwise default.
@@ -1912,7 +1913,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 			// Contributor setup must also pin role detection to contributor.
 			// Without this, SSH remotes can be inferred as maintainer and bypass routing.
-			if isGitRepo() {
+			if isInitRoleGitRepo(ctx) {
 				if err := setBeadsRole("contributor"); err != nil && !quiet {
 					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role=contributor: %v\n", err)
 				}
@@ -1938,7 +1939,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Earlier code paths may skip role-setting when BEADS_DIR is set,
 		// promptContributorMode fails, or edge-case flag combinations are used.
 		// This guarantees every init leaves a usable role-configured state.
-		if isGitRepo() {
+		if isInitRoleGitRepo(ctx) {
 			if _, hasRole := getBeadsRole(); !hasRole {
 				fallbackRole := "maintainer"
 				if roleFlag != "" {
@@ -1953,7 +1954,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Auto-configure contributor routing for fork repos (bd-umbf Child 1).
 		// Non-interactive, idempotent; only fires when upstream remote detected
 		// and routing.contributor is not already set.
-		if !contributor && isGitRepo() {
+		// This gate also enables planning-repository creation and config.yaml updates.
+		if !contributor && isInitRoleGitRepo(ctx) {
 			if err := autoConfigureForkContributor(ctx, store, quiet || nonInteractive, roleFlag); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
 			}
@@ -2983,10 +2985,20 @@ func shouldPromptForRole() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
+// isInitRoleGitRepo uses the same CWD and routing policy as getBeadsRole/setBeadsRole.
+func isInitRoleGitRepo(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
+	return cmd.Run() == nil
+}
+
 // getBeadsRole reads the beads.role git config value.
 // Returns the role and true if configured, or empty string and false if not set.
 func getBeadsRole() (string, bool) {
 	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return "", false
@@ -3001,6 +3013,7 @@ func getBeadsRole() (string, bool) {
 // setBeadsRole writes the beads.role git config value.
 func setBeadsRole(role string) error {
 	cmd := exec.Command("git", "config", "beads.role", role)
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	return cmd.Run()
 }
 
