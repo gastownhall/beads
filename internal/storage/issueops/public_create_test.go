@@ -64,6 +64,10 @@ func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 		// dependency graph. A caller cannot declare it; it is populated only
 		// where it is read back (journal snapshots).
 		"IsBlocked": true,
+		// DueMissed is observed state, not a declaration: the due sweep is its
+		// only writer, and it counts what THIS workspace's clock saw. A creator
+		// that could declare a miss count could manufacture an escalation.
+		"DueMissed": true,
 		// WispPlaneOverride is import-plumbing (the export stream's explicit
 		// plane marker, bd-r9uce); a public create routes by the flags it
 		// accepts (Ephemeral/NoHistory), so the override is dropped here.
