@@ -19,6 +19,10 @@ var undeferCmd = &cobra.Command{
 This brings issues back from the icebox so they can be worked on again.
 Issues will appear in 'bd ready' if they have no blockers.
 
+If an issue carries a defer_until timestamp but its status isn't
+"deferred" (e.g. after an explicit --status change), undefer clears
+the stray timestamp without touching status.
+
 Examples:
   bd undefer bd-abc        # Undefer a single issue
   bd undefer bd-abc bd-def # Undefer multiple issues`,
@@ -64,14 +68,25 @@ Examples:
 				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", fullID, err)
 				continue
 			}
-			if issue.Status != types.StatusDeferred {
+
+			// Gate on defer_until, not status alone (ga-bq3w5): bd ready hides
+			// any issue with a future defer_until regardless of status, so
+			// `bd update <id> --status open --defer <date>` leaves a status=open
+			// issue permanently invisible with no status-based signal anywhere.
+			// Mirrors GH#3233's `bd update --defer=""` gate (update.go): only
+			// flip status to open when it was actually "deferred" — other
+			// statuses shouldn't be clobbered just to clear a stray timestamp.
+			wasDeferred := issue.Status == types.StatusDeferred
+			if !wasDeferred && issue.DeferUntil == nil {
 				fmt.Fprintf(os.Stderr, "%s is not deferred (status: %s)\n", fullID, string(issue.Status))
 				continue
 			}
 
 			updates := map[string]interface{}{
-				"status":      string(types.StatusOpen),
 				"defer_until": nil,
+			}
+			if wasDeferred {
+				updates["status"] = string(types.StatusOpen)
 			}
 
 			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
@@ -84,8 +99,10 @@ Examples:
 				if issue != nil {
 					undeferredIssues = append(undeferredIssues, issue)
 				}
-			} else {
+			} else if wasDeferred {
 				fmt.Printf("%s Undeferred %s (now open)\n", ui.RenderPass("*"), fullID)
+			} else {
+				fmt.Printf("%s Cleared stale defer_until on %s (status unchanged: %s)\n", ui.RenderPass("*"), fullID, string(issue.Status))
 			}
 		}
 
