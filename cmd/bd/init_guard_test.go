@@ -1168,3 +1168,81 @@ func stripProjectID(t *testing.T, beadsDir string) {
 		t.Fatal(err)
 	}
 }
+
+// TestInitGuard_ReinitLocal_NoProjectID_DataDirPresent_StillBlocks is the
+// --reinit-local/--force mirror of
+// TestInitGuard_NoProjectID_DataDirPresent_StillBlocks, and closes ADR-0004
+// follow-up 1: the two guards must agree about a pre-GH#2372 workspace whose
+// local database was lost.
+//
+// guardMissingServerDatabaseAt used to return nil on an empty project_id
+// BEFORE it ever reached its per-database probe, so such a workspace was
+// protected under plain `bd init` (which probes first) and waved straight
+// through under --reinit-local/--force — the one guard whose entire purpose is
+// to be that flag pair's safety net. The flags an operator reaches for in a
+// panic were the weaker path.
+func TestInitGuard_ReinitLocal_NoProjectID_DataDirPresent_StillBlocks(t *testing.T) {
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = false
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+	stripProjectID(t, beadsDir)
+
+	err := guardMissingServerDatabaseAt(beadsDir, "myproject")
+	if err == nil {
+		t.Fatal("--reinit-local/--force must not wave through a workspace with local Dolt storage " +
+			"whose database is gone, just because it predates project_id")
+	}
+	if !strings.Contains(err.Error(), "not found on server") {
+		t.Errorf("expected the missing-database refusal, got:\n%v", err)
+	}
+}
+
+// TestInitGuard_ReinitLocal_NoProjectID_NoDataDir_Allows is the positive
+// control: with nothing local at all, this really is a fresh clone and
+// --reinit-local must still work. It pins the coarse-directory permit
+// condition, so the fix above cannot be over-applied into refusing every
+// pre-GH#2372 workspace.
+func TestInitGuard_ReinitLocal_NoProjectID_NoDataDir_Allows(t *testing.T) {
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = false
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+	stripProjectID(t, beadsDir)
+
+	// Remove the local Dolt data directory the fixture created, leaving the
+	// genuine fresh-clone shape: tracked metadata.json and nothing else.
+	if err := os.RemoveAll(doltserver.ResolveDoltDir(beadsDir)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := guardMissingServerDatabaseAt(beadsDir, "myproject"); err != nil {
+		t.Fatalf("a fresh clone with no local Dolt storage and no project_id must not be refused; got:\n%v", err)
+	}
+}
+
+// TestInitGuard_ReinitLocal_NoProjectID_RecreateMissingAllows pins that the
+// documented resolution path still opens the state the first test refuses.
+func TestInitGuard_ReinitLocal_NoProjectID_RecreateMissingAllows(t *testing.T) {
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = true
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+	stripProjectID(t, beadsDir)
+
+	if err := guardMissingServerDatabaseAt(beadsDir, "myproject"); err != nil {
+		t.Fatalf("--recreate-missing must still permit --reinit-local for a pre-project_id workspace; got:\n%v", err)
+	}
+}
