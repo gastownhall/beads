@@ -15,8 +15,10 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // managedHookNames lists the git hooks managed by beads.
@@ -508,20 +510,21 @@ type HookStatus struct {
 
 // CheckGitHooks checks the status of bd git hooks in .git/hooks/
 func CheckGitHooks() []HookStatus {
-	hooks := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
-	statuses := make([]HookStatus, 0, len(hooks))
-
-	// Get hooks directory from common git dir (hooks are shared across worktrees)
 	hooksDir, err := git.GetGitHooksDir()
 	if err != nil {
 		// Not a git repo - return all hooks as not installed
-		for _, hookName := range hooks {
+		statuses := make([]HookStatus, 0, len(managedHookNames))
+		for _, hookName := range managedHookNames {
 			statuses = append(statuses, HookStatus{Name: hookName, Installed: false})
 		}
 		return statuses
 	}
+	return checkGitHooksAt(hooksDir)
+}
 
-	for _, hookName := range hooks {
+func checkGitHooksAt(hooksDir string) []HookStatus {
+	statuses := make([]HookStatus, 0, len(managedHookNames))
+	for _, hookName := range managedHookNames {
 		status := HookStatus{
 			Name: hookName,
 		}
@@ -691,7 +694,7 @@ Installed hooks:
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
-		if err := installHooksWithOptions(managedHookNames, force, shared, chain, beadsHooks); err != nil {
+		if err := installStandaloneHooks(managedHookNames, force, shared, chain, beadsHooks); err != nil {
 			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
@@ -742,7 +745,7 @@ var hooksUninstallCmd = &cobra.Command{
 			}
 		}()
 
-		if err := uninstallHooks(); err != nil {
+		if err := uninstallStandaloneHooks(); err != nil {
 			return HandleErrorRespectJSON("uninstalling hooks: %v", err)
 		}
 
@@ -810,6 +813,10 @@ var hooksListCmd = &cobra.Command{
 //     allowTracked exempts shared installs (.beads-hooks/ is deliberately
 //     committed).
 func guardHookWritePath(hookPath string, allowTracked bool) error {
+	return guardHookWritePathWithProbe(hookPath, allowTracked, isGitTrackedFile)
+}
+
+func guardHookWritePathWithProbe(hookPath string, allowTracked bool, tracked func(string) bool) error {
 	fi, err := os.Lstat(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -833,7 +840,7 @@ func guardHookWritePath(hookPath string, allowTracked bool) error {
 	// foreign tracked file dirties every clone that shares it (the wy-81fnur
 	// incident). A bd-owned hook the user chose to commit (e.g. a team-shared
 	// .beads/hooks/) is bd's to maintain — same policy as shared installs.
-	if isGitTrackedFile(hookPath) && !isBdOwnedHookFile(hookPath) {
+	if tracked(hookPath) && !isBdOwnedHookFile(hookPath) {
 		return fmt.Errorf("%s is tracked by git and not a bd-managed hook; bd will not modify committed files it does not own\nUntrack it (git rm --cached) or move hooks to an untracked directory and re-run", hookPath)
 	}
 	return nil
@@ -853,22 +860,109 @@ func isBdOwnedHookFile(path string) bool {
 	return err == nil && versionInfo.IsBdHook
 }
 
-// isGitTrackedFile reports whether path is tracked by git in the repository
-// containing it. Errors (not a repo, path inside .git/, no work tree) count
+// isGitTrackedFile reports whether either the containing repository or the
+// inherited Git context tracks path. If neither probe succeeds, errors count
 // as untracked — the guard only blocks writes it can prove are unsafe.
 func isGitTrackedFile(path string) bool {
+	inherited := os.Environ()
+	return isGitTrackedFileWithEnv(path, gitenv.ScrubRouting(inherited), inherited)
+}
+
+func isGitTrackedFileWithEnv(path string, clean, inherited []string) bool {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	// #nosec G204 G702 - fixed "git" command; dir/base come from the hooks
-	// directory bd itself resolved, not user input
-	cmd := exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base)
-	return cmd.Run() == nil
+	// Check the containing repository first so inherited routing cannot hide a
+	// tracked hook. The fallback preserves bare work trees and trusted config.
+	// Either index reporting a tracked path is sufficient to refuse the write,
+	// even if the other view does not track it.
+	for _, env := range [][]string{clean, inherited} {
+		// #nosec G204 G702 - fixed "git" command; dir/base come from the hooks
+		// directory bd itself resolved, not user input
+		cmd := exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base)
+		cmd.Env = env
+		if cmd.Run() == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func installHooksWithOptions(hookNames []string, force bool, shared bool, chain bool, beadsHooks bool) error {
+	return installHooksWithContext(hookNames, force, shared, chain, beadsHooks, nil)
+}
+
+func resolveStandaloneHooksContext() (*initHooksContext, error) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	inherited := os.Environ()
+	clean := gitenv.ScrubRouting(inherited)
+	paths, err := git.ResolveHooksContext(workDir, inherited)
+	if err != nil {
+		// Preserve legacy absolute-path file operations without borrowing cached
+		// repository authority for configuration or managed-directory installs.
+		dir, pathErr := git.GetGitHooksDirFrom(workDir, inherited)
+		if pathErr != nil || !filepath.IsAbs(dir) {
+			return nil, err
+		}
+		return &initHooksContext{workDir: workDir, paths: git.HooksContext{HooksDir: dir}, env: clean, inheritedEnv: inherited}, nil
+	}
+	cmd := exec.Command("git", "rev-parse", "--absolute-git-dir")
+	cmd.Dir, cmd.Env = workDir, inherited
+	gitDir, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("capture selected Git directory: %w", err)
+	}
+	// Keep the private admin directory for effective worktree config reads.
+	// The unpinned clean environment remains the containing-index proof.
+	pinned := append(append([]string(nil), clean...), "GIT_DIR="+strings.TrimSpace(string(gitDir)),
+		"GIT_COMMON_DIR="+paths.CommonDir, "GIT_WORK_TREE="+paths.RepoRoot)
+	paths, err = git.ResolveHooksContext(workDir, pinned)
+	if err != nil {
+		return nil, err // Never recover a selected read through inherited routing.
+	}
+	return &initHooksContext{workDir: paths.RepoRoot, paths: paths, env: clean, inheritedEnv: inherited}, nil
+}
+
+func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) error {
+	selected, err := resolveStandaloneHooksContext()
+	if err != nil {
+		return err
+	}
+	if shared || beadsHooks {
+		if selected.paths.CommonDir == "" {
+			return fmt.Errorf("shared or beads hooks require a working Git repository")
+		}
+		if beadsHooks {
+			selected.beadsDir = beads.FindBeadsDir()
+		}
+	}
+	return installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
 }
 
 //nolint:unparam // force and chain kept for CLI flag compatibility; section markers make them no-ops
-func installHooksWithOptions(hookNames []string, force bool, shared bool, chain bool, beadsHooks bool) error {
+func installHooksWithContext(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
+	if selected != nil && shared {
+		return fmt.Errorf("shared hooks mode is not supported by selected init")
+	}
+	return installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
+}
+
+//nolint:unparam // force and chain remain accepted compatibility no-ops
+func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
 	var hooksDir string
-	if beadsHooks {
+	if selected != nil {
+		hooksDir = selected.paths.HooksDir
+		if beadsHooks {
+			if selected.beadsDir == "" {
+				return fmt.Errorf("%s", activeWorkspaceNotFoundError())
+			}
+			hooksDir = filepath.Join(selected.beadsDir, "hooks")
+		} else if shared {
+			hooksDir = filepath.Join(selected.paths.MainRepoRoot, ".beads-hooks")
+		}
+	} else if beadsHooks {
 		// Use .beads/hooks/ directory (preferred for Dolt backend)
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
@@ -907,13 +1001,21 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 	// core.hooksPath or the default .git/hooks). Without this, setting a local
 	// core.hooksPath silently shadows the global one and those hooks stop running.
 	if beadsHooks || shared {
-		preservePreexistingHooks(hooksDir)
+		if selected == nil {
+			preservePreexistingHooks(hooksDir)
+		} else {
+			preservePreexistingHooksAt(hooksDir, selected.paths.HooksDir, func() string { return selected.paths.MainRepoRoot })
+		}
 	}
 
+	tracked := isGitTrackedFile
+	if selected != nil {
+		tracked = func(path string) bool { return isGitTrackedFileWithEnv(path, selected.env, selected.inheritedEnv) }
+	}
 	// Refuse the whole install up front if any target is unsafe to write —
 	// stopping midway through the loop would leave hooks half-installed.
 	for _, hookName := range hookNames {
-		if err := guardHookWritePath(filepath.Join(hooksDir, hookName), shared); err != nil {
+		if err := guardHookWritePathWithProbe(filepath.Join(hooksDir, hookName), shared, tracked); err != nil {
 			return fmt.Errorf("refusing to install %s hook: %w", hookName, err)
 		}
 	}
@@ -976,8 +1078,12 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 		}
 	}
 
-	// Configure git to use the hooks directory
-	if beadsHooks {
+	// Configure git to use the hooks directory after writing, as in ordinary installs.
+	if selected != nil && (beadsHooks || shared) {
+		if err := selected.configureHooksPath(hooksDir); err != nil {
+			return fmt.Errorf("failed to configure git hooks path: %w", err)
+		}
+	} else if beadsHooks {
 		if err := configureBeadsHooksPath(); err != nil {
 			return fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
@@ -1001,6 +1107,16 @@ func preservePreexistingHooks(targetDir string) {
 		return
 	}
 
+	preservePreexistingHooksAt(targetDir, currentDir, func() string {
+		repoRoot, _ := git.GetMainRepoRoot()
+		if repoRoot == "" {
+			repoRoot = git.GetRepoRoot()
+		}
+		return repoRoot
+	})
+}
+
+func preservePreexistingHooksAt(targetDir, currentDir string, mainRoot func() string) {
 	// Resolve to absolute paths for reliable comparison.
 	absTarget, err := filepath.Abs(targetDir)
 	if err != nil {
@@ -1012,19 +1128,16 @@ func preservePreexistingHooks(targetDir string) {
 	}
 
 	// If the current dir is already our target, this is a re-install — skip.
-	if absTarget == absCurrent {
+	if utils.PathsEqual(absTarget, absCurrent) {
 		return
 	}
 
 	// If current dir is already a beads-managed directory, skip.
-	repoRoot, _ := git.GetMainRepoRoot()
-	if repoRoot == "" {
-		repoRoot = git.GetRepoRoot()
-	}
+	repoRoot := mainRoot()
 	if repoRoot != "" {
 		absBeadsHooks, _ := filepath.Abs(filepath.Join(repoRoot, ".beads", "hooks"))
 		absSharedHooks, _ := filepath.Abs(filepath.Join(repoRoot, ".beads-hooks"))
-		if absCurrent == absBeadsHooks || absCurrent == absSharedHooks {
+		if utils.PathsEqual(absCurrent, absBeadsHooks) || utils.PathsEqual(absCurrent, absSharedHooks) {
 			return
 		}
 	}
@@ -1318,12 +1431,29 @@ func configureBeadsHooksPath() error {
 	return nil
 }
 
+func uninstallStandaloneHooks() error {
+	selected, err := resolveStandaloneHooksContext()
+	if err != nil {
+		return err
+	}
+	return uninstallHooksAt(selected.paths.HooksDir, func() error {
+		if selected.paths.CommonDir == "" {
+			return nil // Absolute-path fallback has no repository config authority.
+		}
+		return resetHooksPathAt(selected.paths.MainRepoRoot, selected.paths.CommonDir, selected.env)
+	})
+}
+
 func uninstallHooks() error {
 	// Get hooks directory from common git dir (hooks are shared across worktrees)
 	hooksDir, err := git.GetGitHooksDir()
 	if err != nil {
 		return err
 	}
+	return uninstallHooksAt(hooksDir, resetHooksPathIfBeadsManaged)
+}
+
+func uninstallHooksAt(hooksDir string, reset func() error) error {
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, hookName := range hookNames {
@@ -1377,7 +1507,7 @@ func uninstallHooks() error {
 	// hook files themselves are removed. A failure here must not be a
 	// scrolling stderr warning — bd hooks uninstall must not report success
 	// while beads-managed config is still left behind (GH#4440).
-	if err := resetHooksPathIfBeadsManaged(); err != nil {
+	if err := reset(); err != nil {
 		return fmt.Errorf("hook files removed, but failed to reset beads-managed git config: %w", err)
 	}
 
@@ -1400,10 +1530,24 @@ func resetHooksPathIfBeadsManaged() error {
 		return nil // not in a git repo
 	}
 
+	// These checks are defensive: repoRoot and commonDir share the cached Git context.
+	// The common-dir pin states intent: --local addresses the common config through either gitdir.
+	commonDir, err := git.GetGitCommonDir()
+	if err != nil {
+		return fmt.Errorf("resolve Git common directory for role reset: %w", err)
+	}
+	if commonDir == "" {
+		return fmt.Errorf("empty Git common directory for role reset")
+	}
+	return resetHooksPathAt(repoRoot, commonDir, gitenv.ScrubRouting(os.Environ()))
+}
+
+func resetHooksPathAt(repoRoot, commonDir string, configEnv []string) error {
 	var failures []string
 
-	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "core.hooksPath")
 	cmd.Dir = repoRoot
+	cmd.Env = configEnv
 	if out, err := cmd.Output(); err == nil {
 		hooksPath := strings.TrimSpace(string(out))
 		// Matches both relative (legacy) and absolute (GH#2414) beads hooks
@@ -1411,29 +1555,42 @@ func resetHooksPathIfBeadsManaged() error {
 		// doctor.CheckHooksPath/FixHooksPath so uninstall and `bd doctor --fix`
 		// cannot disagree about what "beads-managed" means.
 		if doctor.IsBeadsManagedHooksPath(repoRoot, hooksPath) {
-			unsetCmd := exec.Command("git", "config", "--unset", "core.hooksPath")
+			unsetCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "core.hooksPath")
 			unsetCmd.Dir = repoRoot
+			unsetCmd.Env = configEnv
 			if output, err := unsetCmd.CombinedOutput(); err != nil {
 				failures = append(failures, fmt.Sprintf("core.hooksPath: %v (output: %s)", err, strings.TrimSpace(string(output))))
 			}
 		}
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		var diagnostic string
+		if ok {
+			diagnostic = strings.TrimSpace(string(exit.Stderr))
+		}
+		failures = append(failures, fmt.Sprintf("read core.hooksPath: %v (output: %s)", err, diagnostic))
 	}
-	// core.hooksPath not set at all — nothing to reset there; still fall
-	// through to beads.role below.
+	// Exit 1 means the key is absent. Other read failures must remain visible.
 
 	// Read before unsetting rather than treating git's exit 5 as "already
 	// absent". Exit 5 also means "the key has multiple values, refusing an
 	// ambiguous unset" — a repo with a duplicated beads.role (bad merge, hand
 	// edit) would then report a clean uninstall while leaving the key set,
 	// which is the exact failure this is supposed to stop.
-	getRoleCmd := exec.Command("git", "config", "--get", "beads.role")
+	// Keep the selected main/common config, including bare repositories with an
+	// external worktree, while dropping routing overrides from both commands.
+	// The presence query must use the same local scope as the unset.
+	getRoleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "beads.role")
 	getRoleCmd.Dir = repoRoot
-	if _, err := getRoleCmd.Output(); err == nil {
-		roleCmd := exec.Command("git", "config", "--unset", "beads.role")
+	getRoleCmd.Env = configEnv
+	if out, err := getRoleCmd.CombinedOutput(); err == nil {
+		roleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "beads.role")
 		roleCmd.Dir = repoRoot
+		roleCmd.Env = configEnv
 		if output, err := roleCmd.CombinedOutput(); err != nil {
 			failures = append(failures, fmt.Sprintf("beads.role: %v (output: %s)", err, strings.TrimSpace(string(output))))
 		}
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		failures = append(failures, fmt.Sprintf("read beads.role: %v (output: %s)", err, strings.TrimSpace(string(out))))
 	}
 
 	if len(failures) > 0 {
