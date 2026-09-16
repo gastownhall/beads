@@ -191,10 +191,8 @@ func IsSchemaBehindError(err error) bool {
 // to a warning, mirroring forward drift. A fresh DB (version 0) is reported
 // as behind too: it has no readable schema at all.
 func CheckBehindDrift(ctx context.Context, db *sql.DB) error {
-	var currentVersion int
-	if err := db.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-	).Scan(&currentVersion); err != nil {
+	currentVersion, err := CurrentVersion(ctx, db)
+	if err != nil {
 		return fmt.Errorf("schema behind-drift check: %w", err)
 	}
 	if currentVersion >= LatestVersion() {
