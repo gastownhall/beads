@@ -392,6 +392,9 @@ pointless).`,
 		// --force bypasses the live-claim reassign fence (bd-98s5c); mutually
 		// exclusive with --if-assignee at the flag-group level.
 		forceFlag, _ := cmd.Flags().GetBool("force")
+		// --replace-notes is the deliberate overwrite; without it a --notes
+		// write that would discard existing notes is refused below.
+		replaceNotes, _ := cmd.Flags().GetBool("replace-notes")
 
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
@@ -523,7 +526,15 @@ pointless).`,
 			if clearDeferStatus && issue.Status == types.StatusDeferred {
 				patch.Status = issueops.Field[issueops.Status]{Set: true, Value: types.StatusOpen}
 			}
+			// Refused before the write: the post-write warning cannot undo it.
 			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
+			if notesOverwritten && !replaceNotes {
+				refusal := errNotesOverwrite()
+				fmt.Fprintf(os.Stderr, "%s: %v\n", id, refusal)
+				recordFailure(id, refusal.Error())
+				closeIfUnmutated(result)
+				continue
+			}
 
 			ops, err := writeOps(issueStore)
 			if err != nil {
@@ -809,6 +820,12 @@ func replacesExistingNotes(existing string, fields map[string]any) bool {
 	return replacing && existing != "" && newNotes != existing
 }
 
+// errNotesOverwrite refuses a --notes write that would discard existing notes.
+// Callers prefix the issue id, so the message carries none.
+func errNotesOverwrite() error {
+	return errors.New("--notes would discard the existing notes; use --append-notes to add to them, or --replace-notes to overwrite them deliberately")
+}
+
 func warnNotesReplacement(id string) {
 	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id) //nolint:gosec // G705: stderr, not a browser context
 }
@@ -980,7 +997,8 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
 	registerCommonIssueFlags(updateCmd)
-	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; use --append-notes to append)"
+	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (refused when the issue already has notes; use --append-notes to append, or --replace-notes to overwrite)"
+	updateCmd.Flags().Bool("replace-notes", false, "Allow --notes to overwrite existing notes (without it, such a write is refused before anything is written)")
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
