@@ -235,8 +235,21 @@ func (s *DoltStore) updateIssue(ctx context.Context, id string, updates map[stri
 		}
 
 		commitMsg := fmt.Sprintf("bd: update %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+		return s.doltAddAndCommitInTx(ctx, tx, updateStagedTables(result), commitMsg)
 	})
+}
+
+// updateStagedTables is what an update commit stages: the issue row and its
+// event, plus whatever a status change into closed spawned for a recurring
+// bead (issueops.UpdateResult.Spawned).
+func updateStagedTables(result *issueops.UpdateResult) []string {
+	tables := []string{"issues", "events"}
+	for table := range result.Spawned.ChangedTables {
+		if table != "issues" && table != "events" {
+			tables = append(tables, table)
+		}
+	}
+	return tables
 }
 
 // UpdateIssueChecked applies the update like UpdateIssue, adding an optional
@@ -312,7 +325,7 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 			}
 
 			commitMsg := fmt.Sprintf("bd: update %s", id)
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			return s.doltAddAndCommitInTx(ctx, tx, updateStagedTables(result), commitMsg)
 		})
 	}
 
@@ -598,7 +611,11 @@ func (s *DoltStore) closeIssue(ctx context.Context, id string, reason string, ac
 		}
 
 		commitMsg := fmt.Sprintf("bd: close %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+		// RecurrenceSpawnTables, not {issues, events}: closing a recurring bead
+		// files its successor in this transaction, and that successor's labels
+		// live in their own table. Staging a table the close did not touch is
+		// free (DOLT_ADD on a clean table stages nothing).
+		return s.doltAddAndCommitInTx(ctx, tx, issueops.RecurrenceSpawnTables(), commitMsg)
 	})
 }
 
@@ -641,7 +658,8 @@ func (s *DoltStore) closeIssueChecked(ctx context.Context, id string, actor stri
 		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}
 
 		commitMsg := fmt.Sprintf("bd: close %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+		// See CloseIssue: a recurring close also writes its successor's labels.
+		return s.doltAddAndCommitInTx(ctx, tx, issueops.RecurrenceSpawnTables(), commitMsg)
 	}); err != nil {
 		return storage.CloseIssueResult{}, err
 	}

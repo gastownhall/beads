@@ -64,7 +64,9 @@ func ParseCompactDuration(s string, now time.Time) (time.Time, error) {
 	return applyDuration(now, amount, unit), nil
 }
 
-// applyDuration applies the given amount and unit to the base time.
+// applyDuration applies the given amount and unit to the base time. Month and
+// year steps clamp to the last day of a shorter target month (Jan 31 + 1m is
+// Feb 28, not Mar 3) instead of overflowing the way time.AddDate does.
 func applyDuration(base time.Time, amount int, unit string) time.Time {
 	switch unit {
 	case "h":
@@ -74,13 +76,31 @@ func applyDuration(base time.Time, amount int, unit string) time.Time {
 	case "w":
 		return base.AddDate(0, 0, amount*7)
 	case "m":
-		return base.AddDate(0, amount, 0)
+		return addMonthsClamped(base, amount)
 	case "y":
-		return base.AddDate(amount, 0, 0)
+		return addMonthsClamped(base, 12*amount)
 	default:
 		// Should not happen given regex, but return base unchanged
 		return base
 	}
+}
+
+// addMonthsClamped moves base forward (or back) by whole months, keeping its
+// day-of-month where the target month has it and clamping to the target
+// month's last day where it does not.
+func addMonthsClamped(base time.Time, months int) time.Time {
+	target := time.Date(base.Year(), base.Month()+time.Month(months), 1,
+		base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
+	day := base.Day()
+	if last := daysInMonth(target); day > last {
+		day = last
+	}
+	return target.AddDate(0, 0, day-1)
+}
+
+// daysInMonth reports the length of t's month.
+func daysInMonth(t time.Time) int {
+	return time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, t.Location()).Day()
 }
 
 // isCompactDuration returns true if the string matches compact duration syntax.

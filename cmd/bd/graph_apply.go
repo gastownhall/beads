@@ -49,6 +49,9 @@ type GraphApplyNode struct {
 	EstimatedMinutes   *int                       `json:"estimated_minutes,omitempty"` // minutes
 	DueAt              *time.Time                 `json:"due_at,omitempty"`            // RFC3339
 	DeferUntil         *time.Time                 `json:"defer_until,omitempty"`       // RFC3339
+	RepeatPattern      string                     `json:"repeat_pattern,omitempty"`    // interval (+1w) or 5-field cron (0 9 * * 1)
+	RepeatStart        *time.Time                 `json:"repeat_start,omitempty"`      // RFC3339
+	RepeatEnd          *time.Time                 `json:"repeat_end,omitempty"`        // RFC3339
 	Labels             []string                   `json:"labels,omitempty"`
 	Metadata           map[string]json.RawMessage `json:"metadata,omitempty"`
 	MetadataRefs       map[string]string          `json:"metadata_refs,omitempty"`
@@ -181,6 +184,7 @@ var graphFieldHints = map[string]string{
 	"acceptance":     "use 'acceptance_criteria' (matching the issue model's JSON field)",
 	"body":           "use 'description' (matching the issue model's JSON field)",
 	"due":            "use 'due_at' with an RFC3339 timestamp",
+	"repeat":         "use 'repeat_pattern' (an interval like +1w, or 5-field cron)",
 	"defer":          "use 'defer_until' with an RFC3339 timestamp",
 	"event_category": "use 'event_kind' (matching the issue model's JSON field)",
 	"event_actor":    "use 'actor' (matching the issue model's JSON field)",
@@ -856,6 +860,9 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 		InitialStatus:      node.Status,
 		DueAt:              node.DueAt,
 		DeferUntil:         node.DeferUntil,
+		RepeatPattern:      node.RepeatPattern,
+		RepeatStart:        node.RepeatStart,
+		RepeatEnd:          node.RepeatEnd,
 		Metadata:           metadataJSON,
 	})
 	// Backfill status-coupled timestamps: the proxied domain insert does no

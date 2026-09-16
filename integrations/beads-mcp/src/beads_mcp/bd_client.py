@@ -538,6 +538,14 @@ class BdCliClient(BdClientBase):
             args.extend(["--assignee", params.assignee])
         if params.id:
             args.extend(["--id", params.id])
+        if params.due:
+            args.extend(["--due", params.due])
+        if params.repeat:
+            args.extend(["--repeat", params.repeat])
+        if params.repeat_start:
+            args.extend(["--repeat-start", params.repeat_start])
+        if params.repeat_end:
+            args.extend(["--repeat-end", params.repeat_end])
         for label in params.labels:
             args.extend(["-l", label])
         if params.deps:
@@ -578,6 +586,17 @@ class BdCliClient(BdClientBase):
             args.extend(["--notes", params.notes])
         if params.external_ref:
             args.extend(["--external-ref", params.external_ref])
+        # These four are pass-through: an empty string is meaningful to the CLI
+        # (clear the date, stop the series), so `is not None` is the test, not
+        # truthiness.
+        if params.due is not None:
+            args.extend(["--due", params.due])
+        if params.repeat is not None:
+            args.extend(["--repeat", params.repeat])
+        if params.repeat_start is not None:
+            args.extend(["--repeat-start", params.repeat_start])
+        if params.repeat_end is not None:
+            args.extend(["--repeat-end", params.repeat_end])
 
         data = await self._run_command(*args)
         # bd update returns an array, extract first element
