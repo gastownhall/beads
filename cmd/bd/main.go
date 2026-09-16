@@ -229,13 +229,6 @@ func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePoli
 	}
 }
 
-// backendSupportsStrictReadonly reports whether the live backend path can open
-// without provisioning or lifecycle changes. Unsupported SQL backends are
-// rejected earlier by validateConfiguredBackend; proxied Dolt remains writable-only.
-func backendSupportsStrictReadonly(cfg *configfile.Config) bool {
-	return cfg == nil || !cfg.IsDoltProxiedServerMode()
-}
-
 // runsPostCommandMaintenance reports whether PersistentPostRunE should run the
 // post-command maintenance net — Dolt auto-commit, the tip-metadata commit,
 // auto-backup, auto-export and auto-push.
@@ -1257,11 +1250,11 @@ var rootCmd = &cobra.Command{
 				}
 			}
 			if cmdName == "doctor" && usesProxiedServer() {
-				// Refuse only on a real refusal. validateProxyMaintenance...
+				// Refuse only on a real refusal. The registry validator
 				// returns nil for doctor subcommands, and returning early on
 				// that would skip the legacy-store guard and autocommit-mode
 				// resolution every other skipsStoreInit command still runs.
-				if err := validateProxyMaintenanceBeforeProvider(cmd); err != nil {
+				if err := validateProxyRegistryBeforeProvider(cmd); err != nil {
 					return err
 				}
 			}
@@ -1468,14 +1461,13 @@ var rootCmd = &cobra.Command{
 		}
 		// Reject proxy capability combinations before any workspace side effect
 		// (version tracking, migration, auto-start, or provider construction).
+		// Two validators, one for each half of the policy: flag-keyed rules and
+		// the path-keyed capability registry.
 		if cfg != nil && cfg.IsDoltProxiedServerMode() {
 			if err := validateProxyCapabilitiesBeforeProvider(cmd); err != nil {
 				return err
 			}
-			if err := validateProxyMaintenanceBeforeProvider(cmd); err != nil {
-				return err
-			}
-			if err := validateProxyTransformBeforeProvider(cmd); err != nil {
+			if err := validateProxyRegistryBeforeProvider(cmd); err != nil {
 				return err
 			}
 		}
@@ -1485,9 +1477,6 @@ var rootCmd = &cobra.Command{
 		// front-door refusals.
 		if readonlyMode && cfg != nil && cfg.IsDoltProxiedServerMode() {
 			return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapReadonly))
-		}
-		if readonlyMode && !backendSupportsStrictReadonly(cfg) {
-			return HandleError("strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access")
 		}
 
 		// Set actor for audit trail
