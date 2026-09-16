@@ -128,14 +128,42 @@ func TestLoadRefusesFutureSchemaVersion(t *testing.T) {
 	}
 }
 
-// TODO(beads#6545): once the merged ownershiphandoff package exports
-// ErrUnsupportedJournalVersion, this asserts that v2's Load maps that sentinel
-// onto CodeUnsupportedJournalVersion rather than collapsing it into
-// CodeJournalUnreadable. The mirror guard is #6545's to land (branch
-// guard/journal-schema-version); this branch deliberately does not carry it, so
-// the assertion is written against the code both sides agree on.
-func TestMergedSentinelMapsToUnsupportedJournalVersion(t *testing.T) {
-	t.Skip("pending beads#6545: merged ownershiphandoff.ErrUnsupportedJournalVersion does not exist yet")
+// There is no second journal reader to agree with any more, and that is now the
+// whole story: #6281's v1 package was reverted before v1.3.0 was tagged, so this
+// package is the only thing that reads <root>/.beads/ownership-handoff.json.
+//
+// The mirror guard #6545 was going to add to the v1 Load has nothing left to
+// guard, and #6545 is closed obsolete. What the guard existed to prevent —
+// a journal being read under a phase vocabulary that is not the one that wrote
+// it — is still prevented, from this side alone: Load refuses anything whose
+// schema_version is not this package's, and a v1 journal has no such field at
+// all, so it decodes to zero and is refused by name.
+//
+// Asserted here rather than left implied, because "the other reader is gone" is
+// the kind of fact that stops being true quietly.
+func TestUnsupportedVersionRefusalStandsAlone(t *testing.T) {
+	dir := canonicalTempDir(t)
+	path := filepath.Join(dir, JournalName)
+
+	for name, body := range map[string]string{
+		// A v1 journal: the field was never written.
+		"no schema_version": `{"phase":"old_owner_stopped","owner":"legacy-gc","request":{"root":"` + dir + `"}}`,
+		// An explicit zero, which is what an absent field decodes to — a reader
+		// that only checked "!= 2" after defaulting would let this through.
+		"explicit zero": `{"schema_version":0,"phase":"prepared","owner":"legacy-gc","request":{"root":"` + dir + `"}}`,
+		// And a version from some future writer.
+		"future version": `{"schema_version":3,"phase":"prepared","owner":"legacy-gc","request":{"root":"` + dir + `"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			_, err := Load(path)
+			if code := ErrorCode(err); code != CodeUnsupportedJournalVersion {
+				t.Fatalf("Load returned %q, want %q (error: %v)", code, CodeUnsupportedJournalVersion, err)
+			}
+		})
+	}
 }
 
 func TestValidateRejectsImpossibleStates(t *testing.T) {
