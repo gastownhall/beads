@@ -31,7 +31,7 @@ func TestSyncRefusesBeforeProvider(t *testing.T) {
 	root := &cobra.Command{Use: "bd"}
 	cmd := &cobra.Command{Use: "sync"}
 	root.AddCommand(cmd)
-	err := validateProxyRegistryBeforeProvider(cmd)
+	err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 	if err == nil {
 		t.Fatalf("sync refusal = %#v", err)
 	}
@@ -71,7 +71,7 @@ func TestHistoryDirectOnlyRefusalContract(t *testing.T) {
 		}
 		uowProvider = nil
 		jsonOutput = true
-		out := captureStdout(t, func() error { _ = validateProxyRegistryBeforeProvider(cmd); return nil })
+		out := captureStdout(t, func() error { _ = validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); return nil })
 		var got map[string]any
 		want := expected[path]
 		if err := json.Unmarshal([]byte(out), &got); err != nil || got["code"] != want.code || got["error"] != want.message || got["mutates"] != false {
@@ -104,7 +104,7 @@ func TestHistoryNestedFrontDoorsRefuseAndSupportedPathsPass(t *testing.T) {
 			cmd.AddCommand(child)
 			cmd = child
 		}
-		err := validateProxyRegistryBeforeProvider(cmd)
+		err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 		if path == "dolt remote remove" {
 			if err != nil {
 				t.Fatalf("supported %s refused: %v", path, err)
@@ -120,7 +120,7 @@ func TestHistoryNestedFrontDoorsRefuseAndSupportedPathsPass(t *testing.T) {
 		var got map[string]any
 		// validateProxyRegistryBeforeProvider renders the typed refusal to
 		// stdout in JSON mode; the command must retain its nested path.
-		out := captureStdout(t, func() error { _ = validateProxyRegistryBeforeProvider(cmd); return nil })
+		out := captureStdout(t, func() error { _ = validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); return nil })
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatalf("%s refusal JSON: %v (%q)", path, err, out)
 		}
@@ -132,7 +132,7 @@ func TestHistoryNestedFrontDoorsRefuseAndSupportedPathsPass(t *testing.T) {
 	root := &cobra.Command{Use: "bd"}
 	history := &cobra.Command{Use: "history"}
 	root.AddCommand(history)
-	if err := validateProxyRegistryBeforeProvider(history); err != nil {
+	if err := validateProxyRegistryBeforeProvider(history, ProxyTopologyManagedLocal); err != nil {
 		t.Fatalf("history --events supported path refused: %v", err)
 	}
 }
