@@ -9,12 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd backup` works on a proxied-server workspace bd runs the Dolt server
+  for.** `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
+  over the proxied provider; before this, a proxied workspace — the default
+  topology since 1.3.0 — had no backup path at all. `bd backup restore` stops
+  the proxy and its Dolt child before replacing the database and leaves the
+  workspace quiescent, so the next command relaunches against the restored
+  data.
+
+  The family stays **refused by design** on a proxied workspace pointed at a
+  Dolt server bd does not own (an external host, socket, or a beads-team-server
+  database): `CALL DOLT_BACKUP('add', …)` registers the backup remote on the
+  *server*, where it is global to every client connected to it, so one
+  workspace's backup decision would silently become everyone's — the shape
+  `bd backup`'s own help text already warns about for auto-backup. A `file://`
+  destination has a second problem on top, since the server resolves that path
+  on its own filesystem. The refusal keeps the `proxy.backup.unsupported` code
+  and now carries `"reason": "design"`; a backup story for those deployments
+  belongs to whoever runs the server. Whether a *remote-scheme* destination
+  (DoltHub, `aws://`, `gs://`) should eventually be allowed there is recorded as
+  an open question rather than settled — the server pushes those over the
+  network from its own environment, which is the same credential question the
+  next slice has to answer for `dolt push`.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every
   row.
 
 ### Changed
+
+- **Proxied-server refusals now say *why* they refuse.** The JSON a refused
+  command prints gains a `reason` field next to the existing `code`, `error`
+  and `mutates`: `design` for a refusal that is expected to stay (shared
+  history, multi-repo routing, destructive admin, strict `--readonly`) and
+  `unimplemented` for a capability gap with a named owner. Every existing code,
+  message and exit status is unchanged, and `reason` is absent on refusals that
+  report a runtime state rather than a policy, so existing consumers are
+  unaffected. The policy behind it moved into one registry
+  (`cmd/bd/capability_registry.go`) that every command must appear in.
+- **A command with no proxied-server route now fails with a typed error**
+  (`proxy.store.unrouted`) instead of the bare string `proxy server store
+  should be uow provider`.
+- **`bd backup restore --json` prints a result object on every topology**
+  (`{"restored": true, "source": "<dir>"}`). It previously printed nothing at
+  all, which left a caller unable to tell a completed restore from a silently
+  skipped one. This applies to direct/embedded workspaces too, not only proxied
+  ones.
+- **`bd backup init`, `sync`, `remove` and `restore` no longer print a usage
+  block after a failure.** They now silence cobra's own error and usage
+  rendering like the rest of the CLI, so a failure is one error line on stderr
+  instead of the message followed by `Error: exit code 1` and the full usage
+  text. Exit statuses are unchanged; this applies on every topology.
 
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local

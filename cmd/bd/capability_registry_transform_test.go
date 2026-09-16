@@ -58,24 +58,25 @@ func TestProxyTransformCapabilityRows(t *testing.T) {
 					}
 				}
 			}
-			row, ok := lookupTransformCapability(cmd)
+			row, ok := capabilityRowFor(cmd)
 			if !ok {
 				t.Fatalf("lookup(%q, %q) missing row", tc.path, tc.argument)
 			}
-			if row.Path != tc.path || row.Argument != tc.argument || row.Outcome != tc.outcome {
+			if row.Path != tc.path || row.ArgSet != tc.argument || row.Rule.Outcome != tc.outcome {
 				t.Fatalf("row = %#v, want path=%q argument=%q outcome=%q", row, tc.path, tc.argument, tc.outcome)
 			}
 			if tc.outcome == ProxyOutcomeRefused {
-				if row.Code != tc.code || row.Message != tc.message || row.ExitCode != tc.exit || row.Mutates != tc.mutates {
-					t.Fatalf("refusal fields = code=%q message=%q exit=%d mutates=%t", row.Code, row.Message, row.ExitCode, row.Mutates)
+				if row.Rule.Code != tc.code || row.Rule.Message != tc.message || row.Rule.ExitCode != tc.exit || row.Rule.Mutates != tc.mutates {
+					t.Fatalf("refusal fields = code=%q message=%q exit=%d mutates=%t",
+						row.Rule.Code, row.Rule.Message, row.Rule.ExitCode, row.Rule.Mutates)
 				}
-				typed := transformCapabilityError(row)
+				var typed error = proxyCapabilityErrorFor(row.Rule)
 				var got *ProxyCapabilityError
 				if !errors.As(typed, &got) || got.Code != tc.code || got.ExitCode != 1 || got.Mutates {
 					t.Fatalf("typed refusal = %#v", typed)
 				}
 			}
-			if err := validateProxyTransformBeforeProvider(cmd); tc.outcome == ProxyOutcomeHonored && err != nil {
+			if err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); tc.outcome == ProxyOutcomeHonored && err != nil {
 				t.Fatalf("honored transform refused: %v", err)
 			}
 		})
@@ -85,11 +86,11 @@ func TestProxyTransformCapabilityRows(t *testing.T) {
 func TestProxyDuplicatesAutoMergeDryRunMatrix(t *testing.T) {
 	cmd := transformTestCommand("duplicates", "auto-merge", "dry-run")
 	_ = cmd.Flags().Set("auto-merge", "true")
-	if err := validateProxyTransformBeforeProvider(cmd); err == nil {
+	if err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); err == nil {
 		t.Fatalf("non-dry auto-merge error = %v", err)
 	}
 	_ = cmd.Flags().Set("dry-run", "true")
-	if err := validateProxyTransformBeforeProvider(cmd); err != nil {
+	if err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); err != nil {
 		t.Fatalf("dry-run auto-merge refused: %v", err)
 	}
 }
@@ -103,7 +104,7 @@ func TestProxyTransformRefusalRendering(t *testing.T) {
 	jsonOutput = false
 	var textErr string
 	stderr := captureStderr(t, func() {
-		err := validateProxyTransformBeforeProvider(cmd)
+		err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 		if code, ok := exitCodeFromError(err); !ok || code != 1 {
 			t.Fatalf("exit = %v, want 1", err)
 		}
@@ -115,7 +116,7 @@ func TestProxyTransformRefusalRendering(t *testing.T) {
 
 	jsonOutput = true
 	stdout := captureStdout(t, func() error {
-		_ = validateProxyTransformBeforeProvider(cmd)
+		_ = validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 		return nil
 	})
 	var envelope map[string]any
@@ -140,8 +141,8 @@ func TestProxyTransformMatcherIgnoresInheritedOutputFlags(t *testing.T) {
 	if err := root.PersistentFlags().Set("json", "true"); err != nil {
 		t.Fatal(err)
 	}
-	row, ok := lookupTransformCapability(cmd)
-	if !ok || row.Argument != "--auto-merge" || row.Outcome != ProxyOutcomeRefused {
+	row, ok := capabilityRowFor(cmd)
+	if !ok || row.ArgSet != "--auto-merge" || row.Rule.Outcome != ProxyOutcomeRefused {
 		t.Fatalf("row with inherited --json = %#v, ok=%v", row, ok)
 	}
 }
@@ -163,7 +164,7 @@ func TestProxyTransformRefusalHasNoProviderOrFileMutation(t *testing.T) {
 	t.Cleanup(func() { uowProvider = oldProvider })
 
 	cmd := transformTestCommand("supersede")
-	err := validateProxyTransformBeforeProvider(cmd)
+	err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 	if err == nil {
 		t.Fatal("expected transform refusal")
 	}
