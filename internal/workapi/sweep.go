@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -98,34 +97,89 @@ func MatchesSweepPattern(pattern, id string) bool {
 	return err == nil && ok
 }
 
-// FilterSweepCandidates applies the pattern and then the two protections that
-// hold a candidate back before any reference scan: the pinned flag, and the
-// closed_at recheck.
+// SweepProtectedLabelSet turns a request's ProtectedLabels into the set
+// FilterSweepCandidates matches against. Empty entries are dropped: a label
+// row is never empty, so an empty entry could only ever have come from a
+// caller splitting an empty config value, and admitting it would protect
+// nothing while looking like protection.
+//
+// It is exported so a front door can report what it resolved without
+// re-deriving the rule.
+func SweepProtectedLabelSet(labels []string) map[string]bool {
+	if len(labels) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(labels))
+	for _, l := range labels {
+		if l == "" {
+			continue
+		}
+		set[l] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// hasProtectedLabel reports whether an issue carries any label in set. A nil
+// set protects nothing, which is the no-opt-in case and must stay a cheap
+// no-op: this runs once per candidate on the delete path.
+func hasProtectedLabel(issue *types.Issue, set map[string]bool) bool {
+	if len(set) == 0 {
+		return false
+	}
+	for _, l := range issue.Labels {
+		if set[l] {
+			return true
+		}
+	}
+	return false
+}
+
+// FilterSweepCandidates applies the pattern and then the protections that hold
+// a candidate back before any reference scan: the pinned flag, the protected
+// labels, and the closed_at recheck.
+//
+// IT TAKES THE WHOLE REQUEST rather than the two or three fields it reads,
+// because every field it reads is a way a candidate can be held back, and the
+// three call sites below the two front doors must not be able to drift on
+// which of them they pass. Handing the request over means a protection added
+// to it reaches every route by construction; handing over a parameter list
+// means a new protection is a signature change that one call site can be
+// updated without.
 //
 // THE ORDER IS PART OF THE ANSWER, and issueops.Sweeper.Sweep states it: the
-// pattern narrows first, so a pinned row the pattern excluded is not counted
-// as protected — it was never a candidate. The three closed_at buckets are
-// defenses against the tier query returning a row it was not asked for, counted
-// rather than dropped so a disagreement between the query and the recheck is
-// visible instead of silent.
+// pattern narrows first, so a pinned or labeled row the pattern excluded is
+// not counted as protected — it was never a candidate. The two protections
+// then come before the three closed_at buckets, which are defenses against the
+// tier query returning a row it was not asked for, counted rather than dropped
+// so a disagreement between the query and the recheck is visible instead of
+// silent. A candidate lands in exactly one bucket.
 //
-// cutoff is the request's ClosedBefore; a nil cutoff performs the presence
-// checks and skips the comparison.
-func FilterSweepCandidates(issues []*types.Issue, pattern string, cutoff *time.Time) ([]*types.Issue, issueops.SweepSkips) {
+// LABEL PROTECTION READS issue.Labels, so a caller that hands over rows from a
+// label-skipping projection (types.IssueFilter.SkipLabels, or Lite) gets a
+// total and SILENT loss of it — every row looks unlabeled and no error is
+// raised. BuildSweepCandidateFilter sets neither, deliberately.
+func FilterSweepCandidates(issues []*types.Issue, req issueops.SweepRequest) ([]*types.Issue, issueops.SweepSkips) {
 	kept := make([]*types.Issue, 0, len(issues))
 	var skips issueops.SweepSkips
+	protected := SweepProtectedLabelSet(req.ProtectedLabels)
+	cutoff := req.ClosedBefore
 
 	for _, issue := range issues {
 		if issue == nil {
 			skips.Unreadable++
 			continue
 		}
-		if !MatchesSweepPattern(pattern, issue.ID) {
+		if !MatchesSweepPattern(req.IDPattern, issue.ID) {
 			continue
 		}
 		switch {
 		case issue.Pinned:
 			skips.Pinned++
+		case hasProtectedLabel(issue, protected):
+			skips.Labeled++
 		case issue.Status != types.StatusClosed:
 			skips.NotClosed++
 		case issue.ClosedAt == nil:

@@ -118,7 +118,7 @@ func runWispListProxiedServer(ctx context.Context, showAll bool, typeFilter stri
 	return renderWispListResult(buildWispListResult(issues, showAll))
 }
 
-func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.Duration, cleanAll, closedMode, force bool, excludeTypes []types.IssueType) error {
+func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.Duration, cleanAll, closedMode, force bool, excludeTypes []types.IssueType, excludeLabels []string) error {
 	CheckReadonly("wisp gc")
 
 	if uowProvider == nil {
@@ -126,7 +126,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 
 	if closedMode {
-		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, excludeTypes, excludeLabels)
 	}
 
 	uw, err := proxiedOpenReadUOW(ctx)
@@ -134,7 +134,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		return err
 	}
 	r := uowMolReader{uw: uw}
-	abandoned, err := findAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes)
+	abandoned, err := findAbandonedWisps(ctx, r, cleanAll, ageThreshold, excludeTypes, excludeLabels)
 	uw.Close(ctx)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
@@ -219,7 +219,7 @@ func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error
 	return nil
 }
 
-func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType) error {
+func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType, excludeLabels []string) error {
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
 		return err
@@ -240,28 +240,17 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		return HandleError("listing closed wisps: %v", err)
 	}
 
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
+	protectedLabels, err := protectedWispLabels(ctx, r, excludeLabels)
+	if err != nil {
+		uw.Close(ctx)
+		return HandleError("%v", err)
 	}
-	closedIssues = filtered
+
+	closedIssues, skips := filterClosedPurgeCandidates(ctx, r, closedIssues, protectedLabels)
 	uw.Close(ctx)
 
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if !jsonOutput {
+		skips.report()
 	}
 
 	if len(closedIssues) == 0 {

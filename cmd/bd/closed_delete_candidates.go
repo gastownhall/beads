@@ -17,10 +17,15 @@ import (
 type closedDeletionCandidateStats = issueops.SweepSkips
 
 // filterClosedDeletionCandidates keeps the closed, unpinned, old-enough
-// candidates and reports what it held back. `bd gc` matches no glob, so it
-// passes the empty pattern, which admits everything.
+// candidates and reports what it held back. `bd gc` matches no glob, so the
+// request carries the empty pattern, which admits everything.
+//
+// It carries no ProtectedLabels: `bd gc` sweeps the DURABLE tier, and
+// wisp.protected_labels is a wisp-tier guard. A durable-tier label protection
+// would be its own decision with its own config key, not this one read from a
+// second command.
 func filterClosedDeletionCandidates(issues []*types.Issue, cutoff *time.Time) ([]*types.Issue, closedDeletionCandidateStats) {
-	return workapi.FilterSweepCandidates(issues, "", cutoff)
+	return workapi.FilterSweepCandidates(issues, issueops.SweepRequest{ClosedBefore: cutoff})
 }
 
 func warnClosedDeletionSafetySkips(stats closedDeletionCandidateStats) {
