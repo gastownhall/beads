@@ -1,13 +1,17 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSetupGitExclude_Worktree verifies that setupGitExclude writes to the main
@@ -448,5 +452,205 @@ func TestSetupGitExclude_RegularRepo(t *testing.T) {
 	}
 	if !strings.Contains(string(content), ".claude/settings.local.json") {
 		t.Errorf("exclude file missing .claude/settings.local.json pattern: %s", content)
+	}
+}
+
+func TestAddExcludePatternsPreservesAppendLineEndings(t *testing.T) {
+	const lf = "\n# managed\n.beads/\ncache/\n"
+	const crlf = "\r\n# managed\r\n.beads/\r\ncache/\r\n"
+	for _, tc := range []struct{ name, existing, want, added string }{
+		{"empty", "", "# managed\n.beads/\ncache/\n", ".beads/,cache/"},
+		{"whitespace unterminated", " \t", " \t\n" + lf, ".beads/,cache/"},
+		{"blank LF", "\n", "\n" + lf, ".beads/,cache/"},
+		{"blank CRLF", "\r\n", "\r\n" + crlf, ".beads/,cache/"},
+		{"blank pending CR", "\r", "\r\n" + lf, ".beads/,cache/"},
+		{"delimiter-free", "local", "local\n" + lf, ".beads/,cache/"},
+		{"LF", "local\n", "local\n" + lf, ".beads/,cache/"},
+		{"CRLF", "local\r\n", "local\r\n" + crlf, ".beads/,cache/"},
+		{"CRLF unterminated", "local\r\nlast", "local\r\nlast\r\n" + crlf, ".beads/,cache/"},
+		{"CRLF pending CR", "local\r\nlast\r", "local\r\nlast\r\n" + crlf, ".beads/,cache/"},
+		{"LF pending CR", "local\nlast\r", "local\nlast\r\n" + lf, ".beads/,cache/"},
+		{"only pending CR", "local\r", "local\r\n" + lf, ".beads/,cache/"},
+		{"mixed", "a\r\nb\r\nc\n", "a\r\nb\r\nc\n" + lf, ".beads/,cache/"},
+		{"partial", ".beads/\r\n", ".beads/\r\n\r\n# managed\r\ncache/\r\n", "cache/"},
+		{"complete", ".beads/\r\ncache/", ".beads/\r\ncache/", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newGitRepo(t)
+			gitignorePath := filepath.Join(dir, ".gitignore")
+			const tracked = "user-rule\r\n"
+			if err := os.WriteFile(gitignorePath, []byte(tracked), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command("git", "-C", dir, "add", "--", ".gitignore").CombinedOutput(); err != nil {
+				t.Fatalf("track .gitignore: %v: %s", err, out)
+			}
+			path, err := resolveGitExcludePath(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.existing), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for pass := 0; pass < 2; pass++ {
+				added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/", "cache/"})
+				if err != nil || gotPath != path {
+					t.Fatalf("addExcludePatterns: path=%q, err=%v", gotPath, err)
+				}
+				wantAdded := tc.added
+				if pass == 1 {
+					wantAdded = ""
+				}
+				if strings.Join(added, ",") != wantAdded {
+					t.Errorf("pass %d added=%q, want %q", pass, added, wantAdded)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != tc.want {
+					t.Fatalf("pass %d exclude=%q, want %q: %v", pass, got, tc.want, err)
+				}
+				got, err = os.ReadFile(gitignorePath)
+				if err != nil || string(got) != tracked {
+					t.Fatalf("tracked .gitignore changed: %q: %v", got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAddExcludePatternsRefusesReadErrors(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		if os.Getenv("BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION") == "1" {
+			t.Fatal("exclude read-error coverage requires an unprivileged POSIX permission boundary")
+		}
+		t.Skip("write-only permission coverage requires an unprivileged POSIX host")
+	}
+	dir := newGitRepo(t)
+	path, err := resolveGitExcludePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const before = "user-rule\r\n"
+	if err := os.WriteFile(path, []byte(before), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0600); err != nil {
+			t.Errorf("restore exclude mode: %v", err)
+		}
+	})
+	if err := os.Chmod(path, 0200); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("read-denied precondition: %v", err)
+	}
+	// Prove a write would succeed without truncating the bytes being protected.
+	writable, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("write-allowed precondition: %v", err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/"})
+	if restoreErr := os.Chmod(path, 0600); restoreErr != nil {
+		t.Fatal(restoreErr)
+	}
+	if err == nil || !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "failed to read git exclude file") {
+		t.Errorf("expected contextual wrapped permission error, got %v", err)
+	}
+	if added != nil || gotPath != path {
+		t.Errorf("read failure returned added=%v path=%q, want nil and %q", added, gotPath, path)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != before {
+		t.Errorf("exclude bytes after read failure = %q, want %q: %v", got, before, err)
+	}
+}
+
+func TestAddExcludePatternsCreatesMissingFile(t *testing.T) {
+	dir := newGitRepo(t)
+	path, err := resolveGitExcludePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/"})
+	if err != nil || gotPath != path || len(added) != 1 || added[0] != ".beads/" {
+		t.Fatalf("create missing exclude: added=%v path=%q err=%v", added, gotPath, err)
+	}
+	const want = "# managed\n.beads/\n"
+	if got, err := os.ReadFile(path); err != nil || string(got) != want {
+		t.Errorf("created exclude = %q, want %q: %v", got, want, err)
+	}
+}
+
+func initExcludeGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "fixture git %v: %s", args, out)
+	return strings.TrimSpace(string(out))
+}
+
+func newInitExcludeRepos(t *testing.T) (worktree, decoy, commonExclude, privateExclude string) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			// Setenv registers restoration; Unsetenv then makes the key absent during the test.
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	mainDir, decoy := t.TempDir(), t.TempDir()
+	for _, dir := range []string{mainDir, decoy} {
+		initExcludeGit(t, dir, "init", "--quiet")
+		for key, value := range map[string]string{"user.name": "Fixture", "user.email": "fixture@example.test", "commit.gpgSign": "false", "core.hooksPath": filepath.Join(home, "hooks")} {
+			initExcludeGit(t, dir, "config", "--local", key, value)
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "info", "exclude"), []byte("# preserved\r\n"), 0600))
+	}
+	initExcludeGit(t, mainDir, "commit", "--allow-empty", "-m", "fixture")
+	worktree = filepath.Join(t.TempDir(), "selected worktree")
+	initExcludeGit(t, mainDir, "worktree", "add", "--quiet", "-b", "selected", worktree)
+	commonExclude = filepath.Join(mainDir, ".git", "info", "exclude")
+	privateExclude = filepath.Join(initExcludeGit(t, worktree, "rev-parse", "--absolute-git-dir"), "info", "exclude")
+	t.Chdir(decoy)
+	return worktree, decoy, commonExclude, privateExclude
+}
+
+func TestGitExcludeExplicitPathSelectsCommonDir(t *testing.T) {
+	for _, key := range []string{"GIT_DIR", "GIT_COMMON_DIR"} {
+		t.Run(key, func(t *testing.T) {
+			worktree, decoy, commonExclude, privateExclude := newInitExcludeRepos(t)
+			t.Setenv(key, filepath.Join(decoy, ".git"))
+			t.Setenv("GIT_WORK_TREE", decoy)
+			// The empty-path API intentionally retains inherited repository selection.
+			inherited, err := resolveGitExcludePath("")
+			require.NoError(t, err)
+			got, err := os.Stat(inherited)
+			require.NoError(t, err)
+			want, err := os.Stat(filepath.Join(decoy, ".git", "info", "exclude"))
+			require.NoError(t, err)
+			require.True(t, os.SameFile(got, want))
+			added, _, err := addExcludePatterns(worktree, "# selected", []string{".beads/"})
+			require.NoError(t, err)
+			require.Equal(t, []string{".beads/"}, added)
+			data, err := os.ReadFile(commonExclude)
+			require.NoError(t, err)
+			require.Equal(t, "# preserved\r\n\r\n# selected\r\n.beads/\r\n", string(data))
+			data, err = os.ReadFile(filepath.Join(decoy, ".git", "info", "exclude"))
+			require.NoError(t, err)
+			require.Equal(t, "# preserved\r\n", string(data))
+			_, err = os.Stat(privateExclude)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
 	}
 }
