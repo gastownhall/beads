@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // The embedded store's wiring of the BatchCloser contract. It shares the
@@ -47,6 +48,12 @@ func TestEmbeddedBatchCloserBackendFailureReturnsNoOutcomes(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 	conformance.RunBatchCloserBackendFailureReturnsNoOutcomes(t, ctx, newEmbeddedBatchCloserFixture(t, "bcdeadctx"))
+}
+
+func TestEmbeddedBatchCloserMidBatchInfrastructureFailureAbortsTheBatch(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunBatchCloserMidBatchInfrastructureFailureAbortsTheBatch(t, ctx, newEmbeddedBatchCloserFixture(t, "bcmidinfra"))
 }
 
 func TestEmbeddedBatchCloserIdempotentRecloseIsAPerItemSuccess(t *testing.T) {
@@ -154,5 +161,6 @@ func newEmbeddedBatchCloserFixture(t *testing.T, prefix string) conformance.Batc
 		QueryScalar:          kit.QueryScalar,
 		CountHistory:         kit.CountHistory,
 		CountHistoryMatching: kit.CountHistoryMatching,
+		FailHydrationOf:      storageissueops.FailBatchCloseHydrationOf,
 	}
 }
