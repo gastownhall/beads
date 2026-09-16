@@ -93,7 +93,7 @@ type expectation struct {
 	reason   matrixReason
 }
 
-// probe is one command exercised across every topology.
+// probe is one command exercised across every topology that can safely run it.
 //
 // Adding a command to the matrix is a single row here. `direct` applies to
 // every direct-class topology and `proxied` to every proxied-class one, which
@@ -107,6 +107,12 @@ type probe struct {
 	direct   expectation
 	proxied  expectation
 	override map[string]expectation
+	// skipOn excuses named topologies from this row, with the reason. The only
+	// admissible reason is that RUNNING the command there would leave process
+	// state this matrix cannot tear down; an inconvenient answer is never one.
+	// Excused cells print as "(not probed)" and the reason prints under the
+	// table, so absence is not mistaken for coverage.
+	skipOn map[string]string
 }
 
 func (p probe) want(topology string, class topologyClass) expectation {
@@ -150,28 +156,69 @@ var capabilityProbes = []probe{
 		proxied: expectation{outcome: outcomeHonored, reason: reasonNA},
 	},
 
-	// --- the two verified wrong answers ------------------------------------
+	// --- dolt server lifecycle ---------------------------------------------
 	{
-		// dolt status reads the CLASSIC pidfile. Proxied mode writes
-		// proxy-child.pid under the proxied root, so status reports "not
-		// running" while the proxy is serving CRUD. Direct-external has the
-		// same shape for a different reason: bd never wrote a pidfile for a
-		// server it does not own, so it reports a live server as down.
-		// Both direct server topologies report the truth: a bd-owned local
-		// server and an externally-managed one both come back running, with
-		// host/port/version. Proxied is the outlier.
+		// The same command, three refusal surfaces. A proxied workspace's dolt
+		// backend belongs to the proxy, which spawns it on demand and reaps it
+		// when idle, so bd refuses with a code a JSON consumer can branch on.
+		// Embedded refuses too — there is no server to start — but with a bare
+		// string and no code. Direct-local is the one topology where bd owns
+		// the server and the command is its own honored idempotent no-op.
+		name: "dolt start",
+		args: []string{"dolt", "start"},
+		direct: expectation{
+			// The fixture's `bd init --server` already started it, so this is
+			// the adopt path: doltserver.Start finds the recorded server live
+			// and returns it rather than launching a second one.
+			outcome: outcomeHonored, substr: "Dolt server started", reason: reasonNA,
+		},
+		proxied: expectation{
+			outcome: outcomeRefusedTyped, code: "proxy.dolt_start.conflict",
+			substr: "dolt start is not supported in proxied-server mode",
+			reason: reasonDesign,
+		},
+		override: map[string]expectation{
+			topoEmbedded: {
+				outcome: outcomeRefusedUntyped,
+				substr:  "'bd dolt start' is not supported in embedded mode",
+				reason:  reasonDesign,
+			},
+		},
+		skipOn: map[string]string{
+			// The configured host is 127.0.0.1, so the remote-host ownership
+			// guard does not fire and doltserver.Start goes on to put a
+			// bd-owned sql-server over this workspace's own .beads/dolt — for
+			// a workspace whose server bd does not own. That is worth
+			// recording, but not by running it: the external-server fixture
+			// tears down only its proxy, so whatever the start leaves behind
+			// outlives the test, and this matrix must not leak a dolt server
+			// onto a shared host. Probe it when the fixture can stop one.
+			topoDirectExternal: "`bd dolt start` would launch a bd-owned sql-server over the workspace's .beads/dolt " +
+				"(host is 127.0.0.1, so the remote-host guard does not fire) and the external-server fixture has no " +
+				"`bd dolt stop` teardown for it, so the process would outlive the test",
+		},
+	},
+	{
+		// Every topology reports the process it actually depends on. Proxied
+		// used to be the outlier: status read the CLASSIC pidfile, which
+		// proxied mode never writes, and answered "not running" while the
+		// proxy was serving CRUD. It now reads the proxy's own records and
+		// reports the proxy and its dolt backend separately. Direct-local and
+		// direct-external both report a live server, one bd-owned and one not.
 		name: "dolt status",
 		args: []string{"dolt", "status"},
 		direct: expectation{
 			outcome: outcomeHonored, substr: `"running": true`, reason: reasonNA,
 		},
 		proxied: expectation{
-			// The proxy and its child are live and serving CRUD — every
-			// honored row on this topology proves it — yet status reports
-			// running=false with pid 0 and port 0.
-			outcome: outcomeWrongAnswer, substr: `"running": false`,
-			knownBad: "proxied status reads the classic pidfile; proxy.IsRunning is never called (design 1.2 / slice S1)",
-			reason:   reasonNA,
+			// `running` describes the PROXY — the endpoint every bd command
+			// connects through — and the honored rows ahead of this one have
+			// just started it. The rest of the payload (mode, proxy pid/port,
+			// backend_managed on an external backend) is asserted field by
+			// field by the dolt lifecycle tests; what this cell pins is the
+			// cross-topology claim, that no topology's status lies about
+			// whether the thing bd talks to is up.
+			outcome: outcomeHonored, substr: `"running": true`, reason: reasonNA,
 		},
 		override: map[string]expectation{
 			topoEmbedded: {
@@ -179,6 +226,8 @@ var capabilityProbes = []probe{
 			},
 		},
 	},
+
+	// --- the verified wrong answer -----------------------------------------
 	{
 		// collectDatabaseEntries calls ensureDirectMode, which fails under
 		// proxied, and the error is swallowed with `return nil`. Every
@@ -407,13 +456,11 @@ var capabilityProbes = []probe{
 	},
 }
 
-// deliberatelyNotProbed records commands this matrix will not run, and why.
-// Leaving them undocumented would let a reader mistake absence for coverage.
+// deliberatelyNotProbed records commands this matrix will not run at all, and
+// why. Leaving them undocumented would let a reader mistake absence for
+// coverage. A command excused from only SOME topologies belongs in that
+// probe's skipOn instead.
 var deliberatelyNotProbed = map[string]string{
-	"dolt start": "running it under proxied config spawns a SECOND, unmanaged dolt sql-server over the live child's data dir " +
-		"(design 1.2). The hazard is the thing slice S1 fixes, and the second server is not recorded in any pidfile bd's own " +
-		"`dolt stop` will read, so the test could not guarantee teardown by recorded PID. Add the row as a typed-refusal " +
-		"assertion once S1 lands.",
 	"restore": "`bd restore` restores an ISSUE, not a backup; the backup verb is `bd backup restore`, which is already " +
 		"covered by the backup rows. Probing it adds a row that says nothing about the backup family.",
 	"backup restore": "would need a real backup destination to distinguish a topology refusal from a missing-backup error. " +
@@ -660,6 +707,9 @@ func runCapabilityMatrix(t *testing.T, topologies []topologySpec) {
 // table order within each group.
 func partitionProbes(all []probe, topology string, class topologyClass) (refusals, others []probe) {
 	for _, p := range all {
+		if _, excused := p.skipOn[topology]; excused {
+			continue
+		}
 		switch p.want(topology, class).outcome {
 		case outcomeRefusedTyped, outcomeRefusedUntyped:
 			refusals = append(refusals, p)
@@ -872,7 +922,11 @@ func reportMatrix(t *testing.T, topologies []topologySpec, results []cellResult,
 		for _, n := range names {
 			cell, ok := byProbe[p.name][n]
 			if !ok {
-				fmt.Fprintf(&b, " | %-*s", cellWidth, "(not exercised)")
+				missing := "(not exercised)"
+				if _, excused := p.skipOn[n]; excused {
+					missing = "(not probed)"
+				}
+				fmt.Fprintf(&b, " | %-*s", cellWidth, missing)
 				continue
 			}
 			label := string(cell.outcome)
@@ -925,12 +979,17 @@ func reportMatrix(t *testing.T, topologies []topologySpec, results []cellResult,
 	}
 	b.WriteString("\ndeliberately not probed:\n")
 	var notProbed []string
-	for k := range deliberatelyNotProbed {
-		notProbed = append(notProbed, k)
+	for k, why := range deliberatelyNotProbed {
+		notProbed = append(notProbed, fmt.Sprintf("  %s — %s", k, why))
+	}
+	for _, p := range capabilityProbes {
+		for topo, why := range p.skipOn {
+			notProbed = append(notProbed, fmt.Sprintf("  %s on %s — %s", p.name, topo, why))
+		}
 	}
 	sort.Strings(notProbed)
-	for _, k := range notProbed {
-		fmt.Fprintf(&b, "  %s — %s\n", k, deliberatelyNotProbed[k])
+	for _, line := range notProbed {
+		b.WriteString(line + "\n")
 	}
 
 	t.Log(b.String())
