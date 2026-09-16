@@ -36,6 +36,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `backend_managed` is false on external proxied topologies, where the dolt
   server is not bd's process to report on.
 
+- **A dotted config key now round-trips: what `bd config set` writes,
+  `bd config get` and bd's own readers find**
+  ([#6578](https://github.com/gastownhall/beads/pull/6578), bd-zj95). Setting a
+  key like `sync.remote` or `dolt.host` into a `config.yaml` with no matching
+  section appended a key whose *name* contained the dot — a top-level
+  `sync.remote: "..."` — instead of nesting it under `sync:`. Viper finds a key
+  spelled that way; the direct reader `GetStringFromDir` splits on the dot and
+  walks nested mappings, so it does not. The value was set and invisible at the
+  same time depending on which reader asked, and `bd init --remote` in a fresh
+  workspace was the ordinary way in: the remote was recorded and then not found.
+  Dotted keys are written nested now, an existing flat spelling of the key being
+  written is migrated to the nested one, and `bd config unset` removes the
+  nested form — it only ever matched the flat spelling, so unsetting
+  `sync.remote` silently left the remote live. Keys the write does not own,
+  including dotted ones somebody else put there, are left exactly as they are.
+
+  Two things that used to succeed now report an error instead, because both
+  produced a value no reader could see: setting a key under a parent that
+  already holds a value (`sync: enabled`, then `bd config set sync.remote`), and
+  setting one in a file whose top level is not a mapping.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
