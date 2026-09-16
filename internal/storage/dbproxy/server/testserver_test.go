@@ -161,6 +161,54 @@ func TestDial_Error(t *testing.T) {
 	assert.Equal(t, int64(0), c.OpenConns)
 }
 
+func TestDial_FirstDialGreeting(t *testing.T) {
+	ctx := context.Background()
+	srv := server.New()
+	srv.SetFirstDialGreeting([]byte("greeting"))
+	srv.Handler = func(c net.Conn) {
+		defer c.Close()
+		_, _ = c.Write([]byte("payload"))
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	first, err := srv.Dial(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "greeting", string(mustReadN(t, first, len("greeting"))))
+	assert.Equal(t, "payload", string(mustReadN(t, first, len("payload"))))
+	require.NoError(t, first.Close())
+
+	second, err := srv.Dial(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(mustReadN(t, second, len("payload"))))
+	require.NoError(t, second.Close())
+
+	eventually(t, func() bool { return srv.Snapshot().OpenConns == 0 }, "OpenConns did not drain")
+	c := srv.Snapshot()
+	assert.Equal(t, int64(2), c.DialCalls)
+	assert.Equal(t, int64(2), c.AcceptedConns)
+	assert.Equal(t, int64(len("payload")*2), c.BytesOut, "greeting is not handler payload")
+}
+
+func TestDial_ErrorDoesNotConsumeFirstDialGreeting(t *testing.T) {
+	ctx := context.Background()
+	srv := server.New()
+	srv.SetFirstDialGreeting([]byte("greeting"))
+	srv.SetDialErr(errors.New("refused"))
+
+	_, err := srv.Dial(ctx)
+	require.EqualError(t, err, "refused")
+	srv.SetDialErr(nil)
+	srv.Handler = func(c net.Conn) {
+		defer c.Close()
+		_, _ = io.Copy(io.Discard, c)
+	}
+
+	conn, err := srv.Dial(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "greeting", string(mustReadN(t, conn, len("greeting"))))
+	require.NoError(t, conn.Close())
+}
+
 func TestDial_DiscardHandler(t *testing.T) {
 	ctx := context.Background()
 	srv := server.New()
