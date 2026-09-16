@@ -160,26 +160,26 @@ var capabilityProbes = []probe{
 
 	// --- the two verified wrong answers ------------------------------------
 	{
-		// dolt status reads the CLASSIC pidfile. Proxied mode writes
-		// proxy-child.pid under the proxied root, so status reports "not
-		// running" while the proxy is serving CRUD. Direct-external has the
-		// same shape for a different reason: bd never wrote a pidfile for a
-		// server it does not own, so it reports a live server as down.
-		// Both direct server topologies report the truth: a bd-owned local
-		// server and an externally-managed one both come back running, with
-		// host/port/version. Proxied is the outlier.
+		// Every topology reports the process it actually depends on. Proxied
+		// used to be the outlier: status read the CLASSIC pidfile, which
+		// proxied mode never writes, and answered "not running" while the
+		// proxy was serving CRUD. It now reads the proxy's own records and
+		// reports the proxy and its dolt backend separately. Direct-local and
+		// direct-external both report a live server, one bd-owned and one not.
 		name: "dolt status",
 		args: []string{"dolt", "status"},
 		direct: expectation{
 			outcome: outcomeHonored, substr: `"running": true`, reason: reasonNA,
 		},
 		proxied: expectation{
-			// The proxy and its child are live and serving CRUD — every
-			// honored row on this topology proves it — yet status reports
-			// running=false with pid 0 and port 0.
-			outcome: outcomeWrongAnswer, substr: `"running": false`,
-			knownBad: "proxied status reads the classic pidfile; proxy.IsRunning is never called (design 1.2 / slice S1)",
-			reason:   reasonNA,
+			// `running` describes the PROXY — the endpoint every bd command
+			// connects through — and the honored rows ahead of this one have
+			// just started it. The rest of the payload (mode, proxy pid/port,
+			// backend_managed on an external backend) is asserted field by
+			// field by the dolt lifecycle tests; what this cell pins is the
+			// cross-topology claim, that no topology's status lies about
+			// whether the thing bd talks to is up.
+			outcome: outcomeHonored, substr: `"running": true`, reason: reasonNA,
 		},
 		override: map[string]expectation{
 			topoEmbedded: {
@@ -205,42 +205,44 @@ var capabilityProbes = []probe{
 
 	// --- dolt start: probed only where it cannot start anything -------------
 	{
-		// §3.5 proposes probing this against a shut-down proxy. It is probed
-		// on EMBEDDED only, because embedded is the single topology where the
-		// command cannot spawn a server: with no SQL server configured it
-		// short-circuits before it gets that far. On all four others it
-		// starts, or tries to start, a real sql-server — the notProbedOn
-		// reasons below say precisely what each one does, measured by running
-		// it there rather than reasoned about.
-		//
-		// `proxied` is deliberately left unset: both proxied topologies are
-		// withheld, so nothing reads it. Slice S1 turns the proxied hazard
-		// into a typed refusal; that slice fills this in and drops the two
-		// proxied entries below, which is the flip that proves it landed.
+		// The same command, three refusal surfaces. A proxied workspace's dolt
+		// backend belongs to the proxy, which spawns it on demand and reaps it
+		// when idle, so bd refuses with a code a JSON consumer can branch on.
+		// Embedded refuses too — there is no server to start — but with a bare
+		// string and no code. Direct-local is the one topology where bd owns
+		// the server and the command is its own honored idempotent no-op.
 		name: "dolt start",
 		args: []string{"dolt", "start"},
 		direct: expectation{
-			outcome: outcomeError,
-			substr:  "'bd dolt start' is not supported in embedded mode",
-			reason:  reasonNA,
+			// The fixture's `bd init --server` already started it, so this is
+			// the adopt path: doltserver.Start finds the recorded server live
+			// and returns it rather than launching a second one.
+			outcome: outcomeHonored, substr: "Dolt server started", reason: reasonNA,
+		},
+		proxied: expectation{
+			outcome: outcomeRefusedTyped, code: "proxy.dolt_start.conflict",
+			substr: "dolt start is not supported in proxied-server mode",
+			reason: reasonDesign,
+		},
+		override: map[string]expectation{
+			topoEmbedded: {
+				outcome: outcomeRefusedUntyped,
+				substr:  "'bd dolt start' is not supported in embedded mode",
+				reason:  reasonDesign,
+			},
 		},
 		notProbedOn: map[string]string{
-			topoDirectLocal: "starts a SECOND bd-managed sql-server over a workspace that ALREADY has one running, " +
-				"and reports success doing it (observed: \"Dolt server started (PID …, port …)\" at exit 0). It overwrites " +
-				"this workspace's .beads/dolt-server.pid with the new PID, so the first server is left with nothing " +
-				"pointing at it and `bd dolt stop` can no longer reach it. Probing it would make this matrix orphan a " +
-				"process on every run. This is a defect in its own right and is NOT the proxied hazard slice S1 fixes.",
-			topoDirectExternal: "tries to start a LOCAL sql-server on the EXTERNAL endpoint's own port — the workspace " +
-				"points at a server bd does not own, and the command does not check that before acting. It fails here only " +
-				"because the container already holds the port (observed: \"cannot start dolt server on port N: port N is " +
-				"busy but cannot identify the process\", exit 1). Safety by collision is not safety, and not something to " +
-				"build an assertion on.",
-			topoProxiedLocal: "spawns a SECOND, unmanaged dolt sql-server over the live proxy child's data directory — " +
-				"the default proxied root IS .beads/dolt (design 1.2). That server is recorded in no pidfile bd's own " +
-				"`dolt stop` reads, so teardown by recorded PID cannot be guaranteed and this matrix must not create one. " +
-				"Slice S1 makes it a typed refusal (proxy.dolt_start.conflict); probe it here then.",
-			topoProxiedTCP: "same hazard as proxied-local: a second, unmanaged sql-server over the proxied root, " +
-				"recorded in no pidfile this test could tear down by PID. Slice S1 makes it a typed refusal; probe it then.",
+			// The configured host is 127.0.0.1, so the remote-host ownership
+			// guard does not fire and doltserver.Start goes on to put a
+			// bd-owned sql-server over this workspace's own .beads/dolt — for
+			// a workspace whose server bd does not own. That is worth
+			// recording, but not by running it: the external-server fixture
+			// tears down only its proxy, so whatever the start leaves behind
+			// outlives the test, and this matrix must not leak a dolt server
+			// onto a shared host. Probe it when the fixture can stop one.
+			topoDirectExternal: "`bd dolt start` would launch a bd-owned sql-server over the workspace's .beads/dolt " +
+				"(host is 127.0.0.1, so the remote-host guard does not fire) and the external-server fixture has no " +
+				"`bd dolt stop` teardown for it, so the process would outlive the test",
 		},
 	},
 
@@ -461,8 +463,8 @@ var capabilityProbes = []probe{
 var deliberatelyNotProbed = map[string]string{
 	// `dolt start` is no longer here: it is a probe row with per-topology
 	// notProbedOn reasons, which is strictly more informative than withholding
-	// the whole command. Embedded is probed; the other four carry their own
-	// measured reason.
+	// the whole command. Embedded and proxied modes are probed; the direct server modes carry
+	// their measured reasons for withholding the unsafe start probe.
 	"restore": "`bd restore` restores an ISSUE, not a backup; the backup verb is `bd backup restore`, which is already " +
 		"covered by the backup rows. Probing it adds a row that says nothing about the backup family.",
 	"backup restore": "would need a real backup destination to distinguish a topology refusal from a missing-backup error. " +
