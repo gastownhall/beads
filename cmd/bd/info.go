@@ -221,6 +221,17 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.1-rc.1",
+		Date:    "2026-09-16",
+		Changes: []string{
+			"RC: first candidate for the 1.3.1 patch line, on top of 1.3.0. It carries fixes only — no schema migration, so upgrading from 1.3.0 is a binary swap. If you are coming from 1.2.2 or earlier, the [1.3.0] entry below still describes everything you meet, including the migration and backup notes; read it first.",
+			"CHANGE: 'bd dolt start' on a PROXIED workspace is now a typed refusal with code 'proxy.dolt_start.conflict' instead of starting a second sql-server over the proxy's own data directory. It previously either stranded ordinary bd commands on 'invalid connection' or adopted the proxy's dolt child into bd's classic PID/port records, leaving two managers for one process. The proxy owns its backend's lifecycle: it starts on demand, and 'bd dolt stop' shuts it down. Direct-server and embedded workspaces are unaffected.",
+			"CHANGE: 'bd dolt status --json' changes shape on a proxied workspace. It now reports the proxy and its dolt backend separately — {\"mode\": \"proxied-server\", \"running\": <proxy up>, \"proxy_pid\", \"proxy_port\", \"backend_managed\", \"backend_running\", \"backend_pid\", \"backend_port\", \"idle_timeout\", \"root\"} — instead of the always-false {\"running\": false, \"pid\": 0, \"port\": 0} it emitted by reading a PID file proxied mode never writes. 'running' now describes the proxy, the endpoint every bd command connects through; 'backend_managed' is false on external proxied topologies. A script parsing the old payload changes behavior on upgrade.",
+			"FIX: a dotted config key now round-trips — what 'bd config set' writes is what 'bd config get' and bd's own readers find. Setting a key like 'sync.remote' or 'dolt.host' into a config.yaml with no matching section used to append a top-level key whose NAME contained the dot, which Viper finds and the direct reader GetStringFromDir does not; 'bd init --remote' in a fresh workspace was the ordinary way in, recording a remote no reader could locate. Dotted keys are written nested now, an existing flat spelling is migrated, and 'bd config unset' removes the nested form (it only ever matched the flat one, so unsetting 'sync.remote' silently left the remote live).",
+			"CHANGE: two config writes that used to exit 0 now exit 1, because both produced a value no reader could see — setting a dotted key under a parent that already holds a scalar ('sync: enabled', then 'bd config set sync.remote'), and setting one in a file whose top level is not a mapping.",
+		},
+	},
+	{
 		Version: "1.3.0",
 		Date:    "2026-09-15",
 		Changes: []string{
