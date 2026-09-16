@@ -205,6 +205,13 @@ func TestResetHooksPathIfBeadsManaged_Worktree(t *testing.T) {
 		t.Fatalf("git config core.hooksPath failed: %v", err)
 	}
 
+	run("config", "beads.role", "primary")
+	run("config", "extensions.worktreeConfig", "true")
+	cmd = exec.Command("git", "config", "--worktree", "beads.role", "worktree-only")
+	cmd.Dir = worktreeDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("configure worktree role: %v\n%s", err, out)
+	}
 	t.Chdir(worktreeDir)
 	git.ResetCaches()
 
@@ -212,6 +219,7 @@ func TestResetHooksPathIfBeadsManaged_Worktree(t *testing.T) {
 		t.Fatal("expected git.IsWorktree() to return true")
 	}
 
+	git.ResetCaches() // Exercise the actual reset with a cold context.
 	if err := resetHooksPathIfBeadsManaged(); err != nil {
 		t.Fatalf("resetHooksPathIfBeadsManaged failed: %v", err)
 	}
@@ -221,6 +229,18 @@ func TestResetHooksPathIfBeadsManaged_Worktree(t *testing.T) {
 	out, _ := cmd.Output()
 	if strings.TrimSpace(string(out)) != "" {
 		t.Errorf("core.hooksPath = %q after reset, want empty", strings.TrimSpace(string(out)))
+	}
+	cmd = exec.Command("git", "config", "--local", "--get", "beads.role")
+	cmd.Dir = mainRepoDir
+	out, err = cmd.Output()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Errorf("main role remains after reset: %q, %v", out, err)
+	}
+	cmd = exec.Command("git", "config", "--worktree", "--get", "beads.role")
+	cmd.Dir = worktreeDir
+	out, err = cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "worktree-only" {
+		t.Errorf("worktree-specific role changed: %q, %v", out, err)
 	}
 }
 
