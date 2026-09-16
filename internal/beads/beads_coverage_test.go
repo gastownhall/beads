@@ -421,6 +421,70 @@ func TestCheckRedirectInDir(t *testing.T) {
 	})
 }
 
+// TestGetRedirectInfoFrom covers the -C form of redirect detection
+// (gastownhall/beads#5509): it reports the named workspace's redirect state,
+// while GetRedirectInfo keeps reporting the cwd's, with BEADS_DIR already
+// resolved to the store the way `bd -C` sets it.
+func TestGetRedirectInfoFrom(t *testing.T) {
+	t.Cleanup(git.ResetCaches)
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	storeDir := filepath.Join(tmpDir, "store", ".beads")
+	clone := filepath.Join(tmpDir, "clone")
+	plain := filepath.Join(tmpDir, "plain")
+	loose := filepath.Join(tmpDir, "loose")
+	for _, dir := range []string{storeDir, filepath.Join(clone, ".beads"), filepath.Join(plain, ".beads"), filepath.Join(loose, ".beads"), filepath.Join(loose, "sub")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Target must contain a recognizable database for FollowRedirect to
+	// honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(storeDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{clone, loose} {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "redirect"), []byte(storeDir+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{clone, plain} {
+		cmd := exec.Command("git", "init", "-q")
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Skipf("git not available: %v", err)
+		}
+	}
+	t.Setenv("BEADS_DIR", storeDir)
+	t.Setenv("BEADS_DB", "")
+
+	// cwd = redirect clone, workspace asked about = plain repo.
+	t.Chdir(clone)
+	git.ResetCaches()
+	if !GetRedirectInfo().IsRedirected {
+		t.Fatal("control: GetRedirectInfo in the clone must report its redirect")
+	}
+	if info := GetRedirectInfoFrom(plain); info.IsRedirected {
+		t.Errorf("GetRedirectInfoFrom(plain) = %+v, want no redirect", info)
+	}
+
+	// cwd = plain repo, workspace asked about = redirect clone.
+	t.Chdir(plain)
+	git.ResetCaches()
+	if GetRedirectInfo().IsRedirected {
+		t.Fatal("control: GetRedirectInfo in the plain repo must report no redirect")
+	}
+	if info := GetRedirectInfoFrom(clone); !info.IsRedirected || info.TargetDir != storeDir {
+		t.Errorf("GetRedirectInfoFrom(clone) = %+v, want redirect to %q", info, storeDir)
+	}
+
+	// No git repository: the nearest .beads above the directory is used.
+	if info := GetRedirectInfoFrom(filepath.Join(loose, "sub")); !info.IsRedirected || info.TargetDir != storeDir {
+		t.Errorf("GetRedirectInfoFrom(loose/sub) = %+v, want redirect to %q", info, storeDir)
+	}
+}
+
 // TestFollowRedirect_ChainPrevention tests that redirect chains are not followed
 func TestFollowRedirect_ChainPrevention(t *testing.T) {
 	tmpDir := t.TempDir()
