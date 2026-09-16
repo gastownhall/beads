@@ -63,7 +63,7 @@ func ResolveServerMode(beadsDir string) ServerMode {
 	return resolveServerMode(beadsDir, true)
 }
 
-// resolveServerModeIgnoringPortEnv is ResolveServerMode with check 2c
+// ResolveServerModeIgnoringPortEnv is ResolveServerMode with check 2c
 // (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT) skipped.
 //
 // Those env vars are also set ambiently on multi-agent rigs purely to route
@@ -74,17 +74,25 @@ func ResolveServerMode(beadsDir string) ServerMode {
 // talk to" want the full ResolveServerMode — an ambient port var correctly
 // means "route there instead of spawning a redundant one". Callers asking
 // "am I allowed to manage/kill OS processes for this directory's server
-// lifecycle" — currently only killStaleServersForDir's orphan-cleanup guard
-// (GH#2430) — must use this instead, or the ambient routing var falsely
-// disables cleanup for a directory beads still owns.
-func resolveServerModeIgnoringPortEnv(beadsDir string) ServerMode {
+// lifecycle" — killStaleServersForDir's orphan-cleanup guard (GH#2430) —
+// must use this instead, or the ambient routing var falsely disables
+// cleanup for a directory beads still owns.
+//
+// Exported for internal/storage/dolt's sharedServerDatabase (GH#6169):
+// once ManagesLiveServerOnPort has PROVEN bd started and tracks the live
+// server on cfg.ServerPort for cfg.BeadsDir, an ambient
+// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT set purely for multi-agent
+// connection routing must not override that proof and reclassify bd's own
+// server as shared -- the same reasoning as the kill-guard above, applied
+// to the migrate-on-open decision instead of the process-reaping one.
+func ResolveServerModeIgnoringPortEnv(beadsDir string) ServerMode {
 	return resolveServerMode(beadsDir, false)
 }
 
 // resolveServerMode is the shared implementation behind ResolveServerMode
-// and resolveServerModeIgnoringPortEnv. honorPortEnv controls whether check
+// and ResolveServerModeIgnoringPortEnv. honorPortEnv controls whether check
 // 2c (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT) participates; see
-// resolveServerModeIgnoringPortEnv for why a caller would want it excluded.
+// ResolveServerModeIgnoringPortEnv for why a caller would want it excluded.
 func resolveServerMode(beadsDir string, honorPortEnv bool) ServerMode {
 	// 1. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
