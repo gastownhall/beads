@@ -75,6 +75,14 @@ var ryukCheckOnce sync.Once
 // runtime still skips cleanly instead of being killed over a reaper it was
 // never going to use. TestRyukDisabled_SwallowingCallerStillDies pins the
 // behavior end-to-end through the swallowing caller shape.
+//
+// The cost of exiting, stated plainly: os.Exit runs no deferred cleanup, so
+// anything registered before the guard leaks on a Ryuk-disabled box.
+// cmd/bd/doctor/dolt_e2e_test.go:74 is the live example — it defers
+// os.RemoveAll(root) two lines before EnsureDoltContainerForTestMain, and
+// that temp tree is left behind. Judged acceptable for test-only code on a
+// box that is already misconfigured, and cheaper than the alternative of
+// leaking unreaped containers, but it is a real trade rather than a free win.
 func checkRyukEnabled() {
 	ryukCheckOnce.Do(func() {
 		allowUnreaped := os.Getenv("BEADS_ALLOW_UNREAPED_TESTCONTAINERS") == "1"
