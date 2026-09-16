@@ -16,14 +16,45 @@ import (
 // the prime-runner and one-shot refresh-marker mechanics are identical and live
 // here to avoid divergence.
 
+// allowedPrimeArgs is the closed set of flags the agent hooks may pass to the
+// re-executed bd binary. The hooks only ever run the fixed `bd prime`
+// invocation (optionally --memories-only); anything else is a programming
+// error and is refused before the subprocess is built.
+var allowedPrimeArgs = map[string]bool{"--memories-only": true}
+
+// primeExecutable resolves the re-exec target for runBdPrime. A var so tests
+// can stub resolution and prove no subprocess is ever built from unexpected
+// input.
+var primeExecutable = os.Executable
+
+// validatePrimeArgs rejects any argument outside allowedPrimeArgs so the
+// re-exec below can never be steered by caller-supplied strings.
+func validatePrimeArgs(args []string) error {
+	for _, arg := range args {
+		if !allowedPrimeArgs[arg] {
+			return fmt.Errorf("bd prime: unsupported hook argument %q", arg)
+		}
+	}
+	return nil
+}
+
 // runBdPrime shells out to `bd prime [args...]` and returns its combined output.
 // The hooks exec a subprocess (rather than calling prime in process) to avoid
 // re-entrant store initialization.
 func runBdPrime(ctx context.Context, args ...string) (string, error) {
+	if err := validatePrimeArgs(args); err != nil {
+		return "", err
+	}
+	exe, err := primeExecutable()
+	if err != nil {
+		return "", fmt.Errorf("bd prime: resolve executable: %w", err)
+	}
 	cmdArgs := append([]string{"prime"}, args...)
-	// #nosec G702 - os.Args[0] is this bd binary re-invoking itself; cmdArgs is the
-	// fixed "prime" subcommand plus internal flags, never attacker-controlled input.
-	cmd := exec.CommandContext(ctx, os.Args[0], cmdArgs...)
+	// #nosec G702 - exe comes from primeExecutable (os.Executable in
+	// production: this bd binary re-invoking itself); cmdArgs is the fixed
+	// "prime" subcommand plus allowlisted internal flags, never
+	// attacker-controlled input.
+	cmd := exec.CommandContext(ctx, exe, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("bd %s: %w: %s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(string(out)))
