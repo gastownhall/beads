@@ -223,7 +223,8 @@ func countFilters(q *query) issueops.CountRequest {
 		// infra type to the ephemeral tier — is four decisions the role makes
 		// from the WORKSPACE's own infra vocabulary, which is a config load this
 		// handler must never perform.
-		IncludeInfra: q.boolean("include_infra"),
+		IncludeInfra:     q.boolean("include_infra"),
+		IncludeEphemeral: q.boolean("include_ephemeral"),
 	}
 }
 
