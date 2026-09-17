@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -175,5 +176,76 @@ func TestRecomputeAllIsBlocked_CascadesThroughParentChild(t *testing.T) {
 	}
 	if n := countInconsistencies(ctx, t, store.db); n != 0 {
 		t.Fatalf("after repair: want 0 inconsistencies, got %d", n)
+	}
+}
+
+// TestCountIsBlockedInconsistencies_UsesDedicatedLongTimeoutConnection guards
+// against regressing the doctor Blocked State detection to the shared pool's
+// ReadTimeout: the correlated-EXISTS count over every issue and wisp is a
+// known-long read on large or busy stores, and on the shared pool it dies as
+// an intermittent MySQL i/o timeout / invalid connection error — blinding the
+// one check that detects stale is_blocked rows exactly where they matter.
+// Mirrors TestHistory_UsesDedicatedLongTimeoutConnection (ga-ahnxx).
+//
+// store.db (the shared pool) is opened once at store-creation time with a
+// baked-in DSN — mutating store.connStr afterward cannot affect it. Only a
+// call path that re-parses store.connStr per invocation (openLongTimeoutConn,
+// via withReadTxLongTimeout) is affected. So: break store.connStr after setup,
+// then confirm the count still routes through it (and fails) rather than
+// silently falling back to the still-healthy shared pool.
+func TestCountIsBlockedInconsistencies_UsesDedicatedLongTimeoutConnection(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// A genuinely stale flag on the store's checked-out test branch: bm-w is
+	// blocked on open bm-x through the write path; clearing the flag with raw
+	// SQL (bypassing the write path) is exactly the stale shape the check
+	// detects. Committed so the state is durable to any session.
+	seedBlockedPair(ctx, t, store, true)
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id = 'bm-w'"); err != nil {
+		t.Fatalf("clear is_blocked: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-am', 'stale is_blocked fixture')"); err != nil {
+		t.Fatalf("commit fixture: %v", err)
+	}
+
+	// Sanity check: the count works before we break anything, and it must
+	// actually read the store's checked-out branch — setupTestStore checks
+	// out an isolated test branch via a raw CALL DOLT_CHECKOUT on store.db
+	// (testutil.StartTestBranch), which bypasses Store.Checkout and never
+	// updates s.branch. If openLongTimeoutConn's fresh connection doesn't
+	// also select that branch, the count silently reads the (schema-only,
+	// row-less) default branch and returns 0 with a nil error — a passing
+	// err check alone would not catch that.
+	stale, err := store.CountIsBlockedInconsistencies(ctx)
+	if err != nil {
+		t.Fatalf("CountIsBlockedInconsistencies failed before connStr corruption: %v", err)
+	}
+	if stale == 0 {
+		t.Fatal("expected >=1 stale is_blocked row on the test branch, got 0 — " +
+			"the count is likely reading the default branch instead of the " +
+			"store's actual checked-out branch (see withReadTxLongTimeout)")
+	}
+
+	// Break store.connStr to an address that fails DNS resolution fast and
+	// permanently (RFC 2606 .invalid TLD) — a clean signal distinct from
+	// "connection refused", which the retry layer treats as transient and
+	// would spend up to serverRetryMaxElapsed (30s) retrying.
+	cfg, err := mysql.ParseDSN(store.connStr)
+	if err != nil {
+		t.Fatalf("failed to parse store.connStr: %v", err)
+	}
+	cfg.Addr = "blocked-count-test.invalid:3306"
+	store.connStr = cfg.FormatDSN()
+
+	if _, err := store.CountIsBlockedInconsistencies(ctx); err == nil {
+		t.Fatal("expected CountIsBlockedInconsistencies to fail after store.connStr " +
+			"was broken; if it still succeeds, the count is reading through the " +
+			"shared pool (store.db) instead of a fresh connection via " +
+			"openLongTimeoutConn/withReadTxLongTimeout, which is what lets the " +
+			"pool's ReadTimeout keep killing the doctor Blocked State check")
 	}
 }
