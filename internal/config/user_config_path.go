@@ -30,7 +30,7 @@ func currentUserConfigYamlCandidates() userConfigYamlCandidates {
 func buildUserConfigYamlCandidates(homeDir string, homeErr error, nativeConfigDir string, nativeErr error) userConfigYamlCandidates {
 	var candidates userConfigYamlCandidates
 
-	if home, err := cleanAbsoluteUserDirectory("user home directory", homeDir, homeErr); err != nil {
+	if home, err := cleanAbsoluteUserDirectory("user home directory (HOME/USERPROFILE)", homeDir, homeErr); err != nil {
 		candidates.homeErr = err
 	} else {
 		candidates.legacy = filepath.Clean(filepath.Join(home, ".beads", "config.yaml"))
