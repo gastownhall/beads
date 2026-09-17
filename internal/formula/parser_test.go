@@ -1022,6 +1022,67 @@ func TestValidate_WaitsForField(t *testing.T) {
 	}
 }
 
+// A bare all-children/any-children gate takes its spawner from needs[0], so a
+// step with no needs gates on nothing: cooking gives it a gate:<value> label,
+// no dependency, and immediate readiness.
+func TestValidate_WaitsForWithoutSpawner(t *testing.T) {
+	for _, gate := range []string{"all-children", "any-children"} {
+		t.Run(gate, func(t *testing.T) {
+			f := &Formula{
+				Formula: "mol-spawnerless",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{ID: "fanout", Title: "Fanout"},
+					{ID: "summarize", Title: "Summarize", WaitsFor: gate},
+				},
+			}
+
+			err := f.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error for %s with no needs", gate)
+			}
+			if !strings.Contains(err.Error(), "needs") {
+				t.Errorf("Validate() error = %q, want it to point at needs", err)
+			}
+		})
+	}
+
+	t.Run("children-of names its own spawner", func(t *testing.T) {
+		f := &Formula{
+			Formula: "mol-explicit-spawner",
+			Version: 1,
+			Type:    TypeWorkflow,
+			Steps: []*Step{
+				{ID: "fanout", Title: "Fanout"},
+				{ID: "summarize", Title: "Summarize", WaitsFor: "children-of(fanout)"},
+			},
+		}
+
+		if err := f.Validate(); err != nil {
+			t.Errorf("Validate() = %v, want nil: children-of() needs no needs", err)
+		}
+	})
+
+	t.Run("nested child step", func(t *testing.T) {
+		f := &Formula{
+			Formula: "mol-spawnerless-child",
+			Version: 1,
+			Type:    TypeWorkflow,
+			Steps: []*Step{
+				{ID: "parent", Title: "Parent", Children: []*Step{
+					{ID: "child1", Title: "Child 1"},
+					{ID: "child2", Title: "Child 2", WaitsFor: "all-children"},
+				}},
+			},
+		}
+
+		if err := f.Validate(); err == nil {
+			t.Error("Validate() = nil, want an error for a spawnerless gate on a child step")
+		}
+	})
+}
+
 // TestValidate_WaitsForChildrenOf tests the children-of(step) syntax (gt-8tmz.38)
 func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Valid children-of() syntax
