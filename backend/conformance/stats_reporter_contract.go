@@ -103,6 +103,65 @@ func RunStatsReporterExcludesTheWispTier(t *testing.T, ctx context.Context, fixt
 	assertStatsReporterDelta(t, before, after, statsReporterCounts{total: 1, open: 1})
 }
 
+// RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses pins the
+// GateIssues and TemplateIssues tally: the durable rows a default `bd list`
+// will not show, broken out of Total rather than removed from it, so `bd
+// status` and `bd list` can be reconciled instead of silently disagreeing.
+//
+// The two predicates have to be the exact complements of the listing's:
+// `issue_type = 'gate'` against list.go's `ExcludeTypes = append(..., "gate")`,
+// and `is_template = 1` against sqlbuild's default
+// `(is_template = 0 OR is_template IS NULL)`. A backend that spelled either
+// one loosely - `is_template <> 0`, or a LIKE on the type - moves the same
+// numbers on these seeds, so the case also seeds the NEGATIVE rows: a plain
+// task, and a gate-typed row that is not a template, each of which must move
+// exactly one of the two counts and not the other.
+//
+// Both counts overlap the status buckets rather than forming their own, in the
+// same way PinnedIssues does; the deltas below assert that by counting the
+// gate and proto rows in Total and Open as well.
+func RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	// Neither suppression: the control. A backend that counted every row
+	// would move both counts by three rather than by one.
+	seedStatsReporterIssue(t, ctx, fixture, statsReporterSeed(fixture, "suppressed-plain", types.StatusOpen))
+
+	gate := statsReporterSeed(fixture, "suppressed-gate", types.StatusOpen)
+	gate.IssueType = types.TypeGate
+	seedStatsReporterIssue(t, ctx, fixture, gate)
+
+	proto := statsReporterSeed(fixture, "suppressed-proto", types.StatusOpen)
+	proto.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, proto)
+
+	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, after, statsReporterCounts{
+		total: 3, open: 3, gates: 1, templates: 1,
+	})
+}
+
+// RunStatsReporterBreaksOutAGateThatIsAlsoATemplate pins that the two
+// suppressions are independent: a proto's gate step is both a gate and a
+// template, and `bd list` hides it for either reason on its own, so it belongs
+// in both counts. A backend that treated the two as exclusive arms of one CASE
+// reports one of them as zero here while passing the case above.
+func RunStatsReporterBreaksOutAGateThatIsAlsoATemplate(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	both := statsReporterSeed(fixture, "suppressed-gateproto", types.StatusOpen)
+	both.IssueType = types.TypeGate
+	both.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, both)
+
+	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, after, statsReporterCounts{
+		total: 1, open: 1, gates: 1, templates: 1,
+	})
+}
+
 // RunStatsReporterAStatusOutsideTheTalliesIsCountedOnlyInTotal pins the second
 // half of statsreporter.go:92-98 — the tallies are exact equality against the
 // stored status, so a row whose status is none of the four lands in Total and
@@ -452,6 +511,43 @@ func RunStatsReporterAssigneeStatsMergesTheWispTier(t *testing.T, ctx context.Co
 	}
 }
 
+// RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows is the scoped half of
+// the pair. `bd status --assigned` reaches a different implementation - the
+// fold over one actor's rows in internal/workapi/stats.go, not
+// ScanIssueCountsInTx - and its filter sets only Assignee, so the actor's gates
+// and protos ARE in these rows while `bd list --assignee` suppresses both. The
+// two counts must therefore be populated here too; a zero would be the same
+// silent disagreement, one scope down.
+func RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	assignee := statsReporterAssignee(fixture, "asuppressed")
+
+	plain := statsReporterSeed(fixture, "asuppressed-plain", types.StatusOpen)
+	plain.Assignee = assignee
+	seedStatsReporterIssue(t, ctx, fixture, plain)
+
+	gate := statsReporterSeed(fixture, "asuppressed-gate", types.StatusOpen)
+	gate.Assignee = assignee
+	gate.IssueType = types.TypeGate
+	seedStatsReporterIssue(t, ctx, fixture, gate)
+
+	proto := statsReporterSeed(fixture, "asuppressed-proto", types.StatusOpen)
+	proto.Assignee = assignee
+	proto.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, proto)
+
+	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
+	if summary.TotalIssues != 3 {
+		t.Fatalf("TotalIssues = %d, want 3 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
+	}
+	if summary.GateIssues != 1 {
+		t.Errorf("GateIssues = %d, want 1 — the actor's gate is in this answer but not in `bd list --assignee`", summary.GateIssues)
+	}
+	if summary.TemplateIssues != 1 {
+		t.Errorf("TemplateIssues = %d, want 1 — the actor's proto is in this answer but not in `bd list --assignee`", summary.TemplateIssues)
+	}
+}
+
 // RunStatsReporterAssigneeStatsPopulatesBothPointers pins the clause
 // FoldStatsAssigneeSummary exists to guarantee: on this path BlockedIssues and
 // ReadyIssues are ALWAYS non-nil, including for an actor with no rows at all.
@@ -499,6 +595,8 @@ type statsReporterCounts struct {
 	deferred   int
 	pinned     int
 	blocked    int
+	gates      int
+	templates  int
 }
 
 // assertStatsReporterDelta compares two summaries field by field against the
@@ -519,6 +617,8 @@ func assertStatsReporterDelta(t *testing.T, before, after types.Statistics, want
 		{"ClosedIssues", before.ClosedIssues, after.ClosedIssues, want.closed},
 		{"DeferredIssues", before.DeferredIssues, after.DeferredIssues, want.deferred},
 		{"PinnedIssues", before.PinnedIssues, after.PinnedIssues, want.pinned},
+		{"GateIssues", before.GateIssues, after.GateIssues, want.gates},
+		{"TemplateIssues", before.TemplateIssues, after.TemplateIssues, want.templates},
 	} {
 		if got := field.after - field.before; got != field.want {
 			t.Errorf("%s moved by %d (%d -> %d), want %d", field.name, got, field.before, field.after, field.want)
