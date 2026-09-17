@@ -216,12 +216,13 @@ type Step struct {
 	// Priority is the issue priority (0-4).
 	Priority *int `json:"priority,omitempty"`
 
-	// Labels are applied to the created issue.
+	// Labels are applied to the created issue (supports substitution).
 	Labels []string `json:"labels,omitempty"`
 
 	// Metadata is carried through to the created issue's Metadata field as
 	// JSON. Lets formulas pre-declare keys that downstream tooling can project
-	// without a post-pour compose step.
+	// without a post-pour compose step. String values support substitution at
+	// any nesting depth; keys are never rewritten.
 	Metadata map[string]interface{} `json:"metadata,omitempty" toml:"metadata,omitempty"`
 
 	// DependsOn lists step IDs this step blocks on (within the formula).
