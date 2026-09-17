@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -774,6 +775,14 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 		}
 	}
 
+	// Record which variables the step conditions reference, before the filter
+	// below removes the steps that carry them. A var used only in a condition
+	// leaves no trace in the cooked subgraph - the step it dropped is simply
+	// absent - so this is the only point at which those names are still
+	// visible. Collected unconditionally: the names are a property of the
+	// formula, not of this pour's --var values.
+	conditionVarNames := stepConditionVariables(resolved.Steps)
+
 	// Apply step condition filtering if vars provided (bd-7zka.1)
 	// This filters out steps whose conditions evaluate to false
 	if conditionVars != nil {
@@ -817,7 +826,42 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 	}
 
 	// Cook to in-memory subgraph, including variable definitions for default handling
-	return cookFormulaToSubgraphWithVars(resolved, resolved.Formula, resolved.Vars)
+	subgraph, err := cookFormulaToSubgraphWithVars(resolved, resolved.Formula, resolved.Vars)
+	if err != nil {
+		return nil, err
+	}
+	subgraph.ConditionVars = conditionVarNames
+	return subgraph, nil
+}
+
+// stepConditionVariables returns the variable names referenced by the steps'
+// conditions, walking children, deduplicated and sorted.
+//
+// Conditions are handlebar expressions - `{{spike}}`, `!{{spike}}`,
+// `{{env}} == "prod"` (internal/formula/stepcondition.go) - so the same
+// extractor the substitutable fields use finds their names.
+func stepConditionVariables(steps []*formula.Step) []string {
+	seen := make(map[string]bool)
+	var walk func([]*formula.Step)
+	walk = func(ss []*formula.Step) {
+		for _, step := range ss {
+			if step == nil {
+				continue
+			}
+			for _, name := range extractVariables(step.Condition) {
+				seen[name] = true
+			}
+			walk(step.Children)
+		}
+	}
+	walk(steps)
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // cookFormulaToSubgraphWithVars creates an in-memory subgraph with variable info attached
