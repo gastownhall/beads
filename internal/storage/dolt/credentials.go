@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -599,14 +600,30 @@ func withEnvCredentials(creds *remoteCredentials, fn func() error) error {
 	return withRemoteOperationEnv(creds, false, fn)
 }
 
+// isMissingFederationPeer reports whether err means no federation_peers row
+// exists for the name (credential-free remote). Other errors remain fatal.
+func isMissingFederationPeer(err error) bool {
+	return err != nil && errors.Is(err, storage.ErrNotFound)
+}
+
 // withPeerCredentials looks up credentials for a federation peer and passes
 // them to fn. The callback receives the credentials and is responsible for
 // applying them appropriately: CLI operations use creds.applyToCmd for
 // subprocess isolation; SQL operations use withEnvCredentials for mutex-protected
 // process env access.
+//
+// A missing federation_peers row (storage.ErrNotFound) is treated as empty
+// credentials, not a hard failure. Credential-free Dolt remotes (add-peer
+// without --user, or bootstrap via sync.remote) never create a peer row, but
+// still need status/fetch/pull/push via normal Dolt credential discovery
+// (GH#4837). Malformed, decryption, and database errors remain fatal.
 func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn func(creds *remoteCredentials) error) error {
 	peer, err := s.GetFederationPeer(ctx, peerName)
 	if err != nil {
+		if isMissingFederationPeer(err) {
+			// No peer-specific SQL credentials stored — proceed without them.
+			return fn(nil)
+		}
 		return fmt.Errorf("failed to get peer credentials: %w", err)
 	}
 
