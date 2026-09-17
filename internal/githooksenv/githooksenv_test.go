@@ -2,6 +2,7 @@ package githooksenv
 
 import (
 	"os"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -34,6 +35,37 @@ func TestDisabledEnv(t *testing.T) {
 				t.Errorf("DisabledEnv(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDisabledEnvUsesHostKeySemantics(t *testing.T) {
+	nearCollision := "GIT_CONFIG_PARAMETERſ='near=3'"
+	in := []string{
+		ParametersEnv + "='canonical=1'",
+		"git_config_parameters='mixed=2'",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+
+	got := DisabledEnv(in)
+	want := []string{
+		"git_config_parameters='mixed=2'",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+		ParametersEnv + "='canonical=1' " + NoHooksParam,
+	}
+	if runtime.GOOS == "windows" {
+		want = []string{
+			nearCollision,
+			"MALFORMED",
+			`=C:=C:\work`,
+			ParametersEnv + "='mixed=2' " + NoHooksParam,
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("DisabledEnv() = %q, want %q on %s", got, want, runtime.GOOS)
 	}
 }
 
