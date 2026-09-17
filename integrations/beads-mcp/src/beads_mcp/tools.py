@@ -441,14 +441,30 @@ async def beads_list_issues(
 
 async def beads_show_issue(
     issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+    include_comments: bool = True,
 ) -> Issue:
     """Show detailed information about a specific issue.
 
-    Includes full description, dependencies, and dependents.
+    Includes full description, dependencies, dependents, and comment chronology.
     """
     client = await _get_client()
     params = ShowIssueParams(issue_id=issue_id)
-    return await client.show(params)
+    issue = await client.show(params)
+
+    if include_comments and (issue.comments_omitted or issue.comment_count > len(issue.comments)):
+        comments = await client.list_comments(ListCommentsParams(issue_id=issue_id))
+        return issue.model_copy(
+            update={
+                "comments": comments,
+                "comment_count": len(comments),
+                "comments_omitted": False,
+            }
+        )
+
+    if issue.comments and issue.comment_count != len(issue.comments):
+        return issue.model_copy(update={"comment_count": len(issue.comments)})
+
+    return issue
 
 
 async def beads_create_issue(
@@ -627,7 +643,8 @@ async def beads_add_comment(
 
     Leave a durable, timestamped record of what you did, decided, or verified so
     humans don't have to read the agent transcript to know what happened. `show`
-    reports comment_count but not the bodies — use beads_list_comments to read them.
+    includes the complete comment chronology; beads_list_comments remains available
+    when only the chronology is needed.
 
     Prefer a comment over overwriting `notes`: comments accumulate as a per-turn
     trail, whereas the notes field is a single value that gets replaced.
@@ -640,10 +657,7 @@ async def beads_add_comment(
 async def beads_list_comments(
     issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
 ) -> list[Comment]:
-    """List all comments on an issue in chronological order.
-
-    `show` returns comment_count but not the comment bodies; use this to read them.
-    """
+    """List all comments on an issue in chronological order."""
     client = await _get_client()
     params = ListCommentsParams(issue_id=issue_id)
     return await client.list_comments(params)
@@ -693,7 +707,19 @@ async def beads_blocked(
     """
     client = await _get_client()
     params = BlockedParams(parent_id=parent)
-    return await client.blocked(params)
+    issues = await client.blocked(params)
+    result: list[BlockedIssue] = []
+    for issue in issues:
+        if "comment_count" not in issue.model_fields_set:
+            comments = await client.list_comments(ListCommentsParams(issue_id=issue.id))
+            issue = issue.model_copy(
+                update={
+                    "comment_count": len(comments),
+                    "comments_omitted": bool(comments),
+                }
+            )
+        result.append(issue)
+    return result
 
 
 async def beads_inspect_migration() -> dict[str, Any]:

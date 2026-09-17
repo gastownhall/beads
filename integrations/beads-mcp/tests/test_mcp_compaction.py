@@ -54,6 +54,8 @@ def _to_minimal_test(issue: Issue) -> IssueMinimal:
         labels=issue.labels,
         dependency_count=issue.dependency_count,
         dependent_count=issue.dependent_count,
+        comment_count=issue.comment_count,
+        comments_omitted=issue.comment_count > 0,
     )
 
 
@@ -341,6 +343,7 @@ class TestConversionToMinimal:
             labels=["urgent", "backend"],
             dependency_count=2,
             dependent_count=1,
+            comment_count=3,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
@@ -357,6 +360,8 @@ class TestConversionToMinimal:
         assert minimal.labels == ["urgent", "backend"]
         assert minimal.dependency_count == 2
         assert minimal.dependent_count == 1
+        assert minimal.comment_count == 3
+        assert minimal.comments_omitted is True
 
         # Check it doesn't have full Issue fields
         assert not hasattr(minimal, "description") or minimal.description is None
