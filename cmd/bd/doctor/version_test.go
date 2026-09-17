@@ -28,6 +28,20 @@ func TestCompareVersions(t *testing.T) {
 		{"v1 shorter but less", "1.0", "1.0.5", -1},
 		{"real version comparison", "0.29.0", "0.30.0", -1},
 		{"real version comparison 2", "0.30.1", "0.30.0", 1},
+		// gastownhall/beads#6595: a prerelease must sort below its own
+		// stable release, not above it.
+		{"stable greater than its own rc", "1.3.1", "1.3.1-rc.1", 1},
+		{"rc less than its own stable", "1.3.1-rc.1", "1.3.1", -1},
+		{"rc equal to itself", "1.3.1-rc.1", "1.3.1-rc.1", 0},
+		{"stable equal to itself", "1.3.1", "1.3.1", 0},
+		{"rc1 less than rc2", "1.3.1-rc.1", "1.3.1-rc.2", -1},
+		{"rc2 greater than rc1", "1.3.1-rc.2", "1.3.1-rc.1", 1},
+		{"rc numeric identifier trap: rc.2 less than rc.10", "1.3.1-rc.2", "1.3.1-rc.10", -1},
+		{"rc numeric identifier trap: rc.10 greater than rc.2", "1.3.1-rc.10", "1.3.1-rc.2", 1},
+		{"rc of a later patch outranks an older stable", "1.3.1-rc.1", "1.3.0", 1},
+		{"an older stable is less than a later patch's rc", "1.3.0", "1.3.1-rc.1", -1},
+		{"fewer prerelease identifiers sorts lower", "1.0.0-alpha", "1.0.0-alpha.1", -1},
+		{"more prerelease identifiers sorts higher", "1.0.0-alpha.1", "1.0.0-alpha", 1},
 	}
 
 	for _, tt := range tests {
