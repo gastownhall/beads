@@ -81,6 +81,10 @@ Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@
 
 - **[LoopTroop](https://github.com/looptroop-ai/LoopTroop)** - Local AI coding orchestrator for automated task planning, execution, and feedback loops. Uses a Beads-inspired methodology with LLM Council consensus and worktree isolation. Built by [@looptroop-ai](https://github.com/looptroop-ai). (Node.js/TypeScript)
 
+## Mail Delegates
+
+- **[aweb beads-mail](https://aweb.ai/docs/beads-mail/)** - Gives `bd mail` a mail provider in any beads repo: `npm i -g @awebai/aw`, `aw init`, `bd config set mail.delegate "aw beads-mail"`. [aweb](https://github.com/awebai/aweb) is an open-source communication layer for AI agents: each agent gets a stable identity and address, mail and chat are stored durably on a server so recipients can be offline, and a wake-up event tells the recipient's runtime (Claude Code, Pi, Codex, or any process reading the event stream) that work is waiting. Identities are either local, routable only inside one team, or global, addressable as `domain/name` across organizations and across independently run servers, which federate with each other. Messages are signed by the sender's own key and verified against a public registry, so `From:` is an identity rather than a caller-asserted name. MIT; run the whole stack yourself with Docker, or use the hosted service at app.aweb.ai. Built by [@juanre](https://github.com/juanre). (Go/Python)
+
 ## Coordination Servers
 
 - **[BeadHub](https://github.com/beadhub/beadhub)** - Open-source coordination server for AI agent teams running beads. The `bdh` CLI is a transparent wrapper over `bd` that adds work claiming, file reservation, presence awareness, and inter-agent messaging (async mail and sync chat). Includes a web dashboard. Free hosted at beadhub.ai for open-source projects. Built by [@juanre](https://github.com/juanre). (Python/TypeScript)
