@@ -762,13 +762,20 @@ func updateNestedYamlKey(content, key, value string) (string, bool, error) {
 		return "", false, fmt.Errorf("cannot set %q: the top level of this config file is not a mapping", key)
 	}
 
-	// A flat key of this exact name is the unreadable shape, whether an older
-	// bd wrote it or the file arrived that way. Migrate it: drop the flat entry
-	// and write the value nested, so the round trip holds from here on. Only the
-	// key being written is touched — a dotted key this call does not own is
-	// someone else's and stays exactly as they wrote it.
+	// Preserve the spelling already chosen by the file's writer. config.yaml is
+	// shared with integrations that intentionally use literal dotted top-level
+	// keys, so migrating that node would make it invisible to those readers.
 	if idx := findMappingChild(mapping, key); idx != -1 {
-		mapping.Content = append(mapping.Content[:idx], mapping.Content[idx+2:]...)
+		flat := mapping.Content[idx+1]
+		flat.Kind = yaml.ScalarNode
+		flat.Tag = ""
+		flat.Style = scalarStyleFor(value)
+		flat.Value = value
+		out, err := yaml.Marshal(&root)
+		if err != nil {
+			return "", false, err
+		}
+		return string(out), true, nil
 	}
 
 	leaf, err := findOrCreateNestedScalar(mapping, parts)
