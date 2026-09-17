@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +20,17 @@ const (
 	maxResponseBytes     = 20 * 1024 * 1024
 	maxQueryPages        = 50
 	maxPageSize          = 100
+	// maxRequestAttempts bounds retries of a rate-limited or transiently failing
+	// request, including the first try.
+	maxRequestAttempts = 5
+	// maxRetryDelay bounds how long one attempt will wait before the next. A
+	// Retry-After longer than this is refused rather than clamped down to it —
+	// see doRequest.
+	maxRetryDelay = 30 * time.Second
+	// statusNotionOverloaded is Notion's overload status. It has no net/http
+	// constant because it is not a standard HTTP status; Notion returns it from
+	// its edge, which may already have handed the request to the origin.
+	statusNotionOverloaded = 529
 )
 
 type Client struct {
@@ -26,6 +38,16 @@ type Client struct {
 	BaseURL       string
 	NotionVersion string
 	HTTPClient    *http.Client
+
+	// MaxQueryPages bounds pagination in QueryDataSource. Zero means
+	// maxQueryPages. Raise it for a data source larger than
+	// maxQueryPages*maxPageSize rows, which otherwise cannot be synced at all.
+	MaxQueryPages int
+
+	// after is the retry delay hook, swapped out in tests so backoff coverage
+	// does not spend real seconds. It hands back a channel rather than blocking,
+	// so the wait can be selected against ctx.Done().
+	after func(time.Duration) <-chan time.Time
 }
 
 func NewClient(token string) *Client {
@@ -34,6 +56,39 @@ func NewClient(token string) *Client {
 		BaseURL:       DefaultBaseURL,
 		NotionVersion: DefaultNotionVersion,
 		HTTPClient:    &http.Client{Timeout: DefaultTimeout},
+	}
+}
+
+// WithMaxQueryPages overrides the pagination bound for QueryDataSource.
+// Non-positive values fall back to the default.
+func (c *Client) WithMaxQueryPages(pages int) *Client {
+	clone := *c
+	clone.MaxQueryPages = pages
+	return &clone
+}
+
+func (c *Client) maxQueryPages() int {
+	if c.MaxQueryPages > 0 {
+		return c.MaxQueryPages
+	}
+	return maxQueryPages
+}
+
+// wait blocks for d, or gives up early with ctx's error if the context is
+// canceled first. A plain time.Sleep would ignore cancellation for up to
+// maxRetryDelay per attempt, and QueryDataSource pays that per page — so the
+// worst case scales with MaxQueryPages, the bound this client lets callers
+// raise.
+func (c *Client) wait(ctx context.Context, d time.Duration) error {
+	after := c.after
+	if after == nil {
+		after = time.After
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-after(d):
+		return nil
 	}
 }
 
@@ -120,7 +175,8 @@ func (c *Client) CreateDatabase(ctx context.Context, parentPageID, title string)
 func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Page, error) {
 	var pages []Page
 	var cursor string
-	for pageNum := 0; pageNum < maxQueryPages; pageNum++ {
+	limit := c.maxQueryPages()
+	for pageNum := 0; pageNum < limit; pageNum++ {
 		request := map[string]interface{}{
 			"page_size":   maxPageSize,
 			"result_type": "page",
@@ -143,7 +199,17 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Pa
 		}
 		cursor = resp.NextCursor
 	}
-	return nil, fmt.Errorf("query pagination exceeded %d pages", maxQueryPages)
+	// Naming the ceiling in rows, not pages, is the difference between a caller
+	// knowing what to do and filing a bug: the number they can compare against
+	// their data source is limit*maxPageSize. The lever named has to be one the
+	// reader can actually pull — this message reaches CLI operators, who cannot
+	// call a Go method.
+	return nil, fmt.Errorf(
+		"query pagination exceeded %d pages (~%d rows): this data source is larger than the "+
+			"configured bound, so no sync can complete. Raise it with "+
+			"'bd config set notion.max_query_pages <n>' or the NOTION_MAX_QUERY_PAGES "+
+			"environment variable, or reduce the number of rows in the data source",
+		limit, limit*maxPageSize)
 }
 
 func (c *Client) CreatePage(ctx context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error) {
@@ -253,50 +319,146 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 		httpClient = &http.Client{Timeout: DefaultTimeout}
 	}
 
-	var bodyReader io.Reader
+	// Marshal once and rebuild the reader per attempt: a retry cannot reuse a
+	// drained body.
+	var payload []byte
 	if requestBody != nil {
-		payload, err := json.Marshal(requestBody)
+		var err error
+		payload, err = json.Marshal(requestBody)
 		if err != nil {
 			return nil, fmt.Errorf("marshal request body: %w", err)
 		}
-		bodyReader = bytes.NewReader(payload)
 	}
 
 	requestURL := path
 	if !strings.HasPrefix(requestURL, "http://") && !strings.HasPrefix(requestURL, "https://") {
 		requestURL = strings.TrimSuffix(c.BaseURL, "/") + path
 	}
-	req, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Notion-Version", c.NotionVersion)
-	req.Header.Set("Accept", "application/json")
-	if requestBody != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
 
+	// Notion enforces ~3 requests/second per connection and answers 429 with a
+	// Retry-After header. Without honoring it, any caller that paginates a
+	// large data source trips the limit and the whole sync dies on a transient
+	// condition the API explicitly tells us how to wait out.
+	var lastErr error
+	for attempt := 0; attempt < maxRequestAttempts; attempt++ {
+		var bodyReader io.Reader
+		if payload != nil {
+			bodyReader = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Notion-Version", c.NotionVersion)
+		req.Header.Set("Accept", "application/json")
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		body, status, retryAfter, err := c.doAttempt(httpClient, req)
+		if err != nil {
+			return nil, err
+		}
+		if status >= 200 && status < 300 {
+			return body, nil
+		}
+
+		if !retryableStatus(status, method) {
+			return nil, notionAPIError(status, body)
+		}
+		lastErr = notionAPIError(status, body)
+		if attempt == maxRequestAttempts-1 {
+			break
+		}
+
+		// A Retry-After longer than we are willing to wait is refused outright
+		// rather than clamped down to the ceiling. Waiting 30s when the server
+		// asked for an hour just spends the remaining attempts inside the window
+		// it told us to stay out of, which is how that window gets extended.
+		if retryAfter > maxRetryDelay {
+			return nil, fmt.Errorf(
+				"Notion asked for a %s wait before retrying, longer than the %s this client will wait: %w",
+				retryAfter, maxRetryDelay, lastErr)
+		}
+
+		// Retry-After is authoritative when present; otherwise exponential.
+		// Either way the wait is bounded by maxRetryDelay, and the refusal above
+		// means clamping only ever shortens the exponential fallback.
+		delay := time.Duration(1<<attempt) * time.Second
+		if retryAfter > 0 {
+			delay = retryAfter
+		}
+		if delay > maxRetryDelay {
+			delay = maxRetryDelay
+		}
+		if err := c.wait(ctx, delay); err != nil {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// doAttempt performs one request and fully reads the response, so the caller can
+// decide about retrying without holding an open body.
+func (c *Client) doAttempt(httpClient *http.Client, req *http.Request) ([]byte, int, time.Duration, error) {
 	resp, err := httpClient.Do(req) //nolint:gosec // G704: URL is constructed from configured Notion API base, not user input
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, 0, 0, fmt.Errorf("read response: %w", err)
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return body, nil
-	}
+	return body, resp.StatusCode, parseRetryAfter(resp.Header.Get("Retry-After")), nil
+}
 
+// retryableStatus reports whether a status is worth another attempt.
+//
+// 429 is safe for every verb: Notion rejects a rate-limited request before
+// processing it, so nothing was applied server-side and a replay cannot
+// duplicate anything.
+//
+// Every other retryable status — 529 included — can be reported after the write
+// already landed, so only verbs without side effects are replayed. Retrying a
+// creating POST on 529 is how one bd issue becomes two Notion rows: the
+// create-vs-update index is keyed on the bd ID and keeps only the last match,
+// so the duplicate is invisible and every later sync updates just one of the
+// pair.
+func retryableStatus(status int, method string) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	if method != http.MethodGet && method != http.MethodDelete {
+		return false
+	}
+	return status == statusNotionOverloaded ||
+		status == http.StatusInternalServerError ||
+		status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout
+}
+
+// parseRetryAfter reads the delay-seconds form. The HTTP-date form is not
+// accepted rather than guessed at: a misparsed date yielding zero would silently
+// retry immediately, which is the opposite of what the header asked for.
+func parseRetryAfter(value string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || seconds < 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func notionAPIError(status int, body []byte) error {
 	var apiErr struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
-		return nil, fmt.Errorf("Notion API error %s (%d): %s", apiErr.Code, resp.StatusCode, apiErr.Message)
+		return fmt.Errorf("Notion API error %s (%d): %s", apiErr.Code, status, apiErr.Message)
 	}
-	return nil, fmt.Errorf("Notion API error (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	return fmt.Errorf("Notion API error (%d): %s", status, strings.TrimSpace(string(body)))
 }
