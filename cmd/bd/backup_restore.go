@@ -11,16 +11,17 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
 var backupRestoreCmd = &cobra.Command{
-	Use:   "restore [path]",
+	Use:   "restore [directory-or-url]",
 	Short: "Restore database from a Dolt backup",
 	Long: `Restore the beads database from a Dolt-native backup.
 
 By default, reads from .beads/backup/ (or the configured backup directory).
-Optionally specify a path to a directory containing a Dolt backup.
+Optionally specify a directory containing a Dolt backup or a remote backup URL.
 
 This restores a full database backup created by 'bd backup sync' or an
 equivalent Dolt backup. JSONL files produced by 'bd export' are issue exports,
@@ -28,7 +29,7 @@ not restore targets for this command.
 
 Use --force to overwrite an existing database with the backup contents.
 
-The database must already be initialized (run 'bd init' first if needed).
+Restore requires a freshly initialized database. Run 'bd init' first if needed.
 To initialize and restore in one step, use: bd init && bd backup restore`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,8 +56,10 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			}
 		}
 
-		if err := validateBackupRestoreDir(dir); err != nil {
-			return err
+		if !versioncontrolops.IsBackupURL(dir) {
+			if err := validateBackupRestoreDir(dir); err != nil {
+				return err
+			}
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
