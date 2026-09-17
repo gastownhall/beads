@@ -3,12 +3,255 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/issueops"
 )
+
+const (
+	initGatewayHelperProcessEnv    = "BEADS_TEST_INTERNAL_INIT_GATEWAY_HELPER"
+	initGatewayHelperExecutableEnv = "BEADS_TEST_INTERNAL_INIT_GATEWAY_HELPER_EXE"
+	initGatewayHelperMarkerEnv     = "BEADS_TEST_INTERNAL_INIT_GATEWAY_MARKER"
+	initGatewayHelperTargetEnv     = "BEADS_TEST_INTERNAL_INIT_GATEWAY_HELPER_TARGET"
+	initGatewayHelperMalformedExit = 97
+)
+
+// runInitGatewayCredentialHelper dispatches an opt-in subprocess before the
+// package's ordinary TestMain setup. This keeps credential fixture processes
+// from starting Dolt, changing HOME, or allocating the cmd/bd suite's shared
+// resources. The -- separator prevents the test harness from interpreting the
+// helper protocol as test flags.
+func runInitGatewayCredentialHelper() (int, bool) {
+	if os.Getenv(initGatewayHelperProcessEnv) != "1" {
+		return 0, false
+	}
+
+	separator := -1
+	for i, arg := range os.Args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 {
+		fmt.Fprintln(os.Stderr, "init gateway credential helper: missing -- separator")
+		return initGatewayHelperMalformedExit, true
+	}
+	args := os.Args[separator+1:]
+
+	switch {
+	case len(args) == 2 && args[0] == "emit":
+		_, _ = io.WriteString(os.Stdout, args[1])
+		return 0, true
+	case len(args) == 2 && args[0] == "exit" && args[1] == "23":
+		return 23, true
+	case len(args) == 1 && args[0] == "marker":
+		marker := os.Getenv(initGatewayHelperMarkerEnv)
+		if marker == "" {
+			fmt.Fprintln(os.Stderr, "init gateway credential helper: marker path is empty")
+			return initGatewayHelperMalformedExit, true
+		}
+		if err := os.WriteFile(marker, []byte("invoked"), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "init gateway credential helper: write marker: %v\n", err)
+			return initGatewayHelperMalformedExit, true
+		}
+		return 0, true
+	default:
+		fmt.Fprintf(os.Stderr, "init gateway credential helper: malformed arguments: %q\n", args)
+		return initGatewayHelperMalformedExit, true
+	}
+}
+
+func initGatewayCredentialCommand(t *testing.T, args ...string) string {
+	t.Helper()
+
+	shell := "sh"
+	if runtime.GOOS == "windows" {
+		shell = "cmd.exe"
+	}
+	shellPath, err := exec.LookPath(shell)
+	if err != nil {
+		t.Fatalf("resolve production credential shell %q: %v", shell, err)
+	}
+	shellPath, err = filepath.Abs(shellPath)
+	if err != nil {
+		t.Fatalf("resolve absolute credential shell path: %v", err)
+	}
+	shellDir := filepath.Dir(shellPath)
+	isolatedShellPath := shellPath
+	if runtime.GOOS != "windows" {
+		shellDir = filepath.Join(t.TempDir(), "credential shell only")
+		if err := os.MkdirAll(shellDir, 0o755); err != nil {
+			t.Fatalf("create isolated credential shell directory: %v", err)
+		}
+		isolatedShellPath = filepath.Join(shellDir, shell)
+		// Execute the original system shell: macOS AMFI may kill a copied sh.
+		// An absolute symlink keeps it usable from the restricted PATH.
+		if err := os.Symlink(shellPath, isolatedShellPath); err != nil {
+			t.Fatalf("link original credential shell: %v", err)
+		}
+	}
+
+	helperDir := filepath.Join(t.TempDir(), "credential helper with spaces")
+	if err := os.MkdirAll(helperDir, 0o755); err != nil {
+		t.Fatalf("create credential helper directory: %v", err)
+	}
+	helperName := "credential-helper"
+	if runtime.GOOS == "windows" {
+		helperName += ".cmd"
+	}
+	helperPath := filepath.Join(helperDir, helperName)
+	currentExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve current test executable: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		trampoline := "@echo off\r\n\"%" + initGatewayHelperTargetEnv + "%\" %*\r\nexit /b %errorlevel%\r\n"
+		if err := os.WriteFile(helperPath, []byte(trampoline), 0o600); err != nil {
+			t.Fatalf("write credential helper trampoline: %v", err)
+		}
+		t.Setenv(initGatewayHelperTargetEnv, currentExecutable)
+	} else {
+		installInitGatewayExecutable(t, currentExecutable, helperPath)
+	}
+	if !strings.Contains(helperPath, " ") {
+		t.Fatalf("credential helper path does not exercise quoting: %q", helperPath)
+	}
+
+	// Keep only the shell that production requires. Unix links the original
+	// sh. Windows keeps the resolved system cmd.exe in place to avoid a
+	// suspicious copied-system-binary/copied-PE process chain.
+	t.Setenv("PATH", shellDir)
+	resolvedShell, err := exec.LookPath(shell)
+	if err != nil {
+		t.Fatalf("resolve credential shell from isolated PATH: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		resolvedInfo, err := os.Stat(resolvedShell)
+		if err != nil {
+			t.Fatalf("stat resolved credential shell: %v", err)
+		}
+		wantInfo, err := os.Stat(shellPath)
+		if err != nil {
+			t.Fatalf("stat production credential shell: %v", err)
+		}
+		if !os.SameFile(resolvedInfo, wantInfo) {
+			t.Fatalf("credential shell resolved outside restricted PATH: got %q, want %q", resolvedShell, shellPath)
+		}
+		for _, forbidden := range []string{"printf", "false"} {
+			if path, err := exec.LookPath(forbidden); err == nil {
+				t.Fatalf("ambient fixture utility %q remains available at %q", forbidden, path)
+			}
+		}
+	} else if filepath.Clean(resolvedShell) != filepath.Clean(isolatedShellPath) {
+		t.Fatalf("credential shell resolved outside isolated PATH: got %q, want %q", resolvedShell, isolatedShellPath)
+	}
+	t.Setenv(initGatewayHelperProcessEnv, "1")
+
+	executable := `"$` + initGatewayHelperExecutableEnv + `"`
+	if runtime.GOOS == "windows" {
+		// Let cmd.exe expand the quotes as part of the variable value. Passing
+		// literal quotes inside exec.Command's single /C argument makes Go's
+		// Windows argv encoder escape them for CommandLineToArgvW, which is not
+		// cmd.exe's parser and leaves backslashes in the command token.
+		t.Setenv(initGatewayHelperExecutableEnv, `"`+helperPath+`"`)
+		executable = `%` + initGatewayHelperExecutableEnv + `%`
+	} else {
+		t.Setenv(initGatewayHelperExecutableEnv, helperPath)
+	}
+	return executable + " -test.run=NoTestsMatchInitGatewayCredentialHelper -- " + strings.Join(args, " ")
+}
+
+func installInitGatewayExecutable(t *testing.T, source, destination string) {
+	t.Helper()
+
+	if err := os.Link(source, destination); err == nil {
+		return
+	}
+	// This fallback copies only the Unix test image, never the system shell.
+	// Windows uses a trampoline to its original test image instead.
+	input, err := os.Open(source)
+	if err != nil {
+		t.Fatalf("open current test executable: %v", err)
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatalf("create credential helper executable: %v", err)
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		t.Fatalf("copy credential helper executable: %v", err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatalf("close credential helper executable: %v", err)
+	}
+	if err := os.Chmod(destination, 0o755); err != nil {
+		t.Fatalf("make credential helper executable: %v", err)
+	}
+}
+
+func assertInitGatewayCredentialMarkerAbsent(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("credential command ran unexpectedly and wrote %q", marker)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("inspect credential marker %q: %v", marker, err)
+	}
+}
+
+func TestApplyInitGatewayCredentialHelperProtocol(t *testing.T) {
+	helperPath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve current test executable: %v", err)
+	}
+
+	helperCommand := func(args ...string) *exec.Cmd {
+		commandArgs := append([]string{"-test.run=NoTestsMatchInitGatewayCredentialHelper", "--"}, args...)
+		cmd := exec.Command(helperPath, commandArgs...)
+		cmd.Env = append(os.Environ(), initGatewayHelperProcessEnv+"=1")
+		return cmd
+	}
+
+	output, err := helperCommand("emit", "tok-init").Output()
+	if err != nil {
+		t.Fatalf("emit helper: %v", err)
+	}
+	if got := string(output); got != "tok-init" {
+		t.Fatalf("emit helper stdout = %q, want exact no-newline token", got)
+	}
+
+	output, err = helperCommand("unknown").CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != initGatewayHelperMalformedExit {
+		t.Fatalf("malformed helper exit = %v, output=%q; want %d", err, output, initGatewayHelperMalformedExit)
+	}
+	if !strings.Contains(string(output), "malformed arguments") {
+		t.Fatalf("malformed helper diagnostic = %q", output)
+	}
+
+	marker := filepath.Join(t.TempDir(), "helper-invoked")
+	markerCommand := helperCommand("marker")
+	markerCommand.Env = append(markerCommand.Env, initGatewayHelperMarkerEnv+"="+marker)
+	if output, err = markerCommand.CombinedOutput(); err != nil {
+		t.Fatalf("marker helper: %v, output=%q", err, output)
+	}
+	markerContent, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read helper marker: %v", err)
+	}
+	if got := string(markerContent); got != "invoked" {
+		t.Fatalf("helper marker = %q, want invoked", got)
+	}
+}
 
 // Gateway mode: a configured credential command resolves its token into the
 // connection username, marks the config as targeting a gateway server, and
@@ -17,19 +260,18 @@ import (
 // store skip the SHOW/CREATE DATABASE probe (openServerConnection keys that on
 // cfg.Gateway). ServerMode is set because gateway init always targets a server.
 func TestApplyInitGatewayCredentialAdoptsToken(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "printf tok-init")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", initGatewayCredentialCommand(t, "emit", "tok-init"))
 	doltCfg := &dolt.Config{ServerMode: true, AutoStart: true}
+	want := *doltCfg
+	want.ServerUser = "tok-init"
+	want.Gateway = true
+	want.AutoStart = false
+	want.DisableAutoStart = true
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("applyInitGatewayCredential: %v", err)
 	}
-	if doltCfg.ServerUser != "tok-init" {
-		t.Fatalf("ServerUser = %q, want tok-init (never root)", doltCfg.ServerUser)
-	}
-	if !doltCfg.Gateway {
-		t.Fatal("Gateway must be true so the store skips SHOW/CREATE DATABASE")
-	}
-	if doltCfg.AutoStart {
-		t.Fatal("AutoStart must be disabled in gateway mode (server is externally managed)")
+	if *doltCfg != want {
+		t.Fatalf("gateway config = %+v, want %+v", *doltCfg, want)
 	}
 }
 
@@ -37,17 +279,20 @@ func TestApplyInitGatewayCredentialAdoptsToken(t *testing.T) {
 // BEADS_DOLT_CREDENTIAL_COMMAND is ambient on the host. This is the FIX-1
 // regression guard: the canonical open path gates the command on server mode
 // ("a command exported in the environment must not run (or fail) an embedded
-// open"), so init must too. The command here (`false`) would error if it ran;
-// the helper returning nil with the config untouched proves it did not.
+// open"), so init must too. The marker helper makes non-invocation observable.
 func TestApplyInitGatewayCredentialSkipsEmbeddedMode(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+	marker := filepath.Join(t.TempDir(), "credential-invoked")
+	t.Setenv(initGatewayHelperMarkerEnv, marker)
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", initGatewayCredentialCommand(t, "marker"))
 	doltCfg := &dolt.Config{AutoStart: true} // ServerMode defaults to false
+	want := *doltCfg
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("embedded init must not run the credential command: %v", err)
 	}
-	if doltCfg.Gateway || doltCfg.ServerUser != "" || !doltCfg.AutoStart {
-		t.Fatalf("embedded config must be left untouched: %+v", doltCfg)
+	if *doltCfg != want {
+		t.Fatalf("embedded config = %+v, want untouched %+v", *doltCfg, want)
 	}
+	assertInitGatewayCredentialMarkerAbsent(t, marker)
 }
 
 // Server mode, but no command configured: a strict no-op. The hand-built config is
@@ -55,39 +300,49 @@ func TestApplyInitGatewayCredentialSkipsEmbeddedMode(t *testing.T) {
 func TestApplyInitGatewayCredentialNoopWithoutCommand(t *testing.T) {
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
 	doltCfg := &dolt.Config{ServerMode: true, AutoStart: true}
+	want := *doltCfg
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("applyInitGatewayCredential: %v", err)
 	}
-	if doltCfg.ServerUser != "" || doltCfg.Gateway || !doltCfg.AutoStart {
-		t.Fatalf("config must be untouched without a command: %+v", doltCfg)
+	if *doltCfg != want {
+		t.Fatalf("config without a command = %+v, want untouched %+v", *doltCfg, want)
 	}
 }
 
 // Fail-closed: in server mode a configured-but-failing command aborts init and
 // never leaves a fallback (root) user behind.
 func TestApplyInitGatewayCredentialFailsClosed(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", initGatewayCredentialCommand(t, "exit", "23"))
 	doltCfg := &dolt.Config{ServerMode: true, AutoStart: true}
+	want := *doltCfg
 	err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg)
 	if err == nil {
 		t.Fatal("expected an error when the credential command fails")
 	}
-	if doltCfg.ServerUser != "" || doltCfg.Gateway {
-		t.Fatalf("config must be untouched on failure: %+v", doltCfg)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
+		t.Fatalf("credential failure = %v, want helper exit code 23", err)
+	}
+	if *doltCfg != want {
+		t.Fatalf("config after failure = %+v, want untouched %+v", *doltCfg, want)
 	}
 }
 
 // A caller/flag-preset --server-user wins over the credential command (the
 // command is not run). Mirrors ApplyGatewayCredential's preset short-circuit.
 func TestApplyInitGatewayCredentialPresetWins(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+	marker := filepath.Join(t.TempDir(), "credential-invoked")
+	t.Setenv(initGatewayHelperMarkerEnv, marker)
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", initGatewayCredentialCommand(t, "marker"))
 	doltCfg := &dolt.Config{ServerMode: true, ServerUser: "preset", AutoStart: true}
+	want := *doltCfg
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("preset should short-circuit before running the command: %v", err)
 	}
-	if doltCfg.ServerUser != "preset" || doltCfg.Gateway || !doltCfg.AutoStart {
-		t.Fatalf("preset user must be preserved untouched: %+v", doltCfg)
+	if *doltCfg != want {
+		t.Fatalf("preset config = %+v, want untouched %+v", *doltCfg, want)
 	}
+	assertInitGatewayCredentialMarkerAbsent(t, marker)
 }
 
 // issue_prefix resolution.
