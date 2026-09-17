@@ -113,9 +113,27 @@ func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 		fmt.Println()
 	}
 
-	fmt.Println("To dispatch a molecule:")
-	fmt.Println("  bd sling <agent> --mol <molecule-id>")
+	if len(molecules) > 1 {
+		// The example can only name one molecule's step, so say which one
+		// rather than letting it read as the single thing to dispatch.
+		fmt.Println("To dispatch a molecule, assign its ready step to an agent - for the first one above:")
+	} else {
+		fmt.Println("To dispatch a molecule, assign its ready step to an agent:")
+	}
+	fmt.Printf("  bd assign %s <agent>\n", firstReadyStepID(molecules))
 	return nil
+}
+
+// firstReadyStepID names the ready step of the first listed molecule that has
+// one, for use as the example in the dispatch hint. Every molecule's own ready
+// step is printed in the listing above the hint.
+func firstReadyStepID(molecules []*GatedMolecule) string {
+	for _, mol := range molecules {
+		if mol.ReadyStep != nil && mol.ReadyStep.ID != "" {
+			return mol.ReadyStep.ID
+		}
+	}
+	return "<ready-step-id>"
 }
 
 // findGateReadyMolecules finds molecules where a gate has closed and work can resume.
