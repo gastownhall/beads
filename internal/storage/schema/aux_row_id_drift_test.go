@@ -292,7 +292,6 @@ func TestRekeyAuxRowIDsResumeStaysScopedAfterCrash(t *testing.T) {
 // a converged database, is empty — is asserting those non-drifted tables stay in
 // dirtyBefore and so never reach the commit.
 func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
-	allFour := []string{"comments", "compaction_snapshots", "events", "issue_snapshots"}
 	cases := []struct {
 		name              string
 		mainVersionBefore int
@@ -318,9 +317,9 @@ func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
 			want: []string{"events"},
 		},
 		{
-			// A markerPending pass is the one-time convergence and legitimately
-			// rewrites — and so exempts — all four.
-			name:              "marker-pending first pass exempts all four",
+			// A first-time pass rewrites all four but has no recovery evidence
+			// to exempt any pre-existing user edits.
+			name:              "marker-pending first pass exempts nothing",
 			mainVersionBefore: auxRekeyPassInitial.shippedMainVersion - 1,
 			setup: func(mock sqlmock.Sqlmock) {
 				expectCursorProbe(mock, "ignored_schema_migrations", true)
@@ -330,7 +329,7 @@ func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
 				expectAuxRekeyStateForPass(mock, auxRekeyPassInitial, false)
 				expectAuxRekeyStateForPass(mock, auxRekeyPassDerivedInsert, false)
 			},
-			want: allFour,
+			want: nil,
 		},
 		{
 			// Converged and current, nothing owed: no exemption at all, so a
@@ -357,7 +356,7 @@ func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
 			defer db.Close()
 			tc.setup(mock)
 
-			exempt, err := auxRekeyExemptTables(context.Background(), db, tc.mainVersionBefore)
+			exempt, err := auxRekeyExemptTables(context.Background(), db, tc.mainVersionBefore, nil)
 			if err != nil {
 				t.Fatalf("auxRekeyExemptTables: %v", err)
 			}

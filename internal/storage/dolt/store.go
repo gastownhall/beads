@@ -373,12 +373,13 @@ type Config struct {
 	Preview        bool   // Non-mutating preview: embedded opens skip schema init and refuse writes
 
 	// LenientOpen opens the store leniently: a migration gate refusal (#4259)
-	// or a dirty-working-set refusal (#4566) skips the migration instead of
+	// a dirty-working-set refusal (#4566), or deferred cursor restoration
+	// skips the migration instead of
 	// failing the open. Set for working-set-reconcile commands (bd dolt
 	// commit, bd vc commit; #4566), whose entire purpose is to clear the
 	// working set that the migration would otherwise refuse to touch.
 	// Honored in embedded and server mode alike. Migrations still RUN on a
-	// lenient open — only those two refusals are tolerated — so a lenient
+	// lenient open — only these recoverable refusals are tolerated — so a lenient
 	// open of a clean database converges normally.
 	LenientOpen bool
 
@@ -2093,7 +2094,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // warnLenientOpenRefusal reports whether a lenient open (Config.LenientOpen)
 // may continue past err instead of failing, warning on stderr when it may.
 //
-// Server mode reaches the same two pending-migration refusals embedded mode
+// Server mode reaches the same pending-migration refusals embedded mode
 // relaxes for this intent (embeddeddolt's openWorkingSetReconcile): the #4566
 // dirty-table guard, whose documented recovery IS the commit these opens exist
 // to run, and the #4259 remote-migrate gate, a coordination stop with no
@@ -2102,10 +2103,15 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // leaving them fatal here left the refusals with no in-band recovery at all
 // (#5781).
 //
+// An interrupted cursor restore can also defer with its saved rows intact.
 // Every other migration failure still fails the open, and the schema-skew and
 // identity guards run before this point either way: lenient relaxes migration,
 // not safety.
 func warnLenientOpenRefusal(err error) bool {
+	if errors.Is(err, schema.ErrIgnoredCursorRestoreDeferred) && !schema.IsMigrationLockError(err) {
+		fmt.Fprintf(os.Stderr, "Warning: %v; continuing on the current schema with the saved cursor.\n", err)
+		return true
+	}
 	var dirtyErr *schema.DirtyTablesError
 	if errors.As(err, &dirtyErr) {
 		fmt.Fprintf(os.Stderr,

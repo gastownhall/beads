@@ -14,6 +14,84 @@ import (
 
 var commentsTable = auxRekeyTables[1]
 
+// A first-time rewrite must refuse before it writes a sentinel or changes any
+// IDs: a later signature check is too late to protect the user's dirty rows.
+func TestFirstTimeAuxRekeyRefusesDirtyEdits(t *testing.T) {
+	for _, pass := range auxRekeyPasses {
+		t.Run(pass.sentinelKey, func(t *testing.T) {
+			for _, table := range []string{"comments", "events"} {
+				t.Run(table, func(t *testing.T) {
+					db, mock := newMockDB(t)
+					// Upstream probes migration work inside this helper before status.
+					expectCursorProbe(mock, "schema_migrations", true)
+					expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", pass.shippedMainVersion-1)
+					for range 2 {
+						mock.ExpectQuery(`(?s)SELECT s\.table_name, s\.staged\s+FROM dolt_status s`).
+							WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow(table, false))
+					}
+					expectCursorProbe(mock, "schema_migrations", true)
+					expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+						"version", pass.shippedMainVersion-1)
+					expectCursorProbe(mock, "ignored_schema_migrations", true)
+					expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+						"version", pass.markerVersion-1)
+					expectIgnoredSentinelProbes(mock, true)
+					for _, readPass := range auxRekeyPasses {
+						expectAuxRekeyStateForPass(mock, readPass, false)
+					}
+					applied, err := migrateUpAfterReconcile(context.Background(), db, false)
+					var dirtyErr *DirtyTablesError
+					if applied != 0 || !errors.As(err, &dirtyErr) {
+						t.Fatalf("first-time rekey = %d, %v; want dirty-table refusal before migrations", applied, err)
+					}
+					if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != table {
+						t.Fatalf("dirty tables = %v, want [%s]", dirtyErr.Tables, table)
+					}
+					if err := mock.ExpectationsWereMet(); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestAuxRekeyExemptionsRequireRecoveryForTheTable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		resume  bool
+		drifted []string
+		dirty   string
+		refuse  bool
+	}{
+		{name: "crashed first pass resumes", resume: true, dirty: "comments"},
+		{name: "recorded drift resumes", drifted: []string{"events"}, dirty: "events"},
+		{name: "drift cannot exempt other tables", drifted: []string{"events"}, dirty: "comments", refuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			expectCursorProbe(mock, "ignored_schema_migrations", true)
+			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", 8)
+			expectIgnoredSentinelProbes(mock, true)
+			expectAuxRekeyStateForPass(mock, auxRekeyPassInitial, tc.resume, tc.drifted...)
+			expectAuxRekeyStateForPass(mock, auxRekeyPassDerivedInsert, false, tc.drifted...)
+			exempt, err := auxRekeyExemptTables(context.Background(), db, 50,
+				map[string]dirtyTableState{tc.dirty: {}})
+			if tc.refuse {
+				var dirtyErr *DirtyTablesError
+				if !errors.As(err, &dirtyErr) || len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != tc.dirty {
+					t.Fatalf("expected refusal for %s, got %v", tc.dirty, err)
+				}
+			} else if err != nil || !exempt[tc.dirty] {
+				t.Fatalf("recorded recovery was not exempted: %v, %v", exempt, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func nstr(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
 
 func commentDigest(issueID, author, text, createdAt string) string {

@@ -195,8 +195,8 @@ func readAuxRekeyState(ctx context.Context, db DBConn, sentinelKeys ...string) (
 }
 
 // auxRekeyExemptTables reports which aux tables MigrateUp must drop from its
-// dirtyBefore set before running the re-key: exactly the tables the upcoming
-// rekeyAuxRowIDsAllPasses will rewrite, unioned across every pass.
+// dirtyBefore set before running the re-key: tables with recorded recovery
+// state that the upcoming rekeyAuxRowIDsAllPasses will rewrite.
 //
 // It is deliberately derived from the same per-pass tablesToRekey selection the
 // rewrite itself uses, so the exemption can never be wider than the rewrite.
@@ -205,13 +205,16 @@ func readAuxRekeyState(ctx context.Context, db DBConn, sentinelKeys ...string) (
 // collapsed "some rewrite is in flight" bit would — drops a non-drifted aux
 // table's pre-existing user edits out of dirtyBefore, and stageSchemaTables
 // then sweeps them into the "schema: apply migrations" commit. Keying the
-// exemption off the exact rewrite set closes that asymmetry by construction.
-func auxRekeyExemptTables(ctx context.Context, db DBConn, mainVersionBefore int) (map[string]bool, error) {
+// exemption off the exact recovery rewrite set closes that asymmetry. A
+// first-time rewrite has no such evidence and must refuse pre-existing dirt
+// before migrations can change the table or record a completion marker.
+func auxRekeyExemptTables(ctx context.Context, db DBConn, mainVersionBefore int, dirtyBefore map[string]dirtyTableState) (map[string]bool, error) {
 	pending, err := ignoredSource.pendingVersions(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("reading pending ignored migrations: %w", err)
 	}
 	exempt := make(map[string]bool)
+	rewritten := make(map[string]bool)
 	for _, pass := range auxRekeyPasses {
 		state, err := readAuxRekeyState(ctx, db, pass.sentinelKey)
 		if err != nil {
@@ -219,8 +222,21 @@ func auxRekeyExemptTables(ctx context.Context, db DBConn, mainVersionBefore int)
 		}
 		tables, _ := pass.tablesToRekey(mainVersionBefore, pending, state)
 		for _, t := range tables {
-			exempt[t.name] = true
+			rewritten[t.name] = true
+			if state.resume || slices.Contains(state.drifted, t.name) {
+				exempt[t.name] = true
+			}
 		}
+	}
+	var refused []string
+	for table := range dirtyBefore {
+		if rewritten[table] && !exempt[table] {
+			refused = append(refused, table)
+		}
+	}
+	if len(refused) > 0 {
+		sort.Strings(refused)
+		return nil, &DirtyTablesError{Tables: refused}
 	}
 	return exempt, nil
 }

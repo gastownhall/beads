@@ -68,7 +68,7 @@ type EmbeddedDoltStore struct {
 // openIntent classifies why a store is being opened. openStrict fails the
 // open on any pending-migration refusal; the other two intents relax both
 // the #4259 remote-migrate gate refusal and the #4566 dirty-table refusal,
-// each with its own warning text (see initSchema).
+// and deferred cursor restoration, each with a warning (see initSchema).
 type openIntent int
 
 const (
@@ -425,6 +425,10 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		if s.intent != openStrict && errors.Is(err, schema.ErrIgnoredCursorRestoreDeferred) {
+			fmt.Fprintf(os.Stderr, "Warning: %v; continuing on the current schema with the saved cursor.\n", err)
+			return nil
+		}
 		var dirtyErr *schema.DirtyTablesError
 		if s.intent != openStrict && errors.As(err, &dirtyErr) {
 			// The guard exists to keep dirty user data from being entangled

@@ -318,6 +318,8 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		}
 	}
 
+	// Both passes are strict: preserve ErrIgnoredCursorRestoreDeferred for the
+	// open policy above this wrapper, and never turn it into bootstrap recovery.
 	applied, err = MigrateUp(ctx, conn)
 	var dirtyErr *DirtyTablesError
 	if err != nil && o.freshBootstrapHeal != nil && errors.As(err, &dirtyErr) {

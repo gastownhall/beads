@@ -271,6 +271,10 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
 			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, nil)
 		})); err != nil {
+		if p.readOnly && errors.Is(err, schema.ErrIgnoredCursorRestoreDeferred) && !schema.IsMigrationLockError(err) {
+			fmt.Fprintf(os.Stderr, "Warning: %v; continuing on the current schema with the saved cursor.\n", err)
+			return nil
+		}
 		var gateErr *schema.RemoteMigrateGateError
 		if errors.As(err, &gateErr) {
 			if p.readOnly {
