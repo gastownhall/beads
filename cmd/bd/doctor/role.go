@@ -3,9 +3,11 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -18,6 +20,7 @@ import (
 func CheckBeadsRole(path string) DoctorCheck {
 	// Read beads.role from git config (canonical location)
 	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	if path != "" {
 		cmd.Dir = path
 	}
@@ -42,6 +45,7 @@ func CheckBeadsRole(path string) DoctorCheck {
 func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
 	// Read beads.role from git config (canonical location)
 	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	if path != "" {
 		cmd.Dir = path
 	}
@@ -87,6 +91,7 @@ func checkBeadsRoleNotInGit(path string) DoctorCheck {
 // isGitRepo checks whether the given path is inside a git repository.
 func isGitRepo(path string) bool {
 	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	if path != "" {
 		cmd.Dir = path
 	}
