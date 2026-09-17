@@ -175,7 +175,7 @@ Examples:
 			// Direct mode
 			apiKey, _ := config.ResolveAIAPIKey("")
 			if apiKey == "" && !compactDryRun {
-				return HandleError("--auto mode requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
+				return HandleError("--auto mode requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, ORCAROUTER_API_KEY, or ai.api_key in config")
 			}
 
 			compactCfg := &compact.Config{

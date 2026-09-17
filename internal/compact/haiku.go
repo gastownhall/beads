@@ -44,11 +44,11 @@ type haikuClient struct {
 }
 
 // newHaikuClient creates a new Haiku API client.
-// API key resolution order: ANTHROPIC_API_KEY env var > MINIMAX_API_KEY env var > ai.api_key config > explicit apiKey parameter.
+// API key resolution order: ANTHROPIC_API_KEY > ORCAROUTER_API_KEY > MINIMAX_API_KEY > ai.api_key config > explicit apiKey parameter.
 func newHaikuClient(apiKey string) (*haikuClient, error) {
 	apiKey, keySource := config.ResolveAIAPIKey(apiKey)
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config", errAPIKeyRequired)
+		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, ORCAROUTER_API_KEY, or ai.api_key in config", errAPIKeyRequired)
 	}
 
 	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
