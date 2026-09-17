@@ -27,6 +27,7 @@ var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
 var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
 var _ storage.ActiveDatabaseSizer = (*EmbeddedDoltStore)(nil)
 var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
+var _ storage.FullGarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
@@ -449,6 +450,22 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			}
 			return nil
 		}
+		var rekeyErr *schema.DependencyRekeyConflictError
+		if s.intent != openStrict && errors.As(err, &rekeyErr) {
+			// Same principle for the dependency re-key's refusal (#5268): it is
+			// a convergence repair, not a precondition for reading, and before
+			// that pass existed these clones opened fine. Bricking 'bd list' and
+			// 'bd show' on latent id corruption the user cannot even inspect
+			// without them would be a worse outcome than a stale primary key.
+			// Nothing is lost by continuing: the 0026 marker stays unrecorded,
+			// so the next open retries the repair.
+			fmt.Fprintf(os.Stderr,
+				"Warning: %v\n"+
+					"  Continuing without re-keying dependencies. Dependency ids stay as\n"+
+					"  they are until the conflict is resolved; run 'bd doctor' to inspect.\n",
+				rekeyErr)
+			return nil
+		}
 		return fmt.Errorf("embeddeddolt: migrate: %w", err)
 	}
 
@@ -478,7 +495,8 @@ func (s *EmbeddedDoltStore) GetIssueByExternalRef(ctx context.Context, externalR
 
 func (s *EmbeddedDoltStore) DeleteIssue(ctx context.Context, id string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.DeleteIssueInTx(ctx, tx, id)
+		// storage.DeleteIssue carries no actor, so the journal rows record none.
+		return issueops.DeleteIssueInTx(ctx, tx, id, "")
 	})
 }
 
@@ -681,10 +699,19 @@ func (s *EmbeddedDoltStore) Close() error {
 	return nil
 }
 
-// DoltGC runs Dolt garbage collection to reclaim disk space.
+// DoltGC runs Dolt's default, generational garbage collection to reclaim disk
+// space.
 func (s *EmbeddedDoltStore) DoltGC(ctx context.Context) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.DoltGC(ctx, db)
+	})
+}
+
+// DoltGCFull runs a full Dolt garbage collection across all storage
+// generations.
+func (s *EmbeddedDoltStore) DoltGCFull(ctx context.Context) error {
+	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.DoltGCFull(ctx, db)
 	})
 }
 
@@ -961,7 +988,8 @@ func (s *EmbeddedDoltStore) DeleteIssues(ctx context.Context, ids []string, casc
 	var result *types.DeleteIssuesResult
 	err := s.withConn(ctx, !dryRun, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun)
+		// storage.DeleteIssues carries no actor, so the journal rows record none.
+		result, err = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun, "")
 		return err
 	})
 	return result, err

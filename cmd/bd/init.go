@@ -399,6 +399,32 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the init flag surface.\n\n")
 			reinitLocal = true
 		}
+
+		// dc-6jaq: "init" is in noDbCommands, so PersistentPreRunE returns at
+		// the skip-store early return before its freeze gate ever runs, and
+		// init.go calls neither CheckReadonly nor the gate itself. That left
+		// the single most destructive command in the CLI free to run during a
+		// migration: `bd init --reinit-local` (or its --force alias) drops and
+		// recreates the very database the marker is protecting, permanently,
+		// and exited 0 without consulting the marker. Gate the destructive
+		// variants here — the earliest point where every one of them is
+		// resolved and nothing has been written yet, and ahead of the
+		// --proxied-server branch below, which reaches its own writes without
+		// passing through the init mutation gate at all.
+		//
+		// A plain first-time init is deliberately not gated: it creates a new
+		// database rather than touching the frozen one, and an existing
+		// workspace already refuses it via checkExistingBeadsData.
+		if reinitLocal || discardRemote {
+			op := "init --reinit-local"
+			if discardRemote {
+				op = "init --discard-remote"
+			}
+			if err := migrationFreezeGateFor(cmd, op, resolveInitBeadsDir()); err != nil {
+				return err
+			}
+		}
+
 		sharedServer, _ := cmd.Flags().GetBool("shared-server")
 		externalServer, _ := cmd.Flags().GetBool("external")
 		debugMode, _ := cmd.Flags().GetBool("debug")
@@ -639,6 +665,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				fromJSONL:              fromJSONL,
 				nonInteractive:         nonInteractive,
 			}); err != nil {
+				// runInitProxiedServer runs the same checkExistingBeadsData
+				// the route below does, but it runs it inside itself — so
+				// --init-if-missing used to end here as a plain exit-1
+				// "Aborting.", and its mismatch guards never ran at all. The
+				// check happens before any .beads/ write, so nothing has been
+				// touched by the time we get this error.
+				if initIfMissing && !reinitLocal && errors.Is(err, errWorkspaceAlreadyInitialized) {
+					return resolveInitIfMissingAlreadyInitialized(cmd, database, prefix, quiet)
+				}
 				return err
 			}
 			return nil
@@ -771,26 +806,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// directory) must still abort rather than be masked as a
 				// successful skip.
 				if initIfMissing && errors.Is(err, errWorkspaceAlreadyInitialized) {
-					// Guard against masking a genuine mismatch: an explicit
-					// --prefix or --database that does not match the existing
-					// workspace must abort, since silently skipping would ignore
-					// the request and reuse a different database. --database is
-					// the authoritative selector, so it is checked even when
-					// --prefix is also set.
-					existing := existingWorkspaceDBName()
-					if cmd.Flags().Changed("database") {
-						if initIfMissingDatabaseMismatch(existing, database) {
-							return fmt.Errorf("workspace already initialized as database %q, but --database %q was requested.\nRemove --database (or pass a matching value) to reuse the existing workspace", existing, database)
-						}
-					} else if cmd.Flags().Changed("prefix") {
-						if initIfMissingPrefixMismatch(existing, prefix) {
-							return fmt.Errorf("workspace already initialized as database %q, but --prefix %q was requested.\nRemove --prefix (or pass a matching value) to reuse the existing workspace", existing, prefix)
-						}
-					}
-					if !quiet {
-						fmt.Fprintln(os.Stderr, "Skipping init: workspace already initialized.")
-					}
-					return nil
+					return resolveInitIfMissingAlreadyInitialized(cmd, database, prefix, quiet)
 				}
 				return fmt.Errorf("%v", err)
 			}
@@ -1289,6 +1305,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if syncFromRemote {
+			// A raw https:// forge URL would route through Dolt's remotesapi
+			// client and spin forever (#4421); its git+ form routes through
+			// the git remote factory. Non-forge URLs are untouched (GH#3339).
+			syncURL = doltRemoteURL(syncURL)
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 			disposition, err := runInitRemoteClone(syncURL, func(remoteURL string) error {
 				return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
@@ -1480,6 +1500,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					printBootstrapRemoteBehindGuidance(os.Stderr, gateErr, syncURL, "bd init")
 				} else {
 					fmt.Fprint(os.Stderr, gateErr.UserMessage())
+					printInitJoinGuidance(os.Stderr, gateErr)
 				}
 				return &exitError{Code: 1}
 			}
@@ -1504,8 +1525,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// falling back to JSONL-as-sync. Gateway mode skips it: the hosted
 		// server owns the database, so DOLT_REMOTE('add', ...) must not run
 		// against it (see shouldWriteInitDoltRemote).
+		// The URL is routed here too, not just on the clone path: the
+		// no-Dolt-data-yet case (the pre-first-push wiring this is for) never
+		// clones, so without routing a raw https forge URL would be stored
+		// verbatim in dolt_remotes and the *first* `bd dolt push` would take
+		// it to the remotesapi client — the #4421 storm, one leg further down
+		// (#5743).
 		if shouldWriteInitDoltRemote(doltCfg.Gateway, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin, isDoltLocalOnly()) {
-			configureInitDoltRemote(ctx, store, syncURL, quiet)
+			configureInitDoltRemote(ctx, store, doltRemoteURL(syncURL), quiet)
 		}
 
 		// === CONFIGURATION METADATA (Pattern A: Fatal) ===
@@ -1740,7 +1767,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Must run AFTER createConfigYaml which creates the file.
 			// Persist the effective remote so future bootstrap and hooks know
 			// Dolt, not JSONL, is the cross-machine sync path. Plain git
-			// origins are valid here: the first push creates refs/dolt/data.
+			// origins are valid here: the first push creates refs/dolt/data,
+			// and bootstrap resolves such a URL by probing refs/dolt/data
+			// rather than rejecting it (#5743).
 			if err := persistInitSyncRemote(beadsDir, initRemote, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin); err != nil {
 				return fmt.Errorf("failed to persist sync.remote to config.yaml: %v", err)
 			}
@@ -2463,7 +2492,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 		return fmt.Errorf("failed to load %s: %w; refusing to reinitialize automatically (restore the metadata or use --reinit-local after safeguarding existing data)", configfile.ConfigPath(beadsDir), cfgErr)
 	}
 	if cfg != nil {
-		if guardErr := validateConfiguredBackend(cfg); guardErr != nil {
+		if guardErr := validateConfiguredBackend(cfg, beadsDir); guardErr != nil {
 			return guardErr
 		}
 	}
@@ -2760,6 +2789,40 @@ func initIfMissingPrefixMismatch(existingDBName, requestedPrefix string) bool {
 	}
 	requested := dbNameFromPrefix(normalizeIssuePrefix(requestedPrefix))
 	return requested != "" && !strings.EqualFold(existingDBName, requested)
+}
+
+// resolveInitIfMissingAlreadyInitialized decides what --init-if-missing does
+// once the workspace is known to be initialized already: nil for the benign
+// skip (message printed here), or the abort for a request that would be
+// silently ignored by skipping.
+//
+// Guard against masking a genuine mismatch: an explicit --prefix or --database
+// that does not match the existing workspace must abort, since silently
+// skipping would ignore the request and reuse a different database. --database
+// is the authoritative selector, so it is checked even when --prefix is also
+// set.
+//
+// Both init routes share this: the embedded/server route reaches it from its
+// own checkExistingBeadsData, the proxied-server route from the identical check
+// inside runInitProxiedServer. Before that wiring existed, --init-if-missing was
+// simply inert on the proxied route — an already-initialized workspace exited 1
+// with the "Aborting." banner, and the two mismatch guards this delegates to had
+// never once run.
+func resolveInitIfMissingAlreadyInitialized(cmd *cobra.Command, database, prefix string, quiet bool) error {
+	existing := existingWorkspaceDBName()
+	if cmd.Flags().Changed("database") {
+		if initIfMissingDatabaseMismatch(existing, database) {
+			return fmt.Errorf("workspace already initialized as database %q, but --database %q was requested.\nRemove --database (or pass a matching value) to reuse the existing workspace", existing, database)
+		}
+	} else if cmd.Flags().Changed("prefix") {
+		if initIfMissingPrefixMismatch(existing, prefix) {
+			return fmt.Errorf("workspace already initialized as database %q, but --prefix %q was requested.\nRemove --prefix (or pass a matching value) to reuse the existing workspace", existing, prefix)
+		}
+	}
+	if !quiet {
+		fmt.Fprintln(os.Stderr, "Skipping init: workspace already initialized.")
+	}
+	return nil
 }
 
 // initIfMissingDatabaseMismatch reports whether an explicit --database request
@@ -3400,6 +3463,15 @@ func initGlobalDatabaseConfig(ctx context.Context, projectCfg *dolt.Config, quie
 	globalStore, err := newDoltStore(ctx, globalCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to open global database: %v\n", err)
+		// The gate's own block prescribes `bd migrate schema`, which migrates
+		// the PROJECT database — on this path that leaves the global database
+		// exactly as refused. Name the command that actually reaches it
+		// (#5920); this warning is the only place the global refusal surfaces.
+		if schema.IsRemoteMigrateGateError(err) {
+			fmt.Fprintf(os.Stderr,
+				"  The global database is shared by every workspace on this server. To migrate it, run:\n        %s\n",
+				schema.SharedConsentCommandGlobal)
+		}
 		return
 	}
 	defer func() { _ = globalStore.Close() }()

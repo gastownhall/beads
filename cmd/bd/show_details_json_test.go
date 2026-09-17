@@ -67,11 +67,16 @@ func TestShowJSONDetailsCarryTheRevisionToken(t *testing.T) {
 		token int64
 		want  string
 	}{
-		{"a mutated row", 123456789, `"revision":123456789`},
+		{"a mutated row", 123456789, `"revision":"123456789"`},
 		// 0 is the migration-0054 backfill token, a legitimate CAS value a
 		// guarded client must be able to read. No omitempty, so it is emitted
-		// rather than standing in for "this producer has no token".
-		{"a legacy un-mutated row", 0, `"revision":0`},
+		// rather than standing in for "this producer has no token", and it is
+		// the STRING "0" rather than the number.
+		{"a legacy un-mutated row", 0, `"revision":"0"`},
+		// The token this spelling exists for: 2^53+1 is the smallest int64 a
+		// double-based `jq`/JavaScript consumer of `bd show --json` cannot
+		// hold.
+		{"a token past 2^53", 9007199254740993, `"revision":"9007199254740993"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			details := types.NewIssueDetails(types.Issue{

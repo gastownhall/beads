@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -110,6 +111,13 @@ var (
 	// an intentional empty JSONL artifact instead of treating it as ambiguous.
 	commandMayEmptyJSONLExport atomic.Bool
 
+	// commandDeletedIssueIDs is the in-process handoff from the delete
+	// commands to post-run auto-export: ids this command hard-deleted are
+	// PROVEN gone, so the export's orphan guard skips them instead of
+	// mistaking a deliberate delete for a torn store and refusing forever
+	// (GH#5896). See deletedIssueIDSet for why it is not persisted.
+	commandDeletedIssueIDs deletedIssueIDSet
+
 	// commandDidExplicitDoltCommit is set when a command already created a Dolt commit
 	// explicitly (e.g., bd sync in dolt-native mode, hook flows, bd vc commit).
 	// This prevents a redundant auto-commit attempt in PersistentPostRun.
@@ -123,6 +131,15 @@ var (
 	// commandTipIDsShown tracks which tip IDs were shown in this command (deduped).
 	// This is used for tip-commit message formatting.
 	commandTipIDsShown map[string]struct{}
+
+	// commandFreeze is the migration-freeze lookup for this invocation,
+	// resolved once in PersistentPreRunE (dc-6jaq). Both hooks read it: the
+	// pre-run gate refuses writes from it, and PersistentPostRunE skips its
+	// own maintenance writes — auto-commit, tip metadata, backup, export,
+	// push — so a read command run during a freeze does not leave a new Dolt
+	// commit in the store being migrated. Zero value means "not frozen",
+	// which is the right default for the paths that never resolve it.
+	commandFreeze migration.Result
 
 	// commandSpan is the root OTel span for the current command execution.
 	// All storage and AI spans are nested as children of this span.
@@ -319,6 +336,74 @@ func isForcedMigrate(cmd *cobra.Command) bool {
 	}
 	force, _ := cmd.Flags().GetBool("force")
 	return force
+}
+
+// printGlobalDatabaseConsentHint adds the one thing the gate's own block
+// cannot know: which database this invocation was aimed at. Under --global the
+// open targets `beads_global`, so the block's `bd migrate schema` would
+// migrate the PROJECT database and leave the refusal in place — the working
+// remedy is the same verb with the same flag.
+func printGlobalDatabaseConsentHint(w io.Writer) {
+	if !globalFlag {
+		return
+	}
+	fmt.Fprintf(w,
+		"\n  This command targeted the global database (--global), so run the\n"+
+			"  migrate step with the same flag:\n"+
+			"        %s\n",
+		schema.SharedConsentCommandGlobal)
+}
+
+// renderTypedOpenError prints the actionable block for the store-open failures
+// that carry one, honoring --json, and reports whether it handled err. A false
+// return means the caller should fall back to its own generic message.
+//
+// Every open path needs this — the Dolt store, the proxied unit-of-work
+// provider, and `bd serve`'s startup. The proxied one used to render every
+// failure as `%v` inside "failed to open uow provider", which turned a
+// multi-line rebuild or migrate-consent guide into one truncated line.
+func renderTypedOpenError(err error) bool {
+	// Schema skew gets dedicated UX with actionable rebuild instructions.
+	var skewErr *schema.SchemaSkewError
+	if errors.As(err, &skewErr) {
+		if jsonOutput {
+			handleSchemaSkewJSON(skewErr)
+		} else {
+			fmt.Fprint(os.Stderr, skewErr.UserMessage())
+		}
+		return true
+	}
+	// #4259 / #5920: the migrate gate blocks a silent in-place migration and
+	// tells the operator to migrate, adopt, or consent.
+	var gateErr *schema.RemoteMigrateGateError
+	if errors.As(err, &gateErr) {
+		if jsonOutput {
+			handleRemoteMigrateGateJSON(gateErr)
+		} else {
+			fmt.Fprint(os.Stderr, gateErr.UserMessage())
+			printGlobalDatabaseConsentHint(os.Stderr)
+		}
+		return true
+	}
+	return false
+}
+
+// isSchemaMigrateVerb reports whether cmd is `bd migrate schema` — the one
+// invocation in which the operator asked for a schema migration by name. That
+// request is the consent the shared-store gate wants for a database with no
+// remote (#5920); see schema.SetSharedMigrateConsent.
+//
+// Deliberately just this one command, not the `bd migrate` tree. Bare
+// `bd migrate` reconciles version/repo-id/clone-id metadata and never applies
+// a migration itself, and its flag modes are further from schema work still:
+// `bd migrate --update-repo-id` is repo-fingerprint surgery after a git remote
+// change, and treating it as consent would let a repo-ID update promote the
+// schema for every co-resident client as a side effect. `bd migrate sync`,
+// `bd migrate hooks`, and the mode-switch verbs consent to nothing either.
+// The operator who does want to migrate has the verb this names, and
+// `--force` still unlocks from either migrate command.
+func isSchemaMigrateVerb(cmd *cobra.Command) bool {
+	return cmd == migrateSchemaCmd
 }
 
 // forcedMigratePreviewFlag returns the name of a preview flag (--dry-run,
@@ -892,9 +977,11 @@ var rootCmd = &cobra.Command{
 		// Reset per-command write tracking (used by Dolt auto-commit).
 		commandDidWrite.Store(false)
 		commandMayEmptyJSONLExport.Store(false)
+		commandDeletedIssueIDs.reset()
 		commandDidExplicitDoltCommit = false
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
+		commandFreeze = migration.Result{}
 
 		// Set up signal-aware context with batch commit flush on shutdown.
 		// Unlike signal.NotifyContext, this also handles SIGHUP and flushes
@@ -1169,10 +1256,29 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
+			if cmdName == "doctor" && usesProxiedServer() {
+				// Refuse only on a real refusal. validateProxyMaintenance...
+				// returns nil for doctor subcommands, and returning early on
+				// that would skip the legacy-store guard and autocommit-mode
+				// resolution every other skipsStoreInit command still runs.
+				if err := validateProxyMaintenanceBeforeProvider(cmd); err != nil {
+					return err
+				}
+			}
 			if beadsDir == "" {
 				beadsDir = beads.FindBeadsDir()
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
+				isMigrationCommand := false
+				for current := cmd; current != nil; current = current.Parent() {
+					if current.Name() == "migrate" {
+						isMigrationCommand = true
+						break
+					}
+				}
+				if isMigrationCommand {
+					return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
+				}
 				return HandleError("%v", err)
 			}
 			if _, err := getDoltAutoCommitMode(); err != nil {
@@ -1357,8 +1463,28 @@ var rootCmd = &cobra.Command{
 		if cfgErr != nil {
 			return HandleError("failed to load beads config from %s: %v (refusing to fall back to the embedded store; fix or restore metadata.json and retry)", beadsDir, cfgErr)
 		}
-		if backendErr := validateConfiguredBackend(cfg); backendErr != nil {
+		if backendErr := validateConfiguredBackend(cfg, beadsDir); backendErr != nil {
 			return HandleError("%v", backendErr)
+		}
+		// Reject proxy capability combinations before any workspace side effect
+		// (version tracking, migration, auto-start, or provider construction).
+		if cfg != nil && cfg.IsDoltProxiedServerMode() {
+			if err := validateProxyCapabilitiesBeforeProvider(cmd); err != nil {
+				return err
+			}
+			if err := validateProxyMaintenanceBeforeProvider(cmd); err != nil {
+				return err
+			}
+			if err := validateProxyTransformBeforeProvider(cmd); err != nil {
+				return err
+			}
+		}
+		// The proxied provider cannot guarantee strict read-only semantics. Refuse
+		// before provider construction so no connection, migration, or mutation
+		// is attempted; expose the same stable capability code as other proxy
+		// front-door refusals.
+		if readonlyMode && cfg != nil && cfg.IsDoltProxiedServerMode() {
+			return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapReadonly))
 		}
 		if readonlyMode && !backendSupportsStrictReadonly(cfg) {
 			return HandleError("strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access")
@@ -1381,7 +1507,7 @@ var rootCmd = &cobra.Command{
 		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
 
-		// dc-6jaq: consult the MIGRATION-FREEZE sentinel here, before any of
+		// dc-6jaq: consult the migration freeze marker here, before any of
 		// this hook's own store-touching side effects — trackBdVersion below
 		// (writes .local_version), autoMigrateOnVersionBump (opens its own
 		// store connection and can apply a schema migration), and
@@ -1395,13 +1521,27 @@ var rootCmd = &cobra.Command{
 		// "write" commands to drift out of sync with the one useReadOnly is
 		// built from. An explicit --dry-run/--inspect preview also sets
 		// useReadOnly and so skips this early gate the same way, but is NOT
-		// exempt overall: CheckReadonly's own freeze check runs again,
-		// unconditionally, at the per-command chokepoint once RunE is
-		// reached, and that later call has no preview awareness — so a
-		// preview on a frozen town still exits 1 there, fail-closed, same as
-		// strict --readonly already blocks `create --dry-run` today.
+		// exempt overall: the per-command chokepoint checks again once RunE
+		// is reached, with no preview awareness — CheckReadonly for the ~120
+		// commands that call it, and runImport's own call for `bd import
+		// --dry-run`, which is not one of them. So a preview on a frozen
+		// workspace still exits ExitMigrationFrozen there, fail-closed, same
+		// as strict --readonly already blocks `create --dry-run` today.
+		// Returning the refusal rather than exiting is load-bearing: the
+		// gates acquired above are released by this hook's deferred cleanup,
+		// which os.Exit would skip.
+		//
+		// One lookup answers the whole invocation: the walk is a stat per
+		// ancestor of both the cwd and the resolved workspace, and resolving
+		// it twice a statement apart would not only pay for it twice but let
+		// the two readings disagree about a marker that appeared or vanished
+		// in between (write allowed but maintenance skipped, or the reverse).
+		// PostRunE reads the same answer via commandFreeze.
+		commandFreeze = migration.Find(beadsDir)
 		if !useReadOnly {
-			CheckMigrationFreeze(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" "))
+			if err := migrationFreezeGate(cmd, strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" "), commandFreeze); err != nil {
+				return err
+			}
 		}
 
 		// dc-6jaq (review round 2, ask #1): a command classified read-only —
@@ -1411,14 +1551,12 @@ var rootCmd = &cobra.Command{
 		// writes against the (possibly frozen) store, run regardless of the
 		// command's own classification — so "the command is a read" must not
 		// imply "these side effects may still run". Reproduced pre-fix:
-		// freeze the town, seed .local_version with a stale version, run
+		// freeze the workspace, seed .local_version with a stale version, run
 		// `bd list` — exit 0 (correct, it's a read), but .local_version was
 		// silently rewritten mid-freeze anyway. Skip both calls under an
-		// active freeze without blocking the read itself. Short-circuits on
-		// !policy.runMaintenance (strict --readonly) so the IsFrozen/
-		// findTownRoot filesystem walk isn't paid on that path, where these
-		// calls are already skipped for an unrelated reason.
-		frozenForMaintenance := policy.runMaintenance && migration.IsFrozen(findTownRoot())
+		// active freeze without blocking the read itself. Reuses the single
+		// lookup resolved above rather than repeating the walk.
+		frozenForMaintenance := policy.runMaintenance && commandFreeze.Frozen()
 
 		// Track bd version changes unless strict readonly forbids repository mutation.
 		// Best-effort tracking - failures are silent.
@@ -1447,6 +1585,14 @@ var rootCmd = &cobra.Command{
 		// Unconditional set-or-clear keeps the override self-clearing should the
 		// root command ever be re-run in-process (tests, a future server mode).
 		schema.SetForceAllowRemoteMigrate(forcedMigrate)
+
+		// Typing `bd migrate schema` is consent to migrate a shared database
+		// that has no remote (#5920): there is no cross-clone fork to risk,
+		// only the co-resident lockout the operator is asking to accept. A
+		// preview withholds it — `bd migrate schema --dry-run` must not
+		// migrate on the way to printing what it would do. Same set-or-clear
+		// discipline as the --force override above.
+		schema.SetSharedMigrateConsent(isSchemaMigrateVerb(cmd) && !previewMode)
 
 		// Auto-migrate database on version bump (bd-jgxi).
 		// Runs for ALL non-preview commands (including read-only ones) because
@@ -1488,12 +1634,27 @@ var rootCmd = &cobra.Command{
 		// deployments that empty relic answers every query with an empty
 		// result set and exit 0 (false-empty), which readers misinterpret as
 		// "no work". Absent metadata.json (cfg == nil, cfgErr == nil) keeps
-		// the fresh-repo embedded default below — unless env/config.yaml
-		// supply a remote host (GH#3545): host inference must not depend
-		// on metadata existing, so substitute the default config and let
-		// the normal mode/connection resolution run.
-		if cfg == nil && configfile.DefaultConfig().HostImpliesServerMode() {
-			logConfigDiscovery(beadsDir, "no metadata.json; host inference (GH#3545) selects server mode")
+		// the fresh-repo embedded default below — unless the env/config.yaml
+		// layers already select server mode: that decision must not depend on
+		// metadata existing, so substitute the default config and let the
+		// normal mode/connection resolution run.
+		//
+		// The gate asks IsDoltServerMode — the same resolver the branch below
+		// uses to set doltCfg.ServerMode — rather than HostImpliesServerMode.
+		// Host inference (GH#3545) answers only one layer of that question and
+		// deliberately returns false as soon as config.yaml names a
+		// `dolt.mode`: correct for inferring FROM a host, wrong as the whole
+		// gate. A workspace declaring `dolt.mode: server` in .beads/config.yaml
+		// with no metadata.json therefore kept cfg nil, fell through to the
+		// embedded branch, and answered every query out of a phantom
+		// .beads/embeddeddolt database that same run had just created —
+		// exit 0, no rows, nothing to distinguish it from real emptiness.
+		// BEADS_DOLT_SERVER_MODE=1 did not rescue it either; the old gate
+		// never consulted it. IsDoltServerMode is a superset of
+		// HostImpliesServerMode, so nothing that reached server mode before
+		// stops reaching it now.
+		if cfg == nil && configfile.DefaultConfig().IsDoltServerMode() {
+			logConfigDiscovery(beadsDir, "no metadata.json; env/config.yaml select server mode")
 			cfg = configfile.DefaultConfig()
 		}
 		if cfg != nil {
@@ -1598,8 +1759,16 @@ var rootCmd = &cobra.Command{
 		// root pre-run, before --dry-run/--inspect has had any effect. Proxied
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
-			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride, previewProviderOptions(previewMode)...)
+			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
+				rootProviderOptions(previewMode, useReadOnly)...)
 			if err != nil {
+				// Same typed rendering the store path gets below: a schema
+				// skew or a migration-gate refusal here carries a whole
+				// actionable block, and `%v` inside "failed to open uow
+				// provider" throws all of it away.
+				if rendered := renderTypedOpenError(err); rendered {
+					return SilentExit()
+				}
 				return HandleError("failed to open uow provider: %v", err)
 			}
 			// Fire the workspace's script hooks after commits on the
@@ -1662,25 +1831,7 @@ var rootCmd = &cobra.Command{
 			if handleFreshCloneError(err) {
 				return SilentExit()
 			}
-			// Schema skew gets dedicated UX with actionable rebuild instructions.
-			var skewErr *schema.SchemaSkewError
-			if errors.As(err, &skewErr) {
-				if jsonOutput {
-					handleSchemaSkewJSON(skewErr)
-				} else {
-					fmt.Fprint(os.Stderr, skewErr.UserMessage())
-				}
-				return SilentExit()
-			}
-			// #4259: the remote-migrate gate blocks silent in-place migration of a
-			// remote-backed database and tells the operator to migrate-or-adopt.
-			var gateErr *schema.RemoteMigrateGateError
-			if errors.As(err, &gateErr) {
-				if jsonOutput {
-					handleRemoteMigrateGateJSON(gateErr)
-				} else {
-					fmt.Fprint(os.Stderr, gateErr.UserMessage())
-				}
+			if renderTypedOpenError(err) {
 				return SilentExit()
 			}
 			return HandleError("failed to open database: %v", err)
@@ -1821,7 +1972,16 @@ var rootCmd = &cobra.Command{
 				uowProvider = nil
 			}
 		} else {
-			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) {
+			// dc-6jaq: the freeze covers this hook's own writes too. A read is
+			// allowed through a freeze, but the maintenance that trails it is
+			// not the user's command — auto-commit, the tip_*_last_shown
+			// metadata write and its separate Dolt commit, auto-backup,
+			// auto-export and auto-push all mutate the very store being
+			// migrated, and `bd list` on a frozen workspace reaches every one
+			// of them. Guarding the outer block keeps that promise in one
+			// place instead of six. Writes never get here at all: they were
+			// refused in PersistentPreRunE.
+			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !commandFreeze.Frozen() {
 				// Dolt auto-commit: after a successful write command (and after final flush),
 				// create a Dolt commit so changes don't remain only in the working set.
 				if commandDidWrite.Load() && !commandDidExplicitDoltCommit {

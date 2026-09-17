@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -138,6 +139,15 @@ func testMainInner(m *testing.M) int {
 	// metrics resolution already unset these per-test and restore them.
 	_ = os.Setenv(metrics.EnvDisableMetrics, "1")
 	_ = os.Setenv(metrics.EnvDisableEventFlush, "1")
+
+	// Pin the migration-freeze override to a path that cannot exist (dc-6jaq).
+	// The freeze gate walks every ancestor of the workspace and of the cwd up
+	// to the filesystem root, so a stray MIGRATION-FREEZE above TMPDIR — or in
+	// a developer's home, or exported by their shell — would refuse every
+	// write in every subprocess suite in this package with exit 14. The
+	// override is authoritative, so pinning it here holds the walk off
+	// globally; the freeze tests that need the walk clear it per-run.
+	_ = os.Setenv(migration.EnvFreezeFile, filepath.Join(tmp, "no-such-freeze-marker"))
 
 	// Also reset viper state that was loaded by main.go's init().
 	config.ResetForTesting()

@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -163,6 +166,203 @@ func TestHandleRemoteMigrateGateJSON_FallbackReason(t *testing.T) {
 		obj := captureJSON(gate)
 		if _, ok := obj["fallback_reason"]; ok {
 			t.Errorf("adopt decision must not carry fallback_reason, got %v", obj["fallback_reason"])
+		}
+	})
+}
+
+// TestHandleRemoteMigrateGateJSON_SharedNoRemote covers the shared-store
+// refusal's agent-facing block (gastownhall/beads#5920). It is deliberately
+// NOT the migrate-or-adopt shape: with no remote there is nothing to adopt
+// from, so the only option is "migrate once the fleet is upgraded", and the
+// runnable command stays inside that conditional option.
+func TestHandleRemoteMigrateGateJSON_SharedNoRemote(t *testing.T) {
+	gate := &schema.RemoteMigrateGateError{
+		CurrentVersion: 53, LatestVersion: 66, Pending: 13,
+		Decision: "shared-no-remote",
+	}
+
+	origStderr := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
+	handleRemoteMigrateGateJSON(gate)
+	_ = w.Close()
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+	}
+	if parsed["hint"] == gate.EscapeHint() {
+		t.Errorf("hint must not be the runnable escape command %q (agent footgun)", gate.EscapeHint())
+	}
+
+	obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("remote_migrate_gate key missing or wrong type: %T", parsed["remote_migrate_gate"])
+	}
+	if got, _ := obj["decision"].(string); got != "shared-no-remote" {
+		t.Errorf("decision = %v, want \"shared-no-remote\"", obj["decision"])
+	}
+	if got, _ := obj["observed"].(string); !strings.Contains(got, "shared server database") {
+		t.Errorf("observed = %q, want the shared-server framing", got)
+	}
+	if got, _ := obj["expected"].(string); !strings.Contains(got, "bd migrate schema") {
+		t.Errorf("expected = %q, want the consent verb", got)
+	}
+	if _, ok := obj["fallback_reason"]; ok {
+		t.Errorf("a tailored decision must not carry fallback_reason, got %v", obj["fallback_reason"])
+	}
+
+	rawOpts, ok := obj["options"].([]interface{})
+	if !ok || len(rawOpts) != 1 {
+		t.Fatalf("options = %v, want exactly one (no adopt path without a remote)", obj["options"])
+	}
+	o, _ := rawOpts[0].(map[string]interface{})
+	if id, _ := o["id"].(string); id != "migrate-shared" {
+		t.Errorf("option id = %v, want \"migrate-shared\"", o["id"])
+	}
+	if o["when"] == nil || o["risk"] == nil {
+		t.Errorf("migrate-shared option missing when/risk: %v", o)
+	}
+	cmds, _ := o["commands"].([]interface{})
+	if len(cmds) != 1 || cmds[0] != "bd migrate schema" {
+		t.Errorf("commands = %v, want [\"bd migrate schema\"]", cmds)
+	}
+}
+
+// TestHandleRemoteMigrateGateJSON_SharedNoRemoteGlobal covers the shared-store
+// refusal's agent-facing block when the refused open targeted the global
+// database (--global). The consent verb is target-scoped: the project-scoped
+// `bd migrate schema` would consent the WRONG database and leave the refusal in
+// place, so both the top-level "expected" directive and the runnable
+// migrate-shared option command must name `bd migrate schema --global`
+// (gastownhall/beads#5920), at parity with the human/text path
+// (TestPrintGlobalDatabaseConsentHint). The --json notice self-suppresses, so
+// this block is the sole channel for a --json consumer.
+func TestHandleRemoteMigrateGateJSON_SharedNoRemoteGlobal(t *testing.T) {
+	origGlobal := globalFlag
+	globalFlag = true
+	defer func() { globalFlag = origGlobal }()
+
+	gate := &schema.RemoteMigrateGateError{
+		CurrentVersion: 53, LatestVersion: 66, Pending: 13,
+		Decision: "shared-no-remote",
+	}
+
+	origStderr := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
+	handleRemoteMigrateGateJSON(gate)
+	_ = w.Close()
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+	}
+
+	obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("remote_migrate_gate key missing or wrong type: %T", parsed["remote_migrate_gate"])
+	}
+	if got, _ := obj["decision"].(string); got != "shared-no-remote" {
+		t.Errorf("decision = %v, want \"shared-no-remote\"", obj["decision"])
+	}
+	// Under --global the top-level directive must name the --global consent verb.
+	if got, _ := obj["expected"].(string); !strings.Contains(got, schema.SharedConsentCommandGlobal) {
+		t.Errorf("expected = %q, want the --global consent verb %q", got, schema.SharedConsentCommandGlobal)
+	}
+
+	rawOpts, ok := obj["options"].([]interface{})
+	if !ok || len(rawOpts) != 1 {
+		t.Fatalf("options = %v, want exactly one (no adopt path without a remote)", obj["options"])
+	}
+	o, _ := rawOpts[0].(map[string]interface{})
+	if id, _ := o["id"].(string); id != "migrate-shared" {
+		t.Errorf("option id = %v, want \"migrate-shared\"", o["id"])
+	}
+	// The runnable command inside the option must be the --global verb too: an
+	// agent extracts the command from here, not from the prose directive.
+	cmds, _ := o["commands"].([]interface{})
+	if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandGlobal {
+		t.Errorf("commands = %v, want [%q]", cmds, schema.SharedConsentCommandGlobal)
+	}
+}
+
+// TestRenderTypedOpenError pins the rendering every store-open path depends
+// on: the Dolt store open, the proxied unit-of-work provider open, and
+// `bd serve`'s startup all call it, and all three must produce the whole
+// actionable block rather than a one-line `%v`. A gate refusal at `bd serve`
+// startup is the case with no operator watching, so the daemon's log is the
+// only place the remediation can appear.
+func TestRenderTypedOpenError(t *testing.T) {
+	capture := func(fn func() bool) (string, bool) {
+		origStderr := os.Stderr
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		os.Stderr = w
+		handled := fn()
+		_ = w.Close()
+		os.Stderr = origStderr
+
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+		return buf.String(), handled
+	}
+
+	t.Run("shared-store gate refusal renders the full block", func(t *testing.T) {
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 53, LatestVersion: 66, Pending: 13,
+			Decision: "shared-no-remote",
+		}
+		out, handled := capture(func() bool {
+			return renderTypedOpenError(fmt.Errorf("uow: init schema: %w", gate))
+		})
+		if !handled {
+			t.Fatal("renderTypedOpenError = false, want true for a wrapped gate refusal")
+		}
+		if out != gate.UserMessage() {
+			t.Errorf("rendered output is not the full UserMessage:\n%s", out)
+		}
+		for _, want := range []string{"co-resident", "bd migrate schema", "Read commands keep working"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("an ordinary error is left to the caller", func(t *testing.T) {
+		out, handled := capture(func() bool {
+			return renderTypedOpenError(errors.New("connection refused"))
+		})
+		if handled {
+			t.Error("renderTypedOpenError = true, want false for an untyped error")
+		}
+		if out != "" {
+			t.Errorf("nothing should be printed for an untyped error, got:\n%s", out)
 		}
 	})
 }

@@ -1,6 +1,12 @@
 // Package schema is the public wrapper around bd's schema migration engine,
 // re-exporting the minimal surface external tools need to create or upgrade a
 // beads database over a standard database/sql connection.
+//
+// # Stability
+//
+// EXPERIMENTAL. This package is not yet covered by the project's compatibility
+// promise and may change in a minor release. The migration set it wraps grows
+// every release; pin an exact beads version.
 package schema
 
 import (

@@ -99,7 +99,7 @@ pointless).`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("update") // also covers CheckMigrationFreeze (dc-6jaq)
+		CheckReadonly("update") // also covers the migration freeze check (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("update")
 		defer func() {
@@ -790,7 +790,8 @@ func optionalTimeField(value any) (issueops.Field[*time.Time], bool) {
 
 // parseSetMetadataFlags splits --set-metadata key=value pairs, matching
 // storage.ApplyMetadataEdits' parsing so the CLI contract is unchanged. Values
-// are always stored as JSON strings (GH#4146).
+// are typed by storage.MetadataEditValue, which infers null/bool/number from
+// the spelling and falls back to a string.
 func parseSetMetadataFlags(flags []string) (map[string]json.RawMessage, error) {
 	set := make(map[string]json.RawMessage, len(flags))
 	for _, flag := range flags {
@@ -917,9 +918,10 @@ func applyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string)
 	return storage.ApplyMetadataEdits(existing, setFlags, unsetFlags)
 }
 
-// toJSONValue stores a CLI metadata value as a JSON string.
-// Previous behavior inferred types (numbers, booleans) from content,
-// which silently broke map[string]string round-trips (GH#4146).
+// toJSONValue converts a CLI metadata value to its most appropriate JSON
+// representation: numbers, booleans and null keep their type, everything else
+// becomes a JSON string.
+// Thin alias over the shared storage helper (also used in-transaction by issueops).
 func toJSONValue(s string) json.RawMessage {
 	return storage.MetadataEditValue(s)
 }

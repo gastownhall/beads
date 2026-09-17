@@ -76,7 +76,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 		Issue:         *result.Issue,
 		AlreadyClosed: !result.Changed,
 		OpenChildren:  result.OpenChildren,
-		Revision:      result.Issue.RowVersion,
+		Revision:      types.RevisionToken(result.Issue.RowVersion),
 	})
 }
 

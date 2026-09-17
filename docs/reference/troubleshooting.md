@@ -423,6 +423,39 @@ don't know", not "this is definitely broken". A genuinely missing or
 broken `dolt` binary (not found, not executable, or the probe itself
 fails/times out) is a hard error, not a warning.
 
+### Proxied-server mode: closing a bead gate fails with "no local store available"
+
+```
+gate condition not satisfied: bead gate "bd-a1b2": no local store available (use --force to override)
+```
+
+`bd close` on a bead gate refuses this way in proxied-server mode even when
+the awaited bead is closed. Proxied-server commands run against a shared
+`dolt sql-server` and never open a local store, so the close path has
+nothing to read the awaited bead's status from.
+
+`bd gate check` does evaluate bead gates in proxied-server mode, and closes
+the ones whose target has closed:
+
+```bash
+bd gate check --type=bead      # closes bead gates whose awaited bead is closed
+bd close <gate-id> --force     # or close without verifying the condition
+```
+
+Tracked in [#5861](https://github.com/gastownhall/beads/issues/5861).
+
+### Prefix routing: "proxy server store needs to be uow provider"
+
+A lookup routed through the orchestrator's `routes.jsonl` prefix routes
+fails with this error when the rig that owns the prefix is itself running in
+proxied-server mode — routed reads cannot open a proxied-server rig. In an
+all-proxied shared-server topology that applies to every routed target, so
+cross-rig bead gates and a plain `bd show <routed-id>` both dead-end here.
+
+Run the command from the owning rig's own workspace instead, where the ID
+resolves locally rather than through a route. Tracked in
+[#5861](https://github.com/gastownhall/beads/issues/5861).
+
 ## Sync Issues
 
 ### Changes not syncing

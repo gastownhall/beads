@@ -1080,7 +1080,7 @@ endpoint via SQL and reports reachability, server version, and database.`,
 		if cfg == nil {
 			cfg = configfile.DefaultConfig()
 		}
-		if err := validateConfiguredBackend(cfg); err != nil {
+		if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 			return HandleError("%v", err)
 		}
 		// A non-Dolt backend (SQLite or a removed-backend tombstone) has no Dolt engine;
@@ -1920,7 +1920,7 @@ func showDoltConfig(testConnection bool) error {
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
-	if err := validateConfiguredBackend(cfg); err != nil {
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return HandleError("%v", err)
 	}
 

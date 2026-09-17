@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // errRollbackProbe is the sentinel a journal test returns from a transaction
@@ -955,11 +956,70 @@ func TestEventsJournal_ActorAttribution(t *testing.T) {
 		t.Errorf("defer auto-wake row actor = %q, %v; want %q", actor, ok, issueops.DeferWakeActor)
 	}
 
-	// Delete plumbing carries no actor; the row records the empty string.
+	// storage.DeleteIssue is the ACTORLESS SYSTEM SURFACE — the interface gc
+	// decay, molecule cleanup and `bd doctor --fix` reach for, which has no
+	// request behind it and no actor to record. Its row is empty by contract,
+	// not by omission: the role-path case below is what pins the attributed
+	// half, and the two together are the whole of the 0066 promise.
 	if err := store.DeleteIssue(ctx, iss.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if actor, ok := journalActorFor(t, store, "delete", iss.ID); !ok || actor != "" {
-		t.Errorf("delete row actor = %q, %v; want empty (actorless plumbing)", actor, ok)
+		t.Errorf("delete row actor = %q, %v; want empty (actorless system surface)", actor, ok)
+	}
+}
+
+// TestEventsJournal_DeleteRoleAttributesTheRequester is the #5985 regression:
+// `bd delete <id> --force --actor A` must land `actor = A` on the delete row AND
+// on the cascade dep_remove rows the same request produces.
+//
+// It goes through the ROLE (store.Deleter()), which is what every user-initiated
+// delete reaches — not storage.DeleteIssue, the actorless system surface the
+// case above pins. That distinction is the whole bug: the actor was in hand at
+// the role body, which already passed it to the reference rewrite, and was
+// dropped one call below.
+//
+// The assertions read the DATABASE rather than a returned result, because the
+// column is what an LWW consumer reconciling replicas actually attributes from.
+func TestEventsJournal_DeleteRoleAttributesTheRequester(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	enableJournalForTest(t, store)
+
+	target := &types.Issue{ID: "bd-delrole-target", Title: "doomed", IssueType: types.TypeTask, Status: types.StatusOpen}
+	dependent := &types.Issue{ID: "bd-delrole-dependent", Title: "survivor", IssueType: types.TypeTask, Status: types.StatusOpen}
+	for _, iss := range []*types.Issue{target, dependent} {
+		if err := store.CreateIssue(ctx, iss, "creator-1"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+	// An INBOUND edge, so the delete has an edge to cascade off and needs Force
+	// to orphan its dependent — the shape #5985 reported.
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: dependent.ID, DependsOnID: target.ID, Type: types.DepBlocks,
+	}, "linker-1"); err != nil {
+		t.Fatalf("add dep: %v", err)
+	}
+	clearJournal(t, store)
+
+	deleter, err := store.Deleter()
+	if err != nil {
+		t.Fatalf("Deleter(): %v", err)
+	}
+	if _, err := deleter.Delete(ctx, publicops.DeleteRequest{
+		IDs: []string{target.ID}, Force: true, Actor: "deleter-1",
+	}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	if actor, ok := journalActorFor(t, store, "delete", target.ID); !ok || actor != "deleter-1" {
+		t.Errorf("delete row actor = %q, %v; want %q", actor, ok, "deleter-1")
+	}
+	// The cascade edge removal is journaled under the edge's SOURCE — the
+	// surviving dependent — and belongs to the identity whose delete removed it,
+	// not to whoever created the edge.
+	if actor, ok := journalActorFor(t, store, "dep_remove", dependent.ID); !ok || actor != "deleter-1" {
+		t.Errorf("cascade dep_remove row actor = %q, %v; want %q", actor, ok, "deleter-1")
 	}
 }
