@@ -17,8 +17,8 @@ import (
 //     writer declined and the caller appended a literal `dolt.host: ...` line —
 //     a key whose NAME contains a dot. GetStringFromDir splits on the dot and
 //     looks for a nested mapping, so it never finds it.
-//   - A file that already carried such a flat key had it updated in place,
-//     which preserved the unreadable shape forever.
+//   - A file that already carried such a flat key had it updated in place, but
+//     the direct reader did not understand that spelling.
 //
 // The observable consequence was a caller writing a value and immediately being
 // unable to read it back. Both consumers found it the hard way (bd-zj95).
@@ -79,17 +79,17 @@ func TestDottedKeysRoundTripThroughEveryConfigShape(t *testing.T) {
 					t.Errorf("GetStringFromDir(%q) = %q, want %q\nfile:\n%s", key, got, want, body)
 				}
 			}
-			// No LIVE flat key may survive: it is the unreadable shape, and a
-			// reader that happens to prefer it finds a stale answer. A commented
-			// one is inert — nothing reads it — and it is the operator's text,
-			// which the assertion below says bd has to leave alone.
+			// Do not introduce a new flat spelling. An existing flat spelling is
+			// preserved because another config writer may own that representation,
+			// and GetStringFromDir now reads it consistently with Viper.
 			for _, line := range strings.Split(string(body), "\n") {
 				if line != strings.TrimSpace(line) || strings.HasPrefix(line, "#") {
 					continue // indented: inside a mapping. commented: not a key.
 				}
 				name, _, isKeyValue := strings.Cut(line, ":")
-				if isKeyValue && writes[strings.TrimSpace(name)] != "" {
-					t.Errorf("a live flat %q survived the write:\n%s", strings.TrimSpace(name), body)
+				name = strings.TrimSpace(name)
+				if isKeyValue && writes[name] != "" && !hasLiveFlatKey(tc.seed, name) {
+					t.Errorf("the write introduced a live flat %q:\n%s", name, body)
 				}
 			}
 			// Comments the file arrived with are the operator's, and a write that
@@ -109,9 +109,18 @@ func TestDottedKeysRoundTripThroughEveryConfigShape(t *testing.T) {
 	}
 }
 
-// Keys the caller owns are left exactly as written. Migrating a flat key is only
-// correct for the key being written; rewriting the whole file would be bd
-// deciding how someone else's config should look.
+func hasLiveFlatKey(content, key string) bool {
+	prefix := key + ":"
+	for _, line := range strings.Split(content, "\n") {
+		if line == strings.TrimSpace(line) && strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// Keys the caller does not own are left exactly as written. Rewriting the whole
+// file would be bd deciding how someone else's config should look.
 func TestDottedWriteLeavesOtherKeysAlone(t *testing.T) {
 	dir := t.TempDir()
 	seed := "# keep this comment\nsync.branch: keep-me\ndolt.host: 10.0.0.1\nnode_id: mini\n"
@@ -136,6 +145,34 @@ func TestDottedWriteLeavesOtherKeysAlone(t *testing.T) {
 	}
 	if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
 		t.Errorf("dolt.host reads back as %q\n%s", got, text)
+	}
+}
+
+func TestDottedWritePreservesExistingFlatSpelling(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	seed := "# managed by another writer\ndolt.host: 10.0.0.1\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := SetYamlConfigInDir(dir, "dolt.host", "127.0.0.1"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "dolt.host: 127.0.0.1") {
+		t.Fatalf("existing flat spelling was not updated in place:\n%s", text)
+	}
+	if strings.Contains(text, "dolt:\n") {
+		t.Fatalf("writer replaced the existing flat spelling with a nested mapping:\n%s", text)
+	}
+	if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+		t.Fatalf("GetStringFromDir(dolt.host) = %q, want %q", got, "127.0.0.1")
 	}
 }
 

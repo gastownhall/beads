@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A dotted config key now round-trips: what `bd config set` writes,
   `bd config get` and bd's own readers find**
-  ([#6574](https://github.com/gastownhall/beads/pull/6574), bd-zj95). Setting a
+  ([#6574](https://github.com/gastownhall/beads/pull/6574),
+  [#6594](https://github.com/gastownhall/beads/issues/6594), bd-zj95). Setting a
   key like `sync.remote` or `dolt.host` into a `config.yaml` with no matching
   section appended a key whose *name* contained the dot — a top-level
   `sync.remote: "..."` — instead of nesting it under `sync:`. Viper finds a key
@@ -35,8 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   walks nested mappings, so it does not. The value was set and invisible at the
   same time depending on which reader asked, and `bd init --remote` in a fresh
   workspace was the ordinary way in: the remote was recorded and then not found.
-  Dotted keys are written nested now, an existing flat spelling of the key being
-  written is migrated to the nested one, and `bd config unset` removes the
+  New dotted keys are written nested now. An existing flat spelling is updated
+  in place for compatibility with other writers of the shared config file, and
+  bd's direct reader recognizes both forms with the same precedence as Viper.
+  `bd doctor` warns when both forms coexist. `bd config unset` removes the
   nested form — it only ever matched the flat spelling, so unsetting
   `sync.remote` silently left the remote live. Keys the write does not own,
   including dotted ones somebody else put there, are left exactly as they are.
