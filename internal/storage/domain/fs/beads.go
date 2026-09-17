@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -164,19 +165,24 @@ func (r *beadsDirFSRepositoryImpl) WriteProjectGitignore(ctx context.Context) er
 		return nil
 	}
 
+	lineEnding := gitignore.AppendLineEnding(existing)
 	var buf bytes.Buffer
 	buf.Write(existing)
 	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
-		buf.WriteByte('\n')
+		if existing[len(existing)-1] == '\r' {
+			buf.WriteByte('\n') // Complete the existing CR without doubling it.
+		} else {
+			buf.WriteString(lineEnding)
+		}
 	}
 	if header := r.templates.ProjectGitignoreHeader; header != "" && !containsLine(existing, header) {
 		if len(existing) > 0 {
-			buf.WriteByte('\n')
+			buf.WriteString(lineEnding)
 		}
-		buf.WriteString(header + "\n")
+		buf.WriteString(header + lineEnding)
 	}
 	for _, pattern := range toAdd {
-		buf.WriteString(pattern + "\n")
+		buf.WriteString(pattern + lineEnding)
 	}
 
 	// #nosec G306 -- .gitignore must be world-readable so users can read/edit it
