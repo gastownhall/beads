@@ -445,8 +445,8 @@ jobs:
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       # No BD_LINT_NEW_FROM_MERGE_BASE here: the push lane sweeps the whole
-      # tree, including the GOOS=windows cross-lint. pr.yml scopes the same
-      # wrapper to the PR's own diff.
+      # tree, including the GOOS=windows and GOOS=darwin cross-lints. pr.yml
+      # scopes the same wrapper to the PR's own diff.
       - name: Run PR lint wrapper
         run: make ci-pr-lint
 
