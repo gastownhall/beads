@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -271,13 +272,9 @@ func TestAddToGitignore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read .gitignore: %v", err)
 		}
-		content := string(updated)
-
-		if count := strings.Count(content, "# bd worktree"); count != 1 {
-			t.Fatalf("expected one worktree marker, got %d:\n%s", count, content)
-		}
-		if count := strings.Count(content, entry+"/"); count != 1 {
-			t.Fatalf("expected one worktree entry, got %d:\n%s", count, content)
+		want := []byte("node_modules/\n# bd worktree\nworktree-feature/\n")
+		if !bytes.Equal(updated, want) {
+			t.Fatalf(".gitignore bytes after two appends:\nwant: %q\ngot:  %q", want, updated)
 		}
 	})
 }
