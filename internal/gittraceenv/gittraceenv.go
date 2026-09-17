@@ -36,6 +36,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/steveyegge/beads/internal/execenv"
 )
 
 // pathCapableVars are git tracing variables that accept a file target (an
@@ -98,15 +100,6 @@ func stderrDirected(name, value string) bool {
 		return false // trace2 socket target — never touches stderr
 	}
 	return true
-}
-
-// envNameEquals compares environment variable names: exact on POSIX,
-// case-insensitive on Windows to match Win32 (and git's) env lookup.
-func envNameEquals(a, b string) bool {
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(a, b)
-	}
-	return a == b
 }
 
 // Process-environment state for WithScrubbed. A refcount rather than a plain
@@ -183,12 +176,12 @@ func ScrubEnv(env []string) []string {
 
 func shouldScrub(name, value string) bool {
 	for _, n := range alwaysStderrVars {
-		if envNameEquals(name, n) {
+		if execenv.KeyEqual(name, n) {
 			return true
 		}
 	}
 	for _, n := range pathCapableVars {
-		if envNameEquals(name, n) {
+		if execenv.KeyEqual(name, n) {
 			return stderrDirected(n, value)
 		}
 	}
