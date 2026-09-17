@@ -34,7 +34,7 @@ freshness source.
 | `reference/json-schema.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. (Mintlify port: was `JSON_SCHEMA.md`.) |
 | `recovery/init-safety.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. (Mintlify port: was `RECOVERY.md`.) |
 | `ERROR_HANDLING.md` | `Last reviewed:` marker tied to current command error exits and JSON error helpers. |
-| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml`, `scripts/ci/pr-lint.sh`, the `Makefile` wrapper, and CI workflow wiring. |
+| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`, the `Makefile` wrapper, and CI workflow wiring. |
 | `SERVE_RUNBOOK.md` | `Last reviewed:` marker tied to the operating-envelope constants in `internal/httpapi/server.go` and the log fields in its `event`/`request` emitters. |
 | `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to the CI audit, workflow files, wrapper scripts, `Makefile`, package manifests, and maintainer decision review. |
 | `design/otel/otel-data-model.md` | `Last reviewed:` marker tied to telemetry, Dolt storage, hooks, and AI call sites. |

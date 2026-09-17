@@ -1,9 +1,9 @@
 # Linting Policy
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-09-13
 
-Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`,
-`.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
+Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`,
+`Makefile`, `.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
 
 This document explains the required Go lint gate for this codebase.
 
@@ -37,12 +37,27 @@ answered.
 
 The wrapper runs:
 
-- `make fmt-check`;
-- golangci-lint with `.golangci.yml`, readonly module downloads, a five-minute
-  timeout, the `gms_pure_go` build tag, and `--new-from-merge-base` when
-  `BD_LINT_NEW_FROM_MERGE_BASE` names a ref; and
-- a second non-CGO Windows cross-lint pass, on the same scope, when the native
-  host does not already cover that target.
+- the shared `scripts/ci/fmt-check.sh` formatting check; and
+- the checkout-owned `scripts/pr-lint` Go driver, which runs golangci-lint with
+  `.golangci.yml`, readonly module downloads, a five-minute timeout, the
+  `gms_pure_go` build tag, and `--new-from-merge-base` when
+  `BD_LINT_NEW_FROM_MERGE_BASE` names a ref, then runs the same scope for the
+  non-CGO Windows target when the native host does not already cover it.
+
+The shell wrapper records one aggregate timing for the Go lint driver. The
+driver prints a heading and result for each native or Windows pass so failures
+remain attributable without duplicating target-selection policy in Bash.
+
+The shared driver owns the lint passes used by `scripts/ci/pr-lint.sh` and
+Beads-source `bd preflight`. The standalone workflow lint action and pre-commit
+hook do not call it. The hook uses changed-lines scope, adds `--fix`, and omits
+the Windows cross-lint pass. Workflow consolidation remains tracked in #5629.
+
+The driver matches `.buildflags` when preparing `GOFLAGS`: appending
+`-tags=gms_pure_go` can override an inherited bare-Go tags value; it does not
+merge tag lists. Each lint process has a six-minute context and a five-minute
+golangci-lint timeout. Cancelling preflight's outer `go run` command does not
+guarantee immediate descendant cleanup.
 
 ## Policy
 
@@ -64,7 +79,8 @@ test-fixture file reads, and documented security false positives.
 
 `pr-lint` stays separate from `pr-policy` and `pr-core` so failures are easy to
 identify and rerun. Its repository-owned wrapper is
-`scripts/ci/pr-lint.sh`, exposed as `make ci-pr-lint`.
+`scripts/ci/pr-lint.sh`, exposed as `make ci-pr-lint`; its lint policy is owned
+by the shell-free `scripts/pr-lint` Go driver.
 
 See [`CI_CLEANUP_PLAN.md`](CI_CLEANUP_PLAN.md) for the full CI tier policy.
 
