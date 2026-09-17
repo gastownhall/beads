@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,68 @@ func TestApplyS3ChecksumEnvToCmd(t *testing.T) {
 	}
 	if gotUser != "user" || gotPassword != "pass" {
 		t.Fatalf("credential env = user:%q password:%q", gotUser, gotPassword)
+	}
+}
+
+func TestSetCmdEnvUsesHostKeySemantics(t *testing.T) {
+	nearCollision := "DOLT_REMOTE_PAſSWORD=near-collision"
+	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
+	cmd.Env = []string{
+		"dolt_remote_password=mixed-stale",
+		"DOLT_REMOTE_PASSWORD=canonical-stale",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+
+	setCmdEnv(cmd, "DOLT_REMOTE_PASSWORD", "fresh")
+	want := []string{
+		"dolt_remote_password=mixed-stale",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+		"DOLT_REMOTE_PASSWORD=fresh",
+	}
+	if runtime.GOOS == "windows" {
+		want = want[1:]
+	}
+	if !slices.Equal(cmd.Env, want) {
+		t.Fatalf("setCmdEnv() = %q, want %q on %s", cmd.Env, want, runtime.GOOS)
+	}
+}
+
+func TestRemoteCredentialsChildEnvUsesHostKeySemantics(t *testing.T) {
+	nearCollision := "DOLT_REMOTE_PAſSWORD=near-collision"
+	base := []string{
+		"dolt_remote_user=mixed-stale-user",
+		"DOLT_REMOTE_USER=canonical-stale-user",
+		"dolt_remote_password=mixed-stale-password",
+		"DOLT_REMOTE_PASSWORD=canonical-stale-password",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+	original := slices.Clone(base)
+	creds := &remoteCredentials{username: "fresh-user", password: "fresh-password"}
+
+	got := creds.childEnv(base)
+	want := []string{
+		"dolt_remote_user=mixed-stale-user",
+		"dolt_remote_password=mixed-stale-password",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+		"DOLT_REMOTE_USER=fresh-user",
+		"DOLT_REMOTE_PASSWORD=fresh-password",
+	}
+	if runtime.GOOS == "windows" {
+		want = want[2:]
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("childEnv() = %q, want %q on %s", got, want, runtime.GOOS)
+	}
+	if !slices.Equal(base, original) {
+		t.Fatal("childEnv modified its input")
 	}
 }
 
