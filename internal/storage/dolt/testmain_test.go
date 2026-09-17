@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 // testServerPort is the port of the shared test Dolt server (0 = not running).
@@ -44,7 +45,15 @@ func isHelperSubprocess() bool {
 }
 
 func TestMain(m *testing.M) {
-	os.Exit(testMainInner(m))
+	if code, ok := credentialcmd.Dispatch(); ok {
+		os.Exit(code)
+	}
+	code := testMainInner(m)
+	if err := credentialcmd.Cleanup(); err != nil {
+		fmt.Fprintf(os.Stderr, "credential command fixture cleanup: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func testMainInner(m *testing.M) int {
