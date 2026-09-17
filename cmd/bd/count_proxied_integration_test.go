@@ -31,6 +31,9 @@ func TestProxiedServerCount(t *testing.T) {
 	bdProxiedCreate(t, bd, p.dir, "Count labeled two", "--type", "task", "--label", "backend")
 	bdProxiedCreate(t, bd, p.dir, "Count notes issue", "--type", "task", "--description", "notes keyword here")
 	bdProxiedCreate(t, bd, p.dir, "Count metadata issue", "--type", "task", "--metadata", `{"count_scope":"matching"}`)
+	// The same key with a different value, so --has-metadata-key and
+	// --metadata-field cannot pass by answering the same number.
+	bdProxiedCreate(t, bd, p.dir, "Count metadata key issue", "--type", "task", "--metadata", `{"count_scope":"other"}`)
 
 	// countInt runs "count <args>" and parses the plain integer stdout.
 	countInt := func(t *testing.T, args ...string) int {
@@ -126,6 +129,13 @@ func TestProxiedServerCount(t *testing.T) {
 		got := countJSONInt(t, "--metadata-field", "count_scope=matching")
 		if want := listCount("--metadata-field", "count_scope=matching"); got != want || got != 1 {
 			t.Errorf("count --metadata-field = %d, want list cardinality %d and fixture count 1", got, want)
+		}
+	})
+
+	t.Run("filter_by_has_metadata_key", func(t *testing.T) {
+		got := countJSONInt(t, "--has-metadata-key", "count_scope")
+		if want := listCount("--has-metadata-key", "count_scope"); got != want || got != 2 {
+			t.Errorf("count --has-metadata-key = %d, want list cardinality %d and fixture count 2", got, want)
 		}
 	})
 

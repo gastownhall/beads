@@ -114,6 +114,7 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		"no_assignee":       {"true"},
 		"no_labels":         {"true"},
 		"metadata_field":    {"team=platform", "env=prod"},
+		"has_metadata_key":  {"audit_ref"},
 		"include_infra":     {"true"},
 	}.Encode())
 	if resp.StatusCode != http.StatusOK {
@@ -163,6 +164,7 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		NoAssignee:     true,
 		NoLabels:       true,
 		MetadataFields: map[string]string{"team": "platform", "env": "prod"},
+		HasMetadataKey: "audit_ref",
 
 		IncludeInfra: true,
 	}
@@ -540,9 +542,10 @@ func TestCountParametersMatchTheHandler(t *testing.T) {
 // It also keeps the role's group refusal unreachable from the wire: the
 // handler refuses an unknown group at the edge. Metadata validation is a
 // separate path. An invalid key reaches BuildCountFilter, whose role refusal
-// failReadErr classifies as a 400 on `metadata_field`. This test guards only the
-// group vocabulary; if that enum and the role's constants diverged, a value the
-// server accepted and the role refused would arrive as an unclassified 500.
+// failReadErr classifies as a 400 on `metadata_field` or `has_metadata_key`.
+// This test guards only the group vocabulary; if that enum and the role's
+// constants diverged, a value the server accepted and the role refused would
+// arrive as an unclassified 500.
 func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 	doc := loadSpec(t)
 	so := specOps(t, doc)["countIssues"]
@@ -568,7 +571,7 @@ func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 // The other two are already mechanical: TestCountParametersMatchTheHandler ties
 // the parameter names to the DOCUMENT, and TestCountForwardsEveryDocumentedParameter
 // ties each parameter's VALUE to the field it lands in. Neither can see a role
-// field that no parameter reaches — a 24th filter added to CountRequest and left
+// field that no parameter reaches — a 25th filter added to CountRequest and left
 // unpublished turns nothing red, and the wire silently stops being able to ask
 // a question the role can answer. That is the failure this map closes, and it is
 // the one that matters for an HTTP-backed store: it is how the wire becomes
@@ -600,11 +603,12 @@ var countFieldForParameter = map[string]string{
 	"no_assignee":       "NoAssignee",
 	"no_labels":         "NoLabels",
 	"metadata_field":    "MetadataFields",
+	"has_metadata_key":  "HasMetadataKey",
 	"include_infra":     "IncludeInfra",
 }
 
-// TestEveryCountRequestFieldIsPublished: the role publishes 24 filters and the
-// wire publishes all 24. A field added to issueops.CountRequest fails here and
+// TestEveryCountRequestFieldIsPublished: the role publishes 25 filters and the
+// wire publishes all 25. A field added to issueops.CountRequest fails here and
 // NAMES itself, so the choice is made deliberately — publish it, or record why
 // it is withheld — rather than by nobody noticing.
 //
