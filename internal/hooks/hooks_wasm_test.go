@@ -3,8 +3,11 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -16,7 +19,37 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+func testUnsupportedExecutionAsyncWarningAndSyncError(t *testing.T) {
+	hookPath := filepath.Join(t.TempDir(), HookOnCreate)
+
+	var stderr bytes.Buffer
+
+	runner := NewRunner(filepath.Dir(hookPath))
+	issue := &types.Issue{ID: "wasm-test"}
+	// Run calls this boundary after its platform-independent existence and
+	// executable-bit preflight. Calling it directly keeps the js/wasm contract
+	// deterministic on Node hosts whose virtual filesystem drops Unix exec bits.
+	runner.runAsync(hookPath, EventCreate, issue, &stderr)
+	if !runner.Wait(runner.Timeout()) {
+		t.Fatal("asynchronous hook refusal did not finish")
+	}
+
+	// RunSync delegates to this platform primitive after the same preflight. It
+	// retains the returned-error contract without printing a second warning.
+	if err := runner.runHook(hookPath, EventCreate, issue); !errors.Is(err, errHookExecutionUnsupported) {
+		t.Fatalf("RunSync error = %v, want %v", err, errHookExecutionUnsupported)
+	}
+
+	got := stderr.String()
+	want := fmt.Sprintf("warning: hook %q was not run: %v\n", hookPath, errHookExecutionUnsupported)
+	if got != want {
+		t.Fatalf("stderr = %q, want exactly one warning %q", got, want)
+	}
+}
+
 func TestRunHookReportsUnsupportedExecution(t *testing.T) {
+	t.Run("async warning and sync error", testUnsupportedExecutionAsyncWarningAndSyncError)
+
 	spanRecorder := tracetest.NewSpanRecorder()
 	tracerProvider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
 	previousTracerProvider := otel.GetTracerProvider()
