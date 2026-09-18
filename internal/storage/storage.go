@@ -642,6 +642,17 @@ type FastStatisticsStore interface {
 	GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error)
 }
 
+// LabelVocabularyStore provides the opt-in curated label vocabulary registry
+// backing `bd label define`/`undefine`/`defined` and the labels.vocabulary
+// enforcement knob (docs/core-concepts/labels.md). It is a bare name
+// registry with no relation to the labels actually stored on an issue --
+// this Storage interface's own AddLabel/RemoveLabel/GetLabels own those.
+type LabelVocabularyStore interface {
+	DefineLabel(ctx context.Context, label, description, actor string) error
+	UndefineLabel(ctx context.Context, label string) error
+	ListLabelDefinitions(ctx context.Context) ([]types.LabelDefinition, error)
+}
+
 // DoltStorage is the full interface for Dolt-backed stores, composing the core
 // Storage interface with all capability sub-interfaces. Both DoltStore and
 // EmbeddedDoltStore satisfy this interface.
@@ -661,6 +672,7 @@ type DoltStorage interface {
 	CompactionStore
 	AdvancedQueryStore
 	FastStatisticsStore
+	LabelVocabularyStore
 }
 
 // RawDBAccessor provides raw *sql.DB access for diagnostics and migrations.

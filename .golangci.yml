@@ -466,8 +466,13 @@ linters:
         text: 'do not write a filter here'
         linters:
           - forbidigo
-      # doctor's diagnostics and the fixes that follow them.
-      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|fix/maintenance|fix/migrate)\.go$'
+      # doctor's diagnostics and the fixes that follow them. label_vocabulary
+      # tallies labels across EVERY issue - deliberately the same bare filter
+      # as `bd label list-all`'s countLabelsAcrossIssues (package main, not
+      # importable from doctor, so the file mirrors it): the vocabulary census
+      # must see what the default listing hides, and a workapi builder's
+      # closed/wisp/template exclusions would change the diagnostic's answer.
+      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|fix/maintenance|fix/migrate|label_vocabulary)\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo
