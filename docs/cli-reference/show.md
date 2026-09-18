@@ -19,6 +19,7 @@ bd show [id...] [--id=<id>...] [--current] [flags]
 
 ```
       --as-of string         Show issue as it existed at a specific commit hash or branch (requires Dolt)
+      --brief-deps           Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)
       --children             Show only the children of this issue
       --current              Show the currently active issue (in-progress, hooked, or last touched)
       --id stringArray       Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)

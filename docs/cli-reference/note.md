@@ -1,6 +1,6 @@
 ---
 title: "bd note"
-description: "Append a note to an issue's notes field."
+description: "Append a note to an issue"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -16,6 +16,9 @@ Examples:
   bd note gt-abc Fixed the flaky test
   echo "note from pipe" | bd note gt-abc --stdin
   bd note gt-abc --file notes.txt
+
+Note: "note" has NO subcommands — it only appends.
+To read notes on an issue, use: bd show &lt;id&gt;
 
 ```
 bd note <id> [text...] [flags]
