@@ -107,6 +107,7 @@ Examples:
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
+  bd config set dolt.open-retry-budget 30s             # Bound open retries against a Dolt server bd does not manage (off by default)
   bd config set lint.sections.epic "Standards scorecard, Cost"   # Extra sections bd lint requires for epics
   bd config get export.auto
   bd config list
