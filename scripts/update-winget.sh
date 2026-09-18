@@ -23,7 +23,7 @@ WINGET_DIR="$SCRIPT_DIR/../winget"
 
 # Get SHA256 from release checksums
 echo "Fetching SHA256 for v$VERSION..."
-SHA256=$(curl -sL "https://github.com/gastownhall/beads/releases/download/v$VERSION/checksums.txt" | grep windows | awk '{print $1}')
+SHA256=$(curl -sL "https://github.com/gastownhall/beads/releases/download/v$VERSION/checksums.txt" | grep windows_amd64 | awk '{print $1}')
 
 if [ -z "$SHA256" ]; then
     echo "Error: Could not find Windows checksum for v$VERSION"
@@ -126,7 +126,7 @@ Installers:
     InstallerSha256: $SHA256
   - Architecture: arm64
     InstallerUrl: https://github.com/gastownhall/beads/releases/download/v$VERSION/beads_${VERSION}_windows_arm64.zip
-    InstallerSha256: $ARM_SHA
+    InstallerSha256: "$ARM_SHA"
 ManifestType: installer
 ManifestVersion: 1.12.0
 EOF

@@ -140,6 +140,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
+      - run: ./scripts/check-winget-portable-alias.sh
 
   # Lock in the cgo-test-contamination fix (mybd-ycx / GH#3683 follow-up).
   # cmd/bd carries a mix of cgo-only test helpers (embedded Dolt, sql.DB) and
