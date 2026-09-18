@@ -118,6 +118,11 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// The shared-store migration gate, between preparation and MigrateUp. This
+	// init just created the database, so the cursor table does not exist yet,
+	// the gate reads version 0, and it allows: creating a database is consent
+	// for its schema.
+	expectCursorProbe(mock, "schema_migrations", false)
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnError(errors.New("first migration statement failed"))
@@ -155,6 +160,8 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 // probe correctly declines and the ordinary locked pass follows — GET_LOCK
 // first, bootstrap DDL after.
 func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
+	schema.SetSharedMigrateConsent(true)
+	defer schema.SetSharedMigrateConsent(false)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create sql mock: %v", err)
@@ -186,6 +193,11 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow("beads"))
 	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The shared-store migration gate, between preparation and MigrateUp. This
+	// database is pre-existing and behind, so the gate would refuse — the
+	// consent below keeps this test about the lock/probe ordering it exists to
+	// pin. See TestInitSchemaSharedStoreGate for the gate's own behavior.
+	expectSharedGateProbe(mock, 1, 0)
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnError(errors.New("first migration statement failed"))

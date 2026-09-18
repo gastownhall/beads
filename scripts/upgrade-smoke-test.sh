@@ -512,6 +512,104 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Scenario 7: Wisp plane must survive upgrade
+# ---------------------------------------------------------------------------
+#
+# Release gate for the wisp-plane migrations (0054-0066 and ignored 0012-0025).
+# Every earlier scenario works entirely in the versioned plane, so the wisp
+# tables reach the candidate empty and those migrations only ever run as DDL
+# over zero rows. This seeds a wisp with the OLD binary — including a dependency
+# edge, which is what makes the is_blocked recompute do real work — then
+# upgrades and exercises the surfaces that break when the replay is wrong:
+# listing wisps, the blocker queries that now have to be wisp-aware, and writing
+# to a wisp through the migrated storage_class default.
+#
+# This matrix reaches back thirty releases on a tag push, so anything the old
+# binary cannot do has to SKIP rather than fail.
+
+scenario "Wisp plane survives upgrade (list/ready/blocked/update on migrated wisps)"
+
+WS=$(new_workspace)
+
+prev_init 2>/dev/null || true
+git -C "$WS" config beads.role maintainer
+
+_CREATED_ID=""
+prev_create --ephemeral --title "Smoke wisp" --type task || true
+WISP_ID="${_CREATED_ID}"
+
+if [ -z "${WISP_ID:-}" ] || [ "$WISP_ID" = "created" ]; then
+    # Pre-wisp release, or one whose create output we cannot parse for an id.
+    pass "Wisp check skipped (old binary has no parseable wisp support)"
+    rm -rf "$WS"
+    finish_scenario
+else
+    pass "Wisp created with previous binary ($WISP_ID)"
+
+    # A blocker edge makes the migrated is_blocked recompute meaningful. Older
+    # binaries may not route wisp-source dependencies, so tolerate failure.
+    _CREATED_ID=""
+    prev_create --title "Wisp blocker task" --type task --priority 1 || true
+    WISP_BLOCKER="${_CREATED_ID}"
+    WISP_DEP=false
+    if [ -n "${WISP_BLOCKER:-}" ] && [ "$WISP_BLOCKER" != "created" ]; then
+        if prev dep add "$WISP_ID" "$WISP_BLOCKER" >/dev/null 2>&1; then
+            WISP_DEP=true
+            pass "Wisp blocked on a task with previous binary"
+        fi
+    fi
+    if ! $WISP_DEP; then
+        pass "Wisp dependency skipped (old binary could not block a wisp on a task)"
+    fi
+
+    # Upgrade.
+    cand_init 2>/dev/null || true
+
+    # 1. The wisp survived the 0054-0066 + ignored 0012-0025 replay. --all
+    #    because the default listing hides closed wisps.
+    WISP_OUT=$(cand mol wisp list --all 2>/dev/null || echo "")
+    if echo "$WISP_OUT" | grep -q "Smoke wisp"; then
+        pass "Wisp visible after upgrade"
+    else
+        fail "Wisp 'Smoke wisp' NOT visible after upgrade (ignored-plane replay dropped it)"
+    fi
+
+    # 2. Blocker queries must not error on the migrated wisp plane. These read
+    #    wisps and wisp_dependencies through views the chain rewrites.
+    if cand ready >/dev/null 2>&1; then
+        pass "bd ready succeeds on the migrated wisp plane"
+    else
+        fail "bd ready errors after upgrade (migrated wisp schema regression)"
+    fi
+    if cand blocked >/dev/null 2>&1; then
+        pass "bd blocked succeeds on the migrated wisp plane"
+    else
+        fail "bd blocked errors after upgrade (migrated wisp schema regression)"
+    fi
+
+    # 3. Wisps must stay writable — this is the storage_class default path.
+    if cand update "$WISP_ID" --notes "smoke wisp mutation" >/dev/null 2>&1; then
+        SHOW_OUT=$(cand show "$WISP_ID" 2>/dev/null || echo "")
+        if echo "$SHOW_OUT" | grep -q "smoke wisp mutation"; then
+            pass "Wisp writable after upgrade (mutation persisted)"
+        else
+            fail "Wisp mutation did not persist after upgrade"
+        fi
+    else
+        fail "bd update on a migrated wisp errors after upgrade"
+    fi
+
+    if cand doctor quick >/dev/null 2>&1; then
+        pass "bd doctor quick passes on the migrated wisp plane"
+    else
+        fail "bd doctor quick fails after the wisp upgrade"
+    fi
+
+    rm -rf "$WS"
+    finish_scenario
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

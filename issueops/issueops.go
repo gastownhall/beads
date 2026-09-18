@@ -1,4 +1,9 @@
 // Package issueops declares the public values used for guarded issue mutations.
+//
+// # Stability
+//
+// EXPERIMENTAL. This package is not yet covered by the project's compatibility
+// promise and may change in a minor release. Pin an exact beads version.
 package issueops
 
 import (

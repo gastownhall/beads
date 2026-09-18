@@ -41,6 +41,17 @@ backfill what happened before, so a consumer starting today baselines from the
 workspace's current state (an [export](/cli-reference/export), or a full read)
 and follows the journal from there.
 
+<Warning>
+Turn it on wherever beads **writes**, not just where your consumer reads. The
+journal records the mutations made by the clone that made them, so a workspace
+whose writers never enabled it stays permanently empty — and an empty journal
+is indistinguishable from a caught-up one. Every writer of a workspace you
+intend to replay needs `events-journal: true` (or `BD_EVENTS_JOURNAL=1` in its
+environment), including agents, CI jobs, and a `bd serve` process. `bd events
+export` and `bd events tail` say so on stderr when the workspace they read is
+disabled; over HTTP the same condition is a `409`.
+</Warning>
+
 | Key | Default | Effect |
 |---|---|---|
 | `events-journal` | `false` | Master switch. Off costs nothing; on costs one snapshot write per mutation. |
@@ -234,7 +245,7 @@ build, and says nothing about whether this workspace has a journal.
 | `ts` | string | UTC insert time, stamped inside the committing transaction. |
 | `op` | string | One of the seven operations below. |
 | `issue_id` | string | The mutated issue. |
-| `actor` | string | The acting identity that performed the mutation, as resolved for the audit-events table; on a `comment` row, the comment's author. Absent when the path has no actor — derived maintenance (`is_blocked` recomputes), deletes (other than a rename's synthetic `delete` row), and rows written before the journal recorded actors. An absent `actor` is never user attribution: read it as "system/unknown", not as a conflicting writer. |
+| `actor` | string | The acting identity that performed the mutation, as resolved for the audit-events table; on a `comment` row, the comment's author. A `delete` and the `dep_remove` records a cascading delete produces carry the identity that *requested* the delete, not the beads the cascade reached. Absent when the path genuinely has no actor — derived maintenance (`is_blocked` recomputes), system cleanup with no request behind it, and rows written before the journal recorded actors. An absent `actor` is never user attribution: read it as "system/unknown", not as a conflicting writer. |
 | `issue` | object or null | The issue's full state *after* the mutation; `null` on a delete. |
 | `dep` | object | `{"kind","target","metadata"}` on `dep_add` and `dep_remove`; absent otherwise. |
 | `comment` | object | `{"id","author","text","created_at","source"}` on `comment`; absent otherwise. |

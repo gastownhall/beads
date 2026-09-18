@@ -75,7 +75,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 		// message below.
 		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
 	}
-	if err := validateConfiguredBackend(cfg); err != nil {
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
 	cfg = normalizeLoadedConfig(cfg)
@@ -106,7 +106,7 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
 	}
-	if err := validateConfiguredBackend(cfg); err != nil {
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
 	cfg = normalizeLoadedConfig(cfg)
