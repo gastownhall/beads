@@ -1984,6 +1984,63 @@ func TestDoltPushRemoteJSONSuppressesChatter(t *testing.T) {
 	}
 }
 
+// TestDoltPushNoPushJSONSuppressesChatter pins GH#5125 re-review
+// (bee-ghosttrack, 2026-09-18): "skipping push: rig is local-only" gated
+// on !isQuiet() alone, so "bd dolt push --json" with no-push: true still
+// wrote human text to stdout ahead of the JSON caller's parser.
+func TestDoltPushNoPushJSONSuppressesChatter(t *testing.T) {
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPushStore{}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = savedJSONOutput })
+
+	out := captureStdout(t, func() error {
+		return doltPushCmd.RunE(doltPushCmd, nil)
+	})
+
+	if fake.pushCalled {
+		t.Error("bd dolt push --json must not call Push() when no-push: true; Push() was called")
+	}
+	if out != "" {
+		t.Errorf("bd dolt push --json with no-push: true must not print human chatter; got: %q", out)
+	}
+}
+
+// TestPrintNoRemoteGuidanceJSONSuppressesChatter pins GH#5125 re-review
+// (bee-ghosttrack, 2026-09-18): printNoRemoteGuidance gated on isQuiet()
+// alone, so "bd dolt push --json" / "pull --json" against a rig with no
+// remote wrote ~490 bytes of prose to stdout ahead of the JSON output.
+func TestPrintNoRemoteGuidanceJSONSuppressesChatter(t *testing.T) {
+	// Cannot be parallel: modifies process-global jsonOutput.
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = savedJSONOutput })
+
+	out := captureStdout(t, func() error {
+		printNoRemoteGuidance()
+		return nil
+	})
+	if out != "" {
+		t.Errorf("printNoRemoteGuidance under --json must not print chatter; got: %q", out)
+	}
+}
+
 func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 	// no-push is a push-only guard. bd dolt pull must contact the remote even when
 	// no-push: true — contributor clones need to receive upstream updates.

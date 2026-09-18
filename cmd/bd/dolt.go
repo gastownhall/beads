@@ -420,7 +420,7 @@ func printAncestorPKMismatchGuidance(err error) {
 // push or pull is attempted but no Dolt remote is configured. Exits 0 because
 // the absence of a remote is a valid configuration — not an error.
 func printNoRemoteGuidance() {
-	if isQuiet() {
+	if isQuiet() || jsonOutput {
 		return
 	}
 	fmt.Println("No remote is configured — skipping.")
@@ -535,7 +535,7 @@ Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.GetBool("no-push") {
-			if !isQuiet() {
+			if !isQuiet() && !jsonOutput {
 				fmt.Println("skipping push: rig is local-only (no-push: true)")
 			}
 			return nil
@@ -589,7 +589,9 @@ The remote must already exist (see 'bd dolt remote add').`,
 		if adopted, err := adoptGitOriginRemoteForPush(ctx, st, policy, pushAdoptOptIn); err != nil {
 			return HandleError("%v", err)
 		} else if adopted {
-			fmt.Println("Configured Dolt remote origin from git origin.")
+			if !isQuiet() && !jsonOutput {
+				fmt.Println("Configured Dolt remote origin from git origin.")
+			}
 		}
 		if !isQuiet() && !jsonOutput {
 			fmt.Println("Pushing to Dolt remote...")

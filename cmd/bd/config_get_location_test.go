@@ -62,6 +62,10 @@ func TestConfigGetYamlOnlyKeyLocation(t *testing.T) {
 			if tt.envVal != "" {
 				t.Setenv("BD_DOLT_AUTO_COMMIT", tt.envVal)
 			} else {
+				// t.Setenv registers the restore of any ambient value before
+				// os.Unsetenv clears it for the test — os.Unsetenv alone
+				// would leak the unset past this subtest.
+				t.Setenv("BD_DOLT_AUTO_COMMIT", "")
 				os.Unsetenv("BD_DOLT_AUTO_COMMIT")
 			}
 
