@@ -298,13 +298,18 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
 		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
-		prTestCommand     = "go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./..."
-		mainTestCommand   = "go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./..."
-		// The macOS leg is the only consumer of main.yml's matrix test-flags (the
-		// ubuntu leg's coverage step hardcodes its own), and it carries an explicit
-		// per-package -timeout because go test's 10m default is what made the ubuntu
-		// leg flaky (wy-5b5fbl). Keep the two legs' deadlines in step when either moves.
-		mainMacOSTestFlags = "-v -race -short -timeout=25m"
+		// -timeout=30m is pinned on both lanes because ./cmd/bd has outgrown
+		// `go test`'s 10m per-package default (#6091, and wy-5b5fbl before it —
+		// that default is what made these legs flaky). In main.yml it sits on
+		// the invocation rather than in matrix.test-flags, so editing the
+		// matrix cannot silently drop it, and so the macOS leg cannot drift
+		// away from the ubuntu -race lanes' deadline.
+		prTestCommand   = "go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./..."
+		mainTestCommand = "go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./..."
+		// The macOS leg is the only consumer of main.yml's matrix test-flags
+		// (the ubuntu leg's coverage step hardcodes its own). The deadline is
+		// deliberately NOT here — see mainTestCommand.
+		mainMacOSTestFlags = "-v -race -short"
 	)
 
 	workflows := map[string]ciWorkflow{

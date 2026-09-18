@@ -409,6 +409,53 @@ func TestSetYamlConfigInDir_WritesTargetConfigDespiteLocalStub(t *testing.T) {
 	}
 }
 
+func TestWorkspaceYamlValueStrictDistinguishesMissingAndMalformed(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if value, present, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server"); err != nil || present || value != "" {
+		t.Fatalf("missing config = (%q, %v, %v), want empty/false/nil", value, present, err)
+	}
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server"); err == nil {
+		t.Fatal("malformed config should return an error")
+	}
+}
+
+func TestWorkspaceYamlValueStrictReadsNestedScalar(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	value, present, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server")
+	if err != nil || !present || value != "false" {
+		t.Fatalf("nested scalar = (%q, %v, %v), want false/true/nil", value, present, err)
+	}
+}
+
+func TestWorkspaceYamlValueStrictRejectsNullAndWrongParent(t *testing.T) {
+	for _, body := range []string{"dolt:\n  shared-server: null\n", "dolt: false\n", "dolt: []\n"} {
+		t.Run(strings.ReplaceAll(body, "\n", "_"), func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server"); err == nil {
+				t.Fatalf("config %q should be rejected", body)
+			}
+		})
+	}
+}
+
 func TestSetYamlConfigInDir_ValidatesBeforeOpeningConfig(t *testing.T) {
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 

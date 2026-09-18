@@ -11,9 +11,12 @@ How to upgrade bd and keep your projects in sync.
 # Current version
 bd version
 
-# What's new in recent versions
+# What changed since the version you were running — the delta, not the archive
+bd upgrade review
+bd upgrade review --json  # Machine-readable
+
+# The full release history (large; every version bd knows about)
 bd info --whats-new
-bd info --whats-new --json  # Machine-readable
 ```
 
 ## Short Version
@@ -22,11 +25,11 @@ bd info --whats-new --json  # Machine-readable
    new binary:
    `bd dolt push`
    `bd dolt pull`
-2. Back up before migration:
+2. Back up **with that same current binary**, before installing:
    `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
 3. Upgrade using the command that matches your install method.
 4. After upgrading:
-   `bd info --whats-new`
+   `bd upgrade review`
    `bd hooks install`
    `bd version`
 5. If crossing a schema migration on a remote-backed database, only the
@@ -139,6 +142,83 @@ bd migrate
 bd migrate --yes
 ```
 
+### Upgrading to 1.3.0
+
+A 1.2.2 or 1.1.x database sits at schema v53, and 1.3.0 knows v66. That is more
+than a routine upgrade: 1.2.2 was a recovery release that shipped the 1.1 code
+under a higher version number, so there is a release line's worth of schema
+between the two.
+
+#### Back up first, with the binary you have now
+
+Do this **before** you install 1.3.0. Under the new binary, `bd export` triggers
+the migration before it exports, so a snapshot taken afterwards is a
+post-migration snapshot and cannot protect you against the migration going
+wrong. The same ordering rule as the section below applies: do all syncing with
+your **current** binary, since once 1.3.0 is installed the pending-migration
+gate refuses `bd dolt push` and `bd dolt pull` too.
+
+```bash
+# with your CURRENT bd:
+bd dolt push                                                   # remote-backed stores only
+bd export --all -o .beads/backup/pre-1.3.0-$(date +%Y%m%d).jsonl
+```
+
+For a Dolt-native snapshot that keeps history and config, configure a
+destination and sync it. Bare `bd backup` takes no backup — it is a command
+group that prints help and exits 0:
+
+```bash
+bd backup init <path-or-dolthub-url>   # once, to configure a destination
+bd backup sync                         # take the snapshot
+```
+
+#### What the migration looks like
+
+On an embedded or local store, the first command you run after installing
+applies the whole set, in place. (A shared `dolt sql-server` is never
+auto-migrated — see [Shared servers](#shared-servers) below.) The main series
+runs 0054 → 0066 (13 migrations), and then the clone-local series runs through
+the same printer with its own numbering, 0012 → 0026 — so it is about
+**28 migrations**, and the counter visibly restarts partway through:
+
+```
+Applying migration 0065: widen_wisp_comments_text…
+Applying migration 0066: add_events_journal_actor…
+Applying migration 0012: create_leases…      ← clone-local series, not a restart
+```
+
+A counter jumping backwards looks exactly like a loop. It is not one — let it
+finish. Expect the run to take noticeably longer than the commands after it
+(two passes rewrite rows rather than reshaping tables). It is crash-resumable
+and picks up where it left off.
+
+Those lines go to stderr, and only when stderr is a terminal, so a piped or CI
+upgrade prints nothing at all. Silence there is not a stall either.
+
+#### Upgrade every client that shares a store, together
+
+A bd binary refuses a database migrated past the schema it knows, rather than
+proceeding blind. One machine upgrading takes the shared store forward and every
+client still on 1.2.2 stops working. Check for a second binary earlier in your
+`PATH` with `which -a bd`, and restart any long-running `bd serve` — noting that
+`bd --readonly serve` is now refused outright, so a server scripted with that
+flag will not come back up until you drop it.
+
+If the store is a shared `dolt sql-server` rather than a local one, follow
+[Shared servers](#shared-servers) below: 1.3.0 will not migrate it without
+explicit consent, precisely so the fleet upgrade can come first.
+
+If you need to go back, the rollback is a schema-cursor rollback rather than a
+downgrade of the data — see
+[Accidental v1.2.1 Release](/recovery/accidental-1-2-1-release), whose
+procedure is the same for any cursor rollback even though its worked example is
+that release.
+
+Once you are on the new binary, `bd upgrade review` prints exactly the changes
+between the version you were running and this one. Several commands changed
+defaults, so read it before your first session.
+
 ### Remote-backed databases and multiple clones
 
 `bd` refuses to silently apply pending schema migrations to a database that has
@@ -160,7 +240,9 @@ The gate is **state-aware by default**
 - **auto-migrates** when the remote is at the same schema version as this
   clone — no one has migrated yet, so this clone is a safe first-mover
   (concurrent first-movers converge to identical tables). It reminds you to
-  `bd dolt push` afterwards.
+  `bd dolt push` afterwards. This applies to embedded mode only: a shared
+  server always stops for consent, because migrating it changes the schema
+  every connected client sees (see [Shared servers](#shared-servers) below).
 - **stops and directs you to adopt** (`bd bootstrap`) when the remote has
   already been migrated by another clone.
 - **stops for a human decision** when this clone and the remote applied
@@ -204,11 +286,10 @@ migrating here as the designated migrator, adopting the remote's already-migrate
 database, or recovering a fork — and asks for an explicit operator decision.
 Follow the guidance it prints.
 
-For scripted or CI upgrades where nobody reads the prompt,
-`BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` (any boolean true value works) declares
-this clone the designated migrator and bypasses the gate entirely — including
-its already-forked checks — so wire it into exactly one clone's upgrade job,
-never all of them.
+For scripted or CI upgrades where nobody reads the output, run `bd migrate` as
+an explicit step in exactly one job, never in all of them. If the gate blocks a
+run it prints both the available options and the scripted override that fits
+the situation.
 
 **Multiple clones sharing one remote:**
 
@@ -242,6 +323,67 @@ schema has already forked — follow the recovery playbook:
 schema against the cached remote ref — a useful post-upgrade verification.
 It runs in both server and embedded modes.
 </Note>
+
+### Shared servers
+
+A server-mode database is served to every `bd` client connected to that
+`dolt sql-server`, so a schema migration is not a local event: it promotes the
+schema version for **all** of them at once, and clients still running an older
+`bd` refuse the database until they are upgraded too. `bd` therefore never
+auto-migrates a shared database on a version bump — with or without a remote
+configured, though the two cases consent differently
+([#5920](https://github.com/gastownhall/beads/issues/5920)).
+
+Upgrade one server's clients like this:
+
+```bash
+# 1. Upgrade bd on every client of the server. Reads keep working throughout —
+#    an upgraded client reads the old schema, it just cannot write to it.
+bd version                     # on each client, confirm the new version
+
+# 2. Once, from a workspace already set up against this server: consent.
+bd migrate schema              # add --global for the shared global database
+
+# 3. Confirm.
+bd doctor
+```
+
+Between steps 1 and 2, an upgraded client reads normally and its writes are
+refused with the gate's guidance. Nothing is silently promoted, so there is no
+deadline — but the window is a degraded one, so keep it short.
+
+**If the shared server also has a Dolt remote**, step 2 is not enough. Two
+hazards now apply at once — the co-resident lockout above and the cross-clone
+fork of [Remote-backed databases](#remote-backed-databases-and-multiple-clones)
+— so `bd` requires the stronger designated-migrator consent it describes:
+`bd migrate --force`, from exactly one machine, followed by `bd dolt push`. If
+another clone has already migrated and pushed, adopt its database with
+`bd bootstrap` instead of migrating. On a shared server, adopting also promotes
+the schema for every client of that server, so step 1 still comes first either
+way.
+
+<Warning>
+Migrating is one-way for the fleet: after step 2, a client still on the older
+`bd` refuses the database until it is upgraded. Do step 1 first, and confirm it
+— the gate cannot see the other clients' versions and will take your word for
+it.
+</Warning>
+
+A new client **joining** a server whose schema is behind is refused before its
+workspace is written, so there is nothing to run `bd migrate schema` from
+there: do step 2 from a client that is already set up, or join and migrate in
+one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
+
+The same rules apply in **proxied-server mode**, which is a shared server
+reached through a local proxy. Two differences worth knowing:
+
+- read commands print a warning and keep serving the current schema, rather
+  than the read simply not touching it;
+- `bd serve` refuses to start against a database with pending migrations,
+  because a daemon has no operator to consent for it. Reconcile the schema
+  first with step 2, then start the daemon — or, for an unattended service,
+  put `BD_ALLOW_REMOTE_MIGRATE=1` in its environment as an explicit, auditable
+  standing consent.
 
 ## Cross-era Upgrades
 

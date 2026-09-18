@@ -754,11 +754,11 @@ func TestBuildIssueDetailsProjectsTheRevisionToken(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildIssueDetails: %v", err)
 			}
-			if details.Revision != 987654321 {
-				t.Errorf("Revision = %d, want the row's token 987654321", details.Revision)
+			if details.Revision != "987654321" {
+				t.Errorf("Revision = %q, want the row's token %q", details.Revision, "987654321")
 			}
-			if details.Revision != details.RowVersion {
-				t.Errorf("Revision = %d but RowVersion = %d; the published token must be the row's",
+			if details.Revision != types.RevisionToken(details.RowVersion) {
+				t.Errorf("Revision = %q but RowVersion = %d; the published token must be the row's",
 					details.Revision, details.RowVersion)
 			}
 		})

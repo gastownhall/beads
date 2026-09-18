@@ -136,15 +136,11 @@ func readyHydrationFor(filter types.WorkFilter) sqlbuild.CountsHydration {
 // within per-statement limits (mirrors issueops.runReadyCountsInTx).
 func (r *issueSQLRepositoryImpl) fetchCountsByIDs(ctx context.Context, ids []string, tables filterTables, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) (map[string]*types.IssueWithCounts, error) {
 	out := make(map[string]*types.IssueWithCounts, len(ids))
-	for start := 0; start < len(ids); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		countsSQL, args := sqlbuild.SearchCountsSQL(tables, ids[start:end], "", "", "", includeWispReverseDeps, hyd)
+	err := forEachIDBatch(ids, func(batch []string) error {
+		countsSQL, args := sqlbuild.SearchCountsSQL(tables, batch, "", "", "", includeWispReverseDeps, hyd)
 		items, err := r.scanCountsQuery(ctx, tables, countsSQL, args, hyd)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, iwc := range items {
 			if iwc == nil || iwc.Issue == nil {
@@ -152,6 +148,10 @@ func (r *issueSQLRepositoryImpl) fetchCountsByIDs(ctx context.Context, ids []str
 			}
 			out[iwc.Issue.ID] = iwc
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -584,10 +584,11 @@ func TestImportChunkedStaleRejectedRowKeepsDeferredDepsOut(t *testing.T) {
 
 // Cross-bucket (regular<->wisp) edges across a chunk boundary. Pre-wy-4276q8
 // the import applied the engine's per-batch cross-bucket filter over the FULL
-// set up front and so dropped every such edge; it now defers a same-chunk one
-// to a single-plane dependency pass (a workaround the engine no longer needs
-// since wy-a648lq, which writes in-batch cross-plane edges under
-// SkipDependencyValidationErrors; wy-y52syc retires it). This exercises the
+// set up front and so dropped every such edge; the engine now writes an
+// in-batch cross-plane edge under SkipDependencyValidationErrors (wy-a648lq),
+// so the import defers one only by the plain chunk rule (target first written
+// in a later chunk) and wires it in one mixed dependency pass (the
+// single-plane split of wy-4276q8 was retired by wy-y52syc). This exercises the
 // outcome end to end against the real engine: a regular -> wisp edge
 // straddling a chunk boundary must be wired, not skip-reported, and a
 // same-bucket wisp -> wisp edge straddling the same boundary must survive as
@@ -609,9 +610,9 @@ func TestImportChunkedMixedRegularWispCrossBucketEdgesWired(t *testing.T) {
 	// 12 rows across three chunks (5/5/2) at chunk size 5. Every edge below is
 	// `related` (non-readiness), so orderImportIssuesForChunking preserves file
 	// order and the two forward edges genuinely straddle the chunk-0/chunk-1
-	// boundary. Chunks 0 and 1 are each mixed (regular + wisp), so the engine's
-	// per-chunk mixed-bucket filter actually runs instead of short-circuiting on
-	// an all-one-bucket chunk.
+	// boundary. Chunks 0 and 1 are each mixed (regular + wisp), so the rows of
+	// both planes share one transaction — the shape wy-a648lq writes the
+	// cross-plane edge under.
 	makeIssues := func() []*types.Issue {
 		issues := []*types.Issue{
 			mk("bd-chunk01", false), // chunk 0: regular source of the cross-bucket edge
@@ -641,12 +642,11 @@ func TestImportChunkedMixedRegularWispCrossBucketEdgesWired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("importIssuesCore: %v", err)
 	}
-	// 3 row chunks (5/5/2) plus TWO deferred-dependency passes: the regular
-	// plane (bd-chunk01 -> bd-wisp07) and the wisp plane (bd-wisp02 ->
-	// bd-wisp07) go in separate transactions, so the cross-bucket edge's
-	// target is never in its batch.
-	if counting.calls != 5 {
-		t.Fatalf("calls = %d, want 3 row chunks + 2 single-plane deferred-dependency passes", counting.calls)
+	// 3 row chunks (5/5/2) plus ONE mixed deferred-dependency pass carrying
+	// both source rows (bd-chunk01 -> bd-wisp07 and bd-wisp02 -> bd-wisp07):
+	// the pass no longer splits by plane.
+	if counting.calls != 4 {
+		t.Fatalf("calls = %d, want 3 row chunks + 1 mixed deferred-dependency pass", counting.calls)
 	}
 	if result.Created != 12 {
 		t.Fatalf("Created = %d, want 12", result.Created)
@@ -686,13 +686,16 @@ func TestImportChunkedMixedRegularWispCrossBucketEdgesWired(t *testing.T) {
 	}
 }
 
-// The wy-4276q8 rollback-drill shape against the real engine: a regular issue
-// blocked by a wisp created in the same chunk (deferred edge) and a wisp
-// blocked by a regular issue from an earlier chunk (inline edge). The import
-// dies after the row chunks and before the dependency pass — where every drill
-// attempt died — so the inline edge is durable and the deferred one is not yet;
-// re-running the same import must backfill it with nothing skip-reported, and
-// a further run must be a no-op for the edges.
+// The wy-4276q8 rollback-drill shape against the real engine, after the
+// same-chunk deferral's retirement (wy-y52syc): a wisp blocked by a regular
+// issue created in the SAME chunk (an inline edge now), a wisp blocked by a
+// regular issue from an earlier chunk (inline edge), and a regular issue
+// related to a wisp first written in a LATER chunk (still deferred, by the
+// plain chunk rule). The import dies after the row chunks and before the
+// dependency pass — where every drill attempt died — so both inline edges are
+// durable and the deferred one is not yet; re-running the same import must
+// backfill it with nothing skip-reported, and a further run must be a no-op
+// for the edges.
 func TestImportChunkedCrossBucketBlocksEdgesResumeBackfills(t *testing.T) {
 	requireEmbeddedDolt(t)
 	setImportChunkSize(t, 4)
@@ -701,21 +704,30 @@ func TestImportChunkedCrossBucketBlocksEdgesResumeBackfills(t *testing.T) {
 	ctx := context.Background()
 	store := provisionChunkStore(t)
 
-	// Kahn's ordering yields  chunk 0: f1 f2 f3 f4   chunk 1: w1 w2 r1
-	// r1 -> w1 is same-chunk cross-bucket (deferred); w2 -> f1 points at an
-	// earlier chunk (inline).
+	// Kahn's ordering (indegree-0 rows in file order, dependents released
+	// behind them) yields
+	//   chunk 0: f1 f2 f3 f4   chunk 1: r1 f5 f6 f7   chunk 2: r2 w2 w1
+	// w1 -> r2 is same-chunk cross-bucket (inline since wy-y52syc); w2 -> f1
+	// points at an earlier chunk (inline); r1 -related-> w2 points at a LATER
+	// chunk (deferred).
 	makeIssues := func() []*types.Issue {
 		issues := []*types.Issue{
 			crossBucketTestIssue("bd-f1", false),
 			crossBucketTestIssue("bd-f2", false),
 			crossBucketTestIssue("bd-f3", false),
 			crossBucketTestIssue("bd-f4", false),
-			crossBucketTestIssue("bd-w1", true),
 			crossBucketTestIssue("bd-r1", false),
+			crossBucketTestIssue("bd-f5", false),
+			crossBucketTestIssue("bd-f6", false),
+			crossBucketTestIssue("bd-f7", false),
+			crossBucketTestIssue("bd-w1", true),
+			crossBucketTestIssue("bd-r2", false),
 			crossBucketTestIssue("bd-w2", true),
 		}
-		issues[5].Dependencies = []*types.Dependency{{IssueID: "bd-r1", DependsOnID: "bd-w1", Type: types.DepBlocks}}
-		issues[6].Dependencies = []*types.Dependency{{IssueID: "bd-w2", DependsOnID: "bd-f1", Type: types.DepBlocks}}
+		issues[4].Dependencies = []*types.Dependency{{IssueID: "bd-r1", DependsOnID: "bd-w2", Type: types.DepRelated}}
+		issues[8].Dependencies = []*types.Dependency{{IssueID: "bd-w1", DependsOnID: "bd-r2", Type: types.DepBlocks}}
+		issues[9].Dependencies = []*types.Dependency{{IssueID: "bd-r2", DependsOnID: "bd-f1", Type: types.DepBlocks}}
+		issues[10].Dependencies = []*types.Dependency{{IssueID: "bd-w2", DependsOnID: "bd-f1", Type: types.DepBlocks}}
 		return issues
 	}
 	depIDs := func(id string) []string {
@@ -731,23 +743,26 @@ func TestImportChunkedCrossBucketBlocksEdgesResumeBackfills(t *testing.T) {
 		return ids
 	}
 
-	failing := &failNthCreateStore{DoltStorage: store, failOnCall: 3}
+	failing := &failNthCreateStore{DoltStorage: store, failOnCall: 4}
 	if _, err := importIssuesCore(ctx, "", failing, makeIssues(), ImportOptions{SkipPrefixValidation: true}); err == nil {
 		t.Fatalf("importIssuesCore succeeded, want the simulated crash in the dependency pass")
 	}
-	if failing.calls != 3 {
-		t.Fatalf("calls = %d, want 2 row chunks + the failing dependency pass", failing.calls)
+	if failing.calls != 4 {
+		t.Fatalf("calls = %d, want 3 row chunks + the failing dependency pass", failing.calls)
 	}
-	for _, id := range []string{"bd-f1", "bd-f2", "bd-f3", "bd-f4", "bd-w1", "bd-r1", "bd-w2"} {
+	for _, id := range []string{"bd-f1", "bd-f2", "bd-f3", "bd-f4", "bd-r1", "bd-f5", "bd-f6", "bd-f7", "bd-w1", "bd-r2", "bd-w2"} {
 		if _, err := store.GetIssue(ctx, id); err != nil {
 			t.Fatalf("row %s not durable after the crash: %v", id, err)
 		}
+	}
+	if got := depIDs("bd-w1"); len(got) != 1 || got[0] != "bd-r2" {
+		t.Fatalf("bd-w1 deps after crash = %v, want the same-chunk cross-bucket edge [bd-r2] already durable (inline since wy-y52syc)", got)
 	}
 	if got := depIDs("bd-w2"); len(got) != 1 || got[0] != "bd-f1" {
 		t.Fatalf("bd-w2 deps after crash = %v, want the inline cross-bucket edge [bd-f1] already durable", got)
 	}
 	if got := depIDs("bd-r1"); len(got) != 0 {
-		t.Fatalf("bd-r1 deps after crash = %v, want none yet (deferred edge lost with the dependency pass)", got)
+		t.Fatalf("bd-r1 deps after crash = %v, want none yet (deferred later-chunk edge lost with the dependency pass)", got)
 	}
 
 	// The re-run backfills the deferred edge: this is the drill's "re-run
@@ -759,8 +774,11 @@ func TestImportChunkedCrossBucketBlocksEdgesResumeBackfills(t *testing.T) {
 	if len(result.SkippedDependencies) != 0 {
 		t.Fatalf("re-run SkippedDependencies = %#v, want none", result.SkippedDependencies)
 	}
-	if got := depIDs("bd-r1"); len(got) != 1 || got[0] != "bd-w1" {
-		t.Fatalf("bd-r1 deps after re-run = %v, want the cross-bucket edge [bd-w1] backfilled", got)
+	if got := depIDs("bd-r1"); len(got) != 1 || got[0] != "bd-w2" {
+		t.Fatalf("bd-r1 deps after re-run = %v, want the later-chunk cross-bucket edge [bd-w2] backfilled", got)
+	}
+	if got := depIDs("bd-w1"); len(got) != 1 || got[0] != "bd-r2" {
+		t.Fatalf("bd-w1 deps after re-run = %v, want [bd-r2] kept", got)
 	}
 	if got := depIDs("bd-w2"); len(got) != 1 || got[0] != "bd-f1" {
 		t.Fatalf("bd-w2 deps after re-run = %v, want [bd-f1] kept", got)
@@ -774,7 +792,7 @@ func TestImportChunkedCrossBucketBlocksEdgesResumeBackfills(t *testing.T) {
 	if len(result.SkippedDependencies) != 0 {
 		t.Fatalf("third run SkippedDependencies = %#v, want none", result.SkippedDependencies)
 	}
-	if got := depIDs("bd-r1"); len(got) != 1 || got[0] != "bd-w1" {
-		t.Fatalf("bd-r1 deps after third run = %v, want [bd-w1]", got)
+	if got := depIDs("bd-r1"); len(got) != 1 || got[0] != "bd-w2" {
+		t.Fatalf("bd-r1 deps after third run = %v, want [bd-w2]", got)
 	}
 }

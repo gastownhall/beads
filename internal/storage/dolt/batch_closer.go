@@ -29,6 +29,15 @@ type batchCloser struct{ store *DoltStore }
 // CloseBatch runs every close, and the optional claim, in ONE transaction with
 // one commit. The message is composed inside the body because it names what
 // LANDED, which is not knowable until the last item has been tried.
+//
+// Durability contract: a nil error means the closes (and the optional claim)
+// are durable in the branch working set. The Dolt history commit runs after
+// the SQL transaction (runIssueOperationTxWithMessage) and may be deferred — if
+// it fails after retries the change still landed and rides the next Dolt
+// commit; the only signal is the bd.db.post_tx_commit_dropped counter, since
+// the batch path has no verify-by-re-read recovery. A nil return is therefore
+// not a retry signal: the closes already applied, and retrying would
+// double-apply.
 func (o *batchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
 	if err := storageissueops.ValidateCloseBatchRequest(request); err != nil {
 		return issueops.CloseBatchResult{}, err

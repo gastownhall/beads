@@ -126,6 +126,34 @@ func TestEmbeddedGC(t *testing.T) {
 		}
 	})
 
+	// ===== Full GC =====
+
+	t.Run("gc_full", func(t *testing.T) {
+		gcDir, _, _ := bdInit(t, bd, "--prefix", "gu")
+		for i := 0; i < 3; i++ {
+			bdCreate(t, bd, gcDir, fmt.Sprintf("Full GC issue %d", i), "--type", "task")
+		}
+
+		// A default pass first, so the second one has an old generation to
+		// collect — the case a generational pass cannot reclaim (#5907).
+		bdGC(t, bd, gcDir, "--force", "--skip-decay")
+
+		out := bdGC(t, bd, gcDir, "--full", "--force", "--skip-decay")
+		if !strings.Contains(out, "GC complete") {
+			t.Errorf("expected 'GC complete' from bd gc --full: %s", out)
+		}
+		if !strings.Contains(out, "full Dolt GC") {
+			t.Errorf("expected the full-GC notice: %s", out)
+		}
+	})
+
+	t.Run("gc_full_dry_run", func(t *testing.T) {
+		out := bdGC(t, bd, dir, "--full", "--dry-run")
+		if !strings.Contains(out, "full DOLT_GC()") {
+			t.Errorf("dry run does not say it would run a full GC: %s", out)
+		}
+	})
+
 	// ===== No --force prompts =====
 
 	t.Run("gc_no_force_prompts", func(t *testing.T) {

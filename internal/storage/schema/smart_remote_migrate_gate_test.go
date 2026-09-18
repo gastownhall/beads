@@ -168,7 +168,7 @@ func TestSmartGateRouting(t *testing.T) {
 		hashes := map[int]string{floor: "h"}
 		expectSmartRemoteReadForRemote(mock, "upstream", hashes, hashes)
 
-		if err := CheckRemoteMigrateGateForRemoteWithRemoteCheck(context.Background(), db, "upstream", nil); err != nil {
+		if err := checkRemoteMigrateGate(context.Background(), db, "upstream", nil, nil, false); err != nil {
 			t.Fatalf("safe first-mover on configured remote should be allowed, got %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {

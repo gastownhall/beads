@@ -3,14 +3,18 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-06-09
+Last reviewed: 2026-09-08
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, and `cmd/bd/dolt.go`.
 
 This document lives next to the ADRs and matches the structure of `bd`'s
 error messages: each named refusal in `bd init` and `bd dolt push`/`pull`
-points here to a labeled anchor with step-by-step recovery instructions.
+has a labeled anchor here with step-by-step recovery instructions. The
+`bd dolt push`/`pull` fork refusal deep-links its anchor directly; since
+[#5310](https://github.com/gastownhall/beads/pull/5310) the `bd init`
+refusals point at `bd help init-safety`, which links this document as a
+whole — match those by exit code and symptom text.
 
 See also: `bd help init-safety`, and
 [ADR 0002 — `bd init` safety invariants](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md).
@@ -18,8 +22,8 @@ See also: `bd help init-safety`, and
 ## Table of contents
 
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
-- [init-token-missing — `--discard-remote` refused because `--destroy-token` is missing or wrong](#init-token-missing)
-- [init-local-exists — `bd init` refused because local data already exists](#init-local-exists)
+- [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
+- [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 
 ---
@@ -92,11 +96,25 @@ team before doing this.
 bd init refuses: --discard-remote requires an explicit destroy-token in non-interactive mode.
 ```
 
+Or, re-initializing over existing local issues with no TTY:
+
+```
+Refusing to destroy N issues in non-interactive mode.
+  See 'bd help init-safety' for the required --destroy-token format.
+```
+
 **Why this happens**
 
-You're running non-interactively (CI, agent, piped input) and passed
-`--discard-remote`. Destructive cross-boundary operations cannot be
-authorized silently.
+You're running non-interactively (CI, agent, piped input) and asked for a
+destructive re-init. Destructive operations cannot be authorized silently,
+so `bd` requires `--destroy-token` in place of the interactive confirmation
+it cannot prompt for.
+
+Both destructive paths need the token, not just the cross-boundary one:
+
+- `--discard-remote`, which would discard the remote's Dolt history.
+- plain `--reinit-local` over existing local issues, which would destroy
+  them (see [init-local-exists](#init-local-exists)).
 
 **Recovery paths**
 
@@ -111,6 +129,10 @@ The token format is `DESTROY-<issue-prefix>`. For a project whose issue
 prefix is `bd`:
 
 ```
+# Destroys local issues only:
+bd init --reinit-local --destroy-token=DESTROY-bd
+
+# Also discards the remote's Dolt history:
 bd init --reinit-local --discard-remote --destroy-token=DESTROY-bd
 ```
 
@@ -122,22 +144,36 @@ for why the token is never echoed in `bd`'s error messages.
 
 ## init-local-exists
 
-**Exit code:** `11` (`ExitLocalExistsRefused`)
+**Exit code:** `11` (`ExitLocalExistsRefused`) interactively;
+`12` (`ExitDestroyTokenMissing`) non-interactively
 
 **Symptom**
+
+Interactive (TTY): you declined the typed `destroy N issues` confirmation.
+This is the only path that exits `11`.
+
+```
+Type 'destroy N issues' to confirm:
+Aborted. Database was NOT modified.
+```
+
+Non-interactive (CI, agent, piped input) — note this exits `12`, not `11`:
 
 ```
 Refusing to destroy N issues in non-interactive mode.
   See 'bd help init-safety' for the required --destroy-token format.
 ```
 
-Or, in interactive mode, you declined the typed `destroy N issues`
-confirmation.
-
 **Why this happens**
 
-Local `.beads/` has existing issues. `bd init --reinit-local` would
-permanently destroy them.
+Local `.beads/` has existing issues. `bd init --reinit-local` (or its
+deprecated alias `--force`) would permanently destroy them, so `bd` demands
+an explicit confirmation first: the typed prompt in a TTY, and a
+`--destroy-token` when there is no TTY. This applies to `--reinit-local` on
+its own — `--discard-remote` is not required to trigger it.
+
+A plain `bd init` over an initialized workspace does not reach either code:
+the local-safety guard refuses it with an ordinary error before this point.
 
 **Recovery paths**
 
@@ -145,7 +181,13 @@ permanently destroy them.
 
 ```
 bd export > issue-export.jsonl
+
+# Interactive: confirm at the typed prompt.
 bd init --reinit-local
+
+# Non-interactive: the token stands in for the prompt. Without it this
+# re-runs straight back into the exit-12 refusal above.
+bd init --reinit-local --destroy-token=DESTROY-<issue-prefix>
 ```
 
 `issue-export.jsonl` lets you re-import individual issues if needed. It is not

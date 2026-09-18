@@ -43,7 +43,7 @@ func TestRegisteredBackendDispatchesReadWriteAndReadOnly(t *testing.T) {
 	registerContractBackend(t, name)
 	beadsDir := writeContractBackendConfig(t, name)
 
-	if err := validateConfiguredBackend(&configfile.Config{Backend: name}); err != nil {
+	if err := validateConfiguredBackend(&configfile.Config{Backend: name}, beadsDir); err != nil {
 		t.Fatalf("validateConfiguredBackend() rejected registered backend: %v", err)
 	}
 	if _, err := newDoltStoreFromConfig(t.Context(), beadsDir); !errors.Is(err, errRegistryReadWrite) {
@@ -78,7 +78,7 @@ func TestOSSRegistersNoRemovedBackends(t *testing.T) {
 		if backends.Registered(name) {
 			t.Errorf("OSS unexpectedly registered removed backend %q", name)
 		}
-		if err := validateConfiguredBackend(&configfile.Config{Backend: name}); err == nil {
+		if err := validateConfiguredBackend(&configfile.Config{Backend: name}, t.TempDir()); err == nil {
 			t.Errorf("OSS unexpectedly accepted removed backend %q", name)
 		}
 	}

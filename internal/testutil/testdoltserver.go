@@ -243,6 +243,35 @@ type IsolatedDoltContainer struct {
 	ctr *dolt.DoltContainer
 }
 
+// Stop pauses the container while retaining its data volume.
+func (c *IsolatedDoltContainer) Stop(ctx context.Context) error {
+	if c == nil || c.ctr == nil {
+		return fmt.Errorf("no Dolt container running")
+	}
+	return c.ctr.Stop(ctx, nil)
+}
+
+// Start resumes a container previously stopped with Stop.
+func (c *IsolatedDoltContainer) Start(ctx context.Context) error {
+	if c == nil || c.ctr == nil {
+		return fmt.Errorf("no Dolt container running")
+	}
+	return c.ctr.Start(ctx)
+}
+
+// CurrentPort returns the container's currently mapped SQL port. Container
+// runtimes may assign a new host port after Stop/Start.
+func (c *IsolatedDoltContainer) CurrentPort(ctx context.Context) (string, error) {
+	if c == nil || c.ctr == nil {
+		return "", fmt.Errorf("no Dolt container running")
+	}
+	p, err := c.ctr.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		return "", err
+	}
+	return p.Port(), nil
+}
+
 // Exec runs cmd inside the container and returns its exit code and combined
 // output, demultiplexed (see containerExec).
 func (c *IsolatedDoltContainer) Exec(ctx context.Context, cmd []string) (int, string, error) {
