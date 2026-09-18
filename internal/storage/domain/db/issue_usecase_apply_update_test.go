@@ -25,6 +25,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("EmptyIDReturnsError", s.iucApplyUpdateEmptyID)
 	s.Run("FieldsOnlyAppliesAndReFetches", s.iucApplyUpdateFieldsOnly)
 	s.Run("ClaimAndFieldsRunTogether", s.iucApplyUpdateClaimPlusFields)
+	s.Run("ClaimAssigneeOverrideArmsLease", s.iucApplyUpdateClaimAssigneeOverrideArmsLease)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
@@ -84,7 +85,7 @@ func (s *testSuite) iucClaimOpenAssignedCopy() {
 	s.seedOpenIssue("bd-iuc-cl-openassigned")
 	r := s.issueRepo()
 	s.Require().NoError(r.Update(s.Ctx(), "bd-iuc-cl-openassigned",
-		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}))
+		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}, false))
 
 	_, err := s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-openassigned", "bob")
 	s.Require().Error(err)
@@ -139,6 +140,37 @@ func (s *testSuite) iucApplyUpdateClaimPlusFields() {
 	s.Equal("alice", updated.Assignee)
 	s.Equal(types.StatusInProgress, updated.Status)
 	s.Equal(1, updated.Priority)
+}
+
+// iucApplyUpdateClaimAssigneeOverrideArmsLease covers PR #6501 review points
+// 5+6 at the use-case layer (no IssueTableOpts/IsClaim in sight): a same-
+// request claim + assignee override issued through the public ApplyUpdate
+// entry point must leave a live lease row for the override target, not the
+// claimant. This fails on origin/main (routes through UpdateIssue ->
+// IssueTableOpts{UseWispsTable:false} -> clearLease -> DeleteLeaseInTx) and
+// passes on the be-plv fix branch (internal/storage/domain/issue.go's
+// update() re-arms the lease post-write). Deliberately self-contained (no
+// helper from parity_claim_lease_test.go, which is itself unmerged PR
+// content and does not exist on origin/main) so this test compiles AND
+// fails behaviorally there, rather than repeating review point 5's
+// complaint that the original red commit was only a compile break. See
+// also TestClaimOverrideArmsLeaseForFinalHolderOnDomain in
+// parity_claim_lease_test.go, which pins the same behavior one layer down.
+func (s *testSuite) iucApplyUpdateClaimAssigneeOverrideArmsLease() {
+	s.seedOpenIssue("bd-iuc-au-cao")
+	updated, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-cao", domain.UpdateSpec{
+		Claim:  true,
+		Fields: map[string]any{"assignee": "bob"},
+	}, "alice")
+	s.Require().NoError(err)
+	s.Equal("bob", updated.Assignee)
+	s.Equal(types.StatusInProgress, updated.Status)
+
+	var holder sql.NullString
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT holder FROM leases WHERE issue_id = ?", "bd-iuc-au-cao").Scan(&holder))
+	s.True(holder.Valid, "claim+assignee override via ApplyUpdate must leave a lease row for the override target")
+	s.Equal("bob", holder.String)
 }
 
 func (s *testSuite) iucApplyUpdateAddRemoveLabels() {

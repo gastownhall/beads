@@ -27,7 +27,7 @@ func (s *testSuite) TestUpdateRefusesUnpoppedClosePolicyOverride() {
 	err = NewIssueSQLRepository(s.Runner()).Update(s.Ctx(), id, map[string]any{
 		"priority":                  1,
 		issueops.OpForceClosePolicy: "yes",
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err, "Update accepted a malformed close-policy override")
 	s.Contains(err.Error(), "is not allowed")
 	s.Contains(err.Error(), issueops.OpForceClosePolicy)
@@ -39,7 +39,7 @@ func (s *testSuite) TestUpdateRefusesUnpoppedClosePolicyOverride() {
 	s.Require().NoError(NewIssueSQLRepository(s.Runner()).Update(s.Ctx(), id, map[string]any{
 		"priority":                  1,
 		issueops.OpForceClosePolicy: true,
-	}, "tester", domain.IssueTableOpts{}))
+	}, "tester", domain.IssueTableOpts{}, false))
 	applied, err := s.issueUseCase().GetIssue(s.Ctx(), id)
 	s.Require().NoError(err)
 	s.Equal(1, applied.Priority)
@@ -63,7 +63,7 @@ func (s *testSuite) TestUpdateRefusesUnreadableStatusInsteadOfSkippingClosePolic
 		&types.Dependency{IssueID: child, DependsOnID: parent, Type: types.DepParentChild}, "tester"))
 
 	err := NewIssueSQLRepository(s.Runner()).Update(s.Ctx(), parent,
-		map[string]any{"status": []byte("closed")}, "tester", domain.IssueTableOpts{})
+		map[string]any{"status": []byte("closed")}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().ErrorIs(err, storage.ErrValidation, "an unreadable status must refuse, not skip the gate")
 
 	untouched, err := s.issueUseCase().GetIssue(s.Ctx(), parent)
@@ -73,7 +73,7 @@ func (s *testSuite) TestUpdateRefusesUnreadableStatusInsteadOfSkippingClosePolic
 	// The refusal is about the transport: spelled as a string, the same close
 	// reaches the gate and is refused on the open child instead.
 	err = NewIssueSQLRepository(s.Runner()).Update(s.Ctx(), parent,
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{})
+		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err, "Update closed a parent with an open child")
 	s.Require().NotErrorIs(err, storage.ErrValidation, "want a close-policy refusal, not a validation error")
 }

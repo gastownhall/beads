@@ -33,7 +33,7 @@ func (s *testSuite) asOfReturnsHistoricalRow() {
 	initialHash := s.doltCommit("seed bd-asof-1")
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-asof-1",
-		map[string]any{"title": "modified"}, "tester", domain.IssueTableOpts{}))
+		map[string]any{"title": "modified"}, "tester", domain.IssueTableOpts{}, false))
 	_ = s.doltCommit("modify bd-asof-1")
 
 	old, err := r.AsOf(s.Ctx(), "bd-asof-1", initialHash)
@@ -49,7 +49,7 @@ func (s *testSuite) asOfCurrentStillLatest() {
 	hash := s.doltCommit("seed bd-asof-cur")
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-asof-cur",
-		map[string]any{"title": "v2"}, "tester", domain.IssueTableOpts{}))
+		map[string]any{"title": "v2"}, "tester", domain.IssueTableOpts{}, false))
 	_ = s.doltCommit("modify bd-asof-cur")
 
 	current, err := r.Get(s.Ctx(), "bd-asof-cur", domain.IssueTableOpts{})
