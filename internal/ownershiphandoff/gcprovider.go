@@ -246,6 +246,17 @@ func (p *GCProvider) invoke(ctx context.Context, r Request, operation, token str
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	runErr := cmd.Run()
+	// Wait prefers a process exit error over cancellation and pipe errors.
+	// Preserve those failures independently: even valid refusal JSON cannot
+	// prove release if the command or either output stream was interrupted.
+	if transportErr := errors.Join(commandCtx.Err(), stdout.err, stderr.err); transportErr != nil {
+		runErr = transportErr
+	}
+	var exitErr *exec.ExitError
+	ordinaryExit := errors.As(runErr, &exitErr) && exitErr.ExitCode() >= 0
+	if runErr != nil && !ordinaryExit {
+		return gcHandoffResponse{}, nil, CodedError{Code: "provider_unavailable", Err: protocolCommandError(commandCtx, runErr, stderr.String())}
+	}
 	response, err := decodeGCResponse(stdout.Bytes())
 	if err != nil {
 		if runErr != nil {
@@ -264,7 +275,7 @@ func protocolCommandError(ctx context.Context, runErr error, stderr string) erro
 		return errors.New("GC handoff protocol command timed out")
 	}
 	if detail := strings.TrimSpace(stderr); detail != "" {
-		return fmt.Errorf("GC handoff protocol command failed: %s", detail)
+		return fmt.Errorf("GC handoff protocol command failed: %w: %s", runErr, detail)
 	}
 	return fmt.Errorf("GC handoff protocol command failed: %w", runErr)
 }
@@ -276,6 +287,7 @@ func protocolCommandError(ctx context.Context, runErr error, stderr string) erro
 type limitedBuffer struct {
 	buf   bytes.Buffer
 	limit int
+	err   error
 }
 
 // Write rejects a write that would only partially fit rather than truncating
@@ -285,9 +297,19 @@ type limitedBuffer struct {
 func (b *limitedBuffer) Write(p []byte) (int, error) {
 	remaining := b.limit - b.buf.Len()
 	if remaining <= 0 || len(p) > remaining {
-		return 0, errors.New("GC handoff protocol output exceeds limit")
+		b.err = errors.New("GC handoff protocol output exceeds limit")
+		return 0, b.err
 	}
 	return b.buf.Write(p)
+}
+
+// ReadFrom retains pipe-drain errors even when exec.Wait masks them with an
+// exit status. Hide ReadFrom from io.Copy so every byte still goes through
+// the bounded Write method, never directly into bytes.Buffer.
+func (b *limitedBuffer) ReadFrom(r io.Reader) (int64, error) {
+	n, err := io.Copy(struct{ io.Writer }{b}, r)
+	b.err = err
+	return n, err
 }
 
 func (b *limitedBuffer) Bytes() []byte { return b.buf.Bytes() }

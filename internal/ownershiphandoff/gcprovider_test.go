@@ -184,6 +184,124 @@ func TestGCProviderBoundsProtocolCommand(t *testing.T) {
 	}
 }
 
+// A refusal proves release only if the subprocess and both output streams
+// completed normally. In particular, exec.ExitError can hide a pipe error.
+func TestGCProviderRefusalRequiresCompletedTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tail string
+		want string
+	}{
+		{name: "ordinary refusal", tail: "exit 1"},
+		{name: "signal after refusal", tail: "kill -KILL $$", want: "signal"},
+		{name: "stdout overflow", tail: "head -c 2097152 /dev/zero | tr '\\0' ' '; exit 1", want: "output exceeds limit"},
+		{name: "stderr overflow", tail: "head -c 2097152 /dev/zero >&2; exit 1", want: "output exceeds limit"},
+		{name: "pipe drain after refusal", tail: "sleep 5 &\nprintf '%s' $! > \"$GC_HANDOFF_TEST_PID\"\nexit 1", want: "file already closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := validRequest(t)
+			pidPath := filepath.Join(r.Root, "child.pid")
+			t.Setenv("GC_HANDOFF_TEST_PID", pidPath)
+			t.Cleanup(func() {
+				if raw, err := os.ReadFile(pidPath); err == nil {
+					if pid, err := strconv.Atoi(string(raw)); err == nil && pid > 0 {
+						if process, err := os.FindProcess(pid); err == nil {
+							_ = process.Kill()
+						}
+					}
+				}
+			})
+			binary := filepath.Join(r.Root, "gc")
+			script := "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":1,\"operation\":\"handoff-inspect\",\"result\":\"refused\",\"owner\":\"legacy-gc\",\"mutates\":false,\"error_code\":\"process_missing\"}'\n" + tc.tail + "\n"
+			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			journalPath := filepath.Join(r.Root, "ownership-handoff.json")
+			if err := save(journalPath, Journal{Request: r, Phase: PhaseOldOwnerStopped, Owner: OwnerLegacyGC, SnapshotCaptured: true}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Run(context.Background(), r, journalPath, &GCProvider{Binary: binary}, false)
+			if tc.want == "" {
+				if err != nil || result.Phase != PhaseCommitted || result.Owner != OwnerBD {
+					t.Fatalf("ordinary refusal exit did not prove release: result=%+v err=%v", result, err)
+				}
+				return
+			}
+			if err == nil || result.ErrorCode != "provider_unavailable" || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("result=%+v err=%v, want transport failure containing %q", result, err, tc.want)
+			}
+			journal, loadErr := Load(journalPath)
+			if loadErr != nil || journal.Phase != PhaseOldOwnerStopped || journal.Owner != OwnerLegacyGC {
+				t.Fatalf("failed verification advanced ownership: journal=%+v err=%v", journal, loadErr)
+			}
+		})
+	}
+}
+
+func TestGCProviderRefusalCannotHideCancellation(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(strconv.FormatBool(deadline), func(t *testing.T) {
+			r := validRequest(t)
+			pidPath := filepath.Join(r.Root, "ready.pid")
+			t.Setenv("GC_HANDOFF_TEST_PID", pidPath)
+			binary := filepath.Join(r.Root, "gc")
+			script := `#!/bin/sh
+printf '%s\n' '{"schema_version":1,"operation":"handoff-inspect","result":"refused","owner":"legacy-gc","mutates":false,"error_code":"process_missing"}'
+printf '%s' $$ > "$GC_HANDOFF_TEST_PID"
+exec sleep 30
+`
+			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			provider := &GCProvider{Binary: binary}
+			if deadline {
+				provider.timeout = time.Second
+			}
+			ready := make(chan descendantReady, 1)
+			go func() {
+				ready <- awaitDescendant(pidPath, 5*time.Second)
+				if !deadline {
+					cancel()
+				}
+			}()
+			journalPath := filepath.Join(r.Root, "ownership-handoff.json")
+			if err := save(journalPath, Journal{Request: r, Phase: PhaseOldOwnerStopped, Owner: OwnerLegacyGC, SnapshotCaptured: true}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Run(ctx, r, journalPath, provider, false)
+			if observed := <-ready; observed.pid <= 0 {
+				t.Fatal("fixture did not print its refusal before cancellation")
+			}
+			if err == nil || result.ErrorCode != "provider_unavailable" || result.Phase != PhaseOldOwnerStopped || result.Owner != OwnerLegacyGC {
+				t.Fatalf("interrupted verification advanced ownership: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestGCProviderNonzeroExitPreservesOnlyRefusal(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		t.Run(strconv.FormatBool(refused), func(t *testing.T) {
+			r := validRequest(t)
+			t.Setenv("GC_HANDOFF_LOG", filepath.Join(r.Root, "gc.log"))
+			t.Setenv("GC_HANDOFF_ERR_LOG", filepath.Join(r.Root, "gc.err"))
+			t.Setenv("GC_HANDOFF_EXIT", "1")
+			want := "provider_unavailable"
+			if refused {
+				t.Setenv("GC_HANDOFF_REFUSE", "1")
+				want = "process_unowned"
+			}
+			p := &GCProvider{Binary: fakeGCProtocol(t)}
+			_, _, err := p.inspect(context.Background(), r)
+			if handoffErrorCode(err, "") != want {
+				t.Fatalf("inspect error=%v, want %s", err, want)
+			}
+		})
+	}
+}
+
 func TestGCProviderStopRefusalReportsProviderMutation(t *testing.T) {
 	for _, mutates := range []bool{false, true} {
 		t.Run(strconv.FormatBool(mutates), func(t *testing.T) {
@@ -716,6 +834,7 @@ else
   start_identity=fake
 fi
 printf '{"schema_version":1,"operation":"%s","result":"%s","owner":"legacy-gc","mutates":%s,"identity":{"city_root":"%s","scope_root":"%s","database":"%s","workspace":"%s","endpoint":%s,"data_dir":"%s/.gc/data","config_file":"%s/.gc/config","pid":%s,"start_identity":"%s","start_time_ticks":1,"port_holder_pid":%s},"identity_token":"%s","error_code":"%s"}\n' "$operation" "$result" "$mutates" "$city" "$scope" "$database" "$workspace" "$endpoint" "$city" "$city" "$$" "$start_identity" "$$" "$token" "$error_code"
+exit "${GC_HANDOFF_EXIT:-0}"
 `
 	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
 		t.Fatal(err)
