@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -93,6 +94,25 @@ const waitsForGateBlockedSQL = `
 		  )
 		)
 `
+
+// waitsForGateRowAliasRE matches the dependency-row alias references in
+// waitsForGateBlockedSQL — `d.` at a word boundary, which never matches the
+// gate's own inner `cd.` rows (no boundary between c and d).
+var waitsForGateRowAliasRE = regexp.MustCompile(`\bd\.`)
+
+// waitsForGateBlockedSQLFor returns waitsForGateBlockedSQL with its
+// dependency-row alias rewritten from d to alias, for callers that evaluate
+// the gate somewhere the row cannot be called d — blockingReasonSQL applies it
+// to a parent's own dependency rows inside a union leg whose outer row is
+// already d (gastownhall/beads#6506). Rewriting beats shadowing: an inner d
+// would resolve correctly by scope rules but reads as a bug at every later
+// glance.
+func waitsForGateBlockedSQLFor(alias string) string {
+	if alias == "d" {
+		return waitsForGateBlockedSQL
+	}
+	return waitsForGateRowAliasRE.ReplaceAllString(waitsForGateBlockedSQL, alias+".")
+}
 
 // RecomputeIsBlockedResult reports which issue tables had rows changed while
 // the blocked-state fixpoint converged.
@@ -187,14 +207,14 @@ func recomputeIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []str
 		return 0, nil
 	}
 
-	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), ids)
+	return runMarkUnmarkBatchedInTx(ctx, tx, issuesBlockedSpec, ids)
 }
 
 func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), ids)
+	return runMarkBatchedInTx(ctx, tx, issuesBlockedSpec, ids)
 }
 
 // The mark/unmark templates explicitly assign updated_at to itself:
@@ -205,38 +225,60 @@ func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) 
 // makes stale-guard/conflict-guard consumers treat the row as user-edited.
 // An explicit assignment suppresses the ON UPDATE clause.
 //
-// Both templates decide membership through shouldBeBlockedIDsUnionScopedSQL,
-// the same uncorrelated union the full repair and the doctor count use
-// (blocked_consistency.go), scoped to the batch: one derived blocked set per
-// batch, computed once and probed by hash. The previous shape — five
-// correlated EXISTS per outer row — was re-executed per row by the engine:
-// ~4 s per 200-id batch on committed, indexed data, and unbounded (>69 min
-// observed on dolt 2.1.8) over a large uncommitted working set, where every
-// probe re-read the uncommitted overlay (gastownhall/beads#6288).
+// Both templates decide membership through
+// shouldBeBlockedIDsUnionScopedPrecomputedSQL, the same uncorrelated union the
+// full repair and the doctor count use (blocked_consistency.go), scoped to the
+// batch: one derived blocked set per batch, computed once and probed by hash.
+// The previous shape — five correlated EXISTS per outer row — was re-executed
+// per row by the engine: ~4 s per 200-id batch on committed, indexed data, and
+// unbounded (>69 min observed on dolt 2.1.8) over a large uncommitted working
+// set, where every probe re-read the uncommitted overlay
+// (gastownhall/beads#6288).
+//
+// The parent-child legs' exogeneity set (gastownhall/beads#6506) is READ once
+// per batch and BOUND into both statements as ids, never spliced as the query
+// that derives it: spliced, a 200-id recompute paid for the derivation four
+// times and measured 6.9x origin/main (scopedExplainedParentsInTx has the
+// numbers). Which is why the templates are built per batch rather than once:
+// the number of bound ids is a property of the batch.
 //
 // The batch IN-list therefore appears more than once per statement — the
-// outer row filter plus one per union leg; expandBatchTemplate repeats the
-// placeholders and the bound ids to match.
+// outer row filter and one per union leg (six occurrences today) — and the
+// exogeneity ids appear as already-rendered ? placeholders inside two of those
+// legs. expandBatchTemplate binds both groups in TEXT order.
 
 // batchScopeSQL is the per-leg predicate that confines the should-be-blocked
-// union to the batch (see shouldBeBlockedIDsUnionScopedSQL); its %s is filled
-// with the batch placeholders by expandBatchTemplate, never by fmt here.
+// union to the batch (see shouldBeBlockedIDsUnionScopedPrecomputedSQL); its %s
+// is filled with the batch placeholders by expandBatchTemplate, and by fmt
+// here ONLY for the batch-scoped exogeneity read, which binds its own ids.
 const batchScopeSQL = "AND d.issue_id IN (%s)"
 
-func markBlockedTemplateForIssues() string {
-	return markBlockedTemplate("issues", "i", "dependencies")
+// blockedTableSpec names the one table a batched mark/unmark pass runs over.
+// The batched statements are now built per batch (the exogeneity ids are), so
+// the runner takes the table rather than a finished template.
+type blockedTableSpec struct {
+	table, alias, depTable string
 }
 
-func unmarkBlockedTemplateForIssues() string {
-	return unmarkBlockedTemplate("issues", "i", "dependencies")
+var (
+	issuesBlockedSpec = blockedTableSpec{table: "issues", alias: "i", depTable: "dependencies"}
+	wispsBlockedSpec  = blockedTableSpec{table: "wisps", alias: "w", depTable: "wisp_dependencies"}
+)
+
+func markBlockedTemplateForIssues(explained subtreeExplainedParents) string {
+	return markBlockedTemplate(issuesBlockedSpec, explained)
 }
 
-func markBlockedTemplateForWisps() string {
-	return markBlockedTemplate("wisps", "w", "wisp_dependencies")
+func unmarkBlockedTemplateForIssues(explained subtreeExplainedParents) string {
+	return unmarkBlockedTemplate(issuesBlockedSpec, explained)
 }
 
-func unmarkBlockedTemplateForWisps() string {
-	return unmarkBlockedTemplate("wisps", "w", "wisp_dependencies")
+func markBlockedTemplateForWisps(explained subtreeExplainedParents) string {
+	return markBlockedTemplate(wispsBlockedSpec, explained)
+}
+
+func unmarkBlockedTemplateForWisps(explained subtreeExplainedParents) string {
+	return unmarkBlockedTemplate(wispsBlockedSpec, explained)
 }
 
 // markBlockedTemplate is the batched mark statement for one table: the
@@ -244,54 +286,78 @@ func unmarkBlockedTemplateForWisps() string {
 // batch's own dependency rows, so `<alias>.id IN (union)` is exactly the
 // old correlated disjunction for every id in the batch.
 //
-//nolint:gosec // G201: table, alias, and depTable are constants from the four callers above.
-func markBlockedTemplate(table, alias, depTable string) string {
+//nolint:gosec // G201: the spec's fields are constants from the four callers above.
+func markBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParents) string {
 	return fmt.Sprintf(`
 		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 1, %[2]s.updated_at = %[2]s.updated_at
 		WHERE %[2]s.id IN (%%s)
 		  AND %[2]s.is_blocked = 0
 		  AND %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
 		  AND %[2]s.id IN (%[3]s)
-	`, table, alias, shouldBeBlockedIDsUnionScopedSQL(depTable, batchScopeSQL))
+	`, spec.table, spec.alias,
+		shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained))
 }
 
 // unmarkBlockedTemplate is the batched unmark statement for one table: the
 // batch-scoped analog of unmarkAllBlockedSQL. NOT IN is null-hostile; the
 // union's d.issue_id IS NOT NULL guards keep it total.
 //
-//nolint:gosec // G201: table, alias, and depTable are constants from the four callers above.
-func unmarkBlockedTemplate(table, alias, depTable string) string {
+//nolint:gosec // G201: the spec's fields are constants from the four callers above.
+func unmarkBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParents) string {
 	return fmt.Sprintf(`
 		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 0, %[2]s.updated_at = %[2]s.updated_at
 		WHERE %[2]s.id IN (%%s)
 		  AND %[2]s.is_blocked = 1
 		  AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
 		        OR %[2]s.id NOT IN (%[3]s) )
-	`, table, alias, shouldBeBlockedIDsUnionScopedSQL(depTable, batchScopeSQL))
+	`, spec.table, spec.alias,
+		shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained))
 }
 
-// expandBatchTemplate fills every %s in a batched template with the same
-// IN-list placeholders and repeats the bound ids once per occurrence, in
-// order. Templates carry the batch list in the outer row filter and in each
-// leg of the scoped union (six occurrences today); a template with a single
-// %s degrades to the plain Sprintf it always was. The count is textual, so a
-// template must contain no other percent sign (no LIKE 'x%' pattern, no %%)
-// and at least one %s — a template with none is a programmer error that
-// surfaces as an %!(EXTRA …) syntax error at exec.
+// expandBatchTemplate finishes a batched template: every %s takes the batch's
+// IN-list placeholders, and the args come out in the order the finished
+// statement reads them — the batch ids once per %s, and the already-rendered
+// ? placeholders the template carries (the two parent-child legs' exogeneity
+// ids, see notInPlaceholders) interleaved where they actually appear.
+//
+// TEXT ORDER is the whole contract, and it is why this walks the template
+// instead of counting: the batch scope and the exogeneity ids alternate inside
+// the union (leg 3's scope, leg 3's NOT IN, leg 4's scope, leg 4's NOT IN), so
+// no amount of counting says where a bound group goes. A template with one %s
+// and no ? degrades to the plain Sprintf it always was.
+//
+// The count is textual, so a template must contain no percent sign that is not
+// one of the %s verbs (no LIKE 'x%' pattern, no %%) and no ? of its own beyond
+// the bound group — both pinned by blocked_state_template_test.go. A mismatch
+// between the ? count and the bound ids is a programmer error and is returned
+// as one rather than sent to the engine, where it would surface as an opaque
+// argument-count error.
 //
 //nolint:gosec // G201: tmpl is a constant template; only IN-clause placeholders are formatted in.
-func expandBatchTemplate(tmpl, placeholders string, args []interface{}) (string, []interface{}) {
-	n := strings.Count(tmpl, "%s")
-	if n <= 1 {
-		return fmt.Sprintf(tmpl, placeholders), args
+func expandBatchTemplate(
+	tmpl, placeholders string, args, bound []interface{},
+) (string, []interface{}, error) {
+	var fills []interface{}
+	out := make([]interface{}, 0, len(args)+len(bound))
+	next := 0
+	for i := 0; i < len(tmpl); i++ {
+		switch {
+		case tmpl[i] == '%' && i+1 < len(tmpl) && tmpl[i+1] == 's':
+			fills = append(fills, placeholders)
+			out = append(out, args...)
+			i++
+		case tmpl[i] == '?':
+			if next < len(bound) {
+				out = append(out, bound[next])
+			}
+			next++
+		}
 	}
-	fills := make([]interface{}, n)
-	expanded := make([]interface{}, 0, n*len(args))
-	for k := range fills {
-		fills[k] = placeholders
-		expanded = append(expanded, args...)
+	if next != len(bound) {
+		return "", nil, fmt.Errorf(
+			"batched template carries %d ? placeholders, want %d bound ids", next, len(bound))
 	}
-	return fmt.Sprintf(tmpl, fills...), expanded
+	return fmt.Sprintf(tmpl, fills...), out, nil
 }
 
 func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
@@ -299,17 +365,35 @@ func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []stri
 		return 0, nil
 	}
 
-	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), ids)
+	return runMarkUnmarkBatchedInTx(ctx, tx, wispsBlockedSpec, ids)
 }
 
 func markIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), ids)
+	return runMarkBatchedInTx(ctx, tx, wispsBlockedSpec, ids)
 }
 
-func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl string, ids []string) (int64, error) {
+// batchExogeneity reads the batch-scoped exogeneity set for one chunk of ids:
+// ONE read for the chunk, shared by the chunk's mark and its unmark.
+//
+// It is read before the mark, so the unmark sees the set as it was at the top
+// of the chunk. That is the same staleness the unbatched full repair accepts
+// (one read per PASS, see recomputeIsBlockedCounting), and it is safe for the
+// same reason: both callers are fixpoint loops that stop only on a pass that
+// changes NO rows, and on that pass the set was read against the state the
+// pass ends in. So the state the loop converges to satisfies both predicates
+// under the set derived from that very state; a stale read can only cost an
+// extra pass, never a wrong fixpoint.
+func batchExogeneity(
+	ctx context.Context, tx DBTX, spec blockedTableSpec, placeholders string, args []interface{},
+) (subtreeExplainedParents, error) {
+	return scopedExplainedParentsInTx(ctx, tx, spec.depTable,
+		fmt.Sprintf(batchScopeSQL, placeholders), args)
+}
+
+func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
@@ -317,8 +401,16 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 			end = len(ids)
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
+		explained, err := batchExogeneity(ctx, tx, spec, placeholders, args)
+		if err != nil {
+			return changed, fmt.Errorf("recompute is_blocked (exogeneity): %w", err)
+		}
 
-		stmt, stmtArgs := expandBatchTemplate(markTmpl, placeholders, args)
+		stmt, stmtArgs, err := expandBatchTemplate(
+			markBlockedTemplate(spec, explained), placeholders, args, explained.args())
+		if err != nil {
+			return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
+		}
 		res, err := tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
@@ -329,7 +421,11 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 		}
 		changed += n
 
-		stmt, stmtArgs = expandBatchTemplate(unmarkTmpl, placeholders, args)
+		stmt, stmtArgs, err = expandBatchTemplate(
+			unmarkBlockedTemplate(spec, explained), placeholders, args, explained.args())
+		if err != nil {
+			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
+		}
 		res, err = tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
@@ -343,7 +439,7 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 	return changed, nil
 }
 
-func runMarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl string, ids []string) (int64, error) {
+func runMarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
@@ -351,8 +447,16 @@ func runMarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl string, ids []str
 			end = len(ids)
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
+		explained, err := batchExogeneity(ctx, tx, spec, placeholders, args)
+		if err != nil {
+			return changed, fmt.Errorf("mark is_blocked (exogeneity): %w", err)
+		}
 
-		stmt, stmtArgs := expandBatchTemplate(markTmpl, placeholders, args)
+		stmt, stmtArgs, err := expandBatchTemplate(
+			markBlockedTemplate(spec, explained), placeholders, args, explained.args())
+		if err != nil {
+			return changed, fmt.Errorf("mark is_blocked: %w", err)
+		}
 		res, err := tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("mark is_blocked: %w", err)
@@ -418,6 +522,9 @@ func AffectedByDepChangeInTx(ctx context.Context, tx DBTX, source, target string
 			if err := loadWaitersOnSpawnerIDsInTx(ctx, tx, []string{target}, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
 				return nil, nil, err
 			}
+			if err := appendSiblingsUnderAncestorsInTx(ctx, tx, target, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
+				return nil, nil, err
+			}
 		}
 		return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)
 	default:
@@ -436,11 +543,128 @@ func AffectedByDepChangeForWispInTx(ctx context.Context, tx DBTX, source, target
 			if err := loadWaitersOnSpawnerIDsInTx(ctx, tx, []string{target}, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
 				return nil, nil, err
 			}
+			if err := appendSiblingsUnderAncestorsInTx(ctx, tx, target, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
+				return nil, nil, err
+			}
 		}
 		return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)
 	default:
 		return nil, nil, nil
 	}
+}
+
+// appendSiblingsUnderAncestorsInTx seeds every existing parent-child child of
+// parent AND of each of parent's own ancestors (of either kind) for recompute.
+//
+// A parent-child edge onto a parent that BLOCKS on the new child reclassifies
+// that blocking reason from exogenous to subtree-derived, and the cascade legs
+// propagate only exogenous blockedness (gastownhall/beads#6506,
+// parentsExplainedBySubtreeSQL). So writing or removing one edge can flip the
+// answer for the parent's OTHER children, which no other seed in this walk
+// reaches: the close-gate epic is built one child at a time, and the second
+// edge is what un-darkens the first child.
+//
+// The walk goes all the way UP because the exogeneity test is over the whole
+// SUBTREE, not over direct children. Hanging G under C changes nothing about C
+// but everything about any ANCESTOR of C that blocks on G: that reason just
+// moved inside its subtree, so the ancestor stops darkening its own children.
+// The reviewer's depth-2 lock is exactly this shape (P blocks G; pc C -> P,
+// C2 -> P, G -> C), and only P's sibling set — not C's — carries the flip.
+// Seeding each ancestor's whole sibling set, which
+// expandByParentChildDescendantsInTx then expands to their subtrees, is what
+// keeps the incremental write path agreeing with the full repair.
+func appendSiblingsUnderAncestorsInTx(
+	ctx context.Context, tx DBTX,
+	parent string,
+	issueSeed *[]string, issueSeen map[string]bool,
+	wispSeed *[]string, wispSeen map[string]bool,
+) error {
+	parents, err := ancestorChainInTx(ctx, tx, parent)
+	if err != nil {
+		return err
+	}
+	if len(parents) == 0 {
+		return nil
+	}
+	// The parents' own kinds are not known here, so probe both target columns;
+	// the one that does not match a parent simply returns no rows.
+	for _, w := range []struct {
+		depTable, parentCol string
+		seed                *[]string
+		seen                map[string]bool
+	}{
+		{"dependencies", "depends_on_issue_id", issueSeed, issueSeen},
+		{"wisp_dependencies", "depends_on_issue_id", wispSeed, wispSeen},
+		{"dependencies", "depends_on_wisp_id", issueSeed, issueSeen},
+		{"wisp_dependencies", "depends_on_wisp_id", wispSeed, wispSeen},
+	} {
+		if err := appendChildrenInTx(ctx, tx, w.depTable, w.parentCol, parents, w.seen, w.seed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ancestorChainInTx returns id, plus every parent-child ancestor of id THAT
+// CARRIES A BLOCKING REASON OF ITS OWN — a dependency row that is not
+// parent-child. Order is not meaningful.
+//
+// The filter is what keeps the walk from being quadratic. Only an ancestor
+// that holds a blocking reason can have that reason reclassified by an edge
+// below it, so only such an ancestor's children can flip; an ancestor with
+// nothing but hierarchy edges contributes seeds that can never change. Without
+// the filter a 70-deep chain reseeds every ancestor's subtree on every edge
+// written into it, which is O(depth x size) per write and times out.
+//
+// It is the seeding twin of isAncestorInTx in dependencies.go and borrows its
+// recursion: UNION distinct, so a malformed diamond or cycle in the hierarchy
+// terminates by unique reachable node rather than running away.
+//
+//nolint:gosec // G201: the union is built from constant table names and DepTargetExpr.
+func ancestorChainInTx(ctx context.Context, tx DBTX, id string) ([]string, error) {
+	if id == "" {
+		return nil, nil
+	}
+	var unions []string
+	for _, t := range cycleDetectionTables() {
+		unions = append(unions, fmt.Sprintf(
+			"SELECT issue_id, %s AS parent_id FROM %s WHERE type = 'parent-child'", DepTargetExpr, t))
+	}
+	query := fmt.Sprintf(`
+		WITH RECURSIVE ancestors(node) AS (
+			SELECT ?
+			UNION
+			SELECT d.parent_id
+			FROM ancestors a
+			JOIN (%s) d ON d.issue_id = a.node
+		)
+		SELECT node FROM ancestors
+		WHERE node IS NOT NULL
+		  AND ( node = ?
+		     OR EXISTS (SELECT 1 FROM dependencies r
+		                WHERE r.issue_id = ancestors.node AND r.type <> 'parent-child')
+		     OR EXISTS (SELECT 1 FROM wisp_dependencies r
+		                WHERE r.issue_id = ancestors.node AND r.type <> 'parent-child') )
+	`, strings.Join(unions, " UNION "))
+
+	rows, err := tx.QueryContext(ctx, query, id, id)
+	if err != nil {
+		return nil, fmt.Errorf("load ancestor chain of %s: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var node string
+		if err := rows.Scan(&node); err != nil {
+			return nil, fmt.Errorf("scan ancestor chain of %s: %w", id, err)
+		}
+		out = append(out, node)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ancestor chain rows for %s: %w", id, err)
+	}
+	return out, nil
 }
 
 func loadBlockingDependersInTx(

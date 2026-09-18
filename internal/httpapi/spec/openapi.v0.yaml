@@ -10978,9 +10978,10 @@ components:
             With `dependency_cycle`, hierarchy refusal only: true when
             `blocker_id` is an ANCESTOR of `issue_id` (which cannot close until
             its descendants finish, so the gate would never clear), false when
-            it is a DESCENDANT (blocked status cascades, so it would inherit the
-            block and never close). Both polarities are reported; this member is
-            never omitted to mean false. See `issue_id`.
+            it is a DESCENDANT (waiting on your own subtree is a close gate, not
+            a blocks edge — use a waits-for gate over the children). Both
+            polarities are reported; this member is never omitted to mean false.
+            See `issue_id`.
         expected_version:
           type: string
           description: >-

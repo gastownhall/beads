@@ -972,6 +972,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, childParentDepsCheck)
 	// Don't fail overall check for child→parent deps, just warn
 
+	// Check 22b: Parent→own-child close gates (informational, #6506)
+	parentCloseGateCheck := convertDoctorCheck(doctor.CheckParentBlocksOwnChild(path))
+	result.Checks = append(result.Checks, parentCloseGateCheck)
+	// Informational only: these edges are legal and never fail the overall check.
+
 	// Check 23: Duplicate issues (from bd validate)
 	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))
 	result.Checks = append(result.Checks, duplicatesCheck)
