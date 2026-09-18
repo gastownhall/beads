@@ -61,11 +61,11 @@ func depEdgeDisplay(t types.DependencyType) (label string, scheduling, ok bool) 
 // orderSiblingsByDeps reorders a sibling group so that, within the group, an
 // issue that depends on another (via a scheduling edge) sorts after it — giving
 // a top-to-bottom reading that is a valid execution order. Ties and dependency
-// cycles fall back to compareIssuesByPriority (priority, then natural ID), so
-// the result is always total and never hangs on a cycle. Ordering is driven by
-// scheduling edges only, regardless of --deps mode: knowledge-graph edges
-// (related, discovered-from, ...) carry no ordering meaning.
-func orderSiblingsByDeps(siblings []*types.Issue, allDeps map[string][]*types.Dependency) []*types.Issue {
+// cycles fall back to compare, so the result is always total and never hangs
+// on a cycle. Ordering is driven by scheduling edges only, regardless of
+// --deps mode: knowledge-graph edges (related, discovered-from, ...) carry no
+// ordering meaning.
+func orderSiblingsByDeps(siblings []*types.Issue, allDeps map[string][]*types.Dependency, compare func(a, b *types.Issue) int) []*types.Issue {
 	if len(siblings) < 2 || allDeps == nil {
 		return siblings
 	}
@@ -95,14 +95,14 @@ func orderSiblingsByDeps(siblings []*types.Issue, allDeps map[string][]*types.De
 		}
 	}
 
-	// Kahn's algorithm with a priority-ordered ready set for a stable result.
+	// Kahn's algorithm with a caller-ordered ready set for a stable result.
 	ready := make([]*types.Issue, 0, len(siblings))
 	for _, s := range siblings {
 		if indeg[s.ID] == 0 {
 			ready = append(ready, s)
 		}
 	}
-	slices.SortFunc(ready, compareIssuesByPriority)
+	slices.SortFunc(ready, compare)
 
 	out := make([]*types.Issue, 0, len(siblings))
 	emitted := make(map[string]bool, len(siblings))
@@ -120,11 +120,11 @@ func orderSiblingsByDeps(siblings []*types.Issue, allDeps map[string][]*types.De
 			}
 		}
 		if grew {
-			slices.SortFunc(ready, compareIssuesByPriority)
+			slices.SortFunc(ready, compare)
 		}
 	}
 
-	// Cycle fallback: emit any remaining nodes in priority/ID order.
+	// Cycle fallback: emit any remaining nodes in the caller's order.
 	if len(out) < len(siblings) {
 		rest := make([]*types.Issue, 0, len(siblings)-len(out))
 		for _, s := range siblings {
@@ -132,7 +132,7 @@ func orderSiblingsByDeps(siblings []*types.Issue, allDeps map[string][]*types.De
 				rest = append(rest, s)
 			}
 		}
-		slices.SortFunc(rest, compareIssuesByPriority)
+		slices.SortFunc(rest, compare)
 		out = append(out, rest...)
 	}
 	return out

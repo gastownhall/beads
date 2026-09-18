@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // buildIssueTree builds parent-child tree structure from issues
@@ -23,6 +24,12 @@ func buildIssueTree(issues []*types.Issue) (roots []*types.Issue, childrenMap ma
 // (blocks, waits-for, discovered-from, relates-to, ...) are workflow/graph
 // links and are not rendered as hierarchy.
 func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.Dependency) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
+	return buildIssueTreeWithDepsOrdered(issues, allDeps, compareIssuesByPriority)
+}
+
+// buildIssueTreeWithDepsOrdered builds the same hierarchy while preserving the
+// caller's requested order within each root and sibling group.
+func buildIssueTreeWithDepsOrdered(issues []*types.Issue, allDeps map[string][]*types.Dependency, compare func(a, b *types.Issue) int) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
 	issueMap := make(map[string]*types.Issue)
 	childrenMap = make(map[string][]*types.Issue)
 	isChild := make(map[string]bool)
@@ -89,14 +96,38 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 
 	// Sort roots for stable tree ordering (fixes unstable --tree output)
 	// Use same sorting logic as children for consistency
-	slices.SortFunc(roots, compareIssuesByPriority)
+	slices.SortFunc(roots, compare)
 
 	// Sort children within each parent for stable ordering in data structure
 	for parentID := range childrenMap {
-		slices.SortFunc(childrenMap[parentID], compareIssuesByPriority)
+		slices.SortFunc(childrenMap[parentID], compare)
 	}
 
 	return roots, childrenMap
+}
+
+func compareIssuesForTree(sortBy string, reverse bool) func(a, b *types.Issue) int {
+	if sortBy == "" {
+		if reverse {
+			return func(a, b *types.Issue) int {
+				if result := cmp.Compare(a.Priority, b.Priority); result != 0 {
+					return -result
+				}
+				return utils.NaturalCompareIDs(a.ID, b.ID)
+			}
+		}
+		return compareIssuesByPriority
+	}
+	return func(a, b *types.Issue) int {
+		result := workapi.CompareIssuesBy(a, b, sortBy)
+		if reverse {
+			result = -result
+		}
+		if result != 0 {
+			return result
+		}
+		return utils.NaturalCompareIDs(a.ID, b.ID)
+	}
 }
 
 // compareIssuesByPriority provides stable sorting for tree display
@@ -112,17 +143,16 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 }
 
 // printPrettyTree recursively prints the issue tree.
-// Children are ordered by dependency then priority when dr != nil (--deps), else
-// by priority (P0 first) for intuitive reading. When dr is set, each node's
+// Children use the requested list order. With --deps, dependency order takes
+// precedence and the requested order breaks ties. When dr is set, each node's
 // dependency edges are annotated just beneath it.
-func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender) {
+func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
-		children = orderSiblingsByDeps(children, dr.allDeps)
+		children = orderSiblingsByDeps(children, dr.allDeps, compare)
 	} else {
-		// Sort children by priority using same comparison as roots for consistency
-		slices.SortFunc(children, compareIssuesByPriority)
+		slices.SortFunc(children, compare)
 	}
 
 	for i, child := range children {
@@ -138,7 +168,7 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr)
+		printPrettyTree(childrenMap, child.ID, prefix+extension, dr, compare)
 	}
 }
 
@@ -156,7 +186,7 @@ func displayPrettyList(issues []*types.Issue, showHeader bool) {
 // summary through this wrapper, and a hardcoded false silently restores the
 // vacuous "(N open, 0 in progress)" that listFooterLine exists to suppress.
 func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool, statusSelector string) {
-	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered, statusSelector)
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered, statusSelector, "", false)
 }
 
 // listFooterLine renders the one-line summary under a text listing.
@@ -217,7 +247,8 @@ func readyFooterScope(statusSelector string) string {
 // by --limit; the summary then says "Showing N" instead of "Total: N" (GH#5362).
 // readyFiltered means --ready was in force; statusSelector is the --status value
 // so the summary names the pin that actually applied — see listFooterLine.
-func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector string) {
+// sortBy and reverse preserve the requested list order within the hierarchy.
+func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -232,7 +263,8 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 		return
 	}
 
-	roots, childrenMap := buildIssueTreeWithDeps(issues, allDeps)
+	compare := compareIssuesForTree(sortBy, reverse)
+	roots, childrenMap := buildIssueTreeWithDepsOrdered(issues, allDeps, compare)
 
 	var dr *depRender
 	if depsMode != "" {
@@ -241,13 +273,13 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 			inView[issue.ID] = issue
 		}
 		dr = &depRender{mode: depsMode, allDeps: allDeps, inView: inView}
-		roots = orderSiblingsByDeps(roots, allDeps)
+		roots = orderSiblingsByDeps(roots, allDeps, compare)
 	}
 
 	for _, issue := range roots {
 		fmt.Println(formatPrettyIssue(issue))
 		dr.annotationsFor(issue.ID, "")
-		printPrettyTree(childrenMap, issue.ID, "", dr)
+		printPrettyTree(childrenMap, issue.ID, "", dr, compare)
 	}
 
 	// Summary — counts describe the shown page; never label a truncated page "Total".
