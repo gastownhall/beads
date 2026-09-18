@@ -267,3 +267,108 @@ func TestStatusBlockedDrift_GraphBlockedRowIsNeverFlaggedOrTouched(t *testing.T)
 		})
 	}
 }
+
+// statusOfIn is statusOf for either row table, so the wisps-side pass of
+// CountStatusBlockedDriftInTx/FixStatusBlockedDriftInTx can be asserted the
+// same way as the issues-side one.
+func statusOfIn(ctx context.Context, t *testing.T, db *sql.DB, table, id string) string {
+	t.Helper()
+	var status string
+	//nolint:gosec // G201: table is a hardcoded "issues" or "wisps" from the callers below.
+	if err := db.QueryRowContext(ctx, "SELECT status FROM "+table+" WHERE id = ?", id).Scan(&status); err != nil {
+		t.Fatalf("read status of %s.%s: %v", table, id, err)
+	}
+	return status
+}
+
+// TestStatusBlockedDrift_WispBlockerIsHonouredUntilItCloses pins the wisp arm
+// of the membership union — the leg that joins a dependency row's
+// depends_on_wisp_id to the wisps table. A durable issue can be blocked by an
+// ephemeral one, and that edge lives in 'dependencies' with depends_on_issue_id
+// NULL, so the issues-to-issues leg alone cannot see it.
+//
+// Both halves matter and they fail in opposite directions: drop the wisp leg
+// and the open-wisp case below reports drift on a legitimately blocked row;
+// keep it but stop checking the wisp's status and the closed-wisp case stops
+// reporting real drift. Before this test the whole leg could be deleted with
+// every status-drift test still green.
+func TestStatusBlockedDrift_WispBlockerIsHonouredUntilItCloses(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "sbw-src")
+	createWisp(t, ctx, store, "sbw-wisp")
+	addStatusDriftDep(ctx, t, store, "sbw-src", "sbw-wisp", types.DepBlocks)
+
+	// The edge really is the wisp-target shape this leg exists for: the
+	// dependency row carries depends_on_wisp_id, not depends_on_issue_id.
+	var wispTargets int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_wisp_id = ?",
+		"sbw-src", "sbw-wisp").Scan(&wispTargets); err != nil {
+		t.Fatalf("count wisp-target dependency rows: %v", err)
+	}
+	if wispTargets != 1 {
+		t.Fatalf("precondition: want 1 dependencies row with depends_on_wisp_id=sbw-wisp, got %d", wispTargets)
+	}
+	if !getIsBlocked(t, ctx, store, "issues", "sbw-src") {
+		t.Fatal("precondition: sbw-src must be is_blocked=1 — blocked by the open wisp")
+	}
+
+	markStatusBlocked(ctx, t, store, "issues", "sbw-src")
+
+	// Open wisp blocker: legitimately blocked, never drift.
+	if n := countStatusDrift(ctx, t, store.db); n != 0 {
+		t.Fatalf("wisp blocker still open: want 0 drifted rows, got %d", n)
+	}
+	if changed := fixStatusDrift(ctx, t, store.db); changed != 0 {
+		t.Fatalf("fix touched a row blocked by an open wisp: want 0 corrected, got %d", changed)
+	}
+	if got := statusOf(ctx, t, store.db, "sbw-src"); got != "blocked" {
+		t.Fatalf("after fix: sbw-src status = %q, want still blocked", got)
+	}
+
+	// Close the wisp — now nothing blocks sbw-src and the status is drift.
+	if _, err := store.db.ExecContext(ctx, "UPDATE wisps SET status = 'closed' WHERE id = ?", "sbw-wisp"); err != nil {
+		t.Fatalf("close wisp blocker: %v", err)
+	}
+	if n := countStatusDrift(ctx, t, store.db); n != 1 {
+		t.Fatalf("after wisp blocker closed: want 1 drifted row, got %d", n)
+	}
+	if changed := fixStatusDrift(ctx, t, store.db); changed != 1 {
+		t.Fatalf("fix: want 1 row corrected, got %d", changed)
+	}
+	if got := statusOf(ctx, t, store.db, "sbw-src"); got != "open" {
+		t.Fatalf("after fix: sbw-src status = %q, want open", got)
+	}
+}
+
+// TestStatusBlockedDrift_WispRowIsFlaggedAndFixed covers the other wisp-shaped
+// gap: the drifted row in the 'wisps' table itself. CountStatusBlockedDriftInTx
+// and FixStatusBlockedDriftInTx each make a second pass over
+// (wisps, wisp_dependencies, wisp_events); before this test that pass could
+// return nothing at all and every other status-drift test stayed green.
+func TestStatusBlockedDrift_WispRowIsFlaggedAndFixed(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createWisp(t, ctx, store, "sbwr-w")
+	markStatusBlocked(ctx, t, store, "wisps", "sbwr-w")
+
+	if n := countStatusDrift(ctx, t, store.db); n != 1 {
+		t.Fatalf("wisp row with no blocker: want 1 drifted row, got %d", n)
+	}
+	if changed := fixStatusDrift(ctx, t, store.db); changed != 1 {
+		t.Fatalf("fix: want 1 wisp row corrected, got %d", changed)
+	}
+	if got := statusOfIn(ctx, t, store.db, "wisps", "sbwr-w"); got != "open" {
+		t.Fatalf("after fix: wisps.sbwr-w status = %q, want open", got)
+	}
+	if n := countStatusDrift(ctx, t, store.db); n != 0 {
+		t.Fatalf("after fix: want 0 drifted rows, got %d", n)
+	}
+}
