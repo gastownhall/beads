@@ -74,6 +74,14 @@ func TestManagedLocalProxiedDoltStatusReportsLiveTopology(t *testing.T) {
 	requireManagedLocalProxiedEnv(t)
 	bd := buildEmbeddedBD(t)
 	p := bdManagedLocalInit(t, bd, "mlstat", 5*time.Minute)
+	// Exercise the symlinked temporary paths used on macOS on every Unix host.
+	linkedWorkspace := filepath.Join(t.TempDir(), "linked-workspace")
+	if err := os.Symlink(p.dir, linkedWorkspace); err != nil {
+		t.Fatalf("symlink workspace directory: %v", err)
+	}
+	p.dir = linkedWorkspace
+	p.beadsDir = filepath.Join(p.dir, ".beads")
+	p.proxyRoot = filepath.Join(p.beadsDir, "dolt")
 	bdProxiedCreate(t, bd, p.dir, "status sentinel")
 
 	proxyPid := readManagedProxyPidFile(t, p)
@@ -123,7 +131,15 @@ func TestManagedLocalProxiedDoltStatusReportsLiveTopology(t *testing.T) {
 	if got.BackendPort != backendPid.Port {
 		t.Errorf("backend_port=%d, want %d (from %s)", got.BackendPort, backendPid.Port, server.PIDFileName)
 	}
-	if got.Root != p.proxyRoot {
+	gotRoot, err := filepath.EvalSymlinks(got.Root)
+	if err != nil {
+		t.Fatalf("resolve reported root %q: %v", got.Root, err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(p.proxyRoot)
+	if err != nil {
+		t.Fatalf("resolve expected root %q: %v", p.proxyRoot, err)
+	}
+	if gotRoot != wantRoot {
 		t.Errorf("root=%q, want %q", got.Root, p.proxyRoot)
 	}
 
