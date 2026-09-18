@@ -2163,10 +2163,14 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 
 	// Also update config.yaml if requested
 	if updateConfig && yamlKey != "" {
+		yamlLocation := "config.yaml"
+		if config.IsMachineLocalKey(yamlKey) {
+			yamlLocation = config.LocalConfigFileName
+		}
 		if err := config.SetYamlConfig(yamlKey, value); err != nil {
-			fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update config.yaml: %v", err)))
+			fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update %s: %v", yamlLocation, err)))
 		} else {
-			fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
+			fmt.Printf("Set %s = %s (in %s)\n", yamlKey, value, yamlLocation)
 		}
 	}
 	return nil

@@ -172,6 +172,9 @@ var configSetCmd = &cobra.Command{
 				setErr = config.SetUserYamlConfig(key, value)
 				location = config.UserConfigYamlDisplayPath()
 			} else {
+				if config.IsMachineLocalKey(key) {
+					location = config.LocalConfigFileName
+				}
 				setErr = config.SetYamlConfig(key, value)
 			}
 			if setErr != nil {
@@ -406,6 +409,9 @@ func runConfigGetBackupEnabled() error {
 		sourceDesc = "env var"
 	case config.SourceConfigFile:
 		sourceDesc = "config.yaml"
+		if _, ok := config.MachineLocalYamlValue(key); ok {
+			sourceDesc = config.LocalConfigFileName
+		}
 	default: // SourceDefault — value came from auto-detection
 		switch {
 		case usesSQLServer():
@@ -575,6 +581,9 @@ var configUnsetCmd = &cobra.Command{
 				unsetErr = config.UnsetUserYamlConfig(key)
 				location = config.UserConfigYamlDisplayPath()
 			} else {
+				if config.IsMachineLocalKey(key) {
+					location = config.LocalConfigFileName
+				}
 				unsetErr = config.UnsetYamlConfig(key)
 			}
 			if unsetErr != nil {
