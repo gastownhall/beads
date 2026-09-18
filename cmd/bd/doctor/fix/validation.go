@@ -138,6 +138,18 @@ func ChildParentDependencies(path string, verbose bool) error {
 	}
 
 	// Both directions of hierarchy-crossing blocking deps (GH#4814).
+	//
+	// The legacy child→parent arm stays prefix-based: a real dotted child →
+	// any-ancestor blocking edge is already unreachable from the CLI via
+	// isDisallowedHierarchicalDependency (cmd/bd/dep.go), so this arm only
+	// ever fires on legacy/import rows.
+	//
+	// The parent→child arm requires a REAL parent-child edge between the pair,
+	// not just a dotted-ID coincidence. IDs and edges diverge by design after a
+	// reparent or import (cmd/bd/reparent_test.go), so a dotted-only pair with
+	// no structural link (e.g. an epic blocking on an orphaned-dotted subtask)
+	// is an ordinary "epic waits for its subtask" shape, not a deadlock, and
+	// must not be deleted (bee-ghosttrack review, PR#5131).
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.dep_table, d.issue_id, d.depends_on_id, d.type
@@ -145,7 +157,15 @@ func ChildParentDependencies(path string, verbose bool) error {
 		WHERE d.type IN ('blocks', 'conditional-blocks', 'waits-for')
 		  AND (
 			d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
-			OR d.depends_on_id LIKE CONCAT(d.issue_id, '.%')
+			OR (
+				d.depends_on_id LIKE CONCAT(d.issue_id, '.%')
+				AND EXISTS (
+					SELECT 1 FROM (` + fixDependencyUnionSQL() + `) pc
+					WHERE pc.type = 'parent-child'
+					  AND pc.issue_id = d.depends_on_id
+					  AND pc.depends_on_id = d.issue_id
+				)
+			)
 		  )
 	`
 	rows, err := db.Query(query)
