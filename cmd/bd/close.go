@@ -275,10 +275,7 @@ the flags appear in the command line.`,
 						"unblocked": unblocked,
 					})
 				}
-				fmt.Printf("\nNewly unblocked:\n")
-				for _, issue := range unblocked {
-					fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
-				}
+				printNewlyUnblocked(unblocked)
 			}
 		}
 
@@ -756,4 +753,34 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 		return nil, func() {}, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
 	}
 	return results, cleanup, nil
+}
+
+// printNewlyUnblocked reports GetNewlyUnblockedByClose's result honestly:
+// is_blocked clears automatically, so an issue at status='open'/'in_progress'
+// in this list is already visible in 'bd ready'. An issue at the manually-set
+// status='blocked' (internal/types/types.go) is not — bd never clears that
+// status on its own — so claiming it as "newly unblocked" asserts an outcome
+// that did not happen (be-ntbxt). Split the two so the still-blocked ones get
+// an accurate label and the fix that actually applies to them.
+func printNewlyUnblocked(unblocked []*types.Issue) {
+	var ready, stillBlocked []*types.Issue
+	for _, issue := range unblocked {
+		if issue.Status == types.StatusBlocked {
+			stillBlocked = append(stillBlocked, issue)
+		} else {
+			ready = append(ready, issue)
+		}
+	}
+	if len(ready) > 0 {
+		fmt.Printf("\nNewly unblocked:\n")
+		for _, issue := range ready {
+			fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
+		}
+	}
+	if len(stillBlocked) > 0 {
+		fmt.Printf("\nStill status=blocked (not in `bd ready` — run `bd recompute-blocked --status --fix`):\n")
+		for _, issue := range stillBlocked {
+			fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
+		}
+	}
 }
