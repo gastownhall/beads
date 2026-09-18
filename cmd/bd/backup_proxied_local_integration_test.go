@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // TestManagedLocalProxiedBackupRoundTrip is the claim slice S3 makes: a
@@ -64,8 +66,19 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 
 	after := bdProxiedCreate(t, bd, p.dir, "must not survive the restore", "-p", "1")
 
-	if out, err := bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force"); err != nil {
+	out, err := bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force", "--json")
+	if err != nil {
 		t.Fatalf("bd backup restore %s --force: %v\n%s", dest, err, out)
+	}
+	var result struct {
+		Restored bool   `json:"restored"`
+		Source   string `json:"source"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse restore JSON: %v\n%s", err, out)
+	}
+	if !result.Restored || result.Source != dest {
+		t.Fatalf("unexpected restore result: %+v; want restored=true, source=%s", result, dest)
 	}
 
 	// The restore quiesces the topology and leaves it down, so the next command
@@ -115,6 +128,54 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 	}
 	if out, err := bdProxiedRun(t, bd, p.dir, "backup", "sync"); err == nil {
 		t.Fatalf("bd backup sync succeeded with no destination configured:\n%s", out)
+	}
+}
+
+// A backup with a malformed migration table can replace the database but fail
+// the following provider construction at schema initialization. That failure must
+// still leave both processes down, even though no provider was returned.
+func TestManagedLocalProxiedBackupRestoreReopenFailure(t *testing.T) {
+	requireManagedLocalProxiedEnv(t)
+	bd := buildEmbeddedBD(t)
+	p := bdManagedLocalInit(t, bd, "bkrf", 5*time.Minute)
+	dest := filepath.Join(t.TempDir(), "malformed-backup")
+	if out, err := bdProxiedRun(t, bd, p.dir, "backup", "init", dest); err != nil {
+		t.Fatalf("backup init: %v\n%s", err, out)
+	}
+
+	// Damage the migration table in the backup, then repair the live table so
+	// the command's initial provider can open normally. Only its post-restore
+	// constructor will see the malformed table and fail after starting Dolt.
+	held := openHeldManagedProxiedConn(t, bd, p)
+	ctx := context.Background()
+	if _, err := held.Conn.ExecContext(ctx, "ALTER TABLE schema_migrations RENAME COLUMN version TO broken_version"); err != nil {
+		t.Fatalf("damage migration table: %v", err)
+	}
+	if _, err := held.Conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'Simulate a malformed migration table in the backup')"); err != nil {
+		t.Fatalf("commit malformed migration table: %v", err)
+	}
+	if err := versioncontrolops.BackupSync(ctx, held.Conn, proxiedBackupTargetName); err != nil {
+		t.Fatalf("back up malformed schema: %v", err)
+	}
+	if _, err := held.Conn.ExecContext(ctx, "ALTER TABLE schema_migrations RENAME COLUMN broken_version TO version"); err != nil {
+		t.Fatalf("repair live migration table: %v", err)
+	}
+	held.Release()
+
+	out, err := bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force")
+	if err == nil {
+		t.Fatalf("restore unexpectedly reopened a malformed schema:\n%s", out)
+	}
+	if !strings.Contains(string(out), "the restored database did not reopen") || !strings.Contains(string(out), "schema") {
+		t.Fatalf("expected post-restore schema initialization failure, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "restored and reconciled") {
+		t.Fatalf("failed reopen reported successful reconciliation:\n%s", out)
+	}
+	for _, name := range []string{proxy.PIDFileName, server.PIDFileName} {
+		if _, err := os.Stat(filepath.Join(p.proxyRoot, name)); !os.IsNotExist(err) {
+			t.Errorf("failed reopen should remove %s; stat error: %v", name, err)
+		}
 	}
 }
 

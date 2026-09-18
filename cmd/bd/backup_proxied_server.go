@@ -396,24 +396,30 @@ func (e *proxiedTeardownError) Unwrap() error { return e.err }
 // register of identity-assertion bypasses and names this one.
 //
 // A teardown failure is returned wrapped in *proxiedTeardownError, and only
-// when the operation itself succeeded — if the operation failed, that error is
-// the one that matters and the teardown failure is noise on top of it. Teardown
-// is attempted either way, so the topology never stays up on the error path.
+// when the operation itself succeeded. If opening or running the operation
+// failed, preserve that error and append any cleanup failure without the
+// success marker. Shutdown is attempted even if construction fails after
+// starting the topology but before returning a provider.
 func withQuiescedProxiedProvider(ctx context.Context, beadsDir, database, root string, fn func(context.Context, *sql.Conn) error) (err error) {
-	provider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, database)
+	var provider uow.UnitOfWorkProvider
+	defer func() {
+		var closeErr error
+		if provider != nil {
+			closeErr = provider.Close(ctx)
+		}
+		stopErr := proxy.Shutdown(root)
+		if teardownErr := errors.Join(closeErr, stopErr); teardownErr != nil {
+			if err != nil {
+				err = errors.Join(err, fmt.Errorf("shut down the proxied server after failure: %w", teardownErr))
+			} else {
+				err = &proxiedTeardownError{err: teardownErr}
+			}
+		}
+	}()
+	provider, err = newProxiedServerUOWProviderAdopting(ctx, beadsDir, database)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		closeErr := provider.Close(ctx)
-		stopErr := proxy.Shutdown(root)
-		if err != nil {
-			return
-		}
-		if teardownErr := errors.Join(closeErr, stopErr); teardownErr != nil {
-			err = &proxiedTeardownError{err: teardownErr}
-		}
-	}()
 
 	maintenance, ok := provider.(uow.MaintenanceProvider)
 	if !ok {
