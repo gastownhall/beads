@@ -474,9 +474,9 @@ func enrichCloneLocalFKs(dc DoctorCheck) agentEnrichment {
 func enrichChildParentDeps(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Child→parent dependencies found: %s. These are an anti-pattern where a child issue depends on its own parent. The parent-child relationship already implies ordering.", dc.Message),
+		explanation: fmt.Sprintf("Hierarchy-blocking dependencies found: %s. These are an anti-pattern where a child issue depends on its own parent, or a parent depends on/waits for its own child. The parent-child relationship already implies ordering, and either direction can deadlock ready-work.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No dependency edges between parent and child issues",
+		expected:    "No blocking dependency edges between parent and child issues in either direction",
 		commands:    []string{"bd doctor --fix --fix-child-parent"},
 		sourceFiles: []string{"cmd/bd/doctor/validation.go:CheckChildParentDependencies"},
 	}
