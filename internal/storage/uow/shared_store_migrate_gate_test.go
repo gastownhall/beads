@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -44,11 +43,12 @@ func expectBehindDatabaseThroughPreparation(mock sqlmock.Sqlmock, database strin
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, 5).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
-	// Locked preparation on a pre-existing database: the bare CREATE loses, so
-	// this init captures no fresh-bootstrap heal authority, and the USE is all
-	// it contributes.
-	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `" + database + "`")).
-		WillReturnError(&mysql.MySQLError{Number: 1007, Message: "database exists"})
+	// Locked preparation probes before any DDL, so a pre-existing database is
+	// opened without a CREATE attempt at all. The outcome is unchanged: this
+	// init did not create the database and captures no fresh-bootstrap heal
+	// authority, and the USE is all it contributes.
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW DATABASES")).
+		WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow(database))
 	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	return lockName
@@ -155,6 +155,10 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 			WithArgs(lockName, 5).
 			WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+		// Locked preparation probes before any DDL: the database is absent, so
+		// the create-enabled open proceeds to the bare CREATE.
+		mock.ExpectQuery(regexp.QuoteMeta("SHOW DATABASES")).
+			WillReturnRows(sqlmock.NewRows([]string{"Database"}))
 		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
@@ -173,7 +177,11 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 			WillReturnError(errors.New("reached the first migration statement"))
 		expectLockRelease(mock, lockName)
 
-		p := &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+		// createIfMissing: only a create-enabled open reaches the fresh CREATE
+		// after #2189; a bare open of an absent database is refused. This test
+		// pins the gate's creation-is-consent behavior, so it opens create-enabled
+		// to reach the fresh-bootstrap path it exercises.
+		p := &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", createIfMissing: true}
 		err = p.initSchema(context.Background(), "beads")
 		if err == nil || !strings.Contains(err.Error(), "reached the first migration statement") {
 			t.Fatalf("initSchema() error = %v, want the fresh bootstrap to migrate", err)
