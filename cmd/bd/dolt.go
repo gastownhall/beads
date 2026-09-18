@@ -420,6 +420,9 @@ func printAncestorPKMismatchGuidance(err error) {
 // push or pull is attempted but no Dolt remote is configured. Exits 0 because
 // the absence of a remote is a valid configuration — not an error.
 func printNoRemoteGuidance() {
+	if isQuiet() {
+		return
+	}
 	fmt.Println("No remote is configured — skipping.")
 	fmt.Println("")
 	fmt.Println("For solo use, pushing is optional — your issues are stored locally")
@@ -532,7 +535,9 @@ Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.GetBool("no-push") {
-			fmt.Println("skipping push: rig is local-only (no-push: true)")
+			if !isQuiet() {
+				fmt.Println("skipping push: rig is local-only (no-push: true)")
+			}
 			return nil
 		}
 		if isDoltLocalOnly() {
@@ -542,9 +547,11 @@ The remote must already exist (see 'bd dolt remote add').`,
 				}
 				return nil
 			}
-			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
-			fmt.Println("Your issues are stored locally in .beads/.")
-			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
+			if !isQuiet() {
+				fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
+				fmt.Println("Your issues are stored locally in .beads/.")
+				fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
+			}
 			return nil
 		}
 		ctx := context.Background()
@@ -555,7 +562,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 		force, _ := cmd.Flags().GetBool("force")
 		remote, _ := cmd.Flags().GetString("remote")
 		if remote != "" {
-			if !isQuiet() {
+			if !isQuiet() && !jsonOutput {
 				fmt.Printf("Pushing to Dolt remote %q...\n", remote)
 			}
 			if err := st.PushRemote(ctx, remote, force); err != nil {
@@ -571,7 +578,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 				}
 				return SilentExit()
 			}
-			if !isQuiet() {
+			if !isQuiet() && !jsonOutput {
 				fmt.Println("Push complete.")
 			}
 			return nil
@@ -584,7 +591,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 		} else if adopted {
 			fmt.Println("Configured Dolt remote origin from git origin.")
 		}
-		if !isQuiet() {
+		if !isQuiet() && !jsonOutput {
 			fmt.Println("Pushing to Dolt remote...")
 		}
 
@@ -611,7 +618,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 			}
 			return SilentExit()
 		}
-		if !isQuiet() {
+		if !isQuiet() && !jsonOutput {
 			fmt.Println("Push complete.")
 		}
 		return nil
@@ -645,9 +652,11 @@ reports conflicts.`,
 				}
 				return nil
 			}
-			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
-			fmt.Println("Nothing to pull.")
-			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
+			if !isQuiet() {
+				fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
+				fmt.Println("Nothing to pull.")
+				fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
+			}
 			return nil
 		}
 		ctx := context.Background()
@@ -671,7 +680,9 @@ reports conflicts.`,
 			}
 		}
 		if remote != "" {
-			fmt.Printf("Pulling from Dolt remote %q...\n", remote)
+			if !isQuiet() && !jsonOutput {
+				fmt.Printf("Pulling from Dolt remote %q...\n", remote)
+			}
 			var err error
 			if strategy != "" {
 				err = puller.PullRemoteWithStrategy(ctx, remote, strategy)
@@ -691,10 +702,14 @@ reports conflicts.`,
 				}
 				return SilentExit()
 			}
-			fmt.Println("Pull complete.")
+			if !isQuiet() && !jsonOutput {
+				fmt.Println("Pull complete.")
+			}
 			return nil
 		}
-		fmt.Println("Pulling from Dolt remote...")
+		if !isQuiet() && !jsonOutput {
+			fmt.Println("Pulling from Dolt remote...")
+		}
 		var err error
 		if strategy != "" {
 			err = puller.PullWithStrategy(ctx, strategy)
@@ -714,7 +729,9 @@ reports conflicts.`,
 			}
 			return SilentExit()
 		}
-		fmt.Println("Pull complete.")
+		if !isQuiet() && !jsonOutput {
+			fmt.Println("Pull complete.")
+		}
 		return nil
 	},
 }
@@ -760,11 +777,13 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 			}
 		}
 		if !committed {
-			fmt.Println("Nothing to commit.")
+			if !isQuiet() && !jsonOutput {
+				fmt.Println("Nothing to commit.")
+			}
 			return nil
 		}
 		commandDidExplicitDoltCommit = true
-		if !isQuiet() {
+		if !isQuiet() && !jsonOutput {
 			fmt.Println("Committed.")
 		}
 		return nil
