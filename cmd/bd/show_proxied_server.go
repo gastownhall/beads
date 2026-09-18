@@ -479,13 +479,21 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 }
 
 func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Issue, isWisp bool, in *showProxiedInput, idx int, formatTime func(time.Time) string) {
+	// The outgoing edges are read here rather than at the DEPENDS ON section
+	// below because the header needs them: the derived GATED marker
+	// (wy-j2upyy) is the gate-typed subset of this very set. Without it the
+	// proxied text route renders a plain OPEN header for a bead whose own
+	// --json already publishes gated_by. Best effort, as it always was.
+	depsWithMeta, _ := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	gates := types.GatesHolding(issue, depsWithMeta)
+
 	if idx > 0 {
 		fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
-		fmt.Printf("\n%s\n", formatIssueHeader(issue))
+		fmt.Printf("\n%s\n", formatIssueHeaderWithGates(issue, gates))
 	} else {
-		fmt.Printf("%s\n", formatIssueHeader(issue))
+		fmt.Printf("%s\n", formatIssueHeaderWithGates(issue, gates))
 	}
-	fmt.Println(formatIssueMetadata(issue))
+	fmt.Println(formatIssueMetadataWithGates(issue, gates))
 
 	if issue.Description != "" {
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
@@ -526,7 +534,7 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
-	depsWithMeta, _ := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	// (read above, with the header's gate decoration).
 	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 		printDepSection(sec)
 	}

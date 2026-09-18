@@ -417,10 +417,10 @@ func buildGateIssue(in gateCreateInput, targetID string) *types.Issue {
 		title = in.titleFlag
 	}
 
-	desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetID)
-	if in.reason != "" {
-		desc = fmt.Sprintf("%s\n\nReason: %s", desc, in.reason)
-	}
+	// types owns the description format because it also owns the read back
+	// out of it (types.GateReason), which is what puts the reason on
+	// `bd show`'s "Gated by:" line and in the detail view's gated_by.
+	desc := types.GateDescription(targetID, in.reason)
 
 	return &types.Issue{
 		Title:       title,

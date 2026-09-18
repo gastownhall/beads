@@ -1169,6 +1169,17 @@ type IssueDetails struct {
 	// Comments slice or a zero count: a true empty stays plain omission.
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
+	// GatedBy names the gates actively blocking this issue — the derived
+	// GATED decoration `bd show` renders in its header, as data. ADDITIVE and
+	// omitted when empty: nothing else on this view changes shape, and the
+	// stored status stays whatever it is (an open issue an open gate blocks
+	// still reads "open" here). The rule is types.GatesHolding — the gate
+	// clause of the readiness query's is_blocked column, subject half
+	// included — so this list is nonempty exactly when `bd ready` withholds
+	// the issue on a gate's account, and a closed or pinned issue carries no
+	// gated_by at all.
+	GatedBy []GateRef `json:"gated_by,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`

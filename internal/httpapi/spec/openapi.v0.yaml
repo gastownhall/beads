@@ -6606,6 +6606,34 @@ components:
         comment_count:
           type: integer
           format: int64
+        gated_by:
+          type: array
+          description: >-
+            The gates actively blocking this issue: gate-typed dependencies
+            reached over a `blocks` or `conditional-blocks` edge whose own
+            status is neither closed nor pinned, on an issue that is itself
+            neither closed nor pinned. ADDITIVE and absent when empty. It is
+            DERIVED, not stored — `status` is unaffected, and an open issue an
+            open gate blocks still reports `open` — and both clauses are the
+            ones the readiness query's is_blocked column applies, so a nonempty
+            list means `bd ready` withholds this issue on a gate's account.
+            A `waits-for` edge onto a gate is deliberately NOT here: that leg
+            of the readiness rule is a fanout over the gate's children rather
+            than a status test, and it can leave the issue ready.
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: The gate issue's id; close it with `bd gate resolve`.
+              type:
+                type: string
+                description: >-
+                  The gate's await condition (human, timer, gh:run, gh:pr,
+                  bead), or `gate` when it carries none.
+              reason:
+                type: string
+                description: The reason recorded when the gate was created, if any.
         comments_omitted:
           type: boolean
           description: >-

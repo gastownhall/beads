@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -115,7 +116,7 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 // Children are ordered by dependency then priority when dr != nil (--deps), else
 // by priority (P0 first) for intuitive reading. When dr is set, each node's
 // dependency edges are annotated just beneath it.
-func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender) {
+func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, gated map[string][]string) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
@@ -131,14 +132,14 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 		if isLast {
 			connector = "└── "
 		}
-		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssue(child))
+		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssueGated(child, gated[child.ID]))
 
 		extension := "│   "
 		if isLast {
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr)
+		printPrettyTree(childrenMap, child.ID, prefix+extension, dr, gated)
 	}
 }
 
@@ -156,7 +157,7 @@ func displayPrettyList(issues []*types.Issue, showHeader bool) {
 // summary through this wrapper, and a hardcoded false silently restores the
 // vacuous "(N open, 0 in progress)" that listFooterLine exists to suppress.
 func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool, statusSelector string) {
-	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered, statusSelector)
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered, statusSelector, nil)
 }
 
 // listFooterLine renders the one-line summary under a text listing.
@@ -217,7 +218,10 @@ func readyFooterScope(statusSelector string) string {
 // by --limit; the summary then says "Showing N" instead of "Total: N" (GH#5362).
 // readyFiltered means --ready was in force; statusSelector is the --status value
 // so the summary names the pin that actually applied — see listFooterLine.
-func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector string) {
+// gated maps each listed id to the OPEN gates holding it (gatesByIssueID);
+// nil means the caller computed no gate decoration, and every row renders as
+// it always did.
+func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector string, gated map[string][]string) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -245,9 +249,9 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 	}
 
 	for _, issue := range roots {
-		fmt.Println(formatPrettyIssue(issue))
+		fmt.Println(formatPrettyIssueGated(issue, gated[issue.ID]))
 		dr.annotationsFor(issue.ID, "")
-		printPrettyTree(childrenMap, issue.ID, "", dr)
+		printPrettyTree(childrenMap, issue.ID, "", dr, gated)
 	}
 
 	// Summary — counts describe the shown page; never label a truncated page "Total".
@@ -265,7 +269,14 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 	}
 	fmt.Println(listFooterLine(len(issues), openCount, inProgressCount, truncated, readyFiltered, statusSelector))
 	fmt.Println()
-	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	// The gated glyph joins the legend only when the page actually carries one:
+	// it is a derived decoration, not a status, and a permanent entry would
+	// promise a row shape most listings never show.
+	statusLegend := "Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred"
+	if len(gated) > 0 {
+		statusLegend += "  " + ui.StatusIconGated + " gated (open gate; not in bd ready)"
+	}
+	fmt.Println(statusLegend)
 	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
 	if dr != nil {
 		fmt.Printf("Deps:   %s = depends-on / relationship (points to target); siblings ordered so dependencies come first; ↗ = target outside current view\n", depGlyph)
