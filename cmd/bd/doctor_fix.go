@@ -37,7 +37,7 @@ func collectFixableIssues(result doctorResult) (dbFixes, fsFixes []doctorCheck) 
 
 // previewFixes shows what would be fixed without applying changes. A dry run
 // writes nothing, so it is never refused on schema grounds; the gate decides
-// how each fix is labelled, not whether the preview runs.
+// how each fix is labeled, not whether the preview runs.
 func previewFixes(result doctorResult, gate doctor.FixGate) {
 	if gate.Reason != "" {
 		fmt.Printf("\n%s Schema gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
