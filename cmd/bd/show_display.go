@@ -16,8 +16,29 @@ import (
 
 // displayShowIssue displays a single issue (reusable for watch mode).
 // Matches the full bd show output: header, metadata, content, labels, deps, comments.
-func displayShowIssue(ctx context.Context, issueID string) {
-	displayShowIssueReturn(ctx, issueID)
+// commentsTail is the --comments-tail render cap; see printComments.
+func displayShowIssue(ctx context.Context, issueID string, commentsTail int) {
+	displayShowIssueReturn(ctx, issueID, commentsTail)
+}
+
+// watchCommentFormatTime is the watch path's comment timestamp formatter.
+// It reproduces, byte for byte, what the inline COMMENTS block here always
+// did before printComments existed: UTC, unconditionally — this path does
+// not read --local-time today (a pre-existing gap from the non-watch
+// render), and this change does not alter that.
+func watchCommentFormatTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04")
+}
+
+// renderWatchComments prints the watch path's COMMENTS section, applying the
+// same --comments-tail cap as the other two show routes, always through
+// watchCommentFormatTime. Split out from displayShowIssueReturn as its own
+// function so tests can exercise the watch path's exact render call —
+// commentsTail plumbed all the way to printComments — without going through
+// displayShowIssueReturn itself, which resolves the issue via a live store
+// and so needs a real database.
+func renderWatchComments(comments []*types.Comment, commentsTail int, issueID string) {
+	printComments(comments, commentsTail, watchCommentFormatTime, issueID)
 }
 
 // singleIssueSnapshot builds a comparable string from a single issue's state
@@ -28,10 +49,12 @@ func singleIssueSnapshot(issue *types.Issue) string {
 
 // watchIssue polls for changes to an issue and auto-refreshes the display (GH#654).
 // Uses polling instead of fsnotify because Dolt stores data in a server-side
-// database, not files — file watchers never fire.
-func watchIssue(ctx context.Context, issueID string) {
+// database, not files — file watchers never fire. commentsTail is the
+// --comments-tail render cap, threaded through to every render this loop
+// does (initial and on each refresh); see printComments.
+func watchIssue(ctx context.Context, issueID string, commentsTail int) {
 	// Initial display and snapshot
-	issue := displayShowIssueReturn(ctx, issueID)
+	issue := displayShowIssueReturn(ctx, issueID, commentsTail)
 	if issue == nil {
 		return
 	}
@@ -61,7 +84,7 @@ func watchIssue(ctx context.Context, issueID string) {
 			snap := singleIssueSnapshot(issue)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayShowIssue(ctx, issueID)
+				displayShowIssue(ctx, issueID, commentsTail)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
 		}
@@ -81,7 +104,7 @@ func fetchIssue(ctx context.Context, issueID string) *types.Issue {
 }
 
 // displayShowIssueReturn displays a single issue and returns it for snapshot use.
-func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
+func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail int) *types.Issue {
 	result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 	if result != nil {
 		defer result.Close()
@@ -137,18 +160,12 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 	// Related (bidirectional, deduplicated)
 	printRelatedSection(relatedSeen)
 
-	// Comments
+	// Comments. watchCommentFormatTime hardcodes UTC — this path does not
+	// thread --local-time today (a pre-existing discrepancy from the
+	// non-watch render, left alone here; only the --comments-tail cap is
+	// wired through).
 	comments, _ := issueStore.GetIssueComments(ctx, issue.ID)
-	if len(comments) > 0 {
-		fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
-		for _, comment := range comments {
-			fmt.Printf("  %s %s\n", ui.RenderMuted(comment.CreatedAt.UTC().Format("2006-01-02 15:04")), comment.Author)
-			rendered := uimd.RenderMarkdown(comment.Text)
-			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-				fmt.Printf("    %s\n", line)
-			}
-		}
-	}
+	renderWatchComments(comments, commentsTail, issue.ID)
 
 	fmt.Println()
 	return issue
