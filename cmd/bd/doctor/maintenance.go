@@ -185,8 +185,8 @@ func CheckStaleMolecules(path string) DoctorCheck {
 	}
 
 	return DoctorCheck{
-		Name:     "Stale Molecules",
-		Status:   StatusWarning,
+		Name:   "Stale Molecules",
+		Status: StatusWarning,
 		// Wording: all children closed with completing reasons — still review
 		// before close (scope may exceed the child set). GH#5026.
 		Message:  fmt.Sprintf("%d molecule(s) with all children closed (review scope before closing)", staleCount),
