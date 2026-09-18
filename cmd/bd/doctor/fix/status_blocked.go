@@ -8,10 +8,11 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
-// FixStatusBlockedDrift repairs status='blocked' rows left behind after their
-// last 'blocks' dependency closed, or that never had one recorded at all
+// FixStatusBlockedDrift repairs status='blocked' rows the dependency graph no
+// longer holds blocked — every blocker closed, or none was ever recorded
 // (be-ntbxt): nothing else clears that manual status, so 'bd ready' never
-// sees them again without this fix.
+// sees them again without this fix. Rows the graph DOES still hold blocked,
+// by any edge type, are left alone.
 //
 // Mirrors RecomputeBlocked: opens its own writable store, repairs in a
 // transaction, and stages only the table it touched so an unrelated dirty

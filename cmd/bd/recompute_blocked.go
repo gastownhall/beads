@@ -33,10 +33,11 @@ storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
 is server-mode only).
 
 --status checks a different drift instead: issues/wisps left at the manually-
-set status='blocked' after every 'blocks' dependency closed, or with none ever
-recorded (be-ntbxt). Nothing else clears that status, so 'bd close
---suggest-next' can report an issue as newly unblocked while it stays invisible
-to 'bd ready' forever. --status is report-only unless paired with --fix.
+set status='blocked' that the dependency graph no longer holds blocked — every
+blocker closed, or none was ever recorded (be-ntbxt). Nothing else clears that
+status, so 'bd close --suggest-next' can report an issue as newly unblocked
+while it stays invisible to 'bd ready' forever. A row still held blocked by any
+edge type is left alone. --status is report-only unless paired with --fix.
 
 Examples:
   bd recompute-blocked                  # Repair stale is_blocked flags

@@ -13,8 +13,11 @@ import (
 const StatusBlockedDriftCheckName = "Status Blocked Drift"
 
 // CheckStatusBlockedDriftWithStore reports issues and wisps left at the
-// manually-set status='blocked' after their last 'blocks' dependency closed,
-// or that never had one recorded at all (be-ntbxt). Nothing else clears that
+// manually-set status='blocked' after the last thing blocking them stopped
+// blocking them, or that never had a blocker recorded at all (be-ntbxt).
+// "Blocking" is the dependency graph's own definition — the same one is_blocked
+// is derived from — so a row still held by conditional-blocks, an inherited
+// parent-child block or a waits-for gate is not drift. Nothing else clears the
 // manual status, so 'bd close --suggest-next' can report an issue as newly
 // unblocked while it stays invisible to 'bd ready' forever — this drift
 // stranded 29 beads fleet-wide (3 of them P1) before this check shipped. The
@@ -53,7 +56,7 @@ func checkStatusBlockedDriftWithStore(ctx context.Context, store *dolt.DoltStore
 		Name:    StatusBlockedDriftCheckName,
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d issue/wisp row(s) marked status=blocked with no open blocker — invisible to 'bd ready' until fixed", drifted),
-		Detail:  "status='blocked' is a manual field; nothing else clears it once the last 'blocks' dependency closes (be-ntbxt)",
+		Detail:  "status='blocked' is a manual field; nothing else clears it once the graph stops holding the row blocked (be-ntbxt)",
 		Fix:     "Run: bd doctor --fix (or 'bd recompute-blocked --status --fix', which also works in embedded mode)",
 	}
 }

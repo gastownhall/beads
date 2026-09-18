@@ -393,7 +393,7 @@ func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error
 }
 
 // CountStatusBlockedDrift reports how many issues/wisps carry the manually-set
-// status='blocked' despite having no open 'blocks' dependency left — the
+// status='blocked' that the dependency graph no longer holds blocked — every
 // blocker closed, or none was ever recorded. Read-only: it never mutates
 // state. This is the embedded path of the mode-independent detector
 // (be-ntbxt); see DoltStore.CountStatusBlockedDrift.

@@ -734,11 +734,13 @@ func runDiagnostics(path string) doctorResult {
 	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
-	// Check 10c2: status='blocked' drift — a manual status left behind after
-	// its last 'blocks' dependency closed, or with none ever recorded
-	// (be-ntbxt). Distinct from 10c: is_blocked is derived and self-heals via
-	// recompute, but status is a manual field nothing else clears, so a
-	// drifted row stays invisible to 'bd ready' forever without this fix.
+	// Check 10c2: status='blocked' drift — a manual status left behind on a row
+	// the dependency graph no longer holds blocked (be-ntbxt). Distinct from
+	// 10c only in which column it repairs: both read blockedness from the one
+	// shouldBeBlockedIDsUnionSQL definition, but is_blocked is derived and
+	// self-heals via recompute, while status is a manual field nothing else
+	// clears, so a drifted row stays invisible to 'bd ready' forever without
+	// this fix.
 	// Warn-only for the same reason as 10c: this ships into databases that
 	// already carry the damage (29 beads fleet-wide at the time of the fix).
 	statusBlockedDriftCheck := convertWithCategory(doctor.CheckStatusBlockedDriftWithStore(sharedStore), doctor.CategoryData)

@@ -158,3 +158,112 @@ func TestStatusBlockedDrift_OpenBlockerIsNeverFlaggedOrTouched(t *testing.T) {
 		t.Fatalf("fix must not touch a legitimately blocked row: status = %q, want still blocked", got)
 	}
 }
+
+// addStatusDriftDep adds one dependency edge through the normal write path, so
+// is_blocked is maintained exactly as it would be in production.
+func addStatusDriftDep(ctx context.Context, t *testing.T, store *DoltStore, src, tgt string, typ types.DependencyType) {
+	t.Helper()
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: src, DependsOnID: tgt, Type: typ}, "tester"); err != nil {
+		t.Fatalf("add dep %s -> %s (%s): %v", src, tgt, typ, err)
+	}
+}
+
+// markStatusBlocked sets the manual status enum directly, mirroring how the
+// fleet-wide victims in be-ntbxt got there (types.StatusBlocked is a manual
+// value that nothing auto-clears).
+func markStatusBlocked(ctx context.Context, t *testing.T, store *DoltStore, table, id string) {
+	t.Helper()
+	//nolint:gosec // G201: table is a hardcoded "issues" or "wisps" from the callers below.
+	if _, err := store.db.ExecContext(ctx, "UPDATE "+table+" SET status = 'blocked' WHERE id = ?", id); err != nil {
+		t.Fatalf("seed status=blocked on %s.%s: %v", table, id, err)
+	}
+}
+
+// TestStatusBlockedDrift_GraphBlockedRowIsNeverFlaggedOrTouched extends
+// TestStatusBlockedDrift_OpenBlockerIsNeverFlaggedOrTouched to every OTHER
+// reason the dependency graph holds a row blocked. "Blocked" is defined once,
+// by shouldBeBlockedIDsUnionSQL in blocked_consistency.go — the same predicate
+// is_blocked itself is derived from — and it counts conditional-blocks, an
+// inherited block through parent-child, and a held waits-for gate alongside
+// plain 'blocks'. A drift predicate that knows only 'blocks' reports each of
+// these as drift and force-opens a row the graph still holds blocked: the
+// exact regression the open-blocker test guards, one edge type over.
+//
+// Every case asserts is_blocked = 1 first, so a subtest that stops failing
+// because its seeding stopped producing a blocked row fails loudly instead of
+// passing vacuously.
+func TestStatusBlockedDrift_GraphBlockedRowIsNeverFlaggedOrTouched(t *testing.T) {
+	cases := []struct {
+		name    string
+		subject string
+		seed    func(ctx context.Context, t *testing.T, store *DoltStore)
+	}{
+		{
+			// A conditional-blocks edge to a still-open target.
+			name:    "conditional-blocks on an open target",
+			subject: "sbg-cb-src",
+			seed: func(ctx context.Context, t *testing.T, store *DoltStore) {
+				createPerm(t, ctx, store, "sbg-cb-tgt")
+				createPerm(t, ctx, store, "sbg-cb-src")
+				addStatusDriftDep(ctx, t, store, "sbg-cb-src", "sbg-cb-tgt", types.DepConditionalBlocks)
+			},
+		},
+		{
+			// A child inheriting its parent's block: the child itself has no
+			// blocking edge of its own, only the parent-child edge upward.
+			name:    "parent-child under a blocked parent",
+			subject: "sbg-pc-child",
+			seed: func(ctx context.Context, t *testing.T, store *DoltStore) {
+				createPerm(t, ctx, store, "sbg-pc-blocker")
+				createPerm(t, ctx, store, "sbg-pc-parent")
+				createPerm(t, ctx, store, "sbg-pc-child")
+				addStatusDriftDep(ctx, t, store, "sbg-pc-parent", "sbg-pc-blocker", types.DepBlocks)
+				addStatusDriftDep(ctx, t, store, "sbg-pc-child", "sbg-pc-parent", types.DepParentChild)
+			},
+		},
+		{
+			// A waits-for gate held open by an active child of the spawner —
+			// the waiter has no blocks/conditional-blocks edge at all.
+			name:    "waits-for gate held by an active child",
+			subject: "sbg-wf-waiter",
+			seed: func(ctx context.Context, t *testing.T, store *DoltStore) {
+				createPerm(t, ctx, store, "sbg-wf-spawner")
+				createPerm(t, ctx, store, "sbg-wf-child")
+				createPerm(t, ctx, store, "sbg-wf-waiter")
+				addStatusDriftDep(ctx, t, store, "sbg-wf-child", "sbg-wf-spawner", types.DepParentChild)
+				addStatusDriftDep(ctx, t, store, "sbg-wf-waiter", "sbg-wf-spawner", types.DepWaitsFor)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			tc.seed(ctx, t, store)
+
+			// The graph's own verdict, before status is touched at all. If
+			// this is false the case is not testing what it claims to.
+			if !getIsBlocked(t, ctx, store, "issues", tc.subject) {
+				t.Fatalf("precondition: %s must be is_blocked=1 — the graph holds it blocked", tc.subject)
+			}
+			markStatusBlocked(ctx, t, store, "issues", tc.subject)
+
+			if n := countStatusDrift(ctx, t, store.db); n != 0 {
+				t.Fatalf("%s is still blocked by the graph: want 0 drifted rows, got %d", tc.subject, n)
+			}
+			if changed := fixStatusDrift(ctx, t, store.db); changed != 0 {
+				t.Fatalf("fix touched a graph-blocked row: want 0 corrected, got %d", changed)
+			}
+			if got := statusOf(ctx, t, store.db, tc.subject); got != "blocked" {
+				t.Fatalf("after fix: %s status = %q, want still blocked", tc.subject, got)
+			}
+			if !getIsBlocked(t, ctx, store, "issues", tc.subject) {
+				t.Fatalf("after fix: %s must still read is_blocked=1", tc.subject)
+			}
+		})
+	}
+}

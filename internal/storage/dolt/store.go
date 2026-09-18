@@ -4668,7 +4668,7 @@ func blockedRecomputeStagedTableList() []string {
 }
 
 // CountStatusBlockedDrift reports how many issues/wisps carry the manually-set
-// status='blocked' despite having no open 'blocks' dependency left — the
+// status='blocked' that the dependency graph no longer holds blocked — every
 // blocker closed, or none was ever recorded. Read-only: it never mutates
 // state. See storage.StatusBlockedDriftRecomputer (be-ntbxt).
 func (s *DoltStore) CountStatusBlockedDrift(ctx context.Context) (int, error) {

@@ -7,34 +7,28 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// openBlockersIDsSQL selects, uncorrelated with any outer row, every depTable
-// issue_id that currently has at least one open (non-closed, non-pinned)
-// 'blocks'-type dependency target. This is the same has-a-blocker test
-// GetNewlyUnblockedByCloseInTx already applies when it decides an issue
-// counts as "newly unblocked" — reused here to detect the be-ntbxt drift
-// instead: status='blocked' rows for which this set does NOT contain the id.
+// The three templates below all decide membership through
+// shouldBeBlockedIDsUnionSQL (blocked_consistency.go) — deliberately the very
+// same builder is_blocked is derived from, not a second predicate that happens
+// to agree today. "Blocked" is defined in exactly one place: an open
+// blocks/conditional-blocks target (issue or wisp), a parent-child parent that
+// is itself blocked, or a held waits-for gate.
 //
-//nolint:gosec // G201: depTable is a hardcoded constant from the two callers below.
-func openBlockersIDsSQL(depTable string) string {
-	return fmt.Sprintf(`
-		SELECT d.issue_id FROM %[1]s d
-		JOIN issues t ON t.id = d.depends_on_issue_id
-		WHERE d.issue_id IS NOT NULL
-		  AND d.type = 'blocks'
-		  AND t.status <> 'closed' AND t.status <> 'pinned'
-		UNION
-		SELECT d.issue_id FROM %[1]s d
-		JOIN wisps t ON t.id = d.depends_on_wisp_id
-		WHERE d.issue_id IS NOT NULL
-		  AND d.type = 'blocks'
-		  AND t.status <> 'closed' AND t.status <> 'pinned'
-	`, depTable)
-}
+// This detector originally carried its own narrower 'blocks'-only union, on the
+// reasoning that it was the has-a-blocker test GetNewlyUnblockedByCloseInTx
+// already applies. That was the wrong set to borrow: that function only ever
+// looks at issues the just-closed bead was a 'blocks' target of, so it never
+// had to define blockedness in general. Against the whole table the narrow
+// predicate reported every OTHER kind of still-blocked row as drift, and
+// --fix then force-opened rows the graph holds blocked while is_blocked stayed
+// 1 (gastownhall/beads#6565 review). Do not re-narrow this: the regression is
+// invisible until a conditional-blocks, parent-child or waits-for bead is
+// force-opened in someone's database.
 
 // countStatusBlockedDriftSQL counts rows in table left at status='blocked'
-// despite having no id in openBlockersIDsSQL(depTable) — the manual status
-// enum (internal/types/types.go:511) disagreeing with the dependency graph
-// because the blocker closed, or because none was ever recorded at all.
+// despite having no id in shouldBeBlockedIDsUnionSQL(depTable) — the manual
+// status enum (internal/types/types.go:511) disagreeing with the dependency
+// graph because every blocker closed, or because none was ever recorded.
 //
 //nolint:gosec // G201: table and depTable are hardcoded constants from the two callers below.
 func countStatusBlockedDriftSQL(table, depTable string) string {
@@ -42,7 +36,7 @@ func countStatusBlockedDriftSQL(table, depTable string) string {
 		SELECT COUNT(*) FROM %[1]s
 		WHERE status = 'blocked'
 		  AND id NOT IN (%[2]s)
-	`, table, openBlockersIDsSQL(depTable))
+	`, table, shouldBeBlockedIDsUnionSQL(depTable))
 }
 
 // selectStatusBlockedDriftSQL is the id-listing analog of
@@ -56,7 +50,7 @@ func selectStatusBlockedDriftSQL(table, depTable string) string {
 		SELECT id FROM %[1]s
 		WHERE status = 'blocked'
 		  AND id NOT IN (%[2]s)
-	`, table, openBlockersIDsSQL(depTable))
+	`, table, shouldBeBlockedIDsUnionSQL(depTable))
 }
 
 // fixOneStatusBlockedDriftSQL is fixStatusBlockedDriftInTable's per-row
@@ -73,7 +67,7 @@ func fixOneStatusBlockedDriftSQL(table, depTable string) string {
 		SET status = 'open'
 		WHERE id = ? AND status = 'blocked'
 		  AND id NOT IN (%[2]s)
-	`, table, openBlockersIDsSQL(depTable))
+	`, table, shouldBeBlockedIDsUnionSQL(depTable))
 }
 
 // fixStatusBlockedDriftActor is recorded as the actor on both the audit event
@@ -86,8 +80,11 @@ const fixStatusBlockedDriftActor = "bd-status-blocked-drift-fix"
 // CountStatusBlockedDriftInTx is the read-only detection behind the bd doctor
 // "Status Blocked Drift" check and the 'bd recompute-blocked --status' flag
 // (be-ntbxt): issues/wisps whose manually-set status='blocked' disagrees with
-// the dependency graph, either because every 'blocks' target has since closed
-// or because none was ever recorded. The repair is FixStatusBlockedDriftInTx.
+// the dependency graph, either because every blocker has since closed or
+// because none was ever recorded. "Blocker" here means whatever
+// shouldBeBlockedIDsUnionSQL means by it, so a row the graph still holds
+// blocked through conditional-blocks, an inherited parent-child block or a
+// waits-for gate is never drift. The repair is FixStatusBlockedDriftInTx.
 func CountStatusBlockedDriftInTx(ctx context.Context, tx DBTX) (int64, error) {
 	var total int64
 
@@ -111,9 +108,10 @@ func CountStatusBlockedDriftInTx(ctx context.Context, tx DBTX) (int64, error) {
 
 // FixStatusBlockedDriftInTx returns every drifted status='blocked' row (see
 // CountStatusBlockedDriftInTx) to status='open' and reports how many rows it
-// corrected. A legitimately blocked row — status='blocked' with a still-open
-// 'blocks' target — is never touched: the membership test is identical to
-// the count, so a converged database (count == 0) leaves this a no-op.
+// corrected. A legitimately blocked row — one the dependency graph still holds
+// blocked by any of the reasons shouldBeBlockedIDsUnionSQL enumerates — is
+// never touched: the membership test is identical to the count, so a converged
+// database (count == 0) leaves this a no-op.
 //
 // This does not decide whether 'bd close' should perform this transition
 // automatically; that is out of scope for be-ntbxt (a manual status may mean

@@ -336,12 +336,13 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// fix, recomputing from the corrected graph.
 			err = fix.RecomputeBlocked(path)
 		case "Status Blocked Drift":
-			// be-ntbxt: returns status='blocked' rows with no open 'blocks'
-			// dependency to status='open'. Reads the same graph tables as
-			// "Blocked State" but writes a different column (status, not
-			// is_blocked), so the two fixes don't order against each other —
-			// only after the graph-mutating fixes above, which the default
-			// same-tier append order already guarantees.
+			// be-ntbxt: returns status='blocked' rows the dependency graph no
+			// longer holds blocked to status='open'. Shares its membership
+			// test with "Blocked State" (shouldBeBlockedIDsUnionSQL) but
+			// writes a different column (status, not is_blocked), so the two
+			// fixes don't order against each other — only after the
+			// graph-mutating fixes above, which the default same-tier append
+			// order already guarantees.
 			err = fix.FixStatusBlockedDrift(path)
 		case "Child-Parent Dependencies":
 			// Requires explicit opt-in flag (destructive, may remove intentional deps)
