@@ -328,10 +328,16 @@ var configGetCmd = &cobra.Command{
 			value := config.GetYamlConfig(key)
 
 			if jsonOutput {
+				// Report real provenance through the same viperSourceLabel
+				// `bd config show` uses, instead of hardcoding "config.yaml"
+				// for every key (including defaults and unset keys) — that
+				// hid whether a value was actually project-set or just a
+				// Viper default (GH#5049), and a second provenance mapping
+				// here would only drift from that one.
 				return outputJSON(map[string]interface{}{
 					"key":      key,
 					"value":    value,
-					"location": "config.yaml",
+					"location": viperSourceLabel(key, config.GetValueSource(key)),
 				})
 			}
 			if value == "" {
