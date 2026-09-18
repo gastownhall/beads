@@ -285,9 +285,14 @@ func TestTransactHonoringAutoCommitBlanksMessageInServerBatch(t *testing.T) {
 	}
 }
 
-// TestIssueOpsContextDefersByModeInProxiedServerMode covers GH#4995: batch/off must
-// defer the Dolt version commit in proxied-server mode, matching direct SQL-server mode.
-func TestIssueOpsContextDefersByModeInProxiedServerMode(t *testing.T) {
+// TestIssueOpsContextDefersByModePolicyTable pins the policy half of GH#4995:
+// issueOpsContext defers the Dolt version commit for batch/off and does not for
+// on/unset. It deliberately does not claim to cover the proxied-server wiring —
+// issueOpsContext branches only on writesCommitNow(), never on the storage
+// mode, so setting proxiedServerMode here would prove nothing. The proxied
+// wiring is pinned by TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
+// and the deferral itself by the doltserver_tx tests.
+func TestIssueOpsContextDefersByModePolicyTable(t *testing.T) {
 	for _, tc := range []struct {
 		mode         string
 		wantDeferred bool
@@ -300,7 +305,7 @@ func TestIssueOpsContextDefersByModeInProxiedServerMode(t *testing.T) {
 		t.Run("mode="+tc.mode, func(t *testing.T) {
 			saveStorageMode(t)
 			serverMode = false
-			proxiedServerMode = true
+			proxiedServerMode = false
 			doltAutoCommit = tc.mode
 
 			ctx, err := issueOpsContext(context.Background())
@@ -308,7 +313,7 @@ func TestIssueOpsContextDefersByModeInProxiedServerMode(t *testing.T) {
 				t.Fatalf("issueOpsContext: %v", err)
 			}
 			if got := storageissueops.VersionCommitDeferred(ctx); got != tc.wantDeferred {
-				t.Fatalf("VersionCommitDeferred = %v, want %v for mode %q in proxied server mode", got, tc.wantDeferred, tc.mode)
+				t.Fatalf("VersionCommitDeferred = %v, want %v for mode %q", got, tc.wantDeferred, tc.mode)
 			}
 		})
 	}

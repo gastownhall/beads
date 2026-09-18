@@ -255,7 +255,7 @@ func TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit(t *testing.T) {
 
 	ctx := issueops.WithDeferredVersionCommit(context.Background())
 	err := RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {
-		return "bd: update bd-4995", nil
+		return "bd: update GH#4995", nil
 	})
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
