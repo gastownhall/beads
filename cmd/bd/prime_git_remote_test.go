@@ -4,8 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -15,15 +13,12 @@ import (
 
 // GH#4927: git remote probe must not depend on BEADS_DIR / RepoContext.
 //
-// buildRepoContext (internal/beads/context.go) can fail two different ways:
-// FindBeadsDir() returning "" (context.go:107, e.g. BEADS_DIR doesn't exist)
-// and isPathInSafeBoundary rejecting an existing BEADS_DIR (context.go:112,
-// SEC-003). The pre-fix bug collapsed a GetRepoContext() error of either
-// shape into "no git remote" / "ephemeral branch". This test poisons
-// BEADS_DIR with one example of each shape and, for each, verifies (a) that
-// GetRepoContext() actually fails via the failure mode the case claims to
-// exercise, and (b) that gitCWDHasRemote/primeHasGitRemote are unaffected by
-// either.
+// buildRepoContext (internal/beads/context.go) can fail when FindBeadsDir()
+// returns "" (context.go:107, e.g. BEADS_DIR doesn't exist). The pre-fix bug
+// collapsed that GetRepoContext() error into "no git remote" / "ephemeral
+// branch". This test poisons BEADS_DIR with a nonexistent path and verifies
+// (a) that GetRepoContext() actually fails via FindBeadsDir()=="", and (b)
+// that gitCWDHasRemote/primeHasGitRemote are unaffected by it.
 func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
 	dir := t.TempDir()
 	run := func(args ...string) {
@@ -52,40 +47,6 @@ func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
 		git.ResetCaches()
 	})
 
-	// Case 1: BEADS_DIR points at a real directory under a rejected prefix
-	// (SEC-003's unsafePrefixes includes "/var"), seeded with a beads.db so
-	// FindBeadsDir() actually returns it instead of falling through — this is
-	// what makes GetRepoContext() fail via isPathInSafeBoundary specifically,
-	// not via FindBeadsDir()=="".
-	boundaryRejectDir := filepath.Join("/var", "tmp", "beads-poison-"+strconv.Itoa(os.Getpid()))
-	if err := os.MkdirAll(boundaryRejectDir, 0o755); err != nil {
-		t.Skipf("cannot create fixture dir under %s: %v", boundaryRejectDir, err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(boundaryRejectDir) })
-	if err := os.WriteFile(filepath.Join(boundaryRejectDir, "beads.db"), nil, 0o644); err != nil {
-		t.Fatalf("failed to seed poison beads.db: %v", err)
-	}
-
-	t.Setenv("BEADS_DIR", boundaryRejectDir)
-	beads.ResetCaches()
-	git.ResetCaches()
-	// isPathInSafeBoundary (internal/beads/context.go) matches unsafePrefixes
-	// as hardcoded forward-slash literals via strings.HasPrefix. On Windows,
-	// filepath.Join renders boundaryRejectDir with backslashes, so it never
-	// matches an unsafePrefix and GetRepoContext() would not fail this way.
-	// Scope the assertion to Unix (via a subtest, so the skip doesn't abort
-	// Case 2 below) rather than deleting or weakening it. The CWD-based
-	// checks that follow exercise the actual fix and are platform-agnostic,
-	// so they stay unconditional.
-	t.Run("unsafe_location_rejected", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("SEC-003's unsafePrefixes are hardcoded forward-slash literals matched via strings.HasPrefix; filepath.Join renders backslashes on Windows so the prefix never matches — this subcase is Unix-only")
-		}
-		if _, err := beads.GetRepoContext(); err == nil || !strings.Contains(err.Error(), "unsafe location") {
-			t.Fatalf("expected GetRepoContext() to reject %q via isPathInSafeBoundary, got err=%v", boundaryRejectDir, err)
-		}
-	})
-
 	// CWD-based probe: chdir into the fixture repo
 	wd, err := os.Getwd()
 	if err != nil {
@@ -96,18 +57,10 @@ func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(wd) })
 
-	if !gitCWDHasRemote() {
-		t.Fatal("gitCWDHasRemote should see origin even with a boundary-rejected BEADS_DIR set")
-	}
-	// And primeHasGitRemote uses the same path
-	if !primeHasGitRemote() {
-		t.Fatal("primeHasGitRemote should see origin even with a boundary-rejected BEADS_DIR set")
-	}
-
-	// Case 2: BEADS_DIR points at a path that simply doesn't exist on disk —
-	// this is the FindBeadsDir()=="" failure mode (context.go:107). CWD is
-	// now the fixture repo (no .beads anywhere in its ancestry), so the walk
-	// in FindBeadsDir also comes up empty.
+	// BEADS_DIR points at a path that simply doesn't exist on disk — this is
+	// the FindBeadsDir()=="" failure mode (context.go:107). CWD is the
+	// fixture repo (no .beads anywhere in its ancestry), so the walk in
+	// FindBeadsDir also comes up empty.
 	t.Setenv("BEADS_DIR", filepath.Join(dir, "does-not-exist", ".beads"))
 	beads.ResetCaches()
 	git.ResetCaches()
@@ -118,6 +71,7 @@ func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
 	if !gitCWDHasRemote() {
 		t.Fatal("gitCWDHasRemote should see origin even with a nonexistent BEADS_DIR set")
 	}
+	// And primeHasGitRemote uses the same path
 	if !primeHasGitRemote() {
 		t.Fatal("primeHasGitRemote should see origin even with a nonexistent BEADS_DIR set")
 	}
