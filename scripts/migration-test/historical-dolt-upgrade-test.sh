@@ -26,7 +26,9 @@ Usage: historical-dolt-upgrade-test.sh [--version VERSION]
 
 Runs the authentic historical SQLite bridges (v0.9.1, v0.17.0, v0.49.6, v0.50.3), historical server-Dolt corpus
 (v0.55.4, v0.56.1, v0.57.0, v0.62.0), and direct embedded-Dolt corpus
-(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2) against CANDIDATE_BIN. Every release archive is pinned and verified.
+(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2, v1.2.2) against CANDIDATE_BIN. Every release archive is pinned and verified.
+The wisp-capable sources (v1.0.1, v1.1.0, v1.1.2, v1.2.2) additionally run a wisp-plane lane in a fresh workspace,
+which needs the pinned external Dolt runtime as a read-only oracle.
 EOF
 }
 
@@ -92,8 +94,10 @@ case "$(uname -s)-$(uname -m)" in
     *) die 'the pinned authentic-binary corpus supports linux/amd64 or darwin/arm64 only' ;;
 esac
 [[ "$OP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 'HISTORICAL_DOLT_E2E_TIMEOUT must be a positive number of seconds'
+# The server-Dolt lanes need the pinned runtime to host their fixture; the
+# wisp-plane lanes need the same binary as a read-only plane oracle.
 for version in "${SELECTED_VERSIONS[@]}"; do
-    case " ${HISTORICAL_DOLT_VERSIONS[*]} " in
+    case " ${HISTORICAL_DOLT_VERSIONS[*]} ${WISP_PLANE_VERSIONS[*]} " in
         *" $version "*) verify_dolt_runtime; break ;;
     esac
 done
@@ -1120,6 +1124,663 @@ run_v0554_default_embedded_dolt_upgrade() {
     verify_post_bridge_semantics "$version" legacy
 }
 
+# ---------------------------------------------------------------------------
+# Wisp-plane upgrade corpus
+# ---------------------------------------------------------------------------
+#
+# create_historical_fixture/verify_surviving_fixture assert exact `length == 3`
+# list shapes and are shared by thirteen version lanes, so wisp coverage gets
+# its own workspace and its own lane instead of widening assertions every other
+# version depends on. 1.3.0's chain is dominated by the plane those fixtures
+# never touch: main 0054-0066 plus ignored 0012-0025 rewrite wisps,
+# wisp_dependencies, wisp_comments, leases and events over rows no existing
+# upgrade test creates.
+#
+# There is no `bd dolt sql`, so plane state (updated_at, is_blocked,
+# leases.granted_node, dolt_ignore, dolt_status, row counts) is read with the
+# pinned external Dolt CLI as a read-only oracle, the way #5816's field repro
+# inspected a real store. `dolt sql -q` can exit 0 on failure
+# (migrations/README.md), so every oracle read is decided by its payload and
+# never by an exit status, and no oracle read ever runs DML.
+
+# Old-binary capabilities, probed against each pinned release rather than
+# assumed, so the lane can stay one shape across both regimes:
+#
+#   v1.0.1  v1.1.0  v1.1.2
+#     yes     yes     yes    bd create --ephemeral
+#     yes     yes     yes    dep add: wisp->issue, wisp->wisp, conditional-blocks
+#     yes     yes     yes    dep add: issue->wisp (main dependencies table)
+#     yes     yes     yes    comments add / label add on a wisp
+#     yes     yes     yes    bd mol wisp list --all --json
+#     yes     yes     yes    bd dolt remote add / push over file://
+#      no     yes     yes    a pre-upgrade remote the candidate will still migrate
+#      no     yes     yes    wisps.is_blocked column
+#      no     yes     yes    post-split wisp_dependencies target columns
+#      no     yes     yes    ignored_schema_migrations cursor
+#
+# The two "no" rows in the last block are the point of keeping v1.0.1: it is the
+# only regime that makes the candidate perform the split and bootstrap the
+# ignored cursor over populated rows instead of finding both already done.
+is_wisp_plane_version() {
+    case " ${WISP_PLANE_VERSIONS[*]} " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+is_embedded_dolt_version() {
+    case " ${EMBEDDED_DOLT_VERSIONS[*]} " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# A pre-upgrade Dolt remote is authentic input only where the candidate will
+# still migrate the clone. Probed at implementation time: at v1.0.1 a configured
+# remote trips the #4259 designated-migrator refusal (main cursor 32 -> 66 is
+# not a same-version first mover), so `bd list` refuses and nothing migrates. At
+# v1.1.x the smart gate admits the upgrade as a safe first mover (#4516), so the
+# remote is seeded there and the version-control checks run against it.
+wisp_lane_has_remote() {
+    [ "$1" != v1.0.1 ]
+}
+
+wisp_embedded_db_dir() {
+    local version="$1" root="$workspace/.beads/embeddeddolt" dir
+    dir=$(find "$root" -mindepth 2 -maxdepth 2 -type d -name .dolt -printf '%h\n' 2>/dev/null | head -1)
+    [ -n "$dir" ] || die "$version: could not locate the embedded Dolt database under $root"
+    printf '%s\n' "$dir"
+}
+
+# Raw oracle read. Returns the CSV payload on success and non-zero when Dolt
+# reported an error, including the cases where it still exits 0.
+oracle_try() {
+    local version="$1" query="$2" db output
+    db=$(wisp_embedded_db_dir "$version") || return 1
+    output=$( (cd "$db" && isolated_env timeout --kill-after=5s "$OP_TIMEOUT" \
+        "$DOLT_BIN" sql -r csv -q "$query") 2>&1 ) || true
+    case "$output" in
+        ''|*'error on line'*|*'Error '*|*'error:'*|*panic:*) return 1 ;;
+    esac
+    printf '%s\n' "$output"
+}
+
+oracle_sql() {
+    local version="$1" query="$2" output
+    output=$(oracle_try "$version" "$query") ||
+        die "$version: oracle query failed: $query"
+    printf '%s\n' "$output"
+}
+
+# Header row plus exactly one value row.
+oracle_scalar() {
+    local version="$1" query="$2" output
+    output=$(oracle_sql "$version" "$query")
+    [ "$(wc -l <<< "$output")" -eq 2 ] ||
+        die "$version: oracle query did not return exactly one row: $query"
+    sed -n '2p' <<< "$output"
+}
+
+# Value rows only, with the CSV header stripped.
+oracle_rows() {
+    local version="$1" query="$2"
+    oracle_sql "$version" "$query" | tail -n +2
+}
+
+oracle_count() {
+    local version="$1" query="$2" value
+    value=$(oracle_scalar "$version" "$query")
+    [[ "$value" =~ ^[0-9]+$ ]] ||
+        die "$version: oracle count is not a number: $query -> $value"
+    printf '%s\n' "$value"
+}
+
+# Existence probes must not die when the answer is legitimately "no", so they
+# read through oracle_try and treat every failure as absent.
+oracle_table_exists() {
+    local version="$1" table="$2" value
+    value=$(oracle_try "$version" \
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$table'" |
+        sed -n '2p') || true
+    [ "$value" = 1 ]
+}
+
+oracle_column_exists() {
+    local version="$1" table="$2" column="$3" value
+    value=$(oracle_try "$version" \
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$table' AND COLUMN_NAME = '$column'" |
+        sed -n '2p') || true
+    [ "$value" = 1 ]
+}
+
+create_wisp_lane_issue() {
+    local source="$1" title="$2" type="$3" priority="$4"
+    shift 4
+    local output id
+    output=$(run_in_workspace "$source" create --title "$title" --type "$type" \
+        --priority "$priority" --description 'Wisp-plane upgrade fixture' "$@") || return 1
+    id=$(sed -n 's/.*Created issue: \([^[:space:]]*\).*/\1/p' <<< "$output" | head -1)
+    [ -n "$id" ] || return 1
+    printf '%s\n' "$id"
+}
+
+wisp_id() {
+    sed -n "$1p" "$workspace/wisp-ids"
+}
+
+create_wisp_fixture() {
+    local version="$1" source="$2" i1 i2 w1 w2 w3 w4 w5 listing
+    i1=$(create_wisp_lane_issue "$source" 'Wisp lane blocker issue' task 1) ||
+        die "$version: could not create the wisp-lane blocker issue"
+    i2=$(create_wisp_lane_issue "$source" 'Wisp-gated issue' task 2) ||
+        die "$version: could not create the wisp-gated issue"
+    w1=$(create_wisp_lane_issue "$source" 'wisp open plain' task 2 --ephemeral) ||
+        die "$version: could not create the plain wisp"
+    w2=$(create_wisp_lane_issue "$source" 'wisp blocked by issue' task 2 --ephemeral) ||
+        die "$version: could not create the issue-blocked wisp"
+    w3=$(create_wisp_lane_issue "$source" 'wisp blocked by wisp' task 2 --ephemeral) ||
+        die "$version: could not create the wisp-blocked wisp"
+    w4=$(create_wisp_lane_issue "$source" 'wisp conditionally blocked' task 2 --ephemeral) ||
+        die "$version: could not create the conditionally blocked wisp"
+    w5=$(create_wisp_lane_issue "$source" 'wisp closed' task 3 --ephemeral) ||
+        die "$version: could not create the closed wisp"
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$i1" "$i2" "$w1" "$w2" "$w3" "$w4" "$w5" \
+        > "$workspace/wisp-ids"
+
+    # Wisp-source dependencies route into wisp_dependencies; the issue-source
+    # dependency on a wisp target lands in the main dependencies table, which is
+    # the depends_on_wisp_id column 0059's stand-in recompute reads.
+    run_in_workspace "$source" dep add "$w2" "$i1" >/dev/null ||
+        die "$version: could not block a wisp on an issue"
+    run_in_workspace "$source" dep add "$w3" "$w1" >/dev/null ||
+        die "$version: could not block a wisp on a wisp"
+    run_in_workspace "$source" dep add "$w4" "$i1" --type conditional-blocks >/dev/null ||
+        die "$version: could not conditionally block a wisp"
+    run_in_workspace "$source" dep add "$i2" "$w1" >/dev/null ||
+        die "$version: could not block an issue on a wisp"
+    run_in_workspace "$source" comments add "$w1" 'Wisp comment must survive the upgrade.' \
+        --author historical-upgrade >/dev/null ||
+        die "$version: could not comment on a wisp"
+    run_in_workspace "$source" label add "$w1" historical-upgrade >/dev/null ||
+        die "$version: could not label a wisp"
+    # Closed but minutes old. Wisp gc's OldThreshold is 24h, so the candidate
+    # must not collect it; the survival count asserts that it did not.
+    run_in_workspace "$source" close "$w5" >/dev/null ||
+        die "$version: could not close the closed-wisp fixture"
+
+    listing=$(run_in_workspace "$source" mol wisp list --all --json) ||
+        die "$version: source could not list its own wisps"
+    jq -e --arg w1 "$w1" --arg w5 "$w5" '
+        (.wisps // []) as $wisps |
+        ($wisps | length) == 5 and
+        ($wisps | any(.id == $w1 and .status == "open")) and
+        ($wisps | any(.id == $w5 and .status == "closed"))
+    ' <<< "$listing" >/dev/null || die "$version: source wisp fixture is incomplete"
+
+    if wisp_lane_has_remote "$version"; then
+        mkdir -p "$workspace/dolt-remote"
+        run_in_workspace "$source" dolt remote add origin "file://$workspace/dolt-remote" >/dev/null ||
+            die "$version: could not configure the file:// Dolt remote"
+        run_in_workspace "$source" dolt push >/dev/null ||
+            die "$version: could not publish the pre-upgrade remote state"
+    fi
+}
+
+# Deliberately selects only columns that exist in every seeded regime: v1.0.1
+# has no wisps.is_blocked and no ignored_schema_migrations, so the shared
+# projection is id/status/updated_at and the split-shape assertions live in the
+# post-upgrade checks instead.
+snapshot_wisp_plane() {
+    local version="$1" label="$2"
+    oracle_sql "$version" 'SELECT id, status, updated_at FROM wisps ORDER BY id' \
+        > "$workspace/oracle-wisps-$label.csv"
+    oracle_sql "$version" 'SELECT id, updated_at FROM issues ORDER BY id' \
+        > "$workspace/oracle-issues-$label.csv"
+    oracle_sql "$version" 'SELECT pattern FROM dolt_ignore ORDER BY pattern' \
+        > "$workspace/oracle-ignore-$label.csv"
+    oracle_count "$version" 'SELECT COUNT(*) FROM wisps' > "$workspace/oracle-wisps-$label.count"
+    oracle_count "$version" 'SELECT COUNT(*) FROM wisp_comments' > "$workspace/oracle-wispcomments-$label.count"
+    oracle_count "$version" 'SELECT COUNT(*) FROM wisp_dependencies' > "$workspace/oracle-wispdeps-$label.count"
+    oracle_count "$version" 'SELECT COUNT(*) FROM events' > "$workspace/oracle-events-$label.count"
+}
+
+verify_wisp_survival() {
+    local version="$1" listing detail w1 w2 w3 w4 w5 file
+    w1=$(wisp_id 3); w2=$(wisp_id 4); w3=$(wisp_id 5); w4=$(wisp_id 6); w5=$(wisp_id 7)
+    # --all: the default listing hides closed wisps, so the closed seed is only
+    # visible here (probed at implementation time, v1.0.1 and v1.1.x alike).
+    listing=$(run_in_workspace "$candidate" mol wisp list --all --json) ||
+        die "$version: candidate could not list wisps after the upgrade"
+    jq -e --arg w1 "$w1" --arg w2 "$w2" --arg w3 "$w3" --arg w4 "$w4" --arg w5 "$w5" '
+        (.wisps // []) as $wisps |
+        ($wisps | length) == 5 and
+        ([$w1, $w2, $w3, $w4] | all(. as $id | ($wisps | any(.id == $id and .status == "open")))) and
+        ($wisps | any(.id == $w5 and .status == "closed"))
+    ' <<< "$listing" >/dev/null ||
+        die "$version: candidate did not preserve the seeded wisp set and statuses"
+
+    for file in wisps wispcomments wispdeps; do
+        [ "$(cat "$workspace/oracle-$file-after.count")" = "$(cat "$workspace/oracle-$file-before.count")" ] ||
+            die "$version: upgrade changed the $file row count on the wisp plane"
+    done
+
+    detail=$(run_in_workspace "$candidate" show "$w1" --json --include-comments) ||
+        die "$version: candidate could not read the commented wisp"
+    jq -e '(if type == "array" then .[0] else . end) |
+        .title == "wisp open plain" and
+        ((.labels // []) | index("historical-upgrade") != null) and
+        ((.comments // []) | any(.author == "historical-upgrade" and .text == "Wisp comment must survive the upgrade."))
+    ' <<< "$detail" >/dev/null ||
+        die "$version: candidate did not preserve the wisp title, label, and comment body"
+}
+
+# updated_at is derived-state-sensitive: 0059 and its ignored/0015 twin both
+# self-assign `updated_at = updated_at` precisely so an is_blocked repair cannot
+# look like a user edit to staleness and TTL consumers. Their predecessors do
+# not: 0046, 0047 and ignored/0007 all recompute without the guard, so replaying
+# any of them restamps every row they touch.
+#
+# Which of them replay is a property of the source cursor, so the tolerance is
+# too:
+#
+#   v1.0.1  main cursor 32, no ignored cursor. 0046/0047 and the whole ignored
+#           series re-run, so every non-closed row in both tables legitimately
+#           moves. Only the closed rows are provably untouched, because every
+#           recompute is scoped `WHERE status NOT IN ('closed', 'pinned')`.
+#   v1.1.x  main cursor 53, so 0046/0047 are behind it and issues must not move
+#           at all. The ignored cursor says 0011, but `leases.granted_node` does
+#           not exist yet, the sentinel disbelieves the cursor, and the ignored
+#           series replays anyway (#5366) — dragging in ignored/0007 and
+#           restamping the wisps whose is_blocked it toggles.
+#
+# Closed rows must be byte-stable in every regime; that is what bites when a
+# migration forgets its status scope. The strongest guard on the rest is
+# verify_ignored_track_idempotence, which requires a second open to move
+# nothing at all.
+#
+# TODO(wisp-restamp): once ignored/0007 carries the same `updated_at =
+# updated_at` guard as ignored/0015, drop the is_blocked tolerance and require
+# the v1.1.x wisp projection to be byte-identical too.
+verify_no_restamp() {
+    local version="$1" table file moved tolerated stray closed_moved
+
+    for table in issues wisps; do
+        file="$workspace/oracle-$table"
+        closed_moved=$(wisp_moved_rows "$file-before.csv" "$file-after.csv" \
+            "$(oracle_rows "$version" "SELECT id FROM $table WHERE status IN ('closed', 'pinned')")")
+        [ -z "$closed_moved" ] ||
+            die "$version: upgrade restamped closed $table rows, so a recompute lost its status scope: $closed_moved"
+    done
+
+    is_wisp_plane_split_source "$version" || return 0
+
+    cmp -s "$workspace/oracle-issues-before.csv" "$workspace/oracle-issues-after.csv" ||
+        die "$version: upgrade restamped issues.updated_at with the main cursor already past 0059"
+
+    moved=$(wisp_updated_at_moves "$workspace/oracle-wisps-before.csv" "$workspace/oracle-wisps-after.csv")
+    tolerated=$(oracle_rows "$version" 'SELECT id FROM wisps WHERE is_blocked = 1 ORDER BY id' | LC_ALL=C sort)
+    stray=$(LC_ALL=C comm -23 <(printf '%s\n' "$moved") <(printf '%s\n' "$tolerated") | tr -d '[:space:]')
+    [ -z "$stray" ] ||
+        die "$version: upgrade restamped wisps the is_blocked recompute never toggled: $stray"
+}
+
+# Sources whose cursors already cover the guarded recomputes, so only the
+# ignored-track replay can move a timestamp.
+is_wisp_plane_split_source() {
+    [ "$1" != v1.0.1 ]
+}
+
+# ids whose updated_at differs between two `id,...,updated_at` projections.
+wisp_updated_at_moves() {
+    local before="$1" after="$2"
+    join -t, -j 1 \
+        <(tail -n +2 "$before" | awk -F, '{print $1 "," $NF}' | LC_ALL=C sort) \
+        <(tail -n +2 "$after" | awk -F, '{print $1 "," $NF}' | LC_ALL=C sort) |
+        awk -F, '$2 != $3 {print $1}' | LC_ALL=C sort
+}
+
+# Of the given ids, those whose updated_at moved.
+wisp_moved_rows() {
+    local before="$1" after="$2" candidates="$3"
+    [ -n "$(tr -d '[:space:]' <<< "$candidates")" ] || return 0
+    LC_ALL=C comm -12 \
+        <(wisp_updated_at_moves "$before" "$after") \
+        <(printf '%s\n' "$candidates" | LC_ALL=C sort) | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# W2 blocks-on-issue, W3 blocks-on-wisp and W4 conditional-blocks-on-issue must
+# all be blocked; the plain and closed wisps must not be. I2 carries the
+# issue-blocked-by-wisp edge through dependencies.depends_on_wisp_id.
+#
+# `bd ready` never lists wisps, so the CLI cross-check is `bd blocked`, which
+# does cover them (probed at implementation time).
+verify_is_blocked() {
+    local version="$1" actual expected blocked w1 w2 w3 w4 w5 i1 i2
+    i1=$(wisp_id 1); i2=$(wisp_id 2)
+    w1=$(wisp_id 3); w2=$(wisp_id 4); w3=$(wisp_id 5); w4=$(wisp_id 6); w5=$(wisp_id 7)
+
+    actual=$(oracle_rows "$version" 'SELECT id, is_blocked FROM wisps ORDER BY id')
+    expected=$(printf '%s,1\n%s,1\n%s,1\n%s,0\n%s,0\n' "$w2" "$w3" "$w4" "$w1" "$w5" | LC_ALL=C sort)
+    [ "$(LC_ALL=C sort <<< "$actual")" = "$expected" ] ||
+        die "$version: wisps.is_blocked truth table is wrong after the upgrade: $(tr '\n' ' ' <<< "$actual")"
+
+    actual=$(oracle_rows "$version" 'SELECT id, is_blocked FROM issues ORDER BY id')
+    expected=$(printf '%s,0\n%s,1\n' "$i1" "$i2" | LC_ALL=C sort)
+    [ "$(LC_ALL=C sort <<< "$actual")" = "$expected" ] ||
+        die "$version: issues.is_blocked is wrong after the upgrade (issue blocked by wisp): $(tr '\n' ' ' <<< "$actual")"
+
+    blocked=$(run_in_workspace "$candidate" blocked --json) ||
+        die "$version: candidate blocked query failed on the migrated wisp plane"
+    jq -e --arg w3 "$w3" --arg i2 "$i2" '
+        type == "array" and any(.[]; .id == $w3) and any(.[]; .id == $i2)
+    ' <<< "$blocked" >/dev/null ||
+        die "$version: bd blocked did not report the blocked wisp and the wisp-gated issue"
+}
+
+# 0055, 0062 and 0064 each register new ignored tables. Registration reads the
+# existing dolt_ignore before writing it (#5947), so every pre-upgrade pattern
+# must still be there afterwards alongside the new ones.
+verify_ignore_superset_and_clean_status() {
+    local version="$1" pattern missing="" dirty
+    while IFS= read -r pattern; do
+        [ -n "$pattern" ] || continue
+        grep -Fxq "$pattern" <(tail -n +2 "$workspace/oracle-ignore-after.csv") ||
+            missing="$missing $pattern"
+    done < <(tail -n +2 "$workspace/oracle-ignore-before.csv")
+    [ -z "$missing" ] ||
+        die "$version: upgrade clobbered pre-existing dolt_ignore patterns:$missing"
+
+    for pattern in leases events bd_events_journal bd_events_seq; do
+        grep -Fxq "$pattern" <(tail -n +2 "$workspace/oracle-ignore-after.csv") ||
+            die "$version: upgrade did not register '$pattern' in dolt_ignore"
+    done
+
+    dirty=$(oracle_count "$version" 'SELECT COUNT(*) FROM dolt_status')
+    [ "$dirty" = 0 ] ||
+        die "$version: upgrade left $dirty dirty tracked table(s): $(oracle_rows "$version" 'SELECT table_name FROM dolt_status' | tr '\n' ' ')"
+    run_in_workspace "$candidate" dolt status >/dev/null ||
+        die "$version: bd dolt status failed after the upgrade"
+}
+
+# 0062 drops, commits and recreates events as an ignored table. Every row has to
+# survive that flip, so this runs before the lane makes any candidate mutation.
+verify_events_flip() {
+    local version="$1" before after
+    before=$(cat "$workspace/oracle-events-before.count")
+    after=$(cat "$workspace/oracle-events-after.count")
+    [ "$before" -gt 0 ] ||
+        die "$version: the events fixture is empty, so the flip assertion would be vacuous"
+    [ "$after" = "$before" ] ||
+        die "$version: the 0062 events flip changed the audit row count ($before -> $after)"
+}
+
+# The lease plane is born in the candidate chain (0054/0055 and ignored
+# 0012/0016), so it is post-upgrade behavior rather than seedable history.
+# granted_node is the column a contradicted-cursor replay loses (#5366).
+verify_lease_plane() {
+    local version="$1" i1 rows holder detail
+    i1=$(wisp_id 1)
+    oracle_table_exists "$version" leases ||
+        die "$version: the upgrade did not create the leases table"
+    oracle_column_exists "$version" leases granted_node ||
+        die "$version: leases.granted_node is missing after the upgrade (contradicted-cursor replay)"
+    [ "$(oracle_count "$version" 'SELECT COUNT(*) FROM leases')" = 0 ] ||
+        die "$version: the upgrade invented lease rows"
+
+    run_in_workspace "$candidate" update "$i1" --claim >/dev/null ||
+        die "$version: candidate could not claim an issue on the migrated store"
+    [ "$(oracle_count "$version" 'SELECT COUNT(*) FROM leases')" = 1 ] ||
+        die "$version: a candidate claim did not write exactly one lease row"
+    rows=$(oracle_rows "$version" 'SELECT issue_id, holder FROM leases')
+    holder=$(cut -d, -f2 <<< "$rows")
+    [ "$(cut -d, -f1 <<< "$rows")" = "$i1" ] ||
+        die "$version: the lease row does not belong to the claimed issue"
+    [ -n "$(tr -d '[:space:]"' <<< "$holder")" ] ||
+        die "$version: the lease row has an empty holder"
+    # TODO(lease-granted-node): `bd update --claim` currently leaves
+    # granted_node empty and `bd show --json` exposes no lease_granted_node
+    # field, so the column's presence is asserted above and its population is
+    # not yet gated. Tighten once the claim path writes the node identity.
+    detail=$(run_in_workspace "$candidate" show "$i1" --json) ||
+        die "$version: candidate could not read the claimed issue"
+    jq -e '(if type == "array" then .[0] else . end) |
+        (.lease_expires_at // "") != "" and (.heartbeat_at // "") != ""
+    ' <<< "$detail" >/dev/null ||
+        die "$version: the claimed issue exposes no lease projection"
+}
+
+# Closing the blocker must release the plain-blocks and conditional-blocks
+# wisps; the wisp-blocked wisp stays blocked because its blocker is still open.
+verify_unblock_path() {
+    local version="$1" i1 w2 w3 w4 actual expected
+    i1=$(wisp_id 1); w2=$(wisp_id 4); w3=$(wisp_id 5); w4=$(wisp_id 6)
+    run_in_workspace "$candidate" close "$i1" >/dev/null ||
+        die "$version: candidate could not close the blocker while holding its own claim"
+    actual=$(oracle_rows "$version" "SELECT id, is_blocked FROM wisps WHERE id IN ('$w2', '$w3', '$w4') ORDER BY id")
+    expected=$(printf '%s,0\n%s,1\n%s,0\n' "$w2" "$w3" "$w4" | LC_ALL=C sort)
+    [ "$(LC_ALL=C sort <<< "$actual")" = "$expected" ] ||
+        die "$version: closing the blocker did not release the blocked wisps: $(tr '\n' ' ' <<< "$actual")"
+}
+
+# The 0058 contract, and the reason v1.0.1 is in this lane at all.
+#
+# v1.0.1 stores wisp dependencies in the legacy single-target shape
+# (issue_id, depends_on_id) with no way to tell an issue target from a wisp
+# target except by looking the id up. The candidate's ignored/0003-0005 split
+# plus the 0047 delegate and the 0058 heal have to re-home those rows into
+# depends_on_issue_id / depends_on_wisp_id / depends_on_external. Getting that
+# wrong on populated rows is the "duplicate primary key given" hazard class in
+# migrations/README.md.
+#
+# At v1.1.x the rows are already split, so the same assertion is a preservation
+# check. Both regimes must end with identical, correctly-homed targets.
+verify_wisp_dependency_split() {
+    local version="$1" column actual expected i1 i2 w1 w2 w3 w4
+    i1=$(wisp_id 1); i2=$(wisp_id 2)
+    w1=$(wisp_id 3); w2=$(wisp_id 4); w3=$(wisp_id 5); w4=$(wisp_id 6)
+    for column in depends_on_issue_id depends_on_wisp_id depends_on_external; do
+        oracle_column_exists "$version" wisp_dependencies "$column" ||
+            die "$version: wisp_dependencies.$column is missing after the split migrations"
+    done
+    if oracle_column_exists "$version" wisp_dependencies depends_on_id; then
+        die "$version: wisp_dependencies still carries the legacy depends_on_id column"
+    fi
+
+    actual=$(oracle_rows "$version" 'SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, type FROM wisp_dependencies ORDER BY issue_id' | LC_ALL=C sort)
+    expected=$(printf '%s,%s,,blocks\n%s,,%s,blocks\n%s,%s,,conditional-blocks\n' \
+        "$w2" "$i1" "$w3" "$w1" "$w4" "$i1" | LC_ALL=C sort)
+    [ "$actual" = "$expected" ] ||
+        die "$version: wisp dependencies did not land on the right split targets: $(tr '\n' ' ' <<< "$actual")"
+
+    # The issue-source edge on a wisp target lives in the main dependencies
+    # table, which is the column 0059's stand-in recompute reads.
+    actual=$(oracle_rows "$version" 'SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, type FROM dependencies ORDER BY issue_id' | LC_ALL=C sort)
+    expected=$(printf '%s,,%s,blocks\n' "$i2" "$w1")
+    [ "$actual" = "$expected" ] ||
+        die "$version: the issue-blocked-by-wisp edge did not survive the dependencies split: $(tr '\n' ' ' <<< "$actual")"
+}
+
+# 0064/0066 and ignored 0022/0025 must land on an upgraded store, not just on a
+# fresh clone, and wisps must stay writable through the 0060/ignored-0020
+# storage_class default.
+verify_events_journal_and_wisp_write() {
+    local version="$1" w1 detail
+    w1=$(wisp_id 3)
+    oracle_table_exists "$version" bd_events_journal ||
+        die "$version: the upgrade did not create bd_events_journal"
+    oracle_column_exists "$version" bd_events_journal actor ||
+        die "$version: bd_events_journal has no actor column after the upgrade (0066/ignored-0025)"
+    oracle_table_exists "$version" bd_events_seq ||
+        die "$version: the upgrade did not create bd_events_seq"
+
+    run_in_workspace "$candidate" update "$w1" --notes 'post-upgrade wisp mutation' >/dev/null ||
+        die "$version: candidate could not mutate a wisp after the upgrade"
+    detail=$(run_in_workspace "$candidate" show "$w1" --json) ||
+        die "$version: candidate could not reopen the mutated wisp"
+    jq -e '(if type == "array" then .[0] else . end) | .notes == "post-upgrade wisp mutation"' \
+        <<< "$detail" >/dev/null ||
+        die "$version: the post-upgrade wisp mutation did not persist across a reopen"
+
+    # TODO(events-journal-rows): the journal stays empty under this harness's
+    # no-daemon isolation, so the shape is gated here and the row-level actor
+    # assertion is not. These must still run clean on a migrated store.
+    run_in_workspace "$candidate" events export >/dev/null ||
+        die "$version: bd events export failed on the migrated store"
+    run_in_workspace "$candidate" events tail >/dev/null ||
+        die "$version: bd events tail failed on the migrated store"
+}
+
+# Push before pull: the 0062 flip leaves the local events table diverged from
+# the pre-upgrade remote's tracked copy, so pulling first is refused with
+# "local changes would be stomped by merge: events". Publishing the migration
+# commits first is the order that works, and the wisp plane must survive both.
+verify_wisp_vc_ops() {
+    local version="$1" listing
+    wisp_lane_has_remote "$version" || return 0
+    run_in_workspace "$candidate" dolt push >/dev/null ||
+        die "$version: candidate could not publish migration commits to the file:// remote"
+    run_in_workspace "$candidate" dolt pull >/dev/null ||
+        die "$version: candidate could not pull from the file:// remote after the upgrade"
+    listing=$(run_in_workspace "$candidate" mol wisp list --all --json) ||
+        die "$version: candidate could not list wisps after a pull"
+    jq -e '(.wisps // []) | length == 5' <<< "$listing" >/dev/null ||
+        die "$version: a pull disturbed the ignored-plane wisp rows"
+}
+
+# MigrateUp reports `applied` from the main track only and never adds
+# appliedIgnored, so `✓ Schema already at vN` is blind to an ignored-track
+# replay. This fingerprint is the only guard: a contradicted-cursor replay that
+# restamps a row, moves the cursor, or re-runs non-idempotent DDL trips it even
+# though the main-track no-op check stays green.
+fingerprint_wisp_plane() {
+    local version="$1"
+    oracle_sql "$version" 'SELECT id, status, is_blocked, updated_at FROM wisps ORDER BY id'
+    oracle_sql "$version" 'SELECT id, is_blocked, updated_at FROM issues ORDER BY id'
+    oracle_sql "$version" 'SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, type FROM wisp_dependencies ORDER BY id'
+    oracle_sql "$version" 'SELECT issue_id, holder FROM leases ORDER BY issue_id'
+    oracle_sql "$version" 'SELECT pattern FROM dolt_ignore ORDER BY pattern'
+    oracle_sql "$version" 'SELECT MAX(version) FROM ignored_schema_migrations'
+    oracle_sql "$version" 'SELECT MAX(version) FROM schema_migrations'
+    oracle_sql "$version" 'SELECT COUNT(*) FROM events'
+    oracle_sql "$version" 'SELECT COUNT(*) FROM wisp_comments'
+}
+
+verify_ignored_track_idempotence() {
+    local version="$1"
+    fingerprint_wisp_plane "$version" > "$workspace/wisp-fingerprint-first"
+    run_in_workspace "$candidate" list --json -n 0 --all >/dev/null ||
+        die "$version: candidate could not reopen the migrated wisp workspace"
+    migrate_schema_current "$version" wisp-second
+    fingerprint_wisp_plane "$version" > "$workspace/wisp-fingerprint-second"
+    cmp -s "$workspace/wisp-fingerprint-first" "$workspace/wisp-fingerprint-second" ||
+        die "$version: a second open changed ignored-plane state that the main-track no-op check cannot see"
+}
+
+run_wisp_plane_upgrade() {
+    local version="$1" source
+    printf '\n● Wisp-plane upgrade: %s → candidate\n' "$version"
+    source=$(download_verified_release_binary "$version") || die "$version: verified release is unavailable"
+    run_in_workspace "$source" init --quiet --prefix histwisp --skip-hooks --skip-agents ||
+        die "$version: wisp-plane source init failed"
+    [ -d "$workspace/.beads/embeddeddolt" ] ||
+        die "$version: wisp-plane source did not create embedded Dolt data"
+    create_wisp_fixture "$version" "$source"
+    snapshot_wisp_plane "$version" before
+
+    # First candidate touch runs the full MigrateUp under the standard per-op
+    # timeout. A dirty-table refusal or a migration error here is the headline
+    # failure class for this lane.
+    run_in_workspace "$candidate" list --json -n 0 --all > "$workspace/wisp-first-open.json" ||
+        die "$version: candidate could not open the seeded wisp workspace"
+    migrate_schema_current "$version" wisp-first
+    snapshot_wisp_plane "$version" after
+
+    # Read-only assertions first: the events count must be observed before any
+    # candidate mutation, and the is_blocked truth table before the unblock.
+    verify_wisp_survival "$version"
+    verify_no_restamp "$version"
+    verify_is_blocked "$version"
+    verify_wisp_dependency_split "$version"
+    verify_ignore_superset_and_clean_status "$version"
+    verify_events_flip "$version"
+
+    verify_lease_plane "$version"
+    verify_unblock_path "$version"
+    verify_events_journal_and_wisp_write "$version"
+    verify_ignored_track_idempotence "$version"
+    verify_wisp_vc_ops "$version"
+    # 'bd doctor' has no embedded-mode JSON report; quick is the supported
+    # health surface here (probed at implementation time).
+    run_in_workspace "$candidate" doctor quick >/dev/null ||
+        die "$version: bd doctor quick failed after the upgrade"
+}
+
+# #5816: an ignored-named table that is tracked at HEAD *and* dirty, with
+# ignored migrations still pending, hard-locks the open.
+#
+# This state is not constructible from clean OSS lineage — every release since
+# v0.63.3 registers the dolt_ignore patterns before creating the tables — which
+# is exactly why it needs synthetic surgery here, and why it still matters:
+# clones from forks and from older-behavior lineages arrive in it. The surgery
+# is the only place this file runs DML through the oracle, and it runs it
+# against a throwaway workspace.
+#
+# #5816 is still open, so this does NOT gate on whether the candidate accepts or
+# refuses. It gates on the two things that must hold either way: the command
+# terminates, and no wisp rows are lost. If it refuses, the refusal has to name
+# the dirty tables rather than failing opaquely.
+#
+# TODO(#5816): once the fix lands, tighten this to "the open must succeed and
+# `bd dolt commit` must clear the dirty state".
+run_dirty_tracked_wisp_scenario() {
+    local version="$1" source i1 w1 w2 before after output table
+    printf '\n● Dirty tracked wisp tables (#5816): %s → candidate\n' "$version"
+    source=$(download_verified_release_binary "$version") || die "$version: verified release is unavailable"
+    run_in_workspace "$source" init --quiet --prefix histwispdirty --skip-hooks --skip-agents ||
+        die "$version: dirty-table source init failed"
+    i1=$(create_wisp_lane_issue "$source" 'Dirty-table blocker issue' task 1) ||
+        die "$version: could not create the dirty-table blocker issue"
+    w1=$(create_wisp_lane_issue "$source" 'dirty-table wisp' task 2 --ephemeral) ||
+        die "$version: could not create the dirty-table wisp"
+    w2=$(create_wisp_lane_issue "$source" 'dirty-table blocked wisp' task 2 --ephemeral) ||
+        die "$version: could not create the dirty-table blocked wisp"
+    run_in_workspace "$source" dep add "$w2" "$i1" >/dev/null ||
+        die "$version: could not block the dirty-table wisp"
+
+    # Track the ignored-named tables at HEAD, then dirty one of them again with
+    # a normal old-binary write. dolt_add/dolt_commit are the only DML the
+    # oracle ever issues.
+    for table in wisps wisp_comments wisp_dependencies; do
+        oracle_sql "$version" "CALL DOLT_ADD('-f', '$table')" >/dev/null
+    done
+    oracle_sql "$version" "CALL DOLT_COMMIT('-m', 'baseline: wisp tables tracked at HEAD', '--author', 'historical-upgrade <historical-upgrade@test.invalid>')" >/dev/null
+    [ "$(oracle_count "$version" 'SELECT COUNT(*) FROM dolt_status')" = 0 ] ||
+        die "$version: the dirty-table baseline commit did not leave a clean status"
+    run_in_workspace "$source" update "$w1" --notes 'dirty the tracked wisp table' >/dev/null ||
+        die "$version: could not dirty the tracked wisp table"
+    [ "$(oracle_count "$version" 'SELECT COUNT(*) FROM dolt_status')" -gt 0 ] ||
+        die "$version: the tracked wisp table did not become dirty, so the scenario would be vacuous"
+
+    before=$(oracle_count "$version" 'SELECT COUNT(*) FROM wisps')
+    output="$workspace/dirty-tracked-open.out"
+    # run_in_workspace already wraps every call in `timeout`, so a hard-lock
+    # surfaces as a timeout kill rather than hanging the job.
+    if run_in_workspace "$candidate" list --json -n 0 --all > "$output" 2>&1; then
+        printf '  · candidate accepted the dirty tracked wisp tables\n'
+    else
+        grep -Fq 'dirty tables' "$output" ||
+            die "$version: candidate refused the dirty tracked wisp tables without naming them: $(head -c 300 "$output")"
+        for table in wisps wisp_comments; do
+            grep -Fq "$table" "$output" || continue
+            printf '  · candidate refused cleanly, naming %s\n' "$table"
+            break
+        done
+    fi
+    after=$(oracle_count "$version" 'SELECT COUNT(*) FROM wisps')
+    [ "$after" = "$before" ] ||
+        die "$version: the dirty-table open lost wisp rows ($before -> $after)"
+}
+
 prepare_workspace() {
     workspace=$(mktemp -d "$RUN_ROOT/bd-historical-upgrade.XXXXXX") || die 'could not create isolated workspace'
     public_bridge_destination=""
@@ -1148,8 +1809,17 @@ for version in "${SELECTED_VERSIONS[@]}"; do
         "$SOURCE_TAG_SQLITE_VERSION") run_v091_upgrade ;;
         "$PRE_CANONICAL_SQLITE_VERSION") run_v017_upgrade ;;
         "$CLASSIC_SQLITE_VERSION"|"$CONFIGURED_SQLITE_VERSION") run_classic_sqlite_upgrade "$version" ;;
-        v0.63.3|v1.0.0|v1.0.1|v1.1.0|v1.1.2) run_embedded_dolt_upgrade "$version" ;;
-        *) run_dolt_upgrade "$version" ;;
+        *)
+            # Membership rather than a second hardcoded list: the embedded
+            # corpus is already declared once in lib/versions.sh, and a copy
+            # here silently routes any newly added version into the server-Dolt
+            # bridge instead.
+            if is_embedded_dolt_version "$version"; then
+                run_embedded_dolt_upgrade "$version"
+            else
+                run_dolt_upgrade "$version"
+            fi
+            ;;
     esac
     printf '  ✓ historical upgrade preserved representative data and schema migration was idempotent\n'
     cleanup
@@ -1158,6 +1828,24 @@ for version in "${SELECTED_VERSIONS[@]}"; do
         prepare_workspace
         run_v0554_default_embedded_dolt_upgrade
         printf '  ✓ historical default embedded Dolt upgrade preserved representative data and schema migration was idempotent\n'
+        cleanup
+        workspace=""
+    fi
+    # Second lane, fresh workspace: the shared three-issue fixture never carries
+    # wisps, so the ignored plane the 1.3.0 chain rewrites gets its own corpus.
+    if is_wisp_plane_version "$version"; then
+        prepare_workspace
+        run_wisp_plane_upgrade "$version"
+        printf '  ✓ wisp-plane upgrade preserved the ignored plane and the ignored track was idempotent\n'
+        cleanup
+        workspace=""
+    fi
+    # One version carries the synthetic #5816 state; it is a containment check,
+    # not a regime check, so it does not need repeating across the corpus.
+    if [ "$version" = v1.1.2 ]; then
+        prepare_workspace
+        run_dirty_tracked_wisp_scenario "$version"
+        printf '  ✓ dirty tracked wisp tables terminated without losing wisp rows\n'
         cleanup
         workspace=""
     fi

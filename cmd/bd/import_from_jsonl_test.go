@@ -400,7 +400,7 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
-	t.Run("wires mixed regular and wisp in-batch dependencies through the dependency pass", func(t *testing.T) {
+	t.Run("wires mixed regular and wisp in-batch dependencies inline", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")
 		store := newTestStore(t, dbPath)
@@ -440,9 +440,15 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		if result.Created != 2 {
 			t.Fatalf("Created = %d, want 2", result.Created)
 		}
-		// The engine's per-batch cross-bucket filter would skip-report the
-		// regular -> wisp edge in a mixed batch, so the import defers it to a
-		// single-plane dependency pass instead (wy-4276q8).
+		// The engine writes an in-batch cross-plane edge under
+		// SkipDependencyValidationErrors (wy-a648lq), so this two-row mixed
+		// batch takes the small path and the regular -> wisp edge rides inline
+		// in its rows' own transaction; the chunked-path detour through a
+		// single-plane dependency pass it once needed (wy-4276q8) was retired
+		// by wy-y52syc. This is the real-engine guard for the small inline
+		// path's cross-plane behavior: the unit test's recording store
+		// (TestImportIssuesCoreSmallBatchCrossBucketEdgeStaysInline) pins the
+		// routing shape, this case pins the outcome against a real store.
 		if len(result.SkippedDependencies) != 0 {
 			t.Fatalf("SkippedDependencies = %#v, want none", result.SkippedDependencies)
 		}
@@ -457,7 +463,7 @@ func TestImportFromLocalJSONL(t *testing.T) {
 			t.Fatalf("GetDependencyRecords(test-mixed-regular): %v", err)
 		}
 		if len(deps) != 1 || deps[0].DependsOnID != "test-mixed-wisp" {
-			t.Fatalf("test-mixed-regular deps = %#v, want the regular -> wisp edge wired by the dependency pass", deps)
+			t.Fatalf("test-mixed-regular deps = %#v, want the regular -> wisp edge wired inline", deps)
 		}
 	})
 

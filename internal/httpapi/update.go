@@ -104,7 +104,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, apigen.UpdateIssueResponse{
 		Issue:    *result.Issue,
 		Changed:  result.Changed,
-		Revision: result.Issue.RowVersion,
+		Revision: types.RevisionToken(result.Issue.RowVersion),
 	})
 }
 

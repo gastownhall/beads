@@ -13,21 +13,22 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestMissingJSONLIssueIDsInStore_IgnoresCompactedWisp pins the actual
-// GH#4988 behaviour at the layer that wedged auto-export permanently:
-// missingJSONLIssueIDsInStore itself. maphew's review noted that
+// TestReconcileAutoExportJSONL_IgnoresCompactedWisp pins the actual GH#4988
+// behaviour at the layer that wedged auto-export permanently: the
+// JSONL-vs-store reconciliation itself (formerly missingJSONLIssueIDsInStore,
+// now reconcileAutoExportJSONL). maphew's review noted that
 // TestMissingJSONLIssueIDsInStore is named in the original guard commit's
 // validation list but doesn't exist in the tree; this closes that gap.
 //
 // Seeds one persistent issue (present in the store) and a JSONL file that
 // additionally lists an ephemeral wisp id that is NOT in the store — the
 // TTL-compaction scenario, where a wisp was written to issues.jsonl and
-// later deleted from Dolt by compaction. Asserts `missing` comes back
-// empty: an out-of-scope (ephemeral) row's absence from the store must not
-// be treated as a hard orphan, or auto-export wedges forever.
+// later deleted from Dolt by compaction. Asserts the reconciliation reports
+// nothing at all: an out-of-scope (ephemeral) row's absence from the store
+// must not be treated as a hard orphan, or auto-export wedges forever.
 //
 // Requires a live Dolt test server/container (cgo build); skips otherwise.
-func TestMissingJSONLIssueIDsInStore_IgnoresCompactedWisp(t *testing.T) {
+func TestReconcileAutoExportJSONL_IgnoresCompactedWisp(t *testing.T) {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available")
 	}
@@ -85,11 +86,16 @@ func TestMissingJSONLIssueIDsInStore_IgnoresCompactedWisp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	missing, err := missingJSONLIssueIDsInStore(ctx, jsonlPath, "")
+	rec, err := reconcileAutoExportJSONL(ctx, jsonlPath, "")
 	if err != nil {
-		t.Fatalf("missingJSONLIssueIDsInStore: %v", err)
+		t.Fatalf("reconcileAutoExportJSONL: %v", err)
 	}
-	if len(missing) != 0 {
-		t.Fatalf("missing = %v, want empty (compacted wisp is out-of-scope and must not be a hard orphan)", missing)
+	if len(rec.unproven) != 0 {
+		t.Fatalf("unproven = %v, want empty (compacted wisp is out-of-scope and must not be a hard orphan)", rec.unproven)
+	}
+	// And it must be out of scope, not merely proven: an ephemeral row never
+	// reaches a proof source, so nothing about it is "reconciled" either.
+	if len(rec.provenDeleted) != 0 {
+		t.Fatalf("provenDeleted = %v, want empty (an out-of-scope wisp is never a candidate in the first place)", rec.provenDeleted)
 	}
 }
