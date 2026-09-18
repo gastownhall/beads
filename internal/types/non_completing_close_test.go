@@ -1,4 +1,4 @@
-package issueops
+package types
 
 import "testing"
 
@@ -38,9 +38,12 @@ func TestIsNonCompletingClose(t *testing.T) {
 		{"added dedup pass for event ingest", false},
 		// GH#5138 review: hyphenated separator ("wont-fix") and the U+2019
 		// typographic right single quote in "won't" must resolve like the
-		// already-handled ASCII forms above.
+		// already-handled ASCII forms above, and the two variants must
+		// compose (hyphen + curly apostrophe together), not just each alone.
 		{"wont-fix", true},
-		{"won’t fix", true}, // explicit ’ escape: U+2019 RIGHT SINGLE QUOTATION MARK, not ASCII '
+		{"won’t fix", true}, // "won’t fix": U+2019 is a literal rune here, in the string AND this comment — if a smart-quote pass ever ASCII-folds one but not the other, the mismatch is the tell.
+		{"won't-fix", true},
+		{"won’t-fix", true}, // same tamper-evidence: literal U+2019 in both the case above and this comment.
 		// Hyphenated prose must not be swallowed by the hyphen tolerance —
 		// only the exact "wont[-]fix" keyword pair gets it.
 		{"not-yet-planned", false},

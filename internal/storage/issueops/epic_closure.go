@@ -3,49 +3,9 @@ package issueops
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
-
-// nonCompletingCloseRegexp matches close reasons that redirect or abandon work
-// rather than finish a deliverable. Children closed this way must not count
-// toward epic/molecule "complete" eligibility (GH#5026).
-//
-// Matching is word-bounded (\b) rather than raw substring: close_reason is
-// free-form prose (types.Issue.CloseReason is a plain string; cmd/bd/close.go
-// only length-validates it), and a bare substring match false-positives on
-// ordinary English — "added dedup pass for event ingest" contains "dup", and
-// "removed obsolete migration shim" contains "obsolete", yet both describe
-// completed work. The bare "dup" keyword is dropped entirely: it was already
-// redundant with "duplicate"/"dupe" and only added false positives. Likewise
-// the bare adjective "obsolete" is dropped in favor of "obsoleted" — a task
-// closed because it was superseded/deprecated typically reads "obsoleted by
-// X", while "obsolete" alone is commonly just describing what was removed.
-//
-// Two separator variants are matched directly in the regex rather than via a
-// global text normalization pass (GH#5138 review): "wont[- ]?fix" accepts a
-// hyphen or space (or neither) between "wont" and "fix", and the apostrophe
-// class "['’]" accepts both the ASCII apostrophe and the U+2019
-// typographic right single quote ("won't"/"won’t"). A blanket
-// hyphen-to-space fold on the whole string was deliberately avoided: it
-// would risk turning unrelated hyphenated prose into a false match (e.g.
-// collapsing "not-yet-planned" into something that reads like "not planned").
-// Scoping the hyphen tolerance to just this one keyword pair sidesteps that
-// entirely.
-var nonCompletingCloseRegexp = regexp.MustCompile(`(?i)\b(duplicate|dupe|wont[- ]?fix|won['\x{2019}]t fix|superseded|obsoleted|not planned)\b`)
-
-// IsNonCompletingClose reports whether closeReason is a redirection/abandon
-// (duplicate, wontfix, superseded, …) rather than finished work. Empty reason
-// is treated as completing for backward compatibility with closes that never
-// recorded a reason.
-func IsNonCompletingClose(closeReason string) bool {
-	if strings.TrimSpace(closeReason) == "" {
-		return false
-	}
-	return nonCompletingCloseRegexp.MatchString(closeReason)
-}
 
 // GetEpicsEligibleForClosureInTx returns open epics whose children are all closed
 // with completing close reasons (not duplicate/wontfix/superseded).
@@ -191,7 +151,7 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 				continue
 			}
 			closedChildren++
-			if !IsNonCompletingClose(info.closeReason) {
+			if !types.IsNonCompletingClose(info.closeReason) {
 				completingClosed++
 			}
 		}

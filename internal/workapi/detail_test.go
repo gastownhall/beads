@@ -32,9 +32,10 @@ func newDetailFixture() *detailFixture {
 
 	return &detailFixture{
 		issues: map[string]*types.Issue{
-			"bd-1":    {ID: "bd-1", Title: "Durable issue", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 1},
-			"bd-epic": {ID: "bd-epic", Title: "Epic", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1},
-			"bd-chat": {ID: "bd-chat", Title: "Has comments", IssueType: types.TypeTask, Status: types.StatusOpen},
+			"bd-1":        {ID: "bd-1", Title: "Durable issue", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 1},
+			"bd-epic":     {ID: "bd-epic", Title: "Epic", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1},
+			"bd-epic-dup": {ID: "bd-epic-dup", Title: "Epic with a duplicate close", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1},
+			"bd-chat":     {ID: "bd-chat", Title: "Has comments", IssueType: types.TypeTask, Status: types.StatusOpen},
 		},
 		wisps: map[string]*types.Issue{
 			"bd-w1": {ID: "bd-w1", Title: "Ephemeral wisp", IssueType: types.TypeTask, Status: types.StatusOpen},
@@ -66,6 +67,9 @@ func newDetailFixture() *detailFixture {
 				{Issue: types.Issue{ID: "bd-kid1", Title: "Kid 1", Status: types.StatusClosed}, DependencyType: types.DepParentChild},
 				{Issue: types.Issue{ID: "bd-kid2", Title: "Kid 2", Status: types.StatusOpen}, DependencyType: types.DepParentChild},
 				{Issue: types.Issue{ID: "bd-other", Title: "Not a child", Status: types.StatusOpen}, DependencyType: types.DepBlocks},
+			},
+			"bd-epic-dup": {
+				{Issue: types.Issue{ID: "bd-dupkid", Title: "Dup kid", Status: types.StatusClosed, CloseReason: "duplicate of bd-1"}, DependencyType: types.DepParentChild},
 			},
 			"bd-w1": {
 				{Issue: types.Issue{ID: "bd-wkid", Title: "Wisp kid", Status: types.StatusOpen}, DependencyType: types.DepParentChild},
@@ -667,6 +671,28 @@ func TestBuildIssueDetailsEpicProgress(t *testing.T) {
 		}
 		if details.EpicTotalChildren == nil || *details.EpicTotalChildren != 2 {
 			t.Errorf("epic_total_children = %v, want 2", details.EpicTotalChildren)
+		}
+		if details.EpicClosedChildren == nil || *details.EpicClosedChildren != 1 {
+			t.Errorf("epic_closed_children = %v, want 1", details.EpicClosedChildren)
+		}
+		if details.EpicCloseable == nil || *details.EpicCloseable {
+			t.Errorf("epic_closeable = %v, want false", details.EpicCloseable)
+		}
+	})
+
+	t.Run("not closeable when the only child closed as a duplicate (GH#5138 review)", func(t *testing.T) {
+		// epic_closeable must agree with issueops.GetEpicsEligibleForClosureInTx's
+		// classifier: a child closed "duplicate of X" redirects the work rather
+		// than finishing it, so total==closed alone must not make the epic
+		// closeable. Before the fix this reported epic_closeable=true because
+		// applyEpicProgress compared raw StatusClosed counts and never looked
+		// at CloseReason.
+		details, err := BuildIssueDetails(ctx, store, fx.issues["bd-epic-dup"], false, DetailOptions{IncludeDependents: true})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.EpicTotalChildren == nil || *details.EpicTotalChildren != 1 {
+			t.Errorf("epic_total_children = %v, want 1", details.EpicTotalChildren)
 		}
 		if details.EpicClosedChildren == nil || *details.EpicClosedChildren != 1 {
 			t.Errorf("epic_closed_children = %v, want 1", details.EpicClosedChildren)
