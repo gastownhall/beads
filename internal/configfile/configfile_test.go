@@ -1297,3 +1297,52 @@ func TestGlobalDoltDatabase_OmittedFromJSON(t *testing.T) {
 		t.Error("global_dolt_database should be omitted from JSON when empty")
 	}
 }
+
+// TestPortImpliesServerMode covers the predicate doltserver's check 2c
+// delegates to. The precedence it encodes -- proxied exemption first, then a
+// live env var outranking an explicit dolt_mode -- is deliberate and mirrors
+// HostImpliesServerMode, whose own env check runs before its DoltMode
+// suppression and can return first (be-yb2ai).
+func TestPortImpliesServerMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *Config
+		serverPort string
+		legacyPort string
+		want       bool
+	}{
+		{"no env, no mode", &Config{}, "", "", false},
+		{"BEADS_DOLT_SERVER_PORT set", &Config{}, "3307", "", true},
+		{"legacy BEADS_DOLT_PORT set", &Config{}, "", "3307", true},
+		{"SERVER_PORT wins over legacy", &Config{}, "3307", "9999", true},
+		{"legacy used when SERVER_PORT empty", &Config{}, "", "3307", true},
+		{"non-numeric port ignored", &Config{}, "notaport", "", false},
+		{"zero port ignored", &Config{}, "0", "", false},
+		{"negative port ignored", &Config{}, "-1", "", false},
+		{"falls back to legacy when SERVER_PORT invalid", &Config{}, "notaport", "3307", true},
+
+		// A live env var outranks an explicit dolt_mode, matching
+		// HostImpliesServerMode's env tier (GH#2949).
+		{"env beats explicit embedded", &Config{DoltMode: DoltModeEmbedded}, "3307", "", true},
+		{"env beats explicit server", &Config{DoltMode: DoltModeServer}, "3307", "", true},
+
+		// ...except for proxied-server, which is exempt outright: it reaches
+		// its server through the proxy, so an ambient port does not describe
+		// its lifecycle.
+		{"proxied-server exempt even with env port", &Config{DoltMode: DoltModeProxiedServer}, "3307", "", false},
+		{"proxied-server exempt, legacy port", &Config{DoltMode: DoltModeProxiedServer}, "", "3307", false},
+		{"proxied-server exempt, case-insensitive", &Config{DoltMode: "Proxied-Server"}, "3307", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_PORT", tt.serverPort)
+			t.Setenv("BEADS_DOLT_PORT", tt.legacyPort)
+
+			if got := tt.cfg.PortImpliesServerMode(); got != tt.want {
+				t.Errorf("PortImpliesServerMode() = %v, want %v (dolt_mode=%q SERVER_PORT=%q PORT=%q)",
+					got, tt.want, tt.cfg.DoltMode, tt.serverPort, tt.legacyPort)
+			}
+		})
+	}
+}
