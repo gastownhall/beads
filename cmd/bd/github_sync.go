@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/syncauth"
 )
 
@@ -28,6 +27,11 @@ GitHub or GitLab remotes.
 bd prefers the official gh and glab CLIs because they store credentials in
 the OS keyring. If neither CLI is available, bd can perform an OAuth device
 flow and store the token in the OS keyring itself.
+
+For self-managed hosts (GitHub Enterprise or self-managed GitLab) pass
+--host; gh and glab handle the host natively. The OAuth device flow targets
+github.com and GitLab-compatible endpoints, so for GitHub Enterprise use
+'--provider gh'.
 
 Run 'bd github-sync status' to see which authentication methods are available
 and 'bd github-sync login --provider gh' (or glab/oauth) to authenticate.`,
@@ -58,11 +62,17 @@ var githubSyncStatusCmd = &cobra.Command{
 }
 
 var gitCredentialCmd = &cobra.Command{
-	Use:    "git-credential",
+	Use:    "git-credential [operation]",
 	Short:  "git credential helper for bd OAuth tokens",
 	Hidden: true,
+	Args:   cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return syncauth.RunGitCredential(cmd.Context())
+		op := ""
+		if len(args) > 0 {
+			op = args[0]
+		}
+		host, _ := cmd.Flags().GetString("host")
+		return syncauth.RunGitCredential(cmd.Context(), op, host)
 	},
 }
 
@@ -72,6 +82,8 @@ func init() {
 		c.Flags().StringVar(&githubSyncAuthHost, "host", "", "Git host (default: inferred from remote, or github.com for login)")
 		c.Flags().BoolVar(&githubSyncAuthDryRun, "dry-run", false, "Show what would happen without making changes")
 	}
+
+	gitCredentialCmd.Flags().String("host", "", "host this helper was configured for; other hosts are not served")
 
 	githubSyncAuthCmd.AddCommand(githubSyncLoginCmd)
 	githubSyncAuthCmd.AddCommand(githubSyncLogoutCmd)
@@ -143,10 +155,16 @@ func runGitHubSyncLogin(cmd *cobra.Command, args []string) error {
 
 	switch cfg.Provider {
 	case syncauth.ProviderAuto:
-		// Default to gh for GitHub, glab for GitLab, oauth otherwise.
+		// Default to gh for GitHub, glab for GitLab. For unknown hosts
+		// (self-managed GitHub Enterprise or GitLab — indistinguishable by
+		// name) prefer whichever CLI is installed, else OAuth.
 		if syncauth.IsGitHubHost(cfg.Host) {
 			cfg.Provider = syncauth.ProviderGH
 		} else if syncauth.IsGitLabHost(cfg.Host) {
+			cfg.Provider = syncauth.ProviderGLab
+		} else if _, err := exec.LookPath("gh"); err == nil {
+			cfg.Provider = syncauth.ProviderGH
+		} else if _, err := exec.LookPath("glab"); err == nil {
 			cfg.Provider = syncauth.ProviderGLab
 		} else {
 			cfg.Provider = syncauth.ProviderOAuth
@@ -305,7 +323,7 @@ func inferRemoteHost(ctx context.Context) string {
 	if err != nil || len(remotes) == 0 {
 		return ""
 	}
-	if !doltutil.IsGitProtocolURL(remotes[0].URL) {
+	if syncauth.CredentialScheme(remotes[0].URL) == "" {
 		return ""
 	}
 	host, err := syncauth.HostFromRemoteURL(remotes[0].URL)
@@ -331,12 +349,18 @@ func clientIDForHost(host string) string {
 
 // clientSecretForHost reads the OAuth client secret from the environment only.
 // Secrets are deliberately not read from beads config — putting them there is
-// the pattern this feature exists to remove.
+// the pattern this feature exists to remove. A configured-but-ignored
+// client_secret key earns a warning rather than silently rotting in
+// config.yaml.
 func clientSecretForHost(host string) string {
+	key, env := "gitlab.client_secret", "BD_GITLAB_CLIENT_SECRET"
 	if syncauth.IsGitHubHost(syncauth.NormalizeHost(host)) {
-		return os.Getenv("BD_GITHUB_CLIENT_SECRET")
+		key, env = "github.client_secret", "BD_GITHUB_CLIENT_SECRET"
 	}
-	return os.Getenv("BD_GITLAB_CLIENT_SECRET")
+	if config.GetString(key) != "" {
+		fmt.Fprintf(os.Stderr, "warning: %s in config.yaml is ignored; set %s in the environment instead\n", key, env)
+	}
+	return os.Getenv(env)
 }
 
 func oauthScopesForHost(host string) []string {

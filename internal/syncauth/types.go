@@ -18,11 +18,16 @@ const (
 	ProviderGH    Provider = "gh"
 	ProviderGLab  Provider = "glab"
 	ProviderOAuth Provider = "oauth"
-	ProviderPAT   Provider = "pat"
+	ProviderNone  Provider = "none"
+
+	// providerUnknown marks a host whose flavor (GitHub vs GitLab) cannot be
+	// determined from the name — self-managed instances of either. It is not a
+	// selectable provider.
+	providerUnknown Provider = "unknown"
 )
 
 // ValidProviders is the list of providers accepted by flags.
-var ValidProviders = []Provider{ProviderGH, ProviderGLab, ProviderOAuth, ProviderPAT, ProviderAuto}
+var ValidProviders = []Provider{ProviderGH, ProviderGLab, ProviderOAuth, ProviderNone, ProviderAuto}
 
 //nolint:gosec
 type Token struct {
@@ -40,7 +45,6 @@ type Config struct {
 	ClientID     string
 	ClientSecret string
 	Scopes       []string
-	PAT          string
 
 	// Exe is the absolute path to the bd binary, used when constructing a
 	// git-credential helper invocation for the OAuth provider.
@@ -71,7 +75,7 @@ type Auth interface {
 // IsValidProvider reports whether p is an accepted provider value.
 func IsValidProvider(p Provider) bool {
 	switch p {
-	case ProviderGH, ProviderGLab, ProviderOAuth, ProviderPAT, ProviderAuto:
+	case ProviderGH, ProviderGLab, ProviderOAuth, ProviderNone, ProviderAuto:
 		return true
 	}
 	return false

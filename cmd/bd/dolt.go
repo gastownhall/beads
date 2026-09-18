@@ -532,11 +532,12 @@ uncommitted changes in its working set).
 Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').
 
-Use --auth to select how bd authenticates git-protocol remotes
-(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
-then the glab CLI, then OAuth if a client_id is configured; when none
-applies, git's own configured credential helpers are used. Non-git Dolt
-remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+Use --auth to select how bd authenticates git-over-HTTP(S) remotes
+(git+https://, git+http://). The default (auto) tries the gh CLI, then
+the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Use 'none'
+to disable wrapping. SSH, git://, file, and non-git Dolt remotes
+(DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
 See 'bd github-sync'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.GetBool("no-push") {
@@ -639,11 +640,12 @@ aborting the pull for manual resolution. Embedded storage only (#4992); on
 server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
 reports conflicts.
 
-Use --auth to select how bd authenticates git-protocol remotes
-(git+https://, git+ssh://, git://). The default (auto) tries the gh CLI,
-then the glab CLI, then OAuth if a client_id is configured; when none
-applies, git's own configured credential helpers are used. Non-git Dolt
-remotes (DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
+Use --auth to select how bd authenticates git-over-HTTP(S) remotes
+(git+https://, git+http://). The default (auto) tries the gh CLI, then
+the glab CLI, then OAuth if a client_id is configured; when none
+applies, git's own configured credential helpers are used. Use 'none'
+to disable wrapping. SSH, git://, file, and non-git Dolt remotes
+(DoltHub, Hosted Dolt, remotesapi https://) are never wrapped.
 See 'bd github-sync'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
@@ -1818,11 +1820,12 @@ func isTimeoutError(err error) bool {
 
 // withRemoteAuth runs fn with GIT_CONFIG_PARAMETERS configured for the
 // requested (or auto-detected) authentication provider. It is a no-op when
-// the remote URL is not a git-protocol remote (e.g. DoltHub, Hosted Dolt, or
-// Azure). Under --auth auto with no detected provider, fn runs unmodified so
-// git's own configured credential helpers still apply.
+// the remote does not use a transport git credential helpers serve (DoltHub,
+// Hosted Dolt, Azure, SSH, git://, file). Under --auth auto with no detected
+// provider, fn runs unmodified so git's own configured credential helpers
+// still apply.
 func withRemoteAuth(ctx context.Context, cmd *cobra.Command, st storage.DoltStorage, remote string, fn func() error) error {
-	host, err := remoteHost(ctx, st, remote)
+	host, scheme, err := remoteHost(ctx, st, remote)
 	if err != nil {
 		return err
 	}
@@ -1845,38 +1848,44 @@ func withRemoteAuth(ctx context.Context, cmd *cobra.Command, st storage.DoltStor
 		return err
 	}
 
-	return syncauth.WithAuth(ctx, host, a, fn)
+	return syncauth.WithAuth(ctx, scheme, host, a, fn)
 }
 
-// remoteHost extracts the host from a configured Dolt remote URL. remote may be
-// empty to use the first configured remote. Non-git remotes return an empty host.
-func remoteHost(ctx context.Context, st storage.DoltStorage, remote string) (string, error) {
+// remoteHost extracts the host and credential-helper scheme from a configured
+// Dolt remote URL. remote may be empty to use the first configured remote.
+// Remotes whose transport git credential helpers never serve (non-git Dolt
+// remotes, SSH, git://, file) return an empty host.
+func remoteHost(ctx context.Context, st storage.DoltStorage, remote string) (host, scheme string, err error) {
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
+	}
+
+	hostFor := func(r storage.RemoteInfo) (string, string, error) {
+		scheme := syncauth.CredentialScheme(r.URL)
+		if scheme == "" {
+			return "", "", nil
+		}
+		host, err := syncauth.HostFromRemoteURL(r.URL)
+		if err != nil {
+			return "", "", fmt.Errorf("parse remote %q URL: %w", r.Name, err)
+		}
+		return host, scheme, nil
 	}
 
 	if remote != "" {
 		for _, r := range remotes {
 			if r.Name == remote {
-				if !doltutil.IsGitProtocolURL(r.URL) {
-					return "", nil
-				}
-				host, _ := syncauth.HostFromRemoteURL(r.URL)
-				return host, nil
+				return hostFor(r)
 			}
 		}
-		return "", fmt.Errorf("remote %q not found", remote)
+		return "", "", fmt.Errorf("remote %q not found", remote)
 	}
 
 	if len(remotes) == 0 {
-		return "", nil
+		return "", "", nil
 	}
-	if !doltutil.IsGitProtocolURL(remotes[0].URL) {
-		return "", nil
-	}
-	host, _ := syncauth.HostFromRemoteURL(remotes[0].URL)
-	return host, nil
+	return hostFor(remotes[0])
 }
 
 // syncAuthConfig builds a syncauth.Config from flags and project config.
@@ -1896,10 +1905,10 @@ func syncAuthConfig(cmd *cobra.Command, host string) (syncauth.Config, error) {
 	}
 
 	switch cfg.Provider {
-	case syncauth.ProviderGH, syncauth.ProviderGLab, syncauth.ProviderOAuth, syncauth.ProviderPAT, syncauth.ProviderAuto:
+	case syncauth.ProviderGH, syncauth.ProviderGLab, syncauth.ProviderOAuth, syncauth.ProviderNone, syncauth.ProviderAuto:
 		// ok
 	default:
-		return syncauth.Config{}, fmt.Errorf("unknown auth provider %q; use gh, glab, oauth, pat, or auto", provider)
+		return syncauth.Config{}, fmt.Errorf("unknown auth provider %q; use gh, glab, oauth, none, or auto", provider)
 	}
 
 	return cfg, nil
@@ -1910,12 +1919,12 @@ func init() {
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
-	doltPushCmd.Flags().String("auth", "auto", "Auth provider for remote git operations: gh, glab, oauth, pat, or auto")
+	doltPushCmd.Flags().String("auth", "auto", "Auth provider for remote git operations: gh, glab, oauth, none, or auto")
 	doltPushCmd.Flags().BoolP("yes", "y", false, "Consent to adopting a Dolt remote derived from git origin when none is configured")
 	doltPushCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltPullCmd.Flags().String("strategy", "", "Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)")
-	doltPullCmd.Flags().String("auth", "auto", "Auth provider for remote git operations: gh, glab, oauth, pat, or auto")
+	doltPullCmd.Flags().String("auth", "auto", "Auth provider for remote git operations: gh, glab, oauth, none, or auto")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")

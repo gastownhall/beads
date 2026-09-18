@@ -52,7 +52,7 @@ func (g *ghAuth) GitConfigParameter(host string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gh not found in PATH: %w", err)
 	}
-	return fmt.Sprintf("!%s auth git-credential", path), nil
+	return fmt.Sprintf("!%s auth git-credential", shellQuote(path)), nil
 }
 
 func (g *ghAuth) host() string {

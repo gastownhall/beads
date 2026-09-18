@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/githooksenv"
 )
@@ -28,8 +29,8 @@ func NewWithKeyring(cfg Config, kr Keyring) (Auth, error) {
 		return newOAuthAuth(cfg, kr), nil
 	case ProviderAuto:
 		return nil, fmt.Errorf("use ResolveAuto to construct an auto provider")
-	case ProviderPAT:
-		return nil, fmt.Errorf("PAT provider is not supported; migrate to gh, glab, or OAuth")
+	case ProviderNone:
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unknown syncauth provider %q", cfg.Provider)
 	}
@@ -54,17 +55,17 @@ func ResolveAuto(ctx context.Context, host string, cfg Config, kr Keyring) (Auth
 
 	var candidates []func(context.Context) (Auth, error)
 
-	if hp == ProviderGH {
+	// Unknown hosts are self-managed GitHub or GitLab — indistinguishable by
+	// name — so auto tries both CLIs there, not just the GitLab guess.
+	if hp != ProviderGLab {
 		candidates = append(candidates, func(ctx context.Context) (Auth, error) {
 			return tryDetect(ctx, newGHAuth(hostCfg))
 		})
 	}
 
-	if hp == ProviderGLab || hp == ProviderGH {
-		candidates = append(candidates, func(ctx context.Context) (Auth, error) {
-			return tryDetect(ctx, newGLabAuth(hostCfg))
-		})
-	}
+	candidates = append(candidates, func(ctx context.Context) (Auth, error) {
+		return tryDetect(ctx, newGLabAuth(hostCfg))
+	})
 
 	if cfg.ClientID != "" {
 		oauthCfg := Config{Host: host, ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret, Scopes: cfg.Scopes, Exe: cfg.Exe}
@@ -101,11 +102,17 @@ func tryDetect(ctx context.Context, a Auth) (Auth, error) {
 }
 
 // GitConfigParameters builds a GIT_CONFIG_PARAMETERS value that configures git
-// to use the selected auth provider as a credential helper for host.
-func GitConfigParameters(host string, a Auth) (string, error) {
+// to use the selected auth provider as a credential helper for host. scheme is
+// the remote's transport ("https" or "http"); git only consults credential
+// helpers for HTTP(S) remotes, so callers should not call this for other
+// transports (see CredentialScheme).
+func GitConfigParameters(scheme, host string, a Auth) (string, error) {
 	host = normalizeHost(host)
 	if host == "" {
 		return "", fmt.Errorf("remote host is empty")
+	}
+	if scheme != "https" && scheme != "http" {
+		return "", fmt.Errorf("credential helpers only apply to http/https remotes, got scheme %q", scheme)
 	}
 
 	value, err := a.GitConfigParameter(host)
@@ -113,22 +120,52 @@ func GitConfigParameters(host string, a Auth) (string, error) {
 		return "", err
 	}
 
-	key := fmt.Sprintf("credential.https://%s.helper", host)
+	key := fmt.Sprintf("credential.%s://%s.helper", scheme, host)
 	// Reset any existing helper for this host, then append our helper.
 	// This mirrors `gh auth setup-git` and prevents stale cached credentials
-	// from shadowing the CLI-managed token.
-	reset := fmt.Sprintf("'%s='", key)
-	set := fmt.Sprintf("'%s=%s'", key, value)
+	// from shadowing the CLI-managed token. Key and value are sq-escaped so a
+	// host or path containing a single quote cannot corrupt the parameter —
+	// an unescaped ' makes git reject the whole GIT_CONFIG_PARAMETERS value.
+	reset := "'" + sqEscape(key) + "='"
+	set := "'" + sqEscape(key) + "=" + sqEscape(value) + "'"
 
 	params := githooksenv.AppendParameter(reset, set)
 
 	// glab and OAuth often need credentials sent proactively.
 	if a.Name() == ProviderGLab || a.Name() == ProviderOAuth {
-		httpKey := fmt.Sprintf("http.https://%s.proactiveAuth", host)
-		params = githooksenv.AppendParameter(params, fmt.Sprintf("'%s=basic'", httpKey))
+		httpKey := fmt.Sprintf("http.%s://%s.proactiveAuth", scheme, host)
+		params = githooksenv.AppendParameter(params, "'"+sqEscape(httpKey)+"=basic'")
 	}
 
 	return params, nil
+}
+
+// CredentialScheme returns the credential-helper URL scheme for a Dolt remote
+// URL: "https" or "http" when the remote uses git-over-HTTP(S) transport — the
+// only transports where git consults credential helpers. It returns "" for
+// SSH (git+ssh://, ssh://, git@host:), git://, file, and non-git Dolt remotes
+// (DoltHub, Hosted Dolt, remotesapi); those must not be wrapped.
+func CredentialScheme(remoteURL string) string {
+	switch {
+	case strings.HasPrefix(remoteURL, "git+https://"):
+		return "https"
+	case strings.HasPrefix(remoteURL, "git+http://"):
+		return "http"
+	default:
+		return ""
+	}
+}
+
+// shellQuote returns s as a POSIX single-quoted string safe to embed in the
+// shell command a "!" credential helper value becomes.
+func shellQuote(s string) string {
+	return "'" + sqEscape(s) + "'"
+}
+
+// sqEscape escapes single quotes in s for embedding inside the single quotes
+// of a GIT_CONFIG_PARAMETERS entry, matching git's sq syntax.
+func sqEscape(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
 }
 
 // CurrentExecutable returns the absolute path to the current process binary.
@@ -147,8 +184,8 @@ func CurrentExecutable() string {
 
 // SetEnv applies the GIT_CONFIG_PARAMETERS needed for a and returns a cleanup
 // function that restores the previous value. It is safe to nest.
-func SetEnv(host string, a Auth) (func(), error) {
-	params, err := GitConfigParameters(host, a)
+func SetEnv(scheme, host string, a Auth) (func(), error) {
+	params, err := GitConfigParameters(scheme, host, a)
 	if err != nil {
 		return nil, err
 	}
@@ -178,11 +215,11 @@ func SetEnv(host string, a Auth) (func(), error) {
 // WithAuth runs fn with the git credential helper environment set for host.
 // A nil Auth runs fn unmodified — ResolveAuto returns nil when no provider is
 // detected, in which case git's own configured credential helpers still apply.
-func WithAuth(ctx context.Context, host string, a Auth, fn func() error) error {
+func WithAuth(ctx context.Context, scheme, host string, a Auth, fn func() error) error {
 	if a == nil {
 		return fn()
 	}
-	cleanup, err := SetEnv(host, a)
+	cleanup, err := SetEnv(scheme, host, a)
 	if err != nil {
 		return err
 	}

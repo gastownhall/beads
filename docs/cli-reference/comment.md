@@ -1,6 +1,6 @@
 ---
 title: "bd comment"
-description: "Add a comment to an issue."
+description: "Add a comment to an issue"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -16,6 +16,9 @@ Examples:
   bd comment bd-123 Working on this now
   echo "comment from pipe" | bd comment bd-123 --stdin
   bd comment bd-123 --file notes.txt
+
+Note: "comment" (singular) only adds a comment — it has no "list" subcommand.
+To list comments on an issue, use the plural form: bd comments &lt;id&gt;
 
 ```
 bd comment <id> [text...] [flags]

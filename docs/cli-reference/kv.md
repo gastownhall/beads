@@ -1,6 +1,6 @@
 ---
 title: "bd kv"
-description: "Commands for working with the beads key-value store."
+description: "Key-value store commands"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -19,7 +19,7 @@ Examples:
   bd kv list                 # List all key-value pairs
 
 ```
-bd kv [flags]
+bd kv [command]
 ```
 
 ## bd kv clear

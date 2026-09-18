@@ -73,20 +73,22 @@ checks and fixes server-gated until the driver interface covers them.
 
 ## GitHub/GitLab Sync Authentication
 
-`bd dolt push` and `bd dolt pull` authenticate git-protocol remotes
-(`git+https://`, `git+ssh://`, `git://`, `git+file://`) via the `gh`/`glab`
-CLIs or an OAuth device flow, injected per-command through
-`GIT_CONFIG_PARAMETERS`. Non-git Dolt remotes (`https://` DoltHub/remotesapi,
-`dolthub://`, Hosted Dolt) are never wrapped. With `--auth auto` and no
-detected provider, bd injects nothing so git's own configured credential
-helpers still apply. Do not store sync PATs in beads config; `github.token`
-and `gitlab.token` remain the issue-tracker bridge credentials (`bd github`,
+`bd dolt push` and `bd dolt pull` authenticate git-over-HTTP(S) remotes
+(`git+https://`, `git+http://`) via the `gh`/`glab` CLIs or an OAuth device
+flow, injected per-command through `GIT_CONFIG_PARAMETERS`. Those are the only
+transports where git consults credential helpers: SSH (`git+ssh://`, `ssh://`,
+`git@`), `git://`, `git+file://`, and non-git Dolt remotes (`https://`
+DoltHub/remotesapi, `dolthub://`, Hosted Dolt) are never wrapped. With
+`--auth auto` and no detected provider, bd injects nothing so git's own
+configured credential helpers still apply; `--auth none` disables wrapping
+entirely. Do not store sync PATs in beads config; `github.token` and
+`gitlab.token` remain the issue-tracker bridge credentials (`bd github`,
 `bd gitlab`) and are unrelated to dolt sync.
 
 1. Run `bd github-sync status` to see the detected provider.
 2. Log in with `bd github-sync login --provider gh --host github.com` or
    `bd github-sync login --provider oauth --host github.com`.
-3. Use `bd dolt push --auth auto` (or `gh`/`glab`/`oauth`) for explicit control.
+3. Use `bd dolt push --auth auto` (or `gh`/`glab`/`oauth`/`none`) for explicit control.
 
 OAuth setup needs `github.client_id`/`gitlab.client_id` in config or
 `BD_GITHUB_CLIENT_ID`/`BD_GITLAB_CLIENT_ID` env vars. Client secrets are

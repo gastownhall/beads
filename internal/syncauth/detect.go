@@ -47,7 +47,10 @@ func HostFromRemoteURL(raw string) (string, error) {
 	return host, nil
 }
 
-// hostProvider guesses the provider from a host name.
+// hostProvider guesses the provider flavor from a host name. Hosts that are
+// neither github.com nor gitlab.com (or their subdomains) return
+// providerUnknown — self-managed GitHub Enterprise and self-managed GitLab are
+// indistinguishable by name, and callers must not assume GitLab.
 func hostProvider(host string) Provider {
 	switch {
 	case strings.EqualFold(host, "github.com") || strings.HasSuffix(host, ".github.com"):
@@ -55,14 +58,8 @@ func hostProvider(host string) Provider {
 	case strings.EqualFold(host, "gitlab.com") || strings.HasSuffix(host, ".gitlab.com"):
 		return ProviderGLab
 	default:
-		// Self-managed GitLab is the more common generic git host.
-		return ProviderGLab
+		return providerUnknown
 	}
-}
-
-// providerForHost returns a provider and its default OAuth endpoint host.
-func providerForHost(host string) Provider {
-	return hostProvider(host)
 }
 
 // normalizeHost returns a lower-case host without a trailing slash/port.

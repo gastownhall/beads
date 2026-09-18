@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -98,6 +99,22 @@ func isNotFound(err error) bool {
 	return err != nil && (err == keyring.ErrNotFound || strings.Contains(err.Error(), "not found"))
 }
 
+// runMu serializes tests that stub the package-level command runner.
+var runMu sync.Mutex
+
+// stubRun swaps the package-level runner for the test duration, restoring the
+// previous value on cleanup.
+func stubRun(t *testing.T, f commandRunner) {
+	t.Helper()
+	runMu.Lock()
+	old := run
+	run = f
+	t.Cleanup(func() {
+		run = old
+		runMu.Unlock()
+	})
+}
+
 func TestGHAuthToken(t *testing.T) {
 	g := newGHAuth(Config{Host: "github.com"})
 	g.runner.run = func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
@@ -151,15 +168,12 @@ func TestResolveAutoPrefersCLI(t *testing.T) {
 	ctx := context.Background()
 	kr := NewMemoryKeyring()
 
-	old := run
-	defer func() { run = old }()
-
-	run = func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+	stubRun(t, func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
 		if filepath.Base(name) == "gh" && len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 			return nil, nil, nil
 		}
 		return nil, nil, fmt.Errorf("not authenticated")
-	}
+	})
 
 	a, err := ResolveAuto(ctx, "github.com", Config{Host: "github.com"}, kr)
 	if err != nil {
@@ -174,12 +188,9 @@ func TestResolveAutoFallsBackToOAuth(t *testing.T) {
 	ctx := context.Background()
 	kr := NewMemoryKeyring()
 
-	old := run
-	defer func() { run = old }()
-
-	run = func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+	stubRun(t, func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("not installed")
-	}
+	})
 
 	if err := kr.Set(keyringService, keyringUser(ProviderOAuth, "github.com"), `{"access_token":"abc","token_type":"bearer","expiry":"2099-01-01T00:00:00Z"}`); err != nil {
 		t.Fatalf("Set failed: %v", err)
@@ -201,12 +212,9 @@ func TestResolveAutoNoProviderReturnsNil(t *testing.T) {
 	ctx := context.Background()
 	kr := NewMemoryKeyring()
 
-	old := run
-	defer func() { run = old }()
-
-	run = func(_ context.Context, _ string, _ ...string) ([]byte, []byte, error) {
+	stubRun(t, func(_ context.Context, _ string, _ ...string) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("not installed")
-	}
+	})
 
 	for _, host := range []string{"github.com", "gitlab.com", "git.example.com"} {
 		a, err := ResolveAuto(ctx, host, Config{Host: host}, kr)
@@ -221,9 +229,7 @@ func TestResolveAutoNoProviderReturnsNil(t *testing.T) {
 
 func TestWithAuthSetsAndRestoresEnv(t *testing.T) {
 	const env = "GIT_CONFIG_PARAMETERS"
-	prev := os.Getenv(env)
-	defer func() { _ = os.Setenv(env, prev) }()
-
+	t.Setenv(env, "")
 	_ = os.Unsetenv(env)
 
 	a, err := New(Config{Provider: ProviderGH, Host: "github.com"})
@@ -231,7 +237,7 @@ func TestWithAuthSetsAndRestoresEnv(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	err = WithAuth(context.Background(), "github.com", a, func() error {
+	err = WithAuth(context.Background(), "https", "github.com", a, func() error {
 		got := os.Getenv(env)
 		if got == "" {
 			return fmt.Errorf("GIT_CONFIG_PARAMETERS not set")
@@ -254,18 +260,11 @@ func TestWithAuthSetsAndRestoresEnv(t *testing.T) {
 // fall-through path.
 func TestWithAuthNilAuthLeavesEnvAlone(t *testing.T) {
 	const env = "GIT_CONFIG_PARAMETERS"
-	prev, had := os.LookupEnv(env)
-	defer func() {
-		if had {
-			_ = os.Setenv(env, prev)
-		} else {
-			_ = os.Unsetenv(env)
-		}
-	}()
+	t.Setenv(env, "")
 	_ = os.Unsetenv(env)
 
 	called := false
-	err := WithAuth(context.Background(), "github.com", nil, func() error {
+	err := WithAuth(context.Background(), "https", "github.com", nil, func() error {
 		called = true
 		if os.Getenv(env) != "" {
 			return fmt.Errorf("GIT_CONFIG_PARAMETERS set by nil Auth: %q", os.Getenv(env))
@@ -280,33 +279,60 @@ func TestWithAuthNilAuthLeavesEnvAlone(t *testing.T) {
 	}
 }
 
-// Proves a real git process sees the injected credential helper, and that the
-// GIT_CONFIG_PARAMETERS quoting survives a bd executable path containing
-// spaces (the oauth helper value is `!<exe> github-sync git-credential`).
+// Proves a real git process sees the injected credential helper AND can
+// execute it: the helper value is a `!` shell command, so the bd executable
+// path must be shell-quoted and the whole parameter must survive git's
+// GIT_CONFIG_PARAMETERS sq syntax. The fake bd lives under a directory with a
+// space — the case that breaks an unquoted helper.
 func TestWithAuthGitReadsCredentialHelper(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not in PATH")
 	}
 
-	exe := filepath.Join(t.TempDir(), "dir with space", "bd")
+	dir := filepath.Join(t.TempDir(), "dir with space")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	exe := filepath.Join(dir, "bd")
+	fake := "#!/bin/sh\nprintf 'username=u\\npassword=p\\n'\n"
+	if err := os.WriteFile(exe, []byte(fake), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	// Isolate git from ambient config so only the injected helper can answer.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
 	a := newOAuthAuth(Config{Host: "github.com", ClientID: "client", Exe: exe}, NewMemoryKeyring())
 
-	var helper string
-	err := WithAuth(context.Background(), "github.com", a, func() error {
+	var helper, filled string
+	err := WithAuth(context.Background(), "https", "github.com", a, func() error {
 		out, err := exec.Command("git", "config", "--get", "credential.https://github.com.helper").Output() // #nosec G204 -- fixed args
 		if err != nil {
 			return fmt.Errorf("git config --get: %w", err)
 		}
 		helper = strings.TrimSpace(string(out))
+
+		cmd := exec.Command("git", "credential", "fill") // #nosec G204 -- fixed args
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git credential fill: %w\n%s", err, out)
+		}
+		filled = string(out)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("WithAuth: %v", err)
 	}
 
-	want := "!" + exe + " github-sync git-credential"
+	want := "!" + shellQuote(exe) + " github-sync git-credential --host 'github.com'"
 	if helper != want {
 		t.Fatalf("credential helper = %q, want %q", helper, want)
+	}
+	if !strings.Contains(filled, "password=p") {
+		t.Fatalf("git credential fill did not execute the helper; output: %q", filled)
 	}
 }
 
@@ -318,7 +344,7 @@ func TestGitCredentialOperation(t *testing.T) {
 
 	input := strings.NewReader("protocol=https\nhost=github.com\n\n")
 	var out strings.Builder
-	if err := GitCredentialOperation(context.Background(), "get", input, &out, kr); err != nil {
+	if err := GitCredentialOperation(context.Background(), "get", input, &out, kr, "github.com"); err != nil {
 		t.Fatalf("GitCredentialOperation failed: %v", err)
 	}
 
@@ -328,6 +354,36 @@ func TestGitCredentialOperation(t *testing.T) {
 	}
 	if !strings.Contains(got, "password=tok") {
 		t.Fatalf("missing password in output: %s", got)
+	}
+}
+
+// The helper serves the keyring token only for https requests to the host it
+// was configured for — anything else gets an empty response so git falls
+// through to the next helper rather than receiving a token it should not see.
+func TestGitCredentialOperationDeclines(t *testing.T) {
+	kr := NewMemoryKeyring()
+	if err := kr.Set(keyringService, keyringUser(ProviderOAuth, "github.com"), `{"access_token":"tok","token_type":"bearer","expiry":"2099-01-01T00:00:00Z"}`); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		input      string
+		expectHost string
+	}{
+		{"http protocol", "protocol=http\nhost=github.com\n\n", "github.com"},
+		{"other host", "protocol=https\nhost=evil.example\n\n", "github.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			err := GitCredentialOperation(context.Background(), "get", strings.NewReader(tc.input), &out, kr, tc.expectHost)
+			if err != nil {
+				t.Fatalf("GitCredentialOperation failed: %v", err)
+			}
+			if got := out.String(); strings.Contains(got, "tok") {
+				t.Fatalf("helper served a token it should have declined: %s", got)
+			}
+		})
 	}
 }
 
@@ -443,14 +499,84 @@ func TestGitConfigParameters(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	params, err := GitConfigParameters("github.com", a)
+	params, err := GitConfigParameters("https", "github.com", a)
 	if err != nil {
 		t.Fatalf("GitConfigParameters failed: %v", err)
 	}
 	if !strings.Contains(params, "credential.https://github.com.helper") {
 		t.Fatalf("params missing credential helper: %s", params)
 	}
-	if !strings.Contains(params, "gh auth git-credential") {
+	if !strings.Contains(params, "auth git-credential") {
 		t.Fatalf("params missing gh credential helper command: %s", params)
+	}
+
+	// The remote scheme keys the helper: git+http:// remotes need an
+	// http-scoped credential entry or the helper never fires.
+	params, err = GitConfigParameters("http", "github.com", a)
+	if err != nil {
+		t.Fatalf("GitConfigParameters(http) failed: %v", err)
+	}
+	if !strings.Contains(params, "credential.http://github.com.helper") {
+		t.Fatalf("params missing http credential helper: %s", params)
+	}
+
+	if _, err := GitConfigParameters("ssh", "github.com", a); err == nil {
+		t.Fatalf("GitConfigParameters(ssh) should fail: credential helpers do not apply")
+	}
+}
+
+// Keys and values are sq-escaped so a single quote in an executable path or
+// host cannot corrupt GIT_CONFIG_PARAMETERS — an unescaped ' makes git reject
+// the whole value ("bogus format in GIT_CONFIG_PARAMETERS") and breaks every
+// git call in the wrapped subtree. Feeding the params to a real git proves it.
+func TestGitConfigParametersEscapesQuotes(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+
+	exe := "/Users/o'brien/bin/bd"
+	a := newOAuthAuth(Config{Host: "github.com", ClientID: "client", Exe: exe}, NewMemoryKeyring())
+
+	params, err := GitConfigParameters("https", "github.com", a)
+	if err != nil {
+		t.Fatalf("GitConfigParameters failed: %v", err)
+	}
+
+	cmd := exec.Command("git", "config", "--get", "credential.https://github.com.helper") // #nosec G204 -- fixed args
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_PARAMETERS="+params,
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git could not parse injected params: %v\n%s", err, out)
+	}
+
+	want := "!" + shellQuote(exe) + " github-sync git-credential --host 'github.com'"
+	if helper := strings.TrimSpace(string(out)); helper != want {
+		t.Fatalf("credential helper = %q, want %q", helper, want)
+	}
+}
+
+func TestCredentialScheme(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want string
+	}{
+		{"git+https://github.com/org/repo.git", "https"},
+		{"git+http://git.example.com/org/repo.git", "http"},
+		{"git+ssh://git@github.com/org/repo.git", ""},
+		{"ssh://git@github.com/org/repo.git", ""},
+		{"git@github.com:org/repo.git", ""},
+		{"git://github.com/org/repo.git", ""},
+		{"git+file:///var/lib/remotes/repo.git", ""},
+		{"https://doltremoteapi.dolthub.com/org/repo", ""},
+		{"dolthub://org/repo", ""},
+		{"", ""},
+	} {
+		if got := CredentialScheme(tc.url); got != tc.want {
+			t.Errorf("CredentialScheme(%q) = %q, want %q", tc.url, got, tc.want)
+		}
 	}
 }

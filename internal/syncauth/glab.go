@@ -61,7 +61,7 @@ func (g *glabAuth) GitConfigParameter(host string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("glab not found in PATH: %w", err)
 	}
-	return fmt.Sprintf("!%s auth git-credential", path), nil
+	return fmt.Sprintf("!%s auth git-credential", shellQuote(path)), nil
 }
 
 func extractGLabToken(out string) (string, bool) {

@@ -64,7 +64,11 @@ func (o *oauthAuth) GitConfigParameter(host string) (string, error) {
 	if exe == "" {
 		exe = CurrentExecutable()
 	}
-	return fmt.Sprintf("!%s github-sync git-credential", exe), nil
+	// The executable and host are shell-quoted: git hands a "!" helper to
+	// /bin/sh, so an unquoted path containing spaces or quotes breaks the
+	// helper (every install under "Application Support", "Program Files", or
+	// a home directory with a space).
+	return fmt.Sprintf("!%s github-sync git-credential --host %s", shellQuote(exe), shellQuote(host)), nil
 }
 
 func (o *oauthAuth) Detect(ctx context.Context) (bool, error) {
