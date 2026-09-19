@@ -421,6 +421,13 @@ func exerciseHistoryParity(t *testing.T, bd, issueID string, run func(...string)
 	if _, stderr, err := run("update", "--json", issueID, "--title", "history parity updated"); err != nil {
 		t.Fatalf("update %s failed: %v\nstderr=%s", issueID, err, stderr)
 	}
+	// Event timestamps have second precision. Give this fixture distinct times
+	// so the parity assertion tests newest-first history rather than an
+	// unspecified order between two writes in the same second.
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE events SET created_at = CASE event_type WHEN 'created' THEN '2026-01-01 00:00:00' WHEN 'updated' THEN '2026-01-01 00:00:01' ELSE created_at END WHERE issue_id = ?", issueID); err != nil {
+		t.Fatalf("set deterministic history timestamps: %v", err)
+	}
 	stdout, stderr, err := run("--json", "history", issueID, "--events")
 	if err != nil {
 		t.Fatalf("history --events %s failed: %v\nstdout=%s\nstderr=%s", issueID, err, stdout, stderr)
@@ -445,6 +452,9 @@ func exerciseHistoryParity(t *testing.T, bd, issueID string, run func(...string)
 			t.Fatalf("history event issue_id=%q, want %q", event.IssueID, issueID)
 		}
 		types = append(types, event.EventType)
+	}
+	if !reflect.DeepEqual(types, []string{"updated", "created"}) {
+		t.Fatalf("history event types = %v, want updated then created", types)
 	}
 	if _, err := db.ExecContext(context.Background(), "CALL DOLT_REMOTE('add', ?, ?)", "backup", "https://example.invalid/backup"); err != nil {
 		t.Fatalf("seed direct/proxy remote: %v", err)
