@@ -72,28 +72,30 @@ func previewFixes(result doctorResult, gate doctor.FixGate) {
 		fmt.Println()
 	}
 
-	// GH#4993: gate solely on AllowDBFix. Reason is advisory text, not a
-	// safety signal — an unreachable/undetermined gate leaves Reason at its
-	// zero value ("") while still needing DB fixes withheld, so admitting on
-	// gate.Reason == "" reopened the bypass this gate exists to close.
-	blockDB := !gate.AllowDBFix
-	for _, issue := range fsFixes {
-		printIssue(issue, !gate.AllowFSFix)
+	// GH#4993: admission is FixGate.AllowsFix alone. Reason is advisory text,
+	// not a safety signal — an unreachable/undetermined gate leaves Reason at
+	// its zero value ("") while still needing schema-writing fixes withheld,
+	// so admitting on gate.Reason == "" reopened the bypass this gate closes.
+	blocked := 0
+	for _, issue := range append(append([]doctorCheck{}, fsFixes...), dbFixes...) {
+		withheld := !gate.AllowsFix(issue.Name)
+		if withheld {
+			blocked++
+		}
+		printIssue(issue, withheld)
 	}
-	for _, issue := range dbFixes {
-		printIssue(issue, blockDB)
-	}
+	total := len(fsFixes) + len(dbFixes)
 
 	switch {
-	case blockDB && len(fsFixes) > 0:
-		fmt.Printf("[DRY-RUN] Would apply %d filesystem fix(es); %d database fix(es) are blocked by the schema gate\n",
-			len(fsFixes), len(dbFixes))
-		fmt.Println("Run 'bd doctor --fix' to apply the filesystem fixes; resolve the schema state to apply the rest")
-	case blockDB:
-		fmt.Printf("[DRY-RUN] All %d fix(es) are blocked by the schema gate\n", len(dbFixes))
+	case blocked > 0 && blocked < total:
+		fmt.Printf("[DRY-RUN] Would apply %d fix(es); %d fix(es) are blocked by the schema gate\n",
+			total-blocked, blocked)
+		fmt.Println("Run 'bd doctor --fix' to apply the permitted fixes; resolve the schema state to apply the rest")
+	case blocked > 0:
+		fmt.Printf("[DRY-RUN] All %d fix(es) are blocked by the schema gate\n", total)
 		fmt.Println("Resolve the schema state shown above before running 'bd doctor --fix'")
 	default:
-		fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", len(dbFixes)+len(fsFixes))
+		fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", total)
 		fmt.Println("Run 'bd doctor --fix' to apply these fixes")
 	}
 }
@@ -105,26 +107,27 @@ func applyFixes(result doctorResult, gate doctor.FixGate) {
 
 	dbFixes, fsFixes := collectFixableIssues(result)
 
-	// GH#4993: withhold only what the gate is about. Blocking filesystem-only
-	// fixes over schema skew leaves no way to repair a gitignore or file mode.
-	var fixableIssues []doctorCheck
-	if gate.AllowFSFix {
-		fixableIssues = append(fixableIssues, fsFixes...)
+	// GH#4993: withhold only what the gate is about. Filesystem-only fixes
+	// are never schema writes, and recovery fixers stay available when the
+	// database is unreachable (FixGate.AllowsFix); everything else is withheld
+	// whenever the gate blocks. Admission is AllowsFix alone, never
+	// gate.Reason == "".
+	var fixableIssues, withheld []doctorCheck
+	for _, issue := range append(append([]doctorCheck{}, fsFixes...), dbFixes...) {
+		if gate.AllowsFix(issue.Name) {
+			fixableIssues = append(fixableIssues, issue)
+		} else if !doctor.IsFilesystemOnlyFix(issue.Name) {
+			withheld = append(withheld, issue)
+		}
 	}
-	// GH#4993: gate solely on AllowDBFix — see the matching comment in
-	// previewFixes. An unreachable/undetermined gate has Reason == "" but
-	// must still withhold DB fixes; falling open on an empty Reason is the
-	// bypass this gate exists to close.
-	if gate.AllowDBFix {
-		fixableIssues = append(fixableIssues, dbFixes...)
-	} else if len(dbFixes) > 0 {
+	if len(withheld) > 0 {
 		reason := gate.Reason
 		if reason == "" {
 			reason = "database schema state could not be assessed"
 		}
 		fmt.Printf("\n%s Skipping %d database fix(es) — %s\n",
-			ui.RenderFail("✗"), len(dbFixes), reason)
-		for _, issue := range dbFixes {
+			ui.RenderFail("✗"), len(withheld), reason)
+		for _, issue := range withheld {
 			fmt.Printf("    · %s\n", issue.Name)
 		}
 	}

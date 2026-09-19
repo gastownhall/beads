@@ -173,3 +173,51 @@ var filesystemOnlyFixes = map[string]bool{
 func IsFilesystemOnlyFix(checkName string) bool {
 	return filesystemOnlyFixes[strings.TrimSpace(checkName)]
 }
+
+// recoveryFixes are the repairs a user reaches for when the database cannot be
+// opened at all. Each rewrites on-disk database state or metadata and none can
+// migrate a schema that already exists elsewhere; each is the *cure* for an
+// unreachable database rather than a schema write:
+//   - Corrupt Manifest moves .dolt/ aside and runs a plain `dolt init`.
+//   - Dolt Format seeds a marker file.
+//   - Dolt Schema probes the server over a plain read connection to find the
+//     right database name and writes only metadata.json.
+//   - Database Integrity moves the local dolt directory aside and runs
+//     `bd init --force`, which does open a store, but only the fresh one it
+//     just created; server-mode repos, whose schema lives on a shared server,
+//     are refused up front by serverModeIntegrityRecoveryGuard.
+//
+// Fresh Clone and Database are deliberately absent: they open the existing
+// store through the migrating factory. Unlisted names are treated as
+// schema-writing, as in filesystemOnlyFixes.
+var recoveryFixes = map[string]bool{
+	"Corrupt Manifest":   true, // backup + reinit of a corrupt .dolt/
+	"Database Integrity": true, // backup + `bd init --force`
+	"Dolt Format":        true, // seeds a marker file
+	"Dolt Schema":        true, // backfills dolt_database in metadata.json
+}
+
+// IsRecoveryFix reports whether the named fix repairs an unopenable database
+// without a schema-writing open. See recoveryFixes.
+func IsRecoveryFix(checkName string) bool {
+	return recoveryFixes[strings.TrimSpace(checkName)]
+}
+
+// AllowsFix is the single admission policy for applying (or previewing as
+// runnable) the named fix under this gate. Filesystem-only fixes follow
+// AllowFSFix. Everything else needs AllowDBFix, with one narrow exception:
+// recovery fixers stay available while the database is unreachable, because
+// with no readable schema there is nothing to skew, and withholding them would
+// block the very repairs that make a dead database reachable again. When the
+// database is reachable but skewed or undetermined they stay withheld.
+func (g FixGate) AllowsFix(checkName string) bool {
+	switch {
+	case IsFilesystemOnlyFix(checkName):
+		return g.AllowFSFix
+	case g.AllowDBFix:
+		return true
+	case !g.DBReachable && IsRecoveryFix(checkName):
+		return true
+	}
+	return false
+}

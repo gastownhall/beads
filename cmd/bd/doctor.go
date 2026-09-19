@@ -342,7 +342,7 @@ Examples:
 		}
 
 		if doctorAgent {
-			agentResult := buildAgentResult(result)
+			agentResult := buildAgentResult(result, schemaGate())
 			if jsonOutput {
 				if err := outputJSON(agentResult); err != nil {
 					return err

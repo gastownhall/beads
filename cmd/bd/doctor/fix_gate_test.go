@@ -139,3 +139,61 @@ func TestIsFilesystemOnlyFix_DefaultsToGuarded(t *testing.T) {
 		}
 	}
 }
+
+// TestFixGateAllowsFix pins the single admission policy: filesystem-only fixes
+// follow AllowFSFix; everything else needs AllowDBFix, except recovery fixers,
+// which stay available only while the database is unreachable.
+func TestFixGateAllowsFix(t *testing.T) {
+	ahead := FixGate{Determined: true, DBReachable: true, Ahead: true, AllowFSFix: true}
+	unreachable := FixGate{Determined: true, RecommendFix: true, AllowFSFix: true}
+	undetermined := FixGate{DBReachable: true, AllowFSFix: true}
+	safe := safeGate()
+
+	cases := []struct {
+		gate string
+		g    FixGate
+		fix  string
+		want bool
+	}{
+		{"safe", safe, "Schema Compatibility", true},
+		{"safe", safe, "Corrupt Manifest", true},
+		{"safe", safe, "Gitignore", true},
+
+		{"ahead", ahead, "Schema Compatibility", false},
+		{"ahead", ahead, "Pending Migrations", false},
+		{"ahead", ahead, "Corrupt Manifest", false},
+		{"ahead", ahead, "Database Integrity", false},
+		{"ahead", ahead, "Gitignore", true},
+
+		{"undetermined", undetermined, "Corrupt Manifest", false},
+		{"undetermined", undetermined, "Schema Compatibility", false},
+
+		{"unreachable", unreachable, "Schema Compatibility", false},
+		{"unreachable", unreachable, "Pending Migrations", false},
+		{"unreachable", unreachable, "Database", false},
+		{"unreachable", unreachable, "Fresh Clone", false},
+		{"unreachable", unreachable, "Some Future Fix", false},
+		{"unreachable", unreachable, "Corrupt Manifest", true},
+		{"unreachable", unreachable, "Database Integrity", true},
+		{"unreachable", unreachable, "Dolt Format", true},
+		{"unreachable", unreachable, "Dolt Schema", true},
+		{"unreachable", unreachable, " Corrupt Manifest ", true},
+		{"unreachable", unreachable, "Gitignore", true},
+		{"no-fs", FixGate{}, "Gitignore", false},
+	}
+	for _, c := range cases {
+		if got := c.g.AllowsFix(c.fix); got != c.want {
+			t.Errorf("%s gate: AllowsFix(%q) = %v, want %v", c.gate, c.fix, got, c.want)
+		}
+	}
+}
+
+// Recovery and filesystem-only are disjoint classes; a name in both would
+// silently take the filesystem branch and ignore the reachability rule.
+func TestRecoveryFixesAreNotFilesystemOnly(t *testing.T) {
+	for name := range recoveryFixes {
+		if IsFilesystemOnlyFix(name) {
+			t.Errorf("%q is listed as both a recovery fix and a filesystem-only fix", name)
+		}
+	}
+}

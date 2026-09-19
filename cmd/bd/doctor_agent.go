@@ -19,7 +19,8 @@ type agentDoctorResult struct {
 
 // buildAgentResult converts a standard doctorResult to an agent-enriched result.
 // Only non-OK checks are included in diagnostics — agents don't need 45 "ok" entries.
-func buildAgentResult(result doctorResult) agentDoctorResult {
+// The gate is applied to each enriched command list; see doctor.EnrichForAgent.
+func buildAgentResult(result doctorResult, gate doctor.FixGate) agentDoctorResult {
 	ar := agentDoctorResult{
 		Path:       result.Path,
 		OverallOK:  result.OverallOK,
@@ -40,7 +41,7 @@ func buildAgentResult(result doctorResult) agentDoctorResult {
 				Detail:   check.Detail,
 				Fix:      check.Fix,
 				Category: check.Category,
-			}))
+			}, gate))
 		case statusWarning:
 			warnCount++
 			ar.Diagnostics = append(ar.Diagnostics, doctor.EnrichForAgent(doctor.DoctorCheck{
@@ -50,7 +51,7 @@ func buildAgentResult(result doctorResult) agentDoctorResult {
 				Detail:   check.Detail,
 				Fix:      check.Fix,
 				Category: check.Category,
-			}))
+			}, gate))
 		}
 	}
 
