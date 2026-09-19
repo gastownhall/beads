@@ -258,9 +258,14 @@ type issueSort struct {
 	number int
 }
 
-// repairPrefixes consolidates multiple prefixes into a single target prefix
-// Issues with the correct prefix are left unchanged.
-// Issues with incorrect prefixes get new hash-based IDs.
+// repairPrefixes consolidates multiple prefixes into a single target prefix.
+// Issues with the correct prefix are left unchanged. Issues with incorrect
+// prefixes are renamed onto the target prefix preserving their existing
+// suffix (e.g. "old-u6ch" -> "kb-u6ch", "old-5su1.13" -> "kb-5su1.13"); a
+// fresh content-hash ID is minted only when the suffix-preserving id would
+// collide with an existing or already-assigned id in this batch — see
+// beads#6591, where unconditional hashing discarded mnemonic ids and dotted
+// children for a batch with only one real collision in 1,266 issues.
 func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
 
 	// Separate issues into correct and incorrect prefix groups
@@ -290,24 +295,17 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		)
 	})
 
-	// Build a map of all renames for text replacement using hash IDs
-	// Track used IDs to avoid collisions within the batch
-	renameMap := make(map[string]string)
-	usedIDs := make(map[string]bool)
-
-	// Mark existing correct IDs as used
-	for _, issue := range correctIssues {
-		usedIDs[issue.ID] = true
+	renameMap, collided, err := computeRepairRenames(targetPrefix, correctIssues, incorrectIssues, actorName)
+	if err != nil {
+		return err
 	}
 
-	// Generate hash IDs for all incorrect issues
-	for _, is := range incorrectIssues {
-		newID, err := generateRepairHashID(targetPrefix, is.issue, actorName, usedIDs)
-		if err != nil {
-			return fmt.Errorf("failed to generate hash ID for %s: %w", is.issue.ID, err)
+	if len(collided) > 0 {
+		fmt.Fprintf(os.Stderr, "%s %d suffix collision(s) detected; minted a fresh id for each:\n", ui.RenderWarn("!"), len(collided))
+		for _, oldID := range collided {
+			fmt.Fprintf(os.Stderr, "  - %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(renameMap[oldID]))
 		}
-		renameMap[is.issue.ID] = newID
-		usedIDs[newID] = true
+		fmt.Fprintf(os.Stderr, "\n")
 	}
 
 	if dryRun {
@@ -395,6 +393,39 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	return nil
+}
+
+// computeRepairRenames decides the target id for every incorrect-prefix
+// issue in a --repair batch. It prefers preserving each issue's existing
+// suffix under targetPrefix (rewriteIssueID's normal rename shape) and only
+// mints a fresh content-hash id when that suffix-preserving id would
+// collide with an already-correct id or with another issue's rename earlier
+// in the same batch. collided lists, in order, the old ids that needed a
+// hash fallback, so the caller can report them. Pure and store-free so it
+// can be unit tested without a Dolt server (see beads#6591).
+func computeRepairRenames(targetPrefix string, correctIssues []*types.Issue, incorrectIssues []issueSort, actorName string) (renameMap map[string]string, collided []string, err error) {
+	renameMap = make(map[string]string, len(incorrectIssues))
+	usedIDs := make(map[string]bool, len(correctIssues)+len(incorrectIssues))
+
+	for _, issue := range correctIssues {
+		usedIDs[issue.ID] = true
+	}
+
+	for _, is := range incorrectIssues {
+		newID := rewriteIssueID(is.prefix, targetPrefix, is.issue.ID)
+		if usedIDs[newID] {
+			collided = append(collided, is.issue.ID)
+			hashID, hashErr := generateRepairHashID(targetPrefix, is.issue, actorName, usedIDs)
+			if hashErr != nil {
+				return nil, nil, fmt.Errorf("failed to generate hash ID for %s: %w", is.issue.ID, hashErr)
+			}
+			newID = hashID
+		}
+		renameMap[is.issue.ID] = newID
+		usedIDs[newID] = true
+	}
+
+	return renameMap, collided, nil
 }
 
 // rewriteIssueID maps oldID from oldPrefix to newPrefix. oldPrefix must be

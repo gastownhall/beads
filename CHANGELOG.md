@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks in embedded, server, and proxied-server command paths; the legacy
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
+### Fixed
+
+- **`bd rename-prefix --repair` preserves each issue's suffix instead of
+  minting a hash id for every renamed issue** (GH#6591). Consolidating
+  multiple prefixes into one always discarded the mnemonic suffix — and any
+  dotted child's visible parent — even when nothing about that suffix
+  collided under the new prefix; a real multi-family migration of 1,266
+  issues hit exactly one true collision but lost every mnemonic id anyway.
+  `--repair` now rewrites `old-u6ch` to `kb-u6ch` the same way a normal
+  single-prefix rename does, and mints a fresh hash id only for an issue
+  whose suffix-preserving id would actually collide with an existing id or
+  another rename earlier in the same batch — reporting each such collision
+  on stderr instead of silently hashing it.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
