@@ -365,6 +365,21 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 		result.Memories++
 	}
 
+	// Seed issue_prefix from config.yaml before the config table has one.
+	// Reads config.yaml directly rather than through config.GetString, since
+	// global config state is not guaranteed to be initialized this early.
+	if len(issues) > 0 {
+		if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
+			if yamlPrefix := config.GetStringFromDir(beadsDir, "issue-prefix"); yamlPrefix != "" {
+				if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix == "" {
+					if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
+						_ = store.CommitWithConfig(ctx, "bd import: seed issue_prefix from config.yaml")
+					}
+				}
+			}
+		}
+	}
+
 	// Import issues
 	if len(issues) > 0 {
 		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale}
