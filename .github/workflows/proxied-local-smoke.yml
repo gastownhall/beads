@@ -14,9 +14,12 @@
 # The paths: filters below track every file compiled into this lane's test
 # binary that hosts or feeds a `^TestManagedLocalProxied` test, so an edit to a
 # test or its fixture re-fires the lane that runs it instead of failing later in
-# the merge queue. Production files are listed only when they implement the
-# proxy/store plumbing the lane exists to prove (db_proxy_child.go,
-# store_factory*.go, uow_factory.go, init*.go). cmd/bd/linear.go is
+# the merge queue. Production files cover the proxy/store plumbing
+# (db_proxy_child.go, store_factory*.go, uow_factory.go, init*.go) and the Jira
+# front doors and shared relations gate in jira.go and sync_push_pull.go that
+# the TestManagedLocalProxiedJira tests exercise. Listing sync_push_pull.go
+# also triggers this lane for edits to the other trackers hosted in that file;
+# that extra CI cost keeps Jira entry-point changes covered. cmd/bd/linear.go is
 # deliberately NOT listed: the status parity test pins a little of its behavior,
 # but it is a 1.5k-line tracker command whose OAuth, id-mode, and help-text
 # edits are almost never proxy-relevant, and firing this 25-minute netns lane on
@@ -40,7 +43,10 @@ on:
       - 'cmd/bd/proxied_integration_helpers_test.go'
       - 'cmd/bd/linear_mock_fixture_test.go'
       - 'cmd/bd/linear_proxy_*'
+      - 'cmd/bd/jira_proxy_*'
+      - 'cmd/bd/jira.go'
       - 'cmd/bd/store_factory*.go'
+      - 'cmd/bd/sync_push_pull.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
@@ -50,6 +56,7 @@ on:
       - 'internal/storage/uow/**'
       - 'internal/tracker/conformance/**'
       - 'internal/tracker/uow_store.go'
+      - 'internal/jira/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
@@ -64,7 +71,10 @@ on:
       - 'cmd/bd/proxied_integration_helpers_test.go'
       - 'cmd/bd/linear_mock_fixture_test.go'
       - 'cmd/bd/linear_proxy_*'
+      - 'cmd/bd/jira_proxy_*'
+      - 'cmd/bd/jira.go'
       - 'cmd/bd/store_factory*.go'
+      - 'cmd/bd/sync_push_pull.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
@@ -74,6 +84,7 @@ on:
       - 'internal/storage/uow/**'
       - 'internal/tracker/conformance/**'
       - 'internal/tracker/uow_store.go'
+      - 'internal/jira/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
@@ -133,7 +144,13 @@ jobs:
             TestManagedLocalProxiedLinearStatusParity \
             TestManagedLocalProxiedLinearPullPushParity \
             TestManagedLocalProxiedLinearConflictResolutionParity \
-            TestManagedLocalProxiedLinearDryRunParity
+            TestManagedLocalProxiedLinearDryRunParity \
+            TestManagedLocalProxiedJiraStatusParity \
+            TestManagedLocalProxiedJiraPullPushParity \
+            TestManagedLocalProxiedJiraConflictJSONParity \
+            TestManagedLocalProxiedJiraPreferExternalConflictParity \
+            TestManagedLocalProxiedJiraDefaultConflictParity \
+            TestManagedLocalProxiedJiraDryRunParity
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2
