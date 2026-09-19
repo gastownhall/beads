@@ -1,6 +1,7 @@
 package ado
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/tracker"
@@ -9,8 +10,9 @@ import (
 
 // adoFieldMapper implements tracker.FieldMapper for Azure DevOps.
 type adoFieldMapper struct {
-	stateMap map[string]string // beads status → ADO state (from ado.state_map.* config)
-	typeMap  map[string]string // beads type → ADO type (from ado.type_map.* config)
+	stateMap    map[string]string // beads status → ADO state (from ado.state_map.* config)
+	typeMap     map[string]string // beads type → ADO type (from ado.type_map.* config)
+	severityMap map[string]string // beads priority → ADO severity (from ado.severity_map.* config)
 }
 
 // Compile-time interface check.
@@ -19,8 +21,9 @@ var _ tracker.FieldMapper = (*adoFieldMapper)(nil)
 // NewFieldMapper creates a new ADO field mapper with optional custom mappings.
 // stateMap overrides default status mapping (beads status → ADO state).
 // typeMap overrides default type mapping (beads type → ADO type).
-// Pass nil for either to use defaults only.
-func NewFieldMapper(stateMap, typeMap map[string]string) tracker.FieldMapper {
+// severityMap overrides default severity mapping (beads priority → ADO severity).
+// Pass nil for any map to use defaults only.
+func NewFieldMapper(stateMap, typeMap, severityMap map[string]string) tracker.FieldMapper {
 	sm := make(map[string]string)
 	for k, v := range stateMap {
 		sm[k] = v
@@ -29,7 +32,27 @@ func NewFieldMapper(stateMap, typeMap map[string]string) tracker.FieldMapper {
 	for k, v := range typeMap {
 		tm[k] = v
 	}
-	return &adoFieldMapper{stateMap: sm, typeMap: tm}
+	svm := normalizeSeverityMap(severityMap)
+	return &adoFieldMapper{stateMap: sm, typeMap: tm, severityMap: svm}
+}
+
+// normalizeSeverityMap trims keys/values, drops empty values, and restricts keys
+// to the valid beads priority strings "0"-"4". Invalid entries are silently
+// ignored so a single malformed config key cannot break the entire mapping.
+func normalizeSeverityMap(m map[string]string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range m {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		switch k {
+		case "0", "1", "2", "3", "4":
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // PriorityToBeads converts an ADO priority (float64 from JSON: 1-4) to beads (0-4).
@@ -161,9 +184,15 @@ func (m *adoFieldMapper) TypeToBeads(trackerType interface{}) types.IssueType {
 
 // SeverityForBug maps a beads priority (0-4) to an ADO Severity string.
 // ADO Bug work items require a Severity field with values like "1 - Critical".
-// Beads 0→"1 - Critical", 1→"2 - High", 2→"3 - Medium", 3/4→"4 - Low".
+// Checks custom severityMap first (keyed by beads priority as string), then falls
+// back to defaults: 0→"1 - Critical", 1→"2 - High", 2→"3 - Medium", 3/4→"4 - Low".
 // Returns "3 - Medium" for unknown values.
 func (m *adoFieldMapper) SeverityForBug(beadsPriority int) string {
+	// Check custom map first.
+	if sev, ok := m.severityMap[strconv.Itoa(beadsPriority)]; ok {
+		return sev
+	}
+
 	switch beadsPriority {
 	case 0:
 		return "1 - Critical"
