@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -17,11 +18,26 @@ func TestRunWithEngineAndUOWFixture(t *testing.T) {
 		store := f.StoreFactory.Open().(*Store)
 		store.Config["test.project"] = "PROJ"
 		ref := "https://tracker.test/EXT-1"
+		// Seeded straight into the map rather than through Store.CreateIssue,
+		// so the create-path label blind spot Run documents does not apply and
+		// the pre-existing label can stay: it makes the suite's single-label
+		// assertion prove the update REPLACES labels instead of merging them.
+		// The real-backend legs cannot seed labels this way, so this is the
+		// one leg carrying that coverage until create-path parity lands.
 		store.Issues["bd-1"] = &types.Issue{ID: "bd-1", Title: "local", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: []string{"old"}, ExternalRef: &ref, UpdatedAt: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)}
-		remote := &mockTracker{}
+		f.HTTP.Enqueue(Response{Status: http.StatusOK, Body: `[{"id":"EXT-1","identifier":"EXT-1","url":"https://tracker.test/EXT-1","title":"remote","updated_at":"2026-09-03T01:00:00Z","labels":[" bug ","","bug"]},{"id":"EXT-2","identifier":"EXT-2","url":"https://tracker.test/EXT-2","title":"dependent","updated_at":"2026-09-03T01:00:00Z"}]`})
+		remote := &mockTracker{client: f.HTTP.Client()}
 		return Setup{
 			Engine:   tracker.NewEngine(remote, store, "conformance"),
 			Store:    store,
+			Snapshot: func(context.Context) (Snapshot, error) { return store.Snapshot(), nil },
+			SeedExternalRefPlanes: func(context.Context) (string, string, error) {
+				ref := "https://tracker.test/EXT-1"
+				store.Wisps["aaa-wisp-bd-1"] = &types.Issue{ID: "aaa-wisp-bd-1", Title: "pushed wisp", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Ephemeral: true, ExternalRef: &ref}
+				otherRef := ref + "-wisp-only"
+				store.Wisps["wisp-only"] = &types.Issue{ID: "wisp-only", ExternalRef: &otherRef}
+				return "bd-1", "wisp-only", nil
+			},
 			Expected: Expected{ExternalRef: ref, ConfigKey: "test.project", MetadataKey: "test.last_sync"},
 			Refusal: func(context.Context) (*tracker.SyncResult, error) {
 				return nil, &storage.ErrUnsupported{Op: "proxy-only operation", Backend: "conformance"}
@@ -68,7 +84,7 @@ func TestHTTPDoubleRecordsBodyAndTransportError(t *testing.T) {
 	}
 }
 
-type mockTracker struct{}
+type mockTracker struct{ client *http.Client }
 
 func (*mockTracker) Name() string                              { return "test" }
 func (*mockTracker) DisplayName() string                       { return "Test" }
@@ -76,8 +92,19 @@ func (*mockTracker) ConfigPrefix() string                      { return "test" }
 func (*mockTracker) Init(context.Context, tracker.Store) error { return nil }
 func (*mockTracker) Validate() error                           { return nil }
 func (*mockTracker) Close() error                              { return nil }
-func (*mockTracker) FetchIssues(context.Context, tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
-	return []tracker.TrackerIssue{{ID: "EXT-1", Identifier: "EXT-1", URL: "https://tracker.test/EXT-1", Title: "remote", UpdatedAt: time.Date(2026, 9, 3, 1, 0, 0, 0, time.UTC), Labels: []string{"bug"}}}, nil
+func (t *mockTracker) FetchIssues(ctx context.Context, _ tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://tracker.test/issues", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var issues []tracker.TrackerIssue
+	err = json.NewDecoder(resp.Body).Decode(&issues)
+	return issues, err
 }
 func (*mockTracker) FetchIssue(context.Context, string) (*tracker.TrackerIssue, error) {
 	return nil, nil
@@ -102,7 +129,15 @@ func (mockMapper) StatusToTracker(types.Status) interface{}  { return "open" }
 func (mockMapper) TypeToBeads(interface{}) types.IssueType   { return types.TypeTask }
 func (mockMapper) TypeToTracker(types.IssueType) interface{} { return "task" }
 func (mockMapper) IssueToBeads(issue *tracker.TrackerIssue) *tracker.IssueConversion {
-	return &tracker.IssueConversion{Issue: &types.Issue{ID: "bd-2", Title: issue.Title, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: issue.Labels}}
+	id := "bd-2"
+	if issue.Identifier == "EXT-1" {
+		id = "bd-1"
+	}
+	conversion := &tracker.IssueConversion{Issue: &types.Issue{ID: id, Title: issue.Title, Status: types.StatusClosed, IssueType: types.TypeTask, Priority: 2, Labels: issue.Labels}}
+	if issue.Identifier == "EXT-2" {
+		conversion.Dependencies = []tracker.DependencyInfo{{FromExternalID: "EXT-2", ToExternalID: "EXT-1", Type: "blocks", Source: tracker.DependencySourceRelation}}
+	}
+	return conversion
 }
 func (mockMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {
 	return map[string]interface{}{"title": issue.Title}

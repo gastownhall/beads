@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 
@@ -25,6 +26,7 @@ type Store struct {
 	// search silently gets wrong. Empty unless a test seeds it, so every
 	// other assertion is unaffected.
 	Wisps map[string]*types.Issue
+	Deps  map[string]map[string]struct{}
 
 	LastSync  string
 	Mutations int
@@ -34,9 +36,15 @@ type Store struct {
 func (s *Store) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Snapshot{Issues: make(map[string]types.Issue, len(s.Issues)), Config: cloneMap(s.Config), Metadata: cloneMap(s.Metadata), LastSync: s.LastSync}
+	out := Snapshot{Issues: make(map[string]types.Issue, len(s.Issues)), Dependencies: make(map[string][]string, len(s.Deps)), Config: cloneMap(s.Config), Metadata: cloneMap(s.Metadata), LastSync: s.LastSync}
 	for id, issue := range s.Issues {
 		out.Issues[id] = *cloneIssue(issue)
+	}
+	for id, targets := range s.Deps {
+		for target := range targets {
+			out.Dependencies[id] = append(out.Dependencies[id], target)
+		}
+		sort.Strings(out.Dependencies[id])
 	}
 	return out
 }
@@ -54,14 +62,37 @@ func (s *Store) ApplyIssueUpdate(ctx context.Context, id string, updates map[str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if issue := s.Issues[id]; issue != nil && labels != nil {
-		issue.Labels = append([]string(nil), labels...)
+		issue.Labels = normalizedLabels(labels)
 	}
 	return nil
 }
 
+// normalizedLabels mirrors the engine's normalizedStringSlice: trim, drop
+// empty, dedupe, sort. The sort is not cosmetic — the fake is the oracle
+// adapters are judged against, and both real backends read labels back
+// ORDER BY label. Without it the first order-sensitive multi-label assertion
+// would pass on the real legs and fail here, or vice versa.
+func normalizedLabels(labels []string) []string {
+	seen := make(map[string]struct{}, len(labels))
+	result := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		result = append(result, label)
+	}
+	sort.Strings(result)
+	return result
+}
+
 // NewStore returns an empty fake tracker store.
 func NewStore() *Store {
-	return &Store{Issues: map[string]*types.Issue{}, Wisps: map[string]*types.Issue{}, Config: map[string]string{}, Metadata: map[string]string{}}
+	return &Store{Issues: map[string]*types.Issue{}, Wisps: map[string]*types.Issue{}, Deps: map[string]map[string]struct{}{}, Config: map[string]string{}, Metadata: map[string]string{}}
 }
 
 // Open returns the store as a unit-of-work target. The call is intentionally
@@ -180,13 +211,20 @@ func (s *Store) UpdateIssue(_ context.Context, id string, updates map[string]int
 	if v, ok := updates["external_ref"].(string); ok {
 		issue.ExternalRef = &v
 	}
+	if v, ok := updates["status"].(string); ok {
+		issue.Status = types.Status(v)
+	}
 	s.Mutations++
 	return nil
 }
 
-// AddDependency is a no-op in the minimal fixture.
-func (s *Store) AddDependency(context.Context, *types.Dependency, string) error {
+// AddDependency stores the dependency relation in the minimal fixture.
+func (s *Store) AddDependency(_ context.Context, dep *types.Dependency, _ string) error {
 	s.mu.Lock()
+	if s.Deps[dep.IssueID] == nil {
+		s.Deps[dep.IssueID] = map[string]struct{}{}
+	}
+	s.Deps[dep.IssueID][dep.DependsOnID] = struct{}{}
 	s.Mutations++
 	s.mu.Unlock()
 	return nil
