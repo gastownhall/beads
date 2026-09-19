@@ -132,16 +132,20 @@ func ForgetInTx(ctx context.Context, tx *sql.Tx, key string) (previous string, f
 	return previous, true, nil
 }
 
-// ListInTx reads the whole memory plane in the caller's transaction, keyed by
-// user key.
+// ListInTx reads the memory plane in the caller's transaction, keyed by user
+// key.
 //
-// It reads the whole config table and narrows in Go rather than issuing a LIKE.
-// The plane is tens of rows inside a table of tens of rows, so the query would
-// buy nothing; what it would cost is a second definition of which rows are
-// memories, expressed in a pattern language where `_` is a wildcard and
-// "kv.memory." contains one.
+// It scopes the read to kv.memory. via SQL LIKE rather than reading the whole
+// config table and narrowing in Go: on a shared dolt sql-server store the
+// config table's dominant occupant is the kv.mail.* mailbox plane, not
+// memories (beads#6115 measured ~94% mail, 2.79 MB, on one store), so "tens of
+// rows in a table of tens of rows" does not hold once many agent clones share
+// one store. The prefix passed to the keyed read is
+// kvkeys.MemoryConfigKeyPrefix — the same constant MemoriesFromConfig strips —
+// so this is still the one definition of which rows are memories, not a
+// second one drifting in a LIKE pattern.
 func ListInTx(ctx context.Context, tx *sql.Tx) (map[string]string, error) {
-	all, err := issueops.GetAllConfigInTx(ctx, tx)
+	all, err := issueops.GetConfigByPrefixInTx(ctx, tx, kvkeys.MemoryConfigKeyPrefix)
 	if err != nil {
 		return nil, err
 	}

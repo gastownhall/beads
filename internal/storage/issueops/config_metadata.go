@@ -53,6 +53,29 @@ func GetAllConfigInTx(ctx context.Context, tx DBTX) (map[string]string, error) {
 	return result, rows.Err()
 }
 
+// GetConfigByPrefixInTx retrieves configuration key-value pairs whose key
+// starts with prefix, within an existing transaction. Prefix is matched via
+// SQL LIKE, so it must itself be free of `%` and `_` wildcard characters —
+// every current caller passes a fixed namespace prefix (e.g. "kv.memory."),
+// never user input.
+func GetConfigByPrefixInTx(ctx context.Context, tx DBTX, prefix string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT `key`, value FROM config WHERE `key` LIKE ?", prefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("get config by prefix %s: %w", prefix, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("get config by prefix %s: scan: %w", prefix, err)
+		}
+		result[k] = v
+	}
+	return result, rows.Err()
+}
+
 // SetMetadataInTx sets a metadata value within an existing transaction.
 func SetMetadataInTx(ctx context.Context, tx DBTX, key, value string) error {
 	_, err := tx.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)
