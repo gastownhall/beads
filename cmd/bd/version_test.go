@@ -51,7 +51,7 @@ func TestVersionCommand(t *testing.T) {
 			t.Fatalf("Failed to create pipe: %v", err)
 		}
 		os.Stdout = w
-		jsonOutput = true
+		pinJSONOutput(t, true)
 
 		// Run version command
 		if err := versionCmd.RunE(versionCmd, []string{}); err != nil {
@@ -83,8 +83,6 @@ func TestVersionCommand(t *testing.T) {
 		}
 	})
 
-	// Restore default
-	jsonOutput = false
 }
 
 func TestResolveCommitHash(t *testing.T) {
@@ -158,7 +156,7 @@ func TestVersionOutputWithCommitAndBranch(t *testing.T) {
 			t.Fatalf("Failed to create pipe: %v", err)
 		}
 		os.Stdout = w
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		if err := versionCmd.RunE(versionCmd, []string{}); err != nil {
 			t.Fatalf("versionCmd.RunE: %v", err)
@@ -187,7 +185,7 @@ func TestVersionOutputWithCommitAndBranch(t *testing.T) {
 			t.Fatalf("Failed to create pipe: %v", err)
 		}
 		os.Stdout = w
-		jsonOutput = true
+		pinJSONOutput(t, true)
 
 		if err := versionCmd.RunE(versionCmd, []string{}); err != nil {
 			t.Fatalf("versionCmd.RunE: %v", err)

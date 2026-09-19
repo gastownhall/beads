@@ -376,6 +376,14 @@ func runServe() error {
 		info.Database = topology.database
 		p, err := newSQLServerUOWProvider(rootCtx, info.BeadsDir, topology)
 		if err != nil {
+			// A daemon has no operator watching a prompt, so a migration-gate
+			// refusal here must fail startup loudly and completely: the whole
+			// block, in the service log, naming the one-time `bd migrate
+			// schema` that unblocks it. No prompt, no auto-consent, no
+			// half-started daemon serving a schema it refused to reconcile.
+			if rendered := renderTypedOpenError(err); rendered {
+				return SilentExit()
+			}
 			return HandleError("bd serve: %v", err)
 		}
 		defer func() {

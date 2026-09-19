@@ -134,6 +134,20 @@ needs = ["preflight-git"]
 description = """
 Ensure we're up to date with origin and branch is properly synced.
 
+**Every `origin/...` below means the branch you are RELEASING FROM, which is
+`release/x.y.z` — never `main`.** Resetting a release branch onto main's tip
+destroys the reviewed release-prep commit and leaves you tagging an untested
+main SHA, which is exactly the failure the release-branch policy exists to
+prevent. Pin the name first and use the variable:
+
+```bash
+# The branch you are releasing from. For a prerelease this is still the BASE
+# version's branch: an RC for 1.3.0 is cut on release/1.3.0.
+REL_BRANCH="release/1.3.0"
+
+git rev-parse --abbrev-ref HEAD    # must equal $REL_BRANCH
+```
+
 ```bash
 # Fetch latest from origin
 git fetch origin
@@ -155,21 +169,20 @@ git pull --rebase
 Recovering from divergence:
 If your branch has diverged from origin (e.g., after a botched commit):
 ```bash
-# Option 1: Reset to origin (loses local commits)
-git reset --hard origin/main
-
-# Option 2: Rebase local commits on top of origin
-git rebase origin/main
-
-# Option 3: Create a backup branch first
+# Option 1: Back up first, ALWAYS
 git branch backup-before-release
-git reset --hard origin/main
+
+# Option 2: Reset to the release branch's origin (loses local commits)
+git reset --hard "origin/$REL_BRANCH"
+
+# Option 3: Rebase local commits on top of it
+git rebase "origin/$REL_BRANCH"
 ```
 
 After pulling, verify sync:
 ```bash
 git status -sb
-# Should show: "## main...origin/main" (no ahead/behind)
+# Should show: "## release/1.3.0...origin/release/1.3.0" (no ahead/behind)
 ```
 """
 
@@ -326,158 +339,68 @@ Focus on workflow-impacting changes agents need to know.
 """
 
 [[steps]]
-id = "bump-version-go"
-title = "Bump version in version.go"
+id = "bump-versions"
+title = "Bump every version reference"
 needs = ["update-info-go"]
 description = """
-Update the Go version constant.
+Run the one script that owns every version reference.
 
 ```bash
-# macOS
-sed -i '' 's/Version = "[^"]*"/Version = "{{version}}"/' cmd/bd/version.go
-
-# Linux
-sed -i 's/Version = "[^"]*"/Version = "{{version}}"/' cmd/bd/version.go
+./scripts/update-versions.sh {{version}}
 ```
+
+This is the ONLY sanctioned way to bump. Hand-rolled sed per file is how the
+set drifts: this formula used to carry its own copies and pointed at a
+`claude-plugin/` path that has not existed since the plugins moved under
+`plugins/beads/`, while missing the copilot plugin, the MCP lockfile and the
+tracked git-hook markers entirely — so it would have failed outright, or
+shipped inconsistent versions, on every step after the stale path.
+
+`scripts/update-versions.sh` rewrites, in one pass:
+
+- `cmd/bd/version.go` — the canonical version everything else is compared to
+- `plugins/beads/.claude-plugin/plugin.json`
+- `plugins/beads/.codex-plugin/plugin.json`
+- `plugins/beads/.copilot-plugin/plugin.json`
+- `.claude-plugin/marketplace.json`
+- `integrations/beads-mcp/pyproject.toml`
+- `integrations/beads-mcp/src/beads_mcp/__init__.py`
+- `integrations/beads-mcp/uv.lock` — via `uv lock`
+- `npm-package/package.json`
+- `.githooks/*` — the `BEGIN`/`END BEADS INTEGRATION v<version>` markers
+- `default.nix`
+- `cmd/bd/winres/winres.json`, `cmd/bd/winres/manifest.xml`
+- `README.md` — the static Alpha badge, if one is present (it is not today;
+  README uses live npm/PyPI/GitHub badges)
+
+Two of those have burned a release before, so check the script's output rather
+than assuming:
+
+- **`uv` must be installed.** Without it the script WARNS and leaves
+  `uv.lock` stale. The release workflow's MCP gate runs `uv sync --locked`,
+  which fails only in the tag-triggered run — after the tag exists and can no
+  longer be rewritten. That burned v1.1.1 and cost v1.1.0 and v1.1.2 their
+  first runs. If you see `uv not found` or `uv lock failed`, stop and fix it:
+  ```bash
+  uv lock --directory integrations/beads-mcp
+  ```
+- **The `.githooks/*` markers are rewritten wholesale**, not matched against
+  the current version, because they can already be drifted when the bump runs
+  (they still said v1.1.0 during the v1.2.0 bump).
+
+Not covered here, by design: `CHANGELOG.md` and `cmd/bd/info.go` (earlier
+steps), and `default.nix`'s `vendorHash` (next step).
 
 Verify:
 ```bash
-grep 'Version = ' cmd/bd/version.go
-```
-"""
-
-[[steps]]
-id = "bump-plugin-json"
-title = "Bump version in plugin JSON files"
-needs = ["bump-version-go"]
-description = """
-Update Claude plugin manifest versions.
-
-```bash
-# macOS/Linux with jq
-jq '.version = "{{version}}"' claude-plugin/.claude-plugin/plugin.json > tmp && mv tmp claude-plugin/.claude-plugin/plugin.json
-jq '.plugins[0].version = "{{version}}"' .claude-plugin/marketplace.json > tmp && mv tmp .claude-plugin/marketplace.json
-```
-
-Verify:
-```bash
-jq -r '.version' claude-plugin/.claude-plugin/plugin.json
-jq -r '.plugins[0].version' .claude-plugin/marketplace.json
-```
-"""
-
-[[steps]]
-id = "bump-mcp-python"
-title = "Bump version in MCP Python package"
-needs = ["bump-plugin-json"]
-description = """
-Update the beads-mcp Python package version.
-
-```bash
-# macOS
-sed -i '' 's/version = "[^"]*"/version = "{{version}}"/' integrations/beads-mcp/pyproject.toml
-sed -i '' 's/__version__ = "[^"]*"/__version__ = "{{version}}"/' integrations/beads-mcp/src/beads_mcp/__init__.py
-
-# Linux
-sed -i 's/version = "[^"]*"/version = "{{version}}"/' integrations/beads-mcp/pyproject.toml
-sed -i 's/__version__ = "[^"]*"/__version__ = "{{version}}"/' integrations/beads-mcp/src/beads_mcp/__init__.py
-```
-
-Verify:
-```bash
-grep 'version = ' integrations/beads-mcp/pyproject.toml | head -1
-grep '__version__ = ' integrations/beads-mcp/src/beads_mcp/__init__.py
-```
-"""
-
-[[steps]]
-id = "bump-npm-package"
-title = "Bump version in npm package"
-needs = ["bump-mcp-python"]
-description = """
-Update the npm package version.
-
-```bash
-# macOS/Linux with jq
-jq '.version = "{{version}}"' npm-package/package.json > tmp && mv tmp npm-package/package.json
-```
-
-Verify:
-```bash
-jq -r '.version' npm-package/package.json
-```
-"""
-
-[[steps]]
-id = "bump-winres"
-title = "Bump version in Windows resource metadata"
-needs = ["bump-npm-package"]
-description = """
-Update Windows PE resource metadata.
-
-```bash
-# macOS
-sed -i '' 's/"file_version": "[^"]*"/"file_version": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i '' 's/"product_version": "[^"]*"/"product_version": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i '' 's/"FileVersion": "[^"]*"/"FileVersion": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i '' 's/"ProductVersion": "[^"]*"/"ProductVersion": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i '' 's/version="[0-9][^"]*\\.0"/version="{{version}}.0"/' cmd/bd/winres/manifest.xml
-
-# Linux
-sed -i 's/"file_version": "[^"]*"/"file_version": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i 's/"product_version": "[^"]*"/"product_version": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i 's/"FileVersion": "[^"]*"/"FileVersion": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i 's/"ProductVersion": "[^"]*"/"ProductVersion": "{{version}}"/' cmd/bd/winres/winres.json
-sed -i 's/version="[0-9][^"]*\\.0"/version="{{version}}.0"/' cmd/bd/winres/manifest.xml
-```
-
-Verify:
-```bash
-grep '{{version}}' cmd/bd/winres/winres.json
-grep 'version="{{version}}.0"' cmd/bd/winres/manifest.xml
-```
-"""
-
-[[steps]]
-id = "bump-readme"
-title = "Check README static version references"
-needs = ["bump-winres"]
-description = """
-README.md currently uses live npm/PyPI/GitHub release badges instead of a static
-Alpha version string. Verify no old static version badge needs updating.
-
-```bash
-rg 'Alpha \\(v|v[0-9]+\\.[0-9]+\\.[0-9]+' README.md || true
-```
-
-If a static release reference is reintroduced later, update it here.
-"""
-
-[[steps]]
-id = "bump-default-nix"
-title = "Bump version in default.nix"
-needs = ["bump-readme"]
-description = """
-Update the Nix package version.
-
-```bash
-# macOS
-sed -i '' 's/version = "[^"]*";/version = "{{version}}";/' default.nix
-
-# Linux
-sed -i 's/version = "[^"]*";/version = "{{version}}";/' default.nix
-```
-
-Verify:
-```bash
-grep 'version = ' default.nix
+git diff --stat
 ```
 """
 
 [[steps]]
 id = "update-vendorhash"
 title = "Update Nix vendorHash if needed"
-needs = ["bump-default-nix"]
+needs = ["bump-versions"]
 description = """
 Update vendorHash if go.mod/go.sum changed since last release.
 
@@ -533,21 +456,45 @@ id = "verify-versions"
 title = "Verify version consistency"
 needs = ["stamp-changelog"]
 description = """
-Confirm all versions match {{version}}.
+Run the gate, not a hand-listed grep pile — the grep list is what drifts.
 
 ```bash
-grep 'Version = ' cmd/bd/version.go
-jq -r '.version' claude-plugin/.claude-plugin/plugin.json
-jq -r '.plugins[0].version' .claude-plugin/marketplace.json
-jq -r '.version' npm-package/package.json
-grep 'version = ' integrations/beads-mcp/pyproject.toml
-grep '__version__ = ' integrations/beads-mcp/src/beads_mcp/__init__.py
-grep 'version = ' default.nix
-grep '{{version}}' cmd/bd/winres/winres.json
-grep 'version="{{version}}.0"' cmd/bd/winres/manifest.xml
+./scripts/check-versions.sh
 ```
 
-All should show {{version}}.
+`scripts/check-versions.sh` reads the canonical version out of
+`cmd/bd/version.go` and compares the gated files against it: all three plugin
+manifests (claude, codex, copilot), the marketplace, the MCP pyproject /
+`__init__.py` / `uv.lock` pin (plus `uv lock --check` for freshness when `uv`
+is present), the npm package, both `BEADS INTEGRATION` markers in every
+`.githooks/*` file, and the Windows PE metadata in `winres.json` and
+`manifest.xml`. It exits non-zero on any mismatch and names the file. This is
+the same script the release-tag pre-push hook and CI run, so a green run here
+is the real signal.
+
+It must print `✓ Version files in sync at: {{version}}` before you continue.
+
+**If it fails, do NOT just re-run the bump — that is a no-op here.**
+`update-versions.sh` derives the OLD version from `cmd/bd/version.go`, which by
+this point already reads `{{version}}`, so its substitutions rewrite
+`{{version}} -> {{version}}` and leave the drifted file exactly as it was while
+printing a green "Version constants updated". Only the `.githooks` markers
+(rewritten wholesale) and `uv.lock` (regenerated) heal on a re-run. The script
+prints the three remedies that do work; the usual one is to edit the named file
+to `{{version}}` and re-run the check.
+
+`check-versions.sh` does NOT gate `default.nix` or `README.md`. Confirm
+`default.nix` yourself:
+
+```bash
+grep 'version = ' default.nix          # should be {{version}}
+```
+
+(For a prerelease, do not expect the version string to appear uniformly in the
+winres files: `file_version`/`product_version` and the manifest's four-part
+version carry the BASE version because PE fields must be purely numeric, while
+`FileVersion`/`ProductVersion` carry the full `{{version}}`. check-versions.sh
+now encodes that split, so let it do the checking.)
 """
 
 [[steps]]
@@ -566,37 +513,74 @@ Review the commit to ensure all expected files are included.
 """
 
 [[steps]]
-id = "create-tag"
-title = "Create release tag"
+id = "push-main"
+title = "Land the release prep as a PR"
 needs = ["commit-release"]
 description = """
-Create annotated git tag.
+Releases are cut from `release/x.y.z`, not from the tip of `main` — see the
+"Release Branches" section of RELEASING.md. **Nothing is pushed straight to the
+release branch, and nothing is tagged before the PR merges.**
+
+The branch is named for the BASE version: a `1.3.0-rc.1` run still targets
+`release/1.3.0`. Derive it rather than substituting `{{version}}` directly,
+which would name a branch nothing ever creates and fail with
+`src refspec ... does not match any`:
 
 ```bash
+BASE="$(printf '%s' "{{version}}" | sed 's/-.*//')"
+REL_BRANCH="release/$BASE"
+echo "$REL_BRANCH"
+```
+
+Create the prep branch, push it, and open the PR:
+
+```bash
+git checkout -b "release-prep/v{{version}}"
+git push -u origin "release-prep/v{{version}}"
+gh pr create --base "$REL_BRANCH" --label status/needs-review-auto
+```
+
+Wait for it to merge, then take the merged state:
+
+```bash
+git checkout "$REL_BRANCH" && git pull
+```
+
+After the release ships, every commit that landed only on the release branch
+needs a forward-port PR to `main`, the version bump included:
+
+```bash
+git log --oneline "main..$REL_BRANCH"
+```
+"""
+
+[[steps]]
+id = "create-tag"
+title = "Create release tag on the merged commit"
+needs = ["push-main"]
+description = """
+Create the annotated tag on the MERGED commit, with the release branch checked
+out and pulled (previous step).
+
+```bash
+git rev-parse --abbrev-ref HEAD    # must be the release branch, not the prep branch
 git tag -a v{{version}} -m "Release v{{version}}"
 ```
+
+Tagging before the merge is the failure to avoid, in two shapes. With branch
+protection on, the direct push is rejected after the tag already exists
+locally. With a squash merge, the tag points at a commit that is not an
+ancestor of the release branch — and goreleaser packages `CHANGELOG.md` *from
+the tag* into every published archive, so the release would ship the
+pre-review notes.
 
 Verify: `git tag -l | tail -5`
 """
 
 [[steps]]
-id = "push-main"
-title = "Push to main"
-needs = ["create-tag"]
-description = """
-Push the release commit to origin.
-
-```bash
-git push origin main
-```
-
-If rejected, someone else pushed. Pull, rebase, try again.
-"""
-
-[[steps]]
 id = "push-tag"
 title = "Push release tag"
-needs = ["push-main"]
+needs = ["create-tag"]
 description = """
 Push the version tag to trigger CI release.
 

@@ -153,8 +153,14 @@ func renderGoldenLines(t *testing.T) []byte {
 
 	// actor pins both halves of the attribution contract: an attributed row
 	// emits the acting identity (the same one the audit-events table resolves),
-	// and an actorless row — derived maintenance, actorless delete plumbing,
+	// and an actorless row — derived maintenance, the system delete surfaces,
 	// records from before the column existed — omits the member entirely.
+	//
+	// A `delete` appears on BOTH sides on purpose. A user's `bd delete --actor A`
+	// is attributed to A, cascade rows included; the actorless surfaces (gc,
+	// molecule cleanup, `bd repo remove`) still emit none. A consumer that read
+	// the empty case as "deletes are never attributed" — which the fixture used
+	// to be the only evidence for — would mis-resolve every delete conflict.
 	records := []eventsjournal.Record{
 		goldenRecord(1, ts, string(issueops.EventCreate), minimal.ID, "author", mustJSON(t, minimal), "", ""),
 		goldenRecord(2, ts, string(issueops.EventCreate), full.ID, "author", mustJSON(t, full), "", ""),
@@ -169,7 +175,11 @@ func renderGoldenLines(t *testing.T) []byte {
 		goldenRecord(8, ts, string(issueops.EventCommentWrite), claimed.ID, "worker-1", mustJSON(t, claimed), "", mustJSON(t, auditComment)),
 		goldenRecord(9, ts, string(issueops.EventClose), closedIssue.ID, "worker-1", mustJSON(t, closedIssue), "", ""),
 		goldenRecord(10, ts, string(issueops.EventCreate), wisp.ID, "author", mustJSON(t, wisp), "", ""),
-		goldenRecord(11, ts, string(issueops.EventDelete), "bd-100", "", "", "", ""), // null issue on delete; actorless delete plumbing
+		// The cascade edge removal a delete emits, attributed to the requester.
+		goldenRecord(11, ts, string(issueops.EventDepRemove), "bd-101", "deleter-1", mustJSON(t, full),
+			mustJSON(t, &issueops.EventDep{Kind: string(types.DepBlocks), Target: "bd-100"}), ""),
+		goldenRecord(12, ts, string(issueops.EventDelete), "bd-100", "deleter-1", "", "", ""), // null issue on delete; requested delete
+		goldenRecord(13, ts, string(issueops.EventDelete), "bd-wisp-1", "", "", "", ""),       // actorless system delete surface
 	}
 
 	var buf bytes.Buffer

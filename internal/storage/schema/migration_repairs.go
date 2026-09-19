@@ -80,8 +80,22 @@ const nonlocalFrozenRowsValues = "('wisps', 'main', 'immediate'), ('wisp_*', 'ma
 // as the pass expects to find it. --skip-empty keeps the commit a clean no-op
 // if the edit staged nothing.
 func commitNonlocalRepair(ctx context.Context, db DBConn, message string) error {
-	if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", nonlocalTablesName); err != nil {
-		return fmt.Errorf("staging %s: %w", nonlocalTablesName, err)
+	return commitScopedTableChange(ctx, db, nonlocalTablesName, message)
+}
+
+// commitScopedTableChange stages exactly one table by name and commits it.
+// Both the version-40/41 repairs and the #4356 untrack reconcile need the same
+// thing — a labeled commit that carries their table and nothing else — for the
+// same two reasons, so the recipe lives here rather than in each of them:
+// DOLT_COMMIT('-Am', …) would sweep an unrelated working set into a
+// repair-labeled commit, and --skip-empty keeps a replay a clean no-op instead
+// of dying on "nothing to commit".
+//
+// It does NOT clear the staging area; a caller with anything possibly staged
+// must unstage first (see unstagePreExistingTables).
+func commitScopedTableChange(ctx context.Context, db DBConn, table, message string) error {
+	if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
+		return fmt.Errorf("staging %s: %w", table, err)
 	}
 	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
 }
