@@ -62,12 +62,12 @@ func TestCheckBeadGateCrossRigPrefixRoute(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 
 	getter := routedBeadGateGetter{localStore: townStore}
-	resolved, reason := checkBeadGate(ctx, getter, "rig:gt-closed")
+	resolved, reason, _ := checkBeadGate(ctx, getter, "rig:gt-closed")
 	if !resolved {
 		t.Fatalf("closed cross-rig target did not resolve gate: %s", reason)
 	}
 
-	resolved, reason = checkBeadGate(ctx, getter, "rig:gt-open")
+	resolved, reason, _ = checkBeadGate(ctx, getter, "rig:gt-open")
 	if resolved {
 		t.Fatalf("open cross-rig target unexpectedly resolved gate: %s", reason)
 	}
