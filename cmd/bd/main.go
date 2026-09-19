@@ -850,7 +850,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables Dolt auto-push")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
 	rootCmd.PersistentFlags().BoolVar(&globalFlag, "global", false, "Use the global shared-server database (beads_global)")
-	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP). Applies to embedded and direct SQL-server modes; proxied-server routes are unaffected. Default: on. Override via config key dolt.auto-commit")
+	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP). In proxied-server mode every write goes through the deferral, including config and version metadata, and bd dolt commit is the flush point; the SIGTERM/SIGHUP flush is embedded-only. Default: on. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().BoolVar(&cpuProfileEnabled, "cpu-profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().StringVar(&memProfilePath, "mem-profile", "", "Write heap profile to FILE on exit (also respects BEADS_MEM_PROFILE)")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
@@ -1783,6 +1783,16 @@ var rootCmd = &cobra.Command{
 				uowSinks.Hook = hookRunner
 			}
 			uowProvider = wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(p, uowSinks))
+
+			// Honor dolt.auto-commit for proxied writes the same way
+			// issueOpsContext already does for the direct/SQL-server routes
+			// (bd-4wamg): batch/off defer the Dolt version commit rather than
+			// minting one per write (GH#4995). uow.issueOperations reads this
+			// off the context for every Create/Update/Close/Reopen it runs.
+			rootCtx, err = issueOpsContext(rootCtx)
+			if err != nil {
+				return HandleError("failed to resolve dolt auto-commit policy: %v", err)
+			}
 
 			if !previewMode {
 				reconcileVersionProxiedServer(rootCtx)
