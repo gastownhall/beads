@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -132,13 +134,26 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 	// transaction, one history entry. The prefix sync runs even when the
 	// batch is otherwise empty, exactly as the classic path's post-commit
 	// sync does (be-llaf; config.yaml is authoritative, not a rename).
+	// Excluded in --global mode: config.yaml is per-project, and the shared
+	// global store's own prefix must win there (selectCreateIDPrefix), not
+	// whichever project last imported into it.
+	var syncPrefix string
+	if !globalFlag {
+		if p := strings.TrimSpace(config.GetString("issue-prefix")); p != "" {
+			if err := validatePrefix(p); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: not seeding issue_prefix from config.yaml: %v\n", err)
+			} else {
+				syncPrefix = p
+			}
+		}
+	}
 	batch, err := importer.ImportBatch(ctx, publicops.ImportBatchRequest{
 		Actor:                getActorWithGit(),
 		Issues:               issues,
 		Memories:             memoryEntries,
 		AllowStale:           importAllowStale,
 		SkipPrefixValidation: true,
-		SyncIssuePrefix:      config.GetString("issue-prefix"),
+		SyncIssuePrefix:      syncPrefix,
 		Source:               filepath.Base(source),
 	})
 	if err != nil {
