@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -52,6 +53,21 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 	}
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ImportBatchResult, string, error) {
 		var result publicops.ImportBatchResult
+
+		// Seed issue_prefix before CreateIssuesInTxWithResult needs it (via
+		// NewBatchContext -> ReadConfigPrefix), for the same reason the sync
+		// below exists: an externally-provisioned database's config table can
+		// be missing the row config.yaml already carries. Seeding only when
+		// the table is empty — never overwriting an existing prefix — keeps
+		// this a pure precondition for the sync 40 lines down, not a second,
+		// conflicting writer.
+		if request.SyncIssuePrefix != "" {
+			if stored, _ := uw.ConfigUseCase().GetConfig(ctx, "issue_prefix"); stored == "" {
+				if err := uw.ConfigUseCase().SetConfig(ctx, "issue_prefix", request.SyncIssuePrefix); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to seed issue_prefix from config.yaml: %v\n", err)
+				}
+			}
+		}
 
 		if len(request.Issues) > 0 {
 			runner, err := importStatementRunner(uw)

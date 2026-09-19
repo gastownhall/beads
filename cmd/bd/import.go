@@ -365,16 +365,22 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 		result.Memories++
 	}
 
-	// Seed issue_prefix from config.yaml before the config table has one.
-	// Reads config.yaml directly rather than through config.GetString, since
-	// global config state is not guaranteed to be initialized this early.
-	if len(issues) > 0 {
-		if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
-			if yamlPrefix := config.GetStringFromDir(beadsDir, "issue-prefix"); yamlPrefix != "" {
-				if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix == "" {
-					if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
-						_ = store.CommitWithConfig(ctx, "bd import: seed issue_prefix from config.yaml")
-					}
+	// Seed issue_prefix from config.yaml before the config table has one, so
+	// NewBatchContext's ReadConfigPrefix (below, via importIssuesCore) does
+	// not reject an externally-provisioned database that config.yaml already
+	// names a prefix for. Never runs in --global mode: config.yaml is a
+	// per-project file, and the shared global store's own prefix must win
+	// there (selectCreateIDPrefix), not whatever project happened to import
+	// into it.
+	if len(issues) > 0 && !globalFlag {
+		if yamlPrefix := strings.TrimSpace(config.GetString("issue-prefix")); yamlPrefix != "" {
+			if err := validatePrefix(yamlPrefix); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: not seeding issue_prefix from config.yaml: %v\n", err)
+			} else if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix == "" {
+				if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to seed issue_prefix from config.yaml: %v\n", setErr)
+				} else if commitErr := store.CommitWithConfig(ctx, "bd import: seed issue_prefix from config.yaml"); commitErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to commit seeded issue_prefix: %v\n", commitErr)
 				}
 			}
 		}
@@ -411,11 +417,16 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 	// for this intentional config update after the issues commit completes.
 	// config.yaml is authoritative here and existing issue IDs are intentionally
 	// left unchanged: this deliberately bypasses the `bd config set issue_prefix`
-	// guard for the import/migration flow and is not a rename.
-	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
-		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != yamlPrefix {
-			if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
-				_ = store.CommitWithConfig(ctx, "bd import: sync issue_prefix from config.yaml")
+	// guard for the import/migration flow and is not a rename. Excluded in
+	// --global mode for the same reason the seed above is: config.yaml is
+	// per-project, and the shared global store's prefix must not be
+	// overwritten by whichever project last imported into it.
+	if !globalFlag {
+		if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
+			if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != yamlPrefix {
+				if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
+					_ = store.CommitWithConfig(ctx, "bd import: sync issue_prefix from config.yaml")
+				}
 			}
 		}
 	}

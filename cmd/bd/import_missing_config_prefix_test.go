@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -25,15 +26,22 @@ import (
 // missing" even though config.yaml had the prefix and `bd where`/`bd
 // context` resolved it correctly.
 func TestCLI_Import_ServerDatabaseMissingConfigPrefix_E2E(t *testing.T) {
+	skipIfNoDolt(t)
+
 	tmpDir := t.TempDir()
 	env := os.Environ()
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() {
+		dropTestDatabase(database, testDoltServerPort)
+	})
 
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--server", "--prefix", "extdb", "--quiet")
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env,
+		"init", "--backend", "dolt", "--server", "--external",
+		"--server-host", "127.0.0.1",
+		"--server-port", fmt.Sprintf("%d", testDoltServerPort),
+		"--database", database,
+		"--prefix", "extdb", "--quiet")
 	if initErr != nil {
-		lower := strings.ToLower(initOut)
-		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
-			t.Skipf("dolt server backend not available: %s", initOut)
-		}
 		t.Fatalf("bd init --server failed: %v\n%s", initErr, initOut)
 	}
 

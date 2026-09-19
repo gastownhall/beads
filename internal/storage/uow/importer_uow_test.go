@@ -261,6 +261,40 @@ func TestImporterUOW(t *testing.T) {
 		}
 	})
 
+	t.Run("SeedsPrefixBeforeCreateNeedsIt", func(t *testing.T) {
+		// Simulate an externally-provisioned database: config.yaml (modeled
+		// here by SyncIssuePrefix, which is what the CLI populates it from)
+		// carries a prefix, but the database's own config table does not —
+		// exactly what NewBatchContext's ReadConfigPrefix treats as "missing"
+		// (sql.ErrNoRows OR an empty value), the state a provisioner that
+		// creates the Dolt database directly (bypassing `bd init`, which is
+		// what normally writes this row) leaves it in.
+		if err := kit.SetConfig(ctx, "issue_prefix", ""); err != nil {
+			t.Fatalf("clear issue_prefix: %v", err)
+		}
+
+		when := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+		result, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor: "importer-test",
+			Issues: []*types.Issue{{
+				ID: "imp-seed", Title: "Seeded via prefix precondition", Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2, CreatedAt: when, UpdatedAt: when,
+			}},
+			SkipPrefixValidation: true,
+			SyncIssuePrefix:      "imp",
+			Source:               "seed.jsonl",
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch against a database with no config-table prefix: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+		if got := queryString(t, "SELECT value FROM config WHERE `key` = 'issue_prefix'"); got != "imp" {
+			t.Errorf("issue_prefix after seed = %q, want %q", got, "imp")
+		}
+	})
+
 	t.Run("EmptyActorIsRefused", func(t *testing.T) {
 		if _, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{Source: "noactor.jsonl"}); err == nil {
 			t.Fatal("ImportBatch with empty actor should be refused")
