@@ -61,7 +61,6 @@ func TestHistoryRemoteRefusalFrontDoorMatrix(t *testing.T) {
 		{"flatten", "proxy.flatten.unsupported", "flatten is not supported in proxied-server mode", []string{"flatten"}},
 		{"dolt push", "proxy.dolt_push.unsupported", "dolt push is not supported in proxied-server mode", []string{"dolt", "push"}},
 		{"dolt pull", "proxy.dolt_pull.unsupported", "dolt pull is not supported in proxied-server mode", []string{"dolt", "pull"}},
-		{"dolt commit", "proxy.dolt_commit.unsupported", "dolt commit is not supported in proxied-server mode", []string{"dolt", "commit"}},
 		{"dolt remote add", "proxy.dolt_remote.unsupported", "dolt remote add is not supported in proxied-server mode", []string{"dolt", "remote", "add", "backup", "https://example.invalid/backup"}},
 		{"dolt remote list", "proxy.dolt_remote.unsupported", "dolt remote list is not supported in proxied-server mode", []string{"dolt", "remote", "list"}},
 		{"dolt remote reset-data", "proxy.dolt_remote.unsupported", "dolt remote reset-data is not supported in proxied-server mode", []string{"dolt", "remote", "reset-data", "backup"}},
@@ -126,8 +125,10 @@ func snapshotHistoryArtifacts(t *testing.T, p proxiedProject) []byte {
 	return out
 }
 
-// TestHistoryRemoteSupportedFrontDoorParity checks the two operations that
-// are intentionally shared by direct and proxied providers.
+// TestHistoryRemoteSupportedFrontDoorParity checks the operations that are
+// intentionally shared by direct and proxied providers: history --events,
+// dolt remote remove, and dolt commit (the flush point dolt.auto-commit=batch/off
+// defers to, GH#4995).
 func TestHistoryRemoteSupportedFrontDoorParity(t *testing.T) {
 	if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" && os.Getenv(managedLocalProxiedEnvVar) != "1" {
 		t.Skip("set a proxied test lane to run history parity")
@@ -161,6 +162,13 @@ func TestHistoryRemoteSupportedFrontDoorParity(t *testing.T) {
 			out, err = bdProxiedRun(t, bd, p.dir, "--json", "dolt", "remote", "remove", "backup")
 			if err != nil || !strings.Contains(string(out), "backup") {
 				t.Fatalf("remote remove failed: %v\n%s", err, out)
+			}
+			// dolt commit must pass the front door rather than be refused. Exact
+			// commit semantics are pinned by
+			// TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce.
+			out, err = bdProxiedRun(t, bd, p.dir, "--json", "dolt", "commit")
+			if err != nil || strings.Contains(string(out), "proxy.dolt_commit.unsupported") {
+				t.Fatalf("dolt commit refused or failed: %v\n%s", err, out)
 			}
 		})
 	}

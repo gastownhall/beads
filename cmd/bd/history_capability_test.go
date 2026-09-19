@@ -12,13 +12,17 @@ func TestHistoryCapabilityMatrixExactPaths(t *testing.T) {
 	if got, ok := LookupHistoryCapability("history"); !ok || got != HistoryProxySupported {
 		t.Fatalf("history = %q, %v; want proxy-supported", got, ok)
 	}
-	for _, path := range []string{"branch", "conflicts", "repo", "federation", "vc", "flatten", "dolt push", "dolt pull", "dolt commit", "dolt remote", "sync"} {
+	for _, path := range []string{"branch", "conflicts", "repo", "federation", "vc", "flatten", "dolt push", "dolt pull", "dolt remote", "sync"} {
 		if got, ok := LookupHistoryCapability(path); !ok || got != HistoryDirectOnly {
 			t.Errorf("%q = %q, %v; want direct-only", path, got, ok)
 		}
 	}
-	if got, ok := LookupHistoryCapability("dolt remote remove"); !ok || got != HistoryProxySupported {
-		t.Fatalf("dolt remote remove = %q, %v; want proxy-supported", got, ok)
+	// dolt commit is the flush point dolt.auto-commit=batch/off defers to
+	// (GH#4995), so it must stay reachable on the proxied route.
+	for _, path := range []string{"dolt remote remove", "dolt commit"} {
+		if got, ok := LookupHistoryCapability(path); !ok || got != HistoryProxySupported {
+			t.Fatalf("%s = %q, %v; want proxy-supported", path, got, ok)
+		}
 	}
 	for _, path := range []string{"dolt remote add", "dolt remote list", "dolt remote reset-data"} {
 		if got, ok := LookupHistoryCapability(path); !ok || got != HistoryDirectOnly {
@@ -50,7 +54,6 @@ func TestHistoryDirectOnlyRefusalContract(t *testing.T) {
 		"flatten":                {"proxy.flatten.unsupported", "flatten is not supported in proxied-server mode"},
 		"dolt push":              {"proxy.dolt_push.unsupported", "dolt push is not supported in proxied-server mode"},
 		"dolt pull":              {"proxy.dolt_pull.unsupported", "dolt pull is not supported in proxied-server mode"},
-		"dolt commit":            {"proxy.dolt_commit.unsupported", "dolt commit is not supported in proxied-server mode"},
 		"dolt remote add":        {"proxy.dolt_remote.unsupported", "dolt remote add is not supported in proxied-server mode"},
 		"dolt remote list":       {"proxy.dolt_remote.unsupported", "dolt remote list is not supported in proxied-server mode"},
 		"dolt remote reset-data": {"proxy.dolt_remote.unsupported", "dolt remote reset-data is not supported in proxied-server mode"},
@@ -59,7 +62,7 @@ func TestHistoryDirectOnlyRefusalContract(t *testing.T) {
 	oldProvider := uowProvider
 	oldJSON := jsonOutput
 	t.Cleanup(func() { uowProvider = oldProvider; jsonOutput = oldJSON })
-	for _, path := range []string{"branch", "conflicts", "repo", "federation", "vc", "flatten", "dolt push", "dolt pull", "dolt commit", "dolt remote add", "sync"} {
+	for _, path := range []string{"branch", "conflicts", "repo", "federation", "vc", "flatten", "dolt push", "dolt pull", "dolt remote add", "sync"} {
 		parts := strings.Split(path, " ")
 		root := &cobra.Command{Use: "bd"}
 		cmd := &cobra.Command{Use: parts[0]}
@@ -94,7 +97,7 @@ func TestHistoryNestedFrontDoorsRefuseAndSupportedPathsPass(t *testing.T) {
 		"conflicts resolve": {"proxy.conflicts.unsupported", "conflicts resolve is not supported in proxied-server mode"},
 		"federation sync":   {"proxy.federation.unsupported", "federation sync is not supported in proxied-server mode"},
 	}
-	for _, path := range []string{"vc merge", "vc commit", "repo add", "conflicts resolve", "federation sync", "dolt remote remove"} {
+	for _, path := range []string{"vc merge", "vc commit", "repo add", "conflicts resolve", "federation sync", "dolt remote remove", "dolt commit"} {
 		parts := strings.Split(path, " ")
 		root := &cobra.Command{Use: "bd"}
 		cmd := &cobra.Command{Use: parts[0]}
@@ -105,7 +108,7 @@ func TestHistoryNestedFrontDoorsRefuseAndSupportedPathsPass(t *testing.T) {
 			cmd = child
 		}
 		err := validateProxyMaintenanceBeforeProvider(cmd)
-		if path == "dolt remote remove" {
+		if path == "dolt remote remove" || path == "dolt commit" {
 			if err != nil {
 				t.Fatalf("supported %s refused: %v", path, err)
 			}
