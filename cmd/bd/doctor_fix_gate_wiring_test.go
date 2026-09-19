@@ -108,7 +108,7 @@ func TestNoEmitterLeaksUnguardedFixAdvice(t *testing.T) {
 		{
 			name: "agent/buildAgentResult",
 			emit: func(t *testing.T, r doctorResult) string {
-				b, err := json.Marshal(buildAgentResult(r))
+				b, err := json.Marshal(buildAgentResult(r, gate))
 				if err != nil {
 					t.Fatalf("marshal agent result: %v", err)
 				}
@@ -136,6 +136,70 @@ func TestNoEmitterLeaksUnguardedFixAdvice(t *testing.T) {
 			assertNoUnguardedFixAdvice(t, e.name, e.emit(t, result))
 		})
 	}
+}
+
+// assertAgentCommandsGuarded fails if any remediation command in the agent
+// output steers at `bd doctor --fix` without the gate's rewrite marker.
+// Agent enrichers hardcode their own commands, so the raw tip used by the
+// other emitters is not what leaks here; the command text itself is.
+func assertAgentCommandsGuarded(t *testing.T, label string, ar agentDoctorResult) {
+	t.Helper()
+	for _, d := range ar.Diagnostics {
+		for _, c := range d.Commands {
+			if doctor.MentionsFixAdvice(c) && !strings.Contains(c, "Original tip was: ") {
+				t.Errorf("%s: check %q (%s) published unguarded --fix command %q under a blocked gate",
+					label, d.Name, d.Status, c)
+			}
+		}
+	}
+}
+
+// TestNoAgentEnricherLeaksUnguardedFixCommand runs the --agent emitter over
+// EVERY registered enricher, plus a name with no enricher (generic path).
+// The original fixture used only an unenriched name, so the ~18 enrichers that
+// hardcode `bd doctor --fix` were never exercised and the test passed
+// vacuously. Both statuses are covered because some enrichers branch on it.
+func TestNoAgentEnricherLeaksUnguardedFixCommand(t *testing.T) {
+	names := append(doctor.AgentEnricherNames(), "Tracked Runtime Files")
+	if len(names) < 20 {
+		t.Fatalf("expected the full enricher registry plus the unenriched case, got %d names", len(names))
+	}
+
+	build := func(gate doctor.FixGate) agentDoctorResult {
+		var r doctorResult
+		for _, name := range names {
+			for _, status := range []string{statusError, statusWarning} {
+				r.Checks = append(r.Checks, doctorCheck{
+					Name: name, Status: status, Message: "m", Category: "Core", Fix: rawFixTip,
+				})
+			}
+		}
+		sanitizeFixAdvice(&r, gate)
+		return buildAgentResult(r, gate)
+	}
+
+	// Non-vacuity: under a safe gate the fixture must actually surface
+	// `bd doctor --fix` commands from enrichers, or the blocked-gate assertion
+	// below proves nothing. Schema Compatibility and Database Integrity are
+	// the checks that fire on the very skew this gate exists for.
+	surfaced := map[string]bool{}
+	for _, d := range build(doctor.FixGate{Determined: true, DBReachable: true, RecommendFix: true, AllowDBFix: true, AllowFSFix: true}).Diagnostics {
+		for _, c := range d.Commands {
+			if doctor.MentionsFixAdvice(c) {
+				surfaced[d.Name] = true
+			}
+		}
+	}
+	for _, must := range []string{"Schema Compatibility", "Database Integrity", "Tracked Runtime Files"} {
+		if !surfaced[must] {
+			t.Fatalf("fixture too weak: %q surfaced no --fix command under a safe gate", must)
+		}
+	}
+	if len(surfaced) < 15 {
+		t.Fatalf("fixture too weak: only %d names surfaced --fix commands", len(surfaced))
+	}
+
+	assertAgentCommandsGuarded(t, "blocked gate", build(blockedGate()))
 }
 
 // TestSanitizeFixAdviceWritesThroughSlice pins the specific Go mistake that
@@ -249,6 +313,98 @@ func TestApplyFixesWithholdsDBFixOnUnreachableGate(t *testing.T) {
 	}
 	if !strings.Contains(out, "No fixable issues found") {
 		t.Fatalf("expected applyFixes to withhold the only fix (a database fix) on an unreachable gate, got:\n%s", out)
+	}
+}
+
+// withNullStdin points os.Stdin at /dev/null so applyFixes takes its
+// non-interactive early return after listing what it would fix, instead of
+// prompting or running a real fixer against the test's fake path.
+func withNullStdin(t *testing.T) {
+	t.Helper()
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() {
+		os.Stdin = orig
+		_ = f.Close()
+	})
+}
+
+func resultWithRecoveryAndSchemaFixes() doctorResult {
+	return doctorResult{
+		Path:       "/tmp/does-not-need-to-exist",
+		CLIVersion: "test",
+		Checks: []doctorCheck{
+			{Name: "Corrupt Manifest", Status: statusError, Message: "manifest corrupt", Fix: "bd doctor --fix"},
+			{Name: "Dolt Format", Status: statusWarning, Message: "pre-v56 dolt dir", Fix: "bd doctor --fix"},
+			{Name: "Database Integrity", Status: statusError, Message: "integrity check failed", Fix: "bd doctor --fix"},
+			{Name: "Dolt Schema", Status: statusWarning, Message: "dolt_database missing", Fix: "bd doctor --fix"},
+			{Name: "Schema Compatibility", Status: statusError, Message: "schema mismatch", Fix: "bd doctor --fix"},
+			{Name: "Pending Migrations", Status: statusWarning, Message: "pending", Fix: "bd doctor --fix"},
+		},
+	}
+}
+
+// TestApplyFixesKeepsRecoveryFixesOnUnreachableGate pins the narrow rule that
+// an unopenable database must not withhold the fixes that repair an unopenable
+// database: recovery fixers are listed as runnable, schema-writing fixes are
+// still skipped.
+func TestApplyFixesKeepsRecoveryFixesOnUnreachableGate(t *testing.T) {
+	withNullStdin(t)
+	out := captureStdout(t, func() error {
+		applyFixes(resultWithRecoveryAndSchemaFixes(), unreachableGate())
+		return nil
+	})
+
+	for _, name := range []string{"Corrupt Manifest", "Dolt Format", "Database Integrity", "Dolt Schema"} {
+		if !strings.Contains(out, name+": ") {
+			t.Errorf("recovery fix %q was not offered on an unreachable gate:\n%s", name, out)
+		}
+	}
+	for _, name := range []string{"Schema Compatibility", "Pending Migrations"} {
+		if strings.Contains(out, name+": ") {
+			t.Errorf("schema-writing fix %q was offered on an unreachable gate:\n%s", name, out)
+		}
+		if !strings.Contains(out, "· "+name) {
+			t.Errorf("schema-writing fix %q was not reported as skipped:\n%s", name, out)
+		}
+	}
+}
+
+// TestApplyFixesWithholdsRecoveryFixesWhenDatabaseReachableButBlocked is the
+// other edge of the same rule: the exception exists because an unreachable
+// database has no readable schema to skew. A reachable database that is ahead
+// of the binary still gets backup+reinit withheld.
+func TestApplyFixesWithholdsRecoveryFixesWhenDatabaseReachableButBlocked(t *testing.T) {
+	withNullStdin(t)
+	out := captureStdout(t, func() error {
+		applyFixes(resultWithRecoveryAndSchemaFixes(), blockedGate())
+		return nil
+	})
+
+	if !strings.Contains(out, "No fixable issues found") {
+		t.Fatalf("expected every fix withheld on a reachable, skewed gate, got:\n%s", out)
+	}
+	if strings.Contains(out, "Corrupt Manifest: ") {
+		t.Fatalf("recovery fix offered while the database is reachable and ahead:\n%s", out)
+	}
+}
+
+// TestPreviewFixesLabelsOnlySchemaWritingFixesBlockedOnUnreachableGate is the
+// dry-run half of the recovery rule.
+func TestPreviewFixesLabelsOnlySchemaWritingFixesBlockedOnUnreachableGate(t *testing.T) {
+	out := captureStdout(t, func() error {
+		previewFixes(resultWithRecoveryAndSchemaFixes(), unreachableGate())
+		return nil
+	})
+	if got := strings.Count(out, "Blocked by the schema gate"); got != 2 {
+		t.Fatalf("expected exactly the 2 schema-writing fixes labelled blocked, got %d:\n%s", got, out)
+	}
+	if !strings.Contains(out, "Would apply 4 fix(es); 2 fix(es) are blocked by the schema gate") {
+		t.Fatalf("unexpected dry-run summary:\n%s", out)
 	}
 }
 
