@@ -221,7 +221,6 @@ func TestIsBlocked_BatchedCreateWithDepsInOneTxn(t *testing.T) {
 	}
 	if err := store.CreateIssuesWithFullOptions(ctx, []*types.Issue{parent, child}, "tester",
 		storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
 			SkipPrefixValidation: true,
 		}); err != nil {
 		t.Fatalf("CreateIssuesWithFullOptions: %v", err)
@@ -325,6 +324,106 @@ func TestIsBlocked_WaitsForAnyChildrenGate(t *testing.T) {
 	}
 	if !getIsBlocked(t, ctx, store, "issues", "isb-wf-any-waiter") {
 		t.Fatal("expected waiter re-blocked: any-children gate no longer satisfied after reopen")
+	}
+}
+
+// TestIsBlocked_WaitsForAlsoBlocksSpawnerOpen covers the GH#3783/#3875
+// also_blocks provenance flag: a waits-for edge collapsed from a redundant
+// needs/depends_on blocks edge (cmd/bd/cook.go collectDependencies) must
+// additionally block while the spawner itself is open, not only while it
+// has an open parent-child child — closing the pre-fanout window where the
+// waiter could become ready before the spawner ever produced (or finished)
+// its fanout.
+func TestIsBlocked_WaitsForAlsoBlocksSpawnerOpen(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "isb-wf-ab-waiter")
+	createPerm(t, ctx, store, "isb-wf-ab-spawner")
+
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-wf-ab-waiter", DependsOnID: "isb-wf-ab-spawner",
+		Type: types.DepWaitsFor, Metadata: `{"gate":"all-children","also_blocks":true}`,
+	}, "tester"); err != nil {
+		t.Fatalf("waits-for also_blocks: %v", err)
+	}
+
+	// Spawner open, zero children spawned yet: the waiter must be blocked.
+	// Without also_blocks this would be unblocked (no children => no
+	// children-open EXISTS) — exactly the pre-fanout regression.
+	if !getIsBlocked(t, ctx, store, "issues", "isb-wf-ab-waiter") {
+		t.Fatal("expected waiter blocked: spawner still open with zero children spawned (also_blocks)")
+	}
+
+	if err := store.CloseIssue(ctx, "isb-wf-ab-spawner", "no fanout needed", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue spawner: %v", err)
+	}
+	if getIsBlocked(t, ctx, store, "issues", "isb-wf-ab-waiter") {
+		t.Fatal("expected waiter unblocked after its childless spawner closed")
+	}
+
+	if err := store.ReopenIssue(ctx, "isb-wf-ab-spawner", "", "tester"); err != nil {
+		t.Fatalf("ReopenIssue spawner: %v", err)
+	}
+	if !getIsBlocked(t, ctx, store, "issues", "isb-wf-ab-waiter") {
+		t.Fatal("expected waiter re-blocked after spawner reopened")
+	}
+}
+
+// TestIsBlocked_WaitsForAlsoBlocksOverridesAnyChildrenEarlyOpen covers the
+// override case explicitly called out in the design: also_blocks is a
+// top-level OR outside the any-children early-open carve-out, so a
+// collapsed edge on an any-children gate must stay blocked while the
+// spawner itself is open even after one child closes (the normal
+// any-children early-open behavior is preserved only for edges WITHOUT
+// also_blocks — see TestIsBlocked_WaitsForAnyChildrenGate above).
+func TestIsBlocked_WaitsForAlsoBlocksOverridesAnyChildrenEarlyOpen(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "isb-wf-ab-any-waiter")
+	createPerm(t, ctx, store, "isb-wf-ab-any-spawner")
+	createPerm(t, ctx, store, "isb-wf-ab-any-child-1")
+	createPerm(t, ctx, store, "isb-wf-ab-any-child-2")
+
+	for _, child := range []string{"isb-wf-ab-any-child-1", "isb-wf-ab-any-child-2"} {
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: child, DependsOnID: "isb-wf-ab-any-spawner", Type: types.DepParentChild,
+		}, "tester"); err != nil {
+			t.Fatalf("parent-child %s: %v", child, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-wf-ab-any-waiter", DependsOnID: "isb-wf-ab-any-spawner",
+		Type: types.DepWaitsFor, Metadata: `{"gate":"any-children","also_blocks":true}`,
+	}, "tester"); err != nil {
+		t.Fatalf("waits-for any-children also_blocks: %v", err)
+	}
+	if !getIsBlocked(t, ctx, store, "issues", "isb-wf-ab-any-waiter") {
+		t.Fatal("expected waiter blocked: no children closed yet")
+	}
+
+	// Close one child: under a plain any-children gate this alone would
+	// unblock (see TestIsBlocked_WaitsForAnyChildrenGate). With also_blocks
+	// the waiter must STAY blocked because the spawner itself is still open.
+	if err := store.CloseIssue(ctx, "isb-wf-ab-any-child-1", "done", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue first child: %v", err)
+	}
+	if !getIsBlocked(t, ctx, store, "issues", "isb-wf-ab-any-waiter") {
+		t.Fatal("expected waiter STILL blocked: also_blocks overrides the any-children early-open carve-out while the spawner is open")
+	}
+
+	// Now close the spawner too: the gate is satisfied (a child closed under
+	// any-children) AND the spawner itself is closed, so the waiter unblocks.
+	if err := store.CloseIssue(ctx, "isb-wf-ab-any-spawner", "done", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue spawner: %v", err)
+	}
+	if getIsBlocked(t, ctx, store, "issues", "isb-wf-ab-any-waiter") {
+		t.Fatal("expected waiter unblocked once the spawner closes with the any-children gate already satisfied")
 	}
 }
 

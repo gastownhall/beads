@@ -80,7 +80,7 @@ func (r *issueSQLRepositoryImpl) GetDescendants(ctx context.Context, rootID stri
 	if err != nil {
 		return nil, fmt.Errorf("descendants: query: %w", err)
 	}
-	page, err := scanIDSrcPage(rows, false)
+	page, err := scanIDSrcPage(rows)
 	if err != nil {
 		return nil, fmt.Errorf("descendants: %w", err)
 	}

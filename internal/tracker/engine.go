@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -74,6 +75,25 @@ type PushHooks struct {
 	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
 	ContentEqual func(local *types.Issue, remote *TrackerIssue) bool
 
+	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
+	// fields. When present, the engine binds the hash to the issue's external_ref
+	// and TargetScope (when provided), and persists that fingerprint in local_metadata
+	// after each successful create/update (and whenever ContentEqual reports a
+	// match). It consults the fingerprint BEFORE fetching the remote issue: if the
+	// stored content and target still match, the remote fetch and update are
+	// skipped entirely. This avoids the per-issue GET that ContentEqual alone
+	// still incurs, so a no-op `--push-only` run does not drain the API rate limit
+	// (gastownhall/beads#4214). Returning "" disables the short-circuit for that
+	// issue (the engine falls back to the fetch + ContentEqual path).
+	ContentHash func(local *types.Issue) string
+
+	// TargetScope returns the canonical remote namespace in which external issue
+	// identifiers are resolved. Trackers whose refs may omit that namespace (for
+	// example github:42 omits host and repository) should provide it so changing
+	// remote configuration invalidates the push cache. If nil or empty, only the
+	// external_ref identifies the target.
+	TargetScope func() string
+
 	// ShouldPush filters issues during push. Return false to skip.
 	// Called in addition to type/state/ephemeral filters. Use for prefix filtering, etc.
 	// If nil, all issues (matching other filters) are pushed.
@@ -94,7 +114,7 @@ type PushHooks struct {
 // integrations follow, eliminating duplication between Linear, GitLab, etc.
 type Engine struct {
 	Tracker   IssueTracker
-	Store     storage.Storage
+	Store     Store
 	Actor     string
 	PullHooks *PullHooks
 	PushHooks *PushHooks
@@ -112,16 +132,24 @@ type Engine struct {
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
-func NewEngine(tracker IssueTracker, store storage.Storage, actor string) *Engine {
+//
+// store is typed rather than interface{} so the seam names its contract: a
+// storage.Storage satisfies Store and is adapted here, while a caller that
+// already adapted its store (trackerStoreForCommand) passes the adapter
+// straight through. NewStore is idempotent, so adapting twice is a no-op.
+func NewEngine(tracker IssueTracker, store Store, actor string) *Engine {
 	return &Engine{
 		Tracker: tracker,
-		Store:   store,
+		Store:   NewStore(store),
 		Actor:   actor,
 	}
 }
 
 // Sync performs a complete synchronization operation based on the given options.
 func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
+	if e == nil || e.Store == nil {
+		return nil, fmt.Errorf("tracker sync store is not initialized")
+	}
 	ctx, span := syncTracer.Start(ctx, "tracker.sync",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
@@ -503,13 +531,19 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				updates["metadata"] = raw
 			}
 
-			if err := e.Store.RunInTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.Transaction) error {
-				if err := tx.UpdateIssue(ctx, existing.ID, updates, e.Actor); err != nil {
-					return err
-				}
-				return syncIssueLabels(ctx, tx, existing.ID, conv.Issue.Labels, e.Actor)
-			}); err != nil {
+			markPullIssueFields(updates)
+			updater, ok := e.Store.(IssueUpdater)
+			if !ok {
+				e.warn("tracker store does not support atomic issue updates")
+				stats.Errors++
+				continue
+			}
+			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, conv.Issue.Labels, e.Actor); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
+				stats.Errors++
+				if pulledIDs != nil {
+					pulledIDs[existing.ID] = true
+				}
 				continue
 			}
 			stats.Updated++
@@ -548,6 +582,17 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
+	markPullIssueFields(updates)
+	return tx.UpdateIssue(ctx, id, updates, actor)
+}
+
+// markPullIssueFields adds the external-authority close policy marker shared
+// by direct and proxied store adapters.
+func markPullIssueFields(updates map[string]interface{}) {
+	updates[issueops.OpForceClosePolicy] = true
 }
 
 func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
@@ -730,7 +775,21 @@ func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue
 // never see this optional capability even when the concrete store underneath
 // implements it — the same reason cmd/bd type-asserts through
 // storage.UnwrapStore for RawDBAccessor, StoreLocator, and friends.
-func externalRefHistoryQuerier(store storage.Storage) (storage.ExternalRefHistoryQuerier, bool) {
+func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
+	if q, ok := store.(ExternalRefHistoryStore); ok {
+		return q, true
+	}
+	if direct, ok := store.(*directStore); ok {
+		if q, ok := direct.Storage.(ExternalRefHistoryStore); ok {
+			return q, true
+		}
+		if dolt, ok := direct.Storage.(storage.DoltStorage); ok {
+			if q, ok := storage.UnwrapStore(dolt).(ExternalRefHistoryStore); ok {
+				return q, true
+			}
+		}
+		return nil, false
+	}
 	if q, ok := store.(storage.ExternalRefHistoryQuerier); ok {
 		return q, true
 	}
@@ -814,6 +873,65 @@ func parseSyncTime(value string) (time.Time, error) {
 }
 
 // doPush exports beads issues to the external tracker.
+// pushHashKey returns the local_metadata key under which the last-pushed
+// content hash for an issue is stored, namespaced per tracker (e.g.
+// "github.pushhash.bd-123"). local_metadata is dolt-ignored, so these hashes
+// are clone-local and reset on clone/branch-checkout/server-restart; that only
+// costs one fetch+ContentEqual pass to repopulate, never a missed update.
+func (e *Engine) pushHashKey(issueID string) string {
+	return e.Tracker.ConfigPrefix() + ".pushhash." + issueID
+}
+
+// pushCacheValue binds the content fingerprint to the remote target and its
+// configured namespace. A local issue can be relinked, or a repo-less ref can
+// resolve under a newly configured namespace, without changing any pushable
+// content. Treating the content hash alone as valid in either case would skip
+// the first update to the new target. Length prefixes keep fields unambiguous.
+func (e *Engine) pushCacheValue(issue *types.Issue, externalRef string) string {
+	if e.PushHooks == nil || e.PushHooks.ContentHash == nil {
+		return ""
+	}
+	content := e.PushHooks.ContentHash(issue)
+	if content == "" {
+		return ""
+	}
+	target := strings.TrimSpace(externalRef)
+	if target == "" {
+		return ""
+	}
+	scope := ""
+	if e.PushHooks.TargetScope != nil {
+		scope = strings.TrimSpace(e.PushHooks.TargetScope())
+	}
+	return fmt.Sprintf("v3:%d:%s%d:%s%s", len(content), content, len(scope), scope, target)
+}
+
+// storedPushHashMatches reports whether the persisted push hash for issue still
+// equals its current content-and-target fingerprint. When true, a push is
+// provably a no-op and both the remote fetch and the update can be skipped.
+func (e *Engine) storedPushHashMatches(ctx context.Context, issue *types.Issue, externalRef string) bool {
+	current := e.pushCacheValue(issue, externalRef)
+	if current == "" {
+		return false
+	}
+	stored, err := e.Store.GetLocalMetadata(ctx, e.pushHashKey(issue.ID))
+	return err == nil && stored != "" && stored == current
+}
+
+// recordPushHash persists the current content-and-target fingerprint for issue
+// so subsequent pushes can short-circuit via storedPushHashMatches. No-op when
+// ContentHash is unset or returns "", or when the target is empty. Never called
+// during dry-run.
+func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externalRef string) {
+	h := e.pushCacheValue(issue, externalRef)
+	if h == "" {
+		return
+	}
+	if err := e.Store.SetLocalMetadata(ctx, e.pushHashKey(issue.ID), h); err != nil {
+		e.warn("Failed to record push hash for %s: %v", issue.ID, err)
+	}
+}
+
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.push",
 		trace.WithAttributes(
@@ -945,6 +1063,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Created++
+			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
+				// Content unchanged since last push: a real run would skip this
+				// issue, so the preview must say so too (gastownhall/beads#4214).
+				stats.Skipped++
 			} else {
 				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Updated++
@@ -991,6 +1113,8 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			for _, w := range created.Warnings {
 				e.warn("%s (%s)", w, issue.ID)
 			}
+			// Remember what we just pushed so the next sync can skip the fetch.
+			e.recordPushHash(ctx, issue, ref)
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
@@ -1002,6 +1126,15 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 
 			// Check if update is needed
 			if !forceIDs[issue.ID] {
+				// Fast path: if the local content is unchanged since the last
+				// successful push, the remote must already match it, so skip the
+				// fetch entirely. This is what keeps a no-op `--push-only` run
+				// from issuing one GET per issue (gastownhall/beads#4214).
+				if e.storedPushHashMatches(ctx, issue, extRef) {
+					stats.Skipped++
+					continue
+				}
+
 				extIssue, err := e.Tracker.FetchIssue(ctx, extID)
 				if isRateLimitExhausted(err) {
 					return stats, fmt.Errorf("sync aborted: %w", err)
@@ -1010,6 +1143,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
 					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
 						if e.PushHooks.ContentEqual(issue, extIssue) {
+							// Remote already matches: record the hash so future
+							// runs skip the fetch above, not just the update.
+							e.recordPushHash(ctx, issue, extRef)
 							stats.Skipped++
 							continue
 						}
@@ -1032,6 +1168,8 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				}
 				continue
 			}
+			// Remember what we just pushed so the next sync can skip the fetch.
+			e.recordPushHash(ctx, issue, extRef)
 			stats.Updated++
 		} else {
 			stats.Skipped++
@@ -1149,7 +1287,9 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 	}
 }
 
-// reimportIssue fetches the external version and updates the local issue.
+// reimportIssue fetches an external version and reapplies its scalar fields.
+// It deliberately preserves local labels because conflict reimport has no
+// authoritative label collection to synchronize.
 func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 	extIssue, err := e.Tracker.FetchIssue(ctx, c.ExternalIdentifier)
 	if err != nil || extIssue == nil {
@@ -1174,7 +1314,13 @@ func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 		}
 	}
 
-	if err := e.Store.UpdateIssue(ctx, c.IssueID, updates, e.Actor); err != nil {
+	markPullIssueFields(updates)
+	updater, ok := e.Store.(IssueUpdater)
+	if !ok {
+		e.warn("tracker store does not support atomic issue updates")
+		return
+	}
+	if err := updater.ApplyIssueUpdate(ctx, c.IssueID, updates, nil, e.Actor); err != nil {
 		e.warn("Failed to update %s during reimport: %v", c.IssueID, err)
 	}
 }
@@ -1344,7 +1490,7 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 	}, nil
 }
 
-func dependencyExists(ctx context.Context, store storage.Storage, issueID, dependsOnID string, depType types.DependencyType) bool {
+func dependencyExists(ctx context.Context, store Store, issueID, dependsOnID string, depType types.DependencyType) bool {
 	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(dependsOnID) == "" {
 		return false
 	}

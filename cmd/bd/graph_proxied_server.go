@@ -3,13 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func runGraphProxiedServer(ctx context.Context, args []string) error {
+func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) error {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
 		return HandleError("%v", err)
@@ -21,7 +22,7 @@ func runGraphProxiedServer(ctx context.Context, args []string) error {
 		if err != nil {
 			return HandleErrorRespectJSON("loading all issues: %v", err)
 		}
-		return renderGraphAllSubgraphs(subgraphs)
+		return renderGraphAllSubgraphs(out, subgraphs)
 	}
 
 	root, err := uw.IssueUseCase().GetIssue(ctx, args[0])
@@ -32,7 +33,7 @@ func runGraphProxiedServer(ctx context.Context, args []string) error {
 	if err != nil {
 		return HandleErrorRespectJSON("loading graph: %v", err)
 	}
-	return renderGraphSingleSubgraph(subgraph)
+	return renderGraphSingleSubgraph(out, subgraph)
 }
 
 func runGraphCheckProxiedServer(ctx context.Context) error {

@@ -328,20 +328,23 @@ func TestWarnUnknownGraphFields_HintsForReporterFields(t *testing.T) {
 	// After GH#4064, "parent" is a recognized field. Only "blocks" triggers a hint.
 	var buf bytes.Buffer
 	hinted := warnUnknownGraphFields(&buf, map[string][]string{
-		`node["c1"]`: {"blocks"},
+		`node["c1"]`: {"blocks", "body"},
 	})
 
 	out := buf.String()
-	if !strings.Contains(out, `unknown field(s): [blocks]`) {
+	if !strings.Contains(out, `unknown field(s): [blocks body]`) {
 		t.Errorf("warning missing field list: %q", out)
 	}
 	if !strings.Contains(out, "deps") {
 		t.Errorf("expected 'blocks' hint to mention deps: %q", out)
 	}
+	if !strings.Contains(out, "description") {
+		t.Errorf("expected 'body' hint to mention description: %q", out)
+	}
 
 	got := append([]string(nil), hinted...)
 	sort.Strings(got)
-	want := []string{"blocks"}
+	want := []string{"blocks", "body"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("hinted fields: got=%v want=%v", got, want)
 	}

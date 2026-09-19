@@ -156,7 +156,7 @@ func runSteps(t *testing.T, bin, dir string, env []string, backend string, steps
 // survive a round trip is timing- and node-dependent. canonicalRecords strips
 // them before the fidelity comparison. The exact restore semantics are pinned
 // separately by cmd/bd/protocol/lease_claim_test.go (L1.2).
-var ephemeralExportKeys = []string{"lease_expires_at", "heartbeat_at", "row_lock"}
+var ephemeralExportKeys = []string{"lease_expires_at", "heartbeat_at", "lease_granted_node", "row_lock"}
 
 // canonicalRecords normalizes a JSONL export for the round-trip fidelity comparison:
 // it drops the ephemeral lease keys from each record and sorts the lines. Record order

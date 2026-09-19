@@ -9,6 +9,21 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// Four of the state classes below were, until recently, held ONLY here, and
+// they now have three-backend cases in backend/conformance/
+// dependency_editor_contract.go:
+//
+//	wisp_parent_child_shadow_rejected  -> RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy
+//	mixed_table_cycle_*                -> RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle
+//	combined_graph_cycle_*             -> RunDependencyEditorRefusesACycleThroughAParentChildHop
+//	deep_linear_chain_allowed          -> the acyclic arm of the same case
+//
+// The subtests stay because the contract does not run the route they run.
+// Every case here drives store.AddDependency, the seam ~15 cmd/bd files call
+// directly; the contract drives the DependencyEditor role, which computes its
+// routing separately. Blanking the seam's own cross-prefix decision leaves the
+// whole DependencyEditor contract green at this backend, so these are the only
+// tests standing over that wrapper.
 func TestAddDependency(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 

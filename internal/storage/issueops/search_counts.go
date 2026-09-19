@@ -23,7 +23,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 		}
 		if !empty && wispDepsExist {
 			wisps, err := runFilterSearchQueryInTx(ctx, tx, query, filter, WispsFilterTables, true)
-			if err != nil && !isTableNotExistError(err) {
+			if err != nil && !missingOptionalWispTable(err) {
 				return nil, err
 			}
 			if len(wisps) > 0 {
@@ -66,7 +66,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 
 	wisps, err := runFilterSearchQueryInTx(ctx, tx, query, filter, WispsFilterTables, true)
 	if err != nil {
-		if isTableNotExistError(err) {
+		if missingOptionalWispTable(err) {
 			return finishSearchIssuesWithCounts(out, filter)
 		}
 		return nil, err
@@ -96,6 +96,13 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 	return finishSearchIssuesWithCounts(kept, filter)
 }
 
+// hydrationFor reads the two hydration opt-outs off a search filter. It is one
+// function rather than two field reads at each call site so a path cannot pick
+// up one of the pair and quietly drop the other.
+func hydrationFor(filter types.IssueFilter) sqlbuild.CountsHydration {
+	return sqlbuild.CountsHydration{SkipLabels: filter.SkipLabels, SkipCounts: filter.SkipCounts, Lite: filter.Lite}
+}
+
 func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
 	whereClauses, args, err := BuildIssueFilterClauses(query, filter, tables)
 	if err != nil {
@@ -105,18 +112,39 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + joinAnd(whereClauses)
 	}
+	// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS —
+	// the same rule searchTableInTxT applies on the plain seam. sqlbuild.OrderBy
+	// renders no ORDER BY for a Go-side sort key ("id"), and a LIMIT with no
+	// ORDER BY returns n rows, not the first n; this is the seam
+	// bd query '<expr>' --sort id reaches on the store-shaped backends
+	// (storequerier → SearchIssuesWithCounts), where BuildQueryPlan always
+	// pushes a bound. So under a Go-side sort the query scans the complete
+	// matching set and the same eff bound is applied below, after the order
+	// exists — leaving every downstream count (the merge, the terminal
+	// finishSearchIssuesWithCounts trim-then-cap) exactly what the SQL LIMIT
+	// used to hand it.
+	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
+	eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows)
 	limitSQL := ""
-	if eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows); eff > 0 {
+	if eff > 0 && !goSideSort {
 		limitSQL = fmt.Sprintf("LIMIT %d", eff)
 	}
 	orderBy := sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, "i")
-	return runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, filter.SkipLabels)
+	out, err := runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, hydrationFor(filter))
+	if err != nil {
+		return nil, err
+	}
+	if goSideSort {
+		// scanCountsRowsInTx drops nil-Issue rows, so the accessor is safe.
+		out = goSideSortAndTrim(out, func(iwc *types.IssueWithCounts) string { return iwc.Issue.ID }, filter.SortDesc, eff)
+	}
+	return out, nil
 }
 
 //nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
-func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, skipLabels bool) ([]*types.IssueWithCounts, error) {
-	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, skipLabels)
-	return scanCountsRowsInTx(ctx, tx, tables.Main, searchSQL, args)
+func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
+	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
+	return scanCountsRowsInTx(ctx, tx, tables.Main, searchSQL, args, hyd)
 }
 
 // scanCountsRowsInTx runs a prebuilt counts mega-query and hydrates each row
@@ -125,7 +153,7 @@ func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, wh
 // ready-counts path.
 //
 //nolint:gosec // G201: query is builder-produced; user input rides ? placeholders.
-func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string, args []interface{}) ([]*types.IssueWithCounts, error) {
+func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string, args []interface{}, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search count %s: %w", mainTable, err)
@@ -135,7 +163,7 @@ func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string
 	var out []*types.IssueWithCounts
 	seen := make(map[string]bool)
 	for rows.Next() {
-		iwc, scanErr := ScanReadyWorkRowWithCounts(rows)
+		iwc, scanErr := ScanReadyWorkRowWithCounts(rows, hyd)
 		if scanErr != nil {
 			return nil, scanErr
 		}

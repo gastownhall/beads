@@ -5,8 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -64,6 +68,23 @@ func leaseTTL(ctx context.Context) time.Duration {
 // SAME lease row and conflict without any help. Adding a new path that sets
 // status/assignee outside updateIssueInTx without rewriting row_lock would
 // silently reintroduce the zombie-merge bug.
+//
+// The exemptions are load-bearing in the OTHER direction too (analysis
+// absorbed from gastownhall/beads#4682, Julian Knutsen): row_lock doubles as
+// the RowVersion optimistic-concurrency token (types.Issue.RowVersion), so a
+// path that reminted it WITHOUT changing the content a CAS holder cares about
+// would spuriously fail honest ExpectedVersion checks. The is_blocked
+// recompute is the canonical case: it is a denormalized aux-marker refresh
+// that already goes out of its way to preserve updated_at
+// (blocked_state.go), and bumping the token there would clobber a concurrent
+// whole-row CAS over a cell derived from OTHER rows. (The PR's second
+// exemption of this kind, the lease heartbeat, no longer arises here — since
+// bd-lrgn1 heartbeats never touch the issues row at all.) So the invariant
+// cuts both ways: status/ownership writes MUST remint, aux-marker writes MUST
+// NOT. The remint direction is enforced at build time by
+// TestAllIssueRowWritesStampRowLock (row_lock_guard_test.go), whose exemption
+// markers are the machine-readable form of this list — widen the stamping
+// policy there first, not by ad-hoc stamps.
 func freshRowLock() int64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -104,6 +125,30 @@ func LeaseTTL(ctx context.Context) time.Duration {
 	return leaseTTL(ctx)
 }
 
+// nodeIDContextKey overrides config.NodeID() for a single call. Used by tests
+// that have to be two replicas at once (one process, one database, two
+// granting nodes); unset in normal use, where every call resolves the real
+// machine identity.
+type nodeIDContextKey struct{}
+
+// WithNodeID returns a context whose lease writes and reclaim guard treat node
+// as this replica's identity instead of config.NodeID().
+func WithNodeID(ctx context.Context, node string) context.Context {
+	return context.WithValue(ctx, nodeIDContextKey{}, node)
+}
+
+// NodeID resolves the granting-replica identity for the current lease
+// operation: the context override (WithNodeID) if present, else the
+// deployment's node identity (config.NodeID()). "" means the provenance of a
+// lease granted here is unknown — see ReclaimExpiredLeasesInTx for how the
+// guard degrades.
+func NodeID(ctx context.Context) string {
+	if node, ok := ctx.Value(nodeIDContextKey{}).(string); ok {
+		return node
+	}
+	return config.NodeID()
+}
+
 // UpsertLeaseInTx grants or re-grants the lease on an issue to holder: a
 // future expiry, a now heartbeat. The lease row lives in the ephemeral leases
 // table (dolt_ignored on the Dolt backend, bd-lrgn1), NOT on the issues row,
@@ -111,6 +156,10 @@ func LeaseTTL(ctx context.Context) time.Duration {
 // deliberately node-local: they are only enforceable on the replica that
 // granted them; cross-machine claim VISIBILITY rides status/assignee on the
 // issues row, which still commits.
+//
+// granted_node records WHICH replica that is (config.NodeID(), wy-jpd3.7).
+// A re-grant through this node makes this node the granting replica, so the
+// value is rewritten unconditionally alongside holder/granted_at.
 //
 // INVARIANT: a leases row exists if and only if its issue is a live claim
 // (in_progress with the row's holder as assignee) on this node. Every path
@@ -120,14 +169,15 @@ func LeaseTTL(ctx context.Context) time.Duration {
 // are never leased (see testHeartbeatWisp) and never get a row here.
 func UpsertLeaseInTx(ctx context.Context, tx DBTX, id, holder string, now time.Time, ttl time.Duration) error {
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO leases (issue_id, holder, granted_at, lease_expires_at, heartbeat_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO leases (issue_id, holder, granted_at, lease_expires_at, heartbeat_at, granted_node)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			holder = VALUES(holder),
 			granted_at = VALUES(granted_at),
 			lease_expires_at = VALUES(lease_expires_at),
-			heartbeat_at = VALUES(heartbeat_at)
-	`, id, holder, now, now.Add(ttl), now)
+			heartbeat_at = VALUES(heartbeat_at),
+			granted_node = VALUES(granted_node)
+	`, id, holder, now, now.Add(ttl), now, NodeID(ctx))
 	if err != nil {
 		return fmt.Errorf("upsert lease for %s: %w", id, err)
 	}
@@ -161,6 +211,13 @@ func DeleteLeaseInTx(ctx context.Context, tx DBTX, id string) error {
 //     any now-orphaned local lease row so the UpsertLeaseInTx invariant
 //     (lease row ⇔ live claim) holds.
 //
+// A restored lease keeps the granting replica the SNAPSHOT names
+// (issue.LeaseGrantedNode), never this node — this is the one path that can
+// materialize a foreign lease row locally, and mislabelling it as local is
+// exactly the cross-replica reclaim hazard (wy-jpd3.7). A snapshot written by
+// a pre-wy-jpd3.7 binary carries no node, which restores as "" (unknown) and
+// therefore behaves exactly as it did before this change.
+//
 // Wisps are never leased; callers route them away before calling this.
 func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, isNew bool) error {
 	now := time.Now().UTC()
@@ -184,15 +241,16 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 			// comparison column and ON DUPLICATE KEY UPDATE assignments are
 			// evaluated in order, so it must be reassigned LAST.
 			_, err := tx.ExecContext(ctx, `
-				INSERT INTO leases (issue_id, holder, granted_at, lease_expires_at, heartbeat_at)
-				VALUES (?, ?, ?, ?, ?)
+				INSERT INTO leases (issue_id, holder, granted_at, lease_expires_at, heartbeat_at, granted_node)
+				VALUES (?, ?, ?, ?, ?, ?)
 				ON DUPLICATE KEY UPDATE
 					holder = IF(leases.lease_expires_at >= ?, leases.holder, VALUES(holder)),
 					granted_at = IF(leases.lease_expires_at >= ?, leases.granted_at, VALUES(granted_at)),
 					heartbeat_at = IF(leases.lease_expires_at >= ?, leases.heartbeat_at, VALUES(heartbeat_at)),
+					granted_node = IF(leases.lease_expires_at >= ?, leases.granted_node, VALUES(granted_node)),
 					lease_expires_at = IF(leases.lease_expires_at >= ?, leases.lease_expires_at, VALUES(lease_expires_at))
-			`, issue.ID, assignee, grantedAt, *issue.LeaseExpiresAt, heartbeatAt,
-				now, now, now, now)
+			`, issue.ID, assignee, grantedAt, *issue.LeaseExpiresAt, heartbeatAt, issue.LeaseGrantedNode,
+				now, now, now, now, now)
 			if err != nil {
 				return fmt.Errorf("restore lease for %s: %w", issue.ID, err)
 			}
@@ -202,6 +260,16 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 	// An upsert over an existing row may have ended or transferred the claim
 	// (e.g. a newer snapshot closed the issue): drop a lease row that no
 	// longer matches a live claim by its holder.
+	//
+	// This join is a SQL equality (i.assignee = leases.holder), not
+	// actorMatches — a query predicate can't canonicalize across a join the
+	// way Go code can, so a lease granted under one spelling of an identity
+	// can be dropped here if the issue's stored assignee is later written
+	// under a different, equivalent spelling (ga-v2k49). Bounded and
+	// self-healing: HeartbeatIssueInTx's disambiguation fallback re-arms the
+	// lease under the caller's current spelling on the next beat, so the gap
+	// is one issue briefly in_progress with no lease row (visible to
+	// stale/reclaim reads), never a stuck state.
 	if !isNew {
 		_, err := tx.ExecContext(ctx, `
 			DELETE FROM leases WHERE issue_id = ?
@@ -233,10 +301,61 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 	now := time.Now().UTC()
+	// granted_node is backfilled, never overwritten: a lease row whose
+	// provenance is unknown (granted before ignored migration 0016, or before
+	// this replica was named) is being kept alive through THIS node's store,
+	// which is the node that can enforce it. A row that already names a
+	// replica keeps it — a heartbeat proves the holder is alive, not that the
+	// lease moved. NodeID is "" unless an operator configured it, so on an
+	// unnamed deployment this backfill writes '' over '' and changes nothing:
+	// the fail-open default cannot be silently converted to fail-closed.
+	//
+	// THE TRAP THIS INVARIANT COSTS (wy-sp2l4 F4), reviewed and KEPT. A
+	// heartbeat that affects 1 row is proof the holder is alive on THIS store,
+	// yet a row positively naming another node keeps that name forever, so the
+	// replica guard in ReclaimExpiredLeasesInTx declines it and only
+	// `bd reclaim --any-replica` can ever recover it. Two states reach that:
+	//
+	//   (a) a replica RENAMED (node_id mini -> mini2) keeps heartbeating its
+	//       own leases, which now read foreign forever;
+	//   (b) a foreign lease materialized by RestoreLeaseOnImportInTx whose
+	//       holder name also exists locally is kept alive here but stays
+	//       labeled with the remote node.
+	//
+	// Re-homing on heartbeat would clear both — and the branch below already
+	// says "heartbeat => this node grants it" (a heartbeat that matches no
+	// lease row calls UpsertLeaseInTx, which stamps the local node). It is NOT
+	// done on THIS path because the two are not the same claim: UpsertLeaseInTx
+	// is MINTING a lease row through this store, while this UPDATE is refreshing
+	// one whose provenance is already recorded. Re-homing here would mean a
+	// heartbeat arriving at this store — including one whose only path here is
+	// the JSONL import that materialized case (b) — silently reassigns
+	// enforcement of a lease another replica granted, which is precisely the
+	// robbery the guard exists to prevent (a remote view is stale by up to one
+	// sync interval). Keeping it makes the failure mode LOUD and recoverable
+	// (reportForeignSkips summarizes it every run; --any-replica reverts it)
+	// rather than silent. The escape hatches are documented in
+	// `bd reclaim --help` and docs/multi-agent/federation.md; the fix for (a)
+	// is to reap on the old name, or `bd reclaim --any-replica --id <id>` /
+	// `bd unclaim --force <id>` for a single stranded unit once that replica is
+	// gone for good.
+	//
+	// SCOPE, precisely: the no-re-home invariant holds on THIS fast path only.
+	// The disambiguation fallback below re-homes, by design and unavoidably —
+	// when `holder = ?` misses because the lease row spells the same identity
+	// differently (ga-v2k49/ga-wzl83), it re-arms through UpsertLeaseInTx, whose
+	// ON DUPLICATE KEY UPDATE stamps the LOCAL node over whatever was there.
+	// So "a heartbeat never re-homes a foreign lease" is false for a
+	// spelling-mismatched holder, and RestoreLeaseOnImportInTx can relabel in
+	// the other direction (it takes granted_node from the snapshot when the
+	// local row is expired). Neither is changed here: both are pre-existing
+	// paths with their own rationale, and the point of this note is that the
+	// invariant is a property of the common path, not of the lease row.
 	result, err := tx.ExecContext(ctx, `
-		UPDATE leases SET lease_expires_at = ?, heartbeat_at = ?
+		UPDATE leases SET lease_expires_at = ?, heartbeat_at = ?,
+			granted_node = IF(COALESCE(granted_node, '') = '', ?, granted_node)
 		WHERE issue_id = ? AND holder = ?
-	`, now.Add(leaseTTL(ctx)), now, id, actor)
+	`, now.Add(leaseTTL(ctx)), now, NodeID(ctx), id, actor)
 	if err != nil {
 		return fmt.Errorf("failed to heartbeat issue: %w", err)
 	}
@@ -257,19 +376,249 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 		if qerr != nil {
 			return fmt.Errorf("%w: %s", storage.ErrNotClaimable, id)
 		}
-		if assignee != "" && assignee != actor {
+		// Judged under actorMatches, not verbatim (ga-v2k49): the primary
+		// UPDATE's own `holder = ?` predicate above stays a verbatim SQL
+		// comparison deliberately — fixing it would mean pre-reading the
+		// lease row on every heartbeat (the hottest write in the fleet, see
+		// above) just to bind back its own holder value. A spelling
+		// difference across layers (ga-wzl83) already makes that predicate
+		// affect 0 rows and fall here; fixing the disambiguation instead
+		// means the caller still self-heals correctly (re-arms below, under
+		// its current spelling) at the cost of the slow path on a spelling
+		// mismatch, never on the byte-identical common case.
+		if assignee != "" && !actorMatches(assignee, actor) {
 			return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
 		}
-		if !isWisp && assignee == actor && status == string(types.StatusInProgress) {
+		if !isWisp && actorMatches(assignee, actor) && status == string(types.StatusInProgress) {
 			// The caller genuinely holds the claim but has no lease row — e.g.
 			// the claim was hand-doled through a generic update (which never
-			// arms a lease, bd-9hpgf) and the worker is now opting into lease
-			// semantics. A real worker's heartbeat re-arms recovery.
+			// arms a lease, bd-9hpgf), the worker is now opting into lease
+			// semantics, or (ga-v2k49) the existing lease row's holder is a
+			// different spelling of the same identity (ga-wzl83) and the
+			// primary UPDATE's verbatim predicate above missed it. A real
+			// worker's heartbeat re-arms recovery — under actor's current
+			// spelling, which is what the next heartbeat's fast path will see.
 			return UpsertLeaseInTx(ctx, tx, id, actor, now, leaseTTL(ctx))
 		}
 		return fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status)
 	}
+	// DELIBERATELY NOT JOURNALED — do not add an emit here. A heartbeat is a
+	// high-frequency lease keepalive: it writes only the clone-local `leases`
+	// table (lease-liveness state), never a durable bead field. Journaling it
+	// would put a full-snapshot write plus the shared seq-counter serialization
+	// on the hottest write in the fleet, and a replay consumer gains nothing —
+	// lease state lives on the working-set plane and expires on its own. Lease
+	// RECLAIM is the opposite case and does journal: it clears assignee and
+	// reverts status, which is durable bead state. The decision is pinned by
+	// journalExemptMutations in journal_completeness_test.go.
 	return nil
+}
+
+// warnReplica writes a replica-guard audit line to STDERR (never stdout —
+// bd reclaim --json owns stdout and a stray line there breaks every machine
+// consumer), suppressed only by quiet mode.
+func warnReplica(format string, args ...any) {
+	if debug.IsQuiet() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+// Output bounds for the foreign-skip audit (wy-sp2l4). A foreign stale lease is
+// by construction NEVER reclaimed, so this report is not a one-off: it repeats
+// identically on every reclaim run, forever. The original shape — one stderr
+// line per foreign ROW — meant a supervisor on a 1-minute timer against a
+// federated store with N stranded remote leases printed N lines/minute
+// indefinitely. So the default is ONE summary line per run, and the per-issue
+// naming moved behind verbose (`bd -v` / BD_DEBUG), itself capped.
+const (
+	// foreignSkipNamedNodes is how many granting replicas the summary line
+	// names before collapsing the rest into a count.
+	foreignSkipNamedNodes = 3
+	// foreignSkipDetailRows caps the verbose per-issue expansion; the tail is
+	// collapsed into a count rather than printed.
+	foreignSkipDetailRows = 20
+)
+
+// foreignSkipGroup is the stale-lease count the replica guard declined for one
+// granting replica.
+type foreignSkipGroup struct {
+	node  string
+	count int
+}
+
+// reportForeignSkips audits the stale leases the replica guard declined.
+// Best-effort and never fatal: this is an audit courtesy on the reclaim path,
+// not a correctness step, so a failed query is swallowed rather than allowed
+// to abort a reclaim that is otherwise fine.
+//
+// Emits ONE summary line (see the bounds above); `bd -v` / BD_DEBUG=1 adds the
+// per-issue detail. Under --quiet it does no work at all — warnReplica would
+// discard every line it produced, so the queries are skipped too.
+func reportForeignSkips(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, localNode string) {
+	if debug.IsQuiet() {
+		return
+	}
+	groups, total := foreignSkipGroups(ctx, tx, cutoff, filter, localNode)
+	if total == 0 {
+		return
+	}
+	warnReplica("%s", formatForeignSkipSummary(groups, total, localNode))
+	if !debug.Enabled() {
+		return
+	}
+	reportForeignSkipDetail(ctx, tx, cutoff, filter, localNode, total)
+}
+
+// foreignSkipGroups counts the declined stale leases per granting replica,
+// most-affected first, and returns their total.
+//
+// One row per granting REPLICA, not per stale lease: the row count is bounded
+// by the deployment's topology (peers whose leases ever landed in this store
+// via RestoreLeaseOnImportInTx), not by the amount of stranded work — which is
+// exactly the unboundedness this replaced. A query error yields no groups and
+// a zero total, so the caller stays silent.
+func foreignSkipGroups(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, localNode string) ([]foreignSkipGroup, int) {
+	scopeSQL, scopeArgs := sqlbuild.ReclaimScopeSQL(filter, sqlbuild.IssuesFilterTables, "i")
+	args := append([]any{cutoff, localNode}, scopeArgs...)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT COALESCE(l.granted_node, ''), COUNT(*) FROM leases l
+		JOIN issues i ON i.id = l.issue_id
+		WHERE i.status = 'in_progress'
+		  AND l.lease_expires_at < ?
+		  AND COALESCE(l.granted_node, '') NOT IN ('', ?)
+	`+scopeSQL+`
+		GROUP BY COALESCE(l.granted_node, '')
+		ORDER BY COUNT(*) DESC, COALESCE(l.granted_node, '')
+	`, args...)
+	if err != nil {
+		return nil, 0
+	}
+	defer func() { _ = rows.Close() }()
+	var groups []foreignSkipGroup
+	total := 0
+	for rows.Next() {
+		var g foreignSkipGroup
+		if err := rows.Scan(&g.node, &g.count); err != nil {
+			return nil, 0
+		}
+		groups = append(groups, g)
+		total += g.count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0
+	}
+	return groups, total
+}
+
+// formatForeignSkipSummary renders the one-line audit. Pure so its bounds are
+// testable without a store: the named-replica list is capped at
+// foreignSkipNamedNodes and the tail collapsed, so the line's length is set by
+// the constant and not by the deployment.
+func formatForeignSkipSummary(groups []foreignSkipGroup, total int, localNode string) string {
+	named := groups
+	rest := 0
+	restCount := 0
+	if len(named) > foreignSkipNamedNodes {
+		named = groups[:foreignSkipNamedNodes]
+		for _, g := range groups[foreignSkipNamedNodes:] {
+			rest++
+			restCount += g.count
+		}
+	}
+	var b strings.Builder
+	for i, g := range named {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q (%d)", g.node, g.count)
+	}
+	if rest > 0 {
+		fmt.Fprintf(&b, ", and %d more %s (%d)", rest, pluralWord(rest, "replica", "replicas"), restCount)
+	}
+	// --any-replica is named with --id: the bare form reverts EVERY foreign
+	// stale lease, live peers included, which is the wrong lever for the
+	// one-stranded-unit case an operator reading this line usually has.
+	return fmt.Sprintf("reclaim: skipped %d stale %s granted by %s — %s, not this node (%q). "+
+		"Reap %s on the granting replica, or pass --any-replica --id <id> if that replica is gone. "+
+		"(bd -v lists up to %d of them.)\n",
+		total, pluralWord(total, "lease", "leases"),
+		pluralWord(len(groups), "another replica", "other replicas"), b.String(), localNode,
+		pluralWord(total, "it", "them"), foreignSkipDetailRows)
+}
+
+// reportForeignSkipDetail names the declined leases one per line, capped at
+// foreignSkipDetailRows with the tail collapsed into a count. total is the
+// figure foreignSkipGroups already computed, so the tail is exact without a
+// second counting pass.
+func reportForeignSkipDetail(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, localNode string, total int) {
+	scopeSQL, scopeArgs := sqlbuild.ReclaimScopeSQL(filter, sqlbuild.IssuesFilterTables, "i")
+	args := append([]any{cutoff, localNode}, scopeArgs...)
+	args = append(args, foreignSkipDetailRows)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT l.issue_id, COALESCE(l.granted_node, ''), COALESCE(i.assignee, '') FROM leases l
+		JOIN issues i ON i.id = l.issue_id
+		WHERE i.status = 'in_progress'
+		  AND l.lease_expires_at < ?
+		  AND COALESCE(l.granted_node, '') NOT IN ('', ?)
+	`+scopeSQL+`
+		ORDER BY l.issue_id
+		LIMIT ?
+	`, args...)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	shown := 0
+	for rows.Next() {
+		var id, grantedNode, holder string
+		if err := rows.Scan(&id, &grantedNode, &holder); err != nil {
+			return
+		}
+		shown++
+		warnReplica("reclaim:   %s (held by %s) — lease granted by replica %q, not this node (%q).\n",
+			id, holder, grantedNode, localNode)
+	}
+	if err := rows.Err(); err != nil {
+		return
+	}
+	if remaining := total - shown; remaining > 0 {
+		warnReplica("reclaim:   ... and %d more.\n", remaining)
+	}
+}
+
+// pluralWord picks between two spellings by count. (issueops already has a
+// plural() for the "s"/"" case; this one carries whole words.)
+func pluralWord(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// reclaimReplicaSQL returns the granting-replica predicate for the reclaim
+// snapshot and the per-row DELETE, plus its args. Both sites must apply the
+// SAME predicate: the DELETE re-checks by id, and skipping the guard there
+// would let a foreign lease slip through on the re-check path.
+//
+// Empty when the guard is disarmed — either explicitly (filter.AnyReplica) or
+// because this deployment cannot name itself (localNode == ""), where every
+// comparison would be against "" and the guard would degenerate to "reclaim
+// only unknown-provenance leases", stranding this node's own work.
+func reclaimReplicaSQL(filter types.ReclaimFilter, localNode string) (string, []any) {
+	if filter.AnyReplica || localNode == "" {
+		return "", nil
+	}
+	// granted_node '' is unknown provenance and stays eligible (fail-open);
+	// only a lease that positively names a different replica is protected.
+	//
+	// granted_node is deliberately UNQUALIFIED: the snapshot splices this into
+	// a `leases l JOIN issues i` (where it resolves to l, since issues has no
+	// such column) but the DELETE site splices it into a bare
+	// `DELETE FROM leases`, which has no alias to qualify with. Adding a
+	// leases-only column to `issues` would make the snapshot ambiguous — give
+	// this an alias parameter then, and pass "" from the DELETE.
+	return "\n\t\t  AND (COALESCE(granted_node, '') = '' OR granted_node = ?)", []any{localNode}
 }
 
 // ReclaimExpiredLeasesInTx reverts in_progress issues whose lease has gone stale
@@ -284,6 +633,34 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 // Leases are node-local (the leases table is dolt_ignored and does not
 // replicate), so a reclaim can only recover claims granted through this node —
 // which is the only place the lease was ever enforceable anyway.
+//
+// REPLICA GUARD (wy-jpd3.7). "Through this node" is now enforced, not merely
+// implied by the transport. The one path that can materialize a foreign lease
+// row locally is RestoreLeaseOnImportInTx (lease fields round-trip the JSONL
+// interchange), and a lease imported from another replica carries a liveness
+// view that is stale by up to one sync interval — reverting on it can rob a
+// worker that is very much alive over there. So a lease whose granted_node
+// POSITIVELY names another replica is skipped, and only an explicit
+// filter.AnyReplica (bd reclaim --any-replica) reverts it.
+//
+// The guard is OPT-IN and deliberately fail-open. An empty granted_node (a lease
+// row predating ignored migration 0016, or the default state of any
+// deployment that has not set config.NodeID()) is treated as local, so an
+// upgrade can never strand a stale lease the reaper could previously recover,
+// and a single-store deployment — including many hosts sharing one dolt
+// sql-server, where there is no sync interval to defend against — keeps
+// exactly its old behavior. See config.NodeID for why there is no hostname
+// fallback. The invariant the guard cannot enforce, and that every federated
+// deployment still owes:
+//
+//	grace window > sync interval  (and TTL > sync interval)
+//
+// A TTL or grace shorter than the cadence at which replicas exchange state is
+// meaningless across the bridge — the remote view is stale by a full interval
+// by construction, so a reaper on the far side decides on liveness data older
+// than the lease it is judging. bd reclaim's default grace is 2× the lease
+// TTL; raise the TTL (or the grace) above the sync interval, not the other way
+// round.
 //
 // Reclaim only ever touches the permanent issues table: wisps are ephemeral and
 // are never leased work. Returns the issues it reverted (id + the owner it took
@@ -303,23 +680,33 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 	// between the SELECT and the DELETE is simply skipped (0 rows) — it never
 	// appears as reclaimed.
 	scopeSQL, scopeArgs := sqlbuild.ReclaimScopeSQL(filter, sqlbuild.IssuesFilterTables, "i")
-	args := append([]any{cutoff}, scopeArgs...)
+	localNode := NodeID(ctx)
+	replicaSQL, replicaArgs := reclaimReplicaSQL(filter, localNode)
+	args := append([]any{cutoff}, replicaArgs...)
+	args = append(args, scopeArgs...)
 	rows, err := tx.QueryContext(ctx, `
-		SELECT l.issue_id, COALESCE(i.assignee, '') FROM leases l
+		SELECT l.issue_id, COALESCE(i.assignee, ''), COALESCE(l.granted_node, '') FROM leases l
 		JOIN issues i ON i.id = l.issue_id
 		WHERE i.status = 'in_progress'
 		  AND l.lease_expires_at < ?
-	`+scopeSQL, args...)
+	`+replicaSQL+scopeSQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("scan for stale leases: %w", err)
 	}
 	var stale []types.ReclaimedLease
+	// Provenance of each snapshot row, parallel to stale, for the
+	// --any-replica audit line below. Kept beside the slice rather than on
+	// types.ReclaimedLease: it is a reclaim-time diagnostic, not part of the
+	// recovery record every backend returns to callers.
+	staleNodes := map[string]string{}
 	for rows.Next() {
 		var r types.ReclaimedLease
-		if err := rows.Scan(&r.ID, &r.PreviousOwner); err != nil {
+		var grantedNode string
+		if err := rows.Scan(&r.ID, &r.PreviousOwner, &grantedNode); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan stale lease row: %w", err)
 		}
+		staleNodes[r.ID] = grantedNode
 		stale = append(stale, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -329,6 +716,15 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close stale lease rows: %w", err)
 	}
+	// Audit the other side of the guard: a stale lease this reaper declined
+	// because another replica granted it. Silence here would look identical to
+	// "nothing to recover" while a genuinely dead remote worker's unit sits
+	// in_progress forever, so name it (the operator's remedy is to reap on the
+	// granting replica, or --any-replica once that replica is gone for good).
+	if replicaSQL != "" {
+		reportForeignSkips(ctx, tx, cutoff, filter, localNode)
+	}
+
 	if len(stale) == 0 {
 		return nil, nil
 	}
@@ -340,9 +736,10 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		// cannot be clobbered: heartbeat and reclaim contend on this same lease
 		// row, so one of a racing pair is forced to retry, and a winning
 		// rescuer's pushed-out expiry makes this DELETE match nothing.
+		delArgs := append([]any{r.ID, cutoff}, replicaArgs...)
 		res, err := tx.ExecContext(ctx, `
 			DELETE FROM leases WHERE issue_id = ? AND lease_expires_at < ?
-		`, r.ID, cutoff)
+		`+replicaSQL, delArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("reclaim %s: %w", r.ID, err)
 		}
@@ -376,6 +773,23 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		if err := RecordFullEventInTable(ctx, tx, "events", r.ID, types.EventLeaseReclaimed, actor,
 			r.PreviousOwner, ""); err != nil {
 			return nil, fmt.Errorf("record reclaim event for %s: %w", r.ID, err)
+		}
+		// Journal the lease reclaim as an update (assignee cleared, status
+		// reverted to open) so a replayer sees the claim released. Emitted past
+		// both re-checks, so only reverts that actually happened are recorded.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, r.ID, actor); err != nil {
+			return nil, err
+		}
+		// Logged HERE, past both re-checks, so the audit trail records reverts
+		// that actually happened: a heartbeat landing after the snapshot makes
+		// the DELETE match nothing, and a "reverting X" line printed up there
+		// would be a lie the operator has no way to catch.
+		// localNode "" is skipped, not printed as `not this node ("")`: on an
+		// unnamed deployment the guard was never armed, so there is no
+		// override to audit — every lease was already eligible.
+		if node := staleNodes[r.ID]; filter.AnyReplica && localNode != "" && node != "" && node != localNode {
+			warnReplica("reclaim: --any-replica reverted %s (held by %s) — lease was granted by replica %q, not this node (%q)\n",
+				r.ID, r.PreviousOwner, node, localNode)
 		}
 		reclaimed = append(reclaimed, r)
 	}

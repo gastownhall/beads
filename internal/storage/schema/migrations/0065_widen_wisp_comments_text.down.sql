@@ -1,0 +1,4 @@
+-- Reverse of 0065: not reversible without potential data loss, for 0049's
+-- reason exactly. Shrinking LONGTEXT back to TEXT would silently truncate any
+-- comment longer than 65535 bytes that was successfully stored after the
+-- migration. Intentional no-op.

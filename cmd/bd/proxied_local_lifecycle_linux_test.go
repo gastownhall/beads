@@ -19,13 +19,26 @@ package main
 // Run locally with:
 //
 //	BEADS_TEST_PROXIED_LOCAL=1 go test -tags gms_pure_go ./cmd/bd \
-//	    -run TestManagedLocalProxiedLifecycleSmoke -v
+//	    -run '^TestManagedLocalProxied' -v
 //
 // CI additionally runs it inside a network namespace with only loopback up
 // (see .github/workflows/proxied-local-smoke.yml), proving the whole
 // lifecycle needs no outbound network once bd and dolt are installed.
 // When BEADS_TEST_PROXIED_LOCAL=1 is set, missing prerequisites or a Dolt
 // child that fails to launch FAIL the test rather than skipping.
+//
+// Defined, not implemented in this Linux-first stage:
+//
+//   - macOS runs the same identity, legacy-record, orphan, convergence, and
+//     stop/start cases using Darwin birth tokens and process inspection,
+//     replacing procfs listener/process enumeration with native facilities.
+//   - Windows runs the same cases using creation-FILETIME identity and
+//     handle-safe termination, LockFileEx-compatible lock injection, and
+//     native listener/process enumeration.
+//
+// Both future lanes retain the same hermetic workspace, bounded-wait, and
+// executable-match safety assertions; only their OS-specific observation and
+// lock-injection helpers differ.
 
 import (
 	"context"
@@ -69,6 +82,9 @@ func TestManagedLocalProxiedLifecycleSmoke(t *testing.T) {
 	proxyPF := readManagedProxyPidFile(t, p)
 	if proxyPF == nil {
 		t.Fatal("proxy.pid missing while a proxied connection is held open")
+	}
+	if proxyPF.Port == 0 {
+		t.Fatal("proxy.pid published port 0 instead of the child's OS-assigned listener port")
 	}
 	backendPF := readManagedBackendPidFile(t, p)
 	if backendPF == nil {

@@ -206,29 +206,42 @@ func ValidateMetadataSchema(metadata json.RawMessage, schema MetadataSchemaConfi
 }
 
 // validMetadataKeyRe validates metadata key names for use in JSON path expressions.
-// Allows alphanumeric, underscore, and dot (for nested paths like "jira.sprint").
-var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
+// Allows alphanumeric, underscore, dot (dotted keys like "jira.sprint"), and
+// slash (path-style keys like "jira/sprint").
+var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_./]*$`)
 
 // ValidateMetadataKey checks that a metadata key is safe for use in JSON path
 // expressions. Keys must start with a letter or underscore and contain only
-// alphanumeric characters, underscores, and dots.
+// alphanumeric characters, underscores, dots, and slashes.
 func ValidateMetadataKey(key string) error {
 	if !validMetadataKeyRe.MatchString(key) {
-		return fmt.Errorf("invalid metadata key %q: must match [a-zA-Z_][a-zA-Z0-9_.]*", key)
+		return fmt.Errorf("invalid metadata key %q: must match %s", key, validMetadataKeyRe.String())
 	}
 	return nil
 }
 
 // JSONMetadataPath returns a MySQL/Dolt JSON path expression for the given
-// metadata key. Keys containing dots are quoted so that "gc.routed_to"
-// produces '$."gc.routed_to"' instead of '$.gc.routed_to' (which dolt
-// interprets as a nested path: {gc: {routed_to: ...}}).
+// metadata key. The key is always quoted so that "gc.routed_to" produces
+// '$."gc.routed_to"' instead of '$.gc.routed_to' (which dolt interprets as a
+// nested path: {gc: {routed_to: ...}}); quoting is valid for plain keys too,
+// so no character list needs to stay in sync with validMetadataKeyRe. Slash
+// and mixed-case keys are proven to round-trip through the real Dolt/
+// go-mysql-server JSON path parser (see TestMetadataFilterSuite's
+// MetadataFieldMatchSlashKey and MetadataFieldMatchMixedCaseKey subtests in
+// cmd/bd/metadata_filter_test.go).
+//
+// Backslashes and quotes are also escaped, but every production caller
+// (sqlbuild.AppendMetadataClauses and doltTransaction.SearchIssues) validates
+// the key with ValidateMetadataKey first, which rejects `"` and `\`, so those escaping
+// branches are unreachable in practice today and are exercised only by the
+// string-level unit test in metadata_jsonpath_test.go, not against the real
+// SQL engines. Treat that escaping as defense-in-depth, not a proven
+// contract, unless a caller starts passing unvalidated keys here.
 func JSONMetadataPath(key string) string {
-	if strings.Contains(key, ".") {
-		return `$."` + key + `"`
-	}
-	return "$." + key
+	return `$."` + jsonPathEscaper.Replace(key) + `"`
 }
+
+var jsonPathEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
 // MergeMetadataJSON merges incoming metadata JSON into existing metadata.
 // Top-level keys from incoming overwrite keys in existing; keys only in
@@ -299,13 +312,33 @@ func ApplyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string)
 	return json.RawMessage(result), nil
 }
 
-// MetadataEditValue converts a --set-metadata string value to JSON. Per the CLI
-// contract (GH#4146), --set-metadata values are ALWAYS stored as JSON strings;
-// inferring numbers/booleans/null from string content silently broke
-// map[string]string round-trips for Go consumers (a numeric-looking id or a
-// version like "1e3" came back as a JSON number). Typed values go through the
-// explicit --metadata / --metadata-json path (MergeMetadataJSON).
+// MetadataEditValue converts a --set-metadata string value to JSON, inferring
+// the scalar type from the value's spelling: "null" is JSON null, "true"/"false"
+// are booleans, anything that scans as a float AND is valid JSON on its own is
+// emitted as that literal (so 5 -> 5, 1e3 -> 1e3, while 05, +5 and NaN stay
+// strings because they are not valid JSON), and everything else is a string.
+//
+// This is the shipped v1.2.2 CLI contract (v1.2.2's cmd/bd/update.go toJSONValue,
+// copied body-for-body so the parity claim stays checkable). GH#4146 asked for
+// string-always so that map[string]string Go consumers keep numeric-looking ids
+// and versions like "1e3" intact; that briefly landed here and silently changed
+// the CLI contract, so it is served instead by the explicitly typed routes —
+// `--metadata` / `--metadata-json` (MergeMetadataJSON) on the CLI and the typed
+// set map on the HTTP/Go path (issueops.applyTypedMetadataEdits).
 func MetadataEditValue(s string) json.RawMessage {
+	if s == "null" {
+		return json.RawMessage("null")
+	}
+	if s == "true" || s == "false" {
+		return json.RawMessage(s)
+	}
+	// Numbers (integer or float), but only when the spelling is also valid JSON
+	// on its own — that rejects NaN, Inf, "+5" and leading-zero forms.
+	if _, err := fmt.Sscanf(s, "%f", new(float64)); err == nil {
+		if json.Valid([]byte(s)) {
+			return json.RawMessage(s)
+		}
+	}
 	b, _ := json.Marshal(s)
 	return json.RawMessage(b)
 }

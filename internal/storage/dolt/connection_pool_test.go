@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,6 +37,50 @@ type mockDriver struct {
 	opens  atomic.Int64 // total Open() calls (NewConnection events)
 	closes atomic.Int64 // total Close() calls (ConnectionClosed events)
 	live   atomic.Int64 // currently-open connections
+
+	qmu     sync.Mutex // guards queries
+	queries []string   // every query string passed to Prepare (borrow-path assertions)
+
+	// failCheckout makes Prepare of a DOLT_CHECKOUT statement fail, so borrow-path
+	// tests can force beginTxOnConn to error and fall through to the fallback.
+	failCheckout atomic.Bool
+
+	// activeBranch is what a SELECT active_branch() query reports; empty means
+	// "main". Borrow-path tests set it to another branch to prove the borrow
+	// refuses to switch a pooled session's branch and falls back instead.
+	activeBranch atomic.Value // string
+
+	// failActiveBranch makes a SELECT active_branch() query fail, modeling a
+	// stale borrowed connection.
+	failActiveBranch atomic.Bool
+}
+
+// reportedBranch returns the branch active_branch() queries report.
+func (d *mockDriver) reportedBranch() string {
+	if v, ok := d.activeBranch.Load().(string); ok && v != "" {
+		return v
+	}
+	return "main"
+}
+
+// recordQuery appends a prepared query for later assertion.
+func (d *mockDriver) recordQuery(query string) {
+	d.qmu.Lock()
+	d.queries = append(d.queries, query)
+	d.qmu.Unlock()
+}
+
+// countQuery returns how many recorded queries contain substr.
+func (d *mockDriver) countQuery(substr string) int {
+	d.qmu.Lock()
+	defer d.qmu.Unlock()
+	n := 0
+	for _, q := range d.queries {
+		if strings.Contains(q, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 func (d *mockDriver) Open(name string) (driver.Conn, error) {
@@ -52,6 +97,10 @@ type mockConn struct {
 }
 
 func (c *mockConn) Prepare(query string) (driver.Stmt, error) {
+	c.drv.recordQuery(query)
+	if c.drv.failCheckout.Load() && strings.Contains(query, "DOLT_CHECKOUT") {
+		return nil, fmt.Errorf("mock: forced DOLT_CHECKOUT failure")
+	}
 	return &mockStmt{}, nil
 }
 
@@ -71,6 +120,13 @@ func (c *mockConn) Begin() (driver.Tx, error) {
 // We simulate a small amount of work so the concurrency test can observe
 // SetMaxOpenConns back-pressure.
 func (c *mockConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "active_branch") {
+		c.drv.recordQuery(query)
+		if c.drv.failActiveBranch.Load() {
+			return nil, fmt.Errorf("mock: forced active_branch failure")
+		}
+		return &mockRows{val: c.drv.reportedBranch()}, nil
+	}
 	time.Sleep(20 * time.Millisecond)
 	return &mockRows{}, nil
 }
@@ -89,6 +145,7 @@ func (mockStmt) Query(args []driver.Value) (driver.Rows, error)  { return &mockR
 
 type mockRows struct {
 	done bool
+	val  driver.Value // value for the single row; nil means int64(1)
 }
 
 func (r *mockRows) Columns() []string { return []string{"x"} }
@@ -99,7 +156,11 @@ func (r *mockRows) Next(dest []driver.Value) error {
 	}
 	r.done = true
 	if len(dest) > 0 {
-		dest[0] = int64(1)
+		if r.val != nil {
+			dest[0] = r.val
+		} else {
+			dest[0] = int64(1)
+		}
 	}
 	return nil
 }
@@ -315,5 +376,40 @@ func TestPool_CloseReleasesUnderlyingConnections(t *testing.T) {
 	}
 	if opens, closes := drv.opens.Load(), drv.closes.Load(); opens != closes {
 		t.Errorf("opens=%d closes=%d — Close should release every opened connection", opens, closes)
+	}
+}
+
+// --- post-migration pool rebuild gate --------------------------------------
+
+// TestRebuildPoolAfterMigration_NoopWhenNotMigrated is the be-itm5 Done-when
+// guard: a non-migrating open (applied == 0, the common re-open-of-an-
+// already-migrated-database path) must not pay for a pool rebuild it does
+// not need. applied == 0 must return before ever touching s.db.
+func TestRebuildPoolAfterMigration_NoopWhenNotMigrated(t *testing.T) {
+	t.Parallel()
+
+	db, drv := openMockDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Warm up the one connection newServerMode's startup Ping would have
+	// already pinned into s.db before initSchema/rebuildPoolAfterMigration
+	// ever run. Without this, the baseline is 0 opens and the assertion
+	// below can't distinguish "no-op" from "never dialed anything".
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("warm-up ping: %v", err)
+	}
+
+	s := &DoltStore{db: db, connStr: "ignored", cfg: &Config{}}
+	before := s.db
+
+	if err := s.rebuildPoolAfterMigration(context.Background(), 0); err != nil {
+		t.Fatalf("rebuildPoolAfterMigration(applied=0): %v", err)
+	}
+
+	if s.db != before {
+		t.Errorf("pool was rebuilt when applied=0; must be a no-op for a non-migrating open")
+	}
+	if opens := drv.opens.Load(); opens != 1 {
+		t.Errorf("driver opens = %d, want 1 (applied=0 must not open a new connection)", opens)
 	}
 }

@@ -105,6 +105,25 @@ update_file ".claude-plugin/marketplace.json" "\"version\": \"$CURRENT_VERSION\"
 echo "  • integrations/beads-mcp/*"
 update_file "integrations/beads-mcp/pyproject.toml" "version = \"$CURRENT_VERSION\"" "version = \"$NEW_VERSION\""
 update_file "integrations/beads-mcp/src/beads_mcp/__init__.py" "__version__ = \"$CURRENT_VERSION\"" "__version__ = \"$NEW_VERSION\""
+# The release workflow's MCP package gate runs `uv sync --locked`, so a
+# pyproject bump without a lock refresh fails the release only in the
+# tag-triggered run — after the tag exists and can no longer be rewritten.
+# That cost v1.1.0 and v1.1.2 their first release runs and burned the v1.1.1
+# tag outright. Regenerate the lock as part of the bump. A failure here must
+# not abort the bump half-applied (set -e): warn and let check-versions.sh
+# hold the gate.
+if command -v uv >/dev/null 2>&1; then
+    echo "  • integrations/beads-mcp/uv.lock"
+    if ! uv lock --directory integrations/beads-mcp; then
+        echo -e "${RED}✗ uv lock failed — integrations/beads-mcp/uv.lock NOT refreshed.${NC}"
+        echo "  Fix and rerun before tagging, or check-versions.sh and the release MCP gate will fail:"
+        echo "    uv lock --directory integrations/beads-mcp"
+    fi
+else
+    echo -e "${RED}✗ uv not found — integrations/beads-mcp/uv.lock NOT refreshed.${NC}"
+    echo "  Run this before tagging, or check-versions.sh and the release MCP gate will fail:"
+    echo "    uv lock --directory integrations/beads-mcp"
+fi
 
 # 4. npm package
 echo "  • npm-package/package.json"
@@ -118,9 +137,22 @@ update_file "README.md" "Alpha (v$CURRENT_VERSION)" "Alpha (v$NEW_VERSION)"
 echo "  • default.nix"
 update_file "default.nix" "version = \"$CURRENT_VERSION\";" "version = \"$NEW_VERSION\";"
 
-# 7. Hook templates — now generated dynamically by cmd/bd/hooks.go using the
-# Version constant from version.go. No template files to update.
-# (Previously updated cmd/bd/templates/hooks/* which no longer exist.)
+# 7. Tracked managed git-hook sections. The hooks a fresh `bd init` installs
+# are generated dynamically by cmd/bd/hooks.go, but this repo also TRACKS
+# rendered copies in .githooks/, whose BEGIN/END markers embed the binary
+# Version (hookSectionBeginLine), and TestTrackedManagedHookSectionsMatchGenerator
+# holds them byte-equal to the generator's output. Rewrite the marker version
+# wholesale rather than from CURRENT_VERSION — the v1.2.0 bump proved the
+# markers can already be drifted when the bump runs (they still said v1.1.0).
+echo "  • .githooks/* managed section markers"
+for hook in .githooks/*; do
+    [ -f "$hook" ] || continue
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -E "s#(--- (BEGIN|END) BEADS INTEGRATION) v[^ ]+ ---#\1 v$NEW_VERSION ---#g" "$hook"
+    else
+        sed -i -E "s#(--- (BEGIN|END) BEADS INTEGRATION) v[^ ]+ ---#\1 v$NEW_VERSION ---#g" "$hook"
+    fi
+done
 
 # 8. Windows PE resource metadata
 echo "  • cmd/bd/winres/winres.json"

@@ -1,0 +1,23 @@
+-- Ignored migration 0018: clone-local marker for the second aux-row-id
+-- re-key pass (bd-ri8bd, Protocol v0.1 C-OQ3).
+--
+-- The initial backfill (ignored 0009) converged the primary keys that
+-- migration 0037 randomized, but rows inserted AFTER that backfill kept
+-- app-minted random UUIDv7 ids — minted once and spread by merge, which was
+-- consistent under the versioned union merge. Unversioned newest-wins
+-- replication (Protocol v0.1 §C) has no merge to union through: only ids that
+-- are functions of row content converge. This release therefore switched the
+-- insert paths to the deterministic content-derived derivation
+-- (issueops.InsertDerivedEvent / InsertDerivedComment /
+-- InsertDerivedCompactionSnapshot), and while this version is still pending,
+-- MigrateUp runs the re-key once more to converge the interim random-id rows.
+-- The rewrite is the same idempotent derivation as 0009's: rows already
+-- holding their content-derived id keep it.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local — every
+-- clone performs its own convergence pass exactly once, which is safe
+-- precisely because the derivation is deterministic (and therefore does not
+-- need the V2 designated-migrator exclusivity).
+--
+-- The marker itself changes nothing.
+SELECT 1;

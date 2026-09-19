@@ -18,10 +18,8 @@ import (
 )
 
 func TestPatrolPollution_DeletesFromDoltWithoutJSONL(t *testing.T) {
+	requireFixDoltContainer(t)
 	port := fixTestServerPort()
-	if port == 0 {
-		t.Skip("Dolt test server not available, skipping")
-	}
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -41,9 +39,9 @@ func TestPatrolPollution_DeletesFromDoltWithoutJSONL(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
+		t.Fatalf("dolt.NewFromConfigWithOptions against running test container: %v", err)
 	}
 	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
 		_ = store.Close()
@@ -96,7 +94,7 @@ func TestPatrolPollution_DeletesFromDoltWithoutJSONL(t *testing.T) {
 
 	verifyStore, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
+		t.Fatalf("failed to reopen store for verification: %v", err)
 	}
 	defer func() { _ = verifyStore.Close() }()
 

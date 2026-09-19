@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -101,11 +102,12 @@ in total before any individual status trips it.`,
 			return HandleErrorWithHintRespectJSON("issue ID required", "Use --all for all open issues")
 		}
 
+		out := cmd.OutOrStdout()
 		if usesProxiedServer() {
 			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
 				return err
 			}
-			return runGraphProxiedServer(rootCtx, args)
+			return runGraphProxiedServer(rootCtx, out, args)
 		}
 
 		ctx := rootCtx
@@ -125,7 +127,7 @@ in total before any individual status trips it.`,
 				}
 				return HandleErrorRespectJSON("loading all issues: %v", err)
 			}
-			return renderGraphAllSubgraphs(subgraphs)
+			return renderGraphAllSubgraphs(out, subgraphs)
 		}
 
 		issueID, err := utils.ResolvePartialID(ctx, store, args[0])
@@ -157,11 +159,17 @@ in total before any individual status trips it.`,
 			}
 		}
 
-		return renderGraphSingleSubgraph(subgraph)
+		return renderGraphSingleSubgraph(out, subgraph)
 	},
 }
 
-func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
+func writeGraphLine(out io.Writer, value string) error {
+	w := &graphExportWriter{out: out}
+	w.println(value)
+	return w.wrapError("graph")
+}
+
+func renderGraphAllSubgraphs(out io.Writer, subgraphs []*TemplateSubgraph) error {
 	if graphOpen {
 		var filtered []*TemplateSubgraph
 		for _, sg := range subgraphs {
@@ -174,8 +182,7 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 	}
 
 	if len(subgraphs) == 0 {
-		fmt.Println("No open issues found")
-		return nil
+		return writeGraphLine(out, "No open issues found")
 	}
 
 	if jsonOutput {
@@ -185,8 +192,7 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 	if graphHTML && !graphOpen {
 		merged := mergeSubgraphsForHTML(subgraphs)
 		layout := computeLayout(merged)
-		renderGraphHTML(layout, merged)
-		return nil
+		return renderGraphHTML(out, layout, merged)
 	}
 
 	if graphOpen {
@@ -194,7 +200,9 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 			layout := computeLayout(subgraph)
 			renderGraphCompact(layout, subgraph)
 			if i < len(subgraphs)-1 {
-				fmt.Println(strings.Repeat("─", 60))
+				if err := writeGraphLine(out, strings.Repeat("─", 60)); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -203,7 +211,9 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 	for i, subgraph := range subgraphs {
 		layout := computeLayout(subgraph)
 		if graphDOT {
-			renderGraphDOT(layout, subgraph)
+			if err := renderGraphDOT(out, layout, subgraph); err != nil {
+				return err
+			}
 		} else if graphCompact {
 			renderGraphCompact(layout, subgraph)
 		} else if graphBox {
@@ -212,18 +222,19 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 			renderGraphVisual(layout, subgraph)
 		}
 		if !graphDOT && i < len(subgraphs)-1 {
-			fmt.Println(strings.Repeat("─", 60))
+			if err := writeGraphLine(out, strings.Repeat("─", 60)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func renderGraphSingleSubgraph(subgraph *TemplateSubgraph) error {
+func renderGraphSingleSubgraph(out io.Writer, subgraph *TemplateSubgraph) error {
 	if graphOpen {
 		subgraph = filterSubgraphOpen(subgraph)
 		if subgraph == nil || len(subgraph.Issues) == 0 {
-			fmt.Println("No open issues in subgraph")
-			return nil
+			return writeGraphLine(out, "No open issues in subgraph")
 		}
 	}
 
@@ -243,9 +254,9 @@ func renderGraphSingleSubgraph(subgraph *TemplateSubgraph) error {
 	}
 
 	if graphDOT {
-		renderGraphDOT(layout, subgraph)
+		return renderGraphDOT(out, layout, subgraph)
 	} else if graphHTML {
-		renderGraphHTML(layout, subgraph)
+		return renderGraphHTML(out, layout, subgraph)
 	} else if graphCompact {
 		renderGraphCompact(layout, subgraph)
 	} else if graphBox {
@@ -1120,7 +1131,7 @@ func formatCompactNode(node *GraphNode) string {
 	// Use shared status icon with semantic color
 	statusIcon := ui.RenderStatusIcon(status)
 
-	// Priority with icon
+	// Priority with semantic color (P-label only)
 	priorityTag := ui.RenderPriority(node.Issue.Priority)
 
 	// Title - truncate if too long
@@ -1132,7 +1143,7 @@ func formatCompactNode(node *GraphNode) string {
 		return fmt.Sprintf("%s %s %s %s",
 			statusIcon,
 			style.Render(node.Issue.ID),
-			style.Render(fmt.Sprintf("● P%d", node.Issue.Priority)),
+			style.Render(fmt.Sprintf("P%d", node.Issue.Priority)),
 			style.Render(title))
 	}
 

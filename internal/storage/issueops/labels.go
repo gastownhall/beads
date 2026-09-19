@@ -153,12 +153,17 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		return fmt.Errorf("add label: %w", err)
 	}
 	comment := "Added label: " + label
-	//nolint:gosec // G201: eventTable is from WispTableRouting ("events" or "wisp_events")
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)`, eventTable),
-		NewEventID(), issueID, types.EventLabelAdded, actor, comment); err != nil {
+	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
+		IssueID:   issueID,
+		EventType: types.EventLabelAdded,
+		Actor:     actor,
+		Comment:   str(comment),
+	}); err != nil {
 		return fmt.Errorf("add label: record event: %w", err)
 	}
-	return nil
+	// A label is part of the bead snapshot, so a label write journals as an
+	// update carrying the complete post-mutation set.
+	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
 }
 
 // RemoveLabelInTx removes a label from an issue and records an event within
@@ -181,9 +186,13 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 		return fmt.Errorf("remove label: %w", err)
 	}
 	comment := "Removed label: " + label
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)`, eventTable),
-		NewEventID(), issueID, types.EventLabelRemoved, actor, comment); err != nil {
+	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
+		IssueID:   issueID,
+		EventType: types.EventLabelRemoved,
+		Actor:     actor,
+		Comment:   str(comment),
+	}); err != nil {
 		return fmt.Errorf("remove label: record event: %w", err)
 	}
-	return nil
+	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
 }

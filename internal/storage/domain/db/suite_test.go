@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -19,6 +20,8 @@ type testSuite struct {
 	db             *sql.DB
 	dbName         string
 	baselineCommit string
+	eventsDDL      string
+	journalEnabled bool
 }
 
 func (s *testSuite) SetupSuite() {
@@ -55,6 +58,19 @@ func (s *testSuite) SetupSuite() {
 		db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&s.baselineCommit),
 		"capture baseline commit hash",
 	)
+
+	// events is dolt_ignored since 0062 (bd-red8u): it lives only in the
+	// working set, so the baseline commit above does not contain it and the
+	// per-test DOLT_RESET below swaps out the issues table it references —
+	// after which the surviving untracked table's fk_events_issue silently
+	// stops enforcing (verified on dolt-sql-server 2.2.0). Capture the DDL so
+	// SetupTest can recreate the table fresh against the reset root, which
+	// re-links the FK and clears any audit rows orphaned by the reset.
+	var tbl string
+	s.Require().NoError(
+		db.QueryRowContext(ctx, "SHOW CREATE TABLE events").Scan(&tbl, &s.eventsDDL),
+		"capture events DDL",
+	)
 }
 
 func (s *testSuite) TearDownSuite() {
@@ -79,8 +95,16 @@ func (s *testSuite) TearDownSuite() {
 }
 
 func (s *testSuite) SetupTest() {
-	_, err := s.db.ExecContext(context.Background(), "CALL DOLT_RESET('--hard', ?)", s.baselineCommit)
+	s.journalEnabled = false
+	ctx := context.Background()
+	_, err := s.db.ExecContext(ctx, "CALL DOLT_RESET('--hard', ?)", s.baselineCommit)
 	s.Require().NoError(err, "reset to baseline %s", s.baselineCommit)
+	// Recreate the working-set-only events table after the reset — see the
+	// eventsDDL capture in SetupSuite for why.
+	_, err = s.db.ExecContext(ctx, "DROP TABLE IF EXISTS events")
+	s.Require().NoError(err, "drop events after reset")
+	_, err = s.db.ExecContext(ctx, s.eventsDDL)
+	s.Require().NoError(err, "recreate events after reset")
 }
 
 func (s *testSuite) Runner() Runner {
@@ -88,7 +112,7 @@ func (s *testSuite) Runner() Runner {
 }
 
 func (s *testSuite) Ctx() context.Context {
-	return context.Background()
+	return issueops.WithEventsJournal(context.Background(), s.journalEnabled)
 }
 
 var suffixLetters = []rune("abcdefghijklmnopqrstuvwxyz")

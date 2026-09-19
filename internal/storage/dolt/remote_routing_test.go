@@ -6,6 +6,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestEnsureMatchingCLIRemoteSurfacesValidationErrors(t *testing.T) {
@@ -165,4 +170,93 @@ func TestCLIRoutingFallsBackToSQLWhenNoCLIDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPrepareCLIRouteForGitProtocolColdStartWindow pins the wy-6k7f7 recovery
+// in the GH#2118 cold-start window: a freshly (auto-)started sql-server
+// reports an EMPTY dolt_remotes even though the remote is persisted on disk
+// in .dolt/repo_state.json. The route decider must consult the persisted
+// enumeration instead of treating the empty listing as proof:
+//   - a persisted git-protocol remote routes over the CLI (the push proceeds
+//     — full recovery, the CLI transport never needed the SQL listing);
+//   - a persisted non-git remote would need the SQL route the cold server
+//     refuses, so the decider fails with the cold-start explanation instead
+//     of letting DOLT_PUSH emit a bare "remote not found";
+//   - nothing persisted keeps today's (false, nil) SQL fallback.
+//
+// Needs the dolt binary (real CLI repo for remote materialization checks)
+// plus sqlmock for the empty server-side listing; no test server.
+func TestPrepareCLIRouteForGitProtocolColdStartWindow(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	ctx := context.Background()
+
+	newColdStore := func(t *testing.T) *DoltStore {
+		t.Helper()
+		db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		// Every ListRemotes in these scenarios sees the cold server's empty
+		// dolt_remotes.
+		mock.MatchExpectationsInOrder(false)
+		for i := 0; i < 4; i++ {
+			mock.ExpectQuery("SELECT name, url FROM dolt_remotes").
+				WillReturnRows(sqlmock.NewRows([]string{"name", "url"}))
+		}
+		store := &DoltStore{
+			serverMode: true,
+			dbPath:     t.TempDir(),
+			database:   "testdb",
+			remote:     "origin",
+			db:         db,
+		}
+		initLocalDoltRepoForRemote(t, store.CLIDir())
+		return store
+	}
+
+	t.Run("persisted_git_protocol_remote_recovers_cli_route", func(t *testing.T) {
+		store := newColdStore(t)
+		const url = "git+ssh://git@example.com/org/repo.git"
+		if err := doltutil.AddCLIRemote(store.CLIDir(), "origin", url); err != nil {
+			t.Fatalf("AddCLIRemote: %v", err)
+		}
+
+		useCLI, err := store.prepareCLIRouteForGitProtocol(ctx, "origin")
+		if err != nil {
+			t.Fatalf("prepareCLIRouteForGitProtocol: %v", err)
+		}
+		if !useCLI {
+			t.Fatal("persisted git-protocol remote should recover the CLI route in the cold-start window")
+		}
+	})
+
+	t.Run("persisted_non_git_remote_fails_with_cold_start_hint", func(t *testing.T) {
+		store := newColdStore(t)
+		if err := doltutil.AddCLIRemote(store.CLIDir(), "origin", "https://doltremoteapi.dolthub.com/org/repo"); err != nil {
+			t.Fatalf("AddCLIRemote: %v", err)
+		}
+
+		_, err := store.prepareCLIRouteForGitProtocol(ctx, "origin")
+		if err == nil {
+			t.Fatal("persisted non-git remote in the window should fail with the cold-start explanation, not fall to a bare SQL 'remote not found'")
+		}
+		for _, want := range []string{"GH#2118", "persisted on disk"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q should contain %q", err.Error(), want)
+			}
+		}
+	})
+
+	t.Run("nothing_persisted_keeps_sql_fallback", func(t *testing.T) {
+		store := newColdStore(t)
+
+		useCLI, err := store.prepareCLIRouteForGitProtocol(ctx, "origin")
+		if err != nil {
+			t.Fatalf("prepareCLIRouteForGitProtocol: %v", err)
+		}
+		if useCLI {
+			t.Fatal("no remote anywhere should keep the SQL fallback, not invent a CLI route")
+		}
+	})
 }

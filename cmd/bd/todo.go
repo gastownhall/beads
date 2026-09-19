@@ -267,10 +267,7 @@ func init() {
 
 // todoTruncate truncates a string to the specified length with ellipsis
 func todoTruncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+	return truncate(s, maxLen)
 }
 
 // todoSortIssues sorts issues by priority (ascending) then ID

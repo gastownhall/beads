@@ -47,6 +47,7 @@ func (m ServerMode) String() string {
 // Decision logic (checked in order):
 //  1. BEADS_DOLT_SERVER_MODE=1 env var             -> ServerModeExternal
 //  2. BEADS_DOLT_SHARED_SERVER env var is set       -> ServerModeExternal
+//     2b. host-based inference (HostImpliesServerMode) -> ServerModeExternal
 //  3. metadata.json dolt_mode == "embedded"         -> ServerModeEmbedded
 //  4. metadata.json has explicit dolt_server_port   -> ServerModeExternal
 //  5. default                                       -> ServerModeOwned
@@ -78,6 +79,21 @@ func ResolveServerMode(beadsDir string) ServerMode {
 		if cfg, loadErr := configfile.Load(beadsDir); loadErr == nil && cfg != nil {
 			fileCfg = cfg
 		}
+	}
+
+	// 2b. Host-based inference (GH#3545) -> external. Uses the same
+	// centralized rule as IsDoltServerMode (explicit-mode gates, env
+	// suppression, effective-host precedence, proxied exemption) so the
+	// storage-mode and lifecycle resolvers cannot disagree: a server
+	// that lives on another machine cannot have a bd-owned lifecycle.
+	// Runs before the embedded-metadata check because a runtime env
+	// host beats stale metadata (GH#2949).
+	hostCfg := fileCfg
+	if hostCfg == nil {
+		hostCfg = &configfile.Config{}
+	}
+	if hostCfg.HostImpliesServerMode() {
+		return ServerModeExternal
 	}
 
 	// 3. Explicit embedded mode in metadata.json

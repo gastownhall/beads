@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -138,5 +139,67 @@ func TestWrapWithSchemaVersion_Envelope_RoundTrip(t *testing.T) {
 	}
 	if innerData["count"] != float64(42) {
 		t.Errorf("data.count = %v, want 42", innerData["count"])
+	}
+}
+
+func TestOutputJSONWithPagination_NoTruncation(t *testing.T) {
+	items := []string{"a", "b"}
+	out := captureStdout(t, func() error {
+		return outputJSONWithPagination(items, nil)
+	})
+	var arr []string
+	if err := json.Unmarshal([]byte(bytes.TrimSpace([]byte(out))), &arr); err != nil {
+		t.Fatalf("unmarshal: %v\noutput: %s", err, out)
+	}
+	if len(arr) != 2 {
+		t.Errorf("len = %d, want 2", len(arr))
+	}
+}
+
+func TestOutputJSONWithPagination_EnvelopeTruncated(t *testing.T) {
+	t.Setenv("BD_JSON_ENVELOPE", "1")
+
+	items := []string{"a", "b", "c"}
+	pag := &PaginationMeta{Returned: 3, Total: 10, Truncated: true}
+	out := captureStdout(t, func() error {
+		return outputJSONWithPagination(items, pag)
+	})
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(bytes.TrimSpace([]byte(out))), &m); err != nil {
+		t.Fatalf("unmarshal: %v\noutput: %s", err, out)
+	}
+	if _, ok := m["pagination"]; !ok {
+		t.Fatal("missing 'pagination' key in envelope")
+	}
+	var got PaginationMeta
+	if err := json.Unmarshal(m["pagination"], &got); err != nil {
+		t.Fatalf("unmarshal pagination: %v", err)
+	}
+	if !got.Truncated {
+		t.Error("pagination.truncated = false, want true")
+	}
+	if got.Returned != 3 {
+		t.Errorf("pagination.returned = %d, want 3", got.Returned)
+	}
+	if got.Total != 10 {
+		t.Errorf("pagination.total = %d, want 10", got.Total)
+	}
+}
+
+func TestOutputJSONWithPagination_EnvelopeNotTruncated(t *testing.T) {
+	t.Setenv("BD_JSON_ENVELOPE", "1")
+
+	items := []string{"a", "b"}
+	out := captureStdout(t, func() error {
+		return outputJSONWithPagination(items, nil)
+	})
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(bytes.TrimSpace([]byte(out))), &m); err != nil {
+		t.Fatalf("unmarshal: %v\noutput: %s", err, out)
+	}
+	if _, ok := m["pagination"]; ok {
+		t.Error("unexpected 'pagination' key when not truncated")
 	}
 }

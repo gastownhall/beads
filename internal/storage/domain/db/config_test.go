@@ -30,6 +30,8 @@ func (s *testSuite) TestConfigSQLRepository() {
 		s.Run("Overwrite", s.configSetConfigOverwrite)
 		s.Run("IssuePrefixTrimsTrailingHyphen", s.configSetConfigIssuePrefixTrim)
 		s.Run("IssuePrefixWithoutHyphenUnchanged", s.configSetConfigIssuePrefixUnchanged)
+		s.Run("SyncsCustomTypesTable", s.configSetConfigSyncsCustomTypesTable)
+		s.Run("SyncsCustomStatusesTable", s.configSetConfigSyncsCustomStatusesTable)
 	})
 	s.Run("DeleteConfig", func() {
 		s.Run("RemovesExistingKey", s.configDeleteConfigRemovesExisting)
@@ -39,14 +41,9 @@ func (s *testSuite) TestConfigSQLRepository() {
 		s.Run("EmptyReturnsEmptyMap", s.configGetAllConfigEmpty)
 		s.Run("ReturnsAllRows", s.configGetAllConfigAllRows)
 	})
-	s.Run("ReconcileVersion", func() {
-		s.Run("EmptyCliVersionErrors", s.configReconcileVersionEmptyErrors)
-		s.Run("FreshInstallMigratesAndSetsMax", s.configReconcileVersionFreshInstall)
-		s.Run("AlreadyCurrentIsNoop", s.configReconcileVersionAlreadyCurrent)
-		s.Run("UpgradeAdvancesVersionAndMax", s.configReconcileVersionUpgrade)
-		s.Run("DowngradeBelowCurrentRefused", s.configReconcileVersionDowngradeRefused)
-		s.Run("DowngradeBelowMaxRefused", s.configReconcileVersionDowngradeBelowMaxRefused)
-		s.Run("CatchUpToMaxMigrates", s.configReconcileVersionCatchUpToMax)
+	s.Run("LocalMetadata", func() {
+		s.Run("SetThenGetRoundTrips", s.configLocalMetadataRoundTrip)
+		s.Run("SetOverwrites", s.configLocalMetadataOverwrite)
 	})
 	s.Run("UseCase", func() {
 		s.Run("GetConfigMissingKey", s.configUseCaseGetConfigMissing)
@@ -200,6 +197,74 @@ func (s *testSuite) configSetConfigIssuePrefixTrim() {
 	s.Equal("bd", v)
 }
 
+// configSetConfigSyncsCustomTypesTable proves the unit-of-work config write
+// path re-syncs the normalized custom_types table (not just the types.custom
+// string), mirroring DoltStore.SetConfig. Without the sync, GetCustomTypes'
+// table-first read keeps returning stale rows and every write of a bead whose
+// type is only in the string (e.g. "session") fails with "invalid issue type".
+func (s *testSuite) configSetConfigSyncsCustomTypesTable() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM custom_types")
+	s.Require().NoError(err)
+	r := s.configRepo()
+	s.Require().NoError(r.SetConfig(s.Ctx(), "types.custom", `["session","gate"]`))
+
+	s.Equal([]string{"gate", "session"}, s.customTypesTableRows())
+
+	// End-to-end: the read path (table-first) now surfaces the synced type, so
+	// "session" validates instead of hitting "invalid issue type: session".
+	customTypes, err := r.GetCustomTypes(s.Ctx())
+	s.Require().NoError(err)
+	s.Contains(customTypes, "session")
+
+	// Overwriting the config value must replace the table, not append to it.
+	s.Require().NoError(r.SetConfig(s.Ctx(), "types.custom", "convoy"))
+	s.Equal([]string{"convoy"}, s.customTypesTableRows())
+
+	// Clearing the config value must empty the table.
+	s.Require().NoError(r.SetConfig(s.Ctx(), "types.custom", ""))
+	s.Empty(s.customTypesTableRows())
+}
+
+// configSetConfigSyncsCustomStatusesTable proves the same sync for the
+// status.custom key against the custom_statuses table.
+func (s *testSuite) configSetConfigSyncsCustomStatusesTable() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM custom_statuses")
+	s.Require().NoError(err)
+	r := s.configRepo()
+	s.Require().NoError(r.SetConfig(s.Ctx(), "status.custom", "review:active,merged:done"))
+
+	rows, err := s.Runner().QueryContext(s.Ctx(), "SELECT name FROM custom_statuses ORDER BY name")
+	s.Require().NoError(err)
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var name string
+		s.Require().NoError(rows.Scan(&name))
+		got = append(got, name)
+	}
+	s.Require().NoError(rows.Err())
+	s.Equal([]string{"merged", "review"}, got)
+
+	// Later subtests in this suite share the same DB (SetupTest resets only per
+	// suite method), and configGetCustomStatuses{Empty,Rows} expect an empty
+	// custom_statuses table - clear it through the same sync path.
+	s.Require().NoError(r.SetConfig(s.Ctx(), "status.custom", ""))
+}
+
+func (s *testSuite) customTypesTableRows() []string {
+	rows, err := s.Runner().QueryContext(s.Ctx(), "SELECT name FROM custom_types ORDER BY name")
+	s.Require().NoError(err)
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var name string
+		s.Require().NoError(rows.Scan(&name))
+		got = append(got, name)
+	}
+	s.Require().NoError(rows.Err())
+	return got
+}
+
 func (s *testSuite) configDeleteConfigRemovesExisting() {
 	r := s.configRepo()
 	s.Require().NoError(r.SetConfig(s.Ctx(), "jira.url", "https://example.atlassian.net"))
@@ -266,7 +331,10 @@ func (s *testSuite) configGetCustomTypesCommaSeparated() {
 	s.Require().NoError(r.SetConfig(s.Ctx(), "types.custom", "molecule,gate,convoy"))
 	got, err := r.GetCustomTypes(s.Ctx())
 	s.Require().NoError(err)
-	s.Equal([]string{"molecule", "gate", "convoy"}, got)
+	// SetConfig now syncs the custom_types table, and GetCustomTypes reads it
+	// table-first (SELECT ... ORDER BY name), so the result is alphabetical -
+	// matching DoltStore, whose primary path has always read the sorted table.
+	s.Equal([]string{"convoy", "gate", "molecule"}, got)
 }
 
 func (s *testSuite) configGetCustomTypesJSONArray() {
@@ -274,7 +342,8 @@ func (s *testSuite) configGetCustomTypesJSONArray() {
 	s.Require().NoError(r.SetConfig(s.Ctx(), "types.custom", `["gate","convoy"]`))
 	got, err := r.GetCustomTypes(s.Ctx())
 	s.Require().NoError(err)
-	s.Equal([]string{"gate", "convoy"}, got)
+	// Table-first read after sync yields alphabetical order (see CommaSeparated).
+	s.Equal([]string{"convoy", "gate"}, got)
 }
 
 func (s *testSuite) configGetCustomTypesTrimsAndSkipsEmpty() {
@@ -319,13 +388,17 @@ func (s *testSuite) configGetAdaptiveIDConfigOverrides() {
 }
 
 func (s *testSuite) configGetCustomStatusesEmpty() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM custom_statuses")
+	s.Require().NoError(err)
 	got, err := s.configRepo().GetCustomStatuses(s.Ctx())
 	s.Require().NoError(err)
 	s.Nil(got)
 }
 
 func (s *testSuite) configGetCustomStatusesRows() {
-	_, err := s.Runner().ExecContext(s.Ctx(),
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM custom_statuses")
+	s.Require().NoError(err)
+	_, err = s.Runner().ExecContext(s.Ctx(),
 		"INSERT INTO custom_statuses (name, category) VALUES (?, ?), (?, ?), (?, ?)",
 		"review", string(types.CategoryWIP),
 		"archived", string(types.CategoryDone),
@@ -445,97 +518,31 @@ func (s *testSuite) resetLocalMetadata() {
 	s.Require().NoError(err)
 }
 
-func (s *testSuite) configReconcileVersionEmptyErrors() {
-	_, err := s.configUC().ReconcileVersion(s.Ctx(), "")
-	s.Require().Error(err)
-}
-
-func (s *testSuite) configReconcileVersionFreshInstall() {
+// The clone-local metadata plane is reached through the USE CASE here because
+// issueops.VersionReconciler's unit-of-work body reads and writes its two
+// markers that way, inside one transaction.
+//
+// The version decision the ReconcileVersion subtests used to cover is now
+// workapi.PlanVersionReconcile, pinned exhaustively and without a database in
+// internal/workapi/versionreconcile_test.go. What only a real backend can
+// show — that the markers persist and that a refusal writes nothing — is
+// asserted at all three backends by TestVersionReconcilerContract.
+func (s *testSuite) configLocalMetadataRoundTrip() {
 	s.resetLocalMetadata()
-	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
+	s.Require().NoError(s.configUC().SetLocalMetadata(s.Ctx(), "bd_version", "1.2.0"))
+
+	got, err := s.configUC().GetLocalMetadata(s.Ctx(), "bd_version")
 	s.Require().NoError(err)
-	s.Equal("", res.Previous)
-	s.Equal("1.2.0", res.Current)
-	s.True(res.Migrated)
-	s.False(res.Downgrade)
+	s.Equal("1.2.0", got)
 	s.Equal("1.2.0", s.localMeta("bd_version"))
-	s.Equal("1.2.0", s.localMeta("bd_version_max"))
 }
 
-func (s *testSuite) configReconcileVersionAlreadyCurrent() {
+func (s *testSuite) configLocalMetadataOverwrite() {
 	s.resetLocalMetadata()
-	r := s.configRepo()
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.2.0"))
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.2.0"))
+	s.Require().NoError(s.configUC().SetLocalMetadata(s.Ctx(), "bd_version", "1.2.0"))
+	s.Require().NoError(s.configUC().SetLocalMetadata(s.Ctx(), "bd_version", "1.3.0"))
 
-	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
-	s.Require().NoError(err)
-	s.Equal("1.2.0", res.Previous)
-	s.Equal("1.2.0", res.Current)
-	s.False(res.Migrated)
-	s.False(res.Downgrade)
-}
-
-func (s *testSuite) configReconcileVersionUpgrade() {
-	s.resetLocalMetadata()
-	r := s.configRepo()
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.2.0"))
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.2.0"))
-
-	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.3.0")
-	s.Require().NoError(err)
-	s.Equal("1.2.0", res.Previous)
-	s.Equal("1.3.0", res.Current)
-	s.True(res.Migrated)
-	s.False(res.Downgrade)
 	s.Equal("1.3.0", s.localMeta("bd_version"))
-	s.Equal("1.3.0", s.localMeta("bd_version_max"))
-}
-
-func (s *testSuite) configReconcileVersionDowngradeRefused() {
-	s.resetLocalMetadata()
-	r := s.configRepo()
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.3.0"))
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.3.0"))
-
-	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
-	s.Require().NoError(err)
-	s.Equal("1.3.0", res.Previous)
-	s.Equal("1.3.0", res.Current)
-	s.False(res.Migrated)
-	s.True(res.Downgrade)
-	s.Equal("1.3.0", s.localMeta("bd_version"))
-	s.Equal("1.3.0", s.localMeta("bd_version_max"))
-}
-
-func (s *testSuite) configReconcileVersionDowngradeBelowMaxRefused() {
-	s.resetLocalMetadata()
-	r := s.configRepo()
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.1.0"))
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.3.0"))
-
-	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
-	s.Require().NoError(err)
-	s.False(res.Migrated)
-	s.True(res.Downgrade)
-	s.Equal("1.1.0", s.localMeta("bd_version"))
-	s.Equal("1.3.0", s.localMeta("bd_version_max"))
-}
-
-func (s *testSuite) configReconcileVersionCatchUpToMax() {
-	s.resetLocalMetadata()
-	r := s.configRepo()
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.1.0"))
-	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.3.0"))
-
-	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.3.0")
-	s.Require().NoError(err)
-	s.Equal("1.1.0", res.Previous)
-	s.Equal("1.3.0", res.Current)
-	s.True(res.Migrated)
-	s.False(res.Downgrade)
-	s.Equal("1.3.0", s.localMeta("bd_version"))
-	s.Equal("1.3.0", s.localMeta("bd_version_max"))
 }
 
 func (s *testSuite) configUseCaseGetConfigMissing() {
@@ -609,7 +616,13 @@ func (s *testSuite) configGetCustomTypesTablePrecedence() {
 	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM custom_types")
 	s.Require().NoError(err)
 	r := s.configRepo()
-	s.Require().NoError(r.SetConfig(s.Ctx(), "types.custom", "from-config"))
+	// Write the config string directly rather than through SetConfig, which now
+	// syncs the types.custom string into the custom_types table (mirroring
+	// DoltStore). Out of band is what isolates the table-first precedence read
+	// from a divergent string value.
+	_, err = s.Runner().ExecContext(s.Ctx(),
+		"REPLACE INTO config (`key`, value) VALUES (?, ?)", "types.custom", "from-config")
+	s.Require().NoError(err)
 	_, err = s.Runner().ExecContext(s.Ctx(),
 		"INSERT INTO custom_types (name) VALUES (?), (?)",
 		"from-table-a", "from-table-b")
@@ -624,7 +637,14 @@ func (s *testSuite) configGetCustomTypesConfigFallback() {
 	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM custom_types")
 	s.Require().NoError(err)
 	r := s.configRepo()
-	s.Require().NoError(r.SetConfig(s.Ctx(), "types.custom", "fallback-only"))
+	// Out of band so the custom_types table stays empty and this actually
+	// exercises the string-fallback read branch. Going through SetConfig would
+	// now sync the table and the read would never reach the fallback - the exact
+	// branch every database with a written string and a never-synced table
+	// depends on until its next config write.
+	_, err = s.Runner().ExecContext(s.Ctx(),
+		"REPLACE INTO config (`key`, value) VALUES (?, ?)", "types.custom", "fallback-only")
+	s.Require().NoError(err)
 
 	got, err := r.GetCustomTypes(s.Ctx())
 	s.Require().NoError(err)

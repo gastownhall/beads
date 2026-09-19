@@ -50,10 +50,15 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	ctx := context.Background()
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// No database - create a new Dolt store
+		// No database - create a new Dolt store. Creation is this branch's
+		// explicit purpose, so opt out of the dolt.New create-guard
+		// (bd-kjfsq: without CreateIfMissing the guard fails the fix with
+		// "database not found" on exactly the fresh clones it exists for).
 		fmt.Println("  → No database found, creating Dolt store...")
 
-		store, err := dolt.NewFromConfig(ctx, beadsDir)
+		// Bead-mutating: the branch below imports every issue in the JSONL, so
+		// it opens through the activating factory and those creates journal.
+		store, err := openBeadMutatingStoreCreating(ctx, beadsDir)
 		if err != nil {
 			return fmt.Errorf("failed to create database: %w", err)
 		}
@@ -153,9 +158,11 @@ func FreshCloneImport(path string, bdVersion string) error {
 		return DatabaseVersionWithBdVersion(path, bdVersion)
 	}
 
-	// Dolt store exists — check if it already has issues
+	// Dolt store exists — check if it already has issues. Bead-mutating: an
+	// empty store is imported into below, so it opens through the activating
+	// factory and those creates journal.
 	ctx := context.Background()
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openBeadMutatingStore(ctx, beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -226,7 +233,6 @@ func importJSONLIntoStore(ctx context.Context, store storage.DoltStorage, jsonlP
 	actor := detectActor()
 
 	err = store.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
-		OrphanHandling:       storage.OrphanAllow,
 		SkipPrefixValidation: true,
 	})
 	if err != nil {

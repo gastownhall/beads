@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -44,9 +45,10 @@ func hookSectionEndLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionEndPrefix, Version)
 }
 
-// hookTimeoutSeconds is the maximum time a beads hook is allowed to run before
-// being killed and allowing the git operation to proceed.  A bounded timeout
-// prevents `bd hooks run` from hanging `git push` indefinitely (GH#2453).
+// hookTimeoutSeconds is the soft deadline for a beads hook. GNU timeout sends
+// SIGTERM at the deadline, while Perl's alarm terminates the direct bd process.
+// Neither backend promises containment of TERM-resistant descendant work. When
+// neither helper is available, the generated hook warns that it is unbounded.
 // The default is 300 seconds (5 minutes) to accommodate chained hooks — e.g.
 // pre-commit framework pipelines that run linters, type-checkers, and builds
 // inside `bd hooks run` via the `.old` hook chain (GH#2732).
@@ -59,7 +61,13 @@ const hookTimeoutSeconds = 300
 // content after the section from executing on success.
 //
 // Resilience (GH#2453, GH#2449):
-//   - A configurable timeout prevents hooks from hanging git operations.
+//   - A compatible timeout helper applies a best-effort soft deadline.
+//   - BEADS_HOOK_TIMEOUT accepts positive whole seconds only.
+//   - Helper argv is separated with -- so user input cannot become an option.
+//   - If no compatible helper exists, the direct fallback is explicitly
+//     unbounded rather than silently pretending to enforce a deadline.
+//   - Only GNU coreutils timeout implementations are selected; Windows
+//     timeout.exe has the same name but an incompatible command line (GH#5503).
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
 func generateHookSection(hookName string) string {
@@ -68,31 +76,57 @@ func generateHookSection(hookName string) string {
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
-		"  _bd_used_perl=0\n" +
-		"  if command -v timeout >/dev/null 2>&1; then\n" +
-		"    timeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
-		"  elif command -v gtimeout >/dev/null 2>&1; then\n" +
-		"    gtimeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
+		"  case \"$_bd_timeout\" in\n" +
+		"    *[!0-9]*|'') _bd_timeout_invalid=1 ;;\n" +
+		"    *[1-9]*) _bd_timeout_invalid=0 ;;\n" +
+		"    *) _bd_timeout_invalid=1 ;;\n" +
+		"  esac\n" +
+		"  if [ \"$_bd_timeout_invalid\" -eq 1 ]; then\n" +
+		"    echo >&2 \"beads: invalid BEADS_HOOK_TIMEOUT; using " + fmt.Sprintf("%d", hookTimeoutSeconds) + " seconds\"\n" +
+		"    _bd_timeout=" + fmt.Sprintf("%d", hookTimeoutSeconds) + "\n" +
+		"  fi\n" +
+		"  _bd_timeout_backend=none\n" +
+		"  _bd_timeout_command=\n" +
+		"  for _bd_timeout_candidate in timeout gtimeout; do\n" +
+		"    if command -v \"$_bd_timeout_candidate\" >/dev/null 2>&1; then\n" +
+		"      if _bd_timeout_version=\"$(\"$_bd_timeout_candidate\" --version 2>/dev/null)\"; then\n" +
+		"        case \"$_bd_timeout_version\" in\n" +
+		"          \"timeout (GNU coreutils) \"*) _bd_timeout_command=$_bd_timeout_candidate; break ;;\n" +
+		"        esac\n" +
+		"      fi\n" +
+		"    fi\n" +
+		"  done\n" +
+		"  if [ -n \"$_bd_timeout_command\" ]; then\n" +
+		"    _bd_timeout_backend=coreutils\n" +
+		"    if \"$_bd_timeout_command\" -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
 		"  elif command -v perl >/dev/null 2>&1; then\n" +
-		"    _bd_used_perl=1\n" +
-		"    perl -e 'alarm shift; exec @ARGV' \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
+		"    _bd_timeout_backend=perl\n" +
+		"    if perl -e 'alarm shift; exec @ARGV' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
 		"  else\n" +
 		"    echo >&2 \"beads: hook '" + hookName + "' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT\"\n" +
-		"    bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
+		"    if bd hooks run " + hookName + " \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
 		"  fi\n" +
-		"  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then\n" +
+		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
 		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
 		"    _bd_exit=0\n" +
 		"  fi\n" +
-		"  if [ $_bd_exit -eq 3 ]; then\n" +
+		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
 		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
 		"    _bd_exit=0\n" +
 		"  fi\n" +
-		"  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
+		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"fi\n" +
 		hookSectionEndLine() + "\n"
 }
@@ -767,6 +801,70 @@ var hooksListCmd = &cobra.Command{
 	},
 }
 
+// guardHookWritePath refuses hook writes that would silently modify files
+// bd does not own (bd-5vdt8):
+//   - a symlinked hook path: os.WriteFile follows the link (O_TRUNC) and
+//     rewrites the target inode — e.g. a repo-tracked script the hook
+//     points at, dirtying every clone that shares it
+//   - a hook file tracked by git: writing it dirties the working tree.
+//     allowTracked exempts shared installs (.beads-hooks/ is deliberately
+//     committed).
+func guardHookWritePath(hookPath string, allowTracked bool) error {
+	fi, err := os.Lstat(hookPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // creating a new file — nothing to clobber
+		}
+		return fmt.Errorf("failed to stat %s: %w", hookPath, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target := "unresolvable target"
+		if resolved, rerr := filepath.EvalSymlinks(hookPath); rerr == nil {
+			target = resolved
+		} else if link, lerr := os.Readlink(hookPath); lerr == nil {
+			target = link
+		}
+		return fmt.Errorf("%s is a symlink to %s; writing would rewrite the link target, not the hook\nRemove the symlink (or leave that hook to its owner) and re-run", hookPath, target)
+	}
+	if allowTracked {
+		return nil
+	}
+	// A tracked file is refused only when bd does NOT own it: writing into a
+	// foreign tracked file dirties every clone that shares it (the wy-81fnur
+	// incident). A bd-owned hook the user chose to commit (e.g. a team-shared
+	// .beads/hooks/) is bd's to maintain — same policy as shared installs.
+	if isGitTrackedFile(hookPath) && !isBdOwnedHookFile(hookPath) {
+		return fmt.Errorf("%s is tracked by git and not a bd-managed hook; bd will not modify committed files it does not own\nUntrack it (git rm --cached) or move hooks to an untracked directory and re-run", hookPath)
+	}
+	return nil
+}
+
+// isBdOwnedHookFile reports whether the hook file at path is bd-managed:
+// either section-marker format or a legacy bd hook (shim or inline).
+func isBdOwnedHookFile(path string) bool {
+	content, err := os.ReadFile(path) // #nosec G304 -- path is a hook location bd resolved
+	if err != nil {
+		return false
+	}
+	if strings.Contains(string(content), hookSectionBeginPrefix) {
+		return true
+	}
+	versionInfo, err := getHookVersion(path)
+	return err == nil && versionInfo.IsBdHook
+}
+
+// isGitTrackedFile reports whether path is tracked by git in the repository
+// containing it. Errors (not a repo, path inside .git/, no work tree) count
+// as untracked — the guard only blocks writes it can prove are unsafe.
+func isGitTrackedFile(path string) bool {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	// #nosec G204 G702 - fixed "git" command; dir/base come from the hooks
+	// directory bd itself resolved, not user input
+	cmd := exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base)
+	return cmd.Run() == nil
+}
+
 //nolint:unparam // force and chain kept for CLI flag compatibility; section markers make them no-ops
 func installHooksWithOptions(hookNames []string, force bool, shared bool, chain bool, beadsHooks bool) error {
 	var hooksDir string
@@ -812,6 +910,14 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 		preservePreexistingHooks(hooksDir)
 	}
 
+	// Refuse the whole install up front if any target is unsafe to write —
+	// stopping midway through the loop would leave hooks half-installed.
+	for _, hookName := range hookNames {
+		if err := guardHookWritePath(filepath.Join(hooksDir, hookName), shared); err != nil {
+			return fmt.Errorf("refusing to install %s hook: %w", hookName, err)
+		}
+	}
+
 	// Install each hook using section markers (GH#1380).
 	// Only the content between markers is managed by beads; user content
 	// outside the markers is preserved across reinstalls and upgrades.
@@ -844,7 +950,17 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 					// Legacy bd hook — replace entire file with section format
 					newContent = "#!/usr/bin/env sh\n" + section
 				} else {
-					// Non-bd hook — inject section (preserving existing content)
+					// Non-bd hook — this is the one write that modifies a file
+					// bd does not own. Preserve the original as a one-time
+					// .backup sidecar before injecting (bd-5vdt8).
+					backupPath := hookPath + ".backup"
+					if _, statErr := os.Lstat(backupPath); os.IsNotExist(statErr) {
+						// #nosec G306 -- keep executable so a rename restores a working hook
+						if backupErr := os.WriteFile(backupPath, existing, 0755); backupErr != nil {
+							return fmt.Errorf("failed to back up %s before injecting bd section: %w", hookName, backupErr)
+						}
+					}
+					// Inject section, preserving existing content
 					newContent = injectHookSection(existingStr, section)
 				}
 			}
@@ -1257,16 +1373,24 @@ func uninstallHooks() error {
 		// Not a bd hook at all — leave it alone
 	}
 
-	// Reset core.hooksPath if it was set to a beads-managed directory
+	// Reset beads-managed git config (core.hooksPath, beads.role) now that the
+	// hook files themselves are removed. A failure here must not be a
+	// scrolling stderr warning — bd hooks uninstall must not report success
+	// while beads-managed config is still left behind (GH#4440).
 	if err := resetHooksPathIfBeadsManaged(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to reset core.hooksPath: %v\n", err)
+		return fmt.Errorf("hook files removed, but failed to reset beads-managed git config: %w", err)
 	}
 
 	return nil
 }
 
 // resetHooksPathIfBeadsManaged unsets core.hooksPath if it points to a
-// beads-managed hooks directory (.beads/hooks or .beads-hooks).
+// beads-managed hooks directory (.beads/hooks or .beads-hooks), and unsets
+// beads.role. beads.role marks a repo as beads-managed independent of
+// core.hooksPath, so it is cleared unconditionally here rather than gated on
+// the hooksPath match — otherwise an uninstall that runs after core.hooksPath
+// was already cleared (e.g. by `bd doctor --fix`) would leave a stale
+// beads.role behind. A key that is already absent is not an error.
 func resetHooksPathIfBeadsManaged() error {
 	repoRoot, _ := git.GetMainRepoRoot()
 	if repoRoot == "" {
@@ -1276,24 +1400,44 @@ func resetHooksPathIfBeadsManaged() error {
 		return nil // not in a git repo
 	}
 
+	var failures []string
+
 	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
 	cmd.Dir = repoRoot
-	out, err := cmd.Output()
-	if err != nil {
-		return nil // core.hooksPath not set — nothing to reset
+	if out, err := cmd.Output(); err == nil {
+		hooksPath := strings.TrimSpace(string(out))
+		// Matches both relative (legacy) and absolute (GH#2414) beads hooks
+		// paths, symlink-resolving the absolute forms. Shared with
+		// doctor.CheckHooksPath/FixHooksPath so uninstall and `bd doctor --fix`
+		// cannot disagree about what "beads-managed" means.
+		if doctor.IsBeadsManagedHooksPath(repoRoot, hooksPath) {
+			unsetCmd := exec.Command("git", "config", "--unset", "core.hooksPath")
+			unsetCmd.Dir = repoRoot
+			if output, err := unsetCmd.CombinedOutput(); err != nil {
+				failures = append(failures, fmt.Sprintf("core.hooksPath: %v (output: %s)", err, strings.TrimSpace(string(output))))
+			}
+		}
+	}
+	// core.hooksPath not set at all — nothing to reset there; still fall
+	// through to beads.role below.
+
+	// Read before unsetting rather than treating git's exit 5 as "already
+	// absent". Exit 5 also means "the key has multiple values, refusing an
+	// ambiguous unset" — a repo with a duplicated beads.role (bad merge, hand
+	// edit) would then report a clean uninstall while leaving the key set,
+	// which is the exact failure this is supposed to stop.
+	getRoleCmd := exec.Command("git", "config", "--get", "beads.role")
+	getRoleCmd.Dir = repoRoot
+	if _, err := getRoleCmd.Output(); err == nil {
+		roleCmd := exec.Command("git", "config", "--unset", "beads.role")
+		roleCmd.Dir = repoRoot
+		if output, err := roleCmd.CombinedOutput(); err != nil {
+			failures = append(failures, fmt.Sprintf("beads.role: %v (output: %s)", err, strings.TrimSpace(string(output))))
+		}
 	}
 
-	hooksPath := strings.TrimSpace(string(out))
-	// Match both relative (legacy) and absolute (GH#2414) beads hooks paths
-	absBeadsHooks := filepath.Join(repoRoot, ".beads", "hooks")
-	absSharedHooks := filepath.Join(repoRoot, ".beads-hooks")
-	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" ||
-		hooksPath == absBeadsHooks || hooksPath == absSharedHooks {
-		cmd = exec.Command("git", "config", "--unset", "core.hooksPath")
-		cmd.Dir = repoRoot
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git config --unset core.hooksPath failed: %w (output: %s)", err, string(output))
-		}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 
 	return nil
@@ -1706,8 +1850,9 @@ Supported hooks:
   - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers for forensics
 
-The thin shim pattern ensures hook logic is always in sync with the
-installed bd version - upgrading bd automatically updates hook behavior.`,
+The thin shim keeps delegated hook logic in sync with the installed bd
+version. Upgrading bd updates that delegated behavior. To adopt changes to the
+shim's generated shell policy, refresh it with 'bd hooks install'.`,
 	Args:          cobra.MinimumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -1749,9 +1894,9 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 }
 
 func init() {
-	hooksInstallCmd.Flags().Bool("force", false, "Overwrite existing hooks without backup")
+	hooksInstallCmd.Flags().Bool("force", false, "No-op, kept for compatibility (section markers always preserve non-bd content)")
 	hooksInstallCmd.Flags().Bool("shared", false, "Install hooks to .beads-hooks/ (versioned) instead of .git/hooks/")
-	hooksInstallCmd.Flags().Bool("chain", false, "Chain with existing hooks (run them before bd hooks)")
+	hooksInstallCmd.Flags().Bool("chain", false, "No-op, kept for compatibility (existing hook content always runs alongside the bd section)")
 	hooksInstallCmd.Flags().Bool("beads", false, "Install hooks to .beads/hooks/ (recommended for Dolt backend)")
 
 	hooksCmd.AddCommand(hooksInstallCmd)

@@ -72,6 +72,9 @@ func bdManagedLocalInit(t *testing.T, bd, prefix string, idleTimeout time.Durati
 	if info.IdleTimeout != idleTimeout {
 		t.Fatalf("persisted managed-local idle timeout: got %s, want %s", info.IdleTimeout, idleTimeout)
 	}
+	if info.Port != 0 {
+		t.Fatalf("default managed proxy port: got %d, want 0 so the child binds an OS-assigned port", info.Port)
+	}
 	return p
 }
 

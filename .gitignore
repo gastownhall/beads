@@ -101,7 +101,7 @@ __pycache__/
 .Python
 .envrc
 
-# Performance profiling files (benchmarks, bd doctor --perf, and bd --profile)
+# Performance profiling files (benchmarks, bd doctor --perf, and bd --cpu-profile)
 *.prof
 *.out
 beads-perf-*.prof
@@ -254,3 +254,4 @@ tmp/build/cli-docs/version.md
 tmp/build/cli-docs/where.md
 tmp/build/cli-docs/worktree.md
 tmp/docs/CLI_REFERENCE.md
+*.gate.lock*

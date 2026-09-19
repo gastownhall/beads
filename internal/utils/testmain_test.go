@@ -10,10 +10,10 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-// testServerPort is the port of the isolated test Dolt server (0 = not running).
-// Set by TestMain before tests run so that newTestStore connects to the test
+// DoltTestServerPort is the port of the isolated test Dolt server (0 = not running).
+// Set by TestMain before tests run so that the store-backed tests connect to the test
 // server instead of the production Dolt server on port 3307.
-var testServerPort int
+var DoltTestServerPort int
 
 func TestMain(m *testing.M) {
 	os.Exit(testMainInner(m))
@@ -27,12 +27,12 @@ func testMainInner(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
 		defer testutil.TerminateDoltContainer()
-		testServerPort = testutil.DoltContainerPortInt()
+		DoltTestServerPort = testutil.DoltContainerPortInt()
 	}
 
 	code := m.Run()
 
-	testServerPort = 0
+	DoltTestServerPort = 0
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
 	return code

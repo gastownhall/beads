@@ -226,41 +226,37 @@ func TestDoltAdministrativeCommandsRejectRemovedBackends(t *testing.T) {
 		{name: "clean-databases", args: []string{"dolt", "clean-databases", "--dry-run"}},
 	}
 
-	for _, backend := range []string{configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite} {
-		t.Run(backend, func(t *testing.T) {
-			root := t.TempDir()
-			beadsDir := filepath.Join(root, ".beads")
-			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-				t.Fatalf("create beads dir: %v", err)
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create beads dir: %v", err)
+	}
+	if err := (&configfile.Config{Backend: configfile.BackendSQLite}).Save(beadsDir); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	for _, command := range commands {
+		t.Run(command.name, func(t *testing.T) {
+			cmd := exec.Command(bd, command.args...)
+			cmd.Dir = root
+			cmd.Env = append(removedBackendTestEnv(beadsDir), "BD_DISABLE_METRICS=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("%q unexpectedly succeeded for removed backend %s: %s", strings.Join(command.args, " "), configfile.BackendSQLite, out)
 			}
-			if err := (&configfile.Config{Backend: backend}).Save(beadsDir); err != nil {
-				t.Fatalf("save config: %v", err)
+
+			message := strings.ToLower(string(out))
+			for _, want := range removedBackendWantSubstrings(configfile.BackendSQLite) {
+				if !strings.Contains(message, want) {
+					t.Errorf("%q error for %s missing %q: %s", strings.Join(command.args, " "), configfile.BackendSQLite, want, message)
+				}
 			}
 
-			for _, command := range commands {
-				t.Run(command.name, func(t *testing.T) {
-					cmd := exec.Command(bd, command.args...)
-					cmd.Dir = root
-					cmd.Env = append(removedBackendTestEnv(beadsDir), "BD_DISABLE_METRICS=1")
-					out, err := cmd.CombinedOutput()
-					if err == nil {
-						t.Fatalf("%q unexpectedly succeeded for removed backend %s: %s", strings.Join(command.args, " "), backend, out)
-					}
-
-					message := strings.ToLower(string(out))
-					for _, want := range removedBackendWantSubstrings(backend) {
-						if !strings.Contains(message, want) {
-							t.Errorf("%q error for %s missing %q: %s", strings.Join(command.args, " "), backend, want, message)
-						}
-					}
-
-					for _, name := range []string{"embeddeddolt", "dolt", "beads.db", ".local_version"} {
-						path := filepath.Join(beadsDir, name)
-						if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-							t.Fatalf("%q created local state for removed backend %s at %s (stat error: %v)", strings.Join(command.args, " "), backend, path, statErr)
-						}
-					}
-				})
+			for _, name := range []string{"embeddeddolt", "dolt", "beads.db", ".local_version"} {
+				path := filepath.Join(beadsDir, name)
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("%q created local state for removed backend %s at %s (stat error: %v)", strings.Join(command.args, " "), configfile.BackendSQLite, path, statErr)
+				}
 			}
 		})
 	}
@@ -382,6 +378,12 @@ func TestStoreFactoriesRemovedBackendsFailLoud(t *testing.T) {
 					if !strings.Contains(guidance, "export") || !strings.Contains(guidance, "dolt") {
 						t.Fatalf("error should provide safe migration guidance: %v", err)
 					}
+					// With no Dolt data on disk the configured database really is
+					// the only copy, so the export path is right and the D-8 heal
+					// must not be offered — that edit would open an empty store.
+					if strings.Contains(guidance, "to heal") {
+						t.Fatalf("error offered a metadata heal for a workspace with no Dolt data: %v", err)
+					}
 					for _, name := range []string{"embeddeddolt", "dolt", "beads.db"} {
 						path := filepath.Join(beadsDir, name)
 						if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
@@ -395,14 +397,15 @@ func TestStoreFactoriesRemovedBackendsFailLoud(t *testing.T) {
 }
 
 func TestRequireDoltBackend(t *testing.T) {
+	beadsDir := t.TempDir()
 	for _, cfg := range []*configfile.Config{nil, {}, {Backend: configfile.BackendDolt}} {
-		if err := requireDoltBackend(cfg); err != nil {
+		if err := requireDoltBackend(cfg, beadsDir); err != nil {
 			t.Fatalf("Dolt config %#v rejected: %v", cfg, err)
 		}
 	}
 
 	for _, backend := range []string{configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite} {
-		err := requireDoltBackend(&configfile.Config{Backend: backend})
+		err := requireDoltBackend(&configfile.Config{Backend: backend}, beadsDir)
 		if err == nil || !strings.Contains(err.Error(), "no longer supported") || !strings.Contains(err.Error(), "export") {
 			t.Fatalf("removed backend %q guard error = %v, want rollback and migration guidance", backend, err)
 		}

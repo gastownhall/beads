@@ -8,9 +8,25 @@ import (
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func TestReExportCommitIndeterminate(t *testing.T) {
+	t.Parallel()
+
+	if beads.ErrCommitIndeterminate != storage.ErrCommitIndeterminate {
+		t.Error("beads.ErrCommitIndeterminate is not the shared storage sentinel value (identity broken)")
+	}
+	if dolt.ErrCommitIndeterminate != storage.ErrCommitIndeterminate {
+		t.Error("dolt.ErrCommitIndeterminate is not the shared storage sentinel value (identity broken)")
+	}
+	wrapped := fmt.Errorf("update issue: %w", storage.ErrCommitIndeterminate)
+	if !errors.Is(wrapped, beads.ErrCommitIndeterminate) {
+		t.Errorf("errors.Is(wrapped, beads.ErrCommitIndeterminate) = false; err = %v", wrapped)
+	}
+}
 
 // TestReExportCloseBlocked proves the public beads.ErrCloseBlocked alias is the
 // same value as the internal sentinel and composes through errors.Is when
@@ -79,6 +95,8 @@ func TestReExportedSentinelIdentity(t *testing.T) {
 		{"ErrVersionMismatch", beads.ErrVersionMismatch, storage.ErrVersionMismatch},
 		{"ErrSelfDependency", beads.ErrSelfDependency, domain.ErrSelfDependency},
 		{"ErrDependencyCycle", beads.ErrDependencyCycle, domain.ErrDependencyCycle},
+		{"ErrDependencySourceNotFound", beads.ErrDependencySourceNotFound, domain.ErrDependencySourceNotFound},
+		{"ErrDependencyTargetNotFound", beads.ErrDependencyTargetNotFound, domain.ErrDependencyTargetNotFound},
 		{"ErrFieldTooLong", beads.ErrFieldTooLong, types.ErrFieldTooLong},
 	}
 	for _, tc := range cases {
@@ -190,6 +208,27 @@ func TestReExportedDependencyConflictTypes(t *testing.T) {
 	}
 	if gotHier.IssueID != "child" || gotHier.BlockerID != "ancestor" || !gotHier.BlockerIsAncestor {
 		t.Errorf("extracted hierarchy-conflict fields = %+v, want {child ancestor true}", gotHier)
+	}
+
+	// Endpoint miss: the target names no row this database holds. The domain
+	// use case passes it through unwrapped for the same reason the two
+	// conflicts above are passed through.
+	missing := &domain.DependencyEndpointNotFoundError{
+		IssueID: "a", DependsOnID: "ghost", MissingID: "ghost",
+		Err: domain.ErrDependencyTargetNotFound,
+	}
+	uc = domain.NewDependencyUseCase(insertErrDepRepo{insertErr: missing})
+	err = uc.AddDependency(context.Background(),
+		&types.Dependency{IssueID: "a", DependsOnID: "ghost", Type: types.DepBlocks}, "tester")
+	var gotMissing *beads.DependencyEndpointNotFoundError
+	if !errors.As(err, &gotMissing) {
+		t.Fatalf("errors.As(real endpoint-miss err, *beads.DependencyEndpointNotFoundError) = false; err = %v", err)
+	}
+	if !errors.Is(err, beads.ErrDependencyTargetNotFound) {
+		t.Errorf("errors.Is(real endpoint-miss err, beads.ErrDependencyTargetNotFound) = false; err = %v", err)
+	}
+	if gotMissing.IssueID != "a" || gotMissing.DependsOnID != "ghost" || gotMissing.MissingID != "ghost" {
+		t.Errorf("extracted endpoint-miss fields = %+v, want {a ghost ghost}", gotMissing)
 	}
 }
 

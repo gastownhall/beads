@@ -31,6 +31,8 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("NormalizesStatusType", s.issueUpdateStatusType)
 		s.Run("NormalizesTimestampToUTC", s.issueUpdateNormalizesTimestamp)
 		s.Run("MissingIDWithStatusChangeReturnsErrNoRows", s.issueUpdateMissingIDWithStatus)
+		s.Run("SameStatusInUnitOfWork", s.issueUpdateSameStatusInUnitOfWork)
+		s.Run("PreservesCallerMap", s.issueUpdatePreservesCallerMap)
 	})
 	s.Run("RowVersion", func() {
 		s.Run("NonZeroAfterCreate", s.issueRowVersionNonZeroOnCreate)
@@ -696,8 +698,8 @@ func (s *testSuite) issueClaimConflict() {
 func (s *testSuite) issueClaimClosed() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-closed", "x"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-closed",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+	_, err := r.Close(s.Ctx(), "bd-claim-closed", domain.CloseRowParams{}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
 
 	res, err := r.Claim(s.Ctx(), "bd-claim-closed", "alice", domain.IssueTableOpts{})
 	s.Require().NoError(err)

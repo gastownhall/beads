@@ -596,6 +596,174 @@ func staleFilePaths(hooksDir string, names []string) []string {
 	return paths
 }
 
+// CheckHooksPath detects a dangling core.hooksPath: a git config value that
+// still points at a hooks directory which no longer exists. This happens
+// when a user manually deletes .beads/ (e.g. `rm -rf .beads/`) without
+// running `bd hooks uninstall` first — git keeps looking for the missing
+// directory, and beads' post-checkout import can recreate a stray .beads/
+// workspace as a side effect (GH#4440).
+func CheckHooksPath() DoctorCheck {
+	const name = "Hooks Path"
+
+	repoRoot, _ := git.GetMainRepoRoot()
+	if repoRoot == "" {
+		repoRoot = git.GetRepoRoot()
+	}
+	if repoRoot == "" {
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	hooksPath, ok := getConfiguredHooksPath(repoRoot)
+	if !ok || hooksPath == "" {
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusOK,
+			Message: "core.hooksPath is not set",
+		}
+	}
+
+	resolved := expandHookPathTilde(hooksPath)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(repoRoot, resolved)
+	}
+
+	if fileExists(resolved) {
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusOK,
+			Message: fmt.Sprintf("core.hooksPath is set to %s", hooksPath),
+		}
+	}
+
+	managed := IsBeadsManagedHooksPath(repoRoot, hooksPath)
+	var fix string
+	if managed {
+		fix = "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
+	} else {
+		fix = "core.hooksPath is not beads-managed; bd will not change it. Restore the missing directory, or unset it yourself: git config --unset core.hooksPath"
+	}
+
+	return DoctorCheck{
+		Name:    name,
+		Status:  StatusWarning,
+		Message: "core.hooksPath points at a missing directory",
+		Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s)", hooksPath, resolved),
+		Fix:     fix,
+	}
+}
+
+// FixHooksPath unsets core.hooksPath ONLY when it is beads-managed and its
+// target is missing. It re-reads the current value and re-checks both
+// conditions immediately before acting, so it never mutates a third-party
+// hooksPath (e.g. husky) even if the check that triggered the fix pass is
+// stale.
+func FixHooksPath() error {
+	repoRoot, _ := git.GetMainRepoRoot()
+	if repoRoot == "" {
+		repoRoot = git.GetRepoRoot()
+	}
+	if repoRoot == "" {
+		return nil // not in a git repo
+	}
+
+	hooksPath, ok := getConfiguredHooksPath(repoRoot)
+	if !ok || hooksPath == "" {
+		return nil // nothing set
+	}
+
+	if !IsBeadsManagedHooksPath(repoRoot, hooksPath) {
+		return nil // never touch a third-party hooksPath
+	}
+
+	resolved := expandHookPathTilde(hooksPath)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(repoRoot, resolved)
+	}
+	if fileExists(resolved) {
+		return nil // target exists — nothing dangling to fix
+	}
+
+	cmd := exec.Command("git", "config", "--unset", "core.hooksPath")
+	cmd.Dir = repoRoot
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config --unset core.hooksPath failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// getConfiguredHooksPath reads the raw core.hooksPath value from repoRoot.
+// The bool return is false when core.hooksPath is not set at all.
+func getConfiguredHooksPath(repoRoot string) (string, bool) {
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// IsBeadsManagedHooksPath reports whether hooksPath is one of the values bd
+// itself writes to core.hooksPath (.beads/hooks or .beads-hooks, relative or
+// absolute under repoRoot). It is the single matcher for that question;
+// resetHooksPathIfBeadsManaged (cmd/bd/hooks.go) calls it too, so the two
+// paths cannot drift apart.
+//
+// Absolute values are compared after symlink resolution. repoRoot comes from
+// git.GetMainRepoRoot, which canonicalizes the path, while the configured
+// core.hooksPath is whatever string the user or an older bd wrote. A raw
+// string compare therefore misses a genuinely beads-managed path any time the
+// repo is reached through a symlink — on macOS every repo under /var (which
+// is a symlink to /private/var, including all of t.TempDir()) hits this. The
+// false negative is not cosmetic: CheckHooksPath then reports the dangling
+// path as third-party and FixHooksPath deliberately refuses to unset it.
+func IsBeadsManagedHooksPath(repoRoot, hooksPath string) bool {
+	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" {
+		return true
+	}
+	if !filepath.IsAbs(hooksPath) {
+		return false
+	}
+	root := resolveExistingPrefix(repoRoot)
+	candidate := resolveExistingPrefix(hooksPath)
+	return candidate == filepath.Join(root, ".beads", "hooks") ||
+		candidate == filepath.Join(root, ".beads-hooks")
+}
+
+// resolveExistingPrefix returns path with its longest existing ancestor
+// replaced by that ancestor's symlink-resolved form, leaving any missing
+// trailing components untouched.
+//
+// filepath.EvalSymlinks alone is not enough here: the whole point of the
+// dangling-hooksPath check is that the leaf does not exist, so EvalSymlinks
+// on the full path fails and returns nothing usable. Walking up to the
+// deepest component that does exist still canonicalizes the symlinked prefix
+// (/var -> /private/var), which is where the divergence lives.
+func resolveExistingPrefix(path string) string {
+	if path == "" || !filepath.IsAbs(path) {
+		return path
+	}
+	current := filepath.Clean(path)
+	var trailing string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, trailing)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached the filesystem root without finding an existing
+			// component; nothing to canonicalize against.
+			return filepath.Clean(path)
+		}
+		trailing = filepath.Join(filepath.Base(current), trailing)
+		current = parent
+	}
+}
+
 // CheckGitHooksDoltCompatibility checks if installed git hooks are compatible with Dolt backend.
 // Hooks installed before Dolt support was added don't have the backend check and will
 // fail with confusing errors on git pull/commit.

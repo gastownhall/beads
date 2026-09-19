@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -44,49 +45,59 @@ func findPIDOnPort(port int) int {
 // listDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
 // Excludes zombies and defunct processes. Callers derive count (len) and
 // membership (linear scan) from the returned slice.
-//
-// The pgrep pattern uses `dolt.*sql-server` rather than the literal
-// `dolt sql-server` so it still matches when top-level dolt flags appear
-// between the binary name and the subcommand — e.g. debug mode launches
-// the server as `dolt --prof cpu --prof-path /…/dolt-pprof sql-server …`,
-// in which `dolt sql-server` no longer appears as a contiguous substring.
-// Without this, IsRunning's isDoltProcess check would reject the PID as
-// "not a dolt process" and wipe the PID/port files of a healthy server,
-// breaking `bd dolt status` and auto-start reattachment. The per-PID
-// substring check below still requires both "dolt" and "sql-server" in
-// the cmdline, so this only widens the first-stage filter; it does not
-// loosen identity validation.
 func listDoltProcessPIDs() []int {
-	out, err := exec.Command("pgrep", "-f", "dolt.*sql-server").Output()
+	out, err := exec.Command("ps", "-axo", "pid=,state=,command=").Output()
 	if err != nil {
 		return nil
 	}
+	return parseDoltProcessPIDs(out)
+}
+
+// parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
+// `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
+	for _, line := range strings.Split(string(snapshot), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		pidText, rest, ok := splitPSField(line)
+		if !ok {
+			continue
+		}
+		state, command, ok := splitPSField(rest)
+		if !ok {
+			continue
+		}
+
+		pid, err := strconv.Atoi(pidText)
 		if err != nil || pid <= 0 {
 			continue
 		}
-		// Exclude zombies: ps -o state= returns Z for zombie, X for dead
-		stateOut, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=").Output()
-		if err != nil {
+		if state[0] == 'Z' || state[0] == 'X' {
 			continue
 		}
-		state := strings.TrimSpace(string(stateOut))
-		if len(state) > 0 && (state[0] == 'Z' || state[0] == 'X') {
-			continue
-		}
-		// Verify command line contains both "dolt" and "sql-server"
-		cmdOut, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-		if err != nil {
-			continue
-		}
-		cmdline := strings.TrimSpace(string(cmdOut))
-		if strings.Contains(cmdline, "dolt") && strings.Contains(cmdline, "sql-server") {
+
+		doltIndex := strings.Index(command, "dolt")
+		if doltIndex >= 0 && strings.Contains(command[doltIndex+len("dolt"):], "sql-server") {
 			pids = append(pids, pid)
 		}
 	}
 	return pids
+}
+
+// splitPSField separates the next whitespace-delimited ps field from the
+// remaining text, retaining whitespace within the final command column.
+func splitPSField(line string) (field, rest string, ok bool) {
+	fieldEnd := strings.IndexFunc(line, unicode.IsSpace)
+	if fieldEnd == -1 {
+		return "", "", false
+	}
+	field = line[:fieldEnd]
+	rest = strings.TrimLeftFunc(line[fieldEnd:], unicode.IsSpace)
+	return field, rest, rest != ""
 }
 
 // isProcessInDir checks if a process's working directory matches the given path.

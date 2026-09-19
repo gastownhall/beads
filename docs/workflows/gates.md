@@ -17,8 +17,8 @@ closes. Gates close in one of two ways:
 
 - **Manually** — `bd gate resolve <gate-id>` (human gates always close this
   way).
-- **Via `bd gate check`** — evaluates open timer and GitHub gates against
-  the real world and closes the ones whose condition is met.
+- **Via `bd gate check`** — evaluates open timer, GitHub, and bead gates
+  against the real world and closes the ones whose condition is met.
 
 ```bash
 bd gate list                 # open gates
@@ -37,16 +37,46 @@ bd gate resolve <gate-id>    # close a gate manually
 | `timer` | a duration after gate creation | `bd gate check` once the timeout elapses |
 | `gh:run` | a GitHub Actions workflow to complete successfully | `bd gate check` (uses `gh run view`) |
 | `gh:pr` | a pull request to merge | `bd gate check` (uses `gh pr view`) |
-| `bead` | a bead in another rig to close | currently unresolvable — multi-rig routing was removed, so `bd gate check` reports these gates as uncheckable |
+| `bead` | a bead to close — a plain ID names a bead in this rig, the cross-rig form is `<rig>:<bead-id>` | `bd gate check` for plain local IDs; cross-rig values cannot be checked — resolve those manually |
 
 Timeouts use Go duration syntax: `30m`, `1h`, `24h` (there is no `d` unit —
 write `24h`, not `1d`).
+
+GitHub gates use the current Git repository by default. To evaluate a PR or
+workflow run in another repository, set the gate's string `metadata.repo` value
+to `OWNER/REPO` or `HOST/OWNER/REPO`. An ad-hoc `gh:run`/`gh:pr` gate created
+with `bd gate create` inherits a valid `metadata.repo` value from the issue it
+blocks; `human`/`timer`/`bead` gates do not, since `metadata.repo` is
+unrelated, ordinary metadata for those types. `bd gate check` rejects
+malformed repository values instead of falling back to the current
+repository.
+
+### Known limitations: multi-rig and proxied-server topologies
+
+Bead gates and prefix routing (`routes.jsonl`) do not work in every
+topology. Three limitations to expect, all tracked in
+[#5861](https://github.com/gastownhall/beads/issues/5861):
+
+- **Cross-rig bead gates never resolve on their own.** A `<rig>:<bead-id>`
+  await value reports `cannot be checked (multi-rig routing removed)` and
+  stays pending regardless of the awaited bead's status. Close it with
+  `bd gate resolve`.
+- **`bd close` cannot verify a bead gate in the experimental proxied-server
+  mode.** Proxied-server commands never open a local store, so closing the
+  gate refuses with `no local store available` even when the awaited bead is
+  closed. Run `bd gate check`, which evaluates bead gates in proxied-server
+  mode and closes the satisfied ones, or `bd close --force`.
+- **Prefix routing cannot open a proxied-server target rig.** A routed
+  lookup into a rig that is itself in proxied-server mode fails with
+  `proxy server store needs to be uow provider`, so an all-proxied
+  shared-server topology cannot resolve routed targets at all.
 
 ## Gates in formulas
 
 A formula step declares a gate with a `[steps.gate]` block. When the formula
 is instantiated, bd creates the gate issue and wires it as a blocker of that
-step. The schema has four fields: `type`, `id`, `await_id`, and `timeout`.
+step. The schema has five fields: `type`, `id`, `await_id`, `timeout`, and
+`repo`.
 
 This is the release gate from beads' own release formula — the step that
 waits for the GitHub release workflow:
@@ -61,6 +91,35 @@ type = "gh:run"
 id = "release.yml"       # which workflow to watch
 timeout = "30m"          # escalate if it takes longer
 ```
+
+For a `gh:run` or `gh:pr` gate that watches another repository, set `repo`
+the same way a `metadata.repo` value works for an ad-hoc gate — `OWNER/REPO`
+or `HOST/OWNER/REPO`. Malformed values are rejected when the gate is checked:
+
+```toml
+[[steps]]
+id = "wait-for-downstream"
+title = "Wait for downstream release"
+
+[steps.gate]
+type = "gh:run"
+id = "release.yml"
+repo = "org/downstream-repo"   # check gh:run against this repo, not the current one
+```
+
+`repo` accepts a `{{var}}` placeholder (e.g. `repo = "{{gate_repo}}"`); for a
+formula persisted with `bd cook --persist`, the placeholder is substituted
+when the proto is later poured with `bd mol pour --var gate_repo=...`, the
+same as `title`, `description`, and `await_id`.
+
+`bd gate discover` (auto-discovery of a `gh:run` gate's run ID) requires a
+workflow name hint (`await_id`/`id`, not left blank) for a gate targeting
+another repository — without one, the local commit/branch heuristics that
+narrow a same-repo match don't apply across repos, so nothing but the
+workflow name can identify the right run. A cross-repo gate discovery also
+ignores the local checkout's branch unless `--branch` is passed explicitly;
+an auto-detected local branch has no relationship to the target repo's
+branches.
 
 A human sign-off gate:
 

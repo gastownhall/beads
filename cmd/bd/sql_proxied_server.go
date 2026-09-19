@@ -11,7 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool, database string) error {
+func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
@@ -20,11 +20,6 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool, data
 
 	if !multiStatement && sqlQueryIsRead(query) {
 		result, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*domain.RawSQLResult, error) {
-			if database != "" {
-				if err := uw.SwitchDatabase(ctx, database); err != nil {
-					return nil, err
-				}
-			}
 			return uw.RawSQLUseCase().Query(ctx, query)
 		})
 		if err != nil {
@@ -36,11 +31,6 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool, data
 	CheckReadonly("sql")
 
 	affected, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (int64, string, error) {
-		if database != "" {
-			if err := uw.SwitchDatabase(ctx, database); err != nil {
-				return 0, "", err
-			}
-		}
 		affected, err := uw.RawSQLUseCase().Exec(ctx, query)
 		if err != nil {
 			return 0, "", err

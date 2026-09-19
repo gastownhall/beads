@@ -16,22 +16,18 @@ import (
 )
 
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
-// Returns types.TypeTask for empty or unrecognized types.
+// Returns types.TypeTask for empty types. Non-empty types pass through
+// (trimmed and normalized) rather than being validated here: at pour and
+// cook --persist time, flattenUnregisteredIssueTypes degrades types that
+// are neither built-in nor registered in types.custom to task (with a
+// warning), and the storage layer validates what remains — the same
+// division of labor as bd create --type.
 func stepTypeToIssueType(stepType string) types.IssueType {
-	switch stepType {
-	case "task":
-		return types.TypeTask
-	case "bug":
-		return types.TypeBug
-	case "feature":
-		return types.TypeFeature
-	case "epic":
-		return types.TypeEpic
-	case "chore":
-		return types.TypeChore
-	default:
+	stepType = strings.TrimSpace(stepType)
+	if stepType == "" {
 		return types.TypeTask
 	}
+	return types.IssueType(stepType).Normalize()
 }
 
 // cookCmd compiles a formula JSON into a proto bead.
@@ -381,6 +377,11 @@ func runCook(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	if flags.runtimeMode {
+		if err := formula.ValidateVars(resolved, flags.inputVars); err != nil {
+			return HandleError("%v", err)
+		}
+	}
 
 	protoID := resolved.Formula
 	if flags.prefix != "" {
@@ -505,7 +506,7 @@ func createGateIssue(step *formula.Step, parentID string) *types.Issue {
 		}
 	}
 
-	return &types.Issue{
+	gateIssue := &types.Issue{
 		ID:          gateID,
 		Title:       title,
 		Description: fmt.Sprintf("Async gate for step %s", step.ID),
@@ -519,6 +520,24 @@ func createGateIssue(step *formula.Step, parentID string) *types.Issue {
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
+
+	// Propagate the formula-declared repo selector (SF2), matching the
+	// declarative `metadata.repo` selector documented for ad-hoc gates.
+	// Malformed values are left for check time (githubRepoFromIssue) to
+	// reject, consistent with how a check-time-only value on any other
+	// gate created outside `bd gate create` is validated.
+	//
+	// Restricted to gh:* gate types (SF4), same as repoMetadataForGate: a
+	// `repo` field on a human/timer/bead gate step is unrelated, ordinary
+	// metadata, not a GitHub repo selector, so only gh:run/gh:pr gates
+	// write it here.
+	if isGitHubGateType(step.Gate.Type) && step.Gate.Repo != "" {
+		if metaJSON, err := json.Marshal(map[string]string{"repo": step.Gate.Repo}); err == nil {
+			gateIssue.Metadata = metaJSON
+		}
+	}
+
+	return gateIssue
 }
 
 func gateAwaitID(gate *formula.Gate) string {
@@ -538,9 +557,12 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 	// Generate issue ID (formula-name.step-id)
 	issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
 
-	// Determine issue type (children override to epic)
-	issueType := stepTypeToIssueType(step.Type)
-	if len(step.Children) > 0 {
+	// Determine issue type. A parent step with no declared type defaults to
+	// epic; a declared type is honored even when the step has children
+	// (GH#5443).
+	declaredType := strings.TrimSpace(step.Type)
+	issueType := stepTypeToIssueType(declaredType)
+	if len(step.Children) > 0 && declaredType == "" {
 		issueType = types.TypeEpic
 	}
 
@@ -691,6 +713,21 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 	resolved, err := parser.Resolve(f)
 	if err != nil {
 		return nil, fmt.Errorf("resolving formula %q: %w", formulaName, err)
+	}
+
+	// Validate any caller-provided variable values against enum/pattern/
+	// required-empty constraints. This is deliberately presence-agnostic:
+	// a var missing entirely is left to the caller's own UX (e.g. bd mol
+	// pour/wisp's missing-var hint), but a var explicitly provided with a
+	// value that violates its constraints must error here so it reaches
+	// every caller of this shared path (pour, wisp, mol bond, mol seed) —
+	// runCook does not go through this helper; it validates separately via
+	// its own formula.ValidateVars call under --mode=runtime. Previously
+	// only that `bd cook --mode=runtime` path enforced these (mybd-u2r6).
+	if conditionVars != nil {
+		if err := formula.ValidateProvidedVars(resolved, conditionVars); err != nil {
+			return nil, fmt.Errorf("formula %q: %w", formulaName, err)
+		}
 	}
 
 	// Apply control flow operators - loops, branches, gates
@@ -863,6 +900,14 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 	// Create issues, labels, and dependencies in a single atomic transaction.
 	// This prevents orphaned issues if label/dependency creation fails.
 	err := transact(ctx, s, fmt.Sprintf("bd: cook formula %s", protoID), func(tx storage.Transaction) error {
+		// Flatten unregistered step types to task (with a warning) before
+		// inserting, mirroring cloneSubgraphInto (pour). Without this,
+		// PrepareIssueForInsert rejects them with "invalid issue type" and
+		// the whole cook --persist transaction rolls back.
+		if err := flattenUnregisteredIssueTypes(ctx, storeMolWriter{DoltStorage: s, tx: tx}, issues, deps); err != nil {
+			return fmt.Errorf("checking custom types: %w", err)
+		}
+
 		// Create all issues
 		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
 			return fmt.Errorf("failed to create issues: %w", err)
@@ -900,8 +945,41 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 func collectDependencies(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
 	issueID := idMapping[step.ID]
 
+	// Pre-compute the waits_for spawner so we can dedupe against depends_on
+	// and needs below. When waits_for has no explicit `from:`, it infers its
+	// spawner from needs[0] — and `depends_on`/`needs` would otherwise emit a
+	// DepBlocks edge on the same (source, target) pair that `waits_for`
+	// emits a DepWaitsFor edge on. Storage rejects the duplicate. The
+	// DepWaitsFor edge subsumes the blocking semantics, so we skip the
+	// redundant DepBlocks for that specific target (GH#3783).
+	var waitsForSpec *formula.WaitsForSpec
+	var waitsForSpawnerStepID string
+	if step.WaitsFor != "" {
+		waitsForSpec = formula.ParseWaitsFor(step.WaitsFor)
+		if waitsForSpec != nil {
+			waitsForSpawnerStepID = waitsForSpec.SpawnerID
+			if waitsForSpawnerStepID == "" && len(step.Needs) > 0 {
+				waitsForSpawnerStepID = step.Needs[0]
+			}
+		}
+	}
+
+	// waitsForCollapsedBlocks records whether we actually skipped emitting a
+	// DepBlocks edge for the waits_for spawner below (i.e. the spawner step ID
+	// really did appear in depends_on/needs and resolve to a known issue). If
+	// so, the DepWaitsFor edge emitted below must carry also_blocks so it
+	// does not silently drop the blocking semantics that edge collapsed away
+	// (GH#3783 review gap).
+	var waitsForCollapsedBlocks bool
+
 	// Process depends_on field
 	for _, depID := range step.DependsOn {
+		if depID == waitsForSpawnerStepID {
+			// This target is also the waits_for spawner; the DepWaitsFor edge
+			// emitted below subsumes the blocking semantics for this pair.
+			waitsForCollapsedBlocks = true
+			continue
+		}
 		depIssueID, ok := idMapping[depID]
 		if !ok {
 			continue // Will be caught during validation
@@ -916,6 +994,12 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 
 	// Process needs field - simpler alias for sibling dependencies
 	for _, needID := range step.Needs {
+		if needID == waitsForSpawnerStepID {
+			// This target is also the waits_for spawner; the DepWaitsFor edge
+			// emitted below subsumes the blocking semantics for this pair.
+			waitsForCollapsedBlocks = true
+			continue
+		}
 		needIssueID, ok := idMapping[needID]
 		if !ok {
 			continue // Will be caught during validation
@@ -929,24 +1013,21 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 	}
 
 	// Process waits_for field - fanout gate dependency
-	if step.WaitsFor != "" {
-		waitsForSpec := formula.ParseWaitsFor(step.WaitsFor)
-		if waitsForSpec != nil {
-			// Determine spawner ID
-			spawnerStepID := waitsForSpec.SpawnerID
-			if spawnerStepID == "" && len(step.Needs) > 0 {
-				// Infer spawner from first need
-				spawnerStepID = step.Needs[0]
+	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
+		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
+			// Spawner identity is the depends_on_id; metadata carries
+			// the gate. A collapsed needs/depends_on edge additionally marks
+			// also_blocks so the gate blocks while the spawner itself is
+			// open, not only while it has an open child (GH#3783).
+			var dep *types.Dependency
+			var err error
+			if waitsForCollapsedBlocks {
+				dep, err = types.NewWaitsForBlockingDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
+			} else {
+				dep, err = types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
 			}
-
-			if spawnerStepID != "" {
-				if spawnerIssueID, ok := idMapping[spawnerStepID]; ok {
-					// Spawner identity is the depends_on_id; metadata carries
-					// the gate.
-					if dep, err := types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate); err == nil {
-						*deps = append(*deps, dep)
-					}
-				}
+			if err == nil {
+				*deps = append(*deps, dep)
 			}
 		}
 	}
@@ -1048,6 +1129,7 @@ func substituteStepVars(steps []*formula.Step, vars map[string]string) {
 			step.Gate.ID = substituteVariables(step.Gate.ID, vars)
 			step.Gate.AwaitID = substituteVariables(step.Gate.AwaitID, vars)
 			step.Gate.Timeout = substituteVariables(step.Gate.Timeout, vars)
+			step.Gate.Repo = substituteVariables(step.Gate.Repo, vars)
 		}
 		if len(step.Children) > 0 {
 			substituteStepVars(step.Children, vars)

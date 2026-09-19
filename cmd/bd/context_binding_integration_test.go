@@ -103,17 +103,10 @@ func TestListExplicitDBPathRebindsTargetContext(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	binPath := filepath.Join(t.TempDir(), "bd-under-test")
-	packageDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
-	buildCmd.Dir = packageDir
-	buildOut, err := buildCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, buildOut)
-	}
+	// Shared once-per-process binary (honors BEADS_TEST_BD_BINARY) instead of
+	// a per-test go build — the in-test link steps dominated cmd/bd's wall
+	// clock (wy-4mtr0).
+	binPath := buildBDForInitTests(t)
 
 	listCmd := exec.Command(binPath, "list", "--db", filepath.Join(targetBeadsDir, "dolt"), "--json")
 	listCmd.Dir = callerRepo

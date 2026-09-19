@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // bdRunRaw runs bd with the given args and env extras (appended to bdEnv(dir)).
@@ -558,7 +559,7 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 	// (the standard >N-matches truncation semantics), not error.
 	//
 	// Round-2 fix (regressed, since replaced): unconditionally skipped the
-	// withFetchOneExtra probe-row bump when Limit>=MaxRows. That avoided
+	// workapi.WithFetchOneExtra probe-row bump when Limit>=MaxRows. That avoided
 	// the false cap error but also stopped fetching the extra row entirely,
 	// so len(results) could never exceed effectiveLimit and the GH#3212
 	// truncation notice silently stopped firing for this case — a partial
@@ -568,7 +569,7 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 	// normal), but when Limit==MaxRows exactly, bump MaxRows to N+1 too, in
 	// lockstep, so EnforceMaxRowsCap's comparison excludes the probe row
 	// from the cap check while the CLI's own len(results)>effectiveLimit
-	// truncation detection still sees it. See withFetchOneExtra's doc
+	// truncation detection still sees it. See workapi.WithFetchOneExtra's doc
 	// comment in list.go for why this can't false-negative a real
 	// violation. Covered directly (bump values, not exit behavior) by
 	// TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe
@@ -699,7 +700,7 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 }
 
 // TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe verifies
-// the exact bump mechanism withFetchOneExtra uses to reconcile the
+// the exact bump mechanism workapi.WithFetchOneExtra uses to reconcile the
 // >N-matches truncation probe (GH#3212) with a MaxRows cap equal to the
 // user's --limit (be-x42v.4 round-3 follow-up).
 //
@@ -714,7 +715,7 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 // still over-fetches by one row (restoring len(results) > effectiveLimit
 // detection) while EnforceMaxRowsCap doesn't trip on that extra row.
 func TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe(t *testing.T) {
-	got := withFetchOneExtra(types.IssueFilter{Limit: 5, MaxRows: 5, MaxRowsSource: "--max-rows"})
+	got := workapi.WithFetchOneExtra(types.IssueFilter{Limit: 5, MaxRows: 5, MaxRowsSource: "--max-rows"})
 	if got.Limit != 6 {
 		t.Errorf("Limit == MaxRows: Limit = %d, want 6 (bumped so the query still fetches the truncation-detection probe row)", got.Limit)
 	}
@@ -731,7 +732,7 @@ func TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe(t *testing
 // bump, or a genuine cap violation would report the wrong Cap value (N+1
 // instead of the user's true --max-rows=N) in the error message.
 func TestWithFetchOneExtra_LimitOverCap_OnlyBumpsLimit(t *testing.T) {
-	got := withFetchOneExtra(types.IssueFilter{Limit: 100, MaxRows: 5})
+	got := workapi.WithFetchOneExtra(types.IssueFilter{Limit: 100, MaxRows: 5})
 	if got.Limit != 101 {
 		t.Errorf("Limit = %d, want 101", got.Limit)
 	}
@@ -745,7 +746,7 @@ func TestWithFetchOneExtra_LimitOverCap_OnlyBumpsLimit(t *testing.T) {
 // probe-row bump alone never crosses EffectiveSearchLimit's `limit >
 // maxRows` branch here, so no MaxRows adjustment is needed.
 func TestWithFetchOneExtra_LimitUnderCap_OnlyBumpsLimit(t *testing.T) {
-	got := withFetchOneExtra(types.IssueFilter{Limit: 5, MaxRows: 100})
+	got := workapi.WithFetchOneExtra(types.IssueFilter{Limit: 5, MaxRows: 100})
 	if got.Limit != 6 {
 		t.Errorf("Limit = %d, want 6", got.Limit)
 	}
@@ -755,9 +756,9 @@ func TestWithFetchOneExtra_LimitUnderCap_OnlyBumpsLimit(t *testing.T) {
 }
 
 // TestWithFetchOneExtra_NoLimit_Unaffected covers the unlimited case
-// (Limit == 0): withFetchOneExtra is a no-op regardless of MaxRows.
+// (Limit == 0): workapi.WithFetchOneExtra is a no-op regardless of MaxRows.
 func TestWithFetchOneExtra_NoLimit_Unaffected(t *testing.T) {
-	got := withFetchOneExtra(types.IssueFilter{Limit: 0, MaxRows: 5})
+	got := workapi.WithFetchOneExtra(types.IssueFilter{Limit: 0, MaxRows: 5})
 	if got.Limit != 0 || got.MaxRows != 5 {
 		t.Errorf("unlimited Limit must pass through unchanged, got Limit=%d MaxRows=%d", got.Limit, got.MaxRows)
 	}

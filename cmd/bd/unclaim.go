@@ -62,10 +62,11 @@ Examples:
 		CheckReadonly("unclaim")
 
 		if usesProxiedServer() {
+			expected := ""
 			if conditional {
-				return HandleErrorRespectJSON("--if-assignee is not supported in proxied-server mode")
+				expected = ifAssignee
 			}
-			return runUnclaimProxiedServer(rootCtx, args, reason, force)
+			return runUnclaimProxiedServer(rootCtx, args, reason, force, expected)
 		}
 
 		ctx := rootCtx

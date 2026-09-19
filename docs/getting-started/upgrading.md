@@ -11,9 +11,12 @@ How to upgrade bd and keep your projects in sync.
 # Current version
 bd version
 
-# What's new in recent versions
+# What changed since the version you were running — the delta, not the archive
+bd upgrade review
+bd upgrade review --json  # Machine-readable
+
+# The full release history (large; every version bd knows about)
 bd info --whats-new
-bd info --whats-new --json  # Machine-readable
 ```
 
 ## Short Version
@@ -22,11 +25,11 @@ bd info --whats-new --json  # Machine-readable
    new binary:
    `bd dolt push`
    `bd dolt pull`
-2. Back up before migration:
+2. Back up **with that same current binary**, before installing:
    `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
 3. Upgrade using the command that matches your install method.
 4. After upgrading:
-   `bd info --whats-new`
+   `bd upgrade review`
    `bd hooks install`
    `bd version`
 5. If crossing a schema migration on a remote-backed database, only the
@@ -139,6 +142,83 @@ bd migrate
 bd migrate --yes
 ```
 
+### Upgrading to 1.3.0
+
+A 1.2.2 or 1.1.x database sits at schema v53, and 1.3.0 knows v66. That is more
+than a routine upgrade: 1.2.2 was a recovery release that shipped the 1.1 code
+under a higher version number, so there is a release line's worth of schema
+between the two.
+
+#### Back up first, with the binary you have now
+
+Do this **before** you install 1.3.0. Under the new binary, `bd export` triggers
+the migration before it exports, so a snapshot taken afterwards is a
+post-migration snapshot and cannot protect you against the migration going
+wrong. The same ordering rule as the section below applies: do all syncing with
+your **current** binary, since once 1.3.0 is installed the pending-migration
+gate refuses `bd dolt push` and `bd dolt pull` too.
+
+```bash
+# with your CURRENT bd:
+bd dolt push                                                   # remote-backed stores only
+bd export --all -o .beads/backup/pre-1.3.0-$(date +%Y%m%d).jsonl
+```
+
+For a Dolt-native snapshot that keeps history and config, configure a
+destination and sync it. Bare `bd backup` takes no backup — it is a command
+group that prints help and exits 0:
+
+```bash
+bd backup init <path-or-dolthub-url>   # once, to configure a destination
+bd backup sync                         # take the snapshot
+```
+
+#### What the migration looks like
+
+On an embedded or local store, the first command you run after installing
+applies the whole set, in place. (A shared `dolt sql-server` is never
+auto-migrated — see [Shared servers](#shared-servers) below.) The main series
+runs 0054 → 0066 (13 migrations), and then the clone-local series runs through
+the same printer with its own numbering, 0012 → 0026 — so it is about
+**28 migrations**, and the counter visibly restarts partway through:
+
+```
+Applying migration 0065: widen_wisp_comments_text…
+Applying migration 0066: add_events_journal_actor…
+Applying migration 0012: create_leases…      ← clone-local series, not a restart
+```
+
+A counter jumping backwards looks exactly like a loop. It is not one — let it
+finish. Expect the run to take noticeably longer than the commands after it
+(two passes rewrite rows rather than reshaping tables). It is crash-resumable
+and picks up where it left off.
+
+Those lines go to stderr, and only when stderr is a terminal, so a piped or CI
+upgrade prints nothing at all. Silence there is not a stall either.
+
+#### Upgrade every client that shares a store, together
+
+A bd binary refuses a database migrated past the schema it knows, rather than
+proceeding blind. One machine upgrading takes the shared store forward and every
+client still on 1.2.2 stops working. Check for a second binary earlier in your
+`PATH` with `which -a bd`, and restart any long-running `bd serve` — noting that
+`bd --readonly serve` is now refused outright, so a server scripted with that
+flag will not come back up until you drop it.
+
+If the store is a shared `dolt sql-server` rather than a local one, follow
+[Shared servers](#shared-servers) below: 1.3.0 will not migrate it without
+explicit consent, precisely so the fleet upgrade can come first.
+
+If you need to go back, the rollback is a schema-cursor rollback rather than a
+downgrade of the data — see
+[Accidental v1.2.1 Release](/recovery/accidental-1-2-1-release), whose
+procedure is the same for any cursor rollback even though its worked example is
+that release.
+
+Once you are on the new binary, `bd upgrade review` prints exactly the changes
+between the version you were running and this one. Several commands changed
+defaults, so read it before your first session.
+
 ### Remote-backed databases and multiple clones
 
 `bd` refuses to silently apply pending schema migrations to a database that has
@@ -160,7 +240,9 @@ The gate is **state-aware by default**
 - **auto-migrates** when the remote is at the same schema version as this
   clone — no one has migrated yet, so this clone is a safe first-mover
   (concurrent first-movers converge to identical tables). It reminds you to
-  `bd dolt push` afterwards.
+  `bd dolt push` afterwards. This applies to embedded mode only: a shared
+  server always stops for consent, because migrating it changes the schema
+  every connected client sees (see [Shared servers](#shared-servers) below).
 - **stops and directs you to adopt** (`bd bootstrap`) when the remote has
   already been migrated by another clone.
 - **stops for a human decision** when this clone and the remote applied
@@ -204,11 +286,10 @@ migrating here as the designated migrator, adopting the remote's already-migrate
 database, or recovering a fork — and asks for an explicit operator decision.
 Follow the guidance it prints.
 
-For scripted or CI upgrades where nobody reads the prompt,
-`BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` (any boolean true value works) declares
-this clone the designated migrator and bypasses the gate entirely — including
-its already-forked checks — so wire it into exactly one clone's upgrade job,
-never all of them.
+For scripted or CI upgrades where nobody reads the output, run `bd migrate` as
+an explicit step in exactly one job, never in all of them. If the gate blocks a
+run it prints both the available options and the scripted override that fits
+the situation.
 
 **Multiple clones sharing one remote:**
 
@@ -243,18 +324,104 @@ schema against the cached remote ref — a useful post-upgrade verification.
 It runs in both server and embedded modes.
 </Note>
 
+### Shared servers
+
+A server-mode database is served to every `bd` client connected to that
+`dolt sql-server`, so a schema migration is not a local event: it promotes the
+schema version for **all** of them at once, and clients still running an older
+`bd` refuse the database until they are upgraded too. `bd` therefore never
+auto-migrates a shared database on a version bump — with or without a remote
+configured, though the two cases consent differently
+([#5920](https://github.com/gastownhall/beads/issues/5920)).
+
+Upgrade one server's clients like this:
+
+```bash
+# 1. Upgrade bd on every client of the server. Reads keep working throughout —
+#    an upgraded client reads the old schema, it just cannot write to it.
+bd version                     # on each client, confirm the new version
+
+# 2. Once, from a workspace already set up against this server: consent.
+bd migrate schema              # add --global for the shared global database
+
+# 3. Confirm.
+bd doctor
+```
+
+Between steps 1 and 2, an upgraded client reads normally and its writes are
+refused with the gate's guidance. Nothing is silently promoted, so there is no
+deadline — but the window is a degraded one, so keep it short.
+
+**If the shared server also has a Dolt remote**, step 2 is not enough. Two
+hazards now apply at once — the co-resident lockout above and the cross-clone
+fork of [Remote-backed databases](#remote-backed-databases-and-multiple-clones)
+— so `bd` requires the stronger designated-migrator consent it describes:
+`bd migrate --force`, from exactly one machine, followed by `bd dolt push`. If
+another clone has already migrated and pushed, adopt its database with
+`bd bootstrap` instead of migrating. On a shared server, adopting also promotes
+the schema for every client of that server, so step 1 still comes first either
+way.
+
+<Warning>
+Migrating is one-way for the fleet: after step 2, a client still on the older
+`bd` refuses the database until it is upgraded. Do step 1 first, and confirm it
+— the gate cannot see the other clients' versions and will take your word for
+it.
+</Warning>
+
+A new client **joining** a server whose schema is behind is refused before its
+workspace is written, so there is nothing to run `bd migrate schema` from
+there: do step 2 from a client that is already set up, or join and migrate in
+one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
+
+The same rules apply in **proxied-server mode**, which is a shared server
+reached through a local proxy. Two differences worth knowing:
+
+- read commands print a warning and keep serving the current schema, rather
+  than the read simply not touching it;
+- `bd serve` refuses to start against a database with pending migrations,
+  because a daemon has no operator to consent for it. Reconcile the schema
+  first with step 2, then start the daemon — or, for an unattended service,
+  put `BD_ALLOW_REMOTE_MIGRATE=1` in its environment as an explicit, auditable
+  standing consent.
+
 ## Cross-era Upgrades
 
-If you're upgrading from a much older version of bd, your project may use a different storage backend. bd has gone through several storage eras:
+If you're upgrading from a much older version of bd, inspect the storage layout
+and metadata before running the current binary. A `.beads/dolt/` directory alone
+does not identify a legacy workspace: supported current server mode uses that
+directory too. Current `bd` evaluates explicit server metadata, the presence of
+that local root, and the bounded `.local_version` witness together. An explicit
+server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 
-Identify your installation's era by what lives under `.beads/`:
-
-| Era | Storage layout |
+| Storage layout | Upgrade path |
 |---|---|
-| SQLite (pre-Dolt, up to ~v0.50) | `.beads/beads.db` |
-| Dolt server | `.beads/dolt/` |
-| Embedded Dolt (the default since its introduction) | `.beads/embeddeddolt/` |
-### From v0.63.3+ (current era)
+| Current embedded metadata with `.beads/embeddeddolt/` and no explicit server selection | Direct current-era upgrade |
+| Explicit server metadata plus `.local_version` from v0.55.4 through v0.62.0, whether or not `.beads/dolt/` exists | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a witness whose major version is 1 or newer | Normal current server-mode upgrade |
+| Explicit server metadata plus `.beads/dolt/` and a missing or pre-v1 witness | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
+| Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
+| `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
+| One `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
+
+The witness is whatever `bd` held in its own version string when it last touched
+the workspace, so it may be a plain release, a release candidate, a build
+carrying metadata, or a Go pseudo-version; all of those are read as the version
+they name. A witness that is present but unreadable is not treated as a legacy
+marker — no pre-v1 `bd` could have written one — so `bd` warns and continues
+rather than refusing every command. A *missing* witness stays ambiguous and is
+still refused.
+
+Current `bd` refuses recognized historical SQLite and legacy Dolt layouts before
+opening storage or rewriting metadata. This is intentional: preserve the source
+and complete the matching explicit migration below.
+
+PostgreSQL and MySQL are removed backends, not supported cross-era upgrade
+paths. Current `bd` refuses metadata that selects either backend, and the sealed
+bridge below accepts SQLite sources only.
+
+### `.beads/embeddeddolt/`: direct upgrade
 
 Upgrade the binary and run:
 
@@ -281,68 +448,83 @@ bd dolt push
 Commit the resulting `.beads/config.yaml` change so other clones can run
 `bd bootstrap` or `bd dolt pull`.
 
-### From v0.59–v0.63.2 (old embedded)
+### Historical Dolt server mode: explicit migration
 
-Direct upgrade works automatically:
+Do not run current `bd init --force` when `.beads/dolt/` has missing metadata
+or persisted `dolt_mode` is blank/`embedded`. Those old embedded layouts are
+never current embedded storage. The same explicit path applies when metadata
+selects `backend: dolt`, `dolt_mode: server` and `.local_version` records
+v0.55.4 through v0.62.0.
 
-```bash
-# Just use the new binary — it handles the conversion
-bd list
-```
+First take a native snapshot while every writer is stopped. Restore that
+snapshot to a disposable workspace, export it with the verified historical
+binary, then import the export into a fresh current project. Keep the original
+and snapshot unchanged until the cutover has been reviewed. The SQLite
+sealed-copy helper below does not start or manage a Dolt SQL server.
 
-### From v0.50–v0.58 (Dolt server era)
+Explicit server metadata with a v0.55.4–v0.62.0 witness is always refused,
+including when there is no local `.beads/dolt/` root. When that root does exist,
+the guard admits explicit server mode only with a syntactically valid witness
+whose major version is 1 or newer; a missing, malformed, or pre-v1 witness fails
+closed. Without the local root, a missing, malformed, or non-historical witness
+is admitted only as a compatibility layout.
 
-The old binary used an external Dolt SQL server. The new binary uses an embedded engine.
+The configured shared-server compatibility path applies only when persisted
+metadata is missing or leaves `dolt_mode` blank/`embedded`; it does not override
+an explicit server selection with a local root. Compatibility admission cannot
+prove that a workspace is modern. If you know it was created by v0.55.4 through
+v0.62.0, use this explicit bridge even when its witness was lost or damaged.
+Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate` flow for
+an admitted server workspace.
 
-```bash
-# 1. Export your data while the old binary still works
-bd list --json -n 0 --all > .beads/issues.jsonl
-
-# 2. Stop the Dolt server
-# stop the dolt sql-server process (kill its PID; there is no --stop flag)
-
-# 3. Remove stale server metadata and old storage directories
-rm -f .beads/metadata.json .beads/config.json
-rm -rf .beads/dolt .beads/embeddeddolt
-
-# 4. Initialize with the new binary
-bd init --from-jsonl --quiet
-
-# 5. Verify
-bd list --all
-```
-
-### From v0.30–v0.50 (SQLite era)
+### One `.beads/*.db` file: sealed SQLite bridge
 
 The old binary stored data in SQLite. The new binary uses Dolt.
 
-**Recommended: use the migration script** (requires `sqlite3` and `jq`):
+**Recommended: use the sealed-copy bridge** (requires `jq`):
+
+Stop every process that can write the old workspace before starting.
+Run this from a source checkout at the exact commit you intend to run; installed
+binaries do not include repository scripts. Record that commit with
+`git rev-parse HEAD` before executing the script. Download the old `bd` asset
+only from the official `gastownhall/beads` release and verify the asset with its
+published SHA-256:
 
 ```bash
-# Download the script from the beads repo
-curl -fsSLO https://raw.githubusercontent.com/gastownhall/beads/main/scripts/migrate-sqlite-to-current.sh
-chmod +x migrate-sqlite-to-current.sh
-
-# Run it in your project directory
-./migrate-sqlite-to-current.sh
+sha256sum -c checksums.txt --ignore-missing
 ```
 
-The script exports issues, dependencies, and labels from SQLite, handles type normalization, and imports everything into the new Dolt backend.
-
-**Alternative: manual export with the old binary.** Old binaries are always available on [GitHub Releases](https://github.com/gastownhall/beads/releases). Download the version that matches your project, then:
+On macOS or BSD, use `shasum -a 256` on the downloaded archive and compare
+the result with that archive's entry in `checksums.txt`.
 
 ```bash
-# 1. Export with the old binary
-./bd-old list --json -n 0 --all > .beads/issues.jsonl
-
-# 2. Import with the current binary
-bd init --from-jsonl --quiet
-
-# 3. Verify
-bd list --all
+scripts/migrate-legacy-to-current.sh \
+  --source /absolute/path/to/old-project \
+  --destination /absolute/path/to/old-project-cutover \
+  --source-version v0.50.3 \
+  --old-bd /absolute/path/to/verified-old-bd \
+  --new-bd /absolute/path/to/current-bd \
+  --prefix beads
 ```
 
-> **Note:** The manual export preserves issue content but not dependencies or labels. Use the migration script for a more complete transfer.
+For a source older than v0.49.6, also supply an authenticated v0.49.6 binary:
+
+```bash
+scripts/migrate-legacy-to-current.sh \
+  --source /absolute/path/to/old-project \
+  --destination /absolute/path/to/old-project-cutover \
+  --source-version v0.17.0 \
+  --old-bd /absolute/path/to/verified-old-bd \
+  --canonicalizer-bd /absolute/path/to/verified-v0.49.6-bd \
+  --new-bd /absolute/path/to/current-bd \
+  --prefix beads
+```
+
+Verify the historical binary against its official release checksum before
+running the bridge. The script verifies each binary's reported version, rejects
+Dolt and ambiguous layouts, retains a sealed source copy, and compares the
+candidate export with the canonical historical export. Activate the cutover
+manually only after reviewing those retained artifacts.
 
 ## Troubleshooting Upgrades
 

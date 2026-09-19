@@ -8,6 +8,7 @@ package dolt
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,74 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func realDoltTestServerRequired() bool {
+	return os.Getenv("BEADS_TEST_ENV_RUN_DOLT") == "1"
+}
+
+// TestDoltAutocommitRollbackContentionConverges creates a real same-cell
+// branch contention, then asks Dolt to merge it while autocommit is enabled.
+// The rejected merge must leave the working set clean before a fresh replay
+// converges on its intended state.
+func TestDoltAutocommitRollbackContentionConverges(t *testing.T) {
+	if testServerPort == 0 && realDoltTestServerRequired() {
+		t.Fatal("real Dolt contention test required but the test server did not start")
+	}
+	const issueID = "autocommit-rollback-contention"
+	store, peerBranch := setupIssueMergeConflict(t, issueID,
+		"base", "2026-08-04 14:00:00",
+		"ours", "2026-08-04 14:01:00",
+		"theirs", "2026-08-04 14:02:00", true)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if _, err := store.db.ExecContext(ctx, "SET autocommit = 1"); err != nil {
+		t.Fatalf("enable autocommit: %v", err)
+	}
+	_, err := store.db.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch)
+	if !isDoltAutocommitRollbackError(err) {
+		t.Fatalf("autocommit DOLT_MERGE error = %v, want typed rollback conflict", err)
+	}
+	var dirty int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'").Scan(&dirty); err != nil {
+		t.Fatalf("check rolled-back session status: %v", err)
+	}
+	if dirty != 0 {
+		t.Fatalf("rolled-back session has %d dirty issues entries, want clean working set", dirty)
+	}
+	if err := store.UpdateIssue(ctx, issueID, map[string]interface{}{"title": "fresh replay"}, "replay"); err != nil {
+		t.Fatalf("fresh replay update: %v", err)
+	}
+	var got string
+	if err := store.db.QueryRowContext(ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", issueID).Scan(&got); err != nil {
+		t.Fatalf("read fresh replay at HEAD: %v", err)
+	}
+	if got != "fresh replay" {
+		t.Fatalf("fresh replay title = %q, want %q", got, "fresh replay")
+	}
+}
+
+func TestRealDoltTestServerRequiredOnlyByExplicitOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		runDolt       string
+		githubActions string
+		want          bool
+	}{
+		{name: "explicit Dolt opt-in", runDolt: "1", want: true},
+		{name: "GitHub Actions alone", githubActions: "true", want: false},
+		{name: "neither environment", want: false},
+		{name: "non-opt-in Dolt value", runDolt: "true", githubActions: "true", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_TEST_ENV_RUN_DOLT", tc.runDolt)
+			t.Setenv("GITHUB_ACTIONS", tc.githubActions)
+			if got := realDoltTestServerRequired(); got != tc.want {
+				t.Fatalf("realDoltTestServerRequired() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 // concurrentTestTimeout is longer than regular tests to allow for contention
 const concurrentTestTimeout = 60 * time.Second

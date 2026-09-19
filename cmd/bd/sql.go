@@ -51,14 +51,9 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 		}
 		query := args[0]
 		csvOutput, _ := cmd.Flags().GetBool("csv")
-		database, _ := cmd.Flags().GetString("database")
 
 		if usesProxiedServer() {
-			return runSQLProxiedServer(rootCtx, query, csvOutput, database)
-		}
-
-		if database != "" {
-			return HandleErrorRespectJSON("--database is only supported in proxied-server mode")
+			return runSQLProxiedServer(rootCtx, query, csvOutput)
 		}
 
 		if store == nil {
@@ -233,7 +228,6 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 
 func init() {
 	sqlCmd.Flags().Bool("csv", false, "Output results in CSV format")
-	sqlCmd.Flags().String("database", "", "Run the query against a different server database (proxied-server mode only)")
 
 	// Register as a read-only command for SELECT queries.
 	// Write queries will be caught by CheckReadonly.

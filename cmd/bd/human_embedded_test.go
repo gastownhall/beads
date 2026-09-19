@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdHuman runs "bd human" with the given args and returns stdout.
@@ -23,6 +26,26 @@ func bdHuman(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd human %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
+}
+
+// createHumanBead creates a bead carrying the 'human' label and returns its ID.
+func createHumanBead(t *testing.T, bd, dir, title string) string {
+	t.Helper()
+	id := bdCreateSilent(t, bd, dir, title, "--labels", "human")
+	if id == "" {
+		t.Fatalf("could not find issue ID in create output for %q", title)
+	}
+	return id
+}
+
+// humanShowClosed asserts the bead is closed and returns its parsed issue.
+func humanShowClosed(t *testing.T, bd, dir, id string) *types.Issue {
+	t.Helper()
+	issue := bdShow(t, bd, dir, id)
+	if issue.Status != types.StatusClosed {
+		t.Errorf("expected issue %s to be closed, got status %q", id, issue.Status)
+	}
+	return issue
 }
 
 func TestEmbeddedHuman(t *testing.T) {
@@ -64,26 +87,7 @@ func TestEmbeddedHuman(t *testing.T) {
 	// ===== Respond and Dismiss =====
 
 	t.Run("human_respond_and_dismiss", func(t *testing.T) {
-		// Create a bead
-		cmd := exec.Command(bd, "create", "Human test issue", "--type", "task", "--silent")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("create failed: %v\n%s", err, out)
-		}
-		id := strings.TrimSpace(string(out))
-		if id == "" {
-			t.Fatalf("could not find issue ID in output: %s", out)
-		}
-
-		// Humanize it
-		cmd = exec.Command(bd, "label", "add", id, "human")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("label add failed: %v\n%s", err, out)
-		}
+		id := createHumanBead(t, bd, dir, "Human test issue")
 
 		// Verify it shows up in human list
 		listOut := bdHuman(t, bd, dir, "list")
@@ -93,55 +97,94 @@ func TestEmbeddedHuman(t *testing.T) {
 
 		// Test Respond
 		bdHuman(t, bd, dir, "respond", id, "--response", "Approved")
+		humanShowClosed(t, bd, dir, id)
 
-		// Verify closed
-		cmd = exec.Command(bd, "show", id)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		showOut, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("show failed: %v\n%s", err, showOut)
+		// Closed beads drop out of the default list but show with
+		// --status=closed and --status=all.
+		listOut = bdHuman(t, bd, dir, "list")
+		if strings.Contains(listOut, id) {
+			t.Errorf("closed issue %s should be hidden from default human list:\n%s", id, listOut)
 		}
-		if !strings.Contains(string(showOut), "CLOSED") {
-			t.Errorf("expected issue %s to be closed after respond:\n%s", id, showOut)
+		closedOut := bdHuman(t, bd, dir, "list", "--status=closed")
+		if !strings.Contains(closedOut, id) {
+			t.Errorf("expected closed issue %s in human list --status=closed:\n%s", id, closedOut)
 		}
-
-		// Create another for Dismiss
-		cmd = exec.Command(bd, "create", "Dismiss test issue", "--silent")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err = cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("create failed: %v\n%s", err, out)
-		}
-		id2 := strings.TrimSpace(string(out))
-		if id2 == "" {
-			t.Fatalf("could not find issue ID in output: %s", out)
+		allOut := bdHuman(t, bd, dir, "list", "--status=all")
+		if !strings.Contains(allOut, id) {
+			t.Errorf("expected closed issue %s in human list --status=all:\n%s", id, allOut)
 		}
 
-		cmd = exec.Command(bd, "label", "add", id2, "human")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		if out, err = cmd.CombinedOutput(); err != nil {
-			t.Fatalf("label add failed: %v\n%s", err, out)
+		// An invalid status is an error, not a silent empty list.
+		if out, _ := bdRunFailCode(t, bd, dir, "human", "list", "--status=colsed"); !strings.Contains(out, "invalid status") {
+			t.Errorf("expected invalid-status error, got:\n%s", out)
 		}
 
 		// Test Dismiss
+		id2 := createHumanBead(t, bd, dir, "Dismiss test issue")
 		bdHuman(t, bd, dir, "dismiss", id2, "--reason", "Not needed")
+		issue2 := humanShowClosed(t, bd, dir, id2)
+		if issue2.CloseReason != "Dismissed: Not needed" {
+			t.Errorf("expected dismiss reason %q, got %q", "Dismissed: Not needed", issue2.CloseReason)
+		}
+	})
 
-		// Verify closed
-		cmd = exec.Command(bd, "show", id2)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		showOut2, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("show failed: %v\n%s", err, showOut2)
+	// ===== Respond via positional text and --file =====
+
+	t.Run("human_respond_positional_and_file", func(t *testing.T) {
+		// Positional response text, multiple words without a flag.
+		id := createHumanBead(t, bd, dir, "Positional respond test")
+		bdHuman(t, bd, dir, "respond", id, "Approved,", "proceed", "with", "implementation")
+		humanShowClosed(t, bd, dir, id)
+
+		// Response text from a file.
+		id2 := createHumanBead(t, bd, dir, "File respond test")
+		respFile := filepath.Join(t.TempDir(), "response.md")
+		if err := os.WriteFile(respFile, []byte("Approved via file\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
-		if !strings.Contains(string(showOut2), "CLOSED") {
-			t.Errorf("expected issue %s to be closed after dismiss:\n%s", id2, showOut2)
+		bdHuman(t, bd, dir, "respond", id2, "--file", respFile)
+		humanShowClosed(t, bd, dir, id2)
+
+		// Positional dismiss reason.
+		id3 := createHumanBead(t, bd, dir, "Positional dismiss test")
+		bdHuman(t, bd, dir, "dismiss", id3, "No", "longer", "applicable")
+		issue3 := humanShowClosed(t, bd, dir, id3)
+		if issue3.CloseReason != "Dismissed: No longer applicable" {
+			t.Errorf("expected dismiss reason %q, got %q", "Dismissed: No longer applicable", issue3.CloseReason)
 		}
-		if !strings.Contains(string(showOut2), "Dismissed: Not needed") {
-			t.Errorf("expected dismiss reason in output:\n%s", showOut2)
+	})
+
+	// ===== Guard rails: conflicting sources and empty text =====
+
+	t.Run("human_respond_dismiss_guards", func(t *testing.T) {
+		id := createHumanBead(t, bd, dir, "Guard test bead")
+
+		// Positional text combined with a flag source is a conflict, not a
+		// silent drop of the positional text.
+		if out, _ := bdRunFailCode(t, bd, dir, "human", "respond", id, "typed", "text", "--response", "flag text"); !strings.Contains(out, "cannot combine positional text") {
+			t.Errorf("expected positional/flag conflict error, got:\n%s", out)
+		}
+		if out, _ := bdRunFailCode(t, bd, dir, "human", "dismiss", id, "typed", "text", "--reason", "flag text"); !strings.Contains(out, "cannot combine positional text") {
+			t.Errorf("expected positional/flag conflict error, got:\n%s", out)
+		}
+
+		// Whitespace-only response must not close the bead.
+		if _, code := bdRunFailCode(t, bd, dir, "human", "respond", id, "   "); code == 0 {
+			t.Error("whitespace-only response should fail")
+		}
+
+		// ID-shaped free text is accepted as a dismiss reason like any other
+		// text: respond/dismiss act on exactly one bead, args[0].
+		idText := createHumanBead(t, bd, dir, "Shaped-text bead")
+		bdHuman(t, bd, dir, "dismiss", idText, "bd-dev")
+		issueText := humanShowClosed(t, bd, dir, idText)
+		if issueText.CloseReason != "Dismissed: bd-dev" {
+			t.Errorf("expected ID-shaped free text kept as dismiss reason, got %q", issueText.CloseReason)
+		}
+
+		// The bead targeted by the rejected invocations is untouched.
+		if issue := bdShow(t, bd, dir, id); issue.Status == types.StatusClosed {
+			t.Errorf("rejected commands must not close the bead, got status %q", issue.Status)
 		}
 	})
 }

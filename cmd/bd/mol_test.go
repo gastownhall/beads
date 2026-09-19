@@ -1853,7 +1853,7 @@ func TestAdvanceToNextStep_PouredMolecule(t *testing.T) {
 		t.Fatalf("Failed to add blocking dep: %v", err)
 	}
 
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "test")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2024,7 +2024,7 @@ func TestAdvanceToNextStep(t *testing.T) {
 	}
 
 	// Advance from step1 (just closed) without auto-claim
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, false, "test")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2050,7 +2050,7 @@ func TestAdvanceToNextStep(t *testing.T) {
 	}
 
 	// Now test with auto-claim
-	result, err = AdvanceToNextStep(ctx, s, step1.ID, true, "test")
+	result, err = AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep with auto-claim failed: %v", err)
 	}
@@ -2108,7 +2108,7 @@ func TestAdvanceToNextStepMoleculeComplete(t *testing.T) {
 	}
 
 	// Advance from the only step (molecule should be complete)
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, false, "test")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2148,7 +2148,7 @@ func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
 	}
 
 	// Advance should return nil (not part of molecule)
-	result, err := AdvanceToNextStep(ctx, s, orphan.ID, false, "test")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), orphan.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2238,7 +2238,7 @@ func TestAdvanceToNextStepConcurrentClaim(t *testing.T) {
 	// Now our agent tries to advance with autoClaim — step2 was identified as
 	// ready during the read phase, but it's already in_progress. The function
 	// should fall back to step3.
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "our-agent")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2331,7 +2331,7 @@ func TestAdvanceToNextStepAllClaimed(t *testing.T) {
 	}
 
 	// Advance with autoClaim — should fail gracefully (no steps to claim)
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "our-agent")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}

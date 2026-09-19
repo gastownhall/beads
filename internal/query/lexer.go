@@ -343,8 +343,10 @@ func isIdentStart(r rune) bool {
 // isIdentChar returns true if r can be part of an identifier.
 // Colons are allowed so that namespaced labels (e.g., gt:merge-request) can
 // be used unquoted in query expressions like "label=gt:merge-request".
+// Slashes are allowed so that path-style metadata keys (e.g., jira/sprint)
+// can be used in query expressions like "metadata.jira/sprint=42".
 func isIdentChar(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' || r == ':'
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' || r == ':' || r == '/'
 }
 
 // isDurationSuffix returns true if r is a valid duration suffix.

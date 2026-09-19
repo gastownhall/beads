@@ -27,7 +27,13 @@ This uses the Tim Sehn recipe:
   4. Swap main branch to the new flattened branch
   5. Prune remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)
-  6. Run Dolt GC to reclaim space from old history
+  6. Run a full Dolt GC (all storage generations) to reclaim the old history
+
+The GC pass is a full collection: Dolt storage is generational, and a default
+GC never revisits data an earlier GC moved to the old generation. On any store
+that has been GC'd before (bd gc, or a previous flatten or compact), only a
+full collection reclaims the squashed history. A full GC can take minutes on
+multi-gigabyte stores.
 
 This is irreversible — all commit history is lost. The resulting database
 has exactly one commit containing all current data.
@@ -79,15 +85,16 @@ Examples:
 		if flattenDryRun {
 			remoteRefs, tags := listRemoteRefsAndTags(ctx)
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
-					"dry_run":           true,
-					"commit_count":      commitCount,
-					"initial_hash":      initialHash,
-					"would_flatten":     commitCount > 1,
-					"remote_refs":       remoteRefs,
-					"tags":              tags,
-					"size_before_bytes": storeSizeBytes(),
-				})
+				result := map[string]interface{}{
+					"dry_run":       true,
+					"commit_count":  commitCount,
+					"initial_hash":  initialHash,
+					"would_flatten": commitCount > 1,
+					"remote_refs":   remoteRefs,
+					"tags":          tags,
+				}
+				addGCSizeJSON(result, storeSizeBytes(ctx), -1)
+				return outputJSON(result)
 			}
 			fmt.Printf("DRY RUN — Flatten preview\n\n")
 			fmt.Printf("  Commits:        %d\n", commitCount)
@@ -136,18 +143,14 @@ Examples:
 		// Prune remote-tracking refs before GC: they still anchor the entire
 		// pre-flatten chain, and with them in place GC reclaims nothing on any
 		// workspace that has ever pushed or fetched (bd-agctw).
-		sizeBefore := storeSizeBytes()
+		sizeBefore := storeSizeBytes(ctx)
 		pruned, tags := pruneRemoteRefsForGC(ctx)
 		if !jsonOutput {
 			printPruneReport(pruned, tags)
 		}
 
-		if gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector); ok {
-			if err := gc.DoltGC(ctx); err != nil {
-				WarnError("dolt gc after flatten failed: %v", err)
-			}
-		}
-		sizeAfter := storeSizeBytes()
+		gcMode := runPostRewriteGC(ctx, "flatten")
+		sizeAfter := storeSizeBytes(ctx)
 
 		elapsed := time.Since(start)
 
@@ -159,6 +162,9 @@ Examples:
 				"remote_refs_pruned": pruned,
 				"tags_anchoring":     tags,
 				"elapsed_ms":         elapsed.Milliseconds(),
+			}
+			if gcMode != "" {
+				result["gc_mode"] = gcMode
 			}
 			addGCSizeJSON(result, sizeBefore, sizeAfter)
 			return outputJSON(result)

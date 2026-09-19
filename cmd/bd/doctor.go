@@ -68,7 +68,11 @@ const ConfigKeyHintsDoctor = "hints.doctor"
 var doctorCmd = &cobra.Command{
 	Use:     "doctor [path]",
 	GroupID: "maint",
-	Short:   "Check and fix beads installation health (start here)",
+	// doctor diagnoses installation health and must run without opening the
+	// store. It opts out of store init via the annotation seam rather than the
+	// noDbCommands list (see commandOptsOutOfStore in main.go).
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
+	Short:       "Check and fix beads installation health (start here)",
 	Long: `Sanity check the beads installation for the current directory or specified path.
 
 This command checks:
@@ -208,7 +212,12 @@ Examples:
 		if err != nil {
 			return HandleError("failed to resolve path: %v", err)
 		}
-		if err := validateDoctorWorkspaceBackend(absPath); err != nil {
+		if err := checkDoctorMutationGate(absPath); err != nil {
+			return err
+		}
+		if err := validateDoctorWorkspaceBackend(absPath); isLegacyUpgradeRefusal(err) {
+			return printLegacyUpgradeDiagnostic(err)
+		} else if err != nil {
 			return HandleError("%v", err)
 		}
 
@@ -348,6 +357,57 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
+// doctorMutationOp returns the operation label for a doctor invocation that
+// will mutate the workspace, or "" when this run is diagnosis-only. --fix and
+// --clean are the complete trigger set: every mutating doctor surface
+// (applyFixes, applyFixesInteractive, applyValidateFixes, the pollution and
+// artifacts cleaners) is reached only through one of those two flags.
+func doctorMutationOp() string {
+	switch {
+	case doctorFix:
+		return "doctor --fix"
+	case doctorClean:
+		return "doctor --clean"
+	}
+	return ""
+}
+
+// checkDoctorMutationGate is doctor's stand-in for the CheckReadonly call every
+// other write command makes at the top of its RunE (#6028). Doctor never made
+// that call, and its skipStoreAnnotation opt-out also skips the root
+// PersistentPreRunE's freeze gate, so both `--readonly` and an active
+// MIGRATION-FREEZE were bypassed structurally rather than deliberately.
+//
+// One call, once, at the flag-level flip point — not per fixer: there are 40+
+// fixers and any check sprinkled among them rots the moment one is added. It
+// runs before every mode dispatch (including the embedded-mode gate), so a
+// refused run never half-executes and never needs a store to refuse.
+//
+// There is deliberately no doctor-side override. A migration freeze is exactly
+// when a shared store has mixed-version clients and `bd doctor --fix` is the
+// mid-incident reflex command; the operator clears the freeze first.
+func checkDoctorMutationGate(absPath string) error {
+	op := doctorMutationOp()
+	if op == "" {
+		return nil
+	}
+	if readonlyMode {
+		// Wording matches CheckReadonly (errors.go) exactly; doctor returns the
+		// error rather than calling that void helper so its deferred metrics
+		// CloseEventAndAdd still runs.
+		fmt.Fprintf(os.Stderr, "Error: operation '%s' is not allowed in read-only mode\n", op)
+		return &exitError{Code: 1}
+	}
+	// Doctor is the one write-capable command that takes a target path, so the
+	// freeze has to be looked up against that target as well as against the
+	// directory bd was launched in: `bd doctor /frozen/repo --fix` from an
+	// unfrozen cwd would otherwise walk the wrong tree entirely. ...ErrorFor
+	// covers both (FindFrom(absPath) alone would miss a freeze in the caller's
+	// own cwd), and doctorCmd already sets SilenceErrors/SilenceUsage
+	// statically, so the cobra-silencing gate variant buys nothing here.
+	return migrationFreezeErrorFor(op, absPath)
+}
+
 func shouldSkipDoctorNetworkChecks() bool {
 	return jsonOutput || !ui.IsTerminal()
 }
@@ -358,11 +418,30 @@ func shouldSkipDoctorNetworkChecks() bool {
 // metadata must be rejected before version tracking or any database check begins.
 func validateDoctorWorkspaceBackend(path string) error {
 	beadsDir := doctor.ResolveBeadsDirForRepo(path)
-	cfg, err := configfile.Load(beadsDir)
+	if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+		return err
+	}
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
 	}
-	return validateConfiguredBackend(cfg)
+	return validateConfiguredBackend(cfg, beadsDir)
+}
+
+// printLegacyUpgradeDiagnostic preserves doctor as a store-free repair path:
+// the workspace is recognized, but no storage or metadata migration is opened.
+func printLegacyUpgradeDiagnostic(err error) error {
+	if jsonOutput || doctorAgent {
+		return outputJSON(map[string]any{
+			"status":  "warning",
+			"code":    "legacy_upgrade_required",
+			"message": err.Error(),
+			"guide":   "docs/getting-started/upgrading.md#cross-era-upgrades",
+		})
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "Warning: %v\n", err)
+	_, _ = fmt.Fprintln(os.Stdout, "Follow docs/getting-started/upgrading.md#cross-era-upgrades for the layout-specific migration path.")
+	return nil
 }
 
 // printEmbeddedUnsupported reports that a doctor variant is not yet wired up
@@ -444,6 +523,11 @@ func runDiagnostics(path string) doctorResult {
 	legacyCheck := convertWithCategory(doctor.CheckStaleLegacyHooks(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, legacyCheck)
 
+	// Check for a dangling core.hooksPath pointing at a missing directory (GH#4440)
+	hooksPathCheck := convertWithCategory(doctor.CheckHooksPath(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, hooksPathCheck)
+	// Warning-class check — don't fail overall check, matching the neighboring hooks checks.
+
 	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
 	doltHooksCheck := convertWithCategory(doctor.CheckGitHooksDoltCompatibility(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, doltHooksCheck)
@@ -495,21 +579,35 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// bd-jgxi: Auto-migrate database version before checking it.
-	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),
+	// Since doctor skips PersistentPreRun DB init (via skipStoreAnnotation),
 	// trackBdVersion() and autoMigrateOnVersionBump() haven't run yet.
 	//
-	// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
-	// can accidentally touch the caller's current repo .beads state.
-	origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
-	_ = os.Setenv("BEADS_DIR", beadsDir)
-	trackBdVersion()
-	if hadBeadsDir {
-		_ = os.Setenv("BEADS_DIR", origBeadsDir)
-	} else {
-		_ = os.Unsetenv("BEADS_DIR")
-	}
+	// #6028: skipping that hook also skipped its guards on these exact two
+	// calls — main.go runs them only when policy.runMaintenance is set and the
+	// workspace is not frozen for maintenance. Doctor replicates the calls, so
+	// it must replicate the guard, or plain `bd doctor` (no --fix needed)
+	// rewrites .beads/.local_version and silently applies a schema migration to
+	// a read-only or mid-freeze store: precisely the torn-upgrade write the
+	// freeze exists to prevent. Under either gate doctor now *reports* the
+	// version/migration mismatch in the checks below instead of healing it.
+	//
+	// The probe takes beadsDir for the same reason the mutation gate takes
+	// absPath: these writes land in the doctor target, so a freeze on that tree
+	// must stop them even when bd was launched somewhere unfrozen.
+	if !readonlyMode && !migrationFreezeActiveFor(beadsDir) {
+		// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
+		// can accidentally touch the caller's current repo .beads state.
+		origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
+		_ = os.Setenv("BEADS_DIR", beadsDir)
+		trackBdVersion()
+		if hadBeadsDir {
+			_ = os.Setenv("BEADS_DIR", origBeadsDir)
+		} else {
+			_ = os.Unsetenv("BEADS_DIR")
+		}
 
-	autoMigrateOnVersionBump(beadsDir)
+		autoMigrateOnVersionBump(beadsDir)
+	}
 
 	// Check 1b: Dolt format compatibility (GH#2137)
 	// Must run before opening the database — old noms formats cause server panics.
@@ -704,6 +802,15 @@ func runDiagnostics(path string) doctorResult {
 	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
+	// Check 10d: label whitespace damage (#5812) — labels written by a bd that
+	// normalized on read but not on write, which no filter can match.
+	// Warn-only (does not fail OverallOK), same reasoning as the check above:
+	// this ships into databases that already carry the damage, and turning
+	// doctor red on pre-existing data across the fleet would be worse than
+	// surfacing it as actionable.
+	labelWhitespaceCheck := convertWithCategory(doctor.CheckLabelWhitespaceWithStore(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, labelWhitespaceCheck)
+
 	// Check 11: Claude integration
 	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)
@@ -854,6 +961,11 @@ func runDiagnostics(path string) doctorResult {
 	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
+
+	// Check 21b: Clone-local FKs severed by hard resets (bd-7bpkd)
+	cloneLocalFKCheck := convertDoctorCheck(doctor.CheckCloneLocalFKs(path))
+	result.Checks = append(result.Checks, cloneLocalFKCheck)
+	// Don't fail overall check for severed clone-local FKs, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
 	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))

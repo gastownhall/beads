@@ -29,6 +29,10 @@ type Conflict struct {
 	Field       string      // Which field has the conflict (empty for table-level)
 	OursValue   interface{} // Value on current branch
 	TheirsValue interface{} // Value on merged branch
+	// Count is how many rows of the table are conflicted, as reported by
+	// dolt_conflicts.num_conflicts. Meaningful for table-level conflicts
+	// (the shape GetConflicts returns); zero otherwise.
+	Count int
 }
 
 // RemoteInfo describes a configured remote.

@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // StatusOutput represents the complete status output
@@ -76,31 +77,29 @@ Examples:
 			jsonOutput = true
 		}
 
-		if usesProxiedServer() {
-			if noBlocked {
-				fmt.Fprintln(os.Stderr, "warning: --no-blocked is not supported in proxied-server mode; running the full blocked-count query")
-			}
-			return runStatusProxiedServer(rootCtx, showAssigned, noActivity)
-		}
-
-		ctx := rootCtx
-
-		var stats *types.Statistics
-		var err error
-		if noBlocked {
-			stats, err = store.GetStatisticsNoBlocked(ctx)
-		} else {
-			stats, err = store.GetStatistics(ctx)
-		}
+		reporter, err := openStatsReporter()
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
+		var result issueops.StatsResult
 		if showAssigned {
-			stats = getAssignedStatistics(actor)
-			if stats == nil {
-				return HandleErrorRespectJSON("failed to get assigned statistics")
+			// --no-blocked is not consulted here, and never was: an
+			// assignee-scoped summary computes both numbers by a route that has
+			// no fast path (issueops.StatsReporter.AssigneeStats).
+			result, err = reporter.AssigneeStats(rootCtx, issueops.AssigneeStatsRequest{Assignee: actor})
+		} else {
+			result, err = reporter.Stats(rootCtx, issueops.StatsRequest{SkipBlocked: noBlocked})
+			if err == nil && noBlocked && result.Summary.BlockedIssues != nil {
+				// Derived from the ANSWER rather than from the route: the two
+				// routes differ on it today (the unit-of-work seam publishes no
+				// no-blocked query), and a backend that gains one stops printing
+				// this without an edit here.
+				fmt.Fprintln(os.Stderr, "warning: this backend has no --no-blocked fast path; the full blocked-count query ran")
 			}
+		}
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		var recentActivity *RecentActivitySummary
@@ -108,8 +107,17 @@ Examples:
 			recentActivity = getGitActivity(24)
 		}
 
-		return renderStatus(stats, recentActivity)
+		return renderStatus(&result.Summary, recentActivity)
 	},
+}
+
+// openStatsReporter hands back the summary role for whichever route this
+// invocation is on, each through its own capability accessor.
+func openStatsReporter() (issueops.StatsReporter, error) {
+	if usesProxiedServer() {
+		return proxiedStatsReporter()
+	}
+	return store.StatsReporter()
 }
 
 func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary) error {
@@ -184,55 +192,6 @@ func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary
 // as activity tracking has moved to Dolt-native queries.
 func getGitActivity(_ int) *RecentActivitySummary {
 	return nil
-}
-
-// getAssignedStatistics returns statistics for issues assigned to a specific user
-func getAssignedStatistics(assignee string) *types.Statistics {
-	if store == nil {
-		return nil
-	}
-
-	ctx := rootCtx
-
-	assigneePtr := assignee
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Assignee: &assigneePtr})
-	if err != nil {
-		return nil
-	}
-
-	readyCount := 0
-	readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{Assignee: &assigneePtr})
-	if err == nil {
-		readyCount = len(readyIssues)
-	}
-
-	return buildAssignedStats(issues, readyCount)
-}
-
-func buildAssignedStats(issues []*types.Issue, readyCount int) *types.Statistics {
-	stats := &types.Statistics{
-		TotalIssues: len(issues),
-	}
-
-	// Count by status
-	blockedCount := 0
-	for _, issue := range issues {
-		switch issue.Status {
-		case types.StatusOpen:
-			stats.OpenIssues++
-		case types.StatusInProgress:
-			stats.InProgressIssues++
-		case types.StatusBlocked:
-			blockedCount++
-		case types.StatusDeferred:
-			stats.DeferredIssues++
-		case types.StatusClosed:
-			stats.ClosedIssues++
-		}
-	}
-	stats.BlockedIssues = &blockedCount
-	stats.ReadyIssues = &readyCount
-	return stats
 }
 
 func init() {

@@ -69,7 +69,7 @@ func (s *testSuite) labelInsertIdempotent() {
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-dup", string(types.EventLabelAdded),
 	).Scan(&count))
-	s.Equal(2, count)
+	s.Equal(1, count)
 }
 
 func (s *testSuite) labelInsertRecordsEvent() {
@@ -259,6 +259,12 @@ func (s *testSuite) labelDeleteMissingNoop() {
 	out, err := r.List(s.Ctx(), "bd-lbl-del-miss", domain.LabelOpts{})
 	s.Require().NoError(err)
 	s.Empty(out)
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-lbl-del-miss", string(types.EventLabelRemoved),
+	).Scan(&count))
+	s.Equal(0, count)
 }
 
 func (s *testSuite) labelDeleteSpecificLabel() {

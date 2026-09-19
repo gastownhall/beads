@@ -178,6 +178,106 @@ func TestEmbeddedEpic(t *testing.T) {
 			t.Errorf("epic1 should not be closed: %s", out)
 		}
 	})
+
+	// ===== epic close-eligible --reason (GH#4817) =====
+
+	t.Run("close_eligible_reason_flag_persists", func(t *testing.T) {
+		dir5, _, _ := bdInit(t, bd, "--prefix", "ep5")
+		e := bdCreate(t, bd, dir5, "Reason epic", "--type", "epic")
+		ch := bdCreate(t, bd, dir5, "Reason child", "--type", "task")
+		bdDep(t, bd, dir5, "add", ch.ID, e.ID, "--type", "parent-child")
+		bdClose(t, bd, dir5, ch.ID)
+
+		bdEpic(t, bd, dir5, "close-eligible", "--reason", "Milestone shipped in v2.3")
+
+		got := bdShow(t, bd, dir5, e.ID)
+		if got.Status != types.StatusClosed {
+			t.Fatalf("expected epic closed, got %s", got.Status)
+		}
+		if got.CloseReason != "Milestone shipped in v2.3" {
+			t.Errorf("close_reason = %q, want %q", got.CloseReason, "Milestone shipped in v2.3")
+		}
+	})
+
+	t.Run("close_eligible_default_reason_unchanged", func(t *testing.T) {
+		dir6, _, _ := bdInit(t, bd, "--prefix", "ep6")
+		e := bdCreate(t, bd, dir6, "Default reason epic", "--type", "epic")
+		ch := bdCreate(t, bd, dir6, "Default reason child", "--type", "task")
+		bdDep(t, bd, dir6, "add", ch.ID, e.ID, "--type", "parent-child")
+		bdClose(t, bd, dir6, ch.ID)
+
+		bdEpic(t, bd, dir6, "close-eligible")
+
+		got := bdShow(t, bd, dir6, e.ID)
+		if got.CloseReason != "All children completed" {
+			t.Errorf("close_reason = %q, want default %q", got.CloseReason, "All children completed")
+		}
+	})
+
+	t.Run("close_eligible_dry_run_shows_reason", func(t *testing.T) {
+		dir7, _, _ := bdInit(t, bd, "--prefix", "ep7")
+		e := bdCreate(t, bd, dir7, "Dry-run reason epic", "--type", "epic")
+		ch := bdCreate(t, bd, dir7, "Dry-run reason child", "--type", "task")
+		bdDep(t, bd, dir7, "add", ch.ID, e.ID, "--type", "parent-child")
+		bdClose(t, bd, dir7, ch.ID)
+
+		out := bdEpic(t, bd, dir7, "close-eligible", "--dry-run", "--reason", "planned reason")
+		if !strings.Contains(out, "Would close") || !strings.Contains(out, "planned reason") {
+			t.Errorf("dry-run output should preview the reason, got: %s", out)
+		}
+		got := bdShow(t, bd, dir7, e.ID)
+		if got.Status != types.StatusOpen {
+			t.Errorf("dry-run must not close the epic, got %s", got.Status)
+		}
+	})
+
+	t.Run("close_eligible_json_includes_reason", func(t *testing.T) {
+		dir8, _, _ := bdInit(t, bd, "--prefix", "ep8")
+		e := bdCreate(t, bd, dir8, "JSON reason epic", "--type", "epic")
+		ch := bdCreate(t, bd, dir8, "JSON reason child", "--type", "task")
+		bdDep(t, bd, dir8, "add", ch.ID, e.ID, "--type", "parent-child")
+		bdClose(t, bd, dir8, ch.ID)
+
+		result := bdEpicJSON(t, bd, dir8, "close-eligible", "--reason", "JSON reason")
+		obj, ok := result.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected JSON object, got %T", result)
+		}
+		if reason, _ := obj["reason"].(string); reason != "JSON reason" {
+			t.Errorf("reason = %q, want %q", reason, "JSON reason")
+		}
+		closed, _ := obj["closed"].([]interface{})
+		found := false
+		for _, id := range closed {
+			if id == e.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("closed = %v, want it to contain %s", closed, e.ID)
+		}
+	})
+
+	t.Run("close_eligible_human_output_ends_with_reason", func(t *testing.T) {
+		dir9, _, _ := bdInit(t, bd, "--prefix", "ep9")
+		e := bdCreate(t, bd, dir9, "Output epic", "--type", "epic")
+		ch := bdCreate(t, bd, dir9, "Output child", "--type", "task")
+		bdDep(t, bd, dir9, "add", ch.ID, e.ID, "--type", "parent-child")
+		bdClose(t, bd, dir9, ch.ID)
+
+		out := bdEpic(t, bd, dir9, "close-eligible", "--reason", "ship it")
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		lastLine := lines[len(lines)-1]
+		if !strings.Contains(lastLine, "ship it") {
+			t.Errorf("final output line should contain the reason, got: %q", lastLine)
+		}
+		if !strings.Contains(lastLine, "Closed") {
+			t.Errorf("final output line should contain Closed summary, got: %q", lastLine)
+		}
+		if !strings.Contains(out, e.ID) {
+			t.Errorf("output should list closed epic ID %s, got: %s", e.ID, out)
+		}
+	})
 }
 
 // TestEmbeddedEpicConcurrent exercises epic operations concurrently.

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -80,19 +81,81 @@ func TestEmbeddedDelete(t *testing.T) {
 	})
 
 	t.Run("delete_without_force_shows_preview", func(t *testing.T) {
+		target := bdCreate(t, bd, dir, "Lonely", "--type", "task")
+
+		// Without --force, bd delete shows a preview (exits 0) but does not delete.
+		out := bdDelete(t, bd, dir, target.ID)
+		if !strings.Contains(out, "PREVIEW") && !strings.Contains(out, "preview") {
+			t.Logf("expected preview output: %s", out)
+		}
+		got := bdShow(t, bd, dir, target.ID)
+		if got.ID != target.ID {
+			t.Errorf("expected the target to still exist after preview")
+		}
+	})
+
+	// The one-id preview over a bead with an OUTSIDE dependent now refuses
+	// rather than exiting 0, which is a change and is the direct route
+	// converging with itself: the batch path and `--dry-run` have always
+	// refused here (see TestEmbeddedDeleteJSONDependencyErrorContract, which
+	// runs both), and only the unconfirmed single-id preview did not. The
+	// refusal is the role's, so both routes and all three of this command's
+	// paths now give the same answer to the same question.
+	t.Run("delete_without_force_refuses_over_an_outside_dependent", func(t *testing.T) {
 		parent := bdCreate(t, bd, dir, "Parent strict", "--type", "task")
 		child := bdCreate(t, bd, dir, "Child strict", "--type", "task")
 		bdDepAdd(t, bd, dir, child.ID, parent.ID)
 
-		// Without --force, bd delete shows a preview (exits 0) but does not delete.
-		out := bdDelete(t, bd, dir, parent.ID)
-		if !strings.Contains(out, "PREVIEW") && !strings.Contains(out, "preview") {
-			t.Logf("expected preview output: %s", out)
+		out := bdDeleteFail(t, bd, dir, parent.ID)
+		if !strings.Contains(out, "dependents not in deletion set") {
+			t.Errorf("refusal did not name the guard: %s", out)
 		}
-		// Parent should still exist.
-		got := bdShow(t, bd, dir, parent.ID)
-		if got.ID != parent.ID {
-			t.Errorf("expected parent to still exist after preview")
+		if !strings.Contains(out, "--cascade") || !strings.Contains(out, "--force") {
+			t.Errorf("refusal did not say what to send instead: %s", out)
+		}
+		// Nothing was deleted, on either end of the edge.
+		if got := bdShow(t, bd, dir, parent.ID); got.ID != parent.ID {
+			t.Errorf("expected the parent to survive a refused delete")
+		}
+		if got := bdShow(t, bd, dir, child.ID); got.ID != child.ID {
+			t.Errorf("expected the dependent to survive a refused delete")
+		}
+	})
+
+	t.Run("delete_single_quiet_forced_dry_run_is_payload_blind", func(t *testing.T) {
+		titleMarker := "EMBEDDED_QUIET_TITLE_MARKER"
+		descriptionMarker := "EMBEDDED_QUIET_DESCRIPTION_MARKER"
+		notesMarker := "EMBEDDED_QUIET_NOTES_MARKER"
+		payloadMarker := "EMBEDDED_QUIET_PAYLOAD_MARKER"
+		parent := bdCreate(t, bd, dir, titleMarker,
+			"--type", "task",
+			"--description", descriptionMarker,
+			"--notes", notesMarker,
+			"--metadata", `{"marker":"`+payloadMarker+`"}`)
+		child := bdCreate(t, bd, dir, "Embedded quiet dependent", "--type", "task")
+		bdDepAdd(t, bd, dir, child.ID, parent.ID)
+
+		cmd := exec.Command(bd, "delete", parent.ID, "--force", "--dry-run", "--quiet")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("single forced quiet dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("quiet dry-run produced stdout: %s", stdout.String())
+		}
+		combined := stdout.String() + stderr.String()
+		for _, marker := range []string{titleMarker, descriptionMarker, notesMarker, payloadMarker} {
+			if strings.Contains(combined, marker) {
+				t.Fatalf("quiet dry-run leaked %q: %s", marker, combined)
+			}
+		}
+		if got := bdShowDetails(t, bd, dir, parent.ID); got["id"] != parent.ID {
+			t.Fatalf("forced dry-run removed parent: got %v, want %q", got["id"], parent.ID)
+		}
+		if got := bdShowDetails(t, bd, dir, child.ID); got["id"] != child.ID {
+			t.Fatalf("forced dry-run removed dependent: got %v, want %q", got["id"], child.ID)
 		}
 	})
 
@@ -124,6 +187,114 @@ func TestEmbeddedDelete(t *testing.T) {
 	t.Run("delete_nonexistent", func(t *testing.T) {
 		bdDeleteFail(t, bd, dir, "td-nonexistent999", "--force")
 	})
+}
+
+func TestEmbeddedDeleteJSONDependencyErrorContract(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "jde")
+
+	for _, tc := range []struct {
+		name  string
+		batch bool
+	}{
+		{name: "single"},
+		{name: "batch", batch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			titleMarker := "EMBEDDED_JSON_ERROR_TITLE_" + tc.name
+			descriptionMarker := "EMBEDDED_JSON_ERROR_DESCRIPTION_" + tc.name
+			notesMarker := "EMBEDDED_JSON_ERROR_NOTES_" + tc.name
+			metadataMarker := "EMBEDDED_JSON_ERROR_METADATA_" + tc.name
+			parent := bdCreate(t, bd, dir, titleMarker,
+				"--type", "task",
+				"--description", descriptionMarker,
+				"--notes", notesMarker,
+				"--metadata", `{"marker":"`+metadataMarker+`"}`)
+			child := bdCreate(t, bd, dir, "JSON error dependent "+tc.name, "--type", "task")
+			bdDepAdd(t, bd, dir, child.ID, parent.ID)
+
+			issueIDs := []string{parent.ID}
+			if tc.batch {
+				other := bdCreate(t, bd, dir, "JSON error batch companion", "--type", "task")
+				issueIDs = append(issueIDs, other.ID)
+			}
+
+			runDelete := func(flags ...string) (string, string, error) {
+				args := append([]string{"delete"}, issueIDs...)
+				args = append(args, flags...)
+				cmd := exec.Command(bd, args...)
+				cmd.Dir = dir
+				cmd.Env = append(bdEnv(dir), "BD_JSON_ENVELOPE=0")
+				stdout, stderr, err := runCommandBuffers(t, cmd)
+				return stdout.String(), stderr.String(), err
+			}
+
+			stdout, stderr, err := runDelete("--dry-run", "--json")
+			if err == nil {
+				t.Fatalf("unforced dependency-blocked JSON dry-run succeeded\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+			var preview map[string]interface{}
+			if err := json.Unmarshal([]byte(stdout), &preview); err != nil {
+				t.Fatalf("unforced preview stdout is not exactly one JSON object: %v\nstdout:\n%s", err, stdout)
+			}
+			if preview["preview"] != true || preview["dry_run"] != true {
+				t.Fatalf("unforced preview missing structural fields: %#v", preview)
+			}
+			if _, ok := preview["error"].(string); !ok {
+				t.Fatalf("unforced preview missing dependency error: %#v", preview)
+			}
+			var jsonErr map[string]interface{}
+			if err := json.Unmarshal([]byte(stderr), &jsonErr); err != nil {
+				t.Fatalf("unforced stderr is not exactly one JSON error object: %v\nstderr:\n%s", err, stderr)
+			}
+			if _, ok := jsonErr["error"].(string); !ok {
+				t.Fatalf("unforced stderr missing error field: %#v", jsonErr)
+			}
+			if strings.Contains(stderr, "Error:") {
+				t.Fatalf("unforced stderr contains plaintext error prefix: %s", stderr)
+			}
+			for _, marker := range []string{titleMarker, descriptionMarker, notesMarker, metadataMarker} {
+				if strings.Contains(stdout+stderr, marker) {
+					t.Fatalf("unforced JSON dry-run leaked %q", marker)
+				}
+			}
+
+			stdout, stderr, err = runDelete("--force", "--dry-run", "--quiet", "--json")
+			if err != nil {
+				t.Fatalf("forced quiet JSON dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			if strings.TrimSpace(stderr) != "" {
+				t.Fatalf("forced quiet JSON dry-run wrote stderr: %s", stderr)
+			}
+			var forcedPreview map[string]interface{}
+			if err := json.Unmarshal([]byte(stdout), &forcedPreview); err != nil {
+				t.Fatalf("forced quiet JSON stdout is not exactly one JSON object: %v\nstdout:\n%s", err, stdout)
+			}
+			for _, key := range []string{"preview", "dry_run", "would_delete", "would_orphan"} {
+				if _, ok := forcedPreview[key]; !ok {
+					t.Fatalf("forced quiet JSON preview missing %q: %#v", key, forcedPreview)
+				}
+			}
+			for _, marker := range []string{titleMarker, descriptionMarker, notesMarker, metadataMarker} {
+				if strings.Contains(stdout, marker) {
+					t.Fatalf("forced quiet JSON dry-run leaked %q", marker)
+				}
+			}
+
+			if got := bdShowDetails(t, bd, dir, parent.ID); got["id"] != parent.ID {
+				t.Fatalf("dry-run removed parent: got %v, want %q", got["id"], parent.ID)
+			}
+			if got := bdShowDetails(t, bd, dir, child.ID); got["id"] != child.ID {
+				t.Fatalf("dry-run removed dependent: got %v, want %q", got["id"], child.ID)
+			}
+			assertDepExists(t, beadsDir, "jde", child.ID, parent.ID)
+		})
+	}
 }
 
 func TestEmbeddedGetDependencies(t *testing.T) {

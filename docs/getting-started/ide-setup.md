@@ -35,6 +35,7 @@ bd setup claude --remove    # Uninstall
 | `windsurf` | `.windsurf/rules/beads.md` | [Windsurf](/integrations/windsurf) |
 | `cody` | `.cody/rules/beads.md` | [Cody](/integrations/cody) |
 | `kilocode` | `.kilocode/rules/beads.md` | [Kilo Code](/integrations/kilocode) |
+| `kiro` | `.kiro/steering/beads.md` | [Kiro CLI](/integrations/kiro) |
 
 `bd prime` is the single source of truth for operational workflow commands. Each integration's instruction file either points to `bd prime` (hook-enabled agents) or carries the full command reference (AGENTS-first agents).
 
@@ -348,7 +349,7 @@ bd setup --print
 
 | Type | Description | Used by |
 |------|-------------|---------|
-| `file` | Write the template to a single file | windsurf, cody, kilocode |
+| `file` | Write the template to a single file | windsurf, cody, kilocode, kiro |
 | `hooks` | Modify JSON settings to add hooks | claude, gemini |
 | `section` | Inject a marked section into an existing file | factory, codex, mux, opencode |
 | `multifile` | Write multiple files | aider, copilot, junie |

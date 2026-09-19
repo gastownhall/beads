@@ -125,6 +125,20 @@ func TestEmbeddedDolt(t *testing.T) {
 		_ = out
 	})
 
+	t.Run("commit_clean_reports_nothing", func(t *testing.T) {
+		// bd init leaves the working set clean (bootstrap's own commit
+		// tolerates nothing-to-commit, GH#3886). A second, truly no-op
+		// "bd dolt commit" here must print "Nothing to commit.", not
+		// "Committed." — this is the case EmbeddedDoltStore.Commit's new
+		// nothing-to-commit tolerance made possible to reach with a nil
+		// error.
+		cleanDir, _, _ := bdInit(t, bd, "--prefix", "tdcln")
+		out := bdDolt(t, bd, cleanDir, "commit")
+		if !strings.Contains(out, "Nothing to commit.") {
+			t.Errorf("expected 'Nothing to commit.' on a clean working set, got: %s", out)
+		}
+	})
+
 	// ===== Remote management =====
 
 	t.Run("remote_list_empty", func(t *testing.T) {

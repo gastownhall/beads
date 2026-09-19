@@ -26,6 +26,11 @@ func OpenReadOnly(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error)
 	return nil, errNoCGO
 }
 
+// OpenForPreviewCommand returns an error when CGO is not enabled.
+func OpenForPreviewCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+	return nil, errNoCGO
+}
+
 // OpenForReadOnlyCommand returns an error when CGO is not enabled.
 func OpenForReadOnlyCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
 	return nil, errNoCGO

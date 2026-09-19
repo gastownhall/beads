@@ -45,12 +45,14 @@ func RemoveRemote(ctx context.Context, db DBConn, name string) error {
 // every other open session on the same engine, so a failed fetch would break
 // concurrent in-flight connections (bd-6dnrw.10).
 func Fetch(ctx context.Context, db DBConn, peer, user string) error {
-	var err error
-	if user != "" {
-		_, err = db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?)", user, peer)
-	} else {
-		_, err = db.ExecContext(ctx, "CALL DOLT_FETCH(?)", peer)
-	}
+	err := withRemoteEnvGuards(func() error {
+		if user != "" {
+			_, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?)", user, peer)
+			return err
+		}
+		_, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?)", peer)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("fetch from %s: %w", peer, err)
 	}
@@ -62,13 +64,15 @@ func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 // must be set in the in-process Dolt server's environment. Required when
 // pushing to a remotesapi server that enforces CLONE_ADMIN authentication.
 func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
-	if user != "" {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", user, remote, branch); err != nil {
-			return fmt.Errorf("push to %s/%s: %w", remote, branch, err)
+	err := withRemoteEnvGuards(func() error {
+		if user != "" {
+			_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", user, remote, branch)
+			return err
 		}
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", remote, branch); err != nil {
+		_, err := db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", remote, branch)
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("push to %s/%s: %w", remote, branch, err)
 	}
 	return nil
@@ -77,13 +81,15 @@ func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
 // ForcePush force-pushes the given branch to the named remote.
 // See Push for the user/auth contract.
 func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) error {
-	if user != "" {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", user, remote, branch); err != nil {
-			return fmt.Errorf("force push to %s/%s: %w", remote, branch, err)
+	err := withRemoteEnvGuards(func() error {
+		if user != "" {
+			_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", user, remote, branch)
+			return err
 		}
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, branch); err != nil {
+		_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, branch)
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("force push to %s/%s: %w", remote, branch, err)
 	}
 	return nil
@@ -100,17 +106,28 @@ func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) erro
 // user/auth contract; only the fetch step authenticates, since the merge step
 // is local.
 func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
-	if user != "" {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch); err != nil {
-			return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
+	return PullWithStrategy(ctx, db, remote, branch, user, "")
+}
+
+// PullWithStrategy is Pull with the #4992 part 2 operator escape hatch:
+// conflicts TryAutoResolveMergeConflicts declines are, when strategy is
+// non-empty, resolved with strategy ("ours" or "theirs") instead of aborting
+// the pull for the operator to resolve out-of-band. strategy == "" is exactly
+// Pull's behavior. See MergeAndSettleWithStrategy/SettleMerge for the
+// resolution logic.
+func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, strategy string) error {
+	if err := withRemoteEnvGuards(func() error {
+		if user != "" {
+			_, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch)
+			return err
 		}
-	} else {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?, ?)", remote, branch); err != nil {
-			return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
-		}
+		_, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?, ?)", remote, branch)
+		return err
+	}); err != nil {
+		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
 	}
 	trackingRef := remote + "/" + branch
-	if err := MergeAndSettle(ctx, db, trackingRef); err != nil {
+	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {
 		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
 	return nil

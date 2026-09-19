@@ -26,12 +26,59 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 	return result, nil
 }
 
+// GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
+// whose dependency type can block ready work. Cross-prefix issue IDs may share
+// depends_on_external storage, so the external: prefix check is intentional.
+func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		if err := getExternalBlockingDependencyRecordsIntoFromTable(ctx, tx, depTable, result); err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
+func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+		FROM %s
+		WHERE depends_on_external LIKE 'external:%%'
+		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
+		ORDER BY issue_id
+	`, DepTargetExpr, depTable))
+	if err != nil {
+		return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		dep, scanErr := scanDependencyRow(rows)
+		if scanErr != nil {
+			return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, scanErr)
+		}
+		result[dep.IssueID] = append(result[dep.IssueID], dep)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, err)
+	}
+	return nil
+}
+
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
 func getAllDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
+	// Total order: issue_id alone is only a grouping key; without a tiebreaker the
+	// intra-issue dependency slice is plan-dependent (export churn, unstable --json).
+	// Mirrors labels bulk-load (issue_id, label). The separate typed-target unique
+	// keys don't make (issue_id, depends_on_id, type) total, so `id` closes it.
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 			FROM %s
-			ORDER BY issue_id
+			ORDER BY issue_id, depends_on_id, type, id
 		`, DepTargetExpr, depTable))
 	if err != nil {
 		return fmt.Errorf("get all dependency records from %s: %w", depTable, err)
@@ -110,7 +157,7 @@ func getDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable st
 		}
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
 			`SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
-			 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id`,
+			 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, depends_on_id, type, id`,
 			DepTargetExpr, depTable, strings.Join(placeholders, ",")), args...)
 		if err != nil {
 			return fmt.Errorf("get dependency records from %s: %w", depTable, err)

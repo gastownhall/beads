@@ -143,7 +143,13 @@ func runCompactProxiedServer(ctx context.Context) error {
 		if tags, perr = versioncontrolops.ListTags(ctx, conn); perr != nil {
 			WarnError("listing tags before GC: %v", perr)
 		}
-		if perr := versioncontrolops.DoltGC(ctx, conn); perr != nil {
+		// Full pass: the squash orphans a commit chain that any earlier GC
+		// already promoted to the old generation, which a default pass never
+		// revisits.
+		if !jsonOutput {
+			fmt.Println("  Running full Dolt GC (all generations; can take minutes on large stores)...")
+		}
+		if perr := versioncontrolops.DoltGCFull(ctx, conn); perr != nil {
 			WarnError("dolt gc after compact failed: %v", perr)
 		}
 		return nil
@@ -167,6 +173,7 @@ func runCompactProxiedServer(ctx context.Context) error {
 			"recent_kept":        recentCommits,
 			"remote_refs_pruned": pruned,
 			"tags_anchoring":     tags,
+			"gc_mode":            gcModeFull,
 			"elapsed_ms":         elapsed.Milliseconds(),
 		})
 	}

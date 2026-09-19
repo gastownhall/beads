@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -16,7 +17,7 @@ type blockingDepRecord struct {
 }
 
 func optionalBlockedTable(table string) bool {
-	return table == "wisps" || table == "wisp_dependencies"
+	return sqlbuild.OptionalWispTable(table)
 }
 
 func loadBlockingDepsForIssueIDsInTx(ctx context.Context, tx DBTX, depTables []string, issueIDs []string) ([]blockingDepRecord, error) {
@@ -240,12 +241,22 @@ func GetDescendantIDsInTx(ctx context.Context, tx DBTX, rootID string, maxDepth 
 func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	var blockedIDList []string
 	blockedSet := make(map[string]bool)
-	for _, table := range []string{"issues", "wisps"} {
-		//nolint:gosec // G201: table is one of two hardcoded values.
+	// Label predicates are applied here, in the per-table scan, rather than to
+	// the assembled results: issues and wisps keep their labels in different
+	// tables, and filtering at the source also spares the blocker-dependency
+	// and hydration passes below any work on rows that cannot survive.
+	for _, tables := range []sqlbuild.FilterTables{IssuesFilterTables, WispsFilterTables} {
+		table := tables.Main
+		labelWhere, labelArgs := sqlbuild.LabelSetClauses("id", tables, filter.Labels, filter.LabelsAny, filter.ExcludeLabels)
+		labelClause := ""
+		if len(labelWhere) > 0 {
+			labelClause = " AND " + strings.Join(labelWhere, " AND ")
+		}
+		//nolint:gosec // G201: table is one of two hardcoded values; labelClause is literal SQL plus ? placeholders.
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT id FROM %s
-			WHERE is_blocked = 1 AND status <> 'closed' AND status <> 'pinned'
-		`, table))
+			WHERE is_blocked = 1 AND status <> 'closed' AND status <> 'pinned'%s
+		`, table, labelClause), labelArgs...)
 		if err != nil {
 			if optionalBlockedTable(table) && isTableNotExistError(err) {
 				continue

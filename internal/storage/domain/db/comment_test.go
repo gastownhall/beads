@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *testSuite) TestCommentSQLRepository() {
@@ -33,7 +34,30 @@ func (s *testSuite) TestCommentSQLRepository() {
 		s.Run("PopulatesReturnedComment", s.commentInsertPopulatesReturn)
 		s.Run("RoundTripsThroughList", s.commentInsertRoundTrip)
 		s.Run("RoutesToWispComments", s.commentInsertWispRouting)
+		s.Run("InsertRecordPreservesImportedValues", s.commentInsertRecordPreservesImportedValues)
 	})
+}
+
+func (s *testSuite) commentInsertRecordPreservesImportedValues() {
+	s.seedIssueRow("bd-cmt-ins-record")
+	createdAt := time.Date(2025, time.January, 2, 3, 4, 5, 987_654_321, time.UTC)
+
+	inserted, err := s.commentRepo().InsertRecord(s.Ctx(), &types.Comment{
+		ID:        "imported-comment-id",
+		IssueID:   "bd-cmt-ins-record",
+		Author:    "importer",
+		Text:      "preserved",
+		CreatedAt: createdAt,
+	}, domain.CommentOpts{})
+	s.Require().NoError(err)
+	s.Equal("imported-comment-id", inserted.ID)
+	s.Equal(createdAt.Truncate(time.Second), inserted.CreatedAt)
+
+	comments, err := s.commentRepo().ListByIssueIDs(s.Ctx(), []string{"bd-cmt-ins-record"}, domain.CommentOpts{})
+	s.Require().NoError(err)
+	s.Require().Len(comments["bd-cmt-ins-record"], 1)
+	s.Equal("imported-comment-id", comments["bd-cmt-ins-record"][0].ID)
+	s.Equal(createdAt.Truncate(time.Second), comments["bd-cmt-ins-record"][0].CreatedAt)
 }
 
 func (s *testSuite) commentRepo() domain.CommentSQLRepository {

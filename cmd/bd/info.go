@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 var infoCmd = &cobra.Command{
@@ -71,9 +72,20 @@ Examples:
 				info["issue_count"] = len(issues)
 			}
 
+			// THE SAME FILTER THE SETTINGS ROLE USES. `bd info --json` serves
+			// this map whole, and the beads MCP server's get_schema_info tool
+			// runs `bd info --schema --json` and returns the parsed dict —
+			// config included — so every memory key AND VALUE landed in the
+			// transcript of any agent that asked a SCHEMA question. `bd info`
+			// is also the diagnostic people paste into bug reports.
+			//
+			// Unlike `bd config show`, which an operator asks for by name to
+			// see provenance, nothing here says "show me my memories".
 			configMap, err := store.GetAllConfig(ctx)
-			if err == nil && len(configMap) > 0 {
-				info["config"] = configMap
+			if err == nil {
+				if filtered := workapi.FilterSettingsEnumeration(configMap); len(filtered) > 0 {
+					info["config"] = filtered
+				}
 			}
 
 			if schemaFlag {
@@ -208,6 +220,74 @@ type VersionChange struct {
 
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
+	{
+		Version: "1.3.0",
+		Date:    "2026-09-15",
+		Changes: []string{
+			"RELEASE: first tested release off main since the 1.1 line. v1.2.2 shipped the v1.1.2 tree, so a v1.2.2 user gets the 1.2.1 changes AND the 1.3.0 changes in one step; read the [1.3.0] AND [1.2.1] sections of CHANGELOG.md. 'bd upgrade review' prints exactly the entries between your previous version and this one — prefer it to 'bd info --whats-new', which dumps the whole release history.",
+			"MIGRATION: on an embedded/local store the first invocation auto-migrates from schema v53 to v66 in place. That is ~28 migrations, not 13: the main series runs 0054->0066, then the clone-local series runs 0012->0026 through the same printer, so the counter VISIBLY RESTARTS partway through. That is not a loop — let it finish. Two passes rewrite rows, so the first command is noticeably slower; it is crash-resumable, do not interrupt it. Progress prints per step on stderr only when stderr is a terminal — a silent CI upgrade is not a stuck one.",
+			"SHARED SERVER: a shared Dolt sql-server is NEVER auto-migrated (#5920, #6048) — migrating promotes the schema for every connected client at once, so it waits for explicit consent via 'bd migrate schema' (add --global for the shared global database). Upgrade every client of that server FIRST; between upgrade and consent, upgraded clients read normally and their writes are refused with guidance. If the shared server also has a Dolt remote, use 'bd migrate --force' from exactly one machine, then 'bd dolt push'.",
+			"BACKUP: back up BEFORE installing, with your OLD binary. Under 1.3.0 'bd export' triggers the migration before exporting, so a snapshot taken afterwards cannot protect you against the migration going wrong. Old binary: 'bd dolt push' (remote-backed stores) then 'bd export --all -o .beads/backup/pre-1.3.0.jsonl'. For a Dolt-native snapshot use 'bd backup init <path>' then 'bd backup sync' — bare 'bd backup' is a command group that prints help and takes NO backup. Remote-backed stores stay gated after install; one designated clone migrates and pushes.",
+			"UPGRADE: after migrating, older co-resident binaries REFUSE the store (forward schema-skew guard), so every client sharing a store must be upgraded together. Check with 'which -a bd' and restart any long-running 'bd serve'. Rollback is a schema-cursor rollback: https://beads.gascity.com/recovery/accidental-1-2-1-release",
+			"BREAKING (highlights, not the full set — read the [1.2.1] CHANGELOG section too): 'bd update -s <done-status>' enforces close policy (override with --force); 'bd search' includes closed by default (narrow with --status open); the no-ID last-touched fallback on update/close is interactive-only; 'bd human list' hides done/frozen/pinned and validates --status; 'bd dolt push'/'bd sync' no longer adopt a git-origin-derived Dolt remote without consent; an explicitly configured Dolt port outranks BEADS_DOLT_PORT; and actor matching decodes an exact '--' run to '/'.",
+			"BREAKING: 'bd --readonly serve' is now REFUSED instead of binding a writable server, so a scripted read-only server does not come back up after this upgrade — drop the flag. 'bd config list' and GET /v0/beads/config no longer enumerate the kv. plane where 'bd remember' memories live (use 'bd kv'/'bd remember'; scripts get empty output, not an error). The published backend package drops OrphanHandling and issueops.CheckOrphan, so a Go consumer naming them no longer compiles.",
+			"BREAKING: the CPU profiling flag is now --cpu-profile; the old --profile spelling is gone with no alias and fails as an unknown flag.",
+			"CHANGE: migration 0061 rekeys every events/comments/snapshot/compaction-snapshot row to a content-derived (UUIDv5-over-SHA-256) id, once per clone, on the first open after upgrade. Ids captured before the upgrade will not resolve afterwards.",
+			"CHANGE: migration 0062 moves the events audit table to the clone-local plane — events keep full local durability and 'bd history <id> --events' still reads them, but they no longer replicate on push or pull.",
+			"CHANGE: the interactions.jsonl audit sidecar is opt-in (audit.enabled defaults false, or BD_AUDIT_ENABLED=1); use 'bd history <id> --events' instead. Auto-backup now defaults OFF under a Dolt sql-server (embedded is unchanged); set backup.enabled explicitly to override.",
+			"CHANGE: 'bd import' now ERRORS on a redirected stdin with no source argument instead of importing the default JSONL — use 'bd import -' or name the file. 'bd hooks install --chain/--force' are accepted no-ops; marker sections always preserve non-bd hook content.",
+			"FIX: 'bd purge'/'bd prune' select candidates by tier (#5995), so typed wisps minted before the ephemeral column are reachable again — the first purge after upgrade may clear considerably more than usual.",
+			"NEW: a two-level cooperative gate writes *.gate.lock files beside .beads and beside the Dolt physical root (e.g. .beads/embeddeddolt.gate.lock). They are flock names, never deleted; 'bd doctor --fix' adds the *.gate.lock* gitignore pattern.",
+		},
+	},
+	{
+		Version: "1.3.0-rc.2",
+		Date:    "2026-09-05",
+		Changes: []string{
+			"RC: candidate for the 1.3.0 line, carrying three server-mode fixes reported against rc.1; the [1.3.0] entry below still describes everything a 1.2.2 user meets, including the migration and backup notes — read it first.",
+			"FIX: an env-pointed Dolt sql-server (BEADS_DOLT_SERVER_PORT) is classified shared, not owned, so the #5920/#6048 shared-store consent gate runs instead of being bypassed. Before this, bd migrated the shared database in place and exited 0, and older co-resident clients were then hard-refused with a schema version mismatch (#6118).",
+			"FIX: a config.yaml server-mode workspace (dolt.mode: server, no metadata.json) is no longer misread as a legacy workspace — the guard resolves mode through the IsDoltServerMode precedence chain, and a .local_version witness naming bd 1.0 or later vetoes the legacy verdict in every mode (#6119).",
+			"FIX: a metadata-less server-mode workspace no longer opens a phantom .beads/embeddeddolt database that answered 'bd list' with a false-empty exit 0; substitution gates on IsDoltServerMode and honors BEADS_DOLT_SERVER_MODE (#6120).",
+			"CHANGE: 'bd ready --claim' under --proxied-server now refuses a --max-rows/BEADS_MAX_ROWS cap instead of silently dropping it; --claim is no longer exempt. Agent rigs that set the cap globally must unset it for proxied 'bd ready --claim'. Direct mode is unchanged.",
+		},
+	},
+	{
+		// Keyed so an rc.1 tester upgrading to rc.2 gets the rc.2 digest
+		// above instead of the whole release history: getVersionsSince
+		// returns every entry when it cannot find the previous version.
+		Version: "1.3.0-rc.1",
+		Date:    "2026-08-31",
+		Changes: []string{
+			"RC: first candidate for the 1.3.0 line. Everything a 1.2.2 user meets on the way here — the in-place schema migration, the shared-server consent gate, the backup ordering, and the breaking changes — is described in the [1.3.0] entry below; read it first.",
+		},
+	},
+	{
+		Version: "1.2.2",
+		Date:    "2026-08-15",
+		Changes: []string{
+			"RELEASE: v1.2.2 re-releases the tested 1.1 line (identical code to v1.1.2) to supersede the accidental, untested v1.2.0/v1.2.1; 1.2.x-only features (leases, events journal, sync federation, HTTP API server, provenance) are not included.",
+			"RECOVERY: if v1.2.1 already migrated a database to schema v65, the v1.2.2 binary refuses with a schema version mismatch; see https://beads.gascity.com/recovery/accidental-1-2-1-release — recommended fix is rolling the schema_migrations cursor back to v53, stopgap is BD_IGNORE_SCHEMA_SKEW=1.",
+			"GO: go.mod retracts v1.2.1/v1.2.0/v1.1.1 so 'go install ...@latest' resolves to v1.2.2.",
+		},
+	},
+	{
+		Version: "1.2.1",
+		Date:    "2026-08-11",
+		Changes: []string{
+			"MIGRATION: first open with this binary runs migration 0062 (events -> dolt_ignored storage, bd-red8u): a one-time four-phase self-committing flip that removes per-event dolt commit churn. Expect one slower first invocation per clone; do not interrupt it.",
+			"NEW: `bd sync` — the federation loop (export, commit, pull, import, push) as one verb.",
+			"NEW: `--brief` on `bd list` / `bd ready --json` and the HTTP listings — omits free-form text fields (~93% smaller payloads on large stores); fields are omitted without a marker, so only the caller that passed the flag knows rows are partial.",
+			"BEHAVIOR: expired dated defers now AUTO-WAKE on ready-front reads and claims (#5386) — a lapsed `--defer` no longer hides an issue forever; stale defers surface on the next `bd ready`.",
+			"PERF: telemetry no longer costs startup time on every invocation (#5646), and the queued-events dir is bounded (7d TTL + drop-oldest caps, #5660) — a backlogged ~/.beads/eventsData self-prunes.",
+		},
+	},
+	{
+		Version: "1.1.2",
+		Date:    "2026-07-26",
+		Changes: []string{
+			"FIX: the v53 aux row re-key no longer aborts the migration on dolt#11131 encoding drift ('invalid hash length' panic); drifted tables are skipped with a warning, recorded clone-locally, and retried on later passes instead of leaving the database unopenable (#4380).",
+		},
+	},
 	{
 		Version: "1.1.0",
 		Date:    "2026-07-04",

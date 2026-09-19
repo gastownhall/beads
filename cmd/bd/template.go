@@ -1,17 +1,30 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+// configReader is the minimal slice of storage.Storage that config-reading
+// helpers depend on, letting tests inject a fake without spinning up a Dolt
+// server. Transaction-bound writers (storeMolWriter) satisfy it with reads
+// that see in-transaction config writes.
+type configReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+}
 
 // BeadsTemplateLabel is the label used to identify Beads-based templates
 const BeadsTemplateLabel = "template"
@@ -67,7 +80,7 @@ var bondedIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 // =============================================================================
 
 // loadTemplateSubgraph loads a template epic and all its descendants
-func loadTemplateSubgraph(ctx context.Context, s storage.DoltStorage, templateID string) (*TemplateSubgraph, error) {
+func loadTemplateSubgraph(ctx context.Context, s molReader, templateID string) (*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -117,7 +130,7 @@ func loadTemplateSubgraph(ctx context.Context, s storage.DoltStorage, templateID
 //
 // The visited set tracks IDs already expanded to detect cycles (GH#2719).
 // Without this, cyclic parent-child dependencies cause unbounded recursion leading to OOM.
-func loadDescendants(ctx context.Context, s storage.DoltStorage, subgraph *TemplateSubgraph, parentID string, visited map[string]bool) error {
+func loadDescendants(ctx context.Context, s molReader, subgraph *TemplateSubgraph, parentID string, visited map[string]bool) error {
 	// Track children we've already added to avoid duplicates
 	addedChildren := make(map[string]bool)
 
@@ -212,7 +225,7 @@ func loadDescendants(ctx context.Context, s storage.DoltStorage, subgraph *Templ
 
 // findHierarchicalChildren finds issues with IDs that match the pattern parentID.N
 // This catches hierarchical children that may be missing parent-child dependencies.
-func findHierarchicalChildren(ctx context.Context, s storage.DoltStorage, parentID string) ([]*types.Issue, error) {
+func findHierarchicalChildren(ctx context.Context, s molReader, parentID string) ([]*types.Issue, error) {
 	pattern := parentID + "."
 	candidates, err := s.SearchIssues(ctx, "", types.IssueFilter{IDPrefix: pattern})
 	if err != nil {
@@ -238,7 +251,7 @@ func findHierarchicalChildren(ctx context.Context, s storage.DoltStorage, parent
 // It first tries to resolve as an ID (via ResolvePartialID).
 // If that fails, it searches for protos with matching titles.
 // Returns the proto ID if found, or an error if not found or ambiguous.
-func resolveProtoIDOrTitle(ctx context.Context, s storage.DoltStorage, input string) (string, error) {
+func resolveProtoIDOrTitle(ctx context.Context, s molReader, input string) (string, error) {
 	// Strategy 1: Try to resolve as an ID
 	protoID, err := utils.ResolvePartialID(ctx, s, input)
 	if err == nil {
@@ -402,6 +415,84 @@ func substituteVariables(text string, vars map[string]string) string {
 	})
 }
 
+// substituteMetadataRepo substitutes {{variable}} placeholders in an issue's
+// metadata.repo value (SF2 follow-up). A formula gate step's `repo` selector
+// (e.g. repo = "{{gate_repo}}") is stored literally on the persisted proto's
+// metadata by createGateIssue/persistCookFormula - `bd cook --persist` keeps
+// the proto reusable across pours rather than substituting at compile time.
+// Substitution instead needs to happen at the same point as every other
+// var-bearing issue field (Title, Description, AwaitID, ...): here, in
+// cloneSubgraphInto, when a proto is poured/spawned into real issues.
+//
+// Restricted to gh:* gate types (SF4), matching createGateIssue's write-side
+// rule: `repo` on a human/timer/bead gate is unrelated, ordinary metadata,
+// not a GitHub repo selector, so it must not be touched here either.
+//
+// Metadata is arbitrary JSON on any issue, so this only touches a top-level
+// string-valued "repo" key; anything else (missing key, non-object, non-
+// string value) is left untouched for githubRepoFromIssue to validate at
+// check time. The round-trip unmarshals into map[string]json.RawMessage
+// rather than map[string]interface{} and replaces only the "repo" entry, so
+// every OTHER key's value survives byte-identical - interface{} would
+// mangle numbers to float64, and a full re-marshal of decoded values can
+// reshuffle nested object keys and HTML-escape strings that were never
+// touched.
+func substituteMetadataRepo(metadata json.RawMessage, awaitType string, vars map[string]string) json.RawMessage {
+	if len(metadata) == 0 || !isGitHubGateType(awaitType) {
+		return metadata
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(metadata, &raw); err != nil {
+		return metadata
+	}
+
+	repoRaw, hasRepo := raw["repo"]
+	if !hasRepo {
+		return metadata
+	}
+
+	var repoStr string
+	if err := json.Unmarshal(repoRaw, &repoStr); err != nil {
+		// Non-string (e.g. null) repo value: leave untouched for
+		// githubRepoFromIssue to reject at check time.
+		return metadata
+	}
+
+	substituted := substituteVariables(repoStr, vars)
+	if substituted == repoStr {
+		return metadata
+	}
+
+	substitutedJSON, err := marshalNoHTMLEscape(substituted)
+	if err != nil {
+		return metadata
+	}
+	raw["repo"] = substitutedJSON
+
+	out, err := marshalNoHTMLEscape(raw)
+	if err != nil {
+		return metadata
+	}
+	return out
+}
+
+// marshalNoHTMLEscape is json.Marshal without HTML-escaping '<', '>', and
+// '&' - the stdlib's json.Marshal escapes them by default (aimed at
+// embedding JSON in HTML), which would silently corrupt an unrelated
+// metadata value round-tripped through substituteMetadataRepo.
+func marshalNoHTMLEscape(v interface{}) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// json.Encoder.Encode appends a trailing newline; callers embed this
+	// result as a json.RawMessage value, which must not carry one.
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // generateBondedID creates a custom ID for dynamically bonded molecules.
 // When bonding a proto to a parent molecule, this generates IDs like:
 //   - Root: parent.childref (e.g., "patrol-x7k.arm-ace")
@@ -478,75 +569,78 @@ func getRelativeID(oldID, rootID string) string {
 	return ""
 }
 
-// ensureSubgraphCustomTypes scans the template subgraph for issue types
-// that are not built-in and ensures they are registered as custom types
-// in the database. This is needed because formula cooking can produce
-// issues with types like "gate" (for async coordination beads) that are
-// not in the default type whitelist. Without this, cloneSubgraph fails
-// with "invalid issue type" on the first non-built-in bead. (GH#3213)
-func ensureSubgraphCustomTypes(ctx context.Context, s storage.DoltStorage, subgraph *TemplateSubgraph) error {
-	// Collect non-built-in types used by the subgraph.
-	needed := make(map[string]bool)
-	for _, issue := range subgraph.Issues {
+// flattenUnregisteredIssueTypes flattens issue types that are neither
+// built-in nor already registered in types.custom, printing a warning
+// naming each flattened type. Issues with children (the DependsOnID side
+// of a parent-child dep) flatten to epic — matching the default for
+// undeclared parent step types — and leaves flatten to task.
+// Materializing a formula must not silently grow the type whitelist — a
+// typo'd step type would become a permanently registered custom type — so
+// unregistered types degrade instead; operators opt in with bd config set
+// types.custom before pouring. Without the flatten, issue creation fails
+// with "invalid issue type" on the first unregistered bead.
+// (GH#3213, GH#5443)
+func flattenUnregisteredIssueTypes(ctx context.Context, s configReader, issues []*types.Issue, deps []*types.Dependency) error {
+	// Seed with every non-built-in type used by the issues, then remove the
+	// registered ones below; what survives is unknown. IsBuiltIn (not
+	// IsValid) matches the validator this check exists to satisfy:
+	// IsValidWithCustom short-circuits on IsBuiltIn, so types like "event"
+	// need no types.custom entry.
+	unknown := make(map[types.IssueType]bool)
+	for _, issue := range issues {
 		t := issue.IssueType
-		if t == "" || t.IsValid() {
+		if t == "" || t.IsBuiltIn() {
 			continue
 		}
-		needed[string(t)] = true
+		unknown[t] = true
 	}
-	if len(needed) == 0 {
+	if len(unknown) == 0 {
 		return nil
 	}
 
-	// Read the current custom types and check which are missing.
+	// Match insert validation's sources: the types.custom config value
+	// (kept in step with the custom_types table by SyncConfigTables)
+	// overlaid with config.yaml-declared types. Read through s so a
+	// transaction-bound caller sees in-transaction registration.
 	existing, err := s.GetConfig(ctx, "types.custom")
 	if err != nil {
-		existing = ""
+		// Don't degrade to "nothing registered": a transient read failure
+		// would silently flatten types the operator did register.
+		return fmt.Errorf("reading types.custom: %w", err)
 	}
-	var current []string
-	if existing != "" {
-		// parseTypesValue handles both JSON arrays and comma-separated.
-		// It's in issueops — but we don't import that package here, so
-		// do a simple comma split (good enough for the merge check).
-		for _, t := range strings.Split(strings.Trim(existing, "[] \""), ",") {
-			t = strings.Trim(t, " \"")
-			if t != "" {
-				current = append(current, t)
+	for _, t := range issueops.ParseTypesConfigValue(existing) {
+		delete(unknown, types.IssueType(t))
+	}
+	for _, t := range config.GetCustomTypesFromYAML() {
+		delete(unknown, types.IssueType(t))
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(unknown))
+	for t := range unknown {
+		names = append(names, string(t))
+	}
+	sort.Strings(names)
+	WarnError("flattening unregistered issue type(s) to task (epic for steps with children): %s (register with bd config set types.custom to keep them)", strings.Join(names, ", "))
+
+	hasChildren := make(map[string]bool)
+	for _, dep := range deps {
+		if dep.Type == types.DepParentChild {
+			hasChildren[dep.DependsOnID] = true
+		}
+	}
+	for _, issue := range issues {
+		if unknown[issue.IssueType] {
+			if hasChildren[issue.ID] {
+				issue.IssueType = types.TypeEpic
+			} else {
+				issue.IssueType = types.TypeTask
 			}
 		}
 	}
-	currentSet := make(map[string]bool, len(current))
-	for _, t := range current {
-		currentSet[t] = true
-	}
-
-	var toAdd []string
-	for t := range needed {
-		if !currentSet[t] {
-			toAdd = append(toAdd, t)
-		}
-	}
-	if len(toAdd) == 0 {
-		return nil
-	}
-
-	// Merge and write back. SetConfig triggers SyncCustomTypesTable
-	// which populates the normalized custom_types table used by
-	// PrepareIssueForInsert → ValidateWithCustom.
-	merged := append(current, toAdd...)
-	// Serialize as JSON array for consistency with bd config set.
-	var buf strings.Builder
-	buf.WriteString("[")
-	for i, t := range merged {
-		if i > 0 {
-			buf.WriteString(",")
-		}
-		buf.WriteString("\"")
-		buf.WriteString(t)
-		buf.WriteString("\"")
-	}
-	buf.WriteString("]")
-	return s.SetConfig(ctx, "types.custom", buf.String())
+	return nil
 }
 
 // cloneSubgraph creates new issues from the template with variable substitution.
@@ -556,107 +650,110 @@ func cloneSubgraph(ctx context.Context, s storage.DoltStorage, subgraph *Templat
 		return nil, fmt.Errorf("no database connection")
 	}
 
-	// Auto-register any non-built-in issue types used by the subgraph
-	// so that formula-generated beads (e.g., type "gate" for async
-	// coordination) pass type validation without requiring the operator
-	// to run `bd config set types.custom` manually first. See GH#3213.
-	if err := ensureSubgraphCustomTypes(ctx, s, subgraph); err != nil {
-		return nil, fmt.Errorf("registering custom types for subgraph: %w", err)
-	}
-
-	// Generate new IDs and create mapping
-	idMapping := make(map[string]string)
-
-	// Use transaction for atomicity
+	var result *InstantiateResult
 	err := transact(ctx, s, "bd: clone template subgraph", func(tx storage.Transaction) error {
-		// First pass: create all issues with new IDs
-		for _, oldIssue := range subgraph.Issues {
-			// RootOnly: skip child issues, only create the root
-			if opts.RootOnly && oldIssue.ID != subgraph.Root.ID {
-				continue
-			}
-			// Determine assignee: use override for root epic, otherwise keep template's
-			issueAssignee := oldIssue.Assignee
-			if oldIssue.ID == subgraph.Root.ID && opts.Assignee != "" {
-				issueAssignee = opts.Assignee
-			}
-
-			newIssue := &types.Issue{
-				// ID will be set below based on bonding options
-				Title:              substituteVariables(oldIssue.Title, opts.Vars),
-				Description:        substituteVariables(oldIssue.Description, opts.Vars),
-				Design:             substituteVariables(oldIssue.Design, opts.Vars),
-				AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
-				Notes:              substituteVariables(oldIssue.Notes, opts.Vars),
-				Status:             types.StatusOpen, // Always start fresh
-				Priority:           oldIssue.Priority,
-				IssueType:          oldIssue.IssueType,
-				Assignee:           issueAssignee,
-				EstimatedMinutes:   oldIssue.EstimatedMinutes,
-				Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
-				IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
-				// Gate fields (for async coordination)
-				AwaitType: oldIssue.AwaitType,
-				AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
-				Timeout:   oldIssue.Timeout,
-				Labels:    oldIssue.Labels,
-				Metadata:  oldIssue.Metadata,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-			}
-
-			// Generate custom ID for dynamic bonding if ParentID is set
-			if opts.ParentID != "" {
-				bondedID, err := generateBondedID(oldIssue.ID, subgraph.Root.ID, opts)
-				if err != nil {
-					return fmt.Errorf("failed to generate bonded ID for %s: %w", oldIssue.ID, err)
-				}
-				newIssue.ID = bondedID
-			}
-
-			if err := tx.CreateIssue(ctx, newIssue, opts.Actor); err != nil {
-				return fmt.Errorf("failed to create issue from %s: %w", oldIssue.ID, err)
-			}
-
-			idMapping[oldIssue.ID] = newIssue.ID
+		r, err := cloneSubgraphInto(ctx, storeMolWriter{DoltStorage: s, tx: tx}, subgraph, opts)
+		if err != nil {
+			return err
 		}
-
-		// Second pass: recreate dependencies with new IDs
-		for _, dep := range subgraph.Dependencies {
-			newFromID, ok1 := idMapping[dep.IssueID]
-			newToID, ok2 := idMapping[dep.DependsOnID]
-			if !ok1 || !ok2 {
-				continue // Skip if either end is outside the subgraph
-			}
-
-			newDep := &types.Dependency{
-				IssueID:     newFromID,
-				DependsOnID: newToID,
-				Type:        dep.Type,
-			}
-			if err := tx.AddDependency(ctx, newDep, opts.Actor); err != nil {
-				return fmt.Errorf("failed to create dependency: %w", err)
-			}
-		}
-
-		// Atomic attachment: link spawned root to target molecule within
-		// the same transaction (bd-wvplu: prevents orphaned spawns)
-		if opts.AttachToID != "" {
-			attachDep := &types.Dependency{
-				IssueID:     idMapping[subgraph.Root.ID],
-				DependsOnID: opts.AttachToID,
-				Type:        opts.AttachDepType,
-			}
-			if err := tx.AddDependency(ctx, attachDep, opts.Actor); err != nil {
-				return fmt.Errorf("attaching to molecule: %w", err)
-			}
-		}
-
+		result = r
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
+	}
+	return result, nil
+}
+
+func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
+	if err := flattenUnregisteredIssueTypes(ctx, w, subgraph.Issues, subgraph.Dependencies); err != nil {
+		return nil, fmt.Errorf("checking custom types for subgraph: %w", err)
+	}
+
+	idMapping := make(map[string]string)
+
+	// First pass: create all issues with new IDs
+	for _, oldIssue := range subgraph.Issues {
+		// RootOnly: skip child issues, only create the root
+		if opts.RootOnly && oldIssue.ID != subgraph.Root.ID {
+			continue
+		}
+		// Determine assignee: use override for root epic, otherwise keep template's
+		issueAssignee := oldIssue.Assignee
+		if oldIssue.ID == subgraph.Root.ID && opts.Assignee != "" {
+			issueAssignee = opts.Assignee
+		}
+
+		newIssue := &types.Issue{
+			// ID will be set below based on bonding options
+			Title:              substituteVariables(oldIssue.Title, opts.Vars),
+			Description:        substituteVariables(oldIssue.Description, opts.Vars),
+			Design:             substituteVariables(oldIssue.Design, opts.Vars),
+			AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
+			Notes:              substituteVariables(oldIssue.Notes, opts.Vars),
+			Status:             types.StatusOpen, // Always start fresh
+			Priority:           oldIssue.Priority,
+			IssueType:          oldIssue.IssueType,
+			Assignee:           issueAssignee,
+			EstimatedMinutes:   oldIssue.EstimatedMinutes,
+			Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
+			IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
+			// Gate fields (for async coordination)
+			AwaitType: oldIssue.AwaitType,
+			AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
+			Timeout:   oldIssue.Timeout,
+			Labels:    oldIssue.Labels,
+			Metadata:  substituteMetadataRepo(oldIssue.Metadata, oldIssue.AwaitType, opts.Vars),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+
+		// Generate custom ID for dynamic bonding if ParentID is set
+		if opts.ParentID != "" {
+			bondedID, err := generateBondedID(oldIssue.ID, subgraph.Root.ID, opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate bonded ID for %s: %w", oldIssue.ID, err)
+			}
+			newIssue.ID = bondedID
+		}
+
+		if err := w.CreateIssue(ctx, newIssue, opts.Actor); err != nil {
+			return nil, fmt.Errorf("failed to create issue from %s: %w", oldIssue.ID, err)
+		}
+
+		idMapping[oldIssue.ID] = newIssue.ID
+	}
+
+	// Second pass: recreate dependencies with new IDs
+	for _, dep := range subgraph.Dependencies {
+		newFromID, ok1 := idMapping[dep.IssueID]
+		newToID, ok2 := idMapping[dep.DependsOnID]
+		if !ok1 || !ok2 {
+			continue // Skip if either end is outside the subgraph
+		}
+
+		newDep := &types.Dependency{
+			IssueID:     newFromID,
+			DependsOnID: newToID,
+			Type:        dep.Type,
+			Metadata:    dep.Metadata,
+		}
+		if err := w.AddDependency(ctx, newDep, opts.Actor); err != nil {
+			return nil, fmt.Errorf("failed to create dependency: %w", err)
+		}
+	}
+
+	// Atomic attachment: link spawned root to target molecule within
+	// the same transaction (bd-wvplu: prevents orphaned spawns)
+	if opts.AttachToID != "" {
+		attachDep := &types.Dependency{
+			IssueID:     idMapping[subgraph.Root.ID],
+			DependsOnID: opts.AttachToID,
+			Type:        opts.AttachDepType,
+		}
+		if err := w.AddDependency(ctx, attachDep, opts.Actor); err != nil {
+			return nil, fmt.Errorf("attaching to molecule: %w", err)
+		}
 	}
 
 	return &InstantiateResult{

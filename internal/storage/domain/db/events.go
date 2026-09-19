@@ -25,12 +25,7 @@ func (r *eventsSQLRepositoryImpl) Record(ctx context.Context, evt domain.Event, 
 	if opts.UseWispsTable {
 		table = "wisp_events"
 	}
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	_, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, table), issueops.NewEventID(), evt.IssueID, string(evt.Type), evt.Actor, evt.OldValue, evt.NewValue)
-	if err != nil {
+	if err := issueops.RecordFullEventInTable(ctx, r.runner, table, evt.IssueID, evt.Type, evt.Actor, evt.OldValue, evt.NewValue); err != nil {
 		return fmt.Errorf("db: record event in %s: %w", table, err)
 	}
 	return nil

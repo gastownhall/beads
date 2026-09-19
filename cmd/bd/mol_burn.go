@@ -56,9 +56,6 @@ type BatchBurnResult struct {
 }
 
 func runMolBurn(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("mol burn is not supported in proxied-server mode")
-	}
 	CheckReadonly("mol burn")
 
 	evt := metrics.NewCommandEvent("mol-burn")
@@ -68,16 +65,20 @@ func runMolBurn(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	ctx := rootCtx
-
-	if store == nil {
-		return HandleErrorWithHint("no database connection", diagHint())
-	}
-
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	force, _ := cmd.Flags().GetBool("force")
 	if yes, _ := cmd.Flags().GetBool("yes"); yes {
 		force = true
+	}
+
+	if usesProxiedServer() {
+		return runMolBurnProxiedServer(rootCtx, args, dryRun, force)
+	}
+
+	ctx := rootCtx
+
+	if store == nil {
+		return HandleErrorWithHint("no database connection", diagHint())
 	}
 
 	if len(args) == 1 {
@@ -189,7 +190,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 
 	// Batch delete all wisps in one call
 	if len(wispIDs) > 0 {
-		result, err := burnWisps(ctx, store, wispIDs)
+		result, err := burnWisps(ctx, store, wispIDs, actor)
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Error burning wisps: %v\n", err)
@@ -295,7 +296,7 @@ func burnWispMolecule(ctx context.Context, resolvedID string, dryRun, force bool
 		}
 	}
 
-	result, err := burnWisps(ctx, store, wispIDs)
+	result, err := burnWisps(ctx, store, wispIDs, actor)
 	if err != nil {
 		return HandleErrorRespectJSON("burning wisp: %v", err)
 	}
@@ -373,25 +374,33 @@ func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, forc
 
 // burnWisps deletes all wisp issues atomically within a single transaction.
 // If any delete fails, the entire operation is rolled back to prevent partial deletion.
-func burnWisps(ctx context.Context, s storage.DoltStorage, ids []string) (*BurnResult, error) {
-	result := &BurnResult{
-		DeletedIDs: make([]string, 0, len(ids)),
-	}
-
+func burnWisps(ctx context.Context, s storage.DoltStorage, ids []string, actorName string) (*BurnResult, error) {
+	var result *BurnResult
 	err := transact(ctx, s, "bd: burn wisps", func(tx storage.Transaction) error {
-		for _, id := range ids {
-			if err := tx.DeleteIssue(ctx, id); err != nil {
-				return fmt.Errorf("failed to delete wisp %s: %w", id, err)
-			}
-			result.DeletedIDs = append(result.DeletedIDs, id)
-			result.DeletedCount++
+		r, err := burnWispsInto(ctx, storeMolWriter{DoltStorage: s, tx: tx}, ids, actorName)
+		if err != nil {
+			return err
 		}
+		result = r
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	return result, nil
+}
 
+func burnWispsInto(ctx context.Context, w molWriter, ids []string, actorName string) (*BurnResult, error) {
+	result := &BurnResult{
+		DeletedIDs: make([]string, 0, len(ids)),
+	}
+	for _, id := range ids {
+		if err := w.DeleteIssue(ctx, id, actorName); err != nil {
+			return nil, fmt.Errorf("failed to delete wisp %s: %w", id, err)
+		}
+		result.DeletedIDs = append(result.DeletedIDs, id)
+		result.DeletedCount++
+	}
 	return result, nil
 }
 

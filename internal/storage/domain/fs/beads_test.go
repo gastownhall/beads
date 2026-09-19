@@ -25,7 +25,8 @@ func (s *testSuite) TestBeadsDirFSRepository() {
 	s.Run("WriteBeadsGitignore", func() {
 		s.Run("WritesTemplate", s.writeBeadsGitignoreWrites)
 		s.Run("IdempotentOnMatchingContent", s.writeBeadsGitignoreIdempotent)
-		s.Run("OverwritesDifferingContent", s.writeBeadsGitignoreOverwrites)
+		s.Run("AppendsMissingPatternsPreservingLocal", s.writeBeadsGitignoreAppendsMissing)
+		s.Run("LeavesFileWithAllPatternsUntouched", s.writeBeadsGitignoreLeavesCoveredFile)
 	})
 	s.Run("BeadsGitignoreExists", func() {
 		s.Run("MissingReturnsFalse", s.beadsGitignoreExistsMissing)
@@ -142,17 +143,36 @@ func (s *testSuite) writeBeadsGitignoreIdempotent() {
 	s.Equal(before.ModTime(), after.ModTime(), "file should not be rewritten when content already matches")
 }
 
-func (s *testSuite) writeBeadsGitignoreOverwrites() {
+func (s *testSuite) writeBeadsGitignoreAppendsMissing() {
 	_, beadsDir, repo := s.newRepo()
 	s.Require().NoError(os.MkdirAll(beadsDir, 0700))
 	path := filepath.Join(beadsDir, ".gitignore")
-	s.Require().NoError(os.WriteFile(path, []byte("stale\n"), 0600))
+	s.Require().NoError(os.WriteFile(path, []byte("!issues.jsonl\n"), 0600))
 
 	s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()))
 
 	data, err := os.ReadFile(path)
 	s.Require().NoError(err)
-	s.Equal(testTemplates().BeadsGitignore, string(data))
+	// bd-kaaz3: local rules survive; the template's pattern lines are appended.
+	s.Contains(string(data), "!issues.jsonl")
+	s.Contains(string(data), "dolt/")
+	s.True(strings.HasPrefix(string(data), "!issues.jsonl\n"), "local content must stay at the top, got:\n%s", data)
+}
+
+func (s *testSuite) writeBeadsGitignoreLeavesCoveredFile() {
+	_, beadsDir, repo := s.newRepo()
+	s.Require().NoError(os.MkdirAll(beadsDir, 0700))
+	path := filepath.Join(beadsDir, ".gitignore")
+	// Different from the template byte-wise, but every template pattern line
+	// is present — nothing to append, the file must not be rewritten.
+	local := "# my notes\ndolt/\n!issues.jsonl\n"
+	s.Require().NoError(os.WriteFile(path, []byte(local), 0600))
+
+	s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()))
+
+	data, err := os.ReadFile(path)
+	s.Require().NoError(err)
+	s.Equal(local, string(data))
 }
 
 func (s *testSuite) beadsGitignoreExistsMissing() {

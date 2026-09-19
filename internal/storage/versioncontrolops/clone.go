@@ -19,10 +19,14 @@ func DoltClone(ctx context.Context, conn DBConn, remoteURL, database, user strin
 		args = []any{user, remoteURL, database}
 	}
 
-	if _, err := conn.ExecContext(ctx, query, args...); err != nil {
-		return fmt.Errorf("dolt clone %s: %w", sanitizeURL(remoteURL), err)
-	}
-	return nil
+	// GH#4272: the initial fetch runs git hooks just like push/pull; disable
+	// them for the clone window too (see remotes.go for the full rationale).
+	return withRemoteEnvGuards(func() error {
+		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("dolt clone %s: %w", sanitizeURL(remoteURL), err)
+		}
+		return nil
+	})
 }
 
 // sanitizeURL removes credentials from a URL for safe error reporting.

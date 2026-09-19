@@ -105,31 +105,30 @@ func TestProtocol_ReadyDefaultOrdering(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
 
-	// created_at has second granularity, so space the issues whose creation
-	// order the test asserts. Same-second pairs are handled by the id tiebreak,
-	// which the two explicit-id issues below exercise.
-	oldP2 := w.create("--title", "old p2", "-p", "2")
-	time.Sleep(1100 * time.Millisecond)
-	oldP1 := w.create("--title", "old p1", "-p", "1")
-	time.Sleep(1100 * time.Millisecond)
-	newP1 := w.create("--title", "new p1", "-p", "1")
-	p0 := w.create("--title", "urgent", "-p", "0")
-
-	// Two same-priority issues that share created_at exactly, so ONLY the id
-	// ASC tiebreak can order them. created_at has second granularity and a bd
-	// invocation takes longer than that, so the pair is imported (J6) rather
-	// than created — a CLI-created pair would straddle a second boundary and
-	// silently stop exercising the tiebreak.
-	prefix, _, _ := strings.Cut(oldP2, "-")
-	tieA, tieB := prefix+"-tieaaaa", prefix+"-tiebbbb"
+	// Import every issue with explicit timestamps, including the same-second
+	// pair that exercises the id ASC tiebreak. This avoids depending on wall
+	// clock granularity or the duration of individual bd create invocations.
+	oldP2 := w.prefix + "-oldp2"
+	oldP1 := w.prefix + "-oldp1"
+	newP1 := w.prefix + "-newp1"
+	p0 := w.prefix + "-urgent"
+	tieA, tieB := w.prefix+"-tieaaaa", w.prefix+"-tiebbbb"
 	w.importIssues(
-		tiedIssueJSONL(tieB, "tie b", 3, "2020-01-01T00:00:00Z"),
-		tiedIssueJSONL(tieA, "tie a", 3, "2020-01-01T00:00:00Z"),
+		readyIssueJSONL(oldP2, "old p2", 2, "2020-01-01T00:00:00Z"),
+		readyIssueJSONL(oldP1, "old p1", 1, "2020-01-01T00:01:00Z"),
+		readyIssueJSONL(newP1, "new p1", 1, "2020-01-01T00:02:00Z"),
+		readyIssueJSONL(p0, "urgent", 0, "2020-01-01T00:03:00Z"),
+		readyIssueJSONL(tieB, "tie b", 3, "2020-01-01T00:04:00Z"),
+		readyIssueJSONL(tieA, "tie a", 3, "2020-01-01T00:04:00Z"),
 	)
 
 	items := readyItems(t, w)
 	if len(items) != 6 {
 		t.Fatalf("R2: expected 6 ready issues, got %d: %v", len(items), items)
+	}
+	requireStringSetEqual(t, ids(items), []string{oldP2, oldP1, newP1, p0, tieA, tieB}, "R2 setup: imported fixture membership")
+	if old, new := itemByID(items, oldP1), itemByID(items, newP1); !old.createdAt.Before(new.createdAt) {
+		t.Fatalf("R2 setup: old P1 %s must be created before new P1 %s, got %s and %s", oldP1, newP1, old.createdAt, new.createdAt)
 	}
 
 	// The observed sequence MUST equal the sequence the R2 comparator produces
@@ -168,9 +167,8 @@ func TestProtocol_ReadyDefaultOrdering(t *testing.T) {
 	}
 }
 
-// tiedIssueJSONL renders one JSONL issue line with an explicit created_at, so a
-// test can construct issues whose timestamps tie exactly.
-func tiedIssueJSONL(id, title string, priority int, createdAt string) string {
+// readyIssueJSONL renders one JSONL issue line with an explicit created_at.
+func readyIssueJSONL(id, title string, priority int, createdAt string) string {
 	line, err := json.Marshal(map[string]any{
 		"id":         id,
 		"title":      title,

@@ -48,18 +48,43 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
-	if _, err := r.runner.ExecContext(ctx,
+	result, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)", table),
 		issueID, label,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
 	}
-	return r.events.Record(ctx, domain.Event{
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: rows affected: %w", issueID, label, err)
+	}
+	if rows == 0 {
+		issueTable := "issues"
+		if opts.UseWispsTable {
+			issueTable = "wisps"
+		}
+		var count int
+		//nolint:gosec // G201: issueTable is one of two hardcoded constants.
+		if err := r.runner.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", issueTable), issueID).Scan(&count); err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: verify issue: %w", issueID, label, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: issue does not exist", issueID, label)
+		}
+		return nil
+	}
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
 		Actor:    actor,
 		NewValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	// A label is part of the bead snapshot; the idempotent no-op path above
+	// returns without writing and journals nothing.
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
@@ -71,18 +96,29 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
-	if _, err := r.runner.ExecContext(ctx,
+	result, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? AND label = ?", table),
 		issueID, label,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: %w", issueID, label, err)
 	}
-	return r.events.Record(ctx, domain.Event{
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: rows affected: %w", issueID, label, err)
+	}
+	if rows == 0 {
+		return nil
+	}
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelRemoved,
 		Actor:    actor,
 		OldValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts domain.LabelOpts) ([]string, error) {
@@ -116,36 +152,34 @@ func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts 
 
 func (r *labelSQLRepositoryImpl) ListByIssueIDs(ctx context.Context, issueIDs []string, opts domain.LabelOpts) (map[string][]string, error) {
 	result := make(map[string][]string)
-	if len(issueIDs) == 0 {
-		return result, nil
-	}
-	placeholders := make([]string, len(issueIDs))
-	args := make([]any, len(issueIDs))
-	for i, id := range issueIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
 	table := pickLabelTable(opts.UseWispsTable)
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	q := fmt.Sprintf(
-		"SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label",
-		table, strings.Join(placeholders, ","),
-	)
-	rows, err := r.runner.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var issueID, label string
-		if err := rows.Scan(&issueID, &label); err != nil {
-			return nil, fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: scan: %w", err)
+	err := forEachIDBatch(issueIDs, func(batch []string) error {
+		placeholders, args := buildInPlaceholders(batch)
+		//nolint:gosec // G201: table is one of two hardcoded constants
+		q := fmt.Sprintf(
+			"SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label",
+			table, placeholders,
+		)
+		rows, err := r.runner.QueryContext(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: %w", err)
 		}
-		result[issueID] = append(result[issueID], label)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: rows: %w", err)
+		defer rows.Close()
+
+		for rows.Next() {
+			var issueID, label string
+			if err := rows.Scan(&issueID, &label); err != nil {
+				return fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: scan: %w", err)
+			}
+			result[issueID] = append(result[issueID], label)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: rows: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }

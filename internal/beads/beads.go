@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -485,6 +486,14 @@ func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 			// storage-selection layer report the metadata error without routing
 			// through a leftover local Dolt directory.
 			return ""
+		}
+		// A registered backend whose workspace is the .beads directory has no
+		// separately discoverable local database; metadata.json plus its remote
+		// store identify the workspace. Return the .beads dir itself so extension
+		// callers discover it, mirroring the CLI's registered-workspace path in
+		// cmd/bd/main.go instead of falling through to Dolt-only discovery.
+		if backends.WorkspaceIsBeadsDir(cfg.GetBackend()) {
+			return beadsDir
 		}
 		// For Dolt server mode, database is on the server - no local directory required
 		if cfg.IsDoltServerMode() {

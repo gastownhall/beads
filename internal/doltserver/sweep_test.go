@@ -144,3 +144,40 @@ func TestIsUnderDir(t *testing.T) {
 		}
 	}
 }
+
+func TestGatherPSCandidates(t *testing.T) {
+	psOutput := []byte(`
+  101 dolt sql-server -H 127.0.0.1 -P 12345
+not-a-pid dolt sql-server
+  102 dolt status
+  103 /opt/dolt --prof cpu sql-server -P 12346
+  104 dolt sql-server -P 12347
+`)
+	cwds := map[int]struct {
+		dir     string
+		deleted bool
+		ok      bool
+	}{
+		101: {dir: "/tmp/my-suite/.beads/dolt", ok: true},
+		103: {dir: "/tmp/deleted-suite/.beads/dolt", deleted: true, ok: true},
+		104: {ok: false},
+	}
+
+	candidates := gatherPSCandidates(psOutput, func(pid int) (string, bool, bool) {
+		cwd := cwds[pid]
+		return cwd.dir, cwd.deleted, cwd.ok
+	})
+	wantCandidates := []serverCandidate{
+		{pid: 101, cmdline: "dolt sql-server -H 127.0.0.1 -P 12345", cwd: "/tmp/my-suite/.beads/dolt"},
+		{pid: 103, cmdline: "/opt/dolt --prof cpu sql-server -P 12346", cwd: "/tmp/deleted-suite/.beads/dolt", cwdDeleted: true},
+	}
+	if !reflect.DeepEqual(candidates, wantCandidates) {
+		t.Fatalf("gatherPSCandidates() = %#v, want %#v", candidates, wantCandidates)
+	}
+
+	gotPIDs := selectOrphanTestServerPIDs(candidates, []string{"/tmp/my-suite"})
+	wantPIDs := []int{101, 103}
+	if !reflect.DeepEqual(gotPIDs, wantPIDs) {
+		t.Errorf("darwin ps selection path = %v, want %v", gotPIDs, wantPIDs)
+	}
+}

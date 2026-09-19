@@ -380,8 +380,9 @@ func TestRunFailsLoudlyWithoutStaging(t *testing.T) {
 	if err == nil {
 		t.Fatal("run() succeeded with no staging tree; want loud failure")
 	}
-	if !strings.Contains(err.Error(), "build/cli-docs") {
-		t.Errorf("error should name the missing staging dir: %v", err)
+	staging := filepath.Join(root, "build", "cli-docs")
+	if !strings.Contains(err.Error(), staging) {
+		t.Errorf("error should name the missing staging dir %q: %v", staging, err)
 	}
 }
 

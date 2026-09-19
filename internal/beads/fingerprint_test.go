@@ -475,3 +475,38 @@ func TestGetCloneIDForPath_UsesTargetRepoOutsideCWD(t *testing.T) {
 		t.Errorf("GetCloneIDForPath(%q) = %q, want %q", repoB, got, want)
 	}
 }
+
+// bd-46vla: callers need to distinguish the canonical remote-derived
+// fingerprint from the host-local path fallback (bd doctor downgrades a
+// path-fallback mismatch; bd migrate --update-repo-id names the propagation).
+func TestComputeRepoIDForPathWithSource(t *testing.T) {
+	t.Run("with remote", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		initFingerprintGitRepo(t, tmpDir, "https://github.com/testuser/testrepo.git")
+		id, source, err := ComputeRepoIDForPathWithSource(tmpDir)
+		if err != nil {
+			t.Fatalf("ComputeRepoIDForPathWithSource: %v", err)
+		}
+		if source != RepoIDSourceRemote {
+			t.Fatalf("source = %q, want %q", source, RepoIDSourceRemote)
+		}
+		if plain, _ := ComputeRepoIDForPath(tmpDir); plain != id {
+			t.Fatalf("ComputeRepoIDForPath = %q, want %q (must agree with WithSource)", plain, id)
+		}
+	})
+
+	t.Run("without remote falls back to path", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		initFingerprintGitRepo(t, tmpDir, "")
+		id, source, err := ComputeRepoIDForPathWithSource(tmpDir)
+		if err != nil {
+			t.Fatalf("ComputeRepoIDForPathWithSource: %v", err)
+		}
+		if source != RepoIDSourcePath {
+			t.Fatalf("source = %q, want %q", source, RepoIDSourcePath)
+		}
+		if id == "" {
+			t.Fatal("empty id")
+		}
+	})
+}

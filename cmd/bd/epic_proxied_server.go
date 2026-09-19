@@ -23,7 +23,7 @@ func runEpicStatusProxiedServer(ctx context.Context, eligibleOnly bool) error {
 	return renderEpicStatus(epics, eligibleOnly)
 }
 
-func runCloseEligibleEpicsProxiedServer(ctx context.Context, dryRun bool) error {
+func runCloseEligibleEpicsProxiedServer(ctx context.Context, dryRun bool, reason string) error {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
 		return HandleError("%v", err)
@@ -37,10 +37,10 @@ func runCloseEligibleEpicsProxiedServer(ctx context.Context, dryRun bool) error 
 	uw.Close(ctx)
 
 	if len(eligibleEpics) == 0 {
-		return outputNoEligibleEpics()
+		return outputNoEligibleEpics(reason)
 	}
 	if dryRun {
-		return outputCloseEligibleDryRun(eligibleEpics)
+		return outputCloseEligibleDryRun(eligibleEpics, reason)
 	}
 
 	if uowProvider == nil {
@@ -54,7 +54,7 @@ func runCloseEligibleEpicsProxiedServer(ctx context.Context, dryRun bool) error 
 		}
 		var closed []string
 		for _, epicStatus := range filterEligibleEpics(epics) {
-			if _, err := uw.IssueUseCase().CloseIssue(ctx, epicStatus.Epic.ID, domain.CloseIssueParams{Reason: "All children completed"}, "system"); err != nil {
+			if _, err := uw.IssueUseCase().CloseIssue(ctx, epicStatus.Epic.ID, domain.CloseIssueParams{Reason: reason}, "system"); err != nil {
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)
 				continue
 			}
@@ -68,5 +68,5 @@ func runCloseEligibleEpicsProxiedServer(ctx context.Context, dryRun bool) error 
 	if len(closedIDs) > 0 {
 		commandDidWrite.Store(true)
 	}
-	return outputCloseEligibleResult(closedIDs)
+	return outputCloseEligibleResult(closedIDs, reason)
 }

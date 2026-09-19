@@ -33,6 +33,7 @@ func setupTestBeadsDir(t *testing.T, tmpDir string) string {
 		t.Fatal(err)
 	}
 
+	requireFixDoltContainer(t)
 	port := fixTestServerPort()
 	dbName := uniqueDBName(t)
 
@@ -74,10 +75,12 @@ func TestImportJSONLIntoStore(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := setupTestBeadsDir(t, tmpDir)
 
-	// Create Dolt store
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	// Create Dolt store. CreateIfMissing: the per-test database does not
+	// exist yet and the dolt.New create-guard refuses to create it
+	// implicitly (bd-nxt5e).
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 	if err != nil {
-		t.Skipf("skipping: Dolt not available: %v", err)
+		t.Fatalf("dolt.NewFromConfigWithOptions against running test container: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -123,9 +126,9 @@ func TestImportJSONLIntoStore_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := setupTestBeadsDir(t, tmpDir)
 
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 	if err != nil {
-		t.Skipf("skipping: Dolt not available: %v", err)
+		t.Fatalf("dolt.NewFromConfigWithOptions against running test container: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -161,6 +164,7 @@ func TestDatabaseVersionWithBdVersion_ImportsJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	requireFixDoltContainer(t)
 	port := fixTestServerPort()
 	dbName := uniqueDBName(t)
 
@@ -175,13 +179,10 @@ func TestDatabaseVersionWithBdVersion_ImportsJSONL(t *testing.T) {
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatal(err)
 	}
-
-	// Pre-flight: verify Dolt server is reachable (skip in CI without server)
-	probe, probeErr := dolt.NewFromConfig(ctx, beadsDir)
-	if probeErr != nil {
-		t.Skipf("skipping: Dolt not available: %v", probeErr)
-	}
-	_ = probe.Close()
+	// No connect probe here: the database must not exist yet (creating it is
+	// the behavior under test), and the port guard above already covers the
+	// no-server case. A probe via dolt.NewFromConfig would always fail on
+	// the missing database and silently skip the test (bd-nxt5e).
 
 	// Write JSONL with issues
 	issues := []types.Issue{

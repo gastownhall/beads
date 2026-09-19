@@ -80,3 +80,37 @@ func TestReclaimFilterFromFlagsRejectsEmptyValue(t *testing.T) {
 		})
 	}
 }
+
+// TestReclaimFilterAnyReplica pins the override flag's parse: off by default
+// (the granting-replica guard is armed unless an operator asks for it), on when
+// given, and never mistaken for a scope. The empty-value hard error that guards
+// the string-slice flags does not apply to a bool — `--any-replica` with no
+// value is the flag, not a degenerate scope.
+func TestReclaimFilterAnyReplica(t *testing.T) {
+	cmd := newReclaimTestCmd()
+	if err := cmd.ParseFlags(nil); err != nil {
+		t.Fatal(err)
+	}
+	filter, err := reclaimFilterFromFlags(cmd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if filter.AnyReplica {
+		t.Error("AnyReplica defaulted to true; the replica guard must be armed by default")
+	}
+
+	cmd = newReclaimTestCmd()
+	if err := cmd.ParseFlags([]string{"--any-replica", "--label", "lane-a"}); err != nil {
+		t.Fatal(err)
+	}
+	filter, err = reclaimFilterFromFlags(cmd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !filter.AnyReplica {
+		t.Error("--any-replica did not set AnyReplica")
+	}
+	if filter.IsEmpty() {
+		t.Error("--label lane-a alongside --any-replica reported an empty (global) filter")
+	}
+}

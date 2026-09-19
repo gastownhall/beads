@@ -3,7 +3,6 @@ package domain
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
@@ -43,16 +42,26 @@ type ConfigUseCase interface {
 	DeleteConfig(ctx context.Context, key string) error
 	GetAllConfig(ctx context.Context) (map[string]string, error)
 	GetMetadata(ctx context.Context, key string) (string, error)
+	// SetMetadata writes one durable metadata value inside the caller's unit of
+	// work. It is the write half of the GetMetadata above it:
+	// issueops.Bootstrapper's unit-of-work body reads the identity, refuses over
+	// an identified substrate and writes the new one in ONE transaction, and a
+	// refusal decided outside the transaction that writes is a refusal two
+	// racing inits both pass. The identity's keys are named once, in
+	// internal/workapi; this seam moves bytes.
+	SetMetadata(ctx context.Context, key, value string) error
 	GetLocalMetadata(ctx context.Context, key string) (string, error)
-
-	ReconcileVersion(ctx context.Context, cliVersion string) (VersionReconcileResult, error)
-}
-
-type VersionReconcileResult struct {
-	Previous  string
-	Current   string
-	Migrated  bool
-	Downgrade bool
+	// SetLocalMetadata writes one clone-local, dolt-ignored value inside the
+	// caller's unit of work. It is the write half of GetLocalMetadata, and it
+	// exists because issueops.VersionReconciler's unit-of-work body reads its
+	// two markers, decides through the shared planner in internal/workapi and
+	// writes them back — all in ONE transaction, which is what makes the read
+	// it qualifies and the write it plans see the same snapshot.
+	//
+	// The DECISION is deliberately not here: both routes plan through
+	// workapi.PlanVersionReconcile, so the rule for which version may overwrite
+	// which is stated once.
+	SetLocalMetadata(ctx context.Context, key, value string) error
 }
 
 // CreateContext bundles the read-only config inputs that bd create needs
@@ -63,6 +72,10 @@ type CreateContext struct {
 	AllowedPrefixes string
 	CustomTypes     []string
 	CustomStatuses  []types.CustomStatus
+	// InfraTypes is the resolved infrastructure-type set. A create whose type
+	// is in this set is routed to the wisp tables, the same routing the
+	// embedded and direct stores apply from IsInfraTypeCtx.
+	InfraTypes map[string]bool
 }
 
 type Issue struct{}
@@ -216,68 +229,18 @@ func (u *configUseCaseImpl) GetAllConfig(ctx context.Context) (map[string]string
 	return out, nil
 }
 
-func (u *configUseCaseImpl) ReconcileVersion(ctx context.Context, cliVersion string) (VersionReconcileResult, error) {
-	if cliVersion == "" {
-		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: cliVersion must be set")
+func (u *configUseCaseImpl) SetMetadata(ctx context.Context, key, value string) error {
+	if err := u.cfgRepo.SetMetadata(ctx, key, value); err != nil {
+		return fmt.Errorf("SetMetadata: %w", err)
 	}
-
-	dbVersion, err := u.cfgRepo.GetLocalMetadata(ctx, "bd_version")
-	if err != nil {
-		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: read bd_version: %w", err)
-	}
-	if dbVersion == cliVersion {
-		return VersionReconcileResult{Previous: dbVersion, Current: dbVersion}, nil
-	}
-
-	maxVersion, err := u.cfgRepo.GetLocalMetadata(ctx, "bd_version_max")
-	if err != nil {
-		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: read bd_version_max: %w", err)
-	}
-
-	if dbVersion != "" && compareVersions(cliVersion, dbVersion) < 0 {
-		return VersionReconcileResult{Previous: dbVersion, Current: dbVersion, Downgrade: true}, nil
-	}
-	if maxVersion != "" && compareVersions(cliVersion, maxVersion) < 0 {
-		return VersionReconcileResult{Previous: dbVersion, Current: dbVersion, Downgrade: true}, nil
-	}
-
-	if err := u.cfgRepo.SetLocalMetadata(ctx, "bd_version", cliVersion); err != nil {
-		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: set bd_version: %w", err)
-	}
-	if maxVersion == "" || compareVersions(cliVersion, maxVersion) > 0 {
-		if err := u.cfgRepo.SetLocalMetadata(ctx, "bd_version_max", cliVersion); err != nil {
-			return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: set bd_version_max: %w", err)
-		}
-	}
-
-	return VersionReconcileResult{Previous: dbVersion, Current: cliVersion, Migrated: true}, nil
+	return nil
 }
 
-func compareVersions(v1, v2 string) int {
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
-
-	maxLen := len(parts1)
-	if len(parts2) > maxLen {
-		maxLen = len(parts2)
+func (u *configUseCaseImpl) SetLocalMetadata(ctx context.Context, key, value string) error {
+	if err := u.cfgRepo.SetLocalMetadata(ctx, key, value); err != nil {
+		return fmt.Errorf("SetLocalMetadata: %w", err)
 	}
-
-	for i := 0; i < maxLen; i++ {
-		var p1, p2 int
-		if i < len(parts1) {
-			_, _ = fmt.Sscanf(parts1[i], "%d", &p1)
-		}
-		if i < len(parts2) {
-			_, _ = fmt.Sscanf(parts2[i], "%d", &p2)
-		}
-		if p1 < p2 {
-			return -1
-		}
-		if p1 > p2 {
-			return 1
-		}
-	}
-	return 0
+	return nil
 }
 
 func (u *configUseCaseImpl) LoadCreateContext(ctx context.Context) (CreateContext, error) {
@@ -297,10 +260,15 @@ func (u *configUseCaseImpl) LoadCreateContext(ctx context.Context) (CreateContex
 	if err != nil {
 		return CreateContext{}, fmt.Errorf("LoadCreateContext: read custom statuses: %w", err)
 	}
+	infraTypes, err := u.GetInfraTypes(ctx)
+	if err != nil {
+		return CreateContext{}, fmt.Errorf("LoadCreateContext: read infra types: %w", err)
+	}
 	return CreateContext{
 		IssuePrefix:     prefix,
 		AllowedPrefixes: allowed,
 		CustomTypes:     customTypes,
 		CustomStatuses:  customStatuses,
+		InfraTypes:      infraTypes,
 	}, nil
 }

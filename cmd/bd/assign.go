@@ -17,6 +17,11 @@ var assignCmd = &cobra.Command{
 
 Shorthand for 'bd update <id> --assignee <name>'.
 
+Refuses to overwrite another actor's live in_progress claim without --force
+(bd-98s5c); issues assigned to a claim.pools alias are exempt, matching
+--claim. For a holder-aware transfer prefer
+'bd update <id> --if-assignee <holder> -a <new>'.
+
 Examples:
   bd assign bd-123 alice
   bd assign bd-123 ""      # unassign`,
@@ -33,8 +38,10 @@ Examples:
 			}
 		}()
 
+		force, _ := cmd.Flags().GetBool("force")
+
 		if usesProxiedServer() {
-			return runAssignProxiedServer(rootCtx, args)
+			return runAssignProxiedServer(rootCtx, args, force)
 		}
 
 		id := args[0]
@@ -60,6 +67,13 @@ Examples:
 		issueStore := result.Store
 
 		if err := validateIssueUpdatable(id, result.Issue); err != nil {
+			return HandleErrorRespectJSON("%s", err)
+		}
+
+		// bd-98s5c: bd assign is shorthand for an unguarded assignee update —
+		// same live-claim fence as bd update -a.
+		if err := validateIssueReassignable(id, result.Issue, actor, assignee,
+			storeClaimPoolAliases(ctx, issueStore), force); err != nil {
 			return HandleErrorRespectJSON("%s", err)
 		}
 
@@ -102,6 +116,7 @@ Examples:
 }
 
 func init() {
+	assignCmd.Flags().Bool("force", false, "Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)")
 	assignCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(assignCmd)
 }

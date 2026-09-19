@@ -121,7 +121,7 @@ func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id strin
 // This is the fallback when the local store doesn't have the issue (GH#2345).
 // Returns a RoutedResult if the issue is found in the auto-routed store.
 func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	routedStore, routed, err := openRoutedReadStore(ctx, localStore)
+	routedStore, routed, _, err := openRoutedReadStore(ctx, localStore)
 	if err != nil || !routed {
 		return nil, fmt.Errorf("no auto-routed store available")
 	}

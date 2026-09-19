@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -336,4 +337,146 @@ func requireRFC3339(t *testing.T, obj map[string]any, field, id string) time.Tim
 		t.Fatalf("L1.2: %s of %s is not RFC 3339: %q (%v)", field, id, raw, err)
 	}
 	return ts
+}
+
+// TestProtocol_GrantingReplicaRoundTripsJSONL is the wy-jpd3.7 half of clause
+// L1.2. The JSONL interchange is the ONE path that can materialize a lease row
+// a different replica granted, so an imported lease must keep the granting
+// replica the SNAPSHOT names — never silently adopt the importing node.
+// Mislabelling an imported lease as local is exactly the cross-replica reclaim
+// hazard the granted_node column exists to close, and it would ship green
+// against every store-level test, which cannot cross the wire.
+func TestProtocol_GrantingReplicaRoundTripsJSONL(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+
+	leased := w.create("--title", "Claimed on the mini", "--type", "task")
+	w.runEnv([]string{"BEADS_ACTOR=alice", "BEADS_NODE_ID=mini"}, "update", leased, "--claim")
+
+	exported := w.showJSON(leased)
+	if got := exported["lease_granted_node"]; got != "mini" {
+		t.Fatalf("L1.2: claim under BEADS_NODE_ID=mini recorded lease_granted_node=%v, want %q", got, "mini")
+	}
+
+	// Export, then age the lease into the past. A freshly-claimed lease is not
+	// stale, so importing it as-is and watching reclaim do nothing would prove
+	// nothing at all — the staleness has to be real for the guard to be the
+	// only thing standing between the reaper and this row.
+	path := filepath.Join(w.dir, "mini.jsonl")
+	w.run("export", "-o", path)
+	stalePath := ageLeaseInExport(t, w, path, leased)
+
+	// Import into a DIFFERENT replica. The restored lease must still name
+	// mini: this node never granted it and cannot enforce it.
+	fresh := newWorkspace(t)
+	out, err := fresh.tryRunEnv([]string{"BEADS_NODE_ID=laptop"}, "import", stalePath)
+	if err != nil {
+		t.Fatalf("import on laptop: %v\n%s", err, out)
+	}
+	restored := fresh.showJSON(leased)
+	if got := restored["lease_granted_node"]; got != "mini" {
+		t.Errorf("L1.2: granting replica did not round-trip: imported on laptop as %v, want %q", got, "mini")
+	}
+	if restored["assignee"] != "alice" || restored["status"] != "in_progress" {
+		t.Errorf("L1.2: lease owner did not round-trip: assignee=%v status=%v",
+			restored["assignee"], restored["status"])
+	}
+
+	// The laptop's reaper must decline this stale lease: mini granted it, and
+	// the laptop's view of alice's liveness is a full sync interval old.
+	reclaimOut, err := fresh.tryRunEnv([]string{"BEADS_NODE_ID=laptop"},
+		"reclaim", "--older-than", "0s", "--json")
+	if err != nil {
+		t.Fatalf("reclaim on laptop: %v\n%s", err, reclaimOut)
+	}
+	if slices.Contains(reclaimedIDs(t, reclaimOut), leased) {
+		t.Errorf("laptop reclaimed a lease granted by mini:\n%s", reclaimOut)
+	}
+	if after := fresh.showJSON(leased); after["status"] != "in_progress" {
+		t.Fatalf("issue status = %v after a declined reclaim, want in_progress", after["status"])
+	}
+
+	// ...and --any-replica reverts the very same row, which is what proves the
+	// replica guard was the thing that declined it rather than some unrelated
+	// ineligibility (staleness, scope, an absent lease row).
+	overrideOut, err := fresh.tryRunEnv([]string{"BEADS_NODE_ID=laptop"},
+		"reclaim", "--older-than", "0s", "--any-replica", "--json")
+	if err != nil {
+		t.Fatalf("reclaim --any-replica on laptop: %v\n%s", err, overrideOut)
+	}
+	if !slices.Contains(reclaimedIDs(t, overrideOut), leased) {
+		t.Errorf("--any-replica did not reclaim the foreign stale lease:\n%s", overrideOut)
+	}
+	if after := fresh.showJSON(leased); after["status"] != "open" || after["assignee"] != nil {
+		t.Errorf("after --any-replica reclaim: status=%v assignee=%v, want open/unassigned",
+			after["status"], after["assignee"])
+	}
+}
+
+// reclaimedIDs extracts the reclaimed issue ids from a `reclaim --json`
+// invocation captured with CombinedOutput. The replica-guard audit lines on
+// stderr name the skipped issue id too (warnReplica), so a raw
+// strings.Contains on the combined stream reads a correctly-declined reclaim
+// as a reclamation. Only the JSON payload on stdout is the machine truth;
+// decode exactly one JSON value starting at the first brace so audit lines on
+// either side of it are ignored.
+func reclaimedIDs(t *testing.T, out string) []string {
+	t.Helper()
+	start := strings.Index(out, "{")
+	if start < 0 {
+		t.Fatalf("no JSON object in reclaim output:\n%s", out)
+	}
+	var payload struct {
+		Reclaimed []struct {
+			ID string `json:"id"`
+		} `json:"reclaimed"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out[start:])).Decode(&payload); err != nil {
+		t.Fatalf("parse reclaim JSON: %v\n%s", err, out)
+	}
+	ids := make([]string, 0, len(payload.Reclaimed))
+	for _, r := range payload.Reclaimed {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+// ageLeaseInExport rewrites id's record in a JSONL export so its lease reads as
+// long expired, and returns the path of the rewritten file. Every other record
+// is copied through byte-for-byte.
+func ageLeaseInExport(t *testing.T, w *workspace, path, id string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	past := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	var out []string
+	patched := false
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil || rec["id"] != id {
+			out = append(out, line)
+			continue
+		}
+		rec["lease_expires_at"] = past
+		rec["heartbeat_at"] = past
+		reencoded, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal aged record: %v", err)
+		}
+		out = append(out, string(reencoded))
+		patched = true
+	}
+	if !patched {
+		t.Fatalf("export %s carries no record for %s", path, id)
+	}
+	staled := filepath.Join(w.dir, "mini-stale.jsonl")
+	if err := os.WriteFile(staled, []byte(strings.Join(out, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write aged export: %v", err)
+	}
+	return staled
 }

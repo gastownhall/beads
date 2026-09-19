@@ -5,28 +5,49 @@
 // Go-based extensions that want to use bd's storage layer programmatically.
 //
 // For a working extension example, see examples/bd-example-extension-go.
+//
+// This is the CONSUMER surface: it opens and uses bd's own storage. To
+// IMPLEMENT a storage backend out of tree — and prove it with the
+// conformance suite — use github.com/steveyegge/beads/backend and
+// github.com/steveyegge/beads/backend/conformance instead.
 package beads
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
-// Storage is the interface for beads storage operations
+// Storage is the interface for beads storage operations. Its
+// RunInTransaction callback is invoked at most once per public call; callers
+// retry it explicitly after a callback has started when their operation is
+// safe to repeat.
 type Storage = beads.Storage
 
-func configuredBackendUnavailable(backend string) error {
+// configuredBackendUnavailable is the public open path's fail-closed refusal for
+// metadata naming a removed or unrecognized backend. beadsDir and cfg let the
+// refusal detect an already-present Dolt database and name the exact
+// metadata.json edit that heals the workspace, instead of the export-and-
+// reinitialize path that would destroy it.
+func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Config) error {
 	switch backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
-		return configfile.RemovedBackendError(backend)
+		return configfile.RemovedBackendErrorAt(backend, beadsDir, cfg)
 	default:
-		return configfile.UnknownBackendError(backend)
+		return configfile.UnknownBackendErrorAt(backend, beadsDir, cfg)
 	}
 }
 
@@ -76,6 +97,12 @@ type UpdateIssueOptions = storage.UpdateIssueOptions
 // starting a walk from the beginning of the thread. Exported so consumers can
 // name it without importing internal/storage.
 type CommentPageCursor = storage.CommentPageCursor
+
+// ErrUnsupported reports that an operation is unavailable for a storage
+// backend — for example Storage.IssueLifecycle on a backend that cannot serve
+// guarded issue mutations. Exported so consumers can match it with errors.As
+// without importing internal/storage.
+type ErrUnsupported = storage.ErrUnsupported
 
 // RemoteStore provides dolt remote management and replication operations.
 // Use type assertion on a Storage value to access these methods:
@@ -175,7 +202,8 @@ func AsDependentQuerier(s Storage) (DependentQuerier, bool) {
 // and ErrNotClaimable — the ones ParseClaimConflict recovers assignee/status
 // detail from — are re-exported with the other error sentinels below.
 var (
-	ErrCircuitOpen = dolt.ErrCircuitOpen
+	ErrCircuitOpen         = dolt.ErrCircuitOpen
+	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
 )
 
 // IssueClaimer is the atomic-claim surface of a Storage. ClaimIssue and
@@ -248,6 +276,39 @@ type (
 	StatusEntry = storage.StatusEntry
 )
 
+// AllowSharedSchemaMigration authorizes this process to apply pending schema
+// migrations to a database that is SHARED with other bd clients — a Dolt
+// sql-server, where migrating promotes the schema version for every connected
+// client at once and clients still running an older bd will refuse the
+// database until they are upgraded (gastownhall/beads#5920).
+//
+// Without it, an embedder that upgrades its beads dependency across a schema
+// bump gets a migration-gate error from every writable Open* call, whose
+// guidance names CLI commands (`bd migrate schema`) that mean nothing inside a
+// library process. This is the programmatic equivalent of that command.
+//
+// It is process-local and set-or-clear, which is the point: the alternative —
+// os.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1") — is process-GLOBAL and inherited
+// by every child process the embedder spawns, including git hooks and dolt
+// subprocesses.
+//
+// The parity with that env var is only in the process-local mechanism, not the
+// reach: BD_ALLOW_REMOTE_MIGRATE=1 unlocks BOTH the no-remote and the
+// remote-backed shared arms, while this authorizes ONLY the no-remote arm. A
+// remote-backed shared store still needs --force / AllowRemoteMigrateEnv,
+// because #4259 cross-clone coordination is a stronger, different contract.
+//
+// Call it before the Open* call that should perform the migration, and clear
+// it afterwards. Only grant it once the operator has confirmed that every
+// other client of the server is upgraded; it is a coordination decision the
+// library cannot make, because other clients' versions are not observable from
+// this process.
+//
+// Embedded (single-writer) databases never need it: they still auto-migrate.
+func AllowSharedSchemaMigration(allow bool) {
+	schema.SetSharedMigrateConsent(allow)
+}
+
 // Open opens a Dolt-backed beads database at the given path.
 // This always opens in embedded mode. Use OpenFromConfig to respect
 // server mode settings from metadata.json.
@@ -261,6 +322,117 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 // beadsDir is the path to the .beads directory.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
 	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+}
+
+// OpenGated is OpenFromConfig plus participation in the workspace
+// operation gate: it holds SHARED gates — the workspace gate and the
+// physical database-root gate(s) — for the storage's lifetime (released by
+// Close), so maintenance operations such as mode migration can DETECT
+// this consumer and refuse to run over it, instead of running blind. The
+// gate cannot force a holder out (there is no drain signal); it makes
+// cooperating consumers visible and excludes new ones. Both levels matter:
+// distinct workspaces can share one physical Dolt root, and a
+// workspace-only gate would let maintenance replace that root under a
+// consumer from another workspace. Library consumers that use the ungated
+// Open/OpenFromConfig are invisible to the gate, and gate-aware
+// maintenance operations refuse to proceed on workspaces they cannot
+// prove quiet — prefer OpenGated in long-lived embedders.
+//
+// The physical roots are the UNION of doltserver.ResolvePhysicalRoots
+// (the side-effect-free CLI-parity resolver: embedded engine's
+// embeddeddolt dir, shared-server dir, proxied-server client info) and
+// doltserver.LibraryOpenRootPath (the root the library open below —
+// which applies central-config defaults and is server-only — will
+// actually use), so the gated directory always includes the one this
+// store opens. A resolver failure is
+// deliberately not fatal here: the same failure will surface from the
+// storage open below with a better error, and the workspace gate alone
+// still covers the workspace-level maintenance conflicts. For a remote
+// server backend there is no local physical root and only the workspace
+// gate is taken.
+//
+// wait bounds how long to poll for the gates when a maintenance
+// operation holds one exclusively; zero means fail fast. A busy gate is
+// reported as ErrGateBusy (match with errors.Is).
+func OpenGated(ctx context.Context, beadsDir string, wait time.Duration) (Storage, error) {
+	wsGate, err := workspacegate.ForWorkspace(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	gates := []workspacegate.Gate{wsGate}
+
+	// Gate the UNION of the CLI-parity resolver roots and the root the
+	// library open path below will actually use (they differ: the library
+	// path is server-only and applies central-config defaults, so an
+	// embedded-metadata workspace still opens at DatabasePath). Over-gating
+	// an extra root under a SHARED hold is benign; under-gating is the bug.
+	// All gates go into the ONE AcquireAll — never nested.
+	var roots []string
+	if pr, rerr := doltserver.ResolvePhysicalRoots(beadsDir); rerr == nil {
+		roots = append(roots, pr.Roots...)
+	}
+	roots = append(roots, doltserver.LibraryOpenRootPath(beadsDir))
+	for _, root := range roots {
+		// A root whose PARENT does not exist yet cannot be gated
+		// (workspacegate requires the gate file's parent) and cannot
+		// be holding data either; skip it rather than fail the open.
+		if _, serr := os.Stat(filepath.Dir(root)); serr != nil {
+			continue
+		}
+		physGate, gErr := workspacegate.ForPhysicalRoot(root)
+		if gErr != nil {
+			return nil, gErr
+		}
+		gates = append(gates, physGate)
+	}
+
+	h, err := workspacegate.AcquireAll(ctx, workspacegate.Shared,
+		workspacegate.Options{Wait: wait}, gates...)
+	if err != nil {
+		return nil, err
+	}
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	if err != nil {
+		rerr := h.Release()
+		return nil, errors.Join(err, rerr)
+	}
+	return &gatedStorage{DoltStorage: st, gate: h}, nil
+}
+
+// gatedStorage ties shared gate handles to the storage lifetime: the
+// gates are held exactly as long as the store is open. Per the decorator
+// contract documented on AsIssueClaimer, it embeds storage.DoltStorage —
+// the full engine interface, not the narrow Storage — so every capability
+// assertion (RemoteStore, SyncStore, VersionControlReader, EventQuerier,
+// ...) keeps working when an embedder switches from OpenFromConfig to
+// OpenGated, and it exposes Unwrap for the cmd/bd optional interfaces
+// that genuinely need storage.UnwrapStore.
+type gatedStorage struct {
+	storage.DoltStorage
+	gate *workspacegate.MultiHandle
+}
+
+var _ storage.DoltStorage = (*gatedStorage)(nil)
+
+// Unwrap exposes the inner store for storage.UnwrapStore, matching
+// HookFiringStore's decorator shape.
+func (g *gatedStorage) Unwrap() storage.DoltStorage { return g.DoltStorage }
+
+// Close closes the store, then releases the gates — but only on a clean
+// close. A failed or timed-out close can leave in-flight queries against
+// the database, and releasing the gates then would let an exclusive
+// maintenance operation start against storage that has not quiesced; in
+// that case the flocks are deliberately left to die with the process.
+func (g *gatedStorage) Close() error {
+	if err := g.DoltStorage.Close(); err != nil {
+		// Say so out loud: a long-lived embedder that ignores this error
+		// would otherwise silently keep excluding exclusive maintenance
+		// for the rest of the process lifetime.
+		fmt.Fprintf(os.Stderr,
+			"warning: beads store close failed; workspace gates deliberately retained until process exit: %v\n", err)
+		return err
+	}
+	return g.gate.Release()
 }
 
 // FindDatabasePath finds the beads database in the current directory tree
@@ -380,7 +552,17 @@ var (
 	ErrVersionMismatch = storage.ErrVersionMismatch
 	ErrSelfDependency  = domain.ErrSelfDependency
 	ErrDependencyCycle = domain.ErrDependencyCycle
-	ErrFieldTooLong    = types.ErrFieldTooLong
+	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
+	// endpoint-existence refusals AddDependency and AddDependencies raise; the
+	// typed value carrying the missing id is DependencyEndpointNotFoundError.
+	ErrDependencySourceNotFound = domain.ErrDependencySourceNotFound
+	ErrDependencyTargetNotFound = domain.ErrDependencyTargetNotFound
+	ErrFieldTooLong             = types.ErrFieldTooLong
+	// ErrGateBusy is returned by OpenGated when a maintenance operation
+	// holds the workspace or physical-root gate exclusively and the wait
+	// budget ran out. Alias of the internal sentinel so errors.Is works
+	// across the package boundary.
+	ErrGateBusy = workspacegate.ErrBusy
 )
 
 // DependencyTypeConflictError is returned by AddDependency when an edge of a
@@ -392,3 +574,8 @@ type DependencyTypeConflictError = domain.DependencyTypeConflictError
 // edge would gate an issue on its own ancestor/descendant (a gate that can
 // never clear).
 type DependencyHierarchyConflictError = domain.DependencyHierarchyConflictError
+
+// DependencyEndpointNotFoundError is returned by AddDependency when an edge
+// names an endpoint this database can see the absence of; callers errors.As it
+// to read the missing id instead of parsing the message.
+type DependencyEndpointNotFoundError = domain.DependencyEndpointNotFoundError

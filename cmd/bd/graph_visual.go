@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -19,14 +21,28 @@ type dagEdgeInfo struct {
 // Each layer is a vertical column of node boxes, with edges drawn in
 // gutter areas between columns.
 func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
+	renderGraphVisualTo(os.Stdout, layout, subgraph)
+}
+
+// renderGraphVisualTo is the writer-aware test seam for the terminal visual
+// renderer. The production wrapper intentionally retains its existing stdout
+// destination and ignored write-error behavior.
+func renderGraphVisualTo(out io.Writer, layout *GraphLayout, subgraph *TemplateSubgraph) {
+	printf := func(format string, args ...interface{}) {
+		_, _ = fmt.Fprintf(out, format, args...)
+	}
+	println := func(args ...interface{}) {
+		_, _ = fmt.Fprintln(out, args...)
+	}
+
 	if len(layout.Nodes) == 0 {
-		fmt.Println("Empty graph")
+		println("Empty graph")
 		return
 	}
 
-	fmt.Printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
-	fmt.Println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
-	fmt.Println()
+	printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
+	println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	println()
 
 	numLayers := len(layout.Layers)
 	if numLayers == 0 {
@@ -75,8 +91,8 @@ func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
 			headerLine.WriteString(strings.Repeat(" ", gutterW))
 		}
 	}
-	fmt.Println(headerLine.String())
-	fmt.Println()
+	println(headerLine.String())
+	println()
 
 	// Render each output line
 	for y := 0; y < totalLines; y++ {
@@ -108,10 +124,10 @@ func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
 			}
 		}
 
-		fmt.Println(strings.TrimRight(line.String(), " "))
+		println(strings.TrimRight(line.String(), " "))
 	}
 
-	fmt.Println()
+	println()
 
 	// Summary
 	blocksDeps := 0
@@ -121,9 +137,9 @@ func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
 		}
 	}
 	if blocksDeps > 0 {
-		fmt.Printf("  Dependencies: %d blocking relationships\n", blocksDeps)
+		printf("  Dependencies: %d blocking relationships\n", blocksDeps)
 	}
-	fmt.Printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
+	printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
 }
 
 // computeDAGNodeWidth calculates a consistent width for all DAG node boxes

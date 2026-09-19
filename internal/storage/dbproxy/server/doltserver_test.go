@@ -17,6 +17,8 @@ import (
 
 	mysqldrv "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -157,12 +159,19 @@ func TestDoltServer_DSN(t *testing.T) {
 }
 
 func TestDoltServer_StartStop_HappyPath(t *testing.T) {
-	s, _ := newDoltServer(t)
+	s, rootDir := newDoltServer(t)
 	ctx := context.Background()
 
 	require.NoError(t, s.Start(ctx))
 	t.Cleanup(func() { stopWithTimeout(t, s) })
 	assert.True(t, s.Running(ctx))
+	pf, err := pidfile.Read(rootDir, server.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf)
+	require.NoError(t, pf.ValidateV2(pidfile.KindDoltBackend))
+	match, err := procid.Verify(pf.Pid, procid.Token(pf.Birth))
+	require.NoError(t, err)
+	assert.True(t, match)
 
 	db, err := sql.Open("mysql", s.DSN(ctx, "", "root", ""))
 	require.NoError(t, err)

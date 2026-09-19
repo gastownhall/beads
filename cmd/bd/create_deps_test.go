@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -11,10 +13,11 @@ import (
 
 func TestParseDepSpecs(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      []string
-		want    []domain.DependencySpec
-		wantErr bool
+		name              string
+		in                []string
+		want              []domain.DependencySpec
+		wantErr           bool
+		wantErrSubstrings []string
 	}{
 		{
 			name: "empty input",
@@ -78,14 +81,44 @@ func TestParseDepSpecs(t *testing.T) {
 			},
 		},
 		{
-			name:    "unknown type rejected",
-			in:      []string{"nonsense:bd-1"},
-			wantErr: true,
+			name:              "unknown type rejected",
+			in:                []string{"nonsense:bd-1"},
+			wantErr:           true,
+			wantErrSubstrings: []string{"unknown dependency type", "blocked-by", "depends-on"},
 		},
 		{
 			name:    "empty type rejected",
 			in:      []string{":bd-1"},
 			wantErr: true,
+		},
+		{
+			// Cobra's StringSlice flag CSV-decodes "--deps a,b" into two
+			// elements before parseDepSpecs ever sees them; this is the
+			// representation parseDepSpecs actually receives in production,
+			// not a single comma-joined string (parseDepSpecs must not
+			// re-split on "," or it double-decodes a CSV-quoted value that
+			// legitimately contains a comma).
+			name: "multi-type different targets (already split by cobra)",
+			in:   []string{"discovered-from:bd-20", "blocks:bd-15"},
+			want: []domain.DependencySpec{
+				{Type: types.DepDiscoveredFrom, TargetID: "bd-20"},
+				{Type: types.DepBlocks, TargetID: "bd-15", SwapDirection: true},
+			},
+		},
+		{
+			name:    "multi-type same target rejected",
+			in:      []string{"discovered-from:bd-1", "blocked-by:bd-1"},
+			wantErr: true,
+		},
+		{
+			name: "duplicate identical edge is deduped, not rejected",
+			in:   []string{"blocked-by:bd-1", "depends-on:bd-1"},
+			// Both aliases normalize to the same {DepBlocks, bd-1, no swap}
+			// edge; storage already treats a repeated identical add as
+			// idempotent, so this must dedupe rather than error.
+			want: []domain.DependencySpec{
+				{Type: types.DepBlocks, TargetID: "bd-1"},
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -94,6 +127,11 @@ func TestParseDepSpecs(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseDepSpecs(%v) = %v, want error", tt.in, got)
+				}
+				for _, want := range tt.wantErrSubstrings {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("parseDepSpecs(%v) error = %q, want to contain %q", tt.in, err, want)
+					}
 				}
 				return
 			}
@@ -107,9 +145,68 @@ func TestParseDepSpecs(t *testing.T) {
 	}
 }
 
+// TestCanonicalDependencyType is a table test for the alias-normalization
+// helper shared by `bd create --deps` (parseDepSpec) and `bd dep add --type`
+// (GH#5069): both "blocked-by" and "depends-on" must map to the canonical
+// "blocks" type that ready/blocked gating checks, and any other value
+// (well-known or custom) must pass through unchanged.
+func TestCanonicalDependencyType(t *testing.T) {
+	tests := []struct {
+		name string
+		in   types.DependencyType
+		want types.DependencyType
+	}{
+		{"blocked-by aliases to blocks", "blocked-by", types.DepBlocks},
+		{"depends-on aliases to blocks", "depends-on", types.DepBlocks},
+		{"blocks passes through unchanged", types.DepBlocks, types.DepBlocks},
+		{"parent-child passes through unchanged", types.DepParentChild, types.DepParentChild},
+		{"discovered-from passes through unchanged", types.DepDiscoveredFrom, types.DepDiscoveredFrom},
+		{"unknown type passes through unchanged", "totally-custom", "totally-custom"},
+		{"empty type passes through unchanged", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canonicalDependencyType(tt.in); got != tt.want {
+				t.Errorf("canonicalDependencyType(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateDependencyType covers the shared validity/well-known-ness gate
+// used by both `bd create --deps` and `bd dep add --type`. Per the intent
+// documented on types.WellKnownDependencyTypes, both commands reject
+// custom/unknown dependency types identically.
+func TestValidateDependencyType(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      types.DependencyType
+		wantErr bool
+	}{
+		{"canonical blocks accepted", types.DepBlocks, false},
+		{"parent-child accepted", types.DepParentChild, false},
+		{"discovered-from accepted", types.DepDiscoveredFrom, false},
+		{"related accepted", types.DepRelated, false},
+		{"empty type rejected", "", true},
+		{"unknown/custom type rejected", "totally-custom", true},
+		{"unnormalized alias rejected (caller must normalize first)", "blocked-by", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDependencyType(tt.in)
+			if tt.wantErr && err == nil {
+				t.Fatalf("validateDependencyType(%q) = nil, want error", tt.in)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validateDependencyType(%q) unexpected error: %v", tt.in, err)
+			}
+		})
+	}
+}
+
 func TestBuildWaitsFor(t *testing.T) {
-	t.Run("empty spawner returns nil", func(t *testing.T) {
-		got, err := buildWaitsFor("", "")
+	t.Run("empty spawner without explicit gate returns nil", func(t *testing.T) {
+		got, err := buildWaitsFor("", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -117,8 +214,22 @@ func TestBuildWaitsFor(t *testing.T) {
 			t.Fatalf("expected nil, got %+v", got)
 		}
 	})
+	t.Run("explicit gate without spawner returns error", func(t *testing.T) {
+		// --waits-for-gate set but --waits-for absent: must be rejected,
+		// not silently ignored. Applies to any gate value, including the
+		// valid "all-children" — the operator clearly intended a dep they
+		// did not get.
+		_, err := buildWaitsFor("", types.WaitsForAllChildren, true)
+		if err == nil {
+			t.Fatal("expected error when --waits-for-gate is explicit but spawner is empty")
+		}
+		_, err = buildWaitsFor("", "TOTALLY-BOGUS", true)
+		if err == nil {
+			t.Fatal("expected error when --waits-for-gate is explicit (invalid value) but spawner is empty")
+		}
+	})
 	t.Run("empty gate defaults to all-children", func(t *testing.T) {
-		got, err := buildWaitsFor("bd-1", "")
+		got, err := buildWaitsFor("bd-1", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -128,7 +239,7 @@ func TestBuildWaitsFor(t *testing.T) {
 		}
 	})
 	t.Run("any-children gate accepted", func(t *testing.T) {
-		got, err := buildWaitsFor("bd-1", types.WaitsForAnyChildren)
+		got, err := buildWaitsFor("bd-1", types.WaitsForAnyChildren, false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -137,13 +248,13 @@ func TestBuildWaitsFor(t *testing.T) {
 		}
 	})
 	t.Run("invalid gate rejected", func(t *testing.T) {
-		_, err := buildWaitsFor("bd-1", "bogus")
+		_, err := buildWaitsFor("bd-1", "bogus", false)
 		if err == nil {
 			t.Fatal("expected error for invalid gate")
 		}
 	})
 	t.Run("whitespace spawner treated as empty", func(t *testing.T) {
-		got, err := buildWaitsFor("   ", "")
+		got, err := buildWaitsFor("   ", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -173,6 +284,45 @@ func TestDiscoveredFromParent(t *testing.T) {
 				t.Errorf("discoveredFromParent(%v) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveDepSpecTargetsNormalizesBareSlug(t *testing.T) {
+	st := &createAtomicFakeStore{}
+	specs := []domain.DependencySpec{
+		{Type: types.DepDiscoveredFrom, TargetID: "8vezf"},
+		{Type: types.DepBlocks, TargetID: "fake-already-full"},
+		{Type: types.DepRelated, TargetID: "external:other-system/42"},
+	}
+	got, err := resolveDepSpecTargets(context.Background(), st, specs)
+	if err != nil {
+		t.Fatalf("resolveDepSpecTargets: %v", err)
+	}
+	if got[0].TargetID != "fake-8vezf" {
+		t.Errorf("bare slug resolved to %q, want fake-8vezf (GH#5005)", got[0].TargetID)
+	}
+	if got[1].TargetID != "fake-already-full" {
+		t.Errorf("full id became %q, want unchanged", got[1].TargetID)
+	}
+	if got[2].TargetID != "external:other-system/42" {
+		t.Errorf("external target became %q, want unchanged", got[2].TargetID)
+	}
+	// Types / swap flags must be preserved.
+	if got[0].Type != types.DepDiscoveredFrom || got[1].Type != types.DepBlocks {
+		t.Errorf("types mutated: %#v", got)
+	}
+}
+
+func TestResolveDepSpecTargetsRejectsEmptyTarget(t *testing.T) {
+	st := &createAtomicFakeStore{}
+	_, err := resolveDepSpecTargets(context.Background(), st, []domain.DependencySpec{
+		{Type: types.DepBlocks, TargetID: "  "},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty target")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should mention empty target, got: %v", err)
 	}
 }
 

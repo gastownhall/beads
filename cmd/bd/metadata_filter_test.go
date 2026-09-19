@@ -75,8 +75,44 @@ func TestMetadataFilterSuite(t *testing.T) {
 		Metadata: json.RawMessage(`{"qm_team":"backend"}`),
 	}
 
+	// --- SlashKey data ---
+	// Regression coverage for the slash-in-metadata-key bug: an unquoted
+	// JSON path treats "/" as invalid path syntax, so this key must go
+	// through JSONMetadataPath's always-quoted form and round-trip through
+	// the real Dolt/go-mysql-server JSON path parser, not just a unit test
+	// of the path string.
+	slash1 := &types.Issue{
+		ID: "slash-1", Title: "Slash key match (slash)", Priority: 2,
+		IssueType: types.TypeTask, Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"jira/sprint":"Q1"}`),
+	}
+	slash2 := &types.Issue{
+		ID: "slash-2", Title: "Slash key no match (slash)", Priority: 2,
+		IssueType: types.TypeTask, Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"jira/sprint":"Q2"}`),
+	}
+
+	// --- MixedCaseKey data ---
+	// Regression coverage for case-sensitive metadata keys: two issues with
+	// keys differing only by case must not collide, proving the query path
+	// preserves case end-to-end (parser, JSONMetadataPath, and the JSON
+	// engine's own key comparison) rather than only at the parser layer.
+	mixedcase1 := &types.Issue{
+		ID: "mixedcase-1", Title: "Mixed-case key match (mixedcase)", Priority: 2,
+		IssueType: types.TypeTask, Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"McTeam":"platform"}`),
+	}
+	mixedcase2 := &types.Issue{
+		ID: "mixedcase-2", Title: "Different-case key no match (mixedcase)", Priority: 2,
+		IssueType: types.TypeTask, Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"mcteam":"platform"}`),
+	}
+
 	// Bulk create all issues
-	allIssues := []*types.Issue{mfm1, mfm2, hmk1, hmk2, and1, and2, nometa, withmeta, queryable}
+	allIssues := []*types.Issue{
+		mfm1, mfm2, hmk1, hmk2, and1, and2, nometa, withmeta, queryable,
+		slash1, slash2, mixedcase1, mixedcase2,
+	}
 	for _, issue := range allIssues {
 		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
@@ -213,6 +249,52 @@ func TestMetadataFilterSuite(t *testing.T) {
 			t.Errorf("expected issue %s, got %s", queryable.ID, results[0].ID)
 		}
 	})
+
+	t.Run("MetadataFieldMatchSlashKey", func(t *testing.T) {
+		results, err := store.SearchIssues(ctx, "", types.IssueFilter{
+			MetadataFields: map[string]string{"jira/sprint": "Q1"},
+		})
+		if err != nil {
+			t.Fatalf("SearchIssues: %v", err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(results))
+		}
+		if results[0].ID != slash1.ID {
+			t.Errorf("expected issue %s, got %s", slash1.ID, results[0].ID)
+		}
+	})
+
+	t.Run("MetadataFieldMatchMixedCaseKey", func(t *testing.T) {
+		results, err := store.SearchIssues(ctx, "", types.IssueFilter{
+			MetadataFields: map[string]string{"McTeam": "platform"},
+		})
+		if err != nil {
+			t.Fatalf("SearchIssues: %v", err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(results))
+		}
+		if results[0].ID != mixedcase1.ID {
+			t.Errorf("expected issue %s (key %q), got %s", mixedcase1.ID, "McTeam", results[0].ID)
+		}
+
+		// A differently-cased key ("mcteam") must not collide with "McTeam":
+		// JSON object keys are case-sensitive, so querying the lowercase
+		// variant must match only mixedcase2.
+		lower, err := store.SearchIssues(ctx, "", types.IssueFilter{
+			MetadataFields: map[string]string{"mcteam": "platform"},
+		})
+		if err != nil {
+			t.Fatalf("SearchIssues: %v", err)
+		}
+		if len(lower) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(lower))
+		}
+		if lower[0].ID != mixedcase2.ID {
+			t.Errorf("expected issue %s (key %q), got %s", mixedcase2.ID, "mcteam", lower[0].ID)
+		}
+	})
 }
 
 // Key validation unit tests (don't need a store)
@@ -226,6 +308,8 @@ func TestValidateMetadataKey(t *testing.T) {
 		{"team", false},
 		{"story_points", false},
 		{"jira.sprint", false},
+		{"jira/sprint", false},
+		{"a/b/c", false},
 		{"_private", false},
 		{"CamelCase", false},
 		{"a1b2c3", false},

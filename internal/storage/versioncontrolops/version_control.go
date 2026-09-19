@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -93,6 +94,15 @@ func CommitExists(ctx context.Context, db DBConn, commitHash string) (bool, erro
 
 // Merge merges the named branch into the current branch. The author string
 // should be formatted as "Name <email>". Returns any merge conflicts.
+//
+// This runs as a bare DOLT_MERGE under autocommit, so a real conflict makes
+// Dolt reject the implicit transaction (Error 1105: "@autocommit must be
+// disabled so that merge conflicts can be resolved ...") before dolt_conflicts
+// can even be inspected — conflicts = error here, same as plain `dolt merge`
+// with no further flags. Callers that want the flag Dolt's error names —
+// resolve-then-commit on conflict — must use MergeWithStrategy instead, which
+// runs the merge on a pinned session with the conflict-tolerant flags set
+// (#4992).
 func Merge(ctx context.Context, db DBConn, branch, author string) ([]storage.Conflict, error) {
 	_, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--author', ?, ?)", author, branch)
 	if err != nil {
@@ -101,9 +111,27 @@ func Merge(ctx context.Context, db DBConn, branch, author string) ([]storage.Con
 		if conflictErr == nil && len(conflicts) > 0 {
 			return conflicts, nil
 		}
+		if isMergeConflictAutocommitError(err) {
+			return nil, fmt.Errorf("merge branch %s: %w (resolve with: bd vc merge %s --strategy ours|theirs)", branch, err, branch)
+		}
 		return nil, fmt.Errorf("merge branch %s: %w", branch, err)
 	}
 	return nil, nil
+}
+
+// isMergeConflictAutocommitError reports whether err is Dolt's autocommit
+// rejection of a conflicted merge (Error 1105, "@autocommit must be disabled
+// so that merge conflicts can be resolved ..."). It is the shape Merge
+// produces for every real conflict, since it runs under autocommit with
+// neither dolt_allow_commit_conflicts nor a pinned session (#4992) — matched
+// on message because the embedded engine and the MySQL driver report it as
+// different error types.
+func isMergeConflictAutocommitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "merge conflict") && strings.Contains(msg, "autocommit")
 }
 
 // GetConflicts returns any merge conflicts in the current Dolt state.
@@ -123,8 +151,8 @@ func GetConflicts(ctx context.Context, db DBConn) ([]storage.Conflict, error) {
 		}
 		conflicts = append(conflicts, storage.Conflict{
 			Field: tableName,
+			Count: numConflicts,
 		})
-		_ = numConflicts // available if needed in the future
 	}
 	return conflicts, rows.Err()
 }

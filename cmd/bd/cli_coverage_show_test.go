@@ -39,6 +39,10 @@ func runBDForCoverage(t *testing.T, dir string, args ...string) (stdout string, 
 	rErr, wErr, _ := os.Pipe()
 	os.Stdout = wOut
 	os.Stderr = wErr
+	defer func() {
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+	}()
 
 	// Mark tests explicitly.
 	oldTestMode, testModeWasSet := os.LookupEnv("BEADS_TEST_MODE")
@@ -126,8 +130,6 @@ func runBDForCoverage(t *testing.T, dir string, args ...string) (stdout string, 
 
 	_ = wOut.Close()
 	_ = wErr.Close()
-	os.Stdout = oldStdout
-	os.Stderr = oldStderr
 	_ = os.Chdir(oldDir)
 	os.Args = oldArgs
 	rootCmd.SetArgs(nil)

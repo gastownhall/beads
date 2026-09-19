@@ -26,9 +26,14 @@ be revisited.
 
 Deferred issues don't show in 'bd ready' but remain visible in 'bd list'.
 
+A defer WITH a date is a snooze: once --until passes, the next ready-front
+read returns the issue to open automatically (same shape as 'bd undefer').
+A defer WITHOUT a date is the indefinite icebox: it stays deferred until
+someone runs 'bd undefer'.
+
 Examples:
-  bd defer bd-abc                  # Defer a single issue (status-based)
-  bd defer bd-abc --until=tomorrow # Defer until specific time
+  bd defer bd-abc                  # Icebox indefinitely (until bd undefer)
+  bd defer bd-abc --until=tomorrow # Snooze: auto-wakes once the date passes
   bd defer bd-abc --reason="waiting on API access"
   bd defer bd-abc bd-def           # Defer multiple issues`,
 	Args:          cobra.MinimumNArgs(1),
@@ -51,7 +56,7 @@ Examples:
 			}
 			if t.Before(time.Now()) && !jsonOutput {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-					ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+					ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 				fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --until=+1h or --until=tomorrow\n")
 			}
 			deferUntil = &t

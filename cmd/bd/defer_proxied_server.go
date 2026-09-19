@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 type deferProxiedResult struct {
@@ -40,9 +43,13 @@ func runDeferProxiedServer(ctx context.Context, args []string, deferUntil *time.
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (deferProxiedResult, string, error) {
 		var r deferProxiedResult
 		for _, id := range args {
-			issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-			if issue == nil {
+			issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+			if errors.Is(rerr, storage.ErrNotFound) {
 				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: not found", id))
+				continue
+			}
+			if rerr != nil {
+				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: %v", id, rerr))
 				continue
 			}
 			fullID := issue.ID
@@ -108,9 +115,13 @@ func runUndeferProxiedServer(ctx context.Context, args []string) error {
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (deferProxiedResult, string, error) {
 		var r deferProxiedResult
 		for _, id := range args {
-			issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-			if issue == nil {
+			issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+			if errors.Is(rerr, storage.ErrNotFound) {
 				r.errs = append(r.errs, fmt.Sprintf("Error getting %s: not found", id))
+				continue
+			}
+			if rerr != nil {
+				r.errs = append(r.errs, fmt.Sprintf("Error getting %s: %v", id, rerr))
 				continue
 			}
 			fullID := issue.ID

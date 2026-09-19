@@ -1,6 +1,7 @@
 package db
 
 import (
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -13,6 +14,7 @@ func (s *testSuite) TestIssueUseCase_ReopenIssue() {
 	s.Run("MissingIDErrors", s.uccReopenMissingID)
 	s.Run("WispVariantRoutesToWispsTable", s.uccReopenWispRoutes)
 	s.Run("ReasonRecordedAsComment", s.uccReopenReasonComment)
+	s.Run("CustomNonDoneReportsNotReopened", s.uccReopenCustomNonDoneReportsNotReopened)
 }
 
 func (s *testSuite) uccReopenReturnsIssue() {
@@ -60,6 +62,7 @@ func (s *testSuite) uccReopenMissingID() {
 	_, err := s.issueUseCase().ReopenIssue(s.Ctx(), "bd-ucc-ro-missing",
 		domain.ReopenIssueParams{}, "tester")
 	s.Require().Error(err)
+	s.ErrorIs(err, storage.ErrNotFound)
 }
 
 func (s *testSuite) uccReopenWispRoutes() {
@@ -98,4 +101,21 @@ func (s *testSuite) uccReopenReasonComment() {
 		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-ucc-ro-cmt", string(types.EventCommented)).Scan(&comment))
 	s.Equal("qa found a regression", comment)
+}
+
+func (s *testSuite) uccReopenCustomNonDoneReportsNotReopened() {
+	const id = "bd-ucc-ro-custom-active"
+	s.seedIssueRow(id)
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO custom_statuses (name, category) VALUES (?, ?)", "triaged", string(types.CategoryActive))
+	s.Require().NoError(err)
+	_, err = s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET status = ? WHERE id = ?", "triaged", id)
+	s.Require().NoError(err)
+
+	res, err := s.issueUseCase().ReopenIssue(s.Ctx(), id,
+		domain.ReopenIssueParams{}, "tester")
+	s.Require().NoError(err)
+	s.False(res.Reopened)
+	s.Require().NotNil(res.Issue)
+	s.Equal(types.Status("triaged"), res.Issue.Status)
 }

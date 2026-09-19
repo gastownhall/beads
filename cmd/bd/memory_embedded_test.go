@@ -6,10 +6,37 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
+
+// countMemoryDoltCommits reads dolt_log for an embedded workspace. It is how
+// the auto-commit epilogue is observed: a direct-route write that never flags
+// it still answers `bd recall` perfectly well, because the row is in the
+// working set — dolt_log is the only place the difference shows.
+func countMemoryDoltCommits(t *testing.T, beadsDir string) int {
+	t.Helper()
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	var count int
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&count); err != nil {
+		t.Fatalf("query dolt_log: %v", err)
+	}
+	return count
+}
 
 // bdRemember runs "bd remember" with the given args and returns stdout.
 func bdRemember(t *testing.T, bd, dir string, args ...string) string {
@@ -183,6 +210,30 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdRecallFail(t, bd, dir, "brand-new-slug-memory")
 	})
 
+	// The two refusals that sit either side of the desire path, and the reason
+	// the bare-slug test is `derived != "" && derived == insight` rather than
+	// the shipped `slugify(insight) == insight`: DeriveKey("") is "", so empty
+	// and underivable content satisfies derived == insight and would be routed
+	// into a "recall" of the empty key instead of being refused. The shipped
+	// code was saved from that by an empty-content check that ran BEFORE the
+	// branch; that check belongs to the role now, so the branch has to exclude
+	// the empty key itself.
+	t.Run("remember_refuses_content_no_key_derives_from", func(t *testing.T) {
+		for _, tc := range []struct{ insight, want string }{
+			{"", "memory content cannot be empty"},
+			{"   ", "memory content cannot be empty"},
+			{"!!!", "could not generate key from content"},
+		} {
+			out := bdRememberFail(t, bd, dir, tc.insight)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("bd remember %q: expected %q, got: %s", tc.insight, tc.want, out)
+			}
+			if strings.Contains(out, "a bare existing key READS") || strings.Contains(out, "no memory named") {
+				t.Errorf("bd remember %q took the bare-slug desire path, got: %s", tc.insight, out)
+			}
+		}
+	})
+
 	t.Run("remember_new_slug_with_explicit_key_stores", func(t *testing.T) {
 		// --key states write intent: slug-like content stores fine.
 		bdRemember(t, bd, dir, "brand-new-slug-memory", "--key", "brand-new-slug-memory")
@@ -227,6 +278,47 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdForget(t, bd, dir, "forget-me")
 		// After forget, recall should fail
 		bdRecallFail(t, bd, dir, "forget-me")
+	})
+
+	// THE AUTO-COMMIT EPILOGUE, which is the trap this convergence was most
+	// likely to spring. A direct-route write lands in the Dolt WORKING SET and
+	// nothing else commits it: durability is the epilogue in main.go, keyed on
+	// commandDidWrite, which noteDirectMemoryWrite is the only thing that sets
+	// for this plane. A converged RunE that forgets it produces memories that
+	// exist until the process exits and then sit uncommitted — and every other
+	// assertion in this file still passes, because a working-set row recalls
+	// and lists exactly like a committed one.
+	//
+	// Its own workspace, so the counts are deterministic (the pattern
+	// close_multiple_ids_single_dolt_commit uses).
+	t.Run("write_verbs_flag_the_auto_commit_epilogue", func(t *testing.T) {
+		edir, ebeads, _ := bdInit(t, bd, "--prefix", "ep")
+
+		// Warm-up write: a fresh workspace's first command may commit
+		// bookkeeping of its own, which is not what this is measuring.
+		bdRemember(t, bd, edir, "warm the workspace up", "--key", "epilogue-warmup")
+
+		before := countMemoryDoltCommits(t, ebeads)
+		bdRemember(t, bd, edir, "the epilogue is what makes a direct write durable", "--key", "epilogue-subject")
+		afterRemember := countMemoryDoltCommits(t, ebeads)
+		if got := afterRemember - before; got != 1 {
+			t.Errorf("bd remember: dolt_log %d -> %d (delta %d), want exactly one auto-commit", before, afterRemember, got)
+		}
+
+		bdForget(t, bd, edir, "epilogue-subject")
+		afterForget := countMemoryDoltCommits(t, ebeads)
+		if got := afterForget - afterRemember; got != 1 {
+			t.Errorf("bd forget: dolt_log %d -> %d (delta %d), want exactly one auto-commit", afterRemember, afterForget, got)
+		}
+
+		// A forget that found nothing deleted nothing, so it must leave no
+		// commit either — the other half of the contract, and the one a
+		// `noteDirectMemoryWrite()` placed before the not-found branch would
+		// break while every output assertion stayed green.
+		bdForgetFail(t, bd, edir, "epilogue-subject")
+		if got := countMemoryDoltCommits(t, ebeads); got != afterForget {
+			t.Errorf("bd forget of an absent key: dolt_log %d -> %d, want no commit", afterForget, got)
+		}
 	})
 
 	// ===== Error Cases =====

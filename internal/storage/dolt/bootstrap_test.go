@@ -9,7 +9,29 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/githooksenv"
 )
+
+// The bootstrap clone does not route through prepareDoltCLITransferCommand;
+// its env needs the git-trace scrub and the no-hooks override itself.
+func TestBootstrapCloneCmdEnvIsGuarded(t *testing.T) {
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_CURL_VERBOSE", "1")
+
+	cmd := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"))
+	if cmd.Env == nil {
+		t.Fatal("bootstrapCloneCmd() left cmd.Env nil; the clone would inherit stderr-directed git tracing")
+	}
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "GIT_TRACE=") || strings.HasPrefix(kv, "GIT_CURL_VERBOSE=") {
+			t.Errorf("bootstrapCloneCmd() kept %q; stderr-directed git tracing must be scrubbed", kv)
+		}
+	}
+	if got := githooksenv.Extract(cmd.Env); !strings.Contains(got, githooksenv.NoHooksParam) {
+		t.Errorf("bootstrapCloneCmd() effective %s = %q, want the no-hooks override", githooksenv.ParametersEnv, got)
+	}
+}
 
 // TestBootstrapFromRemoteWithDB_RejectsEmptyDatabase verifies that
 // BootstrapFromRemoteWithDB returns an error when called with an

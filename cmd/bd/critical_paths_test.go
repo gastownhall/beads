@@ -33,7 +33,7 @@ func TestBurnWisps(t *testing.T) {
 			t.Fatalf("Failed to create wisp: %v", err)
 		}
 
-		result, err := burnWisps(ctx, s, []string{wisp.ID})
+		result, err := burnWisps(ctx, s, []string{wisp.ID}, "test")
 		if err != nil {
 			t.Fatalf("burnWisps failed: %v", err)
 		}
@@ -69,7 +69,7 @@ func TestBurnWisps(t *testing.T) {
 			ids = append(ids, wisp.ID)
 		}
 
-		result, err := burnWisps(ctx, s, ids)
+		result, err := burnWisps(ctx, s, ids, "test")
 		if err != nil {
 			t.Fatalf("burnWisps failed: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestBurnWisps(t *testing.T) {
 	})
 
 	t.Run("EmptyIDs", func(t *testing.T) {
-		result, err := burnWisps(ctx, s, []string{})
+		result, err := burnWisps(ctx, s, []string{}, "test")
 		if err != nil {
 			t.Fatalf("burnWisps failed: %v", err)
 		}
@@ -110,7 +110,7 @@ func TestBurnWisps(t *testing.T) {
 		// burnWisps deletes atomically within a single transaction (bd-6py7):
 		// a nonexistent ID makes DeleteIssue fail, rolling back the whole batch,
 		// so the valid wisp is NOT deleted.
-		if _, err := burnWisps(ctx, s, []string{"nonexistent-id", wisp.ID}); err == nil {
+		if _, err := burnWisps(ctx, s, []string{"nonexistent-id", wisp.ID}, "test"); err == nil {
 			t.Fatal("burnWisps should error when a batch contains a nonexistent ID")
 		}
 

@@ -3,11 +3,11 @@ package schema
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -52,7 +52,7 @@ func needsCustomTypesBackfill(ctx context.Context, db DBConn) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(parseTypesValue(value)) > 0, nil
+	return len(issueops.ParseTypesConfigValue(value)) > 0, nil
 }
 
 func needsCustomStatusesBackfill(ctx context.Context, db DBConn) (bool, error) {
@@ -105,11 +105,8 @@ func backfillCustomTypes(ctx context.Context, db DBConn) (bool, error) {
 	}
 
 	wrote := false
-	for _, name := range parseTypesValue(value) {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
+	// ParseTypesConfigValue already trims elements and drops empties.
+	for _, name := range issueops.ParseTypesConfigValue(value) {
 		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO custom_types (name) VALUES (?)", name)
 		if err != nil {
 			return wrote, fmt.Errorf("inserting type %q: %w", name, err)
@@ -158,24 +155,4 @@ func backfillCustomStatuses(ctx context.Context, db DBConn) (bool, error) {
 		}
 	}
 	return wrote, nil
-}
-
-func parseTypesValue(value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	var jsonTypes []string
-	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-		return jsonTypes
-	}
-	parts := strings.Split(value, ",")
-	var result []string
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	return result
 }

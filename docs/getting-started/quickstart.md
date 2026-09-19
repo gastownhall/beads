@@ -147,6 +147,8 @@ Dependency tree for bd-a3f8e9:
   > bd-a3f8e9.3: Integration tests [P1] (open)
 ```
 
+Children inherit the epic's labels by default — if the epic carries a size/effort label, see [Labels](/core-concepts/labels) for how to keep it off the children.
+
 ## Add dependencies
 
 ```bash

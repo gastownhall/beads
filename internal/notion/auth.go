@@ -4,8 +4,6 @@ import (
 	"context"
 	"os"
 	"strings"
-
-	"github.com/steveyegge/beads/internal/storage"
 )
 
 const configKeyToken = "notion.token"
@@ -22,9 +20,15 @@ type ResolvedAuth struct {
 	Source AuthSource
 }
 
-func ResolveAuth(ctx context.Context, store storage.Storage) (*ResolvedAuth, error) {
-	if store != nil {
-		if token, err := store.GetConfig(ctx, configKeyToken); err == nil && strings.TrimSpace(token) != "" {
+// ConfigReader reads a Notion configuration value.
+type ConfigReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+}
+
+// ResolveAuth resolves a configured Notion token before the environment fallback.
+func ResolveAuth(ctx context.Context, reader ConfigReader) (*ResolvedAuth, error) {
+	if reader != nil {
+		if token, err := reader.GetConfig(ctx, configKeyToken); err == nil && strings.TrimSpace(token) != "" {
 			return &ResolvedAuth{
 				Token:  strings.TrimSpace(token),
 				Source: AuthSourceConfigToken,

@@ -13,23 +13,28 @@ import (
 
 // AddComment adds a comment event to an issue
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	isWisp := s.isActiveWisp(ctx, issueID)
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		isWisp := s.isActiveWisp(ctx, issueID)
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit add comment event", err)
-	}
-	if isWisp {
-		return nil
-	}
-	return s.doltAddAndCommit(ctx, []string{"events"}, fmt.Sprintf("bd: comment %s", issueID))
+		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		defer clearJournalScope()
+
+		if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {
+			return err
+		}
+		if err := s.commitSQLTx(ctx, "commit add comment event", tx); err != nil {
+			return err
+		}
+		if isWisp {
+			return nil
+		}
+		return s.doltAddAndCommit(ctx, []string{"events"}, fmt.Sprintf("bd: comment %s", issueID))
+	})
 }
 
 // GetEvents retrieves events for an issue
@@ -68,28 +73,45 @@ func (s *DoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor,
 	return result, err
 }
 
-// AddIssueComment adds a comment to an issue (structured comment)
+// AddIssueComment adds a comment to an issue (structured comment).
+//
+// Unlike ImportIssueComment it stamps created_at through
+// issueops.AddIssueCommentInTx, which advances past the issue's newest existing
+// comment so a burst of comments still reads back in the order it was written
+// (see issueops.NextLiveCommentTime).
 func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
-	return s.ImportIssueComment(ctx, issueID, author, text, time.Now().UTC())
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
+		return issueops.AddIssueCommentInTx(ctx, tx, issueID, author, text)
+	})
 }
 
 // ImportIssueComment adds a comment during import, preserving the original timestamp.
 // This prevents comment timestamp drift across import/export cycles.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
-	isWisp := s.isActiveWisp(ctx, issueID)
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
+		return issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
+	})
+}
+
+// addOrImportComment is the shared wisp-routing / retry / dolt-commit tail
+// around either comment insert; insert does the write inside the transaction.
+func (s *DoltStore) addOrImportComment(ctx context.Context, issueID string, insert func(*sql.Tx) (*types.Comment, error)) (*types.Comment, error) {
 	var result *types.Comment
-	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
-		return err
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		isWisp := s.isActiveWisp(ctx, issueID)
+		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			var err error
+			result, err = insert(tx)
+			return err
+		}); err != nil {
+			return err
+		}
+		if isWisp {
+			return nil
+		}
+		return s.doltAddAndCommit(ctx, []string{"comments"}, fmt.Sprintf("bd: comment %s", issueID))
 	})
 	if err != nil {
-		return nil, err
-	}
-	if isWisp {
-		return result, nil
-	}
-	if err := s.doltAddAndCommit(ctx, []string{"comments"}, fmt.Sprintf("bd: comment %s", issueID)); err != nil {
 		return nil, err
 	}
 	return result, nil

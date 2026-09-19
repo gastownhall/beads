@@ -315,7 +315,6 @@ Also triggers Dolt push/pull if a remote is configured.`,
 				}
 				if len(issues) > 0 {
 					if importErr := store.CreateIssuesWithFullOptions(ctx, issues, "repo-sync", storage.BatchCreateOptions{
-						OrphanHandling:       storage.OrphanAllow,
 						SkipPrefixValidation: true,
 					}); importErr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to import from %s: %v\n", repoPath, importErr)
@@ -386,7 +385,6 @@ Also triggers Dolt push/pull if a remote is configured.`,
 
 			// Import with prefix validation skipped (cross-prefix hydration)
 			if err := store.CreateIssuesWithFullOptions(ctx, issues, "repo-sync", storage.BatchCreateOptions{
-				OrphanHandling:       storage.OrphanAllow,
 				SkipPrefixValidation: true,
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to import from %s: %v\n", repoPath, err)

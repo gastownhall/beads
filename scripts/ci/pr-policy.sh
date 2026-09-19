@@ -62,6 +62,35 @@ EOF
     printf 'No .beads/issues.jsonl changes detected.\n'
 }
 
+check_workapi_frontend_boundary() {
+    # The import half of this boundary is the workapi-frontend-boundary
+    # depguard rule in .golangci.yml. This is the symbol half depguard cannot
+    # express: internal/workapi legitimately imports internal/config (for
+    # GetCustomTypesFromYAML, a workspace-scoped read), but process-local
+    # reads derived from a client's cwd or environment are meaningless in a
+    # long-lived server and must not leak into the shared contract.
+    local banned='config\.GetDirectoryLabels|os\.Getenv'
+
+    if [[ ! -d internal/workapi ]]; then
+        printf 'internal/workapi does not exist; skipping frontend-boundary check.\n'
+        return 0
+    fi
+
+    if grep -rnE "$banned" internal/workapi --include='*.go'; then
+        cat >&2 <<'EOF'
+
+internal/workapi must not read cwd- or environment-derived state.
+
+Those reads describe the client's process, which a server process does not
+share. Resolve them in the frontend and pass the result in as a parameter.
+See internal/workapi/doc.go.
+EOF
+        return 1
+    fi
+
+    printf 'No banned cwd/env accessors in internal/workapi.\n'
+}
+
 build_docs_binary() {
     tmpdir="$(mktemp -d)"
     local build
@@ -80,4 +109,9 @@ ci_time "build bd for docs checks" -- build_docs_binary
 ci_time "check doc flags" -- ./scripts/check-doc-flags.sh "$tmpdir/bd"
 ci_time "check doc freshness" -- ./scripts/check-doc-freshness.sh
 ci_time "check testing.Short boundaries" -- ./scripts/check-testing-short.sh
+ci_time "check workapi frontend boundary" -- check_workapi_frontend_boundary
 ci_time "check no .beads/issues.jsonl changes" -- check_no_beads_jsonl_changes
+# The OpenAPI drift gate belongs to a REQUIRED PR job. The Main workflow is
+# perpetually concurrency-cancelled, so a gate that only ran there would be
+# unenforced in practice.
+ci_time "check openapi spec gate" -- make api-check

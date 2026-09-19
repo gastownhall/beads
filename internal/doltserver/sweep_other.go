@@ -1,11 +1,10 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package doltserver
 
-// SweepOrphanedTestServers is a no-op on non-Linux platforms. The leaked
-// dolt sql-server evidence for gastownhall/beads mybd-q6cz is Linux-only
-// (/proc-based process/cwd inspection isn't portable), so this stub exists
-// only so callers (test TestMains) compile unchanged everywhere.
+// SweepOrphanedTestServers is a no-op on platforms where process command
+// lines and working directories cannot be inspected by an implementation in
+// this package. The stub keeps callers (test TestMains) portable.
 func SweepOrphanedTestServers(_ ...string) []int {
 	return nil
 }

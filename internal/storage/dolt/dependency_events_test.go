@@ -38,8 +38,8 @@ func newValueOf(t *testing.T, e *types.Event) string {
 // TestDependencyEventEmission ports the SQLite-era dependency_added /
 // dependency_removed event emission onto the Dolt engine: a real add or remove
 // records a descriptive event on the source's event table, an idempotent re-add
-// does not double-emit, and the added event is DOLT_COMMITted (staged), not left
-// dangling in the working set.
+// does not double-emit, and the added event is durable in the working set —
+// events is dolt_ignored since 0062, so audit rows never ride a DOLT_COMMIT.
 func TestDependencyEventEmission(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -72,7 +72,7 @@ func TestDependencyEventEmission(t *testing.T) {
 		}
 	})
 
-	t.Run("AddCommitsEventRow", func(t *testing.T) {
+	t.Run("AddRecordsEventRowOffTheCommitPlane", func(t *testing.T) {
 		src, tgt := "de-commit-a", "de-commit-b"
 		createPerm(t, ctx, store, src)
 		createPerm(t, ctx, store, tgt)
@@ -82,29 +82,24 @@ func TestDependencyEventEmission(t *testing.T) {
 			t.Fatalf("AddDependency: %v", err)
 		}
 
-		// AS OF 'HEAD' reads the committed tree only: a non-zero count proves the
-		// event row was staged and committed, not merely written to the working set.
-		var committed int
+		// events is dolt_ignored since 0062 (bd-red8u): the audit row is durable
+		// in the working set, never part of committed history.
+		var recorded int
 		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 			src, string(types.EventDependencyAdded),
-		).Scan(&committed); err != nil {
-			t.Fatalf("count committed dependency_added events: %v", err)
+		).Scan(&recorded); err != nil {
+			t.Fatalf("count dependency_added events: %v", err)
 		}
-		if committed != 1 {
-			t.Fatalf("committed dependency_added count = %d, want 1 (events must be staged before DOLT_COMMIT)", committed)
+		if recorded != 1 {
+			t.Fatalf("dependency_added count = %d, want 1", recorded)
 		}
-		// The events table must be clean afterward — the row is in the commit, not
-		// left dirty in the working set where a later DOLT_RESET could drop it.
-		var dirtyEvents int
-		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'events'",
-		).Scan(&dirtyEvents); err != nil {
-			t.Fatalf("query dolt_status for events: %v", err)
-		}
-		if dirtyEvents != 0 {
-			t.Fatalf("events table dirty after AddDependency (count=%d); staging is not committing the event", dirtyEvents)
-		}
+		assertEventsNotCommitted(ctx, t, store.db)
+		// No dolt_status assertion here: on a production-shaped database the
+		// untracked ignored table never appears in dolt_status (the embedded
+		// contract tests pin that), but the shared branch-per-test database
+		// materializes events at HEAD, so working-set rows legitimately show
+		// as a modification there. Staging respects dolt_ignore either way.
 	})
 
 	t.Run("ExplicitRemoveEmitsDependencyRemoved", func(t *testing.T) {
@@ -131,17 +126,8 @@ func TestDependencyEventEmission(t *testing.T) {
 		if got, want := newValueOf(t, removed[0]), "Removed dependency on de-rm-b"; got != want {
 			t.Fatalf("dependency_removed new_value = %q, want %q", got, want)
 		}
-		// The removed event is committed too.
-		var committed int
-		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
-			src, string(types.EventDependencyRemoved),
-		).Scan(&committed); err != nil {
-			t.Fatalf("count committed dependency_removed events: %v", err)
-		}
-		if committed != 1 {
-			t.Fatalf("committed dependency_removed count = %d, want 1", committed)
-		}
+		// The removed event is recorded on the same (ignored) plane.
+		assertRecordedEventCount(ctx, t, store.db, src, types.EventDependencyRemoved, 1)
 	})
 
 	t.Run("RemoveMissingEdgeEmitsNothing", func(t *testing.T) {
@@ -184,7 +170,7 @@ func TestDependencyEventEmission(t *testing.T) {
 		if n := len(depEventsOfType(t, ctx, store, src, types.EventDependencyRemoved)); n != 0 {
 			t.Fatalf("structural remove must not emit dependency_removed, got %d", n)
 		}
-		assertCommittedEventCount(ctx, t, store.db, src, types.EventDependencyRemoved, 0)
+		assertRecordedEventCount(ctx, t, store.db, src, types.EventDependencyRemoved, 0)
 	})
 
 	t.Run("IdempotentReAddDoesNotDoubleEmit", func(t *testing.T) {
@@ -259,14 +245,14 @@ func TestRunInTransactionAddRemoveDependencyCommitsEvents(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RunInTransaction AddDependency: %v", err)
 	}
-	assertCommittedEventCount(ctx, t, store.db, src, types.EventDependencyAdded, 1)
+	assertRecordedEventCount(ctx, t, store.db, src, types.EventDependencyAdded, 1)
 
 	if err := store.RunInTransaction(ctx, "test: tx remove dependency emits event", func(tx storage.Transaction) error {
 		return tx.RemoveDependencyWithOptions(ctx, src, tgt, "remover", storage.DependencyRemoveOptions{EmitEvent: true})
 	}); err != nil {
 		t.Fatalf("RunInTransaction RemoveDependency: %v", err)
 	}
-	assertCommittedEventCount(ctx, t, store.db, src, types.EventDependencyRemoved, 1)
+	assertRecordedEventCount(ctx, t, store.db, src, types.EventDependencyRemoved, 1)
 }
 
 // TestCreateTimeTxAddDependencyDoesNotEmit proves the create-with-deps path —
@@ -306,7 +292,7 @@ func TestCreateTimeTxAddDependencyDoesNotEmit(t *testing.T) {
 	if n := len(depEventsOfType(t, ctx, store, child, types.EventDependencyAdded)); n != 0 {
 		t.Fatalf("create-time parent-child edge must not emit dependency_added, got %d", n)
 	}
-	assertCommittedEventCount(ctx, t, store.db, child, types.EventDependencyAdded, 0)
+	assertRecordedEventCount(ctx, t, store.db, child, types.EventDependencyAdded, 0)
 }
 
 // TestRunInTransactionWispSourceDependencyRoutesToWispEvents proves the tx-path
@@ -389,14 +375,19 @@ func TestNoEventDependencyOpsDoNotSweepDirtyEvents(t *testing.T) {
 	}
 	assertUncommitted := func(t *testing.T, strayID string) {
 		t.Helper()
-		var committed int
+		// events is dolt_ignored since 0062 (bd-red8u): absence of the whole
+		// table from HEAD subsumes the original per-row sweep check — no
+		// dependency op can commit an event row on any path anymore.
+		assertEventsNotCommitted(ctx, t, store.db)
+		// The stray row must still be durable in the working set.
+		var live int
 		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE id = ?", strayID,
-		).Scan(&committed); err != nil {
-			t.Fatalf("count committed stray event: %v", err)
+			"SELECT COUNT(*) FROM events WHERE id = ?", strayID,
+		).Scan(&live); err != nil {
+			t.Fatalf("count stray event: %v", err)
 		}
-		if committed != 0 {
-			t.Fatalf("a no-event dependency op swept an unrelated pending event into its commit (committed=%d, want 0)", committed)
+		if live != 1 {
+			t.Fatalf("stray event row lost from the working set (count=%d, want 1)", live)
 		}
 	}
 

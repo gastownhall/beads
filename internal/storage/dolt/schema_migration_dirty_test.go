@@ -294,7 +294,8 @@ func TestSchemaMigrationRejectsChangedPreExistingDirtyTable(t *testing.T) {
 		t.Fatalf("commit cleared custom_statuses: %v", err)
 	}
 
-	// Leave an UNCOMMITTED user write on custom_statuses: the pass's backfill
+	// Seed and commit a scratch row so the table has pre-existing committed
+	// content, then dirty it with an UNCOMMITTED delete: the pass's backfill
 	// (re-inserting 'review' from config) then changes a pre-existing dirty
 	// table mid-pass, which the changed-signature guard must reject.
 	// (Historically this test dirtied dolt_ignore and relied on the pass's
@@ -303,6 +304,12 @@ func TestSchemaMigrationRejectsChangedPreExistingDirtyTable(t *testing.T) {
 	if _, err := store.db.ExecContext(ctx,
 		"INSERT INTO custom_statuses (name, category) VALUES ('scratch', 'wip')",
 	); err != nil {
+		t.Fatalf("seed scratch custom_statuses: %v", err)
+	}
+	if err := store.doltAddAndCommit(ctx, []string{"custom_statuses"}, "test: seed scratch custom status"); err != nil {
+		t.Fatalf("commit scratch custom_statuses: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
 		t.Fatalf("dirty custom_statuses: %v", err)
 	}
 

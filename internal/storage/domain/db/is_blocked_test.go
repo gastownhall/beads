@@ -62,8 +62,8 @@ func (s *testSuite) ibUpdateCloseUnblocks() {
 	s.Require().True(s.isBlocked("bd-ib-up-src"))
 
 	issueRepo := NewIssueSQLRepository(s.Runner())
-	s.Require().NoError(issueRepo.Update(s.Ctx(), "bd-ib-up-tgt",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+	_, err := issueRepo.Close(s.Ctx(), "bd-ib-up-tgt", domain.CloseRowParams{}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
 
 	s.False(s.isBlocked("bd-ib-up-src"), "closing the blocker must unblock its dependent")
 }
@@ -75,12 +75,12 @@ func (s *testSuite) ibUpdateReopenReblocks() {
 		newDep("bd-ib-re-src", "bd-ib-re-tgt", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 
 	issueRepo := NewIssueSQLRepository(s.Runner())
-	s.Require().NoError(issueRepo.Update(s.Ctx(), "bd-ib-re-tgt",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+	_, err := issueRepo.Close(s.Ctx(), "bd-ib-re-tgt", domain.CloseRowParams{}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
 	s.Require().False(s.isBlocked("bd-ib-re-src"))
 
-	s.Require().NoError(issueRepo.Update(s.Ctx(), "bd-ib-re-tgt",
-		map[string]any{"status": string(types.StatusOpen)}, "tester", domain.IssueTableOpts{}))
+	_, err = issueRepo.Reopen(s.Ctx(), "bd-ib-re-tgt", domain.ReopenRowParams{}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
 	s.True(s.isBlocked("bd-ib-re-src"), "reopening the blocker must re-block its dependent")
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -20,6 +21,7 @@ func (timeoutErr) Temporary() bool { return true }
 
 func TestNewHaikuClient_RequiresAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 
 	_, err := newHaikuClient("")
 	if err == nil {
@@ -54,6 +56,67 @@ func TestNewHaikuClient_EnvVarOverridesExplicitKey(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestNewHaikuClient_MiniMaxKeyUsesMiniMaxBaseURL(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	t.Setenv("MINIMAX_BASE_URL", "")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.api_key", "")
+	config.Set("ai.base_url", "")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.apiKeySource != config.AIAPIKeySourceMiniMaxEnv {
+		t.Fatalf("apiKeySource = %q, want %q", client.apiKeySource, config.AIAPIKeySourceMiniMaxEnv)
+	}
+	if client.baseURL != config.MiniMaxDefaultBaseURL {
+		t.Fatalf("baseURL = %q, want %q", client.baseURL, config.MiniMaxDefaultBaseURL)
+	}
+}
+
+func TestNewHaikuClient_AnthropicKeyOverridesMiniMaxKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.base_url", "")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.apiKeySource != config.AIAPIKeySourceAnthropicEnv {
+		t.Fatalf("apiKeySource = %q, want %q", client.apiKeySource, config.AIAPIKeySourceAnthropicEnv)
+	}
+	if client.baseURL != "" {
+		t.Fatalf("baseURL = %q, want SDK default", client.baseURL)
+	}
+}
+
+func TestNewHaikuClient_ConfigBaseURLOverridesMiniMaxDefault(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	t.Setenv("MINIMAX_BASE_URL", "https://minimax.example/anthropic")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.api_key", "")
+	config.Set("ai.base_url", "https://proxy.example/anthropic")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.baseURL != "https://proxy.example/anthropic" {
+		t.Fatalf("baseURL = %q, want config proxy URL", client.baseURL)
 	}
 }
 
@@ -205,6 +268,7 @@ func TestIsRetryable(t *testing.T) {
 
 func TestSummarizeTier1_CancelledContext(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -227,6 +291,7 @@ func TestSummarizeTier1_CancelledContext(t *testing.T) {
 
 func TestSummarizeTier1_WithAuditEnabled(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -251,6 +316,7 @@ func TestSummarizeTier1_WithAuditEnabled(t *testing.T) {
 
 func TestCallWithRetry_ImmediateContextCancel(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -1,0 +1,15 @@
+-- Version anchor for the switch to content-derived aux-row ids at insert
+-- time (bd-ri8bd, Protocol v0.1 C-OQ3). No schema change: the aux tables'
+-- id columns stay CHAR(36) (they now hold RFC-4122 v5 UUIDs derived from row
+-- content — internal/storage/rowid — instead of random UUIDv7s).
+--
+-- The anchor exists for the second re-key pass's fresh-clone gate
+-- (auxRekeyPassDerivedInsert in internal/storage/schema): a lineage whose
+-- main cursor reached this version was migrated by a binary that already
+-- derives ids at insert AND has run the catch-up re-key of the interim
+-- random-id rows, so a fresh clone of it records the clone-local marker
+-- (ignored 0018) without re-running the rewrite. Anchoring to a real main
+-- version — rather than to the neighboring 0060 — matters: a lineage at 0060
+-- may still hold un-converged UUIDv7 rows, and a clone that skipped the pass
+-- there would diverge from its origin's later convergence.
+SELECT 1;

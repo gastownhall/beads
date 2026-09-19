@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // TestGetActorWithGit tests the actor resolution fallback chain.
@@ -153,6 +155,51 @@ func TestGetActorWithGit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolveConfiguredActor verifies that BEADS_ACTOR (primary override)
+// outranks the deprecated BD_ACTOR alias when the --actor flag is not set,
+// even though viper's AutomaticEnv binds BD_ACTOR to the "actor" config key
+// (GH#4645). This is the resolution the pre-run hooks use to pre-populate the
+// global actor before getActorWithGit runs.
+func TestResolveConfiguredActor(t *testing.T) {
+	origBd, bdSet := os.LookupEnv("BD_ACTOR")
+	origBeads, beadsSet := os.LookupEnv("BEADS_ACTOR")
+	defer func() {
+		if bdSet {
+			os.Setenv("BD_ACTOR", origBd)
+		} else {
+			os.Unsetenv("BD_ACTOR")
+		}
+		if beadsSet {
+			os.Setenv("BEADS_ACTOR", origBeads)
+		} else {
+			os.Unsetenv("BEADS_ACTOR")
+		}
+		_ = config.Initialize()
+	}()
+
+	t.Run("BEADS_ACTOR outranks BD_ACTOR", func(t *testing.T) {
+		os.Setenv("BD_ACTOR", "from-bd-actor")
+		os.Setenv("BEADS_ACTOR", "from-beads-actor")
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize(): %v", err)
+		}
+		if got := resolveConfiguredActor(); got != "from-beads-actor" {
+			t.Errorf("resolveConfiguredActor() = %q, want %q (BEADS_ACTOR must win)", got, "from-beads-actor")
+		}
+	})
+
+	t.Run("BD_ACTOR used when BEADS_ACTOR unset", func(t *testing.T) {
+		os.Unsetenv("BEADS_ACTOR")
+		os.Setenv("BD_ACTOR", "from-bd-actor")
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize(): %v", err)
+		}
+		if got := resolveConfiguredActor(); got != "from-bd-actor" {
+			t.Errorf("resolveConfiguredActor() = %q, want %q (BD_ACTOR fallback)", got, "from-bd-actor")
+		}
+	})
 }
 
 // TestGetActorWithGit_PriorityOrder tests that the priority order is respected

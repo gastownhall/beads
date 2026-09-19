@@ -395,6 +395,12 @@ formula authors because it maps directly to Issue.AwaitID.`,
 				JSONName: "timeout",
 				Doc:      `Timeout is how long to wait before escalation (e.g., "1h", "24h").`,
 			},
+			{
+				Name:     "Repo",
+				Type:     "string",
+				JSONName: "repo",
+				Doc:      "Repo optionally selects the GitHub repository (OWNER/REPO or\nHOST/OWNER/REPO) a gh:run or gh:pr gate's condition is checked\nagainst. Empty means the current Git repository - the same default\nas an ad-hoc `bd gate create` gate. Ignored for non-GitHub gate\ntypes (human, timer, bead).",
+			},
 		},
 	},
 	{
@@ -654,7 +660,11 @@ Used for dependency references and bond points.`,
 				Name:     "Type",
 				Type:     "string",
 				JSONName: "type",
-				Doc:      `Type is the issue type: task, bug, feature, epic, chore.`,
+				Doc: `Type is the issue type: any built-in type (task by default; bug,
+feature, epic, chore, decision, spike, story, milestone, ...) or a
+custom type already registered in types.custom. Unregistered types
+are flattened to task, with a warning, when the formula is cooked
+or poured.`,
 			},
 			{
 				Name:     "Priority",

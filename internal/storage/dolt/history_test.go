@@ -4,9 +4,98 @@ import (
 	"errors"
 	"testing"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// =============================================================================
+// DoltStore.History Tests (the production path `bd history` actually calls —
+// distinct from the unexported getIssueHistory below, which nothing calls)
+// =============================================================================
+
+// TestHistory_UsesDedicatedLongTimeoutConnection guards against regressing to
+// the shared pool's 10s ReadTimeout (ga-ahnxx): a dolt_history_issues scan on
+// an issue with many revisions can legitimately take longer than that,
+// surfacing as an intermittent MySQL i/o timeout / invalid connection error
+// even though bd show on the same id succeeds instantly (a fast point lookup
+// on the live table, not the history table).
+//
+// store.db (the shared pool) is opened once at store-creation time with a
+// baked-in DSN — mutating store.connStr afterward cannot affect it. Only a
+// call path that re-parses store.connStr per invocation (openLongTimeoutConn,
+// via withReadTxLongTimeout) is affected. So: break store.connStr after setup,
+// then confirm History still routes through it (and fails) rather than
+// silently falling back to the still-healthy shared pool.
+func TestHistory_UsesDedicatedLongTimeoutConnection(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "history-timeout-test",
+		Title:     "v1",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if err := store.Commit(ctx, "v1"); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Sanity check: History works before we break anything, and it must
+	// actually read the store's checked-out branch — setupTestStore checks
+	// out an isolated test branch via a raw CALL DOLT_CHECKOUT on store.db
+	// (testutil.StartTestBranch), which bypasses Store.Checkout and never
+	// updates s.branch. If openLongTimeoutConn's fresh connection doesn't
+	// also select that branch, this query silently reads the (schema-only,
+	// issue-less) default branch instead and returns an empty result with a
+	// nil error — a passing err check alone would not catch that.
+	sanityHistory, err := store.History(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("History failed before connStr corruption: %v", err)
+	}
+	if len(sanityHistory) == 0 {
+		t.Fatal("expected non-empty history for the created issue; got none — " +
+			"History is likely reading the default branch instead of the " +
+			"store's actual checked-out branch (see withReadTxLongTimeout)")
+	}
+	found := false
+	for _, entry := range sanityHistory {
+		if entry.Issue != nil && (entry.Issue.ID == issue.ID || entry.Issue.Title == issue.Title) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected history to contain the created issue %q (title %q), got entries: %+v",
+			issue.ID, issue.Title, sanityHistory)
+	}
+
+	// Break store.connStr to an address that fails DNS resolution fast and
+	// permanently (RFC 2606 .invalid TLD) — a clean signal distinct from
+	// "connection refused", which the retry layer treats as transient and
+	// would spend up to serverRetryMaxElapsed (30s) retrying.
+	cfg, err := mysql.ParseDSN(store.connStr)
+	if err != nil {
+		t.Fatalf("failed to parse store.connStr: %v", err)
+	}
+	cfg.Addr = "ga-ahnxx-test.invalid:3306"
+	store.connStr = cfg.FormatDSN()
+
+	if _, err := store.History(ctx, issue.ID); err == nil {
+		t.Fatal("expected History to fail after store.connStr was broken; " +
+			"if it still succeeds, History is reading through the shared " +
+			"pool (store.db) instead of a fresh connection via " +
+			"openLongTimeoutConn/withReadTxLongTimeout, which is what lets " +
+			"the pool's 10s ReadTimeout keep biting long dolt_history_issues scans")
+	}
+}
 
 // =============================================================================
 // getIssueHistory Tests

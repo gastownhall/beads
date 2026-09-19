@@ -173,6 +173,22 @@ Created while Dolt auto-commit is in batch mode.
 
 		assertEmbeddedHeadUnchanged(t, beadsDir, "dd", before, "delete")
 	})
+
+	// Prune rides the Sweeper role, which mints its own version commit — so
+	// batch mode has to reach it on the context, exactly as delete's does.
+	// Before the role versioned an embedded sweep, this route was deferred by
+	// accident: nothing under it committed at all, and the post-run flush
+	// already honored the mode.
+	t.Run("prune", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dp")
+		issue := bdCreate(t, bd, dir, "Batch prune target")
+		bdClose(t, bd, dir, issue.ID, "--reason", "done")
+		before := embeddedCurrentCommit(t, beadsDir, "dp")
+
+		bdCommand(t, bd, dir, "--dolt-auto-commit", "batch", "prune", "--pattern", "dp-*", "--force")
+
+		assertEmbeddedHeadUnchanged(t, beadsDir, "dp", before, "prune")
+	})
 }
 
 func TestEmbeddedRoutedSiblingWritesCommitTargetHead(t *testing.T) {

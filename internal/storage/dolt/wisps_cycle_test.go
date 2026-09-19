@@ -8,6 +8,20 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// The RULE these two pin — a same-plane edge is refused when the loop it closes
+// only exists by leaving the plane and coming back — now lives at all three
+// backends as
+// conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle.
+//
+// They stay because they are not the same route. That case reaches the shared
+// gate through issueops.ExecuteAddDependencies, which computes its own routing;
+// these reach it through DoltStore.AddDependency, which computes routing again
+// with its own pre-transaction wisp cache and is what ~15 cmd/bd files call
+// directly (state.go, swarm.go, gate.go, duplicates.go, the tx variants in
+// create_atomic.go and graph_apply.go, …). Breaking that wrapper's own routing
+// leaves every DependencyEditor case green, so nothing in the contract layer
+// covers the seam these run.
+
 func TestAddDependencyRejectsPermanentEndpointCycleThroughWisp(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

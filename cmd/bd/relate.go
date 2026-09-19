@@ -63,6 +63,10 @@ func runRelate(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
+	if usesProxiedServer() {
+		return runRelateProxiedServer(ctx, args)
+	}
+
 	// Resolve partial IDs
 	var id1, id2 string
 	var err error
@@ -146,6 +150,10 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 	}()
 
 	ctx := rootCtx
+
+	if usesProxiedServer() {
+		return runUnrelateProxiedServer(ctx, args)
+	}
 
 	// Resolve partial IDs
 	var id1, id2 string

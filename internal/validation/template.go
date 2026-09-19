@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -32,14 +33,91 @@ func (e *TemplateError) Error() string {
 	return b.String()
 }
 
+// LintSectionsConfigPrefix is the config namespace for per-issue-type
+// additional lint sections (G4): lint.sections.<type> holds a
+// comma-separated list of section headings, e.g.
+//
+//	bd config set lint.sections.epic "Standards scorecard, Cost"
+//
+// The list is ADDITIVE to the built-in sections in
+// types.IssueType.RequiredSections: built-in requirements are never relaxed.
+const LintSectionsConfigPrefix = "lint.sections."
+
+// ConfiguredLintSections returns the extra required sections configured for
+// the issue type under lint.sections.<type>. Each comma-separated entry is
+// normalized to a canonical "## <heading>" form (a leading run of '#' and
+// surrounding whitespace is stripped, so "# Cost", "## Cost", and "cost"
+// all yield "## Cost"), empty entries are dropped, and entries are deduped
+// case-insensitively with the first occurrence's casing kept. Returns nil
+// when the key is unset or empty.
+func ConfiguredLintSections(issueType types.IssueType) []types.RequiredSection {
+	raw := config.GetString(LintSectionsConfigPrefix + string(issueType))
+	var out []types.RequiredSection
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(raw, ",") {
+		text := strings.TrimSpace(part)
+		text = strings.TrimSpace(strings.TrimLeft(text, "#"))
+		if text == "" {
+			continue
+		}
+		if seen[headingKey("## "+text)] {
+			continue
+		}
+		seen[headingKey("## "+text)] = true
+		out = append(out, types.RequiredSection{
+			Heading: "## " + text,
+			Hint:    "Required by " + LintSectionsConfigPrefix + string(issueType) + " config",
+		})
+	}
+	return out
+}
+
+// headingKey normalizes a section heading to a case-insensitive comparison
+// key: markdown prefix hashes and surrounding whitespace are dropped.
+func headingKey(heading string) string {
+	return strings.ToLower(strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(heading), "#")))
+}
+
+// mergeLintSections returns the sections ValidateTemplate requires for the
+// issue type: the built-ins from types.IssueType.RequiredSections plus the
+// additive configured sections from lint.sections.<type> (G4). Deduped
+// case-insensitively by heading text, built-ins first so their canonical
+// hints win.
+func mergeLintSections(issueType types.IssueType) []types.RequiredSection {
+	builtIn := issueType.RequiredSections()
+	configured := ConfiguredLintSections(issueType)
+	if len(configured) == 0 {
+		return builtIn
+	}
+	merged := make([]types.RequiredSection, 0, len(builtIn)+len(configured))
+	seen := make(map[string]bool, len(builtIn)+len(configured))
+	for _, s := range builtIn {
+		if seen[headingKey(s.Heading)] {
+			continue
+		}
+		seen[headingKey(s.Heading)] = true
+		merged = append(merged, s)
+	}
+	for _, s := range configured {
+		if seen[headingKey(s.Heading)] {
+			continue
+		}
+		seen[headingKey(s.Heading)] = true
+		merged = append(merged, s)
+	}
+	return merged
+}
+
 // ValidateTemplate checks if the description contains all required sections
-// for the given issue type. Returns nil if validation passes or if the
+// for the given issue type: the built-ins from
+// types.IssueType.RequiredSections plus the additive configured sections from
+// lint.sections.<type> (G4). Returns nil if validation passes or if the
 // issue type has no required sections.
 //
 // Section matching is case-insensitive and looks for the heading text
 // anywhere in the description (doesn't require exact markdown format).
 func ValidateTemplate(issueType types.IssueType, description string) error {
-	required := issueType.RequiredSections()
+	required := mergeLintSections(issueType)
 	if len(required) == 0 {
 		return nil
 	}

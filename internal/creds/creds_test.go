@@ -53,7 +53,7 @@ func TestResolveLadderSkipsUnconfigured(t *testing.T) {
 func TestResolveLadderFailsClosed(t *testing.T) {
 	sentinel := errors.New("helper exploded")
 	broken := stubSource{name: "cmd", configured: true, err: sentinel}
-	fallback := stubSource{name: "env", cred: Credential{Value: "would-be-wrong"}, configured: true}
+	fallback := stubSource{name: "lower", cred: Credential{Value: "would-be-wrong"}, configured: true}
 
 	_, ok, err := ResolveLadder(context.Background(), broken, fallback)
 	if err == nil {
@@ -77,25 +77,5 @@ func TestResolveLadderNothingConfigured(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected configured=false when nothing is set (driver-native fallthrough)")
-	}
-}
-
-func TestEnvSource(t *testing.T) {
-	t.Setenv("BEADS_CREDS_TEST_VAR", "hunter2")
-	got, ok, err := EnvSource{Var: "BEADS_CREDS_TEST_VAR"}.Resolve(context.Background())
-	if err != nil || !ok {
-		t.Fatalf("resolve: ok=%v err=%v", ok, err)
-	}
-	if got.Value != "hunter2" || got.Kind != KindSecret || got.Source != "BEADS_CREDS_TEST_VAR" {
-		t.Fatalf("unexpected credential: %+v", got)
-	}
-
-	t.Setenv("BEADS_CREDS_TEST_VAR", "")
-	_, ok, err = EnvSource{Var: "BEADS_CREDS_TEST_VAR"}.Resolve(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if ok {
-		t.Fatal("expected configured=false for an empty env var")
 	}
 }

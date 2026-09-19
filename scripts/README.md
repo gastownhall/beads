@@ -66,6 +66,16 @@ signals such as `.beads/` changes or missing tests, and the required
 contributor-protection next steps. It does not replace code review or local
 validation.
 
+Base-branch health is supplemented by a warn-only PR-gate sample: the last 60
+completed `pull_request`-event runs, grouped per workflow. A single workflow
+whose decisive runs (>= 5, across >= 3 distinct head branches) are all
+failure-class is reported as a broken PR gate — the case where a job that
+exists only in the PR workflow is red for every PR while the base branch shows
+green. This detector never blocks (deliberately: automation classifies
+unrecognized `[block]` lines as genuine merge blockers and would park merge
+lanes on a false positive); it is skipped entirely while the base branch is
+red.
+
 ## gh-body-lint
 
 Lint Markdown files before posting them with `gh ... --body-file`.

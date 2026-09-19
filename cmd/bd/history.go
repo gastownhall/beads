@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -9,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var (
@@ -41,8 +43,20 @@ Examples:
 		issueID := args[0]
 
 		if usesProxiedServer() {
+			// Proxied mode has no local store to resolve against, so partial-ID
+			// resolution is unavailable here -- pass the raw ID through and let
+			// the proxied server's own lookup handle it.
 			return runHistoryProxiedServer(rootCtx, issueID, historyLimit, historyEvents)
 		}
+
+		if resolved, err := utils.ResolvePartialID(rootCtx, store, issueID); err == nil {
+			issueID = resolved
+		} else if errors.Is(err, utils.ErrAmbiguousID) {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		// Not-found IDs fall through unchanged -- the queries below just find
+		// nothing and hit the existing "No history found" path (GH#3502), so we
+		// don't hard-error on an id that never existed.
 
 		return runHistory(rootCtx, store, issueID, historyLimit, historyEvents)
 	},

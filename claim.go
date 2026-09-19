@@ -9,13 +9,17 @@ import (
 
 // ClaimConflict describes why a claim failed, recovered from the claim error.
 //
-// The engine's conditional-UPDATE claim path returns no typed conflict result:
-// on ErrAlreadyClaimed it embeds the current assignee in the message
-// ("issue already claimed by <assignee>"), and on ErrNotClaimable it embeds the
-// current status ("issue not claimable: status <status>"). ClaimConflict
-// carries whichever of those was recoverable; the other stays empty. This is a
-// deliberately string-coupled shim — a typed conflict result would require
-// changing the internal claim signature, which this surface deliberately avoids.
+// The engine's claim path embeds the conflicting state in the message: on
+// ErrAlreadyClaimed the current assignee ("issue already claimed by
+// <assignee>"), on ErrNotClaimable the current status ("issue not claimable:
+// status <status>"). ClaimConflict carries whichever of those was recoverable;
+// the other stays empty. This is a deliberately string-coupled shim.
+//
+// A CALLER ON THE LIBRARY CONTRACT DOES NOT NEED IT. The claim path now returns
+// issueops.ClaimConflictError, which carries the assignee and status as typed
+// fields read inside the attempt that lost, so errors.As recovers them without
+// parsing anything. This shim stays for callers holding a claim error from
+// somewhere else, and because it is public API.
 type ClaimConflict struct {
 	// CurrentAssignee is the actor currently holding the issue. Set when the
 	// error wraps ErrAlreadyClaimed and the assignee was parseable.

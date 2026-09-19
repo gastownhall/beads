@@ -275,12 +275,12 @@ func TestInitIfMissing(t *testing.T) {
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
 
 	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--init-if-missing"})
 	execErr := rootCmd.Execute()
 
 	w.Close()
-	os.Stderr = oldStderr
 	var buf bytes.Buffer
 	buf.ReadFrom(r)
 	stderr := buf.String()
@@ -365,13 +365,13 @@ func TestInitIfMissingMatchingPrefixSkips(t *testing.T) {
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
 
 	// Same prefix as the existing workspace: must skip, not abort.
 	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--init-if-missing"})
 	execErr := rootCmd.Execute()
 
 	w.Close()
-	os.Stderr = oldStderr
 	var buf bytes.Buffer
 	buf.ReadFrom(r)
 	stderr := buf.String()

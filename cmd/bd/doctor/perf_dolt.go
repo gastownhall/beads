@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -255,12 +254,8 @@ func measureQueryTime(ctx context.Context, db *sql.DB, query string) int64 {
 
 // isDoltServerRunning checks if a dolt sql-server is responding.
 func isDoltServerRunning(host string, port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close() // Best effort cleanup
-	return true
+	_, err := doltserver.ProbeSQLServer("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
+	return err == nil
 }
 
 // getDoltDatabaseSize returns the total size of the Dolt database directory
@@ -366,7 +361,7 @@ func assessDoltPerformance(metrics *DoltPerfMetrics) {
 
 	// Check database size
 	if metrics.TotalIssues > 5000 && metrics.ClosedIssues > 4000 {
-		recommendations = append(recommendations, "Many closed issues. Consider 'bd cleanup' to prune old issues.")
+		recommendations = append(recommendations, "Many closed issues. Consider 'bd prune --older-than 90d' to prune old issues.")
 	}
 
 	if len(warnings) == 0 {

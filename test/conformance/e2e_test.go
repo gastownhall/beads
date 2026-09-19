@@ -205,16 +205,17 @@ var corpus = []scenario{
 		{"blocked", "--json"},
 	}},
 
-	// bd search --desc-contains (LOWER(description) LIKE) + default closed-exclusion.
-	// Lowercase 'endpoint' matches stored 'ENDPOINT' -> [cf-sd1]; plain search hides
-	// closed cf-sd3 -> []; --status all surfaces it -> [cf-sd3].
+	// bd search --desc-contains (LOWER(description) LIKE) + status defaulting.
+	// Lowercase 'endpoint' matches stored 'ENDPOINT' -> [cf-sd1]; plain search
+	// INCLUDES closed cf-sd3 by default (bd-t5yex) -> [cf-sd3]; --status open
+	// excludes it -> [].
 	{name: "search-desc-contains-and-status", steps: [][]string{
 		{"create", "alpha", "--id", "cf-sd1", "-t", "task", "--description", "Login ENDPOINT here"},
 		{"create", "gamma", "--id", "cf-sd3", "-t", "task"},
 		{"close", "cf-sd3"},
 		{"search", "alpha", "--desc-contains", "endpoint", "--json"},
 		{"search", "gamma", "--json"},
-		{"search", "gamma", "--status", "all", "--json"},
+		{"search", "gamma", "--status", "open", "--json"},
 	}},
 
 	// bd list --parent <id> --flat: non-recursive ParentID filter (deps parent-child

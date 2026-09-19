@@ -3,13 +3,18 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdMigrate runs "bd migrate" with the given args and returns stdout.
@@ -22,6 +27,21 @@ func bdMigrate(t *testing.T, bd, dir string, args ...string) string {
 	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
 		t.Fatalf("bd migrate %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String()
+}
+
+// bdMigrateJSON runs "bd --format=json migrate" so PersistentPreRunE observes
+// the unique root flag without migrate's duplicate local --json shadowing it.
+func bdMigrateJSON(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"--format=json", "migrate"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd --format=json migrate %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
 }
@@ -40,18 +60,32 @@ func extractNewRepoID(t *testing.T, out string) string {
 	return ""
 }
 
-// bdMigrateFail runs "bd migrate" expecting failure.
-func bdMigrateFail(t *testing.T, bd, dir string, args ...string) string {
+// withEmbeddedMigrateSQL runs a direct fixture operation and verifies that the
+// embedded SQL connection closes cleanly even when the operation fails.
+func withEmbeddedMigrateSQL(t *testing.T, beadsDir, database string, operation func(*sql.DB) error) {
 	t.Helper()
-	fullArgs := append([]string{"migrate"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected bd migrate %s to fail, but succeeded:\n%s", strings.Join(args, " "), out)
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("open embedded database: %v", err)
 	}
-	return string(out)
+	opErr := operation(db)
+	cleanupErr := cleanup()
+	if opErr != nil && cleanupErr != nil {
+		t.Fatalf("embedded database operation failed: %v; cleanup failed: %v", opErr, cleanupErr)
+	}
+	if opErr != nil {
+		t.Fatalf("embedded database operation failed: %v", opErr)
+	}
+	if cleanupErr != nil {
+		t.Fatalf("close embedded database: %v", cleanupErr)
+	}
+}
+
+func setMigrateJSONConfigFalse(t *testing.T, beadsDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("json: false\n"), 0o600); err != nil {
+		t.Fatalf("write explicit false JSON config: %v", err)
+	}
 }
 
 func TestEmbeddedMigrate(t *testing.T) {
@@ -62,68 +96,97 @@ func TestEmbeddedMigrate(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 
-	// ===== Default (metadata update) =====
-
-	t.Run("migrate_default", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mg")
-		out := bdMigrate(t, bd, dir)
-		if !strings.Contains(out, "Dolt database") {
-			t.Errorf("expected 'Dolt database' in output: %s", out)
-		}
-	})
-
-	// ===== --dry-run =====
-
-	t.Run("migrate_dry_run", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "md")
-		out := bdMigrate(t, bd, dir, "--dry-run")
-		// Should show what would be done without making changes
-		if len(strings.TrimSpace(out)) == 0 {
-			t.Error("expected non-empty --dry-run output")
-		}
-	})
-
-	// ===== --inspect =====
-
-	t.Run("migrate_inspect", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mi")
+	t.Run("migrate_metadata_preview_and_inspection", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mg")
+		setMigrateJSONConfigFalse(t, beadsDir)
 		bdCreate(t, bd, dir, "Inspect test issue", "--type", "task")
-		out := bdMigrate(t, bd, dir, "--inspect")
-		if !strings.Contains(out, "Migration") || !strings.Contains(out, "Inspection") {
-			t.Errorf("expected migration inspection output: %s", out)
+		const staleVersion = "0.0.0"
+		setVersion := func(version string) {
+			t.Helper()
+			withEmbeddedMigrateSQL(t, beadsDir, "mg", func(db *sql.DB) error {
+				result, err := db.ExecContext(t.Context(), "UPDATE local_metadata SET value = ? WHERE `key` = ?", version, "bd_version")
+				if err != nil {
+					return fmt.Errorf("set fixture bd_version: %w", err)
+				}
+				if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+					return fmt.Errorf("set fixture bd_version affected %d rows, %v; want 1", rows, err)
+				}
+				return nil
+			})
 		}
-	})
+		getVersion := func() string {
+			t.Helper()
+			var version string
+			withEmbeddedMigrateSQL(t, beadsDir, "mg", func(db *sql.DB) error {
+				if err := db.QueryRowContext(t.Context(), "SELECT value FROM local_metadata WHERE `key` = ?", "bd_version").Scan(&version); err != nil {
+					return fmt.Errorf("read fixture bd_version: %w", err)
+				}
+				return nil
+			})
+			return version
+		}
+		setVersion(staleVersion)
 
-	t.Run("migrate_inspect_json", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mj")
-		out := bdMigrate(t, bd, dir, "--inspect", "--json")
-		s := strings.TrimSpace(out)
-		start := strings.Index(s, "{")
-		if start >= 0 {
-			var m map[string]interface{}
-			if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
-				t.Errorf("invalid JSON: %v\n%s", err, s)
+		inspect := func() map[string]interface{} {
+			t.Helper()
+			out := bdMigrateJSON(t, bd, dir, "--inspect")
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("bd --format=json migrate --inspect returned invalid JSON: %v\n%s", err, out)
 			}
+			for _, key := range []string{"registered_migrations", "current_state", "warnings", "invariants_to_check"} {
+				if _, ok := result[key]; !ok {
+					t.Errorf("migrate inspection JSON missing %q: %v", key, result)
+				}
+			}
+			state, ok := result["current_state"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("migrate inspection current_state = %#v, want object", result["current_state"])
+			}
+			for _, key := range []string{"schema_version", "issue_count", "config", "missing_config", "db_exists"} {
+				if _, ok := state[key]; !ok {
+					t.Errorf("migrate inspection current_state missing %q: %v", key, state)
+				}
+			}
+			if got, ok := state["db_exists"].(bool); !ok || !got {
+				t.Errorf("migrate inspection db_exists = %#v, want true", state["db_exists"])
+			}
+			if got, ok := state["issue_count"].(float64); !ok || got != 1 {
+				t.Errorf("migrate inspection issue_count = %#v, want 1", state["issue_count"])
+			}
+			return result
 		}
-		// --json flag may not produce JSON due to flag shadowing;
-		// verify command at least succeeds.
-	})
 
-	// ===== --update-repo-id =====
-
-	t.Run("migrate_update_repo_id_dry_run", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mr")
-		out := bdMigrate(t, bd, dir, "--update-repo-id", "--dry-run")
-		if len(strings.TrimSpace(out)) == 0 {
-			t.Error("expected non-empty --update-repo-id --dry-run output")
+		before := inspect()
+		out := bdMigrateJSON(t, bd, dir, "--dry-run")
+		var preview map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &preview); err != nil {
+			t.Fatalf("bd --format=json migrate --dry-run returned invalid JSON: %v\n%s", err, out)
 		}
-	})
+		if got, ok := preview["dry_run"].(bool); !ok || !got {
+			t.Errorf("migrate metadata dry_run = %#v, want true", preview["dry_run"])
+		}
+		if got, ok := preview["needs_version_update"].(bool); !ok || !got {
+			t.Errorf("migrate metadata needs_version_update = %#v, want true", preview["needs_version_update"])
+		}
+		if got, ok := preview["current_version"].(string); !ok || got != staleVersion {
+			t.Errorf("migrate metadata current_version = %#v, want %q", preview["current_version"], staleVersion)
+		}
+		if got, ok := preview["target_version"].(string); !ok || got != Version {
+			t.Errorf("migrate metadata target_version = %#v, want %q", preview["target_version"], Version)
+		}
+		if got := getVersion(); got != staleVersion {
+			t.Errorf("migrate --dry-run changed persisted bd_version to %q, want %q", got, staleVersion)
+		}
+		after := inspect()
+		if !reflect.DeepEqual(before["current_state"], after["current_state"]) {
+			t.Errorf("migrate --dry-run changed inspection state:\nbefore: %#v\nafter:  %#v", before["current_state"], after["current_state"])
+		}
 
-	t.Run("migrate_update_repo_id", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mu")
-		out := bdMigrate(t, bd, dir, "--update-repo-id", "--yes")
-		if !strings.Contains(out, "Repository ID") && !strings.Contains(out, "repo_id") {
-			t.Errorf("expected repo ID update message: %s", out)
+		setVersion(Version)
+		out = bdMigrate(t, bd, dir)
+		if !strings.Contains(out, "Dolt database version") || !strings.Contains(out, "All metadata fields present") {
+			t.Errorf("migrate output = %q, want current metadata summary", out)
 		}
 	})
 
@@ -133,7 +196,8 @@ func TestEmbeddedMigrate(t *testing.T) {
 	// which then propagates to every clone via the synced metadata table.
 	t.Run("migrate_update_repo_id_honors_C", func(t *testing.T) {
 		dirA, _, _ := bdInit(t, bd, "--prefix", "ca")
-		dirB, _, _ := bdInit(t, bd, "--prefix", "cb")
+		dirB, beadsDirB, _ := bdInit(t, bd, "--prefix", "cb")
+		setMigrateJSONConfigFalse(t, beadsDirB)
 
 		runDryRun := func(cwd, target, home string) string {
 			cmd := exec.Command(bd, "-C", target, "migrate", "--update-repo-id", "--dry-run")
@@ -162,110 +226,133 @@ func TestEmbeddedMigrate(t *testing.T) {
 		if got != wantB {
 			t.Errorf("bd -C <B> migrate --update-repo-id from cwd A reported %q, want B's fingerprint %q", got, wantB)
 		}
-	})
 
-	// ===== --schema =====
-
-	t.Run("migrate_schema", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sa")
-		out := bdMigrate(t, bd, dir, "schema")
-		if !strings.Contains(out, "Schema") {
-			t.Errorf("expected 'Schema' in 'migrate schema' output: %s", out)
-		}
-	})
-
-	t.Run("migrate_schema_idempotent", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "si")
-		// First run: bd init already migrated to latest; this is the
-		// idempotent re-check. Should report current, not error.
-		first := bdMigrate(t, bd, dir, "schema")
-		// Second run: must also succeed and report current.
-		second := bdMigrate(t, bd, dir, "schema")
-		if !strings.Contains(first, "Schema") || !strings.Contains(second, "Schema") {
-			t.Errorf("expected 'Schema' in both runs:\nfirst:%s\nsecond:%s", first, second)
-		}
-	})
-
-	t.Run("migrate_schema_json", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sj")
-		out := bdMigrate(t, bd, dir, "schema", "--json")
-		s := strings.TrimSpace(out)
-		start := strings.Index(s, "{")
-		if start < 0 {
-			// --json flag may be shadowed by other migrate flags; tolerate
-			// non-JSON output so long as the command succeeded.
-			return
-		}
-		var m map[string]interface{}
-		if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, s)
-		}
-		for _, key := range []string{"status", "applied", "latest_version"} {
-			if _, ok := m[key]; !ok {
-				t.Errorf("missing key %q in JSON output: %v", key, m)
+		var expectedRepoID string
+		withEmbeddedMigrateSQL(t, beadsDirB, "cb", func(db *sql.DB) error {
+			if err := db.QueryRowContext(t.Context(), "SELECT value FROM metadata WHERE `key` = ?", "repo_id").Scan(&expectedRepoID); err != nil {
+				return fmt.Errorf("read B repo_id before apply: %w", err)
 			}
-		}
-		if status, _ := m["status"].(string); status != "current" && status != "applied" {
-			t.Errorf("unexpected status %q in JSON output: %v", status, m)
-		}
-	})
-
-	t.Run("migrate_schema_rejects_inspect", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sx")
-		// --inspect lives on the parent migrate command, not on the schema
-		// subcommand. Passing it should error rather than silently apply.
-		out := bdMigrateFail(t, bd, dir, "schema", "--inspect")
-		if !strings.Contains(out, "unknown flag") && !strings.Contains(out, "inspect") {
-			t.Errorf("expected error about --inspect on 'migrate schema': %s", out)
-		}
-	})
-
-	t.Run("migrate_schema_rejects_dry_run", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sd")
-		out := bdMigrateFail(t, bd, dir, "schema", "--dry-run")
-		if !strings.Contains(out, "unknown flag") && !strings.Contains(out, "dry-run") {
-			t.Errorf("expected error about --dry-run on 'migrate schema': %s", out)
-		}
-	})
-
-	// ===== migrate sync =====
-
-	t.Run("migrate_sync_dry_run", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "ms")
-		out := bdMigrate(t, bd, dir, "sync", "test-branch", "--dry-run")
-		if !strings.Contains(out, "test-branch") {
-			t.Errorf("expected branch name in dry-run output: %s", out)
-		}
-	})
-
-	t.Run("migrate_sync", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mc")
-		out := bdMigrate(t, bd, dir, "sync", "beads-sync")
-		if !strings.Contains(out, "beads-sync") {
-			t.Errorf("expected 'beads-sync' in sync output: %s", out)
-		}
-	})
-
-	t.Run("migrate_sync_json", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mz")
-		out := bdMigrate(t, bd, dir, "sync", "json-branch", "--json")
-		s := strings.TrimSpace(out)
-		start := strings.Index(s, "{")
-		if start >= 0 {
-			if !json.Valid([]byte(s[start:])) {
-				t.Errorf("invalid JSON: %s", s)
+			if len(expectedRepoID) < 8 {
+				return fmt.Errorf("B repo_id %q is shorter than the CLI fingerprint", expectedRepoID)
 			}
+			if expectedRepoID[:8] != wantB {
+				return fmt.Errorf("B repo_id %q does not match dry-run fingerprint %q", expectedRepoID, wantB)
+			}
+			_, err := db.ExecContext(t.Context(), "UPDATE metadata SET value = ? WHERE `key` = ?", "stale-repo-id", "repo_id")
+			if err != nil {
+				return fmt.Errorf("seed B stale repo_id: %w", err)
+			}
+			return nil
+		})
+
+		cmd := exec.Command(bd, "-C", dirB, "--format=json", "migrate", "--update-repo-id", "--yes")
+		cmd.Dir = dirA
+		cmd.Env = bdEnv(dirB)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd -C %s --format=json migrate --update-repo-id --yes (cwd=%s) failed: %v\nstdout:\n%s\nstderr:\n%s", dirB, dirA, err, stdout.String(), stderr.String())
 		}
-		// --json flag may not produce JSON due to flag shadowing;
-		// verify command at least succeeds.
+		var applied map[string]interface{}
+		if err := json.Unmarshal(stdout.Bytes(), &applied); err != nil {
+			t.Fatalf("bd -C %s --format=json migrate --update-repo-id returned invalid JSON: %v\n%s", dirB, err, stdout.String())
+		}
+		if got, ok := applied["status"].(string); !ok || got != "success" {
+			t.Errorf("migrate --update-repo-id status = %#v, want success", applied["status"])
+		}
+		if got, ok := applied["new_repo_id"].(string); !ok || got != wantB {
+			t.Errorf("migrate --update-repo-id new_repo_id = %#v, want B fingerprint %q", applied["new_repo_id"], wantB)
+		}
+
+		var persistedRepoID string
+		withEmbeddedMigrateSQL(t, beadsDirB, "cb", func(db *sql.DB) error {
+			if err := db.QueryRowContext(t.Context(), "SELECT value FROM metadata WHERE `key` = ?", "repo_id").Scan(&persistedRepoID); err != nil {
+				return fmt.Errorf("read B repo_id after apply: %w", err)
+			}
+			return nil
+		})
+		if persistedRepoID != expectedRepoID {
+			t.Errorf("persisted B repo_id = %q, want %q", persistedRepoID, expectedRepoID)
+		}
 	})
 
-	// ===== migrate hooks =====
+	t.Run("migrate_schema_json_is_idempotent", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sc")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		run := func() map[string]interface{} {
+			t.Helper()
+			out := bdMigrateJSON(t, bd, dir, "schema")
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
+			}
+			for _, key := range []string{"status", "applied", "latest_version"} {
+				if _, ok := result[key]; !ok {
+					t.Errorf("migrate schema JSON missing %q: %v", key, result)
+				}
+			}
+			return result
+		}
 
-	t.Run("migrate_hooks_dry_run", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mh")
-		out := bdMigrate(t, bd, dir, "hooks", "--dry-run")
-		_ = out // Should succeed without crashing
+		first := run()
+		second := run()
+		if got, ok := first["status"].(string); !ok || got != "current" {
+			t.Errorf("first migrate schema status = %#v, want current", first["status"])
+		}
+		if got, ok := second["status"].(string); !ok || got != "current" {
+			t.Errorf("second migrate schema status = %#v, want current", second["status"])
+		}
+		if got, ok := first["applied"].(float64); !ok || got != 0 {
+			t.Errorf("first migrate schema applied = %#v, want 0", first["applied"])
+		}
+		if got, ok := second["applied"].(float64); !ok || got != 0 {
+			t.Errorf("second migrate schema applied = %#v, want 0", second["applied"])
+		}
+		if !reflect.DeepEqual(first["latest_version"], second["latest_version"]) {
+			t.Errorf("migrate schema latest_version changed between idempotent runs: first %#v, second %#v", first["latest_version"], second["latest_version"])
+		}
+	})
+
+	t.Run("migrate_sync_persists_and_noops", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ms")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		const branch = "beads-sync"
+		decode := func(args ...string) map[string]interface{} {
+			t.Helper()
+			out := bdMigrateJSON(t, bd, dir, args...)
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("migrate %s returned invalid JSON: %v\n%s", strings.Join(args, " "), err, out)
+			}
+			return result
+		}
+
+		dryRun := decode("sync", branch, "--dry-run")
+		if got, ok := dryRun["dry_run"].(bool); !ok || !got {
+			t.Errorf("migrate sync dry_run = %#v, want true", dryRun["dry_run"])
+		}
+		if got, ok := dryRun["branch"].(string); !ok || got != branch {
+			t.Errorf("migrate sync dry-run branch = %#v, want %q", dryRun["branch"], branch)
+		}
+		if got, ok := dryRun["changed"].(bool); !ok || !got {
+			t.Errorf("migrate sync dry-run changed = %#v, want true", dryRun["changed"])
+		}
+
+		applied := decode("sync", branch)
+		if got, ok := applied["status"].(string); !ok || got != "success" {
+			t.Errorf("migrate sync status = %#v, want success", applied["status"])
+		}
+		if got, ok := applied["branch"].(string); !ok || got != branch {
+			t.Errorf("migrate sync branch = %#v, want %q", applied["branch"], branch)
+		}
+
+		// decode launches a fresh process, so noop proves the store value persisted across reopen.
+		noop := decode("sync", branch)
+		if got, ok := noop["status"].(string); !ok || got != "noop" {
+			t.Errorf("same-value migrate sync status = %#v, want noop", noop["status"])
+		}
+		if got, ok := noop["branch"].(string); !ok || got != branch {
+			t.Errorf("same-value migrate sync branch = %#v, want %q", noop["branch"], branch)
+		}
 	})
 }
 

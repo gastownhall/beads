@@ -44,9 +44,13 @@ func TestMetricsOnOffWritesUserConfig(t *testing.T) {
 
 func readUserConfigYAML(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile(config.UserConfigYamlPath())
+	path, err := config.UserConfigYamlPath()
 	if err != nil {
-		t.Fatalf("read user config %s: %v", config.UserConfigYamlPath(), err)
+		t.Fatalf("resolve user config path: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read user config %s: %v", path, err)
 	}
 	return string(b)
 }

@@ -42,8 +42,8 @@ bd todo list --json     # JSON output
 
 **Output:**
 ```
-  ○ test-yxg  Fix the login bug                         ● P1  open
-  ○ test-ryl  Update documentation                      ● P3  open
+  ○ test-yxg  Fix the login bug                         P1  open
+  ○ test-ryl  Update documentation                      P3  open
 
 Total: 2 TODOs
 ```

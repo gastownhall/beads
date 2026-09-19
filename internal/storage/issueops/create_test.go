@@ -111,46 +111,6 @@ func TestValidateCreateIssuesMixedBucketDependenciesRejectsCrossBucketEdges(t *t
 	}
 }
 
-func TestFilterCreateIssuesMixedBucketDependenciesSkipsWhenConfigured(t *testing.T) {
-	regular := &types.Issue{
-		ID:        "test-regular-source",
-		IssueType: types.TypeTask,
-		Dependencies: []*types.Dependency{{
-			DependsOnID: "test-wisp-target",
-			Type:        types.DepBlocks,
-		}},
-	}
-	wisp := &types.Issue{
-		ID:        "test-wisp-target",
-		IssueType: types.TypeTask,
-		Ephemeral: true,
-	}
-	var skipped []string
-
-	filtered, err := filterCreateIssuesMixedBucketDependencies([]*types.Issue{regular, wisp}, storage.BatchCreateOptions{
-		SkipDependencyValidationErrors: true,
-		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
-			skipped = append(skipped, issueID+" -> "+dependsOnID+": "+reason)
-		},
-	})
-	if err != nil {
-		t.Fatalf("filterCreateIssuesMixedBucketDependencies error = %v, want nil", err)
-	}
-	if len(filtered) != 2 {
-		t.Fatalf("len(filtered) = %d, want 2", len(filtered))
-	}
-	if len(filtered[0].Dependencies) != 0 {
-		t.Fatalf("filtered[0].Dependencies = %#v, want none", filtered[0].Dependencies)
-	}
-	if len(regular.Dependencies) != 1 {
-		t.Fatalf("regular.Dependencies was mutated to %#v, want original dependency preserved", regular.Dependencies)
-	}
-	if len(skipped) != 1 || !strings.Contains(skipped[0], "test-regular-source -> test-wisp-target") ||
-		!strings.Contains(skipped[0], "cross-bucket dependency") {
-		t.Fatalf("skipped = %#v, want cross-bucket dependency detail", skipped)
-	}
-}
-
 func TestPersistDependenciesHonorsImportedCreatedBy(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)
@@ -174,7 +134,7 @@ func TestPersistDependenciesHonorsImportedCreatedBy(t *testing.T) {
 		WithArgs("target").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 	mock.ExpectExec("INSERT INTO dependencies").
-		WithArgs(depid.New("source", "target"), "source", "target", types.DepRelated, "someone.else", sqlmock.AnyArg()).
+		WithArgs(depid.New("source", "target"), "source", "target", types.DepRelated, "someone.else", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	result, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{target, source}, "current.user", storage.BatchCreateOptions{})
@@ -216,7 +176,7 @@ func TestPersistDependenciesDefaultsCreatedByToActor(t *testing.T) {
 		WithArgs("target").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 	mock.ExpectExec("INSERT INTO dependencies").
-		WithArgs(depid.New("source", "target"), "source", "target", types.DepRelated, "current.user", sqlmock.AnyArg()).
+		WithArgs(depid.New("source", "target"), "source", "target", types.DepRelated, "current.user", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	_, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{target, source}, "current.user", storage.BatchCreateOptions{})
@@ -251,7 +211,7 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 	// A bare target with a different issue prefix is external. In particular,
 	// persistence must not probe either local target table before this insert.
 	mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_external").
-		WithArgs(depid.New("sym-3su", "mkt-456"), "sym-3su", "mkt-456", types.DepRelated, "tester", sqlmock.AnyArg()).
+		WithArgs(depid.New("sym-3su", "mkt-456"), "sym-3su", "mkt-456", types.DepRelated, "tester", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	result, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{source}, "tester", storage.BatchCreateOptions{
@@ -429,8 +389,11 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 			WithArgs(pair[1], pair[0]).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 		mock.ExpectExec("INSERT INTO dependencies").
-			WithArgs(depid.New(pair[0], pair[1]), pair[0], pair[1], types.DepParentChild, "tester", sqlmock.AnyArg()).
+			WithArgs(depid.New(pair[0], pair[1]), pair[0], pair[1], types.DepParentChild, "tester", sqlmock.AnyArg(), "{}", "").
 			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("REPLACE INTO local_metadata").
+			WithArgs(dependencyCoordinationKey(pair[1], dependencyCoordinationDurableTier), sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
 	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 		WithArgs("bd-grand").
@@ -475,7 +438,7 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 		WithArgs("bb-target", "aa-source").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_external").
-		WithArgs(depid.New("aa-source", "bb-target"), "aa-source", "bb-target", types.DepBlocks, "tester", sqlmock.AnyArg()).
+		WithArgs(depid.New("aa-source", "bb-target"), "aa-source", "bb-target", types.DepBlocks, "tester", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	_, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{issue}, "tester", storage.BatchCreateOptions{})
@@ -492,6 +455,10 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 	}
 }
 
+// The mock half of the missing-parent skip: it pins the STATEMENTS (no counter
+// read, no upsert). Its real-backend twin is the conformance case
+// ReconcileSkipsMissingParentCounter (backend/conformance/portable.go), which
+// pins what a live engine does with the same skip on both Dolt legs.
 func TestReconcileChildCountersSkipsMissingParent(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)

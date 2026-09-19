@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -142,6 +143,16 @@ func TestApplyNoGitHooksToCmdComposesWithCredentials(t *testing.T) {
 	}
 }
 
+// unsetEnvForTest removes key for the duration of the test, restoring the
+// ambient value on cleanup.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+}
+
 func TestWithRemoteOperationEnvRestoresS3ChecksumEnv(t *testing.T) {
 	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
 
@@ -160,10 +171,7 @@ func TestWithRemoteOperationEnvRestoresS3ChecksumEnv(t *testing.T) {
 }
 
 func TestWithRemoteOperationEnvUnsetsS3ChecksumEnv(t *testing.T) {
-	t.Setenv(awsResponseChecksumValidationEnv, "")
-	if err := os.Unsetenv(awsResponseChecksumValidationEnv); err != nil {
-		t.Fatalf("unset %s: %v", awsResponseChecksumValidationEnv, err)
-	}
+	unsetEnvForTest(t, awsResponseChecksumValidationEnv)
 
 	err := withRemoteOperationEnv(nil, true, func() error {
 		if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_required" {
@@ -176,6 +184,125 @@ func TestWithRemoteOperationEnvUnsetsS3ChecksumEnv(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv(awsResponseChecksumValidationEnv); ok {
 		t.Fatalf("%s should be unset after operation", awsResponseChecksumValidationEnv)
+	}
+}
+
+// TestWithRemoteOperationEnvRestoresAmbientCredentials verifies that stored
+// credentials override an ambient DOLT_REMOTE_USER/DOLT_REMOTE_PASSWORD pair
+// for the operation and hand it back afterwards. Unsetting on cleanup would
+// destroy credentials the remote operation never owned.
+func TestWithRemoteOperationEnvRestoresAmbientCredentials(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "ambient-user")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "ambient-pass")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, false, func() error {
+		if got := os.Getenv("DOLT_REMOTE_USER"); got != "peer-user" {
+			t.Fatalf("DOLT_REMOTE_USER during operation = %q, want peer-user", got)
+		}
+		if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "peer-pass" {
+			t.Fatalf("DOLT_REMOTE_PASSWORD during operation = %q, want peer-pass", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if got := os.Getenv("DOLT_REMOTE_USER"); got != "ambient-user" {
+		t.Fatalf("DOLT_REMOTE_USER after operation = %q, want restored ambient-user", got)
+	}
+	if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "ambient-pass" {
+		t.Fatalf("DOLT_REMOTE_PASSWORD after operation = %q, want restored ambient-pass", got)
+	}
+}
+
+// TestWithRemoteOperationEnvRestoresPartialAmbientCredentials covers the mixed
+// case: a var that was set comes back, a var that was unset stays unset.
+func TestWithRemoteOperationEnvRestoresPartialAmbientCredentials(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "ambient-user")
+	unsetEnvForTest(t, "DOLT_REMOTE_PASSWORD")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, false, func() error {
+		if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "peer-pass" {
+			t.Fatalf("DOLT_REMOTE_PASSWORD during operation = %q, want peer-pass", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if got := os.Getenv("DOLT_REMOTE_USER"); got != "ambient-user" {
+		t.Fatalf("DOLT_REMOTE_USER after operation = %q, want restored ambient-user", got)
+	}
+	if _, ok := os.LookupEnv("DOLT_REMOTE_PASSWORD"); ok {
+		t.Fatal("DOLT_REMOTE_PASSWORD should be unset after operation (it was unset before)")
+	}
+}
+
+// TestWithRemoteOperationEnvUnsetsCredentialsWithNoAmbientPair verifies stored
+// credentials do not linger in the process environment when there was nothing
+// ambient to restore.
+func TestWithRemoteOperationEnvUnsetsCredentialsWithNoAmbientPair(t *testing.T) {
+	unsetEnvForTest(t, "DOLT_REMOTE_USER")
+	unsetEnvForTest(t, "DOLT_REMOTE_PASSWORD")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, false, func() error {
+		if got := os.Getenv("DOLT_REMOTE_USER"); got != "peer-user" {
+			t.Fatalf("DOLT_REMOTE_USER during operation = %q, want peer-user", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if _, ok := os.LookupEnv("DOLT_REMOTE_USER"); ok {
+		t.Fatal("DOLT_REMOTE_USER should be unset after operation")
+	}
+	if _, ok := os.LookupEnv("DOLT_REMOTE_PASSWORD"); ok {
+		t.Fatal("DOLT_REMOTE_PASSWORD should be unset after operation")
+	}
+}
+
+// TestWithRemoteOperationEnvRestoresAmbientEnvWithBothCleanups exercises the
+// two-cleanup path, the shape store.go uses for push and pull against an S3
+// remote: credentials plus the checksum override are registered together, so
+// both restores run from the same defer. All three ambient values must come
+// back after the operation.
+func TestWithRemoteOperationEnvRestoresAmbientEnvWithBothCleanups(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "ambient-user")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "ambient-pass")
+	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, true, func() error {
+		if got := os.Getenv("DOLT_REMOTE_USER"); got != "peer-user" {
+			t.Fatalf("DOLT_REMOTE_USER during operation = %q, want peer-user", got)
+		}
+		if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "peer-pass" {
+			t.Fatalf("DOLT_REMOTE_PASSWORD during operation = %q, want peer-pass", got)
+		}
+		if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_required" {
+			t.Fatalf("%s during operation = %q, want when_required", awsResponseChecksumValidationEnv, got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if got := os.Getenv("DOLT_REMOTE_USER"); got != "ambient-user" {
+		t.Fatalf("DOLT_REMOTE_USER after operation = %q, want restored ambient-user", got)
+	}
+	if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "ambient-pass" {
+		t.Fatalf("DOLT_REMOTE_PASSWORD after operation = %q, want restored ambient-pass", got)
+	}
+	if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_supported" {
+		t.Fatalf("%s after operation = %q, want restored when_supported", awsResponseChecksumValidationEnv, got)
 	}
 }
 
@@ -711,6 +838,7 @@ func clearCloudAuthEnv(t *testing.T) {
 func TestCloudAuthCLIRouting(t *testing.T) {
 	skipIfNoServer(t)
 	clearCloudAuthEnv(t)
+	start := time.Now()
 
 	tests := []struct {
 		name      string
@@ -741,22 +869,39 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		// Structural negative: missing conditions → SQL fallback
 		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
 	}
+	// Shared store: creating one Dolt database per case (16 total) is what
+	// made this test slow (see the regression guard below). Each case gets
+	// its own remote name (origin_0..origin_15) against a single store,
+	// since shouldUseCLIForCloudAuth's routing decision is keyed purely by
+	// remote name — distinct names are enough to keep cases isolated.
+	store := openCloudAuthTestStore(t, "route")
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			store := openCloudAuthTestStore(t, fmt.Sprintf("route_%d", i))
-			if err := store.AddRemote(ctx, "origin", tt.remoteURL); err != nil {
+			remote := fmt.Sprintf("origin_%d", i)
+			if err := store.AddRemote(ctx, remote, tt.remoteURL); err != nil {
 				t.Fatalf("AddRemote: %v", err)
 			}
-			addCloudAuthCLIRemote(t, store, "origin", tt.remoteURL)
+			addCloudAuthCLIRemote(t, store, remote, tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
 			}
-			got := store.shouldUseCLIForCloudAuth(ctx, "origin")
+			got := store.shouldUseCLIForCloudAuth(ctx, remote)
 			if got != tt.wantCLI {
 				t.Errorf("shouldUseCLIForCloudAuth() = %v, want %v", got, tt.wantCLI)
 			}
 		})
+	}
+
+	// Regression guard: this test previously created one Dolt database per
+	// case (16 total), each slower than the last as server load grew,
+	// pushing wall time into the hundreds of seconds for a test that only
+	// exercises a pure routing predicate. 90s sits below every measured
+	// unfixed run and comfortably above the shared-store fix's expected
+	// time, so it fails on the old per-case-store shape without flaking
+	// under normal CI load.
+	if elapsed := time.Since(start); elapsed > 90*time.Second {
+		t.Fatalf("TestCloudAuthCLIRouting took %s, want < 90s (regression: are per-case Dolt databases being created again instead of a shared store?)", elapsed)
 	}
 }
 
@@ -773,6 +918,9 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 	})
 	t.Run("no remote configured", func(t *testing.T) {
 		skipIfNoServer(t)
+		// Needs its own fresh store: the precondition under test is the
+		// ABSENCE of any configured remote, which TestCloudAuthCLIRouting's
+		// shared store (populated with origin_0..origin_15) can't provide.
 		store := openCloudAuthTestStore(t, "structural_no_remote")
 		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
 		if store.shouldUseCLIForCloudAuth(context.Background(), "origin") {
@@ -781,6 +929,10 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 	})
 	t.Run("sql remote materializes local CLI remote", func(t *testing.T) {
 		skipIfNoServer(t)
+		// Needs its own fresh store: the precondition under test is a SQL
+		// remote with NO local CLI remote materialized yet (checked
+		// explicitly below), which a store shared across other cases —
+		// which pre-populate CLI remotes — can't provide.
 		store := openCloudAuthTestStore(t, "structural_sql_only")
 		remoteURL := "az://account.blob.core.windows.net/container"
 		if err := store.AddRemote(context.Background(), "origin", remoteURL); err != nil {

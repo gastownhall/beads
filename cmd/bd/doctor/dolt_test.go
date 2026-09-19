@@ -152,7 +152,7 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 
 }
 
-func TestIsWispTable(t *testing.T) {
+func TestIsIgnoredTable(t *testing.T) {
 	tests := []struct {
 		name     string
 		table    string
@@ -163,8 +163,11 @@ func TestIsWispTable(t *testing.T) {
 		{"wisp_labels", "wisp_labels", true},
 		{"wisp_dependencies", "wisp_dependencies", true},
 		{"wisp_comments", "wisp_comments", true},
+		{"leases", "leases", true},
+		{"local_metadata", "local_metadata", true},
+		{"repo_mtimes", "repo_mtimes", true},
+		{"events", "events", true},
 		{"issues table", "issues", false},
-		{"events table", "events", false},
 		{"labels table", "labels", false},
 		{"dependencies table", "dependencies", false},
 		{"config table", "config", false},
@@ -174,9 +177,73 @@ func TestIsWispTable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isWispTable(tt.table); got != tt.expected {
-				t.Errorf("isWispTable(%q) = %v, want %v", tt.table, got, tt.expected)
+			if got := isIgnoredTable(tt.table); got != tt.expected {
+				t.Errorf("isIgnoredTable(%q) = %v, want %v", tt.table, got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestDescribeUncommittedTables_FiltersIgnored is the regression test for the
+// skip-list drift (#5260). Both uncommitted-changes checks — "Dolt Status" and
+// "Dolt Locks" — now share this one filter, so a table that is benign for one
+// cannot be a permanent warning on the other.
+func TestDescribeUncommittedTables_FiltersIgnored(t *testing.T) {
+	rows := []doltStatusRow{
+		{table: "wisps", status: "modified"},
+		{table: "wisp_events", status: "modified"},
+		{table: "leases", status: "modified"},
+		{table: "local_metadata", status: "modified"},
+		{table: "repo_mtimes", status: "modified"},
+		{table: "events", status: "modified"},
+		{table: "issues", status: "modified", staged: true},
+		{table: "labels", status: "modified"},
+	}
+
+	got := describeUncommittedTables(rows)
+
+	want := []string{"issues: modified (staged)", "labels: modified"}
+	if len(got) != len(want) {
+		t.Fatalf("describeUncommittedTables() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("describeUncommittedTables()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestDescribeUncommittedTables_AllIgnoredIsClean pins the property the bug
+// report turned on: a store whose only dirty tables are dolt_ignore'd must read
+// as clean, not as a warning that can never be cleared.
+func TestDescribeUncommittedTables_AllIgnoredIsClean(t *testing.T) {
+	rows := []doltStatusRow{
+		{table: "wisps", status: "modified"},
+		{table: "wisp_dependencies", status: "new table"},
+		{table: "leases", status: "modified"},
+		{table: "events", status: "modified"},
+	}
+
+	if got := describeUncommittedTables(rows); len(got) != 0 {
+		t.Errorf("describeUncommittedTables() = %v, want empty (all tables are dolt_ignore'd)", got)
+	}
+}
+
+// TestDoltLocksAndDoltStatusShareOneFilter is the anti-drift guard. The two
+// checks previously kept independent skip-lists that diverged; if a future
+// change reintroduces a second private filter, the shared helper stops being
+// the only path and this test is the place that should start failing.
+func TestDoltLocksAndDoltStatusShareOneFilter(t *testing.T) {
+	// Tables that were reported dirty by "Dolt Locks" but not by "Dolt Status"
+	// before #5260, because checkDoltLocks skipped only wisp tables.
+	previouslyDivergent := []string{"leases", "local_metadata", "repo_mtimes", "events"}
+
+	for _, table := range previouslyDivergent {
+		if !isIgnoredTable(table) {
+			t.Errorf("isIgnoredTable(%q) = false; the shared filter must cover every table both checks ignore", table)
+		}
+		if got := describeUncommittedTables([]doltStatusRow{{table: table, status: "modified"}}); len(got) != 0 {
+			t.Errorf("describeUncommittedTables(%q) = %v, want empty", table, got)
+		}
 	}
 }

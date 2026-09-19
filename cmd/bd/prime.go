@@ -17,6 +17,7 @@ import (
 	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 var (
@@ -421,9 +422,24 @@ func outputMemoriesOnlyContext(w io.Writer) error {
 	return nil
 }
 
-// formatMemoriesForPrime queries memories from the k/v store and formats them for injection.
-// Returns empty string if no memories or if store is unavailable.
+// formatMemoriesForPrime reads the memory plane through memoryops.Memories and
+// formats it for injection. Prime still never fails a session-start hook over
+// the memory plane — but "degrade" is not "go quiet": a plane that could not be
+// read renders the unavailable banner (or the timeout banner on a deadline), so
+// an operator can tell "this workspace has no memories" from "this agent woke
+// with no recall because the store is down" (gh#5877). Only two cases stay
+// silent: no workspace at all (nothing to inject), and a healthy store with
+// zero memories (a fresh workspace must not be given noise).
 func formatMemoriesForPrime(compact bool) string {
+	// bd-mm8wf: in a proxied-server workspace the memory read must ride the
+	// proxied plane (UOW provider), never ensureStoreActiveForPrime — the
+	// lazy direct-store open is the same seam class bd-m7zzd closed in
+	// relate.go and human.go, here in a read-only limb. The proxied dual
+	// preserves prime's silent-skip and timeout-banner contracts.
+	if usesProxiedServer() {
+		return formatMemoriesForPrimeProxied(compact)
+	}
+
 	// Try to initialize store if not already active (prime may run before other commands)
 	if store == nil {
 		timeout := primeStoreTimeout()
@@ -437,25 +453,35 @@ func formatMemoriesForPrime(compact bool) string {
 			if errors.Is(err, context.DeadlineExceeded) {
 				return formatPrimeMemoryTimeout(compact, timeout)
 			}
-			return "" // Silently skip — store unavailable
+			if errors.Is(err, ErrNoBeadsDatabase) {
+				return "" // No workspace here — genuinely nothing to inject.
+			}
+			return formatPrimeMemoryUnavailable(compact, err)
 		}
 	}
 	if store == nil {
-		return ""
+		return formatPrimeMemoryUnavailable(compact, errors.New("storage reported ready but no store is active"))
 	}
-	ctx := context.Background()
-	allConfig, err := store.GetAllConfig(ctx)
+	memories, err := store.Memories()
 	if err != nil {
-		return ""
+		return formatPrimeMemoryUnavailable(compact, err)
 	}
+	result, err := memories.List(context.Background(), memoryops.ListRequest{})
+	if err != nil {
+		return formatPrimeMemoryUnavailable(compact, err)
+	}
+	return renderPrimeMemoryPlane(result.Memories, compact)
+}
 
-	fullPrefix := kvPrefix + memoryPrefix
-	memories := make(map[string]string)
-	for k, v := range allConfig {
-		if strings.HasPrefix(k, fullPrefix) {
-			memories[strings.TrimPrefix(k, fullPrefix)] = v
-		}
-	}
+// renderPrimeMemoryPlane renders the memory plane for injection — the shared
+// tail of the classic and proxied (bd-mm8wf) memory-read paths, so the two
+// cannot drift in what a memory looks like once fetched.
+//
+// It takes the PLANE, not a config map: which rows are memories is
+// memoryops.Memories.List's answer now, on both routes, which is what stopped
+// prime from being a fifth front door with its own copy of the kv.memory.
+// prefix rule.
+func renderPrimeMemoryPlane(memories map[string]string, compact bool) string {
 	if len(memories) == 0 {
 		return ""
 	}
@@ -582,6 +608,51 @@ func formatPrimeMemoryTimeout(compact bool, timeout time.Duration) string {
 		return "\n## Memories\n- " + msg + "\n"
 	}
 	return "\n## Persistent Memories\n\n" + msg + "\n"
+}
+
+// formatPrimeMemoryUnavailable renders the memory section when the plane could
+// not be read at all — store open failed, the memory accessor errored, or the
+// list call errored. It is the non-deadline sibling of
+// formatPrimeMemoryTimeout and carries the same section shape, and it is shared
+// by the classic and proxied routes so the two cannot drift.
+//
+// The wording is deliberately blunt about what did NOT happen: before this,
+// prime omitted the section entirely on these failures, so a fleet operator
+// could not distinguish an agent that has no memories from an agent whose
+// memory plane is down — every instrument read healthy while agents woke with
+// zero recall (gh#5877).
+func formatPrimeMemoryUnavailable(compact bool, err error) string {
+	msg := fmt.Sprintf("Skipped: beads storage unavailable (%s) — persistent memories were NOT injected this session. Run `bd doctor`; if the store is a Dolt server, check it is running and reachable.", primeErrorSummary(err))
+	if compact {
+		return "\n## Memories\n- " + msg + "\n"
+	}
+	return "\n## Persistent Memories\n\n" + msg + "\n"
+}
+
+// primeMemoryErrorMaxLen caps the error text quoted in the unavailable banner.
+const primeMemoryErrorMaxLen = 160
+
+// primeErrorSummary reduces an error to one short single-line phrase fit for a
+// prime section. Storage errors routinely carry multi-line hints and stack-ish
+// detail; prime is injected into an agent's context window, so it quotes the
+// first line only, whitespace-collapsed and length-capped. `bd doctor` is where
+// the full text belongs.
+func primeErrorSummary(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	line := err.Error()
+	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.Join(strings.Fields(line), " ")
+	if line == "" {
+		return "unknown error"
+	}
+	if runes := []rune(line); len(runes) > primeMemoryErrorMaxLen {
+		line = strings.TrimRight(string(runes[:primeMemoryErrorMaxLen]), " ") + "…"
+	}
+	return line
 }
 
 // outputMCPContext outputs minimal context for MCP users

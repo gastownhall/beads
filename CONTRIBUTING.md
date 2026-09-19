@@ -9,7 +9,7 @@ Thank you for your interest in contributing to bd! This document provides guidel
 - Go (see `go.mod` for the required version; currently 1.26+)
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
-- (Optional) golangci-lint for local linting
+- golangci-lint v2.10.1 for the required local lint gate
 - ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
 
 ### Getting Started
@@ -44,20 +44,10 @@ beads/
 
 ## Running Tests
 
-```bash
-# Run all tests (recommended — uses correct build tags)
-make test
-
-# Run tests with coverage
-go test -tags gms_pure_go -v -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-
-# Run specific package tests
-go test -tags gms_pure_go ./internal/storage/dolt/ -v
-
-# Run tests with race detection
-go test -tags gms_pure_go -race ./...
-```
+Use the canonical [testing guide](engdocs/TESTING.md) to choose focused tests,
+the proportional validation budget, and any applicable CI wrapper. The setup
+and safety notes in this file supplement that guide; they do not define a
+second test policy.
 
 ## Code Style
 
@@ -71,21 +61,23 @@ We follow standard Go conventions:
 
 ### Linting
 
-We use golangci-lint for code quality checks:
+Use the same pinned golangci-lint version and repository-owned wrapper as CI:
 
 ```bash
-# Install golangci-lint
-brew install golangci-lint  # macOS
-# or
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+# Install the version pinned by CI
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
-# Run linter
-golangci-lint run ./...
+# Run the required formatting and lint contract
+make ci-pr-lint
 ```
 
-**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [engdocs/LINTING.md](engdocs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
+`make ci-pr-lint` must pass with zero issues. It checks formatting, lints the
+repository's normal `gms_pure_go` build, and cross-lints Windows-only non-CGO
+code. Accepted intentional patterns are encoded narrowly in `.golangci.yml`;
+do not ignore a failing baseline. See [engdocs/LINTING.md](engdocs/LINTING.md)
+for the full policy.
 
-CI will automatically run linting on all pull requests.
+CI runs the same required wrapper on all pull requests.
 
 ## Making Changes
 
@@ -139,22 +131,19 @@ If you are contributing code that involves AI decision-making or orchestration, 
 
 ## Testing Guidelines
 
-For how to run tests, see [engdocs/TESTING.md](engdocs/TESTING.md). For what to
-test and why (the test pyramid and tiering we follow), see
-[engdocs/TESTING_PHILOSOPHY.md](engdocs/TESTING_PHILOSOPHY.md).
+For test commands, test design, and PR-readiness gates, see the canonical
+[engdocs/TESTING.md](engdocs/TESTING.md).
 
 ### Before Opening a PR
 
-- Run `make test` (or `./scripts/test.sh`) locally and make sure it passes.
-- Add tests for new functionality; extend existing tests when fixing bugs.
-- Write table-driven tests for multiple scenarios, use descriptive test
-  names, use `t.Run()` for subtests, and clean up resources (database
-  files, etc.) in test teardown.
+- Follow the proportional validation budget in
+  [engdocs/TESTING.md](engdocs/TESTING.md): docs-only changes use docs checks;
+  Go changes use focused and affected-package tests plus one final `make test`.
 - If you hit a test failure unrelated to your change, don't silently skip
   it -- check `.test-skip` and file an issue if it's not already tracked
-  (see [engdocs/TESTING.md](engdocs/TESTING.md#known-broken-tests)).
-- Ensure CI passes (`make ci-pr-core`, `make ci-pr-policy`, `make
-  ci-pr-lint`) before requesting review.
+  (see [engdocs/TESTING.md](engdocs/TESTING.md#failures-skips-and-review)).
+- Run a named CI wrapper only when its risk or surface is affected, or when
+  reproducing that CI check.
 - If your change touches ICU or build tags, see
   [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md) for the policy and rationale.
 

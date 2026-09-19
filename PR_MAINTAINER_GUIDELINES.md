@@ -16,7 +16,7 @@ core, metadata, integration, plugin, orchestration layer, or external tool.
 
 ## Contributor Protection
 
-External contributor PRs have priority. Before implementing related work, opening a competing PR, or closing a PR, check whether an existing contributor PR already addresses the same area.
+External contributor PRs have priority. Before implementing related work, opening a competing PR, **reviewing or merging any PR**, or closing a PR, check whether an existing contributor PR already addresses the same area.
 
 - Review contributor work first. Read the PR description, changed files, linked issues, tests, CI status, and latest discussion.
 - Build on the contributor branch by default. If the PR branch allows maintainer edits, push maintainer fix commits directly to that branch instead of opening a replacement PR.
@@ -25,6 +25,39 @@ External contributor PRs have priority. Before implementing related work, openin
 - Never close, supersede, or replace a contributor PR silently. Explain what was preserved, what changed, and why.
 - Open a replacement PR only when in-place maintainer edits are not possible or would create a larger risk, such as when the contributor branch is not writable, the branch history is unusable, or the accepted change must be substantially reimplemented. Document that reason in both PR threads.
 - If a rewrite is unavoidable, credit the contributor's design, tests, bug report, or use case in the replacement commit or PR.
+
+### Prior art is part of the review, not the merge
+
+Every review of a PR — before any verdict, and always before handing it to
+anything that merges on green — includes a prior-art pass over **older open PRs
+and issues**:
+
+```bash
+scripts/pr-preflight.sh --search "<topic keywords>"
+gh search prs --repo gastownhall/beads --state open "<bug keywords>"
+```
+
+The rule at the top of this section always covered implementing, competing, and
+closing; the missing case was *merging*: a newer PR under review can itself be
+the duplicate of an older open contributor PR. Merge automation and per-PR
+preflight run no duplicate scan — the review is the only gate where prior art
+can be caught, so the reviewer owns this check.
+
+When an older open PR covers the same change:
+
+- **Default precedence goes to the older PR.** Merge it (fix-merge if needed)
+  rather than the newer duplicate.
+- If the newer implementation is genuinely superior, resolve the older PR
+  **first**: a personal explanation and credit *before* the newer one merges,
+  never a retire notice after the fact.
+
+Motivating incident (2026-07-26, #4376 vs #4939): a 44-day-old PR whose author
+had complied with a requested rebase in under 24 hours sat merge-ready for 20
+days while a 5-day-old duplicate was reviewed and auto-merged with zero
+comments ever posted on it. The original author learned their work was dead
+from the retire notice. Both the review of the newer PR and the queue
+follow-through on the older one had the information to prevent this; neither
+used it.
 
 ## Triage Groups
 
@@ -101,3 +134,26 @@ These rules apply to everyone who can merge — human maintainers and agents ali
 - Post multi-line PR comments from a real Markdown body file or a shell heredoc, not from strings with escaped `\n` sequences. Run `scripts/gh-body-lint <body-file>` before posting body files; after posting or editing, verify the rendered body with `gh pr view --comments --json comments --jq ...` before moving on.
 - Sign agent-written GitHub comments, reviews, and commits using [engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md).
 - Before finishing, re-read the PR, latest comments, review threads, and linked issues; address or explicitly note any unresolved action items.
+
+### Rebases are maintainer work
+
+Do not ask a contributor to rebase when that is the only thing left. If the
+review verdict is "correct once rebased," the verdict is **fix-merge**: check
+out the PR branch, rebase and resolve conflicts ourselves, push back to the
+contributor's branch (maintainer edits), and take it to merge — in the same
+session.
+
+- Ask for a rebase only when bundled with substantive changes that only the
+  contributor can make. When they comply, the PR goes straight to merge, not
+  back into the ambient queue — a contributor who did what we asked must never
+  be the one waiting on us again.
+- Maintainer edits are refused on branches owned by an **organization** fork
+  (GitHub restriction). In that case use the replacement-PR route from
+  Contributor Protection with preserved attribution, and say why on the thread.
+
+Why: a requested rebase multiplies across everything a contributor has open —
+each of their branches must then be rebased independently against different
+lines of our work, so the cost lands heaviest on the most prolific
+contributors. And a rebase we request but then sit on is pure contributor cost:
+on #4376 the author rebased within 24 hours of the request and then waited 20
+days for a maintainer action that never came.
