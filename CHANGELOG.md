@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks in embedded, server, and proxied-server command paths; the legacy
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
+### Fixed
+
+- **`dolt.user` in `config.yaml` is honored again** (GH#6598).
+  `GetDoltServerUser` read `BEADS_DOLT_SERVER_USER` and the
+  `metadata.json`-sourced field, but never consulted the global
+  `config.yaml`'s `dolt.user` the way `GetDoltServerHost` already consults
+  `dolt.host` — so a caller whose environment lacked
+  `BEADS_DOLT_SERVER_USER` (an editor plugin, a scheduled job, any non-shell
+  surface) silently authenticated as the `root` default even with
+  `dolt.user` configured, surfacing as `Access denied for user 'root'` on a
+  server that had `root` disabled. `GetDoltServerUser` now falls back to
+  `config.yaml`'s `dolt.user` before the default, mirroring the host
+  precedence exactly: env > `metadata.json` > `config.yaml` > default.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery

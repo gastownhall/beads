@@ -532,13 +532,22 @@ func (c *Config) GetDoltServerSocket() string {
 }
 
 // GetDoltServerUser returns the Dolt server MySQL user.
-// Checks BEADS_DOLT_SERVER_USER env var first, then config, then default.
+// Priority: BEADS_DOLT_SERVER_USER env var > metadata.json dolt_server_user
+// > config.yaml / global config dolt.user > DefaultDoltServerUser. The
+// config.yaml layer mirrors GetDoltServerHost's dolt.host fix (GH#2073):
+// without it, a global dolt.user was read into a Config value that every
+// caller ignored, so a caller whose environment lacked
+// BEADS_DOLT_SERVER_USER always authenticated as the "root" default even
+// with dolt.user set (GH#6598).
 func (c *Config) GetDoltServerUser() string {
 	if u := os.Getenv("BEADS_DOLT_SERVER_USER"); u != "" {
 		return u
 	}
 	if c.DoltServerUser != "" {
 		return c.DoltServerUser
+	}
+	if u := config.GetYamlConfig("dolt.user"); u != "" {
+		return u
 	}
 	return DefaultDoltServerUser
 }
