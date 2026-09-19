@@ -127,11 +127,12 @@ func runLinearPullPushFixture(t *testing.T, bd, dir string, env []string, store 
 	}
 }
 
+// linearSetIssueUpdatedAt backdates an issue to a fixed pre-last_sync instant.
+// Callers that need a specific timestamp should use linearSetIssueUpdatedAtTime
+// directly.
 func linearSetIssueUpdatedAt(t *testing.T, db *sql.DB, id string) {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), "UPDATE issues SET updated_at = ? WHERE id = ?", time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), id); err != nil {
-		t.Fatalf("seed local issue %s updated_at before last_sync: %v", id, err)
-	}
+	linearSetIssueUpdatedAtTime(t, db, id, time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC))
 }
 
 func seedLinearPullGraph(mock *mockLinearServer) {
