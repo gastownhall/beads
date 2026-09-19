@@ -22,7 +22,7 @@ import (
 
 func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer, in listInput) error {
 	if in.repoOverrideSet {
-		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
+		return errors.New("--repo is not supported with --proxied-server")
 	}
 	switch {
 	case in.watchMode:
