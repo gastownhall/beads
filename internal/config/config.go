@@ -700,6 +700,11 @@ func GetStringFromDir(beadsDir, key string) string {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return ""
 	}
+	// Match Viper's precedence: an exact top-level key wins over dotted-path
+	// descent when a file contains both spellings.
+	if val, ok := root[key]; ok {
+		return configValueString(val)
+	}
 	parts := strings.SplitN(key, ".", 2)
 	node := root
 	for len(parts) == 2 {
@@ -718,6 +723,10 @@ func GetStringFromDir(beadsDir, key string) string {
 	if !ok {
 		return ""
 	}
+	return configValueString(val)
+}
+
+func configValueString(val interface{}) string {
 	switch s := val.(type) {
 	case string:
 		return s

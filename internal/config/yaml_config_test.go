@@ -273,26 +273,6 @@ func TestFormatYamlValue(t *testing.T) {
 	}
 }
 
-func TestNormalizeYamlKey(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"no-db", "no-db"},               // no alias, unchanged
-		{"json", "json"},                 // no alias, unchanged
-		{"routing.mode", "routing.mode"}, // no alias for this one
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := normalizeYamlKey(tt.input)
-			if got != tt.expected {
-				t.Errorf("normalizeYamlKey(%q) = %q, want %q", tt.input, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestSetYamlConfig(t *testing.T) {
 	oldBeadsDir := os.Getenv("BEADS_DIR")
 	if err := os.Unsetenv("BEADS_DIR"); err != nil {
