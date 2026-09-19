@@ -836,7 +836,7 @@ func runLinearStatus(cmd *cobra.Command, args []string) error {
 	oauthClientID, _ := getLinearConfigForStore(ctx, trackerStore, "linear.oauth_client_id")
 	oauthClientSecret, _ := getLinearConfigForStore(ctx, trackerStore, "linear.oauth_client_secret")
 	teamIDs := getLinearTeamIDsForStore(ctx, trackerStore, nil)
-	lastSync, _ := trackerStore.GetConfig(ctx, "linear.last_sync")
+	lastSync, _ := trackerStore.GetLocalMetadata(ctx, "linear.last_sync")
 
 	hasOAuth := oauthClientID != "" && oauthClientSecret != ""
 	configured := (apiKey != "" || hasOAuth) && len(teamIDs) > 0

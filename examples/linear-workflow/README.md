@@ -392,9 +392,6 @@ All configuration keys for Linear integration:
 linear.api_key          # Linear API key (or LINEAR_API_KEY env var)
 linear.team_id          # Linear team UUID
 
-# Automatic (set by bd)
-linear.last_sync        # ISO8601 timestamp of last sync
-
 # ID generation (optional)
 linear.id_mode          # hash (default) or db (let bd generate IDs)
 linear.hash_length      # Hash length 3-8 (default: 6)
@@ -431,6 +428,12 @@ linear.relation_map.blockedBy # (default: blocks)
 linear.relation_map.duplicate # (default: duplicates)
 linear.relation_map.related   # (default: related)
 ```
+
+The incremental-sync cursor is **not** in this list: `bd` records it as internal
+per-clone local metadata, not as project config, so it is never replicated to
+other clones and `bd config set linear.last_sync` writes a key nothing reads.
+Each sync advances it automatically. Read it with `bd linear status` (the
+`Last Sync` line, or `last_sync` under `--json`).
 
 ## Troubleshooting
 
