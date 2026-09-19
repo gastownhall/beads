@@ -862,16 +862,32 @@ func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx co
 		t.Fatalf("BumpEpoch: %v", err)
 	}
 
+	// record-a's Version survives the transition by being minted again under
+	// the new epoch — MintUnderEpoch's own contract is "mints a fresh
+	// Version for id under storeID's CURRENT epoch", so a second call here
+	// carries record-a's id forward. record-b is never minted again, so it
+	// does not survive. This makes both halves of R20-n deterministically in
+	// play instead of something to be discovered after the fact: addrA must
+	// still be served through the retained mapping, addrB must not, and a
+	// backend that gets the direction backwards must not be able to pass by
+	// having this case discover-then-swap around whatever it observes.
+	if _, err := fixture.MintUnderEpoch(ctx, store, "record-a"); err != nil {
+		t.Fatalf("MintUnderEpoch(record-a) [carries it into the new epoch]: %v", err)
+	}
+
 	servesA, err := fixture.StillServes(ctx, store, addrA)
 	if err != nil {
 		t.Fatalf("StillServes(%s): %v", addrA, err)
+	}
+	if !servesA {
+		t.Errorf("StillServes(record-a's prior-epoch address) = false, want true: record-a was minted again under the new epoch, so its prior address must still resolve through R20-n's retained mapping")
 	}
 	servesB, err := fixture.StillServes(ctx, store, addrB)
 	if err != nil {
 		t.Fatalf("StillServes(%s): %v", addrB, err)
 	}
-	if servesA == servesB {
-		t.Skip("this scenario needs one still-served and one no-longer-served address to exercise both halves of R20-n; StillServes reported the same answer for both, so this fixture gives this case nothing to contrast")
+	if servesB {
+		t.Errorf("StillServes(record-b's prior-epoch address) = true, want false: record-b was never minted again, so it did not survive the epoch transition")
 	}
 
 	stillServed, noLongerServed := addrA, addrB
