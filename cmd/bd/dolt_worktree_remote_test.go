@@ -32,6 +32,12 @@ func TestDoltRemoteAddPersistsSyncRemoteToSharedWorktreeConfig(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
 	)
 
+	// `bd init` in shared-server mode DAEMONIZES a dolt sql-server under
+	// $HOME/.beads/shared-server and returns; nothing here used to stop it,
+	// so it outlived the suite that deleted its tree (wy-j2zc8q). Registered
+	// before the first subprocess so the t.Fatalf paths are covered too.
+	stopSharedServerCleanup(t)
+
 	initCmd := exec.Command(bd, "init", "--prefix", "remote-sync", "--skip-hooks", "--quiet")
 	initCmd.Dir = worktreeDir
 	initCmd.Env = sharedEnv

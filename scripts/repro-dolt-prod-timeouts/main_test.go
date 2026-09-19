@@ -495,6 +495,19 @@ func TestSeedProductionShapeFullSmallIssueCountRealSchema(t *testing.T) {
 	if err := serverCmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Deliberately exempt from the suite-sweep contract every other package
+	// that spawns a `dolt sql-server` is wired into (internal/doltserver's
+	// SweepDeadSuiteRoots + SweepSuiteTestServers + ApplyLeakPolicy).
+	// This is a manual repro harness, and its cleanup is an unconditional
+	// Kill + Wait rather than a stop that can fail silently: the server is
+	// dead before t.TempDir() removes baseDir, so this package cannot produce
+	// the live-server-with-deleted-cwd state that another suite's post-run
+	// sweep reaps and fails on. A run killed outright (`go test -timeout`,
+	// Ctrl-C) does leak one, but with an intact cwd and no claimed suite
+	// root, so no sweep arm can reach it and no suite is misblamed for it.
+	// Wiring a TestMain here would buy only the killed-run reap; if that
+	// becomes worth it, the template is internal/storage/uow/testmain_test.go
+	// (wy-j2zc8q).
 	t.Cleanup(func() {
 		_ = serverCmd.Process.Kill()
 		_ = serverCmd.Wait()
