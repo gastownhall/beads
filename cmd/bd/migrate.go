@@ -627,9 +627,15 @@ func handleSchemaMigrate() error {
 
 	applied, err := migrator.ApplySchemaMigrations(rootCtx)
 	if err != nil {
+		// An interrupted cursor repair can defer with zero applied. It is
+		// never evidence that the schema is already at the latest version.
+		errorCode := "schema_migration_failed"
+		if errors.Is(err, schema.ErrIgnoredCursorRestoreDeferred) {
+			errorCode = "schema_migration_deferred"
+		}
 		if jsonOutput {
 			if jerr := outputJSON(map[string]interface{}{
-				"error":   "schema_migration_failed",
+				"error":   errorCode,
 				"message": err.Error(),
 			}); jerr != nil {
 				return jerr

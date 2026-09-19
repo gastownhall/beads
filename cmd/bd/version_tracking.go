@@ -340,8 +340,8 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 	}
 }
 
-// noticeSharedMigrateRefusal turns the one failure autoMigrateOnVersionBump
-// must not swallow into a one-line stderr notice.
+// noticeSharedMigrateRefusal reports migration refusals and deferred cursor
+// restoration that autoMigrateOnVersionBump must not silently swallow.
 //
 // Every other failure here is genuinely best-effort — the command's own store
 // open will report anything that matters. A gate refusal is different: it is
@@ -358,6 +358,14 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 // at all (a clone whose remote is already migrated must adopt, not migrate),
 // so the line is chosen per decision rather than printed unconditionally.
 func noticeSharedMigrateRefusal(err error) {
+	// Automatic migration is strict as well: do not stamp a new version or
+	// silently claim success when restoration leaves migration work pending.
+	if errors.Is(err, schema.ErrIgnoredCursorRestoreDeferred) {
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Warning: auto-migrate: %v\n", err)
+		}
+		return
+	}
 	var gateErr *schema.RemoteMigrateGateError
 	if !errors.As(err, &gateErr) {
 		return
