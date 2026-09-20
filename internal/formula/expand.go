@@ -17,6 +17,7 @@ package formula
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -202,16 +203,37 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
-		expanded := &Step{
-			ID:             substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars),
-			Title:          substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars),
-			Description:    substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars),
-			Type:           tmpl.Type,
-			Priority:       tmpl.Priority,
-			Assignee:       substituteVars(tmpl.Assignee, vars),
-			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
-			SourceLocation: tmpl.SourceLocation, // Preserve source location
+		// Start from a copy of the template step so every Step field survives
+		// expansion (Gate, WaitsFor, Condition, Loop, ...); only the fields
+		// below need per-expansion substitution or deep copying.
+		expanded := cloneStep(tmpl)
+		expanded.ID = substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars)
+		expanded.Title = substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars)
+		expanded.Description = substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars)
+		expanded.Notes = substituteVars(substituteTargetPlaceholders(tmpl.Notes, target), vars)
+		expanded.Assignee = substituteVars(tmpl.Assignee, vars)
+
+		// Copy fields that would otherwise alias the template's mutable state.
+		// Metadata, Gate, WaitsFor and Condition carry no documented
+		// substitution contract, so they are carried through verbatim.
+		expanded.Metadata = maps.Clone(tmpl.Metadata)
+		if tmpl.Gate != nil {
+			gate := *tmpl.Gate
+			expanded.Gate = &gate
 		}
+		expanded.Loop = cloneLoopSpec(tmpl.Loop)
+
+		// Expand/ExpandVars are deliberately not carried through: an
+		// expansion template must not recursively re-expand.
+		expanded.Expand = ""
+		expanded.ExpandVars = nil
+
+		// Children are re-expanded below; labels and dependencies are
+		// rebuilt with substitution.
+		expanded.Children = nil
+		expanded.Labels = nil
+		expanded.DependsOn = nil
+		expanded.Needs = nil
 
 		// Substitute placeholders in labels
 		if len(tmpl.Labels) > 0 {
