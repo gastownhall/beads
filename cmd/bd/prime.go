@@ -38,6 +38,7 @@ var (
 const (
 	primeStoreTimeoutEnv     = "BEADS_PRIME_TIMEOUT"
 	primeStoreTimeoutDefault = 10 * time.Second
+	primeStealthScopeRule    = "Beads Git/GitHub features only: Do not use Beads features that perform Git or GitHub operations. This setting does not restrict ordinary project git or gh CLI commands; those follow active user, orchestrator, and repository instructions."
 )
 
 var ensureStoreActiveForPrime = ensureStoreActiveWithContext
@@ -96,9 +97,10 @@ Designed for Claude Code, Gemini CLI, and Codex SessionStart hooks to prevent
 agents from forgetting bd workflow after context compaction.
 
 Config options:
-- no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
+- no-git-ops: When true, outputs stealth mode for Beads Git/GitHub features only.
   Set via: bd config set no-git-ops true
-  Useful when you want to control when commits happen manually.
+  Omits Git commands from the Beads session close protocol. Ordinary project git
+  and gh CLI commands still follow active user, orchestrator, and repository instructions.
 - agent.profile: Explicit policy profile for git/commit authority wording
   (conservative | minimal | team-maintainer; default conservative).
   Set via: bd config set agent.profile team-maintainer
@@ -218,7 +220,7 @@ Memory injection caps:
 func init() {
 	primeCmd.Flags().BoolVar(&primeFullMode, "full", false, "Force full CLI output (ignore MCP detection)")
 	primeCmd.Flags().BoolVar(&primeMCPMode, "mcp", false, "Force MCP mode (minimal output)")
-	primeCmd.Flags().BoolVar(&primeStealthMode, "stealth", false, "Stealth mode (no git operations, flush only)")
+	primeCmd.Flags().BoolVar(&primeStealthMode, "stealth", false, "Stealth mode (Beads Git/GitHub features only; ordinary project git/gh authority unchanged)")
 	primeCmd.Flags().BoolVar(&primeExportMode, "export", false, "Output default content (ignores PRIME.md override)")
 	primeCmd.Flags().BoolVar(&primeMemoriesOnly, "memories-only", false, "Output only persistent memories for compact hook contexts")
 	primeCmd.Flags().BoolVar(&primeNoMemories, "no-memories", false, "Omit the persistent memories section (ignored when --memories-only is set, which wins)")
@@ -670,9 +672,9 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 	var closeProtocol string
 	var profileRule string
 	if stealthMode {
-		// Stealth mode is an explicit no-git context.
+		// Stealth mode scopes the restriction to Beads Git/GitHub features.
 		closeProtocol = "Before saying \"done\": bd close <completed-ids>"
-		profileRule = "Git authority: no git operations in this context"
+		profileRule = primeStealthScopeRule
 	} else if localOnly {
 		if primeAgentProfile() == config.ProfileTeamMaintainer {
 			closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; run git status and commit local changes as routine work (agent.profile=team-maintainer); do not push, pull, or run remote sync."
@@ -755,7 +757,7 @@ func outputCLIContext(w io.Writer, stealthMode bool) error {
 	var profileRule string
 
 	if stealthMode {
-		// Stealth mode is an explicit no-git context.
+		// Stealth mode scopes the restriction to Beads Git/GitHub features.
 		closeProtocol = `[ ] bd close <id1> <id2> ...   (close completed issues)`
 		syncSection = `### Sync & Collaboration
 - ` + "`bd search <query>`" + ` - Search issues by keyword`
@@ -763,8 +765,8 @@ func outputCLIContext(w io.Writer, stealthMode bool) error {
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
 ` + "```"
-		gitWorkflowRule = "Git workflow: stealth mode (no git ops)"
-		profileRule = "Git authority: no git operations in this context"
+		gitWorkflowRule = "Beads workflow: stealth mode (omit Beads Git/GitHub operations)"
+		profileRule = primeStealthScopeRule
 	} else if localOnly {
 		closeNote = "**Note:** No git remote configured. Do not push, pull, or run remote sync. Local git operations follow active user, orchestrator, and repository authority."
 		syncSection = `### Sync & Collaboration
