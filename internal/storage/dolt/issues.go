@@ -662,7 +662,8 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 	}
 
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		if err := issueops.DeleteIssueInTx(ctx, tx, id); err != nil {
+		// storage.DeleteIssue carries no actor, so the journal rows record none.
+		if err := issueops.DeleteIssueInTx(ctx, tx, id, ""); err != nil {
 			return err
 		}
 
@@ -738,7 +739,8 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 
 	var result *types.DeleteIssuesResult
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		r, err := issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun)
+		// storage.DeleteIssues carries no actor, so the journal rows record none.
+		r, err := issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun, "")
 		if err != nil {
 			result = r
 			return err

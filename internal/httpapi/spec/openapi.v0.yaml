@@ -1456,6 +1456,13 @@ paths:
         `await_id`.
 
 
+        The per-type `storage-class.<type>` keys in `config.yaml` are CLI-door
+        policy that `bd create` resolves before it calls the role, so they do not
+        reach any create on this surface — this operation, `issues:batchCreate`
+        and `issues:batchApply` all mint the unset (versioned) class no matter
+        what those keys say on the server's machine.
+
+
         `comments` and an inline `dependencies` list on the issue itself — the
         role refuses both, because edges belong to the request's own
         `dependencies` member where their direction can be stated.
@@ -1945,6 +1952,17 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: metadata_field
+          in: query
+          description: >-
+            Top-level metadata equality filter as `key=value`, split on the
+            first `=`. Repeatable. An invalid key is a 400.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
         - name: include_infra
           in: query
           description: >-
@@ -2011,15 +2029,16 @@ paths:
           description: >-
             Invalid request: an unknown query parameter, a repeated
             single-valued one, a malformed boolean, integer or RFC 3339 instant,
-            or a `group_by` outside the closed set.
+            a malformed `metadata_field`, or a `group_by` outside the closed
+            set.
 
 
-            EVERY REFUSAL HERE IS THE TRANSPORT'S. Unlike the listings, this
-            operation has no predicate its library surface can turn down: an
-            unrecognized `status` or `type` matches nothing and answers `0`, and
-            the one refusal the count role does make — an unknown bucketing
-            dimension — is refused at the edge above, so it never reaches the
-            role at all.
+            A malformed `metadata_field` shape and an unknown `group_by` are
+            transport refusals. An invalid metadata key passes query decoding,
+            then `BuildCountFilter` rejects it and `failReadErr` classifies the
+            role's error as a `400` on `metadata_field`. An unrecognized
+            `status` or `type` is not a refusal; it matches nothing and answers
+            `0`.
           x-bd-codes: [invalid_argument]
           content:
             application/problem+json:
@@ -6601,8 +6620,7 @@ components:
         epic_closeable:
           type: boolean
         revision:
-          type: integer
-          format: int64
+          type: string
           description: >-
             The row's optimistic-concurrency token, and THE READ THAT SOURCES A
             GUARD. Every `expected_version` on this surface is composed from a
@@ -6628,16 +6646,10 @@ components:
             `updated_at`, `status` and the label set.
 
 
-            It is ALWAYS PRESENT, including as 0 — a legacy row backfilled and
+            It is ALWAYS PRESENT, including as `"0"` — a legacy row backfilled and
             not mutated since — because an absent member would be ambiguous
             between a legacy-zero row and a server that does not publish the
             token.
-
-
-            DECODE IT AS A 64-BIT INTEGER, for the reason
-            `UpdateIssueRequest.expected_version` spells out: an IEEE-754-double
-            parser corrupts it silently, and the corruption only shows up as a
-            `precondition_failed` on the NEXT request.
 
 
             IT IS THE ANCHOR ROW'S ALONE. The issues nested under
@@ -6651,6 +6663,15 @@ components:
             IT IS NOT ON THE LIST ROWS, and that is a decision rather than an
             oversight — see `GET /v0/beads/issues`.
 
+
+            IT IS A STRING, the token's decimal spelling — `"-3819021935081927"`, or
+            `"0"` for a legacy migration-0054 row. Send it back verbatim as an
+            `expected_version`; do not parse it into a number. A JSON number would not
+            survive the trip: the token spans the FULL 64-bit range, and an
+            IEEE-754-double parser — JavaScript's `JSON.parse`, Go's `any`, Python's
+            `float` — rounds anything past 2^53 to a value NEAR the token that is not
+            it, so a guard composed from it is refused against a row nothing else
+            touched. A string round-trips exactly in every consumer.
     IssueWithDependencyMetadata:
       type: object
       description: >-
@@ -7444,8 +7465,7 @@ components:
             computed against the same snapshot, and nothing is recorded in
             history either.
         expected_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             Requires the named bead's revision to equal this value before
             anything is erased. A miss refuses the whole request with
@@ -7491,10 +7511,14 @@ components:
             The token is the `revision` a lifecycle write answers with, and the
             one `GET /v0/beads/issues/{id}` publishes — which is where a delete
             guard should seed itself, since reading the bead before erasing it
-            is the only way to be sure it is the bead you meant. DECODE IT AS A
-            64-BIT INTEGER, for the reason
-            `UpdateIssueRequest.expected_version` spells out.
+            is the only way to be sure it is the bead you meant.
 
+
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
     DeleteIssuesResult:
       type: object
       required: [dry_run, deleted, dependencies, labels, events, references_updated]
@@ -8930,8 +8954,7 @@ components:
         patch:
           $ref: '#/components/schemas/ApplyPatchBody'
         expected_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             Requires the row's `revision` to equal this value before the patch.
             A miss refuses the WHOLE request with `409 precondition_failed`.
@@ -8950,11 +8973,11 @@ components:
             because a caller CAN know what its own earlier item set them to.
 
 
-            DECODE IT AS A 64-BIT INTEGER, for the reason
-            `UpdateIssueRequest.expected_version` spells out. It bites harder
-            here than anywhere else on the surface: a corrupted token refuses
-            the WHOLE plan rather than one write, so a client with a lossy
-            parser loses every item of every batch it guards.
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
         expected_status:
           type: string
           maxLength: 255
@@ -9218,8 +9241,7 @@ components:
             open child is NOT refused: the policy is a gate on the closing act,
             not an invariant the store maintains.
         expected_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             Requires the row's `revision` to equal this value, evaluated
             as-modified and checked before the idempotent close. A miss refuses
@@ -9235,10 +9257,11 @@ components:
             `update` item whose `patch.status` crosses into the done category.
 
 
-            DECODE IT AS A 64-BIT INTEGER, on
-            `ApplyUpdateItem.expected_version`'s terms, including its note that
-            a corrupted token here costs the whole plan.
-
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
     ApplyDepAddItem:
       type: object
       additionalProperties: false
@@ -9364,8 +9387,7 @@ components:
             idempotent re-add of an edge that already existed with the same
             type.
         revision:
-          type: integer
-          format: int64
+          type: string
           description: >-
             The row's optimistic-concurrency token AFTER the item, and the value
             an `expected_version` guard is composed from. The same member the
@@ -9390,14 +9412,14 @@ components:
             member would be ambiguous between the two.
 
 
-            DECODE IT AS A 64-BIT INTEGER, for the reason
-            `UpdateIssueRequest.expected_version` spells out: an IEEE-754-double
-            parser corrupts it silently, and the corruption only shows up as a
-            `precondition_failed` on the NEXT request. This member is the one
-            every other `revision` on the surface is spelled against, so the
-            warning belongs here most of all — a client that reads it through a
-            lossy parser here carries the damage into every guard it composes.
-
+            IT IS A STRING, the token's decimal spelling — `"-3819021935081927"`, or
+            `"0"` for a legacy migration-0054 row. Send it back verbatim as an
+            `expected_version`; do not parse it into a number. A JSON number would not
+            survive the trip: the token spans the FULL 64-bit range, and an
+            IEEE-754-double parser — JavaScript's `JSON.parse`, Go's `any`, Python's
+            `float` — rounds anything past 2^53 to a value NEAR the token that is not
+            it, so a guard composed from it is refused against a row nothing else
+            touched. A string round-trips exactly in every consumer.
     AddDependenciesRequest:
       type: object
       additionalProperties: false
@@ -9681,14 +9703,13 @@ components:
             space that answers "where is the `already_released` member" —
             there is none, and the operation description says why.
         revision:
-          type: integer
-          format: int64
+          type: string
           description: >-
             The row's optimistic-concurrency token AFTER the release, spelled
             the way `UpdateIssueResponse.revision` spells it and carrying the
             same promise: a read-modify-write loop composes its next
-            `expected_version` from THIS value, never from a number it
-            incremented itself.
+            `expected_version` from THIS value, never from one it composed
+            itself.
 
 
             A release REMINTS the token by design, so a caller that guarded a
@@ -9698,11 +9719,14 @@ components:
             step.
 
 
-            DECODE IT AS A 64-BIT INTEGER, for the reason
-            `UpdateIssueRequest.expected_version` spells out: an IEEE-754-double
-            parser corrupts it silently, and the corruption only shows up as a
-            `precondition_failed` on the NEXT request.
-
+            IT IS A STRING, the token's decimal spelling — `"-3819021935081927"`, or
+            `"0"` for a legacy migration-0054 row. Send it back verbatim as an
+            `expected_version`; do not parse it into a number. A JSON number would not
+            survive the trip: the token spans the FULL 64-bit range, and an
+            IEEE-754-double parser — JavaScript's `JSON.parse`, Go's `any`, Python's
+            `float` — rounds anything past 2^53 to a value NEAR the token that is not
+            it, so a guard composed from it is refused against a row nothing else
+            touched. A string round-trips exactly in every consumer.
     ClaimNextRequest:
       type: object
       additionalProperties: false
@@ -9956,8 +9980,7 @@ components:
             anyway" has said nothing about whether the row is still the one it
             read.
         expected_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             Requires the row's revision to equal this value BEFORE the close. A
             miss refuses the whole request with `409 precondition_failed` and
@@ -9976,7 +9999,7 @@ components:
 
             The token is the `revision` this operation's own response carries.
             Compose the next expectation from the value a write ANSWERED with,
-            never from a number the client incremented itself: the token is
+            never from one the client composed itself: the token is
             OPAQUE and compared for equality alone, so it has no predecessor a
             client can compute. A first guarded close seeds itself from
             `GET /v0/beads/issues/{id}`'s `revision` — the read that sources a
@@ -9985,11 +10008,11 @@ components:
             `ApplyItemResult.revision`.
 
 
-            DECODE IT AS A 64-BIT INTEGER, for the reason
-            `UpdateIssueRequest.expected_version` spells out: an IEEE-754-double
-            parser corrupts it silently, and the corruption only surfaces as a
-            `precondition_failed` on the NEXT request.
-
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
     CloseIssueResponse:
       type: object
       required: [issue, already_closed, open_children, revision]
@@ -10011,8 +10034,7 @@ components:
             bypassed the guard is exactly the caller that wants the number. An
             unforced close that got this far had none, so it reports 0.
         revision:
-          type: integer
-          format: int64
+          type: string
           description: >-
             The row's optimistic-concurrency token AFTER this close, spelled the
             way `UpdateIssueResponse.revision` spells it.
@@ -10027,9 +10049,14 @@ components:
             wrote.
 
 
-            DECODE IT AS A 64-BIT INTEGER, for the reason
-            `UpdateIssueResponse.revision` spells out.
-
+            IT IS A STRING, the token's decimal spelling — `"-3819021935081927"`, or
+            `"0"` for a legacy migration-0054 row. Send it back verbatim as an
+            `expected_version`; do not parse it into a number. A JSON number would not
+            survive the trip: the token spans the FULL 64-bit range, and an
+            IEEE-754-double parser — JavaScript's `JSON.parse`, Go's `any`, Python's
+            `float` — rounds anything past 2^53 to a value NEAR the token that is not
+            it, so a guard composed from it is refused against a row nothing else
+            touched. A string round-trips exactly in every consumer.
     ReopenIssueRequest:
       type: object
       additionalProperties: false
@@ -10058,8 +10085,7 @@ components:
             events. Refused for control characters, and bounded by what the
             column holds rather than by the number above.
         expected_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             Requires the row's revision to equal this value BEFORE the reopen. A
             miss refuses the whole request with `409 precondition_failed` and
@@ -10076,9 +10102,14 @@ components:
 
             The token is the `revision` this operation's own response carries;
             compose the next expectation from a value a write ANSWERED with and
-            never from one the client computed. DECODE IT AS A 64-BIT INTEGER,
-            for the reason `UpdateIssueRequest.expected_version` spells out.
+            never from one the client computed.
 
+
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
     ReopenIssueResponse:
       type: object
       required: [issue, already_open, revision]
@@ -10093,8 +10124,7 @@ components:
             and `ClaimResponse.already_claimed`. The response still carries the
             row.
         revision:
-          type: integer
-          format: int64
+          type: string
           description: >-
             The row's optimistic-concurrency token AFTER this reopen, spelled
             the way `CloseIssueResponse.revision` spells it and here for the same
@@ -10102,6 +10132,15 @@ components:
             next `expected_version` from this value. DECODE IT AS A 64-BIT
             INTEGER.
 
+
+            IT IS A STRING, the token's decimal spelling — `"-3819021935081927"`, or
+            `"0"` for a legacy migration-0054 row. Send it back verbatim as an
+            `expected_version`; do not parse it into a number. A JSON number would not
+            survive the trip: the token spans the FULL 64-bit range, and an
+            IEEE-754-double parser — JavaScript's `JSON.parse`, Go's `any`, Python's
+            `float` — rounds anything past 2^53 to a value NEAR the token that is not
+            it, so a guard composed from it is refused against a row nothing else
+            touched. A string round-trips exactly in every consumer.
     MetadataValue:
       # No x-go-type-import: the generator already imports encoding/json
       # unconditionally, and naming it here emits the import a second time.
@@ -10210,8 +10249,7 @@ components:
         patch:
           $ref: '#/components/schemas/IssuePatchBody'
         expected_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             Requires the row's revision to equal this value before the patch. A
             miss refuses the WHOLE request with `409 precondition_failed` and
@@ -10225,16 +10263,16 @@ components:
             unguarded one or from `POST /v0/beads/issues:batchApply`'s
             `ApplyItemResult.revision`.
             Compose the next expectation from the value the write ANSWERED with,
-            never from a number the client incremented itself: the token is
+            never from one the client composed itself: the token is
             OPAQUE and compared for equality alone, so it has no predecessor a
             client can compute.
 
 
-            DECODE IT AS A 64-BIT INTEGER. Live tokens run past 5e17, where an
-            IEEE-754 double's ulp is already 64, so a parser that decodes JSON
-            numbers as doubles — JavaScript's `JSON.parse`, Go's `any`, Python's
-            `float` — hands back a value NEAR the token that is not it, and the
-            guard is refused against a row nothing else touched.
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
         expected_status:
           type: string
           maxLength: 255
@@ -10497,8 +10535,7 @@ components:
             patch is a 200 with `changed: false` rather than an error —
             idempotent, like every replay answer on this surface.
         revision:
-          type: integer
-          format: int64
+          type: string
           description: >-
             The row's optimistic-concurrency token AFTER this write, spelled the
             way `ApplyItemResult.revision` spells it.
@@ -10513,11 +10550,14 @@ components:
             the same token, and this member agrees with it.
 
 
-            DECODE IT AS A 64-BIT INTEGER, for the reason
-            `UpdateIssueRequest.expected_version` spells out: an IEEE-754-double
-            parser corrupts it silently, and the corruption only shows up as a
-            `precondition_failed` on the NEXT request.
-
+            IT IS A STRING, the token's decimal spelling — `"-3819021935081927"`, or
+            `"0"` for a legacy migration-0054 row. Send it back verbatim as an
+            `expected_version`; do not parse it into a number. A JSON number would not
+            survive the trip: the token spans the FULL 64-bit range, and an
+            IEEE-754-double parser — JavaScript's `JSON.parse`, Go's `any`, Python's
+            `float` — rounds anything past 2^53 to a value NEAR the token that is not
+            it, so a guard composed from it is refused against a row nothing else
+            touched. A string round-trips exactly in every consumer.
     CreateIssueRequest:
       type: object
       additionalProperties: false
@@ -10942,8 +10982,7 @@ components:
             block and never close). Both polarities are reported; this member is
             never omitted to mean false. See `issue_id`.
         expected_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             With `precondition_failed`: the row `revision` the request guarded
             on, echoed from the request itself.
@@ -10955,9 +10994,15 @@ components:
             is a schema alternation, and no composition keyword is available to
             spell one here (see `ApplyItem`). Three typed pairs cost three
             member names and are readable by a generated client without a cast.
+
+
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
         actual_version:
-          type: integer
-          format: int64
+          type: string
           description: >-
             With `precondition_failed`: the `revision` the row was found
             holding, read inside the transaction that refused the guard.
@@ -10980,6 +11025,13 @@ components:
             what it found is an addition rather than a wire change — a client
             must not wait for them, and must never read their absence as a
             value.
+
+
+            IT IS A STRING, and it must be the `revision` string a response carried,
+            verbatim. A JSON number — or any other type — is a `400` naming this
+            member. The token spans the FULL 64-bit range, so a number would be
+            rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
+            row nothing else touched; a string round-trips exactly in every consumer.
         expected_status:
           type: string
           description: >-

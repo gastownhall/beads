@@ -1,20 +1,27 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
+
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
 // wireStorageDecorators composes the storage chain in the order the rest of
 // bd expects:
 //
-//	caller → HookFiringStore (outer) → InstrumentedStorage → raw DoltStorage
+//	caller → HookFiringStore → externaldeps.Store → InstrumentedStorage → raw DoltStorage
 //
 // telemetry.WrapStorage is a no-op when telemetry is disabled, so the
 // instrumentation layer is only present when BD_OTEL_ENABLED=true (or a
-// legacy BD_OTEL_* selector is set). The hook layer sits outermost so
-// storage spans measure pure DB time without hook-firing overhead.
+// legacy BD_OTEL_* selector is set). The hook layer sits outside telemetry so
+// storage spans measure pure DB time without hook-firing overhead. The policy
+// sits directly beneath hooks so serve's one hook-layer peel retains it.
 //
 // Extracted from main.go's PersistentPreRunE so the chain composition is
 // unit-testable — the bug this PR fixes was a missing WrapStorage call,
@@ -24,10 +31,29 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 		return nil
 	}
 	store = telemetry.WrapStorage(store)
+	store = wireExternalDependencyPolicy(store)
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
 	}
 	return store
+}
+
+// wireExternalDependencyPolicy applies only the read/guard policy. Routed
+// stores must use this without inheriting the caller's hooks or telemetry.
+func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
+	if store == nil {
+		return nil
+	}
+	return externaldeps.New(
+		store,
+		func(project externaldeps.ProjectName) (string, bool) {
+			path := config.ResolveExternalProjectPath(string(project))
+			return path, path != ""
+		},
+		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
+			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
+		},
+	)
 }
 
 // waitForCommandHooks lets the hooks this command fired finish before the
@@ -47,4 +73,17 @@ func waitForCommandHooks() {
 		return
 	}
 	hookRunner.Wait(hookRunner.Timeout())
+}
+
+func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
+	return externaldeps.WrapUOWProvider(
+		provider,
+		func(project externaldeps.ProjectName) (string, bool) {
+			path := config.ResolveExternalProjectPath(string(project))
+			return path, path != ""
+		},
+		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
+			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
+		},
+	)
 }

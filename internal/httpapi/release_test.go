@@ -74,8 +74,8 @@ func TestReleaseWritesOnceAndAnswersWithTheRowItWrote(t *testing.T) {
 	if body["changed"] != true {
 		t.Errorf("changed = %v, want true — the role reports it true on every answer it returns without an error", body["changed"])
 	}
-	if body["revision"] != float64(77) {
-		t.Errorf("revision = %v, want the post-release token off the row the role answered with", body["revision"])
+	if body["revision"] != "77" {
+		t.Errorf("revision = %v, want the post-release token off the row the role answered with, as a decimal string", body["revision"])
 	}
 	issue, ok := body["issue"].(map[string]any)
 	if !ok {
@@ -345,7 +345,7 @@ func TestReleaseRefusesUnknownAndMalformedBodies(t *testing.T) {
 		body  string
 		param string
 	}{
-		{name: "an unknown member", body: `{"actor":"alice","expected_version":3}`, param: "expected_version"},
+		{name: "an unknown member", body: `{"actor":"alice","expected_version":"3"}`, param: "expected_version"},
 		{name: "a missing actor", body: `{"force":true}`, param: claimActorMember},
 		{name: "an actor that is blank after trimming", body: `{"actor":"  "}`, param: claimActorMember},
 		{name: "an actor carrying a newline", body: `{"actor":"alice\nbd: released by mallory"}`, param: claimActorMember},

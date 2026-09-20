@@ -799,3 +799,30 @@ func TestShouldStopAutoStartedServerOnClose(t *testing.T) {
 		}
 	})
 }
+
+// wy-sbgucn: PoolReadTimeoutFallback replaces the built-in 10s pool read
+// deadline only when nothing set PoolReadTimeout; an explicit setting wins.
+func TestBuildServerDSN_PoolReadTimeoutFallback(t *testing.T) {
+	base := &Config{ServerHost: "127.0.0.1", ServerPort: 13390, ServerUser: "root", Database: "wy"}
+	parse := func(cfg *Config) time.Duration {
+		t.Helper()
+		parsed, err := mysql.ParseDSN(buildServerDSN(cfg, cfg.Database))
+		if err != nil {
+			t.Fatalf("ParseDSN: %v", err)
+		}
+		return parsed.ReadTimeout
+	}
+	if got := parse(base); got != defaultPoolReadTimeout {
+		t.Fatalf("no settings: ReadTimeout = %v, want built-in %v", got, defaultPoolReadTimeout)
+	}
+	fb := *base
+	fb.PoolReadTimeoutFallback = 5 * time.Minute
+	if got := parse(&fb); got != 5*time.Minute {
+		t.Fatalf("fallback only: ReadTimeout = %v, want 5m", got)
+	}
+	explicit := fb
+	explicit.PoolReadTimeout = 20 * time.Second
+	if got := parse(&explicit); got != 20*time.Second {
+		t.Fatalf("explicit + fallback: ReadTimeout = %v, want the explicit 20s", got)
+	}
+}

@@ -286,6 +286,95 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 	})
 
+	// wy-zdfs6r: the proxied path used to lose every regular<->wisp edge whose
+	// BOTH endpoints were rows of the import file. It writes the whole import
+	// in one ImportBatch, and the engine skip-reports a cross-plane edge while
+	// both of its endpoints are rows of one batch — so the edge was reported
+	// and dropped, and because a re-run upserts the same batch it could never
+	// be backfilled either (the loss wy-4276q8 measured on the classic path,
+	// where a restored export lost all 22 such `blocks` edges). The importer
+	// role now writes the rows first and those edges after, in single-plane
+	// batches, WITHIN THE SAME unit of work.
+	t.Run("cross_plane_in_batch_edges_are_wired", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impx")
+		db := openProxiedDB(t, p)
+
+		// Edges in BOTH directions, so neither plane is only ever a target:
+		// impx-reg -> impx-wisp lands in `dependencies` against the wisp
+		// column, impx-wisp -> impx-other in `wisp_dependencies` against the
+		// issue column. The second is also what makes the single-plane split
+		// load-bearing — impx-wisp is one edge's target and the other's
+		// source, so a mixed second pass would skip-report the first again.
+		fixture := importFixtureJSONL(t, []*types.Issue{
+			{
+				ID: "impx-reg", Title: "Regular source", Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				Dependencies: []*types.Dependency{{IssueID: "impx-reg", DependsOnID: "impx-wisp", Type: types.DepBlocks}},
+				CreatedAt:    when, UpdatedAt: when,
+			},
+			{
+				ID: "impx-other", Title: "Regular target", Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				CreatedAt: when, UpdatedAt: when,
+			},
+		},
+			`{"id":"impx-wisp","title":"Wisp end","status":"open","issue_type":"task","priority":2,"wisp_plane":true,`+
+				`"dependencies":[{"issue_id":"impx-wisp","depends_on_id":"impx-other","type":"blocks"}],`+
+				`"created_at":"2026-08-01T12:00:00Z","updated_at":"2026-08-01T12:00:00Z"}`,
+		)
+		path := filepath.Join(p.dir, "crossplane.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		head := proxiedDoltHead(t, db)
+		report := bdProxiedImport(t, bd, p.dir, path)
+		if strings.Contains(report, "Skipped dependency") {
+			t.Errorf("import skip-reported a cross-plane in-batch edge:\n%s", report)
+		}
+
+		// Both rows land on their own planes: an import that had quietly
+		// re-planed the wisp would satisfy every edge assertion below for the
+		// wrong reason.
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id IN ('impx-reg','impx-other')"); got != 2 {
+			t.Errorf("durable rows = %d, want 2", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM wisps WHERE id = 'impx-wisp'"); got != 1 {
+			t.Errorf("wisp row = %d, want 1", got)
+		}
+
+		// The edges themselves, on the plane's own dependency table and
+		// against the target plane's own column.
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'impx-reg' AND depends_on_wisp_id = 'impx-wisp' AND type = 'blocks'"); got != 1 {
+			t.Errorf("regular -> wisp edge = %d, want 1 (the wy-zdfs6r loss)", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = 'impx-wisp' AND depends_on_issue_id = 'impx-other' AND type = 'blocks'"); got != 1 {
+			t.Errorf("wisp -> regular edge = %d, want 1 (the wy-zdfs6r loss)", got)
+		}
+
+		// STILL ONE COMMIT. The deferred edges are a second pass over the same
+		// unit of work, not a second import: splitting the transaction to wire
+		// them would trade this loss for a torn import.
+		if n := proxiedDoltCommitCountSince(t, db, head); n != 1 {
+			t.Errorf("commits for one import = %d, want exactly 1", n)
+		}
+
+		// And it converges: re-importing the same snapshot writes no second
+		// copy of either edge and commits nothing.
+		headBeforeReimport := proxiedDoltHead(t, db)
+		_ = bdProxiedImport(t, bd, p.dir, path)
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'impx-reg'"); got != 1 {
+			t.Errorf("regular -> wisp edges after re-import = %d, want 1", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = 'impx-wisp'"); got != 1 {
+			t.Errorf("wisp -> regular edges after re-import = %d, want 1", got)
+		}
+		if n := proxiedDoltCommitCountSince(t, db, headBeforeReimport); n != 0 {
+			t.Errorf("re-import of an identical snapshot made %d commits, want 0", n)
+		}
+	})
+
 	t.Run("stdin_dash_and_redirect_guard", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "impb")

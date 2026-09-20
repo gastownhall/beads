@@ -213,9 +213,10 @@ func countFilters(q *query) issueops.CountRequest {
 		ClosedAfter:   q.timestamp("closed_after"),
 		ClosedBefore:  q.timestamp("closed_before"),
 
-		EmptyDesc:  q.boolean("empty_description"),
-		NoAssignee: q.boolean("no_assignee"),
-		NoLabels:   q.boolean("no_labels"),
+		EmptyDesc:      q.boolean("empty_description"),
+		NoAssignee:     q.boolean("no_assignee"),
+		NoLabels:       q.boolean("no_labels"),
+		MetadataFields: q.metadataFields("metadata_field"),
 
 		// The plane switch, forwarded as the boolean the caller sent. What it
 		// MEANS — merge the wisps tier, drop templates, drop gates, and route an

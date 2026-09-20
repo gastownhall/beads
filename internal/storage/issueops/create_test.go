@@ -111,46 +111,6 @@ func TestValidateCreateIssuesMixedBucketDependenciesRejectsCrossBucketEdges(t *t
 	}
 }
 
-func TestFilterCreateIssuesMixedBucketDependenciesSkipsWhenConfigured(t *testing.T) {
-	regular := &types.Issue{
-		ID:        "test-regular-source",
-		IssueType: types.TypeTask,
-		Dependencies: []*types.Dependency{{
-			DependsOnID: "test-wisp-target",
-			Type:        types.DepBlocks,
-		}},
-	}
-	wisp := &types.Issue{
-		ID:        "test-wisp-target",
-		IssueType: types.TypeTask,
-		Ephemeral: true,
-	}
-	var skipped []string
-
-	filtered, err := filterCreateIssuesMixedBucketDependencies([]*types.Issue{regular, wisp}, storage.BatchCreateOptions{
-		SkipDependencyValidationErrors: true,
-		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
-			skipped = append(skipped, issueID+" -> "+dependsOnID+": "+reason)
-		},
-	})
-	if err != nil {
-		t.Fatalf("filterCreateIssuesMixedBucketDependencies error = %v, want nil", err)
-	}
-	if len(filtered) != 2 {
-		t.Fatalf("len(filtered) = %d, want 2", len(filtered))
-	}
-	if len(filtered[0].Dependencies) != 0 {
-		t.Fatalf("filtered[0].Dependencies = %#v, want none", filtered[0].Dependencies)
-	}
-	if len(regular.Dependencies) != 1 {
-		t.Fatalf("regular.Dependencies was mutated to %#v, want original dependency preserved", regular.Dependencies)
-	}
-	if len(skipped) != 1 || !strings.Contains(skipped[0], "test-regular-source -> test-wisp-target") ||
-		!strings.Contains(skipped[0], "cross-bucket dependency") {
-		t.Fatalf("skipped = %#v, want cross-bucket dependency detail", skipped)
-	}
-}
-
 func TestPersistDependenciesHonorsImportedCreatedBy(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)

@@ -66,11 +66,11 @@ func TestPinnedDefaultBySelector(t *testing.T) {
 		}
 	})
 
-	// --ready forces status open and otherwise IGNORES the selector, so an
-	// "all" that the query never applies must not have a pinned side effect
+	// `--status all` is the no-filter spelling, so --ready still pins open.
+	// An "all" that the query never applies must not have a pinned side effect
 	// either. Without this, `bd list --ready --status=all` would admit pinned
 	// beads into a ready listing that is filtered to open.
-	t.Run("--ready ignores the selector, including for pinned", func(t *testing.T) {
+	t.Run("--ready --status=all does not admit pinned", func(t *testing.T) {
 		got := pinnedDefault(t, issueops.ListRequest{Status: "all", ReadyFlag: true})
 		if got == nil || *got {
 			t.Errorf("--ready --status=all: Pinned = %v, want false", got)

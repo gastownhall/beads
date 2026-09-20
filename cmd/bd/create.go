@@ -52,7 +52,7 @@ var createCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("create") // also covers CheckMigrationFreeze (dc-6jaq)
+		CheckReadonly("create") // also covers the migration freeze check (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("create")
 		defer func() {
@@ -197,32 +197,9 @@ var createCmd = &cobra.Command{
 			return HandleError("--ephemeral and --no-history are mutually exclusive")
 		}
 		storageClassFlag, _ := cmd.Flags().GetString("storage-class")
-		storageClass, err := resolveStorageClass(storageClassFlag, types.IssueType(issueType).Normalize())
+		storageClass, wisp, err := resolveCreateStorageClass(storageClassFlag, types.IssueType(issueType), wisp, noHistory)
 		if err != nil {
 			return HandleError("%v", err)
-		}
-		// --storage-class ephemeral is the spelled-out spelling of --ephemeral
-		// (Protocol v0.1 C1.4: the wisp plane is today's ephemeral-class
-		// implementation). It routes to the wisp path exactly like the flag;
-		// the --no-history mutual exclusion above still applies.
-		if storageClass == types.StorageClassEphemeral {
-			if noHistory {
-				return HandleError("--storage-class ephemeral and --no-history are mutually exclusive")
-			}
-			wisp = true
-			storageClass = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
-		}
-		// Reconcile the requested durable class with the effective wisp plane
-		// (flag > config, Protocol v0.1 §C1.3): an explicit --storage-class
-		// contradicts --ephemeral/--no-history and is rejected, so the durable
-		// intent is preserved rather than silently collapsed into an
-		// effective-ephemeral record; a per-type config default yields to the
-		// explicit flag. versioned normalizes to the unset marker only after the
-		// check (C2.4).
-		var storageClassConflict bool
-		storageClass, storageClassConflict = reconcileStorageClassPlane(storageClass, storageClassFlag != "", wisp || noHistory)
-		if storageClassConflict {
-			return HandleError("--storage-class %s conflicts with --ephemeral/--no-history: wisp-plane records are storage class ephemeral", storageClass)
 		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
@@ -759,6 +736,49 @@ func reconcileStorageClassPlane(class types.StorageClass, explicit, wispPlane bo
 	return class.Normalize(), false
 }
 
+// resolveCreateStorageClass is the ONE create-time storage-class decision every
+// `bd create` CLI door makes: parse the flag (or fall back to the per-type
+// storage-class.<type> config default), route the ephemeral spelling to the wisp
+// plane, and reject a durable class that contradicts the plane. Every door goes
+// through it so the direct, proxied, and --file routes cannot answer differently;
+// graphApplyNodeStorageClass is the per-node mirror, which additionally honors a
+// node's own pointer overrides.
+//
+// flagValue is the raw --storage-class spelling ("" when unset). wisp/noHistory
+// are the plane flags as the caller read them; the returned wisp is the plane
+// AFTER the ephemeral spelling has been folded in (Protocol v0.1 C1.4). The
+// returned class is already normalized (C2.4), so it can go straight onto the
+// issue.
+func resolveCreateStorageClass(flagValue string, issueType types.IssueType, wisp, noHistory bool) (types.StorageClass, bool, error) {
+	class, err := resolveStorageClass(flagValue, issueType.Normalize())
+	if err != nil {
+		return "", wisp, err
+	}
+	// --storage-class ephemeral is the spelled-out spelling of --ephemeral
+	// (Protocol v0.1 C1.4: the wisp plane is today's ephemeral-class
+	// implementation). It routes to the wisp path exactly like the flag; the
+	// --ephemeral/--no-history mutual exclusion still applies.
+	if class == types.StorageClassEphemeral {
+		if noHistory {
+			return "", wisp, errors.New("--storage-class ephemeral and --no-history are mutually exclusive")
+		}
+		wisp = true
+		class = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
+	}
+	// Reconcile the requested durable class with the effective wisp plane
+	// (flag > config, Protocol v0.1 §C1.3): an explicit --storage-class
+	// contradicts --ephemeral/--no-history and is rejected, so the durable
+	// intent is preserved rather than silently collapsed into an
+	// effective-ephemeral record; a per-type config default yields to the
+	// explicit flag. versioned normalizes to the unset marker only after the
+	// check (C2.4).
+	class, conflict := reconcileStorageClassPlane(class, flagValue != "", wisp || noHistory)
+	if conflict {
+		return "", wisp, fmt.Errorf("--storage-class %s conflicts with --ephemeral/--no-history: wisp-plane records are storage class ephemeral", class)
+	}
+	return class, wisp, nil
+}
+
 func buildCreateIssue(params createIssueParams) *types.Issue {
 	var externalRefPtr *string
 	if params.ExternalRef != "" {
@@ -895,7 +915,7 @@ func createDepsAcceptedTypeList() string {
 }
 
 func init() {
-	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
+	createCmd.Flags().StringP("file", "f", "", "Create one issue per ## heading (### fields attach to that issue); for title plus description-from-file, use --body-file")
 	createCmd.Flags().String("graph", "", "Create a graph of issues with dependencies from JSON plan file")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")

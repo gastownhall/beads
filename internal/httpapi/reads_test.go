@@ -159,6 +159,7 @@ func TestABuilderRefusalIsTheDocumentedBadRequest(t *testing.T) {
 		{"a has-metadata key the query layer cannot spell", "/v0/beads/issues?has_metadata_key=1bad", "has_metadata_key"},
 		{"a metadata field key on the ready surface", "/v0/beads/ready?metadata_field=1bad=x", "metadata_field"},
 		{"a has-metadata key on the ready surface", "/v0/beads/ready?has_metadata_key=1bad", "has_metadata_key"},
+		{"a metadata field key on the count surface", "/v0/beads/issues:count?metadata_field=1bad=x", "metadata_field"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts, _ := newReadServer(t, Config{})

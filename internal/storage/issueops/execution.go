@@ -108,6 +108,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	if err != nil {
 		return publicops.CreateResult{}, nil, err
 	}
+	OverlayCreateTimestamps(hydrated, issue)
 	return publicops.CreateResult{Issue: hydrated}, tables, nil
 }
 

@@ -316,6 +316,18 @@ func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*
 	return result, err
 }
 
+// GetExternalBlockingDependencyRecords returns explicit external blockers
+// without scanning unrelated graph edges.
+func (s *DoltStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	var result map[string][]*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetExternalBlockingDependencyRecordsInTx(ctx, tx)
+		return err
+	})
+	return result, err
+}
+
 // GetDependencyRecordsForIssues returns dependency records for specific issues.
 // Delegates to issueops.GetDependencyRecordsForIssuesInTx for shared query logic.
 func (s *DoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {

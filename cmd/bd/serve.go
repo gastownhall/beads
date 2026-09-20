@@ -345,6 +345,11 @@ func runServe() error {
 	// firing them. This is the unit-of-work twin of the
 	// (*storage.HookFiringStore).Unwrap the store-shaped source takes.
 	provider := uow.UnwrapProvider(uowProvider)
+	if provider != nil {
+		// Remove hooks, then restore the external-dependency policy. The policy
+		// is not a hook and must remain on every served ready/claim path.
+		provider = wireExternalDependencyUOWProvider(provider)
+	}
 	if provider == nil {
 		// Server, external-server and shared-server workspaces: PersistentPreRunE
 		// builds a DoltStore for those and no unit-of-work provider, so serve
@@ -371,6 +376,14 @@ func runServe() error {
 		info.Database = topology.database
 		p, err := newSQLServerUOWProvider(rootCtx, info.BeadsDir, topology)
 		if err != nil {
+			// A daemon has no operator watching a prompt, so a migration-gate
+			// refusal here must fail startup loudly and completely: the whole
+			// block, in the service log, naming the one-time `bd migrate
+			// schema` that unblocks it. No prompt, no auto-consent, no
+			// half-started daemon serving a schema it refused to reconcile.
+			if rendered := renderTypedOpenError(err); rendered {
+				return SilentExit()
+			}
 			return HandleError("bd serve: %v", err)
 		}
 		defer func() {
@@ -382,7 +395,7 @@ func runServe() error {
 				fmt.Fprintf(os.Stderr, "bd serve: closing the unit-of-work provider: %v\n", err)
 			}
 		}()
-		provider = p
+		provider = wireExternalDependencyUOWProvider(p)
 	}
 
 	defer startServeEventsJournalMaintenance(info.BeadsDir, provider)()

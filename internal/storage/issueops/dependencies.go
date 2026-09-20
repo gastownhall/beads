@@ -175,6 +175,10 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 }
 
 func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
+		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
+	}
+
 	// Auto-detect source routing if not provided.
 	sourceTable := opts.SourceTable
 	writeTable := opts.WriteTable
@@ -759,6 +763,68 @@ func replaceDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column,
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, table), depid.New(row.issueID, newID), row.issueID, nullStringValue(row.issueTarget), nullStringValue(row.wispTarget), nullStringValue(row.external), row.depType, nullTimeValue(row.createdAt), nullStringValue(row.createdBy), nullStringValue(row.metadata), nullStringValue(row.threadID)); err != nil {
 			return fmt.Errorf("insert replacement dependency target: %w", err)
+		}
+	}
+	return rekeyDependencyTargetInTx(ctx, tx, table, column, newID)
+}
+
+// rekeyDependencyTargetInTx re-derives the surrogate primary key of every row
+// whose typed target column already carries newID but whose id was derived from
+// the pre-rename target.
+//
+// The typed target columns carry ON UPDATE CASCADE foreign keys
+// (fk_dep_issue_target, fk_wisp_dep_issue_target), and updateIssueIDInTx renames
+// the issues row FIRST, so by the time replaceDependencyTargetInTx runs the
+// cascade has already moved depends_on_issue_id from oldID to newID. Its
+// `WHERE <column> = oldID` therefore matches nothing and the row keeps
+// id = depid.New(issue_id, oldID) — a stale primary key that re-forks across
+// clones (#4259) and, once a later rename hands oldID to a different issue,
+// leaves two rows contending for one deterministic id, which is the chain the
+// migration-time re-key then has to untangle (#5268).
+//
+// This is the target-side mirror of rekeyDependencySourceInTx, which already
+// matches both the pre- and post-cascade state on the source column. Only rows
+// whose id is actually stale are touched, so it is a no-op on a converged table
+// and on the rows the loop above just reinserted with the right id.
+func rekeyDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column, newID string) error {
+	//nolint:gosec // table and column are hardcoded by callers.
+	queryRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external
+		FROM %s
+		WHERE %s = ?
+	`, table, column), newID)
+	if err != nil {
+		return fmt.Errorf("query renamed dependency targets in %s: %w", table, err)
+	}
+	type rekey struct{ oldRowID, newRowID string }
+	var rekeys []rekey
+	for queryRows.Next() {
+		var id, issueID string
+		var issueTarget, wispTarget, external sql.NullString
+		if err := queryRows.Scan(&id, &issueID, &issueTarget, &wispTarget, &external); err != nil {
+			_ = queryRows.Close()
+			return fmt.Errorf("scan renamed dependency target: %w", err)
+		}
+		// Resolve rather than assume newID: on a row that somehow holds several
+		// typed targets, the identity the unique keys and depid see is the first
+		// non-null in precedence order, which need not be the renamed column.
+		target, ok := resolveDependencyTarget(issueTarget, wispTarget, external)
+		if !ok {
+			continue // ck_dep_one_target guarantees one target; skip defensively
+		}
+		if want := depid.New(issueID, target); want != id {
+			rekeys = append(rekeys, rekey{oldRowID: id, newRowID: want})
+		}
+	}
+	_ = queryRows.Close()
+	if err := queryRows.Err(); err != nil {
+		return fmt.Errorf("iterate renamed dependency targets: %w", err)
+	}
+	for _, rk := range rekeys {
+		//nolint:gosec // table is hardcoded by callers.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET id = ? WHERE id = ?", table),
+			rk.newRowID, rk.oldRowID); err != nil {
+			return fmt.Errorf("rekey dependency target id %s -> %s in %s: %w", rk.oldRowID, rk.newRowID, table, err)
 		}
 	}
 	return nil

@@ -61,6 +61,18 @@ func testMainInner(m *testing.M) int {
 	// The dolt.New database-name firewall requires this opt-in to allow
 	// doctor_pkg_shared and doctest_*-prefixed databases through.
 	os.Setenv("BEADS_TEST_SERVER", "1")
+
+	// Pin t.TempDir() under a suite-owned root so SweepOrphanedTestServers
+	// can reap AutoStart leftovers whose t.TempDir() cleanup failed because
+	// the live child still holds the tree (gastownhall/beads#5631).
+	root, pinErr := testutil.PinSuiteTempRoot("beads-doctor-tests-*")
+	if pinErr != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: suite temp root: %v\n", pinErr)
+		return 1
+	}
+	suiteTempRoot = root
+	defer os.RemoveAll(root)
+
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
@@ -88,8 +100,8 @@ func testMainInner(m *testing.M) int {
 
 	// Best-effort reap of any dolt sql-server left running under a temp dir
 	// this suite created (e.g. a SIGKILLed run) — see
-	// gastownhall/beads mybd-q6cz.
-	doltserver.SweepOrphanedTestServers(testBDDir)
+	// gastownhall/beads mybd-q6cz / #5631.
+	doltserver.SweepOrphanedTestServers(root, testBDDir)
 
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")

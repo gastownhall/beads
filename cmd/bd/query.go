@@ -290,7 +290,7 @@ func init() {
 	queryCmd.Flags().BoolP("all", "a", false, "Include closed issues (default: exclude closed)")
 	queryCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	queryCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
-	queryCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
+	queryCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
 	queryCmd.Flags().Bool("parse-only", false, "Only parse the query and show the AST (for debugging)")
 
 	rootCmd.AddCommand(queryCmd)

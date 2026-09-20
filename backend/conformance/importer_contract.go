@@ -235,45 +235,63 @@ func RunImporterReportsTheAbsentTargetItDroppedOnce(t *testing.T, ctx context.Co
 	assertImporterSkipped(t, result, []publicops.SkippedDependency{{IssueID: source, DependsOnID: absent}})
 }
 
-// RunImporterReportsTheCrossPlaneEdgeItDropped pins the same obligation for the
-// plane rule. The request is the one RunBatchCreatorRefusesACrossPlaneInBatchEdge
+// RunImporterWiresTheCrossPlaneEdgeBetweenItsRows pins the plane rule's OTHER
+// branch. The request is the one RunBatchCreatorRefusesACrossPlaneInBatchEdge
 // sends and refuses whole — a durable item and an ephemeral item created
-// together with an edge between them — where the import keeps BOTH ROWS and
-// drops only the edge.
+// together with an edge between them. BatchCreator refuses because its
+// unit-of-work body creates item by item and cannot promise the edge; the
+// importer writes every row of BOTH planes in one transaction before it
+// persists any edge, so the edge is writable. Until wy-a648lq the engine's
+// per-batch plane filter dropped it anyway — skip-reported, but a re-import
+// upserts both rows unchanged and never backfills it, so an exported snapshot
+// lost every regular<->wisp edge for good (wy-4276q8). A report justifies a
+// drop only when the drop is forced; this one was not.
 //
-// BOTH ROWS ARE ASSERTED, on their own tables. The dropped edge is the visible
-// part, and an implementation that dropped the ephemeral item along with it
-// would satisfy every statement about the edge: there is no edge because there
-// is no wisp. The audit twin's arm (b) reads both rows back through GetIssue,
-// which resolves across planes and so cannot say WHICH table either landed in.
-//
-// The report is again an exact list. Arm (b) of the audit case asserts no
-// report at all — it passes a nil skip callback — so a silent cross-plane drop
-// is invisible to it, which is precisely the drop BatchCreator calls data
-// loss.
-func RunImporterReportsTheCrossPlaneEdgeItDropped(t *testing.T, ctx context.Context, fixture ImporterFixture) {
+// BOTH DIRECTIONS ARE ASSERTED, because they land in different places: a wisp
+// depending on a durable row writes wisp_dependencies.depends_on_issue_id, a
+// durable row depending on a wisp writes dependencies.depends_on_wisp_id, and
+// an implementation could wire one and drop the other. Every row is asserted
+// on its own table, and the skip report must be EMPTY — an entry naming an
+// edge the batch actually wrote is the report lying in the other direction.
+func RunImporterWiresTheCrossPlaneEdgeBetweenItsRows(t *testing.T, ctx context.Context, fixture ImporterFixture) {
 	t.Helper()
 	durable := fixture.IssuePrefix + "-impplane-durable"
 	wisp := fixture.IssuePrefix + "-impplane-wisp"
+	depender := fixture.IssuePrefix + "-impplane-depender"
 
 	ephemeral := importerIssue(wisp, "the ephemeral end")
 	ephemeral.Ephemeral = true
 	ephemeral.Dependencies = []*types.Dependency{
 		{IssueID: wisp, DependsOnID: durable, Type: types.DepBlocks},
 	}
+	durableDepender := importerIssue(depender, "the durable row blocked by the wisp")
+	durableDepender.Dependencies = []*types.Dependency{
+		{IssueID: depender, DependsOnID: wisp, Type: types.DepBlocks},
+	}
 	result := runImporterBatch(t, ctx, fixture, "cross-plane",
-		importerIssue(durable, "the durable end"), ephemeral)
+		importerIssue(durable, "the durable end"), ephemeral, durableDepender)
 
 	assertImporterRowCount(t, ctx, fixture, "issues", durable, 1)
 	assertImporterRowCount(t, ctx, fixture, "wisps", wisp, 1)
-	if result.Created != 2 {
-		t.Errorf("Created = %d, want 2: dropping an edge costs the batch neither row", result.Created)
+	assertImporterRowCount(t, ctx, fixture, "issues", depender, 1)
+	if result.Created != 3 {
+		t.Errorf("Created = %d, want 3", result.Created)
 	}
-	assertImporterEdgeCount(t, ctx, fixture, wisp, durable, 0)
-	assertImporterSkipped(t, result, []publicops.SkippedDependency{{IssueID: wisp, DependsOnID: durable}})
+	// BOTH BELTS PER DIRECTION: the pinned cell fails a misrouted edge (the
+	// expected cell reads 0), and the summed total fails a DUPLICATE landing in
+	// any of the six table x column cells, which no per-cell count can see. The
+	// two together also make "the other plane holds none" exact: total 1 with
+	// the expected cell at 1 leaves every remaining cell empty.
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", "depends_on_issue_id", wisp, durable, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "dependencies", "depends_on_issue_id", wisp, durable, 0)
+	assertImporterEdgeCount(t, ctx, fixture, wisp, durable, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "dependencies", "depends_on_wisp_id", depender, wisp, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", "depends_on_wisp_id", depender, wisp, 0)
+	assertImporterEdgeCount(t, ctx, fixture, depender, wisp, 1)
+	assertImporterSkipped(t, result, nil)
 }
 
-// RunImporterReportsTheCycleEdgeItDropped pins the last of the three drops: an
+// RunImporterReportsTheCycleEdgeItDropped pins the last of the drops: an
 // in-batch dependency cycle. Both rows land, the graph stays acyclic, and the
 // ONE edge given up to keep it acyclic is named.
 //
@@ -406,7 +424,9 @@ func assertImporterRowCount(t *testing.T, ctx context.Context, fixture ImporterF
 // importerEdgeCount counts the stored edges from source to target across BOTH
 // dependency tables and all three target columns. A dropped edge is dropped on
 // every plane, so the cases that expect zero want zero everywhere, and a
-// per-table count could report one while the row sat in the other.
+// per-table count could report one while the row sat in the other. WHICH of the
+// six cells a row landed in is a placement detail the cases that care about it
+// assert through assertImporterPlaneEdgeCount instead.
 func importerEdgeCount(t *testing.T, ctx context.Context, fixture ImporterFixture, source, target string) int {
 	t.Helper()
 	var got int
@@ -426,6 +446,29 @@ func assertImporterEdgeCount(t *testing.T, ctx context.Context, fixture Importer
 	t.Helper()
 	if got := importerEdgeCount(t, ctx, fixture, source, target); got != want {
 		t.Errorf("edges %s -> %s = %d, want %d", source, target, got, want)
+	}
+}
+
+// assertImporterPlaneEdgeCount pins WHERE an edge landed: one table and one
+// target column, the way RunImporterWiresTheCrossPlaneEdgeBetweenItsRows
+// documents its claim. importerEdgeCount deliberately sums both planes, which
+// is right for "dropped everywhere" and wrong for "wired in the right place":
+// an edge written to the other plane's table, or under the wrong target
+// column, counts as one there too. ONE CALL PINS ONE CELL, so the cross-plane
+// case asserts the expected cell holds exactly one row and the mirror cell of
+// the other plane holds none, and keeps importerEdgeCount's summed total
+// alongside them — a duplicate under one of the four cells neither call names
+// is invisible to this helper and is exactly what the sum still catches.
+func assertImporterPlaneEdgeCount(t *testing.T, ctx context.Context, fixture ImporterFixture, table, column, source, target string, want int) {
+	t.Helper()
+	//nolint:gosec // G201: table and column are hardcoded names from this contract's call sites.
+	query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ? AND " + column + " = ?"
+	var got int
+	if err := fixture.QueryScalar(ctx, query, []any{source, target}, &got); err != nil {
+		t.Fatalf("count %s.%s edges %s -> %s: %v", table, column, source, target, err)
+	}
+	if got != want {
+		t.Errorf("%s.%s rows %s -> %s = %d, want %d", table, column, source, target, got, want)
 	}
 }
 

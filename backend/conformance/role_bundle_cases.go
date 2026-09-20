@@ -94,6 +94,7 @@ var roleContractCases = []roleContract{
 		RunBatchCreatorRecordsOneHistoryEntry,
 		RunBatchCreatorRecordsNoHistoryForAnEphemeralBatch,
 		RunBatchCreatorDoesNotMutateTheCallerRequest,
+		RunBatchCreatorEchoesSubSecondTimestamps,
 	),
 
 	roleCases("BlockingAnnotator", "BlockingAnnotator()", oncePerRole,
@@ -323,7 +324,7 @@ var roleContractCases = []roleContract{
 		func(b RoleContractBundle) func(t *testing.T) *ImporterFixture { return b.Importer },
 		RunImporterRejectsAStaleRowAndNamesIt,
 		RunImporterReportsTheAbsentTargetItDroppedOnce,
-		RunImporterReportsTheCrossPlaneEdgeItDropped,
+		RunImporterWiresTheCrossPlaneEdgeBetweenItsRows,
 		RunImporterReportsTheCycleEdgeItDropped,
 	),
 
@@ -412,6 +413,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleCreateRefusesAForeignIDPrefix,
 		RunLifecycleCreateInheritsParentLabels,
 		RunLifecycleCreateWritesEveryScalarField,
+		RunLifecycleCreateEchoesSubSecondTimestamps,
 	),
 
 	roleCases("LifecycleUpdate", "IssueLifecycle()", oncePerRole,

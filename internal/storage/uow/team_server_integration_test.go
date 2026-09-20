@@ -53,14 +53,18 @@ func newTeamServerHarness(t *testing.T) *teamServerHarness {
 }
 
 func (h *teamServerHarness) openProvider(ctx context.Context, database string, teamServer bool, expectedProjectID string) (UnitOfWorkProvider, error) {
+	return h.openProviderAs(ctx, database, "root", "", teamServer, expectedProjectID)
+}
+
+func (h *teamServerHarness) openProviderAs(ctx context.Context, database, user, password string, teamServer bool, expectedProjectID string) (UnitOfWorkProvider, error) {
 	return NewExternalDoltServerUOWProvider(
 		ctx,
 		h.storeRootDir,
 		database,
 		h.logPath,
 		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: h.port},
-		"root",
-		"",
+		user,
+		password,
 		0,
 		0,
 		teamServer,
@@ -98,11 +102,15 @@ func TestTeamServerMode_Integration(t *testing.T) {
 
 	const database = "beads_ts"
 
-	t.Run("missing database refused with bts init", func(t *testing.T) {
+	// A privileged credential CAN see that the database is absent, so the
+	// refusal says exactly that and asks for provisioning. It must not repeat
+	// the old blanket "not found" for failures it did not classify.
+	t.Run("missing database refused as absent, with provisioning guidance", func(t *testing.T) {
 		p, err := h.openProvider(ctx, "beads_ts_missing", true, "")
 		require.Error(t, err)
 		assert.Nil(t, p)
-		assert.Contains(t, err.Error(), "bts init")
+		assert.Contains(t, err.Error(), `database "beads_ts_missing" does not exist on the server`)
+		assert.Contains(t, err.Error(), "ask the server administrator to create it")
 	})
 
 	t.Run("existing empty database refused with bts init", func(t *testing.T) {
@@ -134,6 +142,51 @@ func TestTeamServerMode_Integration(t *testing.T) {
 
 		assert.Equal(t, before, snapshotMigrations(t, ctx, direct),
 			"team-server open must not modify schema_migrations")
+	})
+
+	// A credential granted only its own database is what a gateway front door
+	// hands out, and the server deliberately answers "access denied" for both
+	// absent and merely ungranted names — so bd cannot tell them apart and must
+	// stop claiming it can.
+	t.Run("scoped credential", func(t *testing.T) {
+		admin := h.directDB(t, "")
+		_, err := admin.ExecContext(ctx, "CREATE USER IF NOT EXISTS 'scoped'@'%' IDENTIFIED BY 'pw'")
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, err := admin.ExecContext(ctx, "DROP USER IF EXISTS 'scoped'@'%'")
+			assert.NoError(t, err)
+		})
+		_, err = admin.ExecContext(ctx, "GRANT ALL ON `"+database+"`.* TO 'scoped'@'%'")
+		require.NoError(t, err)
+
+		t.Run("granted database still opens", func(t *testing.T) {
+			p, err := h.openProviderAs(ctx, database, "scoped", "pw", true, "")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = p.Close(ctx) })
+		})
+
+		// beads_test exists on the server; the scoped credential has no grant
+		// for it. Both this and the absent name below must produce the SAME
+		// honest message, because the server gives bd the same error.
+		for _, tc := range []struct {
+			name     string
+			database string
+		}{
+			{name: "ungranted existing database", database: "beads_test"},
+			{name: "absent database", database: "beads_ts_absent"},
+		} {
+			t.Run(tc.name+" is reported as denied, not as absent", func(t *testing.T) {
+				p, err := h.openProviderAs(ctx, tc.database, "scoped", "pw", true, "")
+				require.Error(t, err)
+				assert.Nil(t, p)
+				assert.Contains(t, err.Error(), "access to database "+strconv.Quote(tc.database)+" was denied")
+				assert.Contains(t, err.Error(), "ask the server administrator to provision the database and grant access")
+				assert.NotContains(t, err.Error(), "does not exist on the server",
+					"a denial hides existence — bd must not claim the database is absent")
+				assert.NotContains(t, err.Error(), "bts init",
+					"the remedy for a denial is a grant, not provisioning by a named product")
+			})
+		}
 	})
 
 	t.Run("project identity is verified on every open, not just at init", func(t *testing.T) {

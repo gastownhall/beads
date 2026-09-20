@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-07-10
+Last reviewed: 2026-08-28
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
 
@@ -82,7 +82,7 @@ These keys must live in `config.yaml`, not the database, because they are read b
 
 The full namespaces routed to YAML are:
 
-`routing.*`, `sync.*`, `git.*`, `directory.*`, `repos.*`, `external_projects.*`, `validation.*`, `lint.*`, `hierarchy.*`, `ai.*`, `backup.*`, `export.*`, `dolt.*`, `federation.*`, `metrics.*`, `list.*`
+`routing.*`, `sync.*`, `git.*`, `directory.*`, `repos.*`, `external_projects.*`, `validation.*`, `lint.*`, `hierarchy.*`, `ai.*`, `backup.*`, `export.*`, `dolt.*`, `federation.*`, `metrics.*`, `list.*`, `audit.*`, `storage-class.*`
 
 `lint.*` holds lint settings: `lint.sections.<type>` is a comma-separated, additive list of sections that `bd lint` additionally requires for issues of that type (built-in required sections still apply; unset means no behavior change).
 
@@ -124,6 +124,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `backup.interval` | — | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-backups |
 | `backup.git-push` | — | — | `false` | Auto-push backup repo |
 | `backup.git-repo` | — | `BD_BACKUP_GIT_REPO` | (none) | Backup git repo URL; when set, backups go to a `backup/` directory inside that repo |
+| `audit.enabled` | — | `BD_AUDIT_ENABLED` | `false` | Enable the optional JSONL interaction sidecar at `.beads/interactions.jsonl`, written by `bd audit record` / `bd audit label`. While disabled, `bd init` does not create the file and `bd audit record` / `bd audit label` refuse to write. Issue history is always recorded in the database either way — see `bd history <id> --events` |
 | `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
 | `export.interval` | — | — | `60s` | Minimum time between auto-exports |
@@ -456,6 +457,7 @@ Selected commonly-used variables:
 | `BD_NO_PAGER`, `BD_PAGER` | Pager behavior |
 | `BD_NON_INTERACTIVE` | Disable prompts |
 | `BD_DEBUG` | Enable debug logging |
+| `BD_MIGRATION_FREEZE_FILE` | Check this exact path for the freeze marker instead of walking ancestor directories; authoritative when set (see [Migration Freeze](#migration-freeze)) |
 | `BEADS_DIR` | Force the active beads workspace directory |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
@@ -466,6 +468,44 @@ Selected commonly-used variables:
 Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.
 
 `bd config show` will display the source of every effective key, making overrides explicit.
+
+## Migration Freeze
+
+Maintenance that runs outside `bd` — moving a database to a new host, rewriting schema by hand — needs a way to stop writes for its duration without uninstalling the tool. Create a file named `MIGRATION-FREEZE` and every write command refuses to run until you delete it.
+
+bd looks for the marker in the workspace directory and in the working directory, plus every ancestor of each, so one file above a tree of repositories freezes all of them at once — and targeting a frozen workspace from elsewhere (`BEADS_DIR=…`, `bd -C …`) is refused the same way.
+
+Markers found in a world-writable sticky directory such as `/tmp` are ignored: anyone on a shared machine could plant one there, and the sticky bit would stop you removing it. Put the marker at the root of the tree you are freezing.
+
+A freeze marker must be a regular file. A directory or a symlink named `MIGRATION-FREEZE` that the ancestor walk finds is ignored — the symlink with a one-line warning on stderr, so a stray link never disarms the gate in silence. To drive the freeze through an indirection on purpose, name that link with `BD_MIGRATION_FREEZE_FILE` (below), which bd follows.
+
+```bash
+touch MIGRATION-FREEZE     # the file's existence is the whole signal
+
+# Optional payload: operator, RFC3339 timestamp, and reason, tab-separated
+# on one line. bd echoes it back in the refusal.
+printf 'alice\t2026-08-16T12:00:00Z\tmoving to the new server\n' > MIGRATION-FREEZE
+
+bd create "new work"
+# ⛔ ERROR: workspace is frozen for migration (by alice).
+#    Reason: moving to the new server
+#    bd create is blocked by the freeze marker at /work/MIGRATION-FREEZE.
+#    To resume writes, remove that file.
+
+rm MIGRATION-FREEZE        # thaw
+```
+
+Blocked commands exit **14** — a stable code scripts branch on to tell "someone is migrating this workspace, come back later" from a generic failure worth an immediate retry. That includes the destructive ones: `bd init --reinit-local` and `bd bootstrap` are refused too.
+
+Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating.
+
+<Warning>
+A `bd serve` process started before the marker appeared keeps accepting HTTP writes: the freeze is a CLI-invocation gate, and a running server never re-reads it. Stop the server before you freeze.
+</Warning>
+
+If bd cannot tell whether a marker is present — a permission error on the marker or on a directory above it — it refuses the write and says so, rather than assuming the workspace is open.
+
+`BD_MIGRATION_FREEZE_FILE` names one explicit path to consult instead of walking ancestors, for markers that live outside the tree. It is authoritative: when it is set, nothing else is checked. Because you name that path deliberately, it may be a symlink — bd follows it and freezes when the link resolves to a regular marker file — so an indirection such as `current -> releases/42/MIGRATION-FREEZE` works as the authoritative signal.
 
 ## Security: Where Secrets Live
 
