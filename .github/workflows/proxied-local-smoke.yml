@@ -20,12 +20,21 @@ on:
     branches: [main]
     paths:
       - 'cmd/bd/proxied_local_*'
+      # The managed-local capability-matrix entry point is a 29-line shim; the
+      # table it delegates to holds every expectation. Without this entry the
+      # lane is deaf to edits to the file it exists to verify.
+      - 'cmd/bd/topology_capability_matrix*'
       - 'cmd/bd/proxied_server*.go'
       - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
+      # Hosts TestManagedLocalProxiedOutageReconnectContract, which the
+      # `-test.run "^TestManagedLocalProxied"` selector below already runs but
+      # which no entry here matched. Same defect as the entry above,
+      # pre-existing rather than introduced by this branch.
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/uow_factory.go'
@@ -39,12 +48,17 @@ on:
   pull_request:
     paths:
       - 'cmd/bd/proxied_local_*'
+      # Same reason as the push block above: the entry point's filename matches
+      # `proxied_local_*`, but the table it delegates to does not.
+      - 'cmd/bd/topology_capability_matrix*'
       - 'cmd/bd/proxied_server*.go'
       - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
+      # Same pre-existing deaf file as the push block above.
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/uow_factory.go'
@@ -110,7 +124,8 @@ jobs:
             TestManagedLocalProxiedDoltStatusReportsLiveTopology \
             TestManagedLocalProxiedDoltStartRefusesOverLiveProxy \
             TestManagedLocalProxiedDoltStartRefusesWithProxyDown \
-            TestManagedLocalProxiedDoltLifecycleLeavesOtherTopologiesAlone
+            TestManagedLocalProxiedDoltLifecycleLeavesOtherTopologiesAlone \
+            TestManagedLocalProxiedCapabilityMatrix
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2

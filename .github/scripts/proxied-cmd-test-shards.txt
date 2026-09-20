@@ -8,6 +8,11 @@
 # splitting, or reweighting TestProxiedServer* functions. Newly-added
 # tests not listed here hash-distribute via proxied-test-shard.sh.
 #
+# WARNING: this file is emitted whole from the generator, which reads only
+# the Go sources -- never this file. Regenerating therefore DISCARDS every
+# hand-written note and hand-pinned shard assignment below. Re-apply them
+# (or teach the generator the weight) after any regeneration.
+#
 # `bd serve`'s two suites are listed at the shard the hash fallback was
 # already giving them, so this records the assignment without reshuffling
 # the other 100. TestProxiedServerServeReadParity is the CLI/HTTP read parity
@@ -20,6 +25,14 @@
 # it seeds 1400 rows and walks the listing three ways — and it is here for the
 # same reason as the parity oracle: it is the measurement behind the claim that
 # `sort=priority` retires the client-side walk, so it has to run on PRs.
+#
+# TestProxiedServerTopologyCapabilityMatrix is hand-pinned rather than left to
+# the hash, which was putting it on shard 11 (one of the heaviest). The
+# generator's cost proxy counts newSharedProxiedProject and scores it 1, but it
+# builds four topologies — embedded, a bd-spawned local dolt sql-server, the
+# shared container, and a TCP-proxied workspace — so its real weight is closer
+# to five inits. Shard 6 is one of the three lightest, and pinning it there
+# records the assignment without reshuffling the other entries.
 
 15 1 TestProxiedServerCount
 15 1 TestProxiedServerDelete
@@ -73,6 +86,7 @@
 15 6 TestProxiedServerReady2
 15 6 TestProxiedServerReadyConcurrent
 15 6 TestProxiedServerState
+15 6 TestProxiedServerTopologyCapabilityMatrix
 
 15 7 TestProxiedServerClose
 15 7 TestProxiedServerCloseConcurrent

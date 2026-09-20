@@ -63,10 +63,18 @@ func buildEmbeddedBD(t *testing.T) string {
 	return embeddedBD
 }
 
+// bdEnv builds a hermetic subprocess environment for the embedded bd binary.
+//
+// BOTH prefixes are stripped, not just BEADS_: an inherited BD_* var (say
+// BD_JSON_ENVELOPE=1, which nests the payload under `data`) reshapes output
+// the tests then assert on, so a developer's shell could turn a green suite
+// red — or, worse, green for the wrong reason. The two BD_ vars this suite
+// actually wants are re-added below with fixed values, and they are also the
+// only two CI sets, so the strip is a no-op there and a leak guard locally.
 func bdEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "BEADS_") {
+		if strings.HasPrefix(e, "BEADS_") || strings.HasPrefix(e, "BD_") {
 			continue
 		}
 		env = append(env, e)

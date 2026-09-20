@@ -34,10 +34,13 @@ func requireProxiedServerEnv(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 }
 
+// bdProxiedEnv is bdEnv's proxied twin and strips both prefixes for the same
+// reason: an inherited BD_* var must not reshape the output these tests assert
+// on. The two BD_ vars the suite wants are re-added below.
 func bdProxiedEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "BEADS_") {
+		if strings.HasPrefix(e, "BEADS_") || strings.HasPrefix(e, "BD_") {
 			continue
 		}
 		env = append(env, e)

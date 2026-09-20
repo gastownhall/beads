@@ -12,6 +12,7 @@ package main
 // two pieces those tests had to get right, and nothing else.
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // directLocalServerEnv builds a subprocess environment for a bd-owned local
@@ -84,14 +87,29 @@ func stopDirectLocalServer(t *testing.T, bd, dir, beadsDir string, env []string)
 		"kill by process name: this host runs unrelated dolt servers.", pid)
 }
 
+// readRecordedServerPID reads the pid bd recorded for this workspace's server.
+//
+// A missing file is a legitimate "nothing to verify" (init failed before the
+// server was recorded). Anything else is not: returning 0 there would silently
+// switch off the survival check above, so those cases are reported. The
+// filename comes from doltserver, the package that writes it — a local literal
+// would degrade this guard to a no-op the day that name moves.
 func readRecordedServerPID(t *testing.T, beadsDir string) int {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.pid"))
+	path := filepath.Join(beadsDir, doltserver.PIDFileName)
+	raw, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cannot read %s (%v), so this test cannot verify its dolt "+
+				"sql-server was reaped; check for a stray process", path, err)
+		}
 		return 0
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil {
+		t.Errorf("malformed pid %q in %s (%v), so this test cannot verify its "+
+			"dolt sql-server was reaped; check for a stray process",
+			strings.TrimSpace(string(raw)), path, err)
 		return 0
 	}
 	return pid

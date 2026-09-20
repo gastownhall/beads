@@ -91,6 +91,19 @@ type expectation struct {
 	// WRONG_ANSWER and DEGRADED; a later slice deletes it when it flips.
 	knownBad string
 	reason   matrixReason
+	// allowTextFallback lets a REFUSED_TYPED row pass on the substring alone
+	// when the refusal arrives as text instead of JSON carrying `code`.
+	//
+	// No row sets it, and that is a measurement, not an oversight: all five
+	// topologies were run and every REFUSED_TYPED cell — including the nested
+	// `bd dolt *` and `bd backup *` doors — emitted JSON with a stable
+	// `proxy.*` code. The field exists so that if a front door ever does
+	// render its refusal as text, the exception is enumerated on that one row
+	// with a note naming it, rather than reinstated as a blanket fallback that
+	// would let a code silently vanish from every other typed row — which is
+	// the regression a JSON consumer cannot classify and this column exists to
+	// catch.
+	allowTextFallback bool
 }
 
 // probe is one command exercised across every topology.
@@ -664,8 +677,17 @@ func runCapabilityMatrix(t *testing.T, topologies []topologySpec) {
 			// silently skipped topology is the main way this matrix could
 			// look green while proving nothing.
 			defer func() {
-				if t.Skipped() && skipped[spec.name] == "" {
+				if skipped[spec.name] != "" {
+					return
+				}
+				switch {
+				case t.Skipped():
 					skipped[spec.name] = "gated off in this environment"
+				case t.Failed() && !exercised[spec.name]:
+					// `make` died on t.Fatalf. Without this the report prints
+					// "[NOT EXERCISED] <name> — " with a blank reason, which
+					// reads like a gating decision rather than a build failure.
+					skipped[spec.name] = "failed to build (see subtest output)"
 				}
 			}()
 
@@ -724,12 +746,110 @@ func partitionProbes(all []probe, topology string, class topologyClass) (refusal
 	return refusals, others
 }
 
+// refusalPayload is the typed refusal envelope a front door emits under --json.
+type refusalPayload struct {
+	Code    string `json:"code"`
+	Error   string `json:"error"`
+	Mutates bool   `json:"mutates"`
+}
+
+// findRefusalJSON looks for a typed refusal payload across the streams in the
+// order given. It returns the first object carrying a non-empty "code", else
+// the first decodable object, plus whether any object was found at all.
+//
+// Both streams are searched because the repo encodes coded errors through two
+// helpers: HandleProxyCapabilityError writes to stdout (errors.go:99-102) while
+// jsonStderrError writes to stderr (errors.go:109-112). A stdout-only scan
+// reports "no typed code" for a door that used the latter -- naming the wrong
+// defect, and inviting an allowTextFallback opt-in that would reinstate the
+// blanket leniency this table deliberately dropped. The REFUSED_UNTYPED arm
+// scans `combined` on the same premise; the two arms must agree on which
+// streams can carry a code.
+//
+// Decoding starts at each '{' instead of unmarshalling the whole buffer so a
+// line printed before or after the payload cannot hide it.
+func findRefusalJSON(streams ...string) (payload refusalPayload, coded bool, found bool) {
+	for _, s := range streams {
+		for i := strings.IndexByte(s, '{'); i >= 0; {
+			var got refusalPayload
+			if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&got); err == nil {
+				if got.Code != "" {
+					return got, true, true
+				}
+				if !found {
+					payload, found = got, true
+				}
+			}
+			next := strings.IndexByte(s[i+1:], '{')
+			if next < 0 {
+				break
+			}
+			i += 1 + next
+		}
+	}
+	return payload, false, found
+}
+
+// TestFindRefusalJSON pins the stream-agnostic search the REFUSED_TYPED arm
+// relies on. The stderr cases are the ones no topology exercises today: every
+// current typed cell encodes to stdout, so without this test the stderr half of
+// the premise would be asserted only by a comment.
+func TestFindRefusalJSON(t *testing.T) {
+	const coded = `{"code":"E_PROXY_UNSUPPORTED","error":"nope","mutates":false}`
+
+	for _, tc := range []struct {
+		name      string
+		stdout    string
+		stderr    string
+		wantCode  string
+		wantCoded bool
+		wantFound bool
+	}{
+		{name: "coded on stdout", stdout: coded, wantCode: "E_PROXY_UNSUPPORTED", wantCoded: true, wantFound: true},
+		{name: "coded on stderr", stderr: coded, wantCode: "E_PROXY_UNSUPPORTED", wantCoded: true, wantFound: true},
+		{
+			name:      "coded on stderr while stdout carries an uncoded object",
+			stdout:    `{"error":"nope"}`,
+			stderr:    coded,
+			wantCode:  "E_PROXY_UNSUPPORTED",
+			wantCoded: true,
+			wantFound: true,
+		},
+		{
+			name:      "framed by plain text",
+			stderr:    "Warning: stale lock\n" + coded + "\ntrailing noise\n",
+			wantCode:  "E_PROXY_UNSUPPORTED",
+			wantCoded: true,
+			wantFound: true,
+		},
+		{name: "JSON but no code", stdout: `{"error":"nope"}`, wantFound: true},
+		{name: "no JSON at all", stderr: "Error: nope\n"},
+		{name: "a brace that is not JSON", stderr: "Error: bad thing {oops}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, gotCoded, gotFound := findRefusalJSON(tc.stdout, tc.stderr)
+			if gotCoded != tc.wantCoded || gotFound != tc.wantFound {
+				t.Fatalf("findRefusalJSON() coded=%v found=%v, want coded=%v found=%v",
+					gotCoded, gotFound, tc.wantCoded, tc.wantFound)
+			}
+			if got.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", got.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
 // assertCell runs one probe and asserts the observed outcome class.
 func assertCell(t *testing.T, w topologyWorkspace, bd string, p probe, want expectation) cellResult {
 	t.Helper()
 
-	// --json before the subcommand, plus BEADS_JSON=1: a few nested front
-	// doors do not inherit persistent flags placed after their args.
+	// --json goes BEFORE the subcommand: a few nested front doors do not
+	// inherit a persistent flag placed after their args. That alone is enough
+	// for every row here — measured across all five topologies — so this
+	// deliberately does NOT also set BEADS_JSON=1 the way the sibling
+	// lifecycle suites do (bdProxiedRunBuffersWithEnv). Reaching the doors
+	// through the flag is what keeps a door that stops honoring it visible as
+	// a red row instead of papered over by the env var.
 	args := append([]string{"--json"}, p.args...)
 	stdout, stderr, code := w.run(t, bd, args...)
 	combined := stdout + stderr
@@ -745,12 +865,9 @@ func assertCell(t *testing.T, w topologyWorkspace, bd string, p probe, want expe
 		if code == 0 {
 			fail("expected a typed refusal, but the command succeeded")
 		}
-		var got struct {
-			Code    string `json:"code"`
-			Error   string `json:"error"`
-			Mutates bool   `json:"mutates"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err == nil && got.Code != "" {
+		got, coded, found := findRefusalJSON(stdout, stderr)
+		switch {
+		case coded:
 			if got.Code != want.code {
 				fail("refusal code = %q, want %q", got.Code, want.code)
 			}
@@ -760,19 +877,31 @@ func assertCell(t *testing.T, w topologyWorkspace, bd string, p probe, want expe
 			if want.substr != "" && !strings.Contains(got.Error, want.substr) {
 				fail("refusal message %q does not contain %q", got.Error, want.substr)
 			}
-		} else {
-			// Documented fallback: nested commands render the typed refusal
-			// through the text path before config-backed JSON is applied.
+		case want.allowTextFallback:
+			// Enumerated exception: this front door renders the typed refusal
+			// through the text path before config-backed JSON is applied. The
+			// row opted in, so the substring is all there is to check.
 			if want.substr != "" && !strings.Contains(combined, want.substr) {
 				fail("no typed refusal JSON and output lacks %q", want.substr)
 			}
+		case found:
+			fail("refusal JSON carried no %q field (want %q); a REFUSED_TYPED row "+
+				"without allowTextFallback must emit a code a consumer can branch on",
+				"code", want.code)
+		default:
+			fail("no refusal JSON on either stream (want code %q); a REFUSED_TYPED row "+
+				"without allowTextFallback must emit JSON a consumer can branch on", want.code)
 		}
 
 	case outcomeRefusedUntyped:
 		if code == 0 {
 			fail("expected an untyped refusal, but the command succeeded")
 		}
-		if strings.Contains(stdout, `"code"`) {
+		// Both streams: the repo's error-JSON contract (docs/JSON_SCHEMA.md,
+		// quoted at doctor.go:452) puts the coded payload on stderr, so a
+		// stdout-only scan would let a row that GAINED a typed code keep
+		// passing as untyped and skip the same-diff flip this file demands.
+		if strings.Contains(combined, `"code"`) {
 			fail("refusal carried a typed code; this row should be REFUSED_TYPED")
 		}
 		if want.substr != "" && !strings.Contains(combined, want.substr) {
