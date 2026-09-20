@@ -261,9 +261,16 @@ func applyFixList(path string, fixes []doctorCheck) {
 
 	fixedCount := 0
 	errorCount := 0
+	// graphMutated: a dependency-graph fix succeeded, so is_blocked may be stale.
+	// blockedStateInList: the scan already queued the full recompute (#6608).
+	graphMutated := false
+	blockedStateInList := false
 
 	for _, check := range fixes {
 		fmt.Printf("\nFixing %s...\n", check.Name)
+		if check.Name == "Blocked State" {
+			blockedStateInList = true
+		}
 
 		var err error
 		switch check.Name {
@@ -421,6 +428,25 @@ func applyFixList(path string, fixes []doctorCheck) {
 			errorCount++
 			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
 			fmt.Printf("  Manual fix: %s\n", check.Fix)
+		} else {
+			fixedCount++
+			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
+			switch check.Name {
+			case "Dependency Keys", "Orphaned Dependencies", "Child-Parent Dependencies", "Cross-Table Duplicates":
+				graphMutated = true
+			}
+		}
+	}
+
+	// #6608: a graph that was consistently deadlocked at scan time passes
+	// CheckBlockedState, so "Blocked State" is never queued. Removing the
+	// offending dependency then leaves is_blocked stale, so recompute once here.
+	if graphMutated && !blockedStateInList {
+		fmt.Printf("\nRecomputing blocked state after dependency fixes...\n")
+		if err := fix.RecomputeBlocked(path); err != nil {
+			errorCount++
+			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
+			fmt.Printf("  Manual fix: bd recompute-blocked\n")
 		} else {
 			fixedCount++
 			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
