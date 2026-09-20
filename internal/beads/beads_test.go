@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -383,6 +384,80 @@ func TestFindBeadsDirSkipsDaemonRegistry(t *testing.T) {
 		if resultResolved == beadsDirResolved {
 			t.Errorf("FindBeadsDir() should skip daemon-only directory, got %q", result)
 		}
+	}
+}
+
+func TestFindBeadsDirFromSkipsOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "private", "tmp")
+	if err := os.MkdirAll(filepath.Join(tempRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempRoot, ".beads", "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(tempRoot, "isolated", "project")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	if got := FindBeadsDirFrom(child); got != "" {
+		t.Fatalf("FindBeadsDirFrom() = %q, want no discovery from OS temp root", got)
+	}
+}
+
+func TestFindBeadsDirFromSkipsAliasedOSTempRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinked temp-root alias is a Unix path regression")
+	}
+
+	sandbox := t.TempDir()
+	realTempRoot := filepath.Join(sandbox, "private", "var", "tmp")
+	aliasParent := filepath.Join(sandbox, "var")
+	if err := os.MkdirAll(realTempRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(sandbox, "private", "var"), aliasParent); err != nil {
+		t.Fatal(err)
+	}
+	aliasTempRoot := filepath.Join(aliasParent, "tmp")
+	if err := os.MkdirAll(filepath.Join(realTempRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realTempRoot, ".beads", "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(realTempRoot, "isolated", "project")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", aliasTempRoot)
+
+	if got := FindBeadsDirFrom(child); got != "" {
+		t.Fatalf("FindBeadsDirFrom() = %q, want aliased OS temp root ignored", got)
+	}
+}
+
+func TestFindBeadsDirFromPreservesNestedProjectUnderOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	project := filepath.Join(tempRoot, "project")
+	want := filepath.Join(project, ".beads")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(want, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(project, "nested", "directory")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	if got := FindBeadsDirFrom(child); !utils.PathsEqual(got, want) {
+		t.Fatalf("FindBeadsDirFrom() = %q, want nested project %q", got, want)
 	}
 }
 

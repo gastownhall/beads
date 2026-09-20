@@ -631,6 +631,12 @@ func FindBeadsDirFrom(startDir string) string {
 	}
 
 	for dir := startDir; dir != "/" && dir != "."; {
+		// The OS temp directory is a shared staging area, not a project
+		// boundary. A stale .beads there must never capture unrelated projects
+		// created beneath it (notably mktemp workspaces and test sandboxes).
+		if isOSTempRoot(dir) {
+			break
+		}
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
@@ -707,6 +713,14 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	}
 
 	return false
+}
+
+// isOSTempRoot reports whether dir is the operating system's temp root.
+// Canonicalization is required on macOS, where TMPDIR may use /var while
+// Getwd and symlink resolution produce the equivalent /private/var path.
+func isOSTempRoot(dir string) bool {
+	tempRoot := utils.CanonicalizePath(os.TempDir())
+	return tempRoot != "" && utils.PathsEqual(dir, tempRoot)
 }
 
 // hasBeadsDatabase is the strict counterpart to hasBeadsProjectFiles: it
@@ -825,6 +839,9 @@ func FindBeadsDir() string {
 		// For non-worktrees: stops before git root (which is checked below in the
 		// post-worktree walk, step 4).
 		if walkBoundaryCanonical != "" && dir == walkBoundaryCanonical {
+			break
+		}
+		if isOSTempRoot(dir) {
 			break
 		}
 
@@ -969,6 +986,9 @@ func FindBeadsDir() string {
 		}
 
 		for dir := walkBoundaryCanonical; dir != "/" && dir != "."; {
+			if isOSTempRoot(dir) {
+				break
+			}
 			beadsDir := filepath.Join(dir, ".beads")
 			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 				beadsDir = FollowRedirect(beadsDir)

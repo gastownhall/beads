@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/utils"
 	"golang.org/x/term"
 )
 
@@ -1308,10 +1309,17 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
-	start := filepath.Dir(filepath.Dir(beadsDir))
+	start := utils.CanonicalizePath(filepath.Dir(filepath.Dir(beadsDir)))
 	homeDir, _ := os.UserHomeDir()
+	tempRoot := utils.CanonicalizePath(os.TempDir())
 
 	for dir := start; dir != "/" && dir != "."; {
+		// A temp-root .beads is shared ambient state, not a parent workspace.
+		// Stop before inspecting it, while retaining discovery for real nested
+		// projects beneath the temp root.
+		if tempRoot != "" && utils.PathsEqual(dir, tempRoot) {
+			break
+		}
 		candidate := filepath.Join(dir, ".beads")
 		cfg, err := configfile.LoadForDiscovery(candidate)
 		if err != nil {

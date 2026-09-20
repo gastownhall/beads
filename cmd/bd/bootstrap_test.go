@@ -1044,6 +1044,28 @@ func TestFindParentConfigDoesNotSkipCorruptNearestAncestor(t *testing.T) {
 	}
 }
 
+func TestFindParentConfigDoesNotAdoptOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(rootBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte(`{"dolt_database":"temp_root"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	requested := filepath.Join(tempRoot, "isolated", "project", ".beads")
+	cfg, err := findParentConfig(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg != nil {
+		t.Fatalf("findParentConfig() adopted OS temp-root database %q", cfg.GetDoltDatabase())
+	}
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.
