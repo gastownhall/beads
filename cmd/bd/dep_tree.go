@@ -80,6 +80,11 @@ func proxiedTreeTarget(ctx context.Context, arg string) (treeTarget, error) {
 	return treeTarget{rootID: rootID, walker: walker, cleanup: func() {}}, nil
 }
 
+// isMermaidTreeFormat reports whether --format selects the mermaid renderer.
+func isMermaidTreeFormat(formatStr string) bool {
+	return strings.EqualFold(formatStr, "mermaid")
+}
+
 // runDepTree is the whole of `bd dep tree` on both routes.
 func runDepTree(cmd *cobra.Command, ctx context.Context, args []string) error {
 	maxDepth, _ := cmd.Flags().GetInt("max-depth")
@@ -145,7 +150,7 @@ func runDepTree(cmd *cobra.Command, ctx context.Context, args []string) error {
 	tree := result.Nodes
 
 	// Handle format presets (json handled earlier, near the flag read).
-	if formatStr == "mermaid" {
+	if isMermaidTreeFormat(formatStr) {
 		// The raw argument, not the resolved id: this is only read when the tree
 		// is empty.
 		outputMermaidTree(tree, args[0])
