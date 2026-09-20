@@ -247,3 +247,21 @@ func TestDoltLocksAndDoltStatusShareOneFilter(t *testing.T) {
 		}
 	}
 }
+
+func TestIssuesProbeQuery(t *testing.T) {
+	tests := []struct {
+		name   string
+		dbName string
+		want   string
+	}{
+		{"plain", "beads_x", "SELECT COUNT(*) FROM `beads_x`.issues LIMIT 1"},
+		{"backtick", "evil`; DROP TABLE x", "SELECT COUNT(*) FROM `evil``; DROP TABLE x`.issues LIMIT 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := issuesProbeQuery(tt.dbName); got != tt.want {
+				t.Errorf("issuesProbeQuery(%q) = %q, want %q", tt.dbName, got, tt.want)
+			}
+		})
+	}
+}

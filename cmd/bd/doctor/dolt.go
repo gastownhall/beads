@@ -674,9 +674,7 @@ func probeForCorrectDatabase(conn *doltConn) string {
 	for _, dbName := range candidates {
 		var count int
 		// USE + query to check if the database has the issues table
-		//nolint:gosec // G201: dbName is from SHOW DATABASES, not user input
-		err := conn.db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", dbName)).Scan(&count)
+		err := conn.db.QueryRowContext(ctx, issuesProbeQuery(dbName)).Scan(&count)
 		if err == nil {
 			return dbName
 		}
@@ -788,4 +786,13 @@ func CheckCorruptManifest(path string) DoctorCheck {
 		Fix:      "Run 'bd doctor --fix' to back up the corrupt database(s) and reinitialize",
 		Category: CategoryRuntime,
 	}
+}
+
+// issuesProbeQuery builds the issues-table probe for a database name taken from
+// SHOW DATABASES. The name is identifier-escaped (backticks doubled) because it reflects
+// whatever created the database, not a bd-controlled value.
+func issuesProbeQuery(dbName string) string {
+	safeName := strings.ReplaceAll(dbName, "`", "``")
+	//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
+	return fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", safeName)
 }
