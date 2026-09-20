@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -34,8 +33,10 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	assignee, _ := cmd.Flags().GetString("assignee")
 	issueType, _ := cmd.Flags().GetString("type")
 	limit, _ := cmd.Flags().GetInt("limit")
-	labels, _ := cmd.Flags().GetStringSlice("label")
-	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	labels, labelsAny, err := parseSearchLabelFilter(cmd)
+	if err != nil {
+		return err
+	}
 	longFormat, _ := cmd.Flags().GetBool("long")
 	sortBy, _ := cmd.Flags().GetString("sort")
 	reverse, _ := cmd.Flags().GetBool("reverse")
@@ -57,9 +58,6 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	emptyDesc, _ := cmd.Flags().GetBool("empty-description")
 	noAssignee, _ := cmd.Flags().GetBool("no-assignee")
 	noLabels, _ := cmd.Flags().GetBool("no-labels")
-
-	labels = utils.NormalizeLabels(labels)
-	labelsAny = utils.NormalizeLabels(labelsAny)
 
 	filter := types.IssueFilter{
 		Limit: limit,
