@@ -14,8 +14,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count the same metadata-scoped set `bd list` returns without fetching every
   row.
 
+### Fixed
+
+- **`bd mol ready --gated` no longer refuses under `--proxied-server` when
+  `BEADS_MAX_ROWS` is set**
+  ([#6293](https://github.com/gastownhall/beads/pull/6293)). The proxied
+  capability front door keyed its rules on cobra's leaf name, and `bd ready`
+  and `bd mol ready --gated` share the leaf "ready", so the row cap refusal
+  written for the former also refused the latter — a proxy-supported command
+  with no `--max-rows` flag to refuse. Rules are keyed on the full command
+  path now.
+
 ### Changed
 
+- **Proxied `--repo` and row-cap refusals are typed again**
+  ([#6293](https://github.com/gastownhall/beads/pull/6293)). `bd list --repo`
+  under `--proxied-server` answers `--json` with the stable
+  `{"code": "proxy.repo.unsupported", …, "mutates": false}` on stdout rather
+  than prose on stderr, and `bd ready --claim --max-rows N` refuses with the
+  same `proxy.max_rows.unsupported` shape as `bd ready --max-rows N`: `--claim`
+  does not exempt a row cap the proxied route cannot enforce either way.
+- **The proxied `bd admin compact` refusal names the command it means**
+  ([#6293](https://github.com/gastownhall/beads/pull/6293)). The message is now
+  "only 'bd admin compact --dolt' is supported in proxied-server mode"; it read
+  "only 'compact --dolt'", which names the root `bd compact` — a different
+  command, with no `--dolt` flag and its own proxied route. Scripts matching
+  the old text need updating.
+- **`bd preflight` honors the `json` config default**
+  ([#6293](https://github.com/gastownhall/beads/pull/6293)). Its `--json` flag
+  is bound to the same global every sibling command binds, so `json: true` in
+  the config file now selects JSON output for `bd preflight` as it already did
+  elsewhere. Previously only the explicit flag was honored — and, because an
+  unbound flag reports as unset, `bd preflight --json` did not reach every
+  JSON-aware renderer.
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and
@@ -316,13 +347,6 @@ which dumps the entire release history.)
     (`{"code": …, "error": …, "mutates": false}`) rather than prose on stderr,
     so a wrapper parsing stdout gets a machine-readable answer and
     `"mutates": false` states that the refusal touched nothing.
-
-- **`bd gate check` resolves bead gates whose target lives in a prefix-routed
-  rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
-  miss, the evaluator follows the target bead ID through `routes.jsonl` and
-  reads the owning store without writing to it. This covers explicit gate
-  checks in embedded, server, and proxied-server command paths; the legacy
-  `<rig>:<bead-id>` await value remains accepted for compatibility.
 
 - The smart migration gate's "auto-migrate as safe first-mover" and
   auto-fast-forward arms are now embedded-only. On a shared server the gate

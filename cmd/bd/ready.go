@@ -61,7 +61,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if usesProxiedServer() {
 			// The proxied ready role cannot enforce a row cap, including on
 			// --claim. Refuse any positive cap rather than silently dropping
-			// this safety limit; malformed values remain usage errors.
+			// this safety limit; malformed values remain usage errors. The
+			// pre-provider front door refuses the same cap first, so this is
+			// its backstop — both raise proxy.max_rows.unsupported.
 			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
 				return err
 			}

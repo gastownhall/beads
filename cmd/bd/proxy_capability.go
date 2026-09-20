@@ -111,8 +111,11 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"vc":               refused("proxy.vc.unsupported", "vc is not supported in proxied-server mode"),
 	"federation":       refused("proxy.federation.unsupported", "federation is not supported in proxied-server mode"),
 	"repo":             refused("proxy.repo.unsupported", "repo is not supported in proxied-server mode"),
-	// Wording matches the long-standing compact.go refusal this pre-provider
-	// gate now short-circuits, so the user-facing message does not change.
+	// The wording deliberately names the real command path. The long-standing
+	// compact.go refusal this gate short-circuits said "compact --dolt", which
+	// reads as the root `bd compact` — a different command with no --dolt flag
+	// and its own proxied route. compact.go carries the corrected string too,
+	// so the gate and its fallback cannot drift apart again.
 	"admin compact":          refused("proxy.compact.unsupported", "only 'bd admin compact --dolt' is supported in proxied-server mode"),
 	"backup init":            refused("proxy.backup.unsupported", "backup init is not supported in proxied-server mode"),
 	"backup sync":            refused("proxy.backup.unsupported", "backup sync is not supported in proxied-server mode"),
@@ -235,10 +238,12 @@ var proxyCapabilityMatrix = map[ProxyMode]map[ProxyCapability]proxyCapabilityRul
 
 // proxyCommandCapabilities overrides the mode-wide default for one command.
 // Keys are command paths (proxyCommandPath), so a row lands on the command it
-// was written for and on nothing else. `bd mol ready --gated` is here to say
-// so explicitly: it shares the leaf name "ready" with `bd ready` but accepts
-// no --max-rows flag and is fully proxy-supported, so it must not inherit the
-// refusal `bd ready` carries.
+// was written for and on nothing else. The "mol ready" row is a documentation
+// pin rather than the guard: path keying is what stops `bd mol ready --gated`
+// from inheriting the refusal `bd ready` carries on their shared leaf name
+// "ready", and the row records that the command has no --max-rows flag to
+// refuse. TestProxyCapabilityPolicyKeysResolveInRealCommandTree keeps the pin
+// honest by failing if the path it names stops existing.
 var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]proxyCapabilityRule{
 	"show":            {ProxyModeProxied: {ProxyCapWatch: refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode")}},
 	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: refused("proxy.repo.unsupported", "--repo is not supported with --proxied-server")}},
@@ -371,16 +376,16 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 		}
 	}
 	if path == "ready" {
+		// --claim is NOT exempt. The proxied ready role cannot enforce a row
+		// cap on either arm, and ready.go refuses a positive cap on both (see
+		// its comment above rejectMaxRowsUnderProxiedServer) — so exempting
+		// the claim here would not have let it through, only downgraded the
+		// same refusal to an untyped one raised after the provider opened.
+		// A malformed or negative value is still rejected here, before any
+		// provider work, which is what the claim path gained.
 		maxRows, err := resolveMaxRowsQuiet(cmd)
 		if err != nil {
 			return err
-		}
-		claim, _ := cmd.Flags().GetBool("claim")
-		if claim {
-			// A claim always consumes one row. The proxied claim route has
-			// its own single-row transaction and intentionally ignores the
-			// bulk BEADS_MAX_ROWS cap after validating its value.
-			return nil
 		}
 		if maxRows > 0 {
 			return HandleProxyCapabilityError(AssertProxyCommandCapability(path, ProxyModeProxied, ProxyCapMaxRows))
