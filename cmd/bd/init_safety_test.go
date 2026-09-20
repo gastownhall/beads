@@ -279,6 +279,48 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			RemoteSafetyInput{RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true},
 			ActionProceedWithDivergence, 0,
 		},
+
+		// INTERACTIVE with a supplied-but-WRONG token (#6480): the token must
+		// still be validated. The caller's typed-confirmation prompt only
+		// fires when NO token was supplied, so skipping validation here would
+		// discard the remote with no confirmation of any kind.
+		{
+			"remote/discard-remote/interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		// INTERACTIVE with a token but no expected token to compare against:
+		// nothing can validate it, so refuse rather than fall to the prompt.
+		{
+			"remote/discard-remote/interactive/token-without-expected",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		// INTERACTIVE with a MATCHING token: the token is the authorization.
+		{
+			"remote/discard-remote/interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		// INTERACTIVE with NO token supplied (expected token known): unchanged
+		// — the decision defers to the TTY typed-confirmation prompt.
+		{
+			"remote/discard-remote/interactive/no-token-with-expected",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
 	}
 
 	for _, tc := range cases {

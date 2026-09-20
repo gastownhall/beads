@@ -156,9 +156,12 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 		}
 	}
 
-	// User authorized. Interactive callers prompt; non-interactive must
-	// supply a matching destroy-token.
-	if !in.IsInteractive {
+	// User authorized. Non-interactive callers must supply a matching
+	// destroy-token. Interactive callers that supplied no token defer to the
+	// typed-confirmation prompt, but a token that WAS supplied is always
+	// validated: the caller's prompt only fires when no token was given, so
+	// an unvalidated wrong token would skip every confirmation (#6480).
+	if !in.IsInteractive || in.DestroyToken != "" {
 		if in.ExpectedToken == "" || in.DestroyToken != in.ExpectedToken {
 			return RemoteSafetyDecision{
 				Action:      ActionRequireDestroyToken,
