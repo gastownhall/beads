@@ -53,6 +53,11 @@ out.append('# estimated cost (bd-init count; per-init migration chains dominate)
 out.append('# Regenerate with scripts/ci/gen_proxied_shard_manifest.py after adding,')
 out.append('# splitting, or reweighting TestProxiedServer* functions. Newly-added')
 out.append('# tests not listed here hash-distribute via proxied-test-shard.sh.')
+out.append('#')
+out.append('# WARNING: this file is emitted whole from the generator, which reads only')
+out.append('# the Go sources -- never this file. Regenerating therefore DISCARDS every')
+out.append('# hand-written note and hand-pinned shard assignment below. Re-apply them')
+out.append('# (or teach the generator the weight) after any regeneration.')
 out.append('')
 for i in range(TOTAL):
     for name in sorted(shards[i]):
