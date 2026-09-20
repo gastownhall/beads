@@ -1071,6 +1071,17 @@ func (s *EmbeddedDoltStore) History(ctx context.Context, issueID string) ([]*sto
 	return result, err
 }
 
+// ListVersions implements storage.VersionLister over issue_versions.
+func (s *EmbeddedDoltStore) ListVersions(ctx context.Context, issueID string) ([]storage.IssueVersion, error) {
+	var result []storage.IssueVersion
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ListVersionsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
 	var result *types.Issue
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

@@ -29,7 +29,18 @@ var versionCmd = &cobra.Command{
 	Short:         "Print version information",
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	// Accept args only so the "did you mean bd versions" guard below can see
+	// them. `bd version` names bd's own build; `bd versions <id>` lists a
+	// bead's recorded versions. One character apart, unrelated meanings --
+	// without this a mistyped `bd version be-x5jqd` silently prints the build
+	// and looks like the bead simply has no versions.
+	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return HandleErrorRespectJSON(
+				"bd version prints bd's own version information and takes no arguments.\n"+
+					"Did you mean:  bd versions %s", args[0])
+		}
 		evt := metrics.NewCommandEvent("version")
 		defer func() {
 			if c := metrics.Global(); c != nil {
