@@ -581,8 +581,10 @@ func checkPhantomDatabases(conn *doltConn) DoctorCheck {
 	defer rows.Close()
 
 	configuredDB := configfile.DefaultDoltDatabase
+	globalDB := ""
 	if conn.cfg != nil {
 		configuredDB = conn.cfg.GetDoltDatabase()
+		globalDB = conn.cfg.GetGlobalDoltDatabase()
 	}
 
 	var phantoms []string
@@ -591,8 +593,10 @@ func checkPhantomDatabases(conn *doltConn) DoctorCheck {
 		if err := rows.Scan(&dbName); err != nil {
 			continue
 		}
-		// Skip system databases and the configured database
-		if dbName == "information_schema" || dbName == "mysql" || dbName == configuredDB {
+		// Skip system databases, the configured database, and the shared-server
+		// global routing database (e.g. beads_global), which is created on purpose.
+		if dbName == "information_schema" || dbName == "mysql" || dbName == configuredDB ||
+			(globalDB != "" && dbName == globalDB) {
 			continue
 		}
 		// Flag entries matching beads naming convention patterns

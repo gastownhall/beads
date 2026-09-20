@@ -208,3 +208,26 @@ func TestCheckPhantomDatabases_NilConfig(t *testing.T) {
 		t.Errorf("expected check name 'Phantom Databases', got %q", check.Name)
 	}
 }
+
+func TestCheckPhantomDatabases_GlobalDBNotPhantom(t *testing.T) {
+	db := openSharedDoltForPhantom(t)
+
+	// Shared-server mode creates a global routing database (beads_global) that
+	// matches the beads_ prefix but is intentional, not a phantom.
+	//nolint:gosec // G202: test-only database name, not user input
+	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_global")
+	if err != nil {
+		t.Fatalf("failed to create test database: %v", err)
+	}
+	cleanupPhantomDB(t, db, "beads_global")
+
+	conn := &doltConn{
+		db:  db,
+		cfg: &configfile.Config{GlobalDoltDatabase: "beads_global"},
+	}
+	check := checkPhantomDatabases(conn)
+
+	if check.Status != StatusOK {
+		t.Errorf("expected StatusOK (global DB should not be flagged), got %s: %s", check.Status, check.Message)
+	}
+}
