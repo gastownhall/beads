@@ -517,7 +517,10 @@ func UnsetUserYamlConfig(key string) error {
 		return fmt.Errorf("failed to read user config.yaml: %w", err)
 	}
 
-	newContent := commentOutYamlKey(string(content), key)
+	newContent, err := commentOutYamlKey(string(content), key)
+	if err != nil {
+		return err
+	}
 
 	// Preserve the owner-private 0600 posture every other user-global writer
 	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
@@ -593,7 +596,10 @@ func UnsetYamlConfig(key string) error {
 		return fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
-	newContent := commentOutYamlKey(string(content), key)
+	newContent, err := commentOutYamlKey(string(content), key)
+	if err != nil {
+		return err
+	}
 
 	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
 		return fmt.Errorf("failed to write config.yaml: %w", err)
@@ -765,12 +771,25 @@ func updateNestedYamlKey(content, key, value string) (string, bool, error) {
 	// Preserve the spelling already chosen by the file's writer. config.yaml is
 	// shared with integrations that intentionally use literal dotted top-level
 	// keys, so migrating that node would make it invisible to those readers.
+	//
+	// Rewrite the one line the key is on rather than marshaling the document
+	// back: this branch exists to leave a file other writers share alone, and a
+	// whole-document marshal reformats every unrelated section of it — dropping
+	// blank separators, re-indenting nested blocks from two spaces to four,
+	// collapsing comment alignment. config.yaml is git-tracked, so a one-key set
+	// would show up as a whole-file diff nobody asked for.
 	if idx := findMappingChild(mapping, key); idx != -1 {
-		flat := mapping.Content[idx+1]
-		flat.Kind = yaml.ScalarNode
-		flat.Tag = ""
-		flat.Style = scalarStyleFor(value)
-		flat.Value = value
+		keyNode, valueNode := mapping.Content[idx], mapping.Content[idx+1]
+		if updated, ok := replaceFlatKeyLine(content, keyNode, valueNode, value); ok {
+			return updated, true, nil
+		}
+		// The entry does not fit on its own line, so there is no single line to
+		// swap. Marshal it back, reformatting and all: a correct value in a
+		// reformatted file beats a value written somewhere no reader looks.
+		valueNode.Kind = yaml.ScalarNode
+		valueNode.Tag = ""
+		valueNode.Style = scalarStyleFor(value)
+		valueNode.Value = value
 		out, err := yaml.Marshal(&root)
 		if err != nil {
 			return "", false, err
@@ -793,6 +812,70 @@ func updateNestedYamlKey(content, key, value string) (string, bool, error) {
 		return "", false, err
 	}
 	return string(out), true, nil
+}
+
+// replaceFlatKeyLine swaps the value on the single line a top-level key and its
+// scalar value share, keeping the key exactly as the file spells it — quoting,
+// indentation and all — and leaving every other line byte for byte alone. The
+// rewritten line keeps its own trailing comment too, so the only thing that
+// changes anywhere in the file is the value that was asked for.
+//
+// Reports false when the entry is not that shape. The line is only safe to
+// replace when it is the whole entry: a value that continues onto later lines (a
+// block scalar, a nested mapping, a quoted string wrapped across lines) would
+// have its body left behind. Parsing the one line on its own settles that, since
+// a top-level entry that ends on its line is a complete document.
+func replaceFlatKeyLine(content string, keyNode, valueNode *yaml.Node, value string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	i := keyNode.Line - 1
+	if i < 0 || i >= len(lines) {
+		return "", false
+	}
+
+	var probe map[string]string
+	if err := yaml.Unmarshal([]byte(lines[i]), &probe); err != nil {
+		return "", false
+	}
+	if len(probe) != 1 || probe[keyNode.Value] != valueNode.Value {
+		return "", false
+	}
+	head, _, found := strings.Cut(lines[i], ":")
+	if !found || strings.Trim(strings.TrimSpace(head), `"'`) != keyNode.Value {
+		return "", false
+	}
+
+	tail := trailingCommentOn(lines[i], keyNode, valueNode)
+	lines[i] = head + ": " + formatYamlValue(value) + tail
+	return strings.Join(lines, "\n"), true
+}
+
+// trailingCommentOn returns the entry's end-of-line comment together with the
+// whitespace separating it from the value, exactly as line spells both, or ""
+// when the line carries no comment.
+//
+// The line is rebuilt from the key and the new value, so an operator's note on
+// the one line this branch rewrites would otherwise be the single thing a
+// "rewrite only this line" edit silently dropped. Matching yaml.v3's already
+// parsed comment text back from the right is what keeps a "#" inside a quoted
+// value (`host: 'a # b'  # note`) from being mistaken for the comment. yaml.v3
+// hangs the comment on the value node, except when the value is empty and there
+// is no value node line to hang it on, so both are consulted.
+func trailingCommentOn(line string, keyNode, valueNode *yaml.Node) string {
+	comment := valueNode.LineComment
+	if comment == "" {
+		comment = keyNode.LineComment
+	}
+	if comment == "" {
+		return ""
+	}
+	start := strings.LastIndex(line, comment)
+	if start < 0 {
+		return " " + comment
+	}
+	for start > 0 && (line[start-1] == ' ' || line[start-1] == '\t') {
+		start--
+	}
+	return line[start:]
 }
 
 func findOrCreateNestedScalar(mapping *yaml.Node, parts []string) (*yaml.Node, error) {
@@ -896,7 +979,11 @@ func scalarStyleFor(value string) yaml.Style {
 	return 0
 }
 
-func commentOutYamlKey(content, key string) string {
+func commentOutYamlKey(content, key string) (string, error) {
+	if err := unsupportedUnsetShape(content, key); err != nil {
+		return "", err
+	}
+
 	// The flat spelling first — a key literally named "sync.remote", which
 	// older files carry and which this function has always handled.
 	flatPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
@@ -905,15 +992,9 @@ func commentOutYamlKey(content, key string) string {
 	// value stayed live, so bd kept a setting the operator had asked it to
 	// forget. Unset is the other direction of the same round-trip property as
 	// set and get, and all three have to agree on the shape.
-	segments := strings.Split(key, ".")
+	walk := newNestedKeyWalk(key)
 
 	var result []string
-	// depth tracks how many segments of the key have been matched so far, and
-	// indents holds the indentation each was found at, so a key is only
-	// commented out when it is nested under its OWN parents rather than under
-	// some other section that happens to share a leaf name.
-	depth := 0
-	var indents []int
 	// blockIndent is the indentation of the key that opened a literal or folded
 	// block scalar, or -1 outside one. Everything indented past that key is the
 	// value the user typed, not structure: `notes: |` with an indented
@@ -938,29 +1019,155 @@ func commentOutYamlKey(content, key string) string {
 			continue
 		}
 
-		if len(segments) > 1 {
-			if name, indent, ok := yamlKeyOnLine(line); ok {
-				// Leaving a block: drop every segment matched at an indent at
-				// or deeper than this line's.
-				for depth > 0 && indent <= indents[depth-1] {
-					depth--
-					indents = indents[:depth]
-				}
-				if depth < len(segments) && name == segments[depth] {
-					if depth == len(segments)-1 {
-						result = append(result, strings.Repeat(" ", indent)+"# "+strings.TrimLeft(line, " \t"))
-						depth, indents = 0, nil
-						continue
-					}
-					indents = append(indents, indent)
-					depth++
-				}
-			}
+		if name, indent, ok := yamlKeyOnLine(line); ok && walk.step(name, indent) {
+			result = append(result, strings.Repeat(" ", indent)+"# "+strings.TrimLeft(line, " \t"))
+			continue
 		}
 		result = append(result, line)
 	}
 
-	return strings.Join(result, "\n")
+	return strings.Join(result, "\n"), nil
+}
+
+// nestedKeyWalk tracks how much of a dotted key a line-by-line scan has matched
+// so far, so a leaf is commented out only when it is nested under its OWN
+// parents rather than under some other section that happens to repeat a name.
+type nestedKeyWalk struct {
+	segments []string
+	// depth is how many segments have been matched, and indents holds the
+	// indentation each was matched at.
+	depth   int
+	indents []int
+	// opaque is the indentation of the last key line that could not continue
+	// the match, or -1. Everything nested under such a key belongs to some
+	// other path, so the walk steps over that whole subtree instead of
+	// descending into it and matching a leaf name that repeats there.
+	opaque int
+}
+
+func newNestedKeyWalk(key string) *nestedKeyWalk {
+	return &nestedKeyWalk{segments: strings.Split(key, "."), opaque: -1}
+}
+
+// step advances the walk by one mapping line and reports whether that line is
+// the key being looked for.
+func (w *nestedKeyWalk) step(name string, indent int) bool {
+	if len(w.segments) < 2 {
+		// A single-segment key has no nesting to walk; the flat pattern owns it.
+		return false
+	}
+	if w.opaque >= 0 && indent > w.opaque {
+		return false
+	}
+	w.opaque = -1
+	// Leaving a block: drop every segment matched at an indent at or deeper
+	// than this line's.
+	for w.depth > 0 && indent <= w.indents[w.depth-1] {
+		w.depth--
+		w.indents = w.indents[:w.depth]
+	}
+	// Both halves of the anchor matter, and missing either one made an unset
+	// edit keys it does not own. Segment 0 is only itself at the TOP level:
+	// without that, a `sync:` section nested under an unrelated key seeded the
+	// walk, so unsetting `dolt.host` commented out `other.dolt.host` too. And
+	// every later segment has to be a DIRECT child of the one before it:
+	// without that, an interposed section was stepped over rather than ending
+	// the match, so unsetting `sync.remote` on
+	//
+	//	sync:
+	//	    sub:
+	//	        remote: keep
+	//	    remote: target
+	//
+	// commented out `sync.sub.remote` and left the real `sync.remote` live,
+	// reporting success — the silent divergence this whole fix exists to end.
+	if w.depth < len(w.segments) && name == w.segments[w.depth] && (w.depth > 0 || indent == 0) {
+		if w.depth == len(w.segments)-1 {
+			w.depth, w.indents = 0, nil
+			return true
+		}
+		w.indents = append(w.indents, indent)
+		w.depth++
+		return false
+	}
+	w.opaque = indent
+	return false
+}
+
+// unsupportedUnsetShape reports the two shapes named in the changelog — a key
+// under a flow-style mapping, and a key whose value is a block scalar — in
+// whichever spelling the file uses. Both used to be silent: the flow-style one
+// reported success while the value stayed live, and the block scalar had its key
+// line commented out while the body stayed behind as a value of its own. The set
+// direction already refuses what it cannot write correctly, so unset says so too.
+//
+// This is a list of known shapes, not a decision procedure for the whole class:
+// a mapping-valued key and a value that spans lines in flow or quoted style land
+// their bodies in the same place and are still silent.
+//
+// Only a key that is actually present can be refused: unsetting a key that was
+// never there has always been a successful no-op, and staying silent about a
+// shape nobody asked to touch is the point.
+func unsupportedUnsetShape(content, key string) error {
+	segments := strings.Split(key, ".")
+	if len(segments) < 2 {
+		return nil
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &root); err != nil || len(root.Content) == 0 {
+		// Nothing to walk. A file yaml.v3 cannot parse is not this function's
+		// to diagnose, and the line matcher has always been best-effort on it.
+		return nil
+	}
+
+	// The flat spelling first, and by the same order the line matcher uses: it
+	// comments a literal `sync.remote:` line out without ever walking the nested
+	// path, so the body left behind orphans at the TOP level, where it stops the
+	// whole document from parsing rather than just its own section.
+	if top := root.Content[0]; top.Kind == yaml.MappingNode {
+		if idx := findMappingChild(top, key); idx != -1 {
+			if err := blockScalarUnsetRefusal(top.Content[idx+1], key); err != nil {
+				return err
+			}
+		}
+	}
+
+	node := root.Content[0]
+	parents := make([]*yaml.Node, 0, len(segments))
+	for _, segment := range segments {
+		if node.Kind != yaml.MappingNode {
+			return nil
+		}
+		idx := findMappingChild(node, segment)
+		if idx == -1 {
+			return nil
+		}
+		parents = append(parents, node)
+		node = node.Content[idx+1]
+	}
+
+	for i, parent := range parents {
+		if parent.Style&yaml.FlowStyle == 0 {
+			continue
+		}
+		where := "the top level of this config file"
+		if i > 0 {
+			where = fmt.Sprintf("%q", strings.Join(segments[:i], "."))
+		}
+		return fmt.Errorf("cannot unset %q: %s is written in flow style ({...}), which bd cannot edit; remove the key by hand", key, where)
+	}
+	return blockScalarUnsetRefusal(node, key)
+}
+
+// blockScalarUnsetRefusal refuses a key whose value is written as a block
+// scalar, in whichever spelling the caller resolved it: commenting the key line
+// out leaves the indented body behind, to be re-read as a value of whatever
+// encloses it.
+func blockScalarUnsetRefusal(valueNode *yaml.Node, key string) error {
+	if valueNode.Style&(yaml.LiteralStyle|yaml.FoldedStyle) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cannot unset %q: its value is a block scalar (| or >), and commenting the key out would leave the body behind as a value of its own; remove the key by hand", key)
 }
 
 // blockScalarIndent reports the indentation of a key whose value is a literal

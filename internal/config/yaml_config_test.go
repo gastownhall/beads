@@ -1035,7 +1035,10 @@ func TestCommentOutYamlKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := commentOutYamlKey(tt.content, tt.key)
+			got, err := commentOutYamlKey(tt.content, tt.key)
+			if err != nil {
+				t.Fatalf("commentOutYamlKey() error = %v", err)
+			}
 			if got != tt.expected {
 				t.Errorf("commentOutYamlKey() =\n%q\nwant:\n%q", got, tt.expected)
 			}

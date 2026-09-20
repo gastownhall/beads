@@ -176,6 +176,153 @@ func TestDottedWritePreservesExistingFlatSpelling(t *testing.T) {
 	}
 }
 
+// Updating an existing flat key must change that key's line and nothing else.
+// The branch exists to leave a file other writers share alone, so rewriting the
+// rest of it to bd's taste defeats the point: config.yaml is git-tracked, and a
+// one-key set that re-indents unrelated sections and drops blank separators is a
+// whole-file diff nobody asked for (bd-zj95 review, Finding 2).
+//
+// The key under test carries the trailing note, not just a bystander: an
+// assertion that only watches other lines cannot see the rewritten line lose its
+// own annotation, which is the one way "rewrite only this line" still destroys
+// content (bd-zj95 review iteration 2, Finding 3).
+func TestDottedSetOnAnExistingFlatKeyRewritesOnlyThatLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	seed := "# top comment\n\nnode_id: mini   # trailing note\n\n# section\ndolt.host: 10.0.0.1  # staging box, do not change\n\nsync:\n  branch: main\n  extras:\n    - a\n    - b\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := SetYamlConfigInDir(dir, "dolt.host", "127.0.0.1"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := strings.Replace(seed, "dolt.host: 10.0.0.1", "dolt.host: 127.0.0.1", 1)
+	if string(body) != want {
+		t.Errorf("a one-key set rewrote more than the key's line:\ngot:\n%s\nwant:\n%s", body, want)
+	}
+	if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+		t.Errorf("dolt.host reads back as %q\n%s", got, body)
+	}
+}
+
+// The comment the line rewrite has to carry over is found by matching yaml.v3's
+// parsed comment text back from the right, so a "#" the value itself contains is
+// never read as the start of one. An empty value is the shape where yaml.v3 has
+// no value node line to hang the comment on and puts it on the key instead.
+func TestDottedSetKeepsTheTrailingCommentOnTheKeyItRewrites(t *testing.T) {
+	cases := []struct {
+		name string
+		seed string
+		want string
+	}{
+		{
+			name: "note after a plain value",
+			seed: "dolt.host: 10.0.0.1  # staging box\nnode_id: mini\n",
+			want: "dolt.host: 127.0.0.1  # staging box\nnode_id: mini\n",
+		},
+		{
+			name: "note after a value containing a hash",
+			seed: "dolt.host: 'a # b'  # the real note\nnode_id: mini\n",
+			want: "dolt.host: 127.0.0.1  # the real note\nnode_id: mini\n",
+		},
+		{
+			name: "note on a key with no value",
+			seed: "dolt.host:\t# not set yet\nnode_id: mini\n",
+			want: "dolt.host: 127.0.0.1\t# not set yet\nnode_id: mini\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.seed), 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			if err := SetYamlConfigInDir(dir, "dolt.host", "127.0.0.1"); err != nil {
+				t.Fatalf("set: %v", err)
+			}
+
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if string(body) != tc.want {
+				t.Errorf("the rewritten line did not keep its trailing comment:\ngot:\n%s\nwant:\n%s", body, tc.want)
+			}
+			if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+				t.Errorf("dolt.host reads back as %q\n%s", got, body)
+			}
+			if got := GetStringFromDir(dir, "node_id"); got != "mini" {
+				t.Errorf("node_id reads back as %q\n%s", got, body)
+			}
+		})
+	}
+}
+
+// Rewriting the key's line means rewriting the line the key is ACTUALLY on,
+// whatever it looks like. A quoted flat key is still that key — bd never writes
+// one, but a shared config.yaml can arrive with one, and a writer that matches
+// the unquoted spelling by text finds nothing and appends a second flat key
+// beside the first, leaving the value it just "set" unreadable.
+func TestDottedSetFindsAQuotedFlatKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	seed := "\"dolt.host\": 10.0.0.1\nnode_id: mini\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := SetYamlConfigInDir(dir, "dolt.host", "127.0.0.1"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+		t.Errorf("dolt.host reads back as %q\n%s", got, body)
+	}
+	if want := strings.Replace(seed, "10.0.0.1", "127.0.0.1", 1); string(body) != want {
+		t.Errorf("the write did not update the quoted key in place:\ngot:\n%s\nwant:\n%s", body, want)
+	}
+}
+
+// A flat key whose value does not fit on the key's own line has no single line
+// to swap. Correctness wins over formatting there: the value must still read
+// back, even though the document gets marshaled and reformatted to do it.
+func TestDottedSetOnAMultiLineFlatKeyStillWrites(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	seed := "dolt.host: |\n  10.0.0.1\nnode_id: mini\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := SetYamlConfigInDir(dir, "dolt.host", "127.0.0.1"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+		t.Errorf("dolt.host reads back as %q\n%s", got, body)
+	}
+	if got := GetStringFromDir(dir, "node_id"); got != "mini" {
+		t.Errorf("node_id reads back as %q\n%s", got, body)
+	}
+}
+
 // A single-segment key has no nesting to do and must keep working exactly as it
 // did: this is the shape most of bd's config keys have.
 func TestUndottedKeysAreUnaffected(t *testing.T) {
@@ -198,15 +345,136 @@ func TestUndottedKeysAreUnaffected(t *testing.T) {
 // `sync.remote:` line. Once the writer nests, an unset silently does nothing
 // and the value stays live — which for sync.remote means bd keeps a remote the
 // operator asked it to forget.
+// The over-match cases matter as much as the removal cases, and the first
+// version of this table could not express them: every case put the leaf exactly
+// one level under a top-level parent, so it was blind to a walk that matched a
+// leaf name at the wrong depth or under the wrong parent. Each survivor below is
+// a key the unset was never asked about, and each one was destroyed — or left
+// live while a bystander died — by the descent this test now pins (bd-zj95
+// review, Finding 1).
 func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 	cases := []struct {
 		name string
 		seed string
+		key  string
+		// survivors are keys the unset must not touch, and the values they must
+		// still read back afterwards.
+		survivors map[string]string
 	}{
-		{name: "nested", seed: "sync:\n    remote: \"file:///origin.git\"\n"},
-		{name: "nested among siblings", seed: "sync:\n    branch: beads-sync\n    remote: \"file:///origin.git\"\n"},
-		{name: "legacy flat", seed: "sync.remote: \"file:///origin.git\"\n"},
-		{name: "nested with other sections", seed: "dolt:\n    port: 3307\nsync:\n    remote: \"file:///origin.git\"\n"},
+		{name: "nested", seed: "sync:\n    remote: \"file:///origin.git\"\n", key: "sync.remote"},
+		{
+			name:      "nested among siblings",
+			seed:      "sync:\n    branch: beads-sync\n    remote: \"file:///origin.git\"\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"sync.branch": "beads-sync"},
+		},
+		{name: "legacy flat", seed: "sync.remote: \"file:///origin.git\"\n", key: "sync.remote"},
+		{
+			name:      "nested with other sections",
+			seed:      "dolt:\n    port: 3307\nsync:\n    remote: \"file:///origin.git\"\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"dolt.port": "3307"},
+		},
+		{
+			// The target is present AND a deeper key repeats its name. The walk
+			// used to take the deeper one and report success, so the operator
+			// lost sync.sub.remote and kept the sync.remote they asked to forget.
+			name:      "deeper key repeats the leaf name",
+			seed:      "sync:\n    sub:\n        remote: keep\n    remote: target\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"sync.sub.remote": "keep"},
+		},
+		{
+			// Same shape, two spaces of indent and a scalar sibling after the
+			// interposed section: the target does not exist at all here, so the
+			// only correct outcome is to change nothing.
+			name:      "leaf repeats under a section the key does not own",
+			seed:      "sync:\n  nested:\n    remote: should-survive\n  other: x\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"sync.nested.remote": "should-survive", "sync.other": "x"},
+		},
+		{
+			// The key's own section name repeated under a foreign top-level key.
+			// Segment 0 used to match at any indent, so this was read as the
+			// sync section and a key at a completely different path was cut.
+			name:      "section name repeats under a foreign parent",
+			seed:      "other:\n    sync:\n        remote: keep\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"other.sync.remote": "keep"},
+		},
+		{
+			// Both spellings present: the real dolt.host at top level and a
+			// namesake under `other`. The unset used to comment out both.
+			name:      "target and namesake in the same file",
+			seed:      "other:\n  dolt:\n    host: should-survive\ndolt:\n  host: kill-me\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"other.dolt.host": "should-survive"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.seed), 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			// Whether the key was set to begin with decides what "commented out
+			// as documentation" can mean below: an unset of a key that was never
+			// there is a no-op, not a removal.
+			wasSet := GetStringFromDir(dir, tc.key) != ""
+
+			t.Setenv("BEADS_DIR", dir)
+			if err := UnsetYamlConfig(tc.key); err != nil {
+				t.Fatalf("UnsetYamlConfig: %v", err)
+			}
+
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if got := GetStringFromDir(dir, tc.key); got != "" {
+				t.Errorf("%s still reads back as %q after unset:\n%s", tc.key, got, body)
+			}
+			leaf := tc.key[strings.LastIndex(tc.key, ".")+1:]
+			// The key is preserved as documentation, which is this function's
+			// stated contract, so it must still be visible — commented.
+			if wasSet && !strings.Contains(string(body), leaf+":") {
+				t.Errorf("unset removed the key instead of commenting it out:\n%s", body)
+			}
+			// Anything the unset was not asked about is none of its business.
+			for key, want := range tc.survivors {
+				if got := GetStringFromDir(dir, key); got != want {
+					t.Errorf("unset touched a key it was not asked about: %s = %q, want %q\n%s",
+						key, got, want, body)
+				}
+			}
+		})
+	}
+}
+
+// bd cannot comment out a key it cannot find by line, and it used to pretend
+// otherwise in both directions: a flow-style mapping came back unchanged with a
+// success exit, leaving live the value the operator asked bd to forget — the
+// PR's own headline symptom — and a block scalar had its key line commented
+// while the body stayed behind, re-parsing as a plain multi-line value of the
+// PARENT. Say so instead, and leave the file alone (bd-zj95 review, Finding 3).
+func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
+	cases := []struct {
+		name string
+		seed string
+		key  string
+		// want is a substring the error must carry beyond the key name.
+		want string
+	}{
+		{name: "flow style section", seed: "sync: {remote: \"file:///origin.git\"}\n", key: "sync.remote", want: "flow style"},
+		{name: "flow style nested deeper", seed: "dolt:\n    limits: {host: mini}\n", key: "dolt.limits.host", want: "flow style"},
+		{name: "literal block scalar", seed: "sync:\n    remote: |\n        line1\n        line2\n", key: "sync.remote", want: "block scalar"},
+		{name: "folded block scalar", seed: "sync:\n    remote: >\n        line1\n", key: "sync.remote", want: "block scalar"},
+		// The flat spelling reaches the same body-left-behind outcome by the
+		// other half of the line matcher, and the orphan lands at the top level,
+		// so the whole file stops parsing rather than one section.
+		{name: "block scalar under the flat spelling", seed: "dolt.host: |\n    10.0.0.1\nnode_id: mini\n", key: "dolt.host", want: "block scalar"},
+		{name: "folded block scalar under the flat spelling", seed: "dolt.host: >\n    10.0.0.1\nnode_id: mini\n", key: "dolt.host", want: "block scalar"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,34 +485,47 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			}
 
 			t.Setenv("BEADS_DIR", dir)
-			if err := UnsetYamlConfig("sync.remote"); err != nil {
-				t.Fatalf("UnsetYamlConfig: %v", err)
+			err := UnsetYamlConfig(tc.key)
+			if err == nil {
+				body, _ := os.ReadFile(path) //nolint:errcheck // diagnostic
+				t.Fatalf("unsetting %s in a %s reported success\n%s", tc.key, tc.name, body)
+			}
+			if !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the error names neither the key nor the shape: %v", err)
 			}
 
 			body, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("read: %v", err)
 			}
-			if got := GetStringFromDir(dir, "sync.remote"); got != "" {
-				t.Errorf("sync.remote still reads back as %q after unset:\n%s", got, body)
-			}
-			// The key is preserved as documentation, which is this function's
-			// stated contract, so it must still be visible — commented.
-			if !strings.Contains(string(body), "remote:") {
-				t.Errorf("unset removed the key instead of commenting it out:\n%s", body)
-			}
-			// A sibling under the same section is none of the unset's business.
-			if tc.name == "nested among siblings" {
-				if got := GetStringFromDir(dir, "sync.branch"); got != "beads-sync" {
-					t.Errorf("unset took a sibling with it: sync.branch = %q\n%s", got, body)
-				}
-			}
-			if tc.name == "nested with other sections" {
-				if got := GetStringFromDir(dir, "dolt.port"); got != "3307" {
-					t.Errorf("unset touched an unrelated section: dolt.port = %q\n%s", got, body)
-				}
+			if string(body) != tc.seed {
+				t.Errorf("a refused unset still changed the file:\n%s", body)
 			}
 		})
+	}
+}
+
+// A shape bd cannot edit is only worth refusing when the key is actually there.
+// Unsetting a key that was never set has always been a successful no-op, and a
+// flow-style mapping elsewhere in the file is not the operator's problem.
+func TestUnsetOfAnAbsentKeyStillSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	seed := "sync: {branch: beads-sync}\ndolt:\n    port: 3307\n"
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	t.Setenv("BEADS_DIR", dir)
+	if err := UnsetYamlConfig("sync.remote"); err != nil {
+		t.Fatalf("UnsetYamlConfig on an unset key: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got := GetStringFromDir(dir, "sync.branch"); got != "beads-sync" {
+		t.Errorf("the no-op unset changed sync.branch to %q:\n%s", got, body)
 	}
 }
 
