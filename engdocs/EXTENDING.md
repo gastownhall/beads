@@ -4,6 +4,15 @@ This file documents contracts that callers of the storage API must honor.
 It is not user-facing; it is for code that embeds bd or talks to the
 storage layer directly.
 
+An embedder running against a **proxied-server** workspace also ends up
+reading surfaces that are not contracts at all — the proxy's PID file, its
+child argv, `bd dolt status --json`, optional interfaces reached by type
+assertion. Those are written down, as observed behaviour with the commit
+they were read at, in
+[EMBEDDING_OVER_PROXIED_SERVER.md](EMBEDDING_OVER_PROXIED_SERVER.md).
+Nothing in that document is a compatibility promise; read it alongside the
+contracts here, not as one of them.
+
 ## Lite SELECT shape — `IssueFilter.Lite`
 
 `store.SearchIssues(ctx, query, filter)` accepts an `IssueFilter` value.
