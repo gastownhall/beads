@@ -324,6 +324,30 @@ func isWorkingSetReconcileCommand(cmd *cobra.Command) bool {
 	return parent.Name() == "dolt" || parent.Name() == "vc"
 }
 
+// isRemoteSyncCommand reports whether cmd is `bd dolt pull`: the one command
+// the #6575 data-behind migrate-gate refusal tells the operator to run.
+//
+// It is the same deadlock isWorkingSetReconcileCommand breaks for #4566, one
+// refusal over. The gate stops a data-behind clone from migrating and names
+// `bd dolt pull` as the remedy — but the pull opens the store too, so it hit
+// that refusal before it could clear its cause. On an embedded clone there is
+// no external `dolt` binary to fall back to, which left the refused clone with
+// exactly one exit: BD_ALLOW_REMOTE_MIGRATE=1, i.e. performing the migration
+// the refusal exists to prevent. Opening via embeddeddolt.OpenForRemoteSync /
+// dolt.Config.RemoteSyncOpen tolerates that ONE gate reason and nothing else.
+//
+// Deliberately just the pull, not `bd sync`: sync also pushes and can write
+// issue rows, and a write against a stale schema is the hazard the gate is
+// about. The pull only moves the commit graph, which is precisely the
+// precondition the refusal is waiting on.
+func isRemoteSyncCommand(cmd *cobra.Command) bool {
+	if cmd.Name() != "pull" {
+		return false
+	}
+	parent := cmd.Parent()
+	return parent != nil && parent.Name() == "dolt"
+}
+
 // isForcedMigrate reports whether cmd is `bd migrate` or `bd migrate schema`
 // invoked with --force: the operator confirming they are the single designated
 // migrator, so the remote-migrate gate (#4259) must not block this run's store
@@ -1622,6 +1646,7 @@ var rootCmd = &cobra.Command{
 			DisableAutoStart: policy.disableAutoStart,
 			BeadsDir:         beadsDir,
 			LenientOpen:      isWorkingSetReconcileCommand(cmd),
+			RemoteSyncOpen:   isRemoteSyncCommand(cmd),
 			// Bulk loads outlive the pool's 10s fast-fail on every server
 			// pause (wy-sbgucn); explicit env/config settings still win.
 			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),

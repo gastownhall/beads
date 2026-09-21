@@ -109,6 +109,16 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage,
 		// branch is the embedded half of one policy, not the whole of it.
 		return embeddeddolt.OpenForWorkingSetReconcile(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
+	if cfg.RemoteSyncOpen {
+		// `bd dolt pull` must not be bricked by the #6575 data-behind gate
+		// refusal, because that refusal's entire remedy IS this pull: the gate
+		// stops a clone that is behind the remote from migrating and tells the
+		// operator to pull first, and an embedded clone has no external dolt
+		// binary to do it with. Same deadlock as #4566, and this open tolerates
+		// only that one gate reason (see openRemoteSync). The server arm above
+		// honors the same cfg.RemoteSyncOpen inside dolt.New.
+		return embeddeddolt.OpenForRemoteSync(ctx, cfg.BeadsDir, cfg.Database, "main")
+	}
 	return embeddeddolt.Open(ctx, cfg.BeadsDir, cfg.Database, "main")
 }
 

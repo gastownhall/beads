@@ -23,9 +23,9 @@ import (
 // #6368 events pull refusal.
 //
 // The fixture builds a genuinely data-behind clone against a real Dolt server
-// — the behind-ness is MEASURED here (LocalIsStrictAncestorOf against the
-// clone's own cached ref), never stubbed, because a test that fakes the fact
-// the bug is about proves nothing:
+// — the behind-ness is MEASURED here (the same ahead/behind primitive the gate
+// consults), never stubbed, because a test that fakes the fact the bug is about
+// proves nothing:
 //
 //   - "source" regresses its schema cursor one migration below latest (commit
 //     C0) and publishes C0 to a file:// origin.
@@ -40,11 +40,41 @@ import (
 // data commit behind it. The gate must refuse with the pull-first fallback
 // reason rather than auto-migrate.
 //
-// The second half then proves the remedy loop self-heals and that the fix does
-// not over-refuse: once the clone fast-forwards (what `bd dolt pull` does), it
-// is no longer a strict ancestor, and the very same gate call auto-migrates it
-// as a true first-mover.
+// BOTH shapes of that state are covered, because the review of the first fix
+// measured that the narrower one was the rarer one (F2). The subtests differ
+// only in whether the clone also makes a local commit of its own before the
+// gate runs:
+//
+//   - ahead=0, behind=1 — a strict ancestor; `bd dolt pull` fast-forwards.
+//   - ahead=1, behind=1 — diverged; `bd dolt pull` merges. Since bd
+//     auto-commits every write, this is the ordinary multi-machine state, and
+//     it reaches the identical wedge. At the first fix's head this shape
+//     printed "safe first-mover" and migrated.
+//
+// The second half of each subtest then proves the remedy loop self-heals and
+// that the fix does not over-refuse: once the clone has nothing left to pull,
+// the very same gate call auto-migrates it as a true first-mover.
 func TestDoltNew_SmartRemoteMigrateGate_DataBehindBlocks_RealDolt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// localCommits is how many commits of its own the lagging clone makes
+		// after fetching: 0 is the strict-ancestor shape, 1 the diverged one.
+		localCommits int
+		wantDiverged bool
+		// wantRemedy is the substring the guidance must carry for this shape,
+		// so a clone is never told its pull will fast-forward when it merges.
+		wantRemedy string
+	}{
+		{name: "strict ancestor", localCommits: 0, wantRemedy: "pure fast-forward"},
+		{name: "diverged", localCommits: 1, wantDiverged: true, wantRemedy: "MERGES"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runDataBehindGateCase(t, tc.localCommits, tc.wantDiverged, tc.wantRemedy)
+		})
+	}
+}
+
+func runDataBehindGateCase(t *testing.T, localCommits int, wantDiverged bool, wantRemedy string) {
 	skipIfNoDolt(t)
 	t.Setenv(schema.SmartGateEnv, "1")
 	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
@@ -126,6 +156,15 @@ func TestDoltNew_SmartRemoteMigrateGate_DataBehindBlocks_RealDolt(t *testing.T) 
 	// its own branch HEAD stays at C0. ---
 	mustExec("fetch (no merge)", laggingConn, "CALL DOLT_FETCH('origin')")
 
+	// --- and, for the diverged shape, commits of its own on top of C0. bd
+	// auto-commits every write, so this is what an ordinary local `bd create`
+	// leaves behind. ---
+	for i := 0; i < localCommits; i++ {
+		mustExec("clone data edit", laggingConn,
+			"REPLACE INTO config (`key`, value) VALUES ('local-marker', ?)", fmt.Sprintf("L%d", i))
+		mustExec("clone local commit", laggingConn, "CALL DOLT_COMMIT('-Am', 'test: local-only data commit')")
+	}
+
 	// Fixture sanity: the clone's schema cursor equals the remote's (the
 	// first-mover precondition), not below it.
 	var laggingCurrent int
@@ -145,14 +184,26 @@ func TestDoltNew_SmartRemoteMigrateGate_DataBehindBlocks_RealDolt(t *testing.T) 
 		t.Fatalf("cached remote version = %d, want %d (equal-version first-mover path)", remoteCurrent, laggingCurrent)
 	}
 
-	// The load-bearing measurement: the clone IS data-behind its own cached
-	// remote ref, read through the same primitive the gate consults.
-	behind, err := versioncontrolops.LocalIsStrictAncestorOf(ctx, laggingConn, "remotes/origin/main")
+	// The load-bearing measurement: the clone IS behind its own cached remote
+	// ref, in exactly the shape this subtest claims, read through the same
+	// primitive the gate consults.
+	ahead, behind, err := versioncontrolops.LocalAheadBehind(ctx, laggingConn, "remotes/origin/main")
+	if err != nil {
+		t.Fatalf("LocalAheadBehind: %v", err)
+	}
+	if behind < 1 || ahead != localCommits {
+		t.Fatalf("fixture position = ahead %d, behind %d; want ahead %d, behind >= 1", ahead, behind, localCommits)
+	}
+	// The strict-ancestor relation is the NARROWER fact the first fix used, and
+	// the diverged shape is precisely where it reads false while the clone is
+	// still behind — pin that, so this subtest cannot silently stop covering
+	// the widening it exists for.
+	strictAncestor, err := versioncontrolops.LocalIsStrictAncestorOf(ctx, laggingConn, "remotes/origin/main")
 	if err != nil {
 		t.Fatalf("LocalIsStrictAncestorOf: %v", err)
 	}
-	if !behind {
-		t.Fatalf("fixture did not produce a data-behind clone: LocalIsStrictAncestorOf = false")
+	if want := localCommits == 0; strictAncestor != want {
+		t.Fatalf("LocalIsStrictAncestorOf = %v, want %v for ahead=%d", strictAncestor, want, ahead)
 	}
 	// And it is behind for data reasons only — the working set is clean, so the
 	// refusal below cannot be attributed to local dirt.
@@ -169,48 +220,58 @@ func TestDoltNew_SmartRemoteMigrateGate_DataBehindBlocks_RealDolt(t *testing.T) 
 		ctx, laggingConn, "origin", nil, realFastForwardAdopter())
 	var gateErr *schema.RemoteMigrateGateError
 	if !errors.As(err, &gateErr) {
-		t.Fatalf("data-behind clone: expected the gate to refuse, got %v (#6575: schema parity is not proof of first-mover status)", err)
+		t.Fatalf("data-behind clone (ahead=%d): expected the gate to refuse, got %v (#6575: schema parity is not proof of first-mover status)", ahead, err)
 	}
 	if gateErr.Decision != "" {
 		t.Errorf("Decision = %q, want \"\" (the blunt #4515 stop)", gateErr.Decision)
 	}
-	if got, want := gateErr.FallbackReason, "data-behind"; got != want {
-		t.Errorf("FallbackReason = %q, want %q", got, want)
+	if !gateErr.IsDataBehind() {
+		t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, "data-behind")
 	}
-	if msg := gateErr.UserMessage(); !strings.Contains(msg, "Run `bd dolt pull` first") {
-		t.Errorf("UserMessage does not carry the smart gate's pull-first note:\n%s", msg)
+	if gateErr.DataDiverged != wantDiverged {
+		t.Errorf("DataDiverged = %v, want %v", gateErr.DataDiverged, wantDiverged)
+	}
+	msg := gateErr.UserMessage()
+	// The remedy has to be there, and has to be the one measured to work from
+	// this state: the refusal's own open classification lets `bd dolt pull`
+	// through (see embeddeddolt's TestEmbeddedOpenForRemoteSync_DataBehind).
+	if !strings.Contains(msg, schema.DataBehindRemedyCommand) {
+		t.Errorf("UserMessage does not carry the pull-first remedy:\n%s", msg)
+	}
+	if !strings.Contains(msg, wantRemedy) {
+		t.Errorf("UserMessage does not describe this shape's pull (%q):\n%s", wantRemedy, msg)
 	}
 
 	// No data motion: the refusal must not have moved the clone's HEAD.
-	var aheadAfter, behindAfter int
-	if err := laggingConn.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM dolt_log WHERE commit_hash NOT IN
-				(SELECT commit_hash FROM dolt_log AS OF 'remotes/origin/main')) AS ahead,
-			(SELECT COUNT(*) FROM dolt_log AS OF 'remotes/origin/main' WHERE commit_hash NOT IN
-				(SELECT commit_hash FROM dolt_log)) AS behind
-	`).Scan(&aheadAfter, &behindAfter); err != nil {
+	aheadAfter, behindAfter, err := versioncontrolops.LocalAheadBehind(ctx, laggingConn, "remotes/origin/main")
+	if err != nil {
 		t.Fatalf("compare laggingClone HEAD to origin/main after refusal: %v", err)
 	}
-	if aheadAfter != 0 || behindAfter == 0 {
-		t.Errorf("after refusal: ahead=%d behind=%d, want ahead=0 behind>=1 (no data motion)", aheadAfter, behindAfter)
+	if aheadAfter != ahead || behindAfter != behind {
+		t.Errorf("after refusal: ahead=%d behind=%d, want ahead=%d behind=%d (no data motion)",
+			aheadAfter, behindAfter, ahead, behind)
 	}
 
-	// --- remedy loop: `bd dolt pull` (a pure fast-forward here) makes the
-	// clone level with the remote, and the SAME gate call then auto-migrates it
-	// as a true first-mover. This is what keeps the fix from over-refusing. ---
-	mustExec("pull (fast-forward)", laggingConn, "CALL DOLT_MERGE('--ff-only', 'remotes/origin/main')")
+	// --- remedy loop: `bd dolt pull` (a fast-forward for the strict-ancestor
+	// shape, a merge for the diverged one) leaves the clone with nothing left to
+	// pull, and the SAME gate call then auto-migrates it as a true first-mover.
+	// This is what keeps the fix from over-refusing. ---
+	if localCommits == 0 {
+		mustExec("pull (fast-forward)", laggingConn, "CALL DOLT_MERGE('--ff-only', 'remotes/origin/main')")
+	} else {
+		mustExec("pull (merge)", laggingConn, "CALL DOLT_MERGE('remotes/origin/main')")
+	}
 
-	stillBehind, err := versioncontrolops.LocalIsStrictAncestorOf(ctx, laggingConn, "remotes/origin/main")
+	_, behindAfterPull, err := versioncontrolops.LocalAheadBehind(ctx, laggingConn, "remotes/origin/main")
 	if err != nil {
-		t.Fatalf("LocalIsStrictAncestorOf after pull: %v", err)
+		t.Fatalf("LocalAheadBehind after pull: %v", err)
 	}
-	if stillBehind {
-		t.Fatalf("clone is still a strict ancestor after the fast-forward; fixture broken")
+	if behindAfterPull != 0 {
+		t.Fatalf("clone is still behind by %d after the pull; fixture broken", behindAfterPull)
 	}
 
 	if err := schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
 		ctx, laggingConn, "origin", nil, realFastForwardAdopter()); err != nil {
-		t.Fatalf("level clone: the first-mover auto-migrate must still be allowed after pulling, got %v", err)
+		t.Fatalf("the first-mover auto-migrate must be allowed once there is nothing left to pull, got %v", err)
 	}
 }

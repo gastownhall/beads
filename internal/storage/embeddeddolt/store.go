@@ -66,9 +66,11 @@ type EmbeddedDoltStore struct {
 }
 
 // openIntent classifies why a store is being opened. openStrict fails the
-// open on any pending-migration refusal; the other two intents relax both
-// the #4259 remote-migrate gate refusal and the #4566 dirty-table refusal,
-// each with its own warning text (see initSchema).
+// open on any pending-migration refusal; openReadOnlyCommand and
+// openWorkingSetReconcile relax both the #4259 remote-migrate gate refusal and
+// the #4566 dirty-table refusal, each with its own warning text (see
+// initSchema); openRemoteSync relaxes exactly one gate refusal and nothing
+// else.
 type openIntent int
 
 const (
@@ -86,7 +88,51 @@ const (
 	// touch, so failing the open here would deadlock the documented recovery
 	// (#4566). Used by OpenForWorkingSetReconcile.
 	openWorkingSetReconcile
+	// openRemoteSync is the same shape of deadlock break as
+	// openWorkingSetReconcile, for the #6575 data-behind gate refusal: that
+	// refusal's entire remedy is `bd dolt pull`, which itself opens the store
+	// and so hit the refusal that prescribed it — a fence with no gate. Unlike
+	// the two intents above it relaxes exactly ONE refusal and nothing else:
+	// only a gate error whose reason is data-behind
+	// (RemoteMigrateGateError.IsDataBehind). Every other gate refusal, the
+	// #4566 dirty-table guard, and the #5268 dependency re-key still fail this
+	// open exactly as they do a strict one — the pull is being let through its
+	// own precondition, not granted a general exemption. Used by
+	// OpenForRemoteSync.
+	openRemoteSync
 )
+
+// toleratesGateRefusal reports whether this open's intent may warn and
+// continue past a remote-migrate gate refusal (#4259/#5920/#6575) instead of
+// failing the open.
+//
+// openRemoteSync is deliberately conditional on the REASON rather than being
+// another blanket exemption: it exists only so `bd dolt pull` can execute the
+// #6575 data-behind refusal's own remedy, and widening it to every gate
+// refusal would quietly let a pull through a fork-skew or shared-store stop
+// that the pull cannot help with.
+func (s *EmbeddedDoltStore) toleratesGateRefusal(gateErr *schema.RemoteMigrateGateError) bool {
+	switch s.intent {
+	case openReadOnlyCommand, openWorkingSetReconcile:
+		return true
+	case openRemoteSync:
+		return gateErr.IsDataBehind()
+	default: // openStrict
+		return false
+	}
+}
+
+// toleratesMigrationRefusal reports whether this open's intent may warn and
+// continue past a MigrateUp refusal that is not the gate: the #4566
+// dirty-table guard and the #5268 dependency re-key conflict.
+//
+// openRemoteSync is absent on purpose. It is not listed as "not openStrict"
+// because that phrasing is what would have silently enrolled it: the remote-
+// sync exemption was granted for one gate reason, and a dirty working set or a
+// re-key conflict is a different refusal with a different recovery.
+func (s *EmbeddedDoltStore) toleratesMigrationRefusal() bool {
+	return s.intent == openReadOnlyCommand || s.intent == openWorkingSetReconcile
+}
 
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
@@ -369,6 +415,13 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
 			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
 		},
+		// The raw counts the equal-version data-behind check needs
+		// (gastownhall/beads#6575): behind >= 1 whatever ahead is, plus
+		// which shape it is so the refusal names the pull the operator
+		// will actually get.
+		AheadBehind: func(ctx context.Context, db schema.DBConn, ref string) (int, int, error) {
+			return versioncontrolops.LocalAheadBehind(ctx, db, ref)
+		},
 		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
 			return versioncontrolops.WorkingSetClean(ctx, db)
 		},
@@ -388,7 +441,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	}
 	if err := schema.CheckRemoteMigrateGateWithAdopt(ctx, conn, adopt); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
-		if s.intent != openStrict && errors.As(err, &gateErr) {
+		if errors.As(err, &gateErr) && s.toleratesGateRefusal(gateErr) {
 			// The gate exists to stop in-place migration on a remote-backed,
 			// already-initialized database (#4259), not to block reads or a
 			// working-set commit. Warn and continue on the current schema;
@@ -403,6 +456,19 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				"    • several machines: only ONE migrates; sync each other clone and run\n" +
 				"      bd dolt pull after the migrator pushes, before upgrading it\n"
 			switch s.intent {
+			case openRemoteSync:
+				// #6575: this is the refusal's own prescribed remedy running.
+				// It gets the data-behind guidance, not the migrate-or-adopt
+				// coordination text — there is no decision to make here, and
+				// naming `bd migrate --force` at the moment the operator is
+				// finally doing the right thing is how the last round sent
+				// people back into the wedge.
+				fmt.Fprintf(os.Stderr,
+					"Warning: %[1]v\n"+
+						"  Remote-sync command: continuing on schema v%[2]d without migrating, so\n"+
+						"  this pull can bring in the commits this clone is behind on. Re-run the\n"+
+						"  command you were blocked on once it completes.\n",
+					gateErr, gateErr.CurrentVersion)
 			case openWorkingSetReconcile:
 				fmt.Fprintf(os.Stderr,
 					"Warning: %[1]v\n"+
@@ -426,7 +492,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
 		var dirtyErr *schema.DirtyTablesError
-		if s.intent != openStrict && errors.As(err, &dirtyErr) {
+		if s.toleratesMigrationRefusal() && errors.As(err, &dirtyErr) {
 			// The guard exists to keep dirty user data from being entangled
 			// with a migration, but its documented recovery - committing the
 			// working set - also opens the store and would otherwise hit
@@ -451,7 +517,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			return nil
 		}
 		var rekeyErr *schema.DependencyRekeyConflictError
-		if s.intent != openStrict && errors.As(err, &rekeyErr) {
+		if s.toleratesMigrationRefusal() && errors.As(err, &rekeyErr) {
 			// Same principle for the dependency re-key's refusal (#5268): it is
 			// a convergence repair, not a precondition for reading, and before
 			// that pass existed these clones opened fine. Bricking 'bd list' and
