@@ -829,6 +829,22 @@ func RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange(t *testing.T, ct
 // real backend. It asks StillServes what the fixture (once real) decided,
 // and checks the rest of the contract's promise against that decision for
 // both outcomes.
+//
+// A second, independent phase below (its own store, so it cannot be
+// satisfied by whatever the first phase already set up) pins the same
+// clause more precisely than a single bump can: bumping only once, as the
+// first phase does, cannot structurally distinguish a backend that answers
+// "retained" from an unbroken chain of rows through every intervening epoch
+// from one that answers it from the bare existence of SOME row for the id
+// at the current epoch — both answer the same way after only one hop. The
+// second phase bumps twice, deliberately leaving a GAP at the middle epoch
+// (its id is not re-minted there), then re-mints at the third epoch. The
+// original, first-epoch Address must stay voided: the id was re-minted
+// LATER, but not carried forward THROUGH the epoch where it lapsed, and
+// R20-n's exception is for a mapping that survives the transition, not one
+// that lapses and is only later, coincidentally, reused by a fresh mint
+// sharing the same id (gastownhall/beads#6664, bee-ghosttrack review
+// 5268699223, item B1).
 func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx context.Context, fixture EpochFixture) {
 	t.Helper()
 	if fixture.MintUnderEpoch == nil {
@@ -922,6 +938,59 @@ func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx co
 	}
 	if newAddr == "" {
 		t.Error("CurrentAddressFor(a still-served prior-epoch Address) returned an empty Address, want a real one under the new epoch")
+	}
+
+	// Second phase (B1): a later, non-contiguous re-mint must not
+	// retroactively retain an address across a gap epoch. Its own store —
+	// epochStore(fixture, "voids-gap") — keeps it from seeing or being
+	// satisfied by the addrA/addrB state the first phase set up above.
+	// Epoch numbers are captured from BumpEpoch's own return values rather
+	// than assumed: store_epoch is one physical counter per database
+	// (epoch_cas.go's package doc), not per-store, so this store's epoch
+	// numbering continues from wherever the shared counter already stood.
+	gapStore := epochStore(fixture, "voids-gap")
+
+	gapAddr1, err := fixture.MintUnderEpoch(ctx, gapStore, "record-gap")
+	if err != nil {
+		t.Fatalf("MintUnderEpoch(record-gap) [gap phase, first epoch]: %v", err)
+	}
+
+	// Bump once and deliberately do NOT re-mint record-gap here — this is
+	// the gap. The point under test is what a query sees after the SECOND
+	// bump, not this one, so this phase does not assert anything yet.
+	if _, err := fixture.BumpEpoch(ctx, gapStore, EpochBumpTriggerRestore); err != nil {
+		t.Fatalf("BumpEpoch [gap phase, leaving the gap]: %v", err)
+	}
+
+	// Bump again, THEN re-mint record-gap — reusing the same id after the
+	// gap, not carrying it forward through the epoch in between.
+	gapNewEpoch, err := fixture.BumpEpoch(ctx, gapStore, EpochBumpTriggerRestore)
+	if err != nil {
+		t.Fatalf("BumpEpoch [gap phase, after the gap]: %v", err)
+	}
+	if _, err := fixture.MintUnderEpoch(ctx, gapStore, "record-gap"); err != nil {
+		t.Fatalf("MintUnderEpoch(record-gap) [gap phase, re-mint after the gap]: %v", err)
+	}
+
+	gapServes, err := fixture.StillServes(ctx, gapStore, gapAddr1)
+	if err != nil {
+		t.Fatalf("StillServes(%s) [gap phase]: %v", gapAddr1, err)
+	}
+	if gapServes {
+		t.Errorf("StillServes(record-gap's first-epoch address) = true, want false: record-gap's mapping lapsed at the gap epoch (never re-minted there) before being reused later — a later, non-contiguous re-mint must not retroactively retain the first-epoch address (R20-n requires the mapping to be CARRIED FORWARD, not merely reused after a gap)")
+	}
+
+	gapAnswer, err := fixture.Resolve(ctx, gapStore, gapAddr1)
+	if err != nil {
+		t.Fatalf("Resolve(%s) [gap phase]: %v", gapAddr1, err)
+	}
+	if gapAnswer.Restriction != RestrictionGoneReorganization {
+		t.Errorf("Resolve(record-gap's first-epoch address, after a lapsed-then-reused mapping) = %s, want RestrictionGoneReorganization", gapAnswer.Restriction)
+	}
+	if gapAnswer.Epoch == nil {
+		t.Fatal("Resolve(record-gap's first-epoch address).Epoch = nil, want the current epoch populated")
+	} else if *gapAnswer.Epoch != gapNewEpoch {
+		t.Errorf("Resolve(record-gap's first-epoch address).Epoch = %d, want the current epoch %d", *gapAnswer.Epoch, gapNewEpoch)
 	}
 }
 
