@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -31,14 +32,18 @@ type freshCloneDBCheck struct {
 // socket is the transport its repair writes (freshCloneRepairTransport): the
 // unix socket to dial, or "" for TCP at host:port. Over TCP alone a
 // socket-only server was probed at host:0.
-func checkFreshCloneDB(host string, port int, socket, user, password, dbName string, tls bool) freshCloneDBCheck {
+func checkFreshCloneDB(host string, port int, socket, user, password, dbName string, tls, allowCleartext bool) freshCloneDBCheck {
+	if err := configfile.ValidateServerAuthConfig(allowCleartext, tls); err != nil {
+		return freshCloneDBCheck{Reachable: false, Err: err}
+	}
 	dsn := doltutil.ServerDSN{
-		Socket:   socket,
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      tls,
+		Socket:                  socket,
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		TLS:                     tls,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", dsn)

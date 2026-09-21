@@ -157,13 +157,20 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, cfg *configfile.Config, 
 			return err
 		}
 	}
+	allowCleartext := cfg.GetDoltServerAllowCleartextPassword()
+	tls := cfg.GetDoltServerTLS()
+	if err := configfile.ValidateServerAuthConfig(allowCleartext, tls); err != nil {
+		return err
+	}
+
 	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: password,
-		Database: cfg.GetDoltDatabase(),
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    host,
+		Port:                    port,
+		User:                    cfg.GetDoltServerUser(),
+		Password:                password,
+		Database:                cfg.GetDoltDatabase(),
+		TLS:                     tls,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	// Measure connection time

@@ -63,8 +63,11 @@ type ServerDSN struct {
 	Database string        // optional; empty connects without selecting a database
 	Timeout  time.Duration // connect timeout; 0 defaults to 5s
 	TLS      bool
-	// AllowCleartextPasswords: set only alongside TLS; the gate is
-	// internal/storage/dolt.validateServerAuthConfig.
+	// AllowCleartextPasswords: intended only alongside TLS. String() fails
+	// safe and omits it when TLS is false; the invariant that REFUSES the
+	// combination up front (rather than silently degrading) is
+	// configfile.ValidateServerAuthConfig, called by every builder that
+	// populates this field.
 	AllowCleartextPasswords bool
 }
 
@@ -118,10 +121,16 @@ func (d ServerDSN) String() string {
 		// See maxAllowedPacketBytes for why the value is the Dolt server's own
 		// 1 GiB ceiling rather than the driver's 64 MiB default: pinning must
 		// not shrink what the client is willing to send.
-		MaxAllowedPacket:        maxAllowedPacketBytes,
-		Timeout:                 timeout,
-		AllowNativePasswords:    true,
-		AllowCleartextPasswords: d.AllowCleartextPasswords,
+		MaxAllowedPacket:     maxAllowedPacketBytes,
+		Timeout:              timeout,
+		AllowNativePasswords: true,
+		// Fail safe rather than fail loud: a builder that forgot to also
+		// resolve/validate TLS (the invariant lives in
+		// configfile.ValidateServerAuthConfig, called by every builder that
+		// has a *configfile.Config, and internal/storage/dolt.New) gets the
+		// driver's own "requires clear text authentication" refusal instead
+		// of a DSN that would send the password in the clear.
+		AllowCleartextPasswords: d.AllowCleartextPasswords && d.TLS,
 	}
 	if d.TLS {
 		cfg.TLSConfig = "true"

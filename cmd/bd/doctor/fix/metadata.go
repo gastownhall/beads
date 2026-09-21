@@ -567,12 +567,17 @@ func openServerCatalogDB(ep doltserver.Endpoint) (*sql.DB, error) {
 			return nil, err
 		}
 	}
+	allowCleartext, err := ep.CleartextAuth()
+	if err != nil {
+		return nil, err
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     ep.Host,
-		Port:     ep.Port,
-		User:     ep.User,
-		Password: password,
-		TLS:      ep.TLS,
+		Host:                    ep.Host,
+		Port:                    ep.Port,
+		User:                    ep.User,
+		Password:                password,
+		TLS:                     ep.TLS,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 	return sql.Open("mysql", connStr)
 }

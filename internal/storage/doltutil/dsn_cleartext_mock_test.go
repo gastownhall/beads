@@ -163,15 +163,33 @@ func answerMaxAllowedPacketQuery(rw io.ReadWriter) error {
 	return nil
 }
 
+// clearPasswordAuthResult reports what the mock actually observed during one
+// handshake attempt, so a test can assert the TLS-upgrade branch really ran
+// and that the auth-switch response really was the client's password bytes —
+// rather than trusting that the overall handshake succeeding proves either
+// one. tls is only ever true when the 32-byte SSLRequest branch upgraded the
+// connection; authBytes is nil whenever the client never answered the
+// AuthSwitchRequest (the expected case when AllowCleartextPasswords=false).
+type clearPasswordAuthResult struct {
+	tls       bool
+	authBytes []byte
+}
+
 // serveClearPasswordAuthOnce drives the handshake far enough to force
 // mysql_clear_password, then reports pass/fail by whether the client answers
 // it. diag is buffered and non-blocking: errors here (t.Errorf from this
 // goroutine after the subtest returns would panic the binary) go there
 // instead, including the expected case where AllowCleartextPasswords=false
-// makes the client bail without ever sending the cleartext packet.
-func serveClearPasswordAuthOnce(conn net.Conn, tlsCfg *tls.Config, diag chan<- string) {
+// makes the client bail without ever sending the cleartext packet. result
+// receives exactly one clearPasswordAuthResult (via the deferred send below),
+// on every return path, so a caller can always read it without knowing which
+// path this attempt took.
+func serveClearPasswordAuthOnce(conn net.Conn, tlsCfg *tls.Config, diag chan<- string, result chan<- clearPasswordAuthResult) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	var res clearPasswordAuthResult
+	defer func() { result <- res }()
 
 	note := func(format string, args ...any) {
 		select {
@@ -202,6 +220,7 @@ func serveClearPasswordAuthOnce(conn net.Conn, tlsCfg *tls.Config, diag chan<- s
 			return
 		}
 		rw = tlsConn
+		res.tls = true
 		if _, err := readMySQLPacket(rw); err != nil { // real HandshakeResponse41, over TLS
 			note("read post-TLS HandshakeResponse41: %v", err)
 			return
@@ -214,10 +233,12 @@ func serveClearPasswordAuthOnce(conn net.Conn, tlsCfg *tls.Config, diag chan<- s
 		return
 	}
 
-	if _, err := readMySQLPacket(rw); err != nil {
+	authBytes, err := readMySQLPacket(rw)
+	if err != nil {
 		note("read cleartext password response (ok if AllowCleartextPasswords=false): %v", err)
 		return
 	}
+	res.authBytes = authBytes
 
 	if err := writeMySQLPacket(rw, nextSeq+2, minimalOKPacket()); err != nil {
 		note("write final OK packet: %v", err)
@@ -232,9 +253,11 @@ func serveClearPasswordAuthOnce(conn net.Conn, tlsCfg *tls.Config, diag chan<- s
 }
 
 // startMockClearPasswordServer starts a one-shot listener, returning its
-// address and a buffered channel of diagnostic notes for failure messages.
-// tlsCfg may be nil when the test doesn't need TLS.
-func startMockClearPasswordServer(t *testing.T, tlsCfg *tls.Config) (addr string, diag <-chan string) {
+// address, a buffered channel of diagnostic notes for failure messages, and a
+// channel that receives exactly one clearPasswordAuthResult once the attempt
+// finishes (including an Accept failure, so a caller reading it never
+// blocks). tlsCfg may be nil when the test doesn't need TLS.
+func startMockClearPasswordServer(t *testing.T, tlsCfg *tls.Config) (addr string, diag <-chan string, result <-chan clearPasswordAuthResult) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -245,6 +268,7 @@ func startMockClearPasswordServer(t *testing.T, tlsCfg *tls.Config) (addr string
 		_ = tcpLn.SetDeadline(time.Now().Add(15 * time.Second)) // never leak the Accept goroutine
 	}
 	diagCh := make(chan string, 16)
+	resultCh := make(chan clearPasswordAuthResult, 1)
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -252,11 +276,12 @@ func startMockClearPasswordServer(t *testing.T, tlsCfg *tls.Config) (addr string
 			case diagCh <- fmt.Sprintf("Accept: %v", err):
 			default:
 			}
+			resultCh <- clearPasswordAuthResult{}
 			return
 		}
-		serveClearPasswordAuthOnce(conn, tlsCfg, diagCh)
+		serveClearPasswordAuthOnce(conn, tlsCfg, diagCh, resultCh)
 	}()
-	return ln.Addr().String(), diagCh
+	return ln.Addr().String(), diagCh, resultCh
 }
 
 // generateSelfSignedTLSConfig returns a throwaway server TLS config.
@@ -327,7 +352,7 @@ func drainDiag(diag <-chan string) string {
 // shape (AllowCleartextPasswords false) is refused by a server that demands
 // mysql_clear_password — the failure this change fixes.
 func TestServerDSN_ClearTextPasswordAuth_RefusedWithoutFlag(t *testing.T) {
-	addr, diag := startMockClearPasswordServer(t, nil)
+	addr, diag, result := startMockClearPasswordServer(t, nil)
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatalf("split mock server addr %q: %v", addr, err)
@@ -357,13 +382,27 @@ func TestServerDSN_ClearTextPasswordAuth_RefusedWithoutFlag(t *testing.T) {
 		t.Fatalf("expected a clear-text-password refusal (mysql.ErrCleartextPassword), got: %v (mock server notes: %s)",
 			err, drainDiag(diag))
 	}
+
+	// The client refused the plugin and must never have sent the password:
+	// prove the mock's own reading agrees, rather than trusting the client
+	// error alone (round 2 review: "assert ... that the plaintext arm never
+	// received them").
+	res := <-result
+	if res.authBytes != nil {
+		t.Fatalf("mock should never have received the cleartext password when the client refuses the plugin; got %q", res.authBytes)
+	}
 }
 
 // TestServerDSN_ClearTextPasswordAuth_SucceedsWithFlagAndTLS: TLS +
 // AllowCleartextPasswords completes the handshake against the same server.
+// Beyond the client-side success, it proves the mock's own reading of the
+// attempt: the TLS-upgrade branch actually ran, and the auth-switch response
+// it received really was the client's password bytes — not merely that the
+// overall handshake happened to succeed, which stays green even if the
+// client sent the password in the clear (round 2 review, point 3).
 func TestServerDSN_ClearTextPasswordAuth_SucceedsWithFlagAndTLS(t *testing.T) {
 	tlsCfg := generateSelfSignedTLSConfig(t)
-	addr, diag := startMockClearPasswordServer(t, tlsCfg)
+	addr, diag, result := startMockClearPasswordServer(t, tlsCfg)
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatalf("split mock server addr %q: %v", addr, err)
@@ -373,11 +412,12 @@ func TestServerDSN_ClearTextPasswordAuth_SucceedsWithFlagAndTLS(t *testing.T) {
 		t.Fatalf("parse mock server port %q: %v", portStr, err)
 	}
 
+	const password = "s3cret"
 	dsn := ServerDSN{
 		Host:                    host,
 		Port:                    port,
 		User:                    "root",
-		Password:                "s3cret",
+		Password:                password,
 		Timeout:                 5 * time.Second,
 		TLS:                     true,
 		AllowCleartextPasswords: true,
@@ -397,4 +437,17 @@ func TestServerDSN_ClearTextPasswordAuth_SucceedsWithFlagAndTLS(t *testing.T) {
 			err, drainDiag(diag))
 	}
 	_ = conn.Close()
+
+	res := <-result
+	if !res.tls {
+		t.Fatalf("mock never upgraded to TLS — the client completed the handshake without the SSLRequest/TLS-upgrade branch running (mock server notes: %s)", drainDiag(diag))
+	}
+	// mysql_clear_password's AuthSwitchResponse is the raw password bytes
+	// plus a NUL terminator (no length prefix) — go-sql-driver/mysql's
+	// writeClearAuthPacket.
+	wantAuthBytes := password + "\x00"
+	if string(res.authBytes) != wantAuthBytes {
+		t.Fatalf("mock did not receive the real cleartext password over the auth-switch response; got %q, want %q (mock server notes: %s)",
+			res.authBytes, wantAuthBytes, drainDiag(diag))
+	}
 }
