@@ -223,3 +223,132 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 		}
 	})
 }
+
+// TestHandleRemoteMigrateGateJSON_HumanDecisionRequired pins the one arm of
+// this payload where human_decision_required is false, and — more importantly
+// — the three where it must stay true.
+//
+// The field was hard-coded true, which made the data-behind payload contradict
+// itself: the single option it carries is annotated `when: "always, for this
+// stop"` and `risk: "none — a pure fast-forward"`, and AgentDirective says the
+// same, yet an agent keying on this field stopped to ask a human to approve an
+// unconditional, riskless step. The cost of that stall is the operator
+// reaching for `bd migrate --force` instead — the #6575 wedge.
+//
+// The two narrowings are the substance of the finding: a diverged pull MERGES
+// and can need conflict resolution (and a `--strategy ours|theirs` choice), and
+// a shared store carries a SECOND option whose precondition is operator
+// confirmation that every co-resident client is upgraded (#5920), which this
+// process cannot observe. Either one flipping to false would be worse than the
+// contradiction it replaced.
+func TestHandleRemoteMigrateGateJSON_HumanDecisionRequired(t *testing.T) {
+	capture := func(t *testing.T, gate *schema.RemoteMigrateGateError) map[string]interface{} {
+		t.Helper()
+		origStderr := os.Stderr
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		os.Stderr = w
+		defer func() { os.Stderr = origStderr }()
+		handleRemoteMigrateGateJSON(gate)
+		_ = w.Close()
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+			t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+		}
+		return parsed
+	}
+
+	for _, tc := range []struct {
+		name string
+		gate *schema.RemoteMigrateGateError
+		want bool
+		why  string
+	}{
+		{
+			name: "data-behind, fast-forward, not shared",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, FallbackReason: "data-behind"},
+			want: false,
+			why:  "the single option is an unconditional, riskless, non-destructive pull",
+		},
+		{
+			name: "data-behind, diverged",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, FallbackReason: "data-behind", DataDiverged: true},
+			want: true,
+			why:  "the pull merges and can need conflict resolution / a strategy choice",
+		},
+		{
+			name: "data-behind, shared",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, FallbackReason: "data-behind", Shared: true},
+			want: true,
+			why:  "the second option needs operator confirmation that every co-resident client is upgraded (#5920)",
+		},
+		{
+			name: "data-behind, diverged and shared",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, FallbackReason: "data-behind", DataDiverged: true, Shared: true},
+			want: true,
+			why:  "both narrowings apply",
+		},
+		{
+			name: "blunt remote-backed stop",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1},
+			want: true,
+			why:  "only ONE clone may migrate a shared remote — a coordination decision",
+		},
+		{
+			name: "adopt",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, Decision: "adopt"},
+			want: true,
+			why:  "adoption is destructive",
+		},
+		{
+			name: "fork-skew",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, Decision: "fork-skew"},
+			want: true,
+			why:  "picking a canonical clone discards the others' unpushed work",
+		},
+		{
+			name: "shared-no-remote",
+			gate: &schema.RemoteMigrateGateError{CurrentVersion: 66, LatestVersion: 67, Pending: 1, Decision: "shared-no-remote", Shared: true},
+			want: true,
+			why:  "other clients' binary versions are not observable from this process",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := capture(t, tc.gate)
+			obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("remote_migrate_gate missing or wrong type: %T", parsed["remote_migrate_gate"])
+			}
+			got, ok := obj["human_decision_required"].(bool)
+			if !ok {
+				t.Fatalf("human_decision_required missing or not a bool: %T", obj["human_decision_required"])
+			}
+			if got != tc.want {
+				t.Errorf("human_decision_required = %v, want %v — %s", got, tc.want, tc.why)
+			}
+			// The contradiction is only resolved if the rest of the payload
+			// still says what it said: a false here has to come with the
+			// unconditional, riskless single option it is claiming.
+			if !tc.want {
+				rawOpts, ok := obj["options"].([]interface{})
+				if !ok || len(rawOpts) != 1 {
+					t.Fatalf("human_decision_required=false with options = %v; it may only be false for the single-option pull", obj["options"])
+				}
+				o, _ := rawOpts[0].(map[string]interface{})
+				if risk, _ := o["risk"].(string); !strings.HasPrefix(risk, "none") {
+					t.Errorf("human_decision_required=false but option risk = %q; want a risk-free option", risk)
+				}
+				if when, _ := o["when"].(string); !strings.HasPrefix(when, "always") {
+					t.Errorf("human_decision_required=false but option when = %q; want an unconditional option", when)
+				}
+			}
+		})
+	}
+}

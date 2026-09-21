@@ -18,6 +18,49 @@ const (
 	sharedServersDocsURL = "https://github.com/gastownhall/beads/blob/main/docs/getting-started/upgrading.md#shared-servers"
 )
 
+// humanDecisionRequired reports whether this refusal is one an agent must stop
+// and hand to a human, rather than act on.
+//
+// Every arm of this gate but one is a coordination or data-loss decision the
+// process cannot make — which clone is the designated migrator, whether it is
+// safe to discard unpushed work, whether every co-resident client is upgraded
+// — so the answer is true by default, and was hard-coded true before the
+// #6575 data-behind stop existed.
+//
+// The data-behind stop is the exception, and only in its narrowest shape. It
+// carries a single option whose command is `bd dolt pull`, whose When is
+// unconditional ("always, for this stop") and whose Risk is "none — a pure
+// fast-forward"; AgentDirective says the same in prose. Leaving the field true
+// there made this payload contradict itself: an agent keying on it stopped to
+// ask a human to approve a step the rest of the payload calls unconditional
+// and riskless — and the cost of that stall is the operator reaching for
+// `bd migrate --force` instead, which is the #6575 wedge.
+//
+// Both narrowing conditions are deliberate, and getting either backwards would
+// be worse than leaving the field true:
+//
+//   - DataDiverged: the clone has commits of its own, so the pull MERGES.
+//     Options() already says so — its Risk for this shape is conflicts "that
+//     must be resolved before it completes", with a `--strategy ours|theirs`
+//     choice behind them. A merge that can require conflict resolution, and a
+//     strategy that decides whose rows win, is exactly a human decision.
+//     AgentDirective agrees ("surface a conflict outcome to the operator
+//     rather than forcing past it"). Stays true.
+//
+//   - Shared: the pull itself is still safe, but on a shared store the payload
+//     carries a SECOND option, migrate-shared-after-pulling, whose When
+//     requires the operator to confirm every co-resident bd client is upgraded
+//     (#5920) — unobservable from this process. This field describes the
+//     payload, not its first option, so one option needing a human makes the
+//     answer true. AgentDirective agrees ("Do NOT auto-run it"). Stays true.
+//
+// What is NOT narrowed on: the When string, which is "always, for this stop"
+// in both shapes and correctly so — the pull is the only way forward either
+// way. It is the Risk, not the applicability, that the diverged shape changes.
+func humanDecisionRequired(e *schema.RemoteMigrateGateError) bool {
+	return !(e.IsDataBehind() && !e.DataDiverged && !e.Shared)
+}
+
 // handleRemoteMigrateGateJSON renders the #4259 remote-migrate gate error as a
 // structured JSON error block for agent consumption.
 //
@@ -82,7 +125,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			"latest_version":          e.LatestVersion,
 			"pending":                 e.Pending,
 			"severity":                "blocking",
-			"human_decision_required": true,
+			"human_decision_required": humanDecisionRequired(e),
 			"observed":                fmt.Sprintf("%d pending schema migration(s) and a configured remote", e.Pending),
 			"expected":                "exactly one designated clone migrates and publishes; every other clone adopts the result",
 			"options":                 opts,

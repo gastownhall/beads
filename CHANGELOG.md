@@ -118,14 +118,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   statement that the pending-migration gate refuses `bd dolt pull` as well as
   `bd dolt push`: for the data-behind stop it does not, by design.
 
+  Commands that keep working through the stop say the same thing. `bd list`,
+  `bd ready` and `bd show` succeed against the old schema, and `bd dolt commit`
+  still commits the working set; on embedded storage all of them used to print
+  the blunt migrate-or-adopt coordination bullets while doing so — naming
+  `bd migrate --force && bd dolt push`, which on a data-behind clone applies
+  the migration this stop exists to prevent and then fails the push
+  non-fast-forward, and `bd bootstrap`, which no-ops against an existing
+  workspace. They now print the pull-first guidance, shape-branched the same
+  way the fatal refusal is, alongside the note that the command in hand
+  continued at the current schema. Refusals that are *not* the data-behind stop
+  keep the coordination bullets, which are right for them.
+
   `--json` callers get the same remedy the terminal does: `observed`,
   `expected` and `options` describe the pull (a single `pull-first` option)
   rather than the migrate-or-adopt decision that does not apply here, plus a
   `data_behind_shape` of `fast-forward` or `diverged`. `fallback_reason` stays
-  `data-behind`. On a shared Dolt sql-server the guidance carries #5920's
-  consequence — migrating promotes the schema for every co-resident client, and
-  clients still on an older bd refuse the database until upgraded — and names
-  the `bd migrate schema` consent step the retry needs there.
+  `data-behind`. For the fast-forward shape on a non-shared store — one
+  unconditional option, no local commits, nothing discarded —
+  `human_decision_required` is now `false`, so an agent can run the pull
+  instead of stalling for approval of a step the same payload calls riskless.
+  It stays `true` for the diverged shape (the pull merges and can need conflict
+  resolution) and on a shared store (the follow-up consent step needs an
+  operator who can confirm every co-resident client is upgraded). On a shared
+  Dolt sql-server the guidance carries #5920's consequence — migrating promotes
+  the schema for every co-resident client, and clients still on an older bd
+  refuse the database until upgraded — and names the `bd migrate schema`
+  consent step the retry needs there.
 
   Both existing workarounds keep working unchanged: `BD_SMART_GATE=0` opts out
   of the smart gate entirely (which means the blunt gate applies to `bd dolt
