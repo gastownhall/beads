@@ -22,26 +22,6 @@ func (f *fakeVersionLister) ListVersions(_ context.Context, _ string) ([]storage
 
 type notAVersionLister struct{ storage.DoltStorage }
 
-// TestVersionsRefusesWhenFlagOff pins the distinction #5898 exists to make:
-// with the feature off the answer is a REFUSAL, never an empty list. An empty
-// list is a claim about the bead ("it has no versions"); the truth is a claim
-// about the store ("it never recorded any"). Returning the former for the
-// latter is the wrong-answer-not-an-empty-one failure.
-func TestVersionsRefusesWhenFlagOff(t *testing.T) {
-	backend := &fakeVersionLister{versions: []storage.IssueVersion{{Revision: 1}}}
-
-	// Recording off AND nothing recorded: refuse with the remedy.
-	got, err := runVersions(context.Background(), &fakeVersionLister{}, "bd-1", false, true)
-
-	if !errors.Is(err, errVersionedHistoryOff) {
-		t.Fatalf("runVersions(recording=false, empty) error = %v, want errVersionedHistoryOff", err)
-	}
-	if len(got.Versions) != 0 {
-		t.Errorf("returned %d versions, want none", len(got.Versions))
-	}
-	_ = backend
-}
-
 // TestVersionsOffButRecordedStillLists is finding 3 from bee's #6661 review:
 // a store that recorded for a month and was then switched off HAS versions,
 // and refusing with "nothing is recorded" states a fact about this
@@ -59,6 +39,35 @@ func TestVersionsOffButRecordedStillLists(t *testing.T) {
 	}
 	if got.Recording {
 		t.Error("Recording should be false so the caller can say the listing ends where recording stopped")
+	}
+}
+
+// TestVersionsOffAndEmptyRefusesWithRemedy is the empty arm of the pair above,
+// and together they are the whole of finding 3: recording off decides the
+// FOOTER, never whether to read. Off with rows recorded lists them; off with
+// nothing recorded is the one case that refuses, and it refuses with the
+// remedy rather than returning an empty list.
+//
+// That distinction is what #5898 exists to make. An empty list is a claim
+// about the bead ("it has no versions"); the truth here is a claim about the
+// store ("it never recorded any"). Returning the former for the latter is the
+// wrong-answer-not-an-empty-one failure.
+//
+// This was TestVersionsRefusesWhenFlagOff, which asserted that the read was
+// refused BEFORE the backend was consulted. Finding 3 removed that behaviour
+// deliberately, so the assertion went with it -- but the fixture it had been
+// asserting against stayed behind, built, unused and ending in `_ = backend`,
+// under a name that still promised the old contract. Renamed to what it
+// actually pins, and the dead fixture is gone.
+// (bee-ghosttrack, #6661 third review, finding 3.)
+func TestVersionsOffAndEmptyRefusesWithRemedy(t *testing.T) {
+	got, err := runVersions(context.Background(), &fakeVersionLister{}, "bd-1", false, true)
+
+	if !errors.Is(err, errVersionedHistoryOff) {
+		t.Fatalf("runVersions(recording=false, empty) error = %v, want errVersionedHistoryOff", err)
+	}
+	if len(got.Versions) != 0 {
+		t.Errorf("returned %d versions, want none", len(got.Versions))
 	}
 }
 
