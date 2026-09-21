@@ -93,6 +93,24 @@ func TestExternalDoltConfig_Validate_TLS(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("allow cleartext password with tls required and skip verify is rejected", func(t *testing.T) {
+		err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSSkipVerify: true, AllowCleartextPassword: true}.Validate()
+		if err == nil {
+			t.Fatal("expected error for AllowCleartextPassword with TLSRequired and TLSSkipVerify")
+		}
+		if !strings.Contains(err.Error(), "AllowCleartextPassword") ||
+			!strings.Contains(err.Error(), "TLSRequired") ||
+			!strings.Contains(err.Error(), "TLSSkipVerify") {
+			t.Errorf("error should name all three settings, got: %v", err)
+		}
+	})
+
+	t.Run("allow cleartext password with tls required and verification is accepted", func(t *testing.T) {
+		if err := (ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSServerName: "db", TLSSkipVerify: false, AllowCleartextPassword: true}).Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestExternalDoltConfig_TLSClientConfig(t *testing.T) {

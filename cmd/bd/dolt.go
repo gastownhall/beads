@@ -99,8 +99,7 @@ Examples:
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1 BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD=1
   bd list           # bd dolt test only probes an unauthenticated TCP greeting;
-                     # it confirms neither setting. bd list (or bd doctor, once
-                     # plumbed) does.`,
+                     # it confirms neither setting. bd list (or bd doctor) does.`,
 }
 
 var doltShowCmd = &cobra.Command{
@@ -138,9 +137,12 @@ not land in metadata.json. Use environment variables or the credentials file:
 
 dolt_server_allow_cleartext_password IS intended as a metadata.json key too
 (mirroring dolt_server_tls): unlike password, it is not a secret, so it round-
-trips through 'bd dolt show' / 'bd config show' and can be set directly in
-metadata.json or config.yaml — 'bd dolt set' just doesn't write either of
-these two, same reasoning as tls.
+trips through 'bd dolt show' / 'bd config show'. It is read in this order —
+BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD, then metadata.json, then the
+central ~/.config/beads/server.json — never config.yaml, which this key has
+no field for. 'bd dolt set' just doesn't write metadata.json for this key,
+same reasoning as tls: edit metadata.json or server.json by hand, or use the
+env var.
 
   Default credentials file: ~/.config/beads/credentials
   Format:
@@ -1309,9 +1311,13 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 
 	// A refused auth config (cleartext without TLS) is reported the same way
 	// as any other connection failure below, rather than skipping straight
-	// to "not reachable" with no explanation.
+	// to "not reachable" with no explanation. Report the CONFIGURED value
+	// even when it is refused — GetDoltServerAllowCleartextPasswordChecked
+	// returns false on refusal, which would otherwise misstate a flag that
+	// is actually set to true.
+	configuredCleartext := cfg.GetDoltServerAllowCleartextPassword()
 	allowCleartext, authErr := cfg.GetDoltServerAllowCleartextPasswordChecked()
-	result["allow_cleartext_password"] = allowCleartext
+	result["allow_cleartext_password"] = configuredCleartext
 	if authErr != nil {
 		connErr = authErr
 	} else {
@@ -1367,7 +1373,7 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	fmt.Printf("  Database: %s\n", database)
 	fmt.Printf("  User:     %s\n", user)
 	fmt.Printf("  TLS:      %t\n", tls)
-	fmt.Printf("  Cleartext password auth: %t\n", allowCleartext)
+	fmt.Printf("  Cleartext password auth: %t\n", configuredCleartext)
 	if version != "" {
 		fmt.Printf("  Version:  %s\n", version)
 	}
@@ -1977,6 +1983,24 @@ func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDat
 	return nil
 }
 
+// resolveDoltShowAllowCleartextPassword returns the cleartext-password
+// setting that actually applies to bd's own connection, plus whether that
+// came from the proxied-server sidecar. In proxied mode the connection bd
+// makes is governed by ProxiedServerClientInfo.External.AllowCleartextPassword
+// (see ExternalDoltConfig), not by cfg.GetDoltServerAllowCleartextPassword()
+// (the metadata.json/env value) — those two can differ, and only the
+// External one is enforced by ExternalDoltConfig.Validate on this
+// connection. Falls back to the metadata/env value if the sidecar can't be
+// read, so 'bd dolt show' still prints something rather than erroring.
+func resolveDoltShowAllowCleartextPassword(beadsDir string, cfg *configfile.Config) (value bool, external bool) {
+	if usesProxiedServer() {
+		if info, err := configfile.LoadProxiedServerClientInfo(beadsDir); err == nil && info != nil && info.External != nil {
+			return info.External.AllowCleartextPassword, true
+		}
+	}
+	return cfg.GetDoltServerAllowCleartextPassword(), false
+}
+
 func showDoltConfig(testConnection bool) error {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
@@ -2017,7 +2041,12 @@ func showDoltConfig(testConnection bool) error {
 				result["port"] = showPort
 				result["user"] = cfg.GetDoltServerUser()
 				result["tls"] = cfg.GetDoltServerTLS()
-				result["allow_cleartext_password"] = cfg.GetDoltServerAllowCleartextPassword()
+				allowCleartext, externalCleartext := resolveDoltShowAllowCleartextPassword(beadsDir, cfg)
+				result["allow_cleartext_password"] = allowCleartext
+				result["allow_cleartext_password_source"] = "metadata"
+				if externalCleartext {
+					result["allow_cleartext_password_source"] = "external"
+				}
 				result["shared_server"] = doltserver.IsSharedServerMode()
 				if testConnection {
 					result["connection_ok"] = testServerConnection(showHost, showPort)
@@ -2046,7 +2075,12 @@ func showDoltConfig(testConnection bool) error {
 		fmt.Printf("  Port:     %d\n", showPort)
 		fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
 		fmt.Printf("  TLS:      %t\n", cfg.GetDoltServerTLS())
-		fmt.Printf("  Cleartext password auth: %t\n", cfg.GetDoltServerAllowCleartextPassword())
+		allowCleartext, externalCleartext := resolveDoltShowAllowCleartextPassword(beadsDir, cfg)
+		if externalCleartext {
+			fmt.Printf("  Cleartext password auth (external, applies to this connection): %t\n", allowCleartext)
+		} else {
+			fmt.Printf("  Cleartext password auth: %t\n", allowCleartext)
+		}
 		if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode:     shared server")
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {

@@ -130,6 +130,28 @@ func TestResolveProxiedServerUOWTopology_AbsentFilesResolveDefaults(t *testing.T
 	assert.Nil(t, topology.external)
 }
 
+// The sidecar's External.AllowCleartextPassword has to reach the topology
+// unchanged — this is the setting ExternalDoltConfig.Validate actually
+// enforces on bd's connection, per its own doc comment on the field.
+func TestResolveProxiedServerUOWTopology_PlumbsAllowCleartextPassword(t *testing.T) {
+	beadsDir := t.TempDir()
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{
+		External: &configfile.ExternalDoltConfig{
+			Host:                   "db.invalid",
+			Port:                   3306,
+			TLSRequired:            true,
+			TLSServerName:          "db.invalid",
+			AllowCleartextPassword: true,
+		},
+	}))
+
+	topology, err := resolveProxiedServerUOWTopology(beadsDir, "", assertWorkspaceIdentity)
+	require.NoError(t, err)
+	require.NotNil(t, topology.external)
+	assert.True(t, topology.external.AllowCleartextPassword,
+		"the sidecar's External.AllowCleartextPassword must reach the topology unchanged")
+}
+
 func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
 	beadsDir := t.TempDir()
 	external := &configfile.ExternalDoltConfig{Host: "db.invalid"}
