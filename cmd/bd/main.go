@@ -1850,6 +1850,49 @@ var rootCmd = &cobra.Command{
 
 		doltCfg.Path = doltPath
 
+		// Validate workspace identity for write commands (GH#2438, GH#2372)
+		// BEFORE the real store opens below. Skip for read-only commands
+		// since they can't corrupt data. Skip for --global: the global
+		// database uses a sentinel project ID that won't match any
+		// project's metadata.json.
+		//
+		// This has to run before the store opens, not after: opening it is
+		// what lets a pending schema migration auto-apply (the smart gate,
+		// #4516), and checking identity only after that open means a
+		// mismatch is caught after the migration already landed as a real,
+		// permanent commit — the refusal arrives too late to prevent it
+		// (be-0gfcs). newPreviewStoreFromConfig gives a non-mutating,
+		// behind-schema-tolerant peek at the same database: enough to read
+		// _project_id without running (or needing) the migration this check
+		// must complete ahead of.
+		//
+		// Gated on previewErr, not on idStore's own nilness: a failed peek
+		// (no database yet, unloadable config, absent server-mode
+		// connection, ...) is treated as nothing-to-validate and skipped
+		// outright, the same bootstrap tolerance this check has always had
+		// — but idStore itself cannot be trusted to signal that on its own.
+		// openNonMutatingStoreFromConfig's dolt-server-mode branch returns
+		// dolt.NewFromConfigWithOptions's result straight through, and on a
+		// failed connection that is a nil *dolt.DoltStore boxed into a
+		// non-nil storage.DoltStorage interface — the classic Go typed-nil
+		// trap, where `idStore != nil` reads true even though the store
+		// behind it is not there. Calling Close() (or anything else) on
+		// that reference panics (confirmed live:
+		// TestPersistentPreRunHonorsSkipStoreAnnotation's control case, a
+		// command with no skip-store annotation run against an absent
+		// server-mode database). Checking previewErr first sidesteps the
+		// trap entirely, matching the ordinary (value, err) contract every
+		// other caller of this pair already trusts.
+		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
+			if idStore, previewErr := newPreviewStoreFromConfig(rootCtx, beadsDir); previewErr == nil {
+				checkErr := validateWorkspaceIdentity(rootCtx, idStore, beadsDir)
+				_ = idStore.Close()
+				if checkErr != nil {
+					return checkErr
+				}
+			}
+		}
+
 		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
 		// directory — including noms/LOCK files. These are Dolt-internal files.
 		// Removing them WILL cause unrecoverable data corruption and data loss.
@@ -1897,15 +1940,10 @@ var rootCmd = &cobra.Command{
 			maybeAutoImportJSONL(rootCtx, store, beadsDir)
 		}
 
-		// Validate workspace identity for write commands (GH#2438, GH#2372)
-		// Skip for read-only commands since they can't corrupt data.
-		// Skip for --global: the global database uses a sentinel project ID
-		// that won't match any project's metadata.json.
-		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			if err := validateWorkspaceIdentity(rootCtx, beadsDir); err != nil {
-				return err
-			}
-		}
+		// Workspace identity is validated earlier now, before the store below
+		// was allowed to open and auto-apply a pending schema migration as a
+		// side effect (be-0gfcs) — see the check right before
+		// newRegisteredBackendStore/newDoltStore.
 
 		// Initialize hook runner using the .beads directory resolved above via
 		// resolveCommandBeadsDir. Do not use filepath.Dir(dbPath): for a
@@ -2337,15 +2375,21 @@ func flushBatchCommitOnShutdown() {
 }
 
 // validateWorkspaceIdentity checks that the project identity from metadata.json
-// matches the database's stored project_id. A mismatch indicates configuration
-// drift — the CLI may be pointing at the wrong database (GH#2438, GH#2372).
+// matches s's stored project_id. A mismatch indicates configuration drift —
+// the CLI may be pointing at the wrong database (GH#2438, GH#2372).
 //
 // This check only runs for write commands because:
 // 1. Read commands are safe even against wrong databases (no data mutation)
-// 2. The check requires an open store connection
+// 2. The check requires a store connection
 // 3. New databases won't have _project_id yet (bootstrap case)
-func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
-	if store == nil {
+//
+// s is passed explicitly rather than read off the package-level store: the
+// caller runs this against a throwaway, non-mutating store opened BEFORE the
+// real command store, specifically so a mismatch is caught before that real
+// open lets a pending schema migration auto-apply (be-0gfcs) — see the call
+// site in the root command's PersistentPreRunE.
+func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beadsDir string) error {
+	if s == nil {
 		return nil // No store connection, nothing to validate
 	}
 
@@ -2360,7 +2404,7 @@ func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
 	}
 
 	// Get project_id from database
-	dbProjectID, err := store.GetMetadata(ctx, "_project_id")
+	dbProjectID, err := s.GetMetadata(ctx, "_project_id")
 	if err != nil || dbProjectID == "" {
 		return nil // No project_id in DB (new or pre-identity database)
 	}
