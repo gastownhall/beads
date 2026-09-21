@@ -192,6 +192,54 @@ func TestResolveServerModeUOWTopology_RefusesGatewayWithoutRunningTheCommand(t *
 		"the command's own exit status can only appear if the command ran")
 }
 
+// The cleartext-password setting configured for the CLI's own connection
+// (metadata.json's dolt_server_allow_cleartext_password) has to reach the
+// external topology bd serve fronts, or a server behind a proxy that demands
+// mysql_clear_password (e.g. a Warpgate MySQL listener) would work for every
+// CLI command in this workspace but not for bd serve.
+func TestResolveServerModeUOWTopology_PlumbsAllowCleartextPassword(t *testing.T) {
+	beadsDir := serverModeBeadsDir(t, &configfile.Config{
+		DoltServerHost:                   "127.0.0.1",
+		DoltServerPort:                   3521,
+		DoltDatabase:                     "beads_serve",
+		DoltServerTLS:                    true,
+		DoltServerAllowCleartextPassword: true,
+	})
+	t.Setenv("BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "")
+
+	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
+	require.NoError(t, err)
+	require.NotNil(t, topology.external)
+	assert.True(t, topology.external.AllowCleartextPassword,
+		"metadata.json's dolt_server_allow_cleartext_password must reach the topology bd serve fronts")
+	assert.True(t, topology.external.TLSRequired)
+}
+
+// The plumbed flag is not just carried, it is enforced: a topology built
+// with AllowCleartextPassword but no TLSRequired must be refused by the same
+// ExternalDoltConfig.Validate gate the CLI's own connection is refused by,
+// before the provider dials anything (an invalid Host/Port would otherwise
+// mask which of the two errors fired).
+func TestNewSQLServerUOWProvider_RefusesCleartextWithoutTLS(t *testing.T) {
+	beadsDir := serverModeBeadsDir(t, &configfile.Config{
+		DoltServerHost:                   "127.0.0.1",
+		DoltServerPort:                   3521,
+		DoltDatabase:                     "beads_serve",
+		DoltServerAllowCleartextPassword: true,
+	})
+	t.Setenv("BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "")
+
+	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
+	require.NoError(t, err)
+
+	_, err = newSQLServerUOWProvider(context.Background(), beadsDir, topology)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AllowCleartextPassword")
+	assert.Contains(t, err.Error(), "TLSRequired")
+}
+
 // The refusal names the knob to change and what serve cannot do, and stays a
 // plain error: storage.ErrUnsupported carries a BACKEND, and typing this one
 // would tell a caller that bd serve does not support dolt.
