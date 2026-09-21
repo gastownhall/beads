@@ -1,6 +1,7 @@
 package configfile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -870,6 +871,45 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 			t.Errorf("RootPath = %q, want /var/lib/beads/proxieddb", got.RootPath)
 		}
 	})
+}
+
+func TestSaveProxiedServerClientInfo_WritesEffectiveIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{name: "default", in: 0, want: DefaultProxyIdleTimeout},
+		{name: "never", in: -1, want: -1},
+		{name: "positive", in: 45 * time.Second, want: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			info := &ProxiedServerClientInfo{RootPath: "/var/lib/beads/proxieddb", IdleTimeout: tc.in}
+			if err := SaveProxiedServerClientInfo(dir, info); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+
+			data, err := os.ReadFile(ProxiedServerClientInfoPath(dir))
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			got, ok := raw["idle_timeout"]
+			if !ok {
+				t.Fatalf("idle_timeout is absent from sidecar: %s", data)
+			}
+			if got != float64(tc.want.Nanoseconds()) {
+				t.Fatalf("idle_timeout = %v, want %d: %s", got, tc.want.Nanoseconds(), data)
+			}
+			if info.IdleTimeout != tc.want {
+				t.Fatalf("caller plan IdleTimeout = %s, want effective %s", info.IdleTimeout, tc.want)
+			}
+		})
+	}
 }
 
 func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
