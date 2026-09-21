@@ -21,18 +21,11 @@ import (
 const migration0069Up = "0069_add_removed_restriction.up.sql"
 const migration0069Down = "0069_add_removed_restriction.down.sql"
 
-// TestLatestVersionIncludesMigration0069 pins the real next free slot this
-// phase claims, superseding 0068's own version of this test. Deliberately a
-// hardcoded literal for the same reason 0067's and 0068's were: LatestVersion()
-// drifting to 69 for the wrong reason should still be caught by this test
-// failing to explain why 69 is removed-restriction-shaped, which the CLI test
-// below checks.
-func TestLatestVersionIncludesMigration0069(t *testing.T) {
-	const want = 69
-	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (issue_versions.removed_restriction migration slot claimed by be-x5jqd.5)", got, want)
-	}
-}
+// TestLatestVersionIncludesMigration0069 (pinning LatestVersion() == 69) is
+// superseded by TestLatestVersionIncludesMigration0070
+// (migration_0070_add_epoch_minted_addresses_test.go) now that 0070 claims
+// the next free slot -- only one such pin lives at a time, matching how this
+// test itself already superseded 0068's own version.
 
 // TestMigration0069AddsRemovedRestriction is a pure-Go, DB-independent check
 // of the frozen migration bytes themselves — it runs even where no `dolt`
