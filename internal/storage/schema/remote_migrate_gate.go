@@ -334,7 +334,8 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 			"  still needs explicit consent afterwards — it promotes the schema for EVERY\n" +
 			"  client at once, and clients still on an older bd will refuse this database\n" +
 			"  until they are upgraded (#5920):\n" +
-			"        " + SharedConsentCommand + "\n"
+			"        " + SharedConsentCommand + "\n" +
+			"        (" + SharedConsentCommandGlobal + " for the shared global database)\n"
 	} else {
 		body += "" +
 			"  The migration then runs on its own: with nothing left to pull, this clone\n" +
