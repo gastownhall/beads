@@ -184,4 +184,42 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 			}
 		})
 	}
+
+	// A shared, data-behind refusal carries the #5920 consent verb in its
+	// second option, and that verb is target-scoped: under --global the
+	// project-scoped `bd migrate schema` would consent the WRONG database and
+	// leave the refusal in place. This stop reaches the renderer through the
+	// default (empty-Decision) arm, so the retarget cannot be keyed on
+	// Decision alone the way shared-no-remote's is.
+	t.Run("shared under --global retargets the consent verb", func(t *testing.T) {
+		origGlobal := globalFlag
+		globalFlag = true
+		defer func() { globalFlag = origGlobal }()
+
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 66, LatestVersion: 67, Pending: 1,
+			FallbackReason: "data-behind",
+			Shared:         true,
+		}
+		parsed := capture(t, gate)
+		obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("remote_migrate_gate missing or wrong type: %T", parsed["remote_migrate_gate"])
+		}
+		rawOpts, ok := obj["options"].([]interface{})
+		if !ok || len(rawOpts) != 2 {
+			t.Fatalf("options = %v, want the pull plus the shared consent step", obj["options"])
+		}
+		consent, _ := rawOpts[1].(map[string]interface{})
+		cmds, _ := consent["commands"].([]interface{})
+		if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandGlobal {
+			t.Errorf("consent option commands = %v, want [%q] under --global", cmds, schema.SharedConsentCommandGlobal)
+		}
+		// The pull is target-agnostic and must NOT be rewritten.
+		pull, _ := rawOpts[0].(map[string]interface{})
+		pullCmds, _ := pull["commands"].([]interface{})
+		if len(pullCmds) != 1 || pullCmds[0] != schema.DataBehindRemedyCommand {
+			t.Errorf("pull option commands = %v, want [%q] unchanged", pullCmds, schema.DataBehindRemedyCommand)
+		}
+	})
 }

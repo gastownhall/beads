@@ -44,7 +44,13 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		if globalFlag {
 			sharedConsent = schema.SharedConsentCommandGlobal
 		}
-		retargetShared := globalFlag && e.Decision == "shared-no-remote"
+		// The #6575 data-behind stop on a SHARED store carries the same consent
+		// verb in its second option (migrate-shared-after-pulling), so it needs
+		// the same retarget: under --global the project-scoped verb would
+		// consent the wrong database and leave the refusal in place. It reaches
+		// here through the default arm (empty Decision), so the Decision test
+		// alone would miss it.
+		retargetShared := globalFlag && (e.Decision == "shared-no-remote" || (e.IsDataBehind() && e.Shared))
 
 		opts := make([]map[string]interface{}, 0, len(e.Options()))
 		for _, o := range e.Options() {
