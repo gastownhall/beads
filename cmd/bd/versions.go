@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
@@ -25,7 +24,20 @@ import (
 var (
 	errVersionedHistoryOff = errors.New("versioned history is not enabled on this store")
 	errVersionsUnsupported = errors.New("this storage backend cannot serve version history")
+	errNoSuchBead          = errors.New("no such bead")
 )
+
+// versionsOutcome is what runVersions resolved, kept apart from the rendering
+// so the four ways of having nothing to show stay four different answers.
+type versionsOutcome struct {
+	Versions []storage.IssueVersion
+	// Recording reports whether the store is recording versions RIGHT NOW.
+	// It is independent of whether Versions is empty: a store that recorded
+	// for a month and was then switched off still has versions, and saying
+	// otherwise would be a claim about the store made from a fact about this
+	// invocation's config.
+	Recording bool
+}
 
 var versionsCmd = &cobra.Command{
 	Use:     "versions <id>",
@@ -33,15 +45,29 @@ var versionsCmd = &cobra.Command{
 	Short:   "List the recorded versions of a bead",
 	Long: `List the versions recorded for a bead by versioned history.
 
-Versioned history is off by default. Turn it on with:
+Recording is off by default. Turn it on with:
 
   bd config set versioned-history.enabled true
-  # or, per invocation:
+
+That writes the setting into the store, so every client of that store agrees
+about whether a write is recorded. For a single run without changing the
+store:
+
   BD_VERSIONED_HISTORY_ENABLED=1 bd versions <id>
 
-Versions are recorded from the moment the feature is switched on. Enabling it
-does not backfill anything that happened before, so a bead edited yesterday
-shows no versions until it is edited again.
+Either source turning it on is enough; neither can switch the other off.
+
+Versions are recorded from the moment recording is turned on. It does not
+backfill, so a bead edited yesterday shows nothing until it is edited again.
+
+Turning recording off does not hide what was already recorded — this command
+still lists it, and says that recording is currently off.
+
+A caution while the feature is young: keep recording ON for every writer of a
+shared store, or leave it off for all of them. A write from a client with
+recording off advances nothing, and the next recorded write mints a version
+that absorbs that unrecorded change under its own actor — the revisions stay
+contiguous and the listing looks gapless when it is not.
 
 Examples:
   bd versions bd-123
@@ -58,20 +84,27 @@ Examples:
 		}()
 
 		issueID := args[0]
-		if resolved, err := utils.ResolvePartialID(rootCtx, store, issueID); err == nil {
-			issueID = resolved
+		resolved := false
+		if full, err := utils.ResolvePartialID(rootCtx, store, issueID); err == nil {
+			issueID, resolved = full, true
 		} else if errors.Is(err, utils.ErrAmbiguousID) {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		versions, err := runVersions(rootCtx, store, issueID, config.GetBool("versioned-history.enabled"))
+		recording := versionedHistoryEnabled(rootCtx, store)
+
+		outcome, err := runVersions(rootCtx, store, issueID, recording, resolved)
 		switch {
+		case errors.Is(err, errNoSuchBead):
+			return HandleErrorRespectJSON(
+				"no bead %s in this store, and no versions recorded under that id.", issueID)
 		case errors.Is(err, errVersionedHistoryOff):
 			return HandleErrorRespectJSON(
-				"versioned history is not enabled on this store, so no versions are recorded.\n"+
-					"Enable it with:  bd config set versioned-history.enabled true\n"+
-					"or per command:  BD_VERSIONED_HISTORY_ENABLED=1 bd versions %s\n"+
-					"Enabling records new versions from that point on; it does not backfill.", issueID)
+				"versioned history is not being recorded on this store, and nothing was recorded earlier.\n"+
+					"Turn it on with:  bd config set %s true\n"+
+					"or for one run:   BD_VERSIONED_HISTORY_ENABLED=1 bd versions %s\n"+
+					"Recording starts from that point on; it does not backfill.",
+				versionedHistorySettingKey, issueID)
 		case errors.Is(err, errVersionsUnsupported):
 			return HandleErrorRespectJSON(
 				"this storage backend cannot serve version history (proxied, no-db and non-Dolt backends cannot).\n" +
@@ -81,24 +114,53 @@ Examples:
 		}
 
 		if jsonOutput {
-			return outputJSON(versions)
+			return outputJSON(outcome.Versions)
 		}
-		printVersions(issueID, versions)
+		printVersions(issueID, outcome)
 		return nil
 	},
 }
 
-// runVersions is the testable core: it refuses before it reads, so a caller
-// can never confuse "off" or "unsupported" with "none".
-func runVersions(ctx context.Context, backend any, issueID string, enabled bool) ([]storage.IssueVersion, error) {
-	if !enabled {
-		return nil, errVersionedHistoryOff
-	}
+// runVersions is the testable core. It separates four situations that all
+// look like "nothing here" and each need a different response.
+//
+// It deliberately READS EVEN WHEN RECORDING IS OFF. An earlier version
+// refused up front, which meant a store that recorded for a month and was
+// then switched off reported "no versions are recorded" -- a claim about the
+// store, derived from a fact about this invocation's config. storage
+// .VersionLister's own doc already says the two are independent: holding the
+// capability says the backend can READ versions and says nothing about
+// whether recording is on. (bee-ghosttrack, #6661 review, finding 3.)
+//
+// resolved reports whether issueID named a bead the store knows. An
+// unresolved id with no versions is "no such bead", not "none yet" -- falling
+// through on an unresolved id is right, because a deleted bead can still have
+// versions, but only until the answer turns out to be empty. (Same review,
+// finding 4.)
+func runVersions(ctx context.Context, backend any, issueID string, recording, resolved bool) (versionsOutcome, error) {
 	lister, ok := versionListerFor(backend)
 	if !ok {
-		return nil, errVersionsUnsupported
+		return versionsOutcome{}, errVersionsUnsupported
 	}
-	return lister.ListVersions(ctx, issueID)
+
+	versions, err := lister.ListVersions(ctx, issueID)
+	if err != nil {
+		return versionsOutcome{}, err
+	}
+	if len(versions) > 0 {
+		// Something was recorded. Whether recording is on right now changes
+		// the footnote, never whether these rows are shown.
+		return versionsOutcome{Versions: versions, Recording: recording}, nil
+	}
+
+	// Nothing to show. Which of the three reasons it is decides the message.
+	if !resolved {
+		return versionsOutcome{}, errNoSuchBead
+	}
+	if !recording {
+		return versionsOutcome{}, errVersionedHistoryOff
+	}
+	return versionsOutcome{Recording: true}, nil
 }
 
 // versionListerFor finds the VersionLister behind whatever cmd/bd is holding.
@@ -125,10 +187,13 @@ func versionListerFor(backend any) (storage.VersionLister, bool) {
 	return nil, false
 }
 
-func printVersions(issueID string, versions []storage.IssueVersion) {
+func printVersions(issueID string, outcome versionsOutcome) {
+	versions := outcome.Versions
 	if len(versions) == 0 {
+		// Recording is on (runVersions refuses otherwise) and the bead
+		// resolved, so this is the honest empty: nothing has changed yet.
 		fmt.Printf("\nNo versions recorded for %s yet.\n", issueID)
-		fmt.Println(ui.RenderMuted("Versioned history records a version on each accepted change from the time it was enabled; it does not backfill."))
+		fmt.Println(ui.RenderMuted("A version is recorded on each accepted change from the time recording was turned on; it does not backfill."))
 		return
 	}
 
@@ -163,6 +228,13 @@ func printVersions(issueID string, versions []storage.IssueVersion) {
 	}
 
 	fmt.Println()
+	if !outcome.Recording {
+		// The rows are real; recording is simply off now. Saying nothing here
+		// would let a stale listing read as current.
+		fmt.Println(ui.RenderWarn("Recording is currently OFF — this listing ends where it was switched off."))
+		fmt.Println(ui.RenderMuted(fmt.Sprintf("Turn it back on with:  bd config set %s true", versionedHistorySettingKey)))
+		fmt.Println()
+	}
 	fmt.Println(ui.RenderMuted("REV is local to this store and is not a citable address: two clones can"))
 	fmt.Println(ui.RenderMuted("both hold revision 8 of the same bead. Portable version addresses arrive"))
 	fmt.Println(ui.RenderMuted("with the version_id change."))

@@ -1446,3 +1446,8 @@ func (s *EmbeddedDoltStore) GetStaleIssues(ctx context.Context, filter types.Sta
 	})
 	return result, err
 }
+
+// Compile-time proof that this leg serves versions -- see the matching
+// assertion in internal/storage/dolt/versioned.go for why it lives in the
+// leg's own package.
+var _ storage.VersionLister = (*EmbeddedDoltStore)(nil)

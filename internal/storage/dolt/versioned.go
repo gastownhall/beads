@@ -301,3 +301,9 @@ func isSafeCommitRef(s string) bool {
 	}
 	return true
 }
+
+// Compile-time proof that this leg serves versions. It lives here rather than
+// in package storage because storage cannot import the legs. Dropping
+// ListVersions is then a build failure rather than a silent demotion to
+// "this backend cannot serve version history" at runtime.
+var _ storage.VersionLister = (*DoltStore)(nil)

@@ -186,7 +186,12 @@ func TestVersionedHistoryConfigAppliesToTheRawStore(t *testing.T) {
 
 	wrapped := storage.DoltStorage(wireExternalDependencyPolicy(telemetry.WrapStorage(raw)))
 	if _, ok := wrapped.(storage.VersionedHistoryConfigurer); ok {
-		t.Skip("a decorator now forwards SetVersionedHistoryEnabled; the ordering constraint has changed and this test needs rewriting rather than silently passing")
+		// Fatal, not Skip. A skip here returns BEFORE the afterWrap
+		// assertion below -- the half that actually guards the ordering --
+		// so the case would report "not applicable" while checking nothing.
+		// If a decorator starts forwarding, the constraint this test exists
+		// for has changed and the test must be rewritten, not quietly passed.
+		t.Fatal("a decorator now forwards SetVersionedHistoryEnabled; the ordering constraint has changed and this test needs rewriting rather than silently passing")
 	}
 
 	var afterWrap bool

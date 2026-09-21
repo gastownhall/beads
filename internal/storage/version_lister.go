@@ -67,7 +67,3 @@ type VersionLister interface {
 	// unsupported is the failed type assertion.
 	ListVersions(ctx context.Context, issueID string) ([]IssueVersion, error)
 }
-
-// Compile-time proof that the legs which can serve versions actually do.
-// A leg dropped from this list is a leg `bd versions` will report as
-// unsupported, which is a visible behavior change, not a silent one.

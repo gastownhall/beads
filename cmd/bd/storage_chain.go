@@ -32,7 +32,7 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 	if store == nil {
 		return nil
 	}
-	applyVersionedHistoryConfig(store, config.GetBool("versioned-history.enabled"))
+	applyVersionedHistoryConfig(store, versionedHistoryEnabled(context.Background(), store))
 	store = telemetry.WrapStorage(store)
 	store = wireExternalDependencyPolicy(store)
 	if hookRunner != nil && !hooksDisabled {
@@ -102,7 +102,7 @@ func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.Unit
 // against the wrapper, fail silently, and leave history off while the config
 // said it was on. That is the "wrong answer, not an empty one" failure this
 // feature exists to avoid, so the ordering is pinned by
-// TestVersionedHistoryConfigAppliesBeforeDecorators.
+// TestVersionedHistoryConfigAppliesToTheRawStore.
 //
 // A store that does not implement the capability is not an error: proxied and
 // no-db backends legitimately do not. But it is not silently ignored either --

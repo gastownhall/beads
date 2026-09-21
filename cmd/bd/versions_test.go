@@ -30,16 +30,46 @@ type notAVersionLister struct{ storage.DoltStorage }
 func TestVersionsRefusesWhenFlagOff(t *testing.T) {
 	backend := &fakeVersionLister{versions: []storage.IssueVersion{{Revision: 1}}}
 
-	got, err := runVersions(context.Background(), backend, "bd-1", false)
+	// Recording off AND nothing recorded: refuse with the remedy.
+	got, err := runVersions(context.Background(), &fakeVersionLister{}, "bd-1", false, true)
 
 	if !errors.Is(err, errVersionedHistoryOff) {
-		t.Fatalf("runVersions(enabled=false) error = %v, want errVersionedHistoryOff", err)
+		t.Fatalf("runVersions(recording=false, empty) error = %v, want errVersionedHistoryOff", err)
 	}
-	if got != nil {
-		t.Errorf("runVersions(enabled=false) returned %d versions, want none", len(got))
+	if len(got.Versions) != 0 {
+		t.Errorf("returned %d versions, want none", len(got.Versions))
 	}
-	if backend.called {
-		t.Error("runVersions(enabled=false) queried the backend; it must refuse before reading")
+	_ = backend
+}
+
+// TestVersionsOffButRecordedStillLists is finding 3 from bee's #6661 review:
+// a store that recorded for a month and was then switched off HAS versions,
+// and refusing with "nothing is recorded" states a fact about this
+// invocation's config as if it were a fact about the store.
+func TestVersionsOffButRecordedStillLists(t *testing.T) {
+	backend := &fakeVersionLister{versions: []storage.IssueVersion{{Revision: 3}, {Revision: 2}}}
+
+	got, err := runVersions(context.Background(), backend, "bd-1", false, true)
+
+	if err != nil {
+		t.Fatalf("runVersions(recording=false, 2 rows) = %v, want the rows", err)
+	}
+	if len(got.Versions) != 2 {
+		t.Fatalf("got %d versions, want 2 — recorded history must survive the switch going off", len(got.Versions))
+	}
+	if got.Recording {
+		t.Error("Recording should be false so the caller can say the listing ends where recording stopped")
+	}
+}
+
+// TestVersionsUnresolvedIDIsNotAnEmptyBead is finding 4: falling through on an
+// unresolved id is right (a deleted bead can still have versions), but only
+// until the answer is empty. Then it is "no such bead", not "none yet".
+func TestVersionsUnresolvedIDIsNotAnEmptyBead(t *testing.T) {
+	_, err := runVersions(context.Background(), &fakeVersionLister{}, "nosuch-id", true, false)
+
+	if !errors.Is(err, errNoSuchBead) {
+		t.Fatalf("runVersions(resolved=false, empty) error = %v, want errNoSuchBead", err)
 	}
 }
 
@@ -47,7 +77,7 @@ func TestVersionsRefusesWhenFlagOff(t *testing.T) {
 // is distinguishable from "there are no versions" -- the third shape of an
 // answer, not a smaller success.
 func TestVersionsRefusesUnsupportedBackend(t *testing.T) {
-	_, err := runVersions(context.Background(), &notAVersionLister{}, "bd-1", true)
+	_, err := runVersions(context.Background(), &notAVersionLister{}, "bd-1", true, true)
 
 	if !errors.Is(err, errVersionsUnsupported) {
 		t.Fatalf("runVersions(unsupported backend) error = %v, want errVersionsUnsupported", err)
@@ -61,12 +91,12 @@ func TestVersionsRefusesUnsupportedBackend(t *testing.T) {
 // store with nothing recorded returns an empty list and no error. That is a
 // truthful answer, and the command renders the no-backfill explanation.
 func TestVersionsEmptyIsNotAnError(t *testing.T) {
-	got, err := runVersions(context.Background(), &fakeVersionLister{}, "bd-1", true)
+	got, err := runVersions(context.Background(), &fakeVersionLister{}, "bd-1", true, true)
 	if err != nil {
 		t.Fatalf("runVersions on an empty store = %v, want nil", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("got %d versions, want 0", len(got))
+	if len(got.Versions) != 0 {
+		t.Errorf("got %d versions, want 0", len(got.Versions))
 	}
 }
 
