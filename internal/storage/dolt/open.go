@@ -428,6 +428,9 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if !cfg.ServerTLS {
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
+	if !cfg.ServerAllowCleartextPassword {
+		cfg.ServerAllowCleartextPassword = fileCfg.GetDoltServerAllowCleartextPassword()
+	}
 
 	applyPoolKnobs(cfg)
 

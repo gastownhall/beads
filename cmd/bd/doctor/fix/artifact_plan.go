@@ -148,7 +148,7 @@ func metadataNamesDolt(cfg *configfile.Config) bool {
 			return true
 		}
 	}
-	return cfg.Backend == configfile.BackendDolt || cfg.DoltServerPort != 0 || cfg.DoltRemotesAPIPort != 0 || cfg.DoltServerTLS || cfg.DoltTeamServer
+	return cfg.Backend == configfile.BackendDolt || cfg.DoltServerPort != 0 || cfg.DoltRemotesAPIPort != 0 || cfg.DoltServerTLS || cfg.DoltServerAllowCleartextPassword || cfg.DoltTeamServer
 }
 
 // holdsRedirect reports whether entries, those of a .beads directory, include
