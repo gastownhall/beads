@@ -112,3 +112,49 @@ func TestServerDSN_TLSEnabledWhenRequested(t *testing.T) {
 		t.Errorf("DSN should not contain tls=false when TLS is enabled; got %q", dsn)
 	}
 }
+
+func TestServerDSN_AllowCleartextPasswordsOmittedByDefault(t *testing.T) {
+	dsn := ServerDSN{
+		Host: "dolt.example.com",
+		Port: 3307,
+		User: "root",
+		TLS:  true,
+	}.String()
+
+	// go-sql-driver/mysql only writes allowCleartextPasswords when true.
+	if strings.Contains(dsn, "allowCleartextPasswords") {
+		t.Errorf("DSN should not mention allowCleartextPasswords by default; got %q", dsn)
+	}
+}
+
+func TestServerDSN_AllowCleartextPasswordsEnabledWhenRequested(t *testing.T) {
+	dsn := ServerDSN{
+		Host:                    "dolt.example.com",
+		Port:                    3307,
+		User:                    "root",
+		TLS:                     true,
+		AllowCleartextPasswords: true,
+	}.String()
+
+	if !strings.Contains(dsn, "allowCleartextPasswords=true") {
+		t.Errorf("DSN should contain allowCleartextPasswords=true when requested; got %q", dsn)
+	}
+}
+
+func TestServerDSN_AllowCleartextPasswordsIndependentOfTLS(t *testing.T) {
+	// String() doesn't enforce the TLS pairing; the gate is
+	// internal/storage/dolt.validateServerAuthConfig.
+	dsn := ServerDSN{
+		Host:                    "dolt.example.com",
+		Port:                    3307,
+		User:                    "root",
+		AllowCleartextPasswords: true,
+	}.String()
+
+	if !strings.Contains(dsn, "allowCleartextPasswords=true") {
+		t.Errorf("DSN should contain allowCleartextPasswords=true even without TLS; got %q", dsn)
+	}
+	if !strings.Contains(dsn, "tls=false") {
+		t.Errorf("DSN should still contain tls=false when TLS was not requested; got %q", dsn)
+	}
+}

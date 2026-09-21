@@ -559,6 +559,7 @@ dolt:
 | `BEADS_DOLT_SERVER_HOST` | Server host (default: 127.0.0.1) |
 | `BEADS_DOLT_SERVER_PORT` | Server port (default: 3307, or 3308 in shared mode) |
 | `BEADS_DOLT_SERVER_TLS` | Enable TLS (set to "1" or "true") |
+| `BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD` | Allow the `mysql_clear_password` auth plugin (set to "1" or "true"); only takes effect together with `BEADS_DOLT_SERVER_TLS=1`, refused otherwise |
 | `BEADS_DOLT_SERVER_USER` | MySQL connection user |
 | `BEADS_DOLT_SHARED_SERVER` | Enable shared server mode (set to "1" or "true") |
 | `DOLT_REMOTE_USER` | Clone/push/pull auth user |
