@@ -8,7 +8,19 @@ import (
 	"testing"
 )
 
-// TestVersionedHistorySwitchRoundTrip_Embedded drives the REAL
+// THE NAME IS LOAD-BEARING: it must keep the TestEmbedded prefix, because
+// .github/scripts/embedded-test-shard.sh selects what runs with
+// `grep -rh '^func TestEmbedded' cmd/bd/*_embedded_test.go` and validates each
+// manifest entry against `^TestEmbedded[A-Za-z0-9_]+$`. As
+// TestVersionedHistorySwitchRoundTrip_Embedded this test matched neither, so
+// the only job that sets BEADS_TEST_EMBEDDED_DOLT=1 for cmd/bd never selected
+// it, and the generic Test jobs run without that env so its own guard skipped
+// it there. The one test that can see the two planes disagree therefore ran
+// only on the author's machine. Renaming it is the whole fix -- a test absent
+// from the manifest still gets a shard from the fallback distribution.
+// (bee-ghosttrack, #6661 third review, blocking finding 2.)
+//
+// TestEmbeddedVersionedHistorySwitchRoundTrip drives the REAL
 // `bd config set versioned-history.enabled true` through to a real
 // `bd versions`, against a real store.
 //
@@ -25,7 +37,7 @@ import (
 //
 // The env var is explicitly cleared for the write and read below, so a
 // passing run proves the STORE setting alone carried it.
-func TestVersionedHistorySwitchRoundTrip_Embedded(t *testing.T) {
+func TestEmbeddedVersionedHistorySwitchRoundTrip(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
