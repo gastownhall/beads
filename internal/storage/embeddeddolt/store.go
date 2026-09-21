@@ -455,14 +455,39 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				"    • every other clone (another already migrated): bd bootstrap\n" +
 				"    • several machines: only ONE migrates; sync each other clone and run\n" +
 				"      bd dolt pull after the migrator pushes, before upgrading it\n"
+			// #6575: sharedGuidance is the blunt migrate-or-adopt block, and
+			// on the data-behind stop every bullet in it is measurably wrong
+			// — `bd migrate --force` applies the migration this stop exists
+			// to prevent, the `bd dolt push` after it is rejected
+			// non-fast-forward while the clone is still behind, and
+			// `bd bootstrap` no-ops against an existing workspace. The one
+			// command that moves the clone forward is `bd dolt pull`, and
+			// gateErr's own UserMessage is where that body lives, already
+			// branched for the fast-forward and diverged pulls. Printing
+			// %v (Error(), the one-line summary) and appending the bullets
+			// dropped it: a 1.1-era upgrader's first `bd list` and their
+			// `bd dolt commit` both land in the two arms below, so the first
+			// thing bd said to a data-behind clone was the wedge. Server
+			// mode's warnLenientOpenRefusal (dolt/store.go) has rendered
+			// UserMessage all along; these arms are the ones that lagged.
+			//
+			// The intent framing stays: the command in hand is still
+			// SUCCEEDING against the old schema, which UserMessage — written
+			// for the fatal refusal — does not say. So the mode line is
+			// appended to the data-behind body rather than replacing it.
+			body := "Warning: " + gateErr.Error() + "\n"
+			if gateErr.IsDataBehind() {
+				body = "Warning: " + gateErr.UserMessage()
+			}
 			switch s.intent {
 			case openRemoteSync:
-				// #6575: this is the refusal's own prescribed remedy running.
-				// It gets the data-behind guidance, not the migrate-or-adopt
-				// coordination text — there is no decision to make here, and
-				// naming `bd migrate --force` at the moment the operator is
-				// finally doing the right thing is how the last round sent
-				// people back into the wedge.
+				// This is the refusal's own prescribed remedy running. It gets
+				// the short confirmation rather than the full data-behind body:
+				// toleratesGateRefusal admits only the data-behind stop here, so
+				// the operator has necessarily just been handed that body by the
+				// command this pull is unblocking, and re-printing "pull first"
+				// at the moment they are finally doing it is noise. What it must
+				// never do is name `bd migrate --force`.
 				fmt.Fprintf(os.Stderr,
 					"Warning: %[1]v\n"+
 						"  Remote-sync command: continuing on schema v%[2]d without migrating, so\n"+
@@ -470,18 +495,36 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 						"  command you were blocked on once it completes.\n",
 					gateErr, gateErr.CurrentVersion)
 			case openWorkingSetReconcile:
+				if gateErr.IsDataBehind() {
+					fmt.Fprintf(os.Stderr,
+						"%[1]s"+
+							"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
+							"  migrating; the commit applies to the working set at the current\n"+
+							"  schema. It does not resolve the schema — the pull above is what does.\n",
+						body, gateErr.CurrentVersion)
+					break
+				}
 				fmt.Fprintf(os.Stderr,
-					"Warning: %[1]v\n"+
+					"%[1]s"+
 						"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
 						"  migrating; the commit applies to the working set at the current\n"+
 						"  schema."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion)
+					body, gateErr.CurrentVersion)
 			default: // openReadOnlyCommand
+				if gateErr.IsDataBehind() {
+					fmt.Fprintf(os.Stderr,
+						"%[1]s"+
+							"  Read-only command: continuing on schema v%[2]d without migrating, so\n"+
+							"  this read succeeds against the old schema. Writes stay blocked until\n"+
+							"  this clone has pulled.\n",
+						body, gateErr.CurrentVersion)
+					break
+				}
 				fmt.Fprintf(os.Stderr,
-					"Warning: %[1]v\n"+
+					"%[1]s"+
 						"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
 						"  Writes are blocked until the schema is reconciled."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion)
+					body, gateErr.CurrentVersion)
 			}
 			return nil
 		}

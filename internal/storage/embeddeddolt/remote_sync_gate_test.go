@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -222,5 +223,159 @@ func TestEmbeddedOpenForRemoteSync_OtherRefusalsStayFatal(t *testing.T) {
 	}
 	if rmErr.IsDataBehind() {
 		t.Fatalf("FallbackReason = %q; with the smart gate off this must be the blunt opted-out stop", rmErr.FallbackReason)
+	}
+}
+
+// TestEmbeddedLenientOpenWarning_DataBehind is the READ-path half of
+// gastownhall/beads#6575, and the half the write-path fix missed.
+//
+// The lenient embedded opens do not fail on this refusal — they warn and carry
+// on — so the warning IS the entire user-facing contract for `bd list`,
+// `bd ready`, `bd show` (openReadOnlyCommand) and `bd dolt commit`
+// (openWorkingSetReconcile). Those are the first commands a 1.1-era upgrader
+// runs and the ones agents run constantly, and they printed the blunt #4259
+// coordination bullets: `bd migrate --force && bd dolt push`, which on a
+// data-behind clone applies the migration this stop exists to prevent and then
+// fails the push non-fast-forward, and `bd bootstrap`, which no-ops against an
+// existing workspace. A fence whose own signage pointed into the wedge.
+//
+// The assertions are deliberately two-sided — the pull must be present AND the
+// wedge commands must be absent — because the previous round satisfied
+// "mentions the remedy somewhere" while still printing the bullets underneath
+// it.
+func TestEmbeddedLenientOpenWarning_DataBehind(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	shapes := []struct {
+		name              string
+		extraLocalCommits int
+		wantShapeText     string
+		notShapeText      string
+	}{
+		{
+			name:          "fast-forward (ahead 0, behind 1)",
+			wantShapeText: "pure fast-forward",
+			notShapeText:  "MERGES rather than",
+		},
+		{
+			name:              "diverged (ahead 1, behind 1)",
+			extraLocalCommits: 1,
+			wantShapeText:     "MERGES rather than",
+			notShapeText:      "pure fast-forward",
+		},
+	}
+	intents := []struct {
+		name     string
+		open     func(t *testing.T, beadsDir string) (*embeddeddolt.EmbeddedDoltStore, error)
+		modeText string
+	}{
+		{
+			name: "openReadOnlyCommand (bd list)",
+			open: func(t *testing.T, beadsDir string) (*embeddeddolt.EmbeddedDoltStore, error) {
+				return embeddeddolt.OpenForReadOnlyCommand(t.Context(), beadsDir, "testdb", "main")
+			},
+			modeText: "Read-only command: continuing on schema v",
+		},
+		{
+			name: "openWorkingSetReconcile (bd dolt commit)",
+			open: func(t *testing.T, beadsDir string) (*embeddeddolt.EmbeddedDoltStore, error) {
+				return embeddeddolt.OpenForWorkingSetReconcile(t.Context(), beadsDir, "testdb", "main")
+			},
+			modeText: "Working-set reconcile command: continuing on schema v",
+		},
+	}
+
+	for _, shape := range shapes {
+		for _, intent := range intents {
+			t.Run(shape.name+"/"+intent.name, func(t *testing.T) {
+				t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+				t.Setenv(schema.SmartGateEnv, "1")
+				schema.SetForceAllowRemoteMigrate(false)
+
+				beadsDir := filepath.Join(t.TempDir(), ".beads")
+				buildDataBehindEmbedded(t, beadsDir, shape.extraLocalCommits)
+
+				var store *embeddeddolt.EmbeddedDoltStore
+				var openErr error
+				warning := captureStderr(t, func() {
+					store, openErr = intent.open(t, beadsDir)
+				})
+				if openErr != nil {
+					t.Fatalf("lenient open of a data-behind DB = %v; it must warn and continue", openErr)
+				}
+				store.Close()
+				pendingMigrationStillPending(t, beadsDir)
+
+				for _, want := range []string{
+					schema.DataBehindRemedyCommand,
+					"This clone is BEHIND the remote",
+					"Do NOT use `bd migrate --force` to get past this",
+					shape.wantShapeText,
+					intent.modeText,
+				} {
+					if !strings.Contains(warning, want) {
+						t.Errorf("warning is missing %q; got:\n%s", want, warning)
+					}
+				}
+				if strings.Contains(warning, shape.notShapeText) {
+					t.Errorf("warning describes the wrong pull shape (%q); got:\n%s", shape.notShapeText, warning)
+				}
+
+				// The blunt #4259 coordination bullets, which ARE the #6575
+				// wedge when this is the refusal.
+				for _, unwanted := range []string{
+					"bd migrate --force && bd dolt push",
+					"designated migrator (only ONE machine)",
+					"bd bootstrap",
+				} {
+					if strings.Contains(warning, unwanted) {
+						t.Errorf("warning still prescribes %q on a data-behind clone; got:\n%s", unwanted, warning)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestEmbeddedLenientOpenWarning_OtherRefusalsKeepBluntGuidance is the other
+// side of that fence. The data-behind body REPLACES the blunt coordination
+// bullets rather than decorating them, so it must not swallow them for the
+// refusals they are right for. BD_SMART_GATE=0 turns the same fixture into the
+// blunt opted-out stop, where migrate-or-adopt genuinely is the decision.
+func TestEmbeddedLenientOpenWarning_OtherRefusalsKeepBluntGuidance(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	schema.SetForceAllowRemoteMigrate(false)
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	t.Setenv(schema.SmartGateEnv, "1")
+	buildDataBehindEmbedded(t, beadsDir, 0)
+	t.Setenv(schema.SmartGateEnv, "0")
+
+	var store *embeddeddolt.EmbeddedDoltStore
+	var openErr error
+	warning := captureStderr(t, func() {
+		store, openErr = embeddeddolt.OpenForReadOnlyCommand(t.Context(), beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("lenient open with the smart gate off = %v; it must warn and continue", openErr)
+	}
+	store.Close()
+
+	for _, want := range []string{
+		"designated migrator (only ONE machine): bd migrate --force && bd dolt push",
+		"every other clone (another already migrated): bd bootstrap",
+		"Read-only command: continuing on schema v",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("blunt warning is missing %q; got:\n%s", want, warning)
+		}
+	}
+	if strings.Contains(warning, "This clone is BEHIND the remote") {
+		t.Errorf("the data-behind body leaked into a non-data-behind refusal; got:\n%s", warning)
 	}
 }
