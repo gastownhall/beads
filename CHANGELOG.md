@@ -81,6 +81,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count the same metadata-scoped set `bd list` returns without fetching every
   row.
 
+- **`bd show --comments-tail N`** renders only the last N comments in text
+  output (including under `--watch`)
+  ([#6618](https://github.com/gastownhall/beads/pull/6618)), preceded by one
+  elision line naming how many older ones were hidden. A render-only cap for
+  fat, append-only beads whose full comment history is hundreds of KB —
+  description and metadata are unchanged, and omitting the flag (or passing
+  `0`) is byte-identical to today's output. JSON output is untouched;
+  `--include-comments` still streams every comment there.
+
 ### Changed
 
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed

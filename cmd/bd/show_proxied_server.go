@@ -36,6 +36,7 @@ type showProxiedInput struct {
 	includeDepends  bool
 	briefDeps       bool
 	includeComments bool
+	commentsTail    int
 }
 
 func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput {
@@ -52,6 +53,7 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	in.includeDepends, _ = cmd.Flags().GetBool("include-dependents")
 	in.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
 	in.includeComments, _ = cmd.Flags().GetBool("include-comments")
+	in.commentsTail, _ = cmd.Flags().GetInt("comments-tail")
 
 	idFlags, _ := cmd.Flags().GetStringArray("id")
 	in.ids = append(in.ids, args...)
@@ -93,6 +95,10 @@ func proxiedIssueReader() (issueops.Reader, error) {
 
 func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	in := gatherShowProxiedInput(cmd, args)
+
+	if err := validateCommentsTail(in.commentsTail); err != nil {
+		return err
+	}
 
 	if in.watchMode {
 		return HandleProxyCapabilityError(AssertProxyCommandCapability("show", ProxyModeProxied, ProxyCapWatch))
@@ -542,16 +548,7 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	printRelatedSection(relatedSeen)
 
 	comments, _ := proxiedGetComments(ctx, uw, issue.ID, isWisp)
-	if len(comments) > 0 {
-		fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
-		for _, c := range comments {
-			fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(c.CreatedAt)), c.Author)
-			rendered := uimd.RenderMarkdown(c.Text)
-			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-				fmt.Printf("    %s\n", line)
-			}
-		}
-	}
+	printComments(comments, in.commentsTail, formatTime, issue.ID)
 
 	if in.longMode {
 		fmt.Print(formatIssueLongExtras(issue, formatTime))

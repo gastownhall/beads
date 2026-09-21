@@ -296,6 +296,58 @@ func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
 	}
 }
 
+// validateCommentsTail rejects a negative --comments-tail value the same way
+// on both show routes (direct and --proxied-server): a negative render cap
+// has no meaning, so it is a usage error rather than a silently-clamped
+// default, matching how resolveMaxRows (max_rows.go) rejects a negative
+// --max-rows.
+func validateCommentsTail(n int) error {
+	if n < 0 {
+		return HandleErrorRespectJSON("--comments-tail must be non-negative; got %d", n)
+	}
+	return nil
+}
+
+// printComments prints the COMMENTS section of bd show's text-mode output:
+// the bold heading, then one block per comment (muted timestamp + author,
+// rendered markdown body). Both show routes (direct and --proxied-server)
+// call this so the render stays identical between them.
+//
+// tailN is the --comments-tail cap: <= 0 or >= len(comments) renders every
+// comment with no elision line, byte-identical to the output before the flag
+// existed (the flag's off state MUST be indistinguishable from its absence).
+// A real cap — 0 < tailN < len(comments) — hides the older comments behind
+// exactly one muted elision line naming how many were hidden (singular for
+// one), then renders only the last tailN in their existing order and format.
+// issueID feeds the elision line's "bd show <id>" pointer at the full
+// record.
+func printComments(comments []*types.Comment, tailN int, formatTime func(time.Time) string, issueID string) {
+	if len(comments) == 0 {
+		return
+	}
+	fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
+
+	start := 0
+	if tailN > 0 && tailN < len(comments) {
+		hidden := len(comments) - tailN
+		start = hidden
+		noun := "comments"
+		if hidden == 1 {
+			noun = "comment"
+		}
+		fmt.Printf("  %s\n", ui.RenderMuted(fmt.Sprintf("… %d older %s hidden — bd show %s for the full record", hidden, noun, issueID)))
+	}
+
+	for _, comment := range comments[start:] {
+		fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
+		rendered := uimd.RenderMarkdown(comment.Text)
+		// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
+		for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
+			fmt.Printf("    %s\n", line)
+		}
+	}
+}
+
 // formatSimpleDependencyLine formats a dependency without metadata (fallback)
 // Closed items get entire row muted - the work is done, no need for attention
 func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {
