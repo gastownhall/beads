@@ -13,12 +13,21 @@ import (
 // header says so, and the flag is single-writer-only until the version_id
 // primary key lands). Callers must not present it as a citable address.
 //
+// Its JSON key is "local_revision", NOT "revision", for two reasons that
+// compound. types.Issue already ships `json:"revision"` (types.go:1206) and
+// that is the row-lock CAS token, an unrelated thing -- and it is a STRING
+// there while this is an int64, so a script that learned one shape breaks on
+// the other. The name also carries the non-citability with the value, where a
+// machine reader sees it, instead of only in a footer no script parses. It
+// needs no rename when version_id lands beside it. (bee-ghosttrack, #5898
+// consumer read, 2026-09-20.)
+//
 // It lives here rather than in issueops for the same reason HistoryEntry
 // does: issueops imports storage, so the shared row type has to sit on this
 // side of that edge.
 type IssueVersion struct {
 	IssueID            string     `json:"issue_id"`
-	Revision           int64      `json:"revision"`
+	Revision           int64      `json:"local_revision"`
 	Epoch              int64      `json:"epoch"`
 	ChangeActor        string     `json:"change_actor"`
 	ChangeAgent        string     `json:"change_agent"`

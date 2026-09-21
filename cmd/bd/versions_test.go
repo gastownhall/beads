@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -110,5 +111,37 @@ func TestRestrictionLabelsAreDistinct(t *testing.T) {
 	}
 	if restrictionLabel("unknown") == restrictionLabel("gone_erasure") {
 		t.Error("unknown must not read as gone: no lineage knowledge is not erasure")
+	}
+}
+
+// TestVersionsJSONDoesNotCollideWithIssueRevision pins that the versions
+// payload does not emit a "revision" key.
+//
+// types.Issue already ships `json:"revision"` and it is the row-lock CAS
+// token -- an unrelated value, and a STRING where this one is a number. One
+// key carrying two meanings, in the place machines read, is the `bd version`
+// collision again with worse consequences: a script that learned one shape
+// gets the other and cannot tell. Raised by bee-ghosttrack's consumer read on
+// #5898, who reported a couple of hundred script files parsing bd --json.
+func TestVersionsJSONDoesNotCollideWithIssueRevision(t *testing.T) {
+	blob, err := json.Marshal(storage.IssueVersion{Revision: 7, IssueID: "bd-1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var generic map[string]any
+	if err := json.Unmarshal(blob, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if _, collides := generic["revision"]; collides {
+		t.Errorf(`IssueVersion emits a "revision" key; types.Issue already uses that key for the row-lock token. Got: %s`, blob)
+	}
+	got, ok := generic["local_revision"]
+	if !ok {
+		t.Fatalf(`IssueVersion has no "local_revision" key. Got: %s`, blob)
+	}
+	if n, isNum := got.(float64); !isNum || n != 7 {
+		t.Errorf("local_revision = %v, want 7", got)
 	}
 }
