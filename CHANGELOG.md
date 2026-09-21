@@ -100,17 +100,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warns. `bd doctor --fix` appends the rule and silences it; workspaces
   initialised after this release get it from the template and never warn.
 
-- **Opening a store against an unreachable Dolt server now takes up to ~30s to
-  fail instead of failing at once**
-  ([#6003](https://github.com/gastownhall/beads/pull/6003)). The bootstrap ping
-  is retried for up to 30 seconds, each attempt capped at 10s, so a server still
-  coming up is waited out rather than turned into a hard failure (see
-  **Fixed**). The cost is that a genuinely dead or misconfigured endpoint no
+- **Opening a store against an unreachable Dolt server now takes up to ~40s to
+  fail instead of failing at once — on proxied-server workspaces, and under
+  `bd serve`** ([#6003](https://github.com/gastownhall/beads/pull/6003)). The
+  bootstrap ping is retried for up to 30 seconds, each attempt capped at 10s, so
+  a server still coming up is waited out rather than turned into a hard failure
+  (see **Fixed**). The cost is that a genuinely dead or misconfigured endpoint no
   longer errors immediately: an interactive command against a stopped server, and
   any script or CI step that counted on a fast failure, now waits out the retry
   budget first. Durable rejections — bad credentials, unknown database, a
   hostname that does not resolve — are still reported immediately without
   retrying.
+
+  Only the paths that build a unit-of-work provider take that ping, so this is a
+  minority of topologies: every command in a proxied-server workspace, local or
+  external, and `bd serve` in a server, external-server or shared-server
+  workspace, which builds its own provider through the same funnel. **Embedded —
+  the default — is unaffected entirely**; `bd serve` refuses it outright, and no
+  embedded command can slow down here. An ordinary CLI command in a server or
+  shared-server workspace is also unaffected: it opens a Dolt store, which does
+  not take this ping. Only that mode's `bd serve` startup does.
+
+  The 30s figure is the retry budget, not the wall-clock bound. It stops
+  *scheduling* attempts at 30s but cannot cancel one already in flight, and each
+  attempt carries its own 10s cap, so ~40s is the honest worst case for a single
+  open. A provider open pings twice — once for the schema-init connection, once
+  for the database pool — each with a fresh budget, so a backend that satisfies
+  the first ping and the schema init and is then unreachable for the second can
+  push one command to ~80s. That ordering is narrow, but it is reachable.
 
 - **A backup sync that would leave the backup's manifest ahead of its chunk
   files now fails at that point instead of corrupting the backup quietly**
