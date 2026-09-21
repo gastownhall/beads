@@ -416,6 +416,17 @@ type fakeAdopter struct {
 	ffCalls         int
 
 	readOnly bool
+
+	// aheadResult/behindResult/aheadBehindErr back the AheadBehind callback,
+	// counted by aheadBehindCalls. Wired into the adopter only when
+	// withAheadBehind is true, so the tests that leave it off keep exercising
+	// the IsStrictAncestor-only fallback an injection site that never wired
+	// the newer callback would take (gastownhall/beads#6575).
+	withAheadBehind  bool
+	aheadResult      int
+	behindResult     int
+	aheadBehindErr   error
+	aheadBehindCalls int
 }
 
 func (f *fakeAdopter) adopter() *FastForwardAdopter {
@@ -434,6 +445,12 @@ func (f *fakeAdopter) adopter() *FastForwardAdopter {
 		a.FastForward = func(_ context.Context, _ DBConn, _ string) error {
 			f.ffCalls++
 			return f.ffErr
+		}
+	}
+	if f.withAheadBehind {
+		a.AheadBehind = func(_ context.Context, _ DBConn, _ string) (int, int, error) {
+			f.aheadBehindCalls++
+			return f.aheadResult, f.behindResult, f.aheadBehindErr
 		}
 	}
 	return a
@@ -1034,6 +1051,253 @@ func TestSmartGateRoutingDataBehind(t *testing.T) {
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
+// TestSmartGateRoutingDataBehindShapes covers the widened data-behind
+// predicate (gastownhall/beads#6575 review finding F2): the stop is keyed on
+// behind >= 1 whatever ahead is, not on the strict-ancestor relation.
+//
+// The narrower form protected only a clone with zero local commits, and bd
+// auto-commits every write — so "has local commits AND is behind" is the
+// ORDINARY multi-machine state, and it reaches the identical wedge (the
+// pending migration lands on a history missing the remote's commits either
+// way). What differs is the remedy's behavior, not the remedy: the pull
+// fast-forwards in one shape and merges in the other, so the two verdicts stay
+// distinguishable all the way out to the message and the JSON.
+func TestSmartGateRoutingDataBehindShapes(t *testing.T) {
+	floor := LastNonDeterministicMigration
+
+	route := func(t *testing.T, fa *fakeAdopter, shared bool) error {
+		t.Helper()
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		SetForceAllowRemoteMigrate(false)
+		SetSharedMigrateConsent(false)
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+		var err error
+		if shared {
+			err = CheckSharedStoreMigrateGate(context.Background(), db, "", nil, fa.adopter())
+		} else {
+			err = CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		}
+		if mockErr := mock.ExpectationsWereMet(); mockErr != nil {
+			t.Fatalf("unmet expectations: %v", mockErr)
+		}
+		return err
+	}
+
+	t.Run("behind with no local commits: the fast-forward shape", func(t *testing.T) {
+		fa := &fakeAdopter{withAheadBehind: true, aheadResult: 0, behindResult: 1}
+		err := route(t, fa, false)
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("a data-behind clone must not auto-migrate, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonDataBehind {
+			t.Fatalf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonDataBehind)
+		}
+		if gateErr.DataDiverged {
+			t.Error("DataDiverged = true, want false (ahead == 0 is a pure fast-forward)")
+		}
+		if msg := gateErr.UserMessage(); !strings.Contains(msg, "pure fast-forward") {
+			t.Errorf("message should say the pull fast-forwards:\n%s", msg)
+		}
+		// The raw counts are what the widened predicate reads; the older
+		// boolean callback must not be consulted when they are available.
+		if fa.aheadBehindCalls != 1 {
+			t.Errorf("AheadBehind calls = %d, want 1", fa.aheadBehindCalls)
+		}
+		if fa.ancestorCalls != 0 {
+			t.Errorf("IsStrictAncestor calls = %d, want 0 once AheadBehind is wired", fa.ancestorCalls)
+		}
+	})
+
+	t.Run("behind WITH local commits: the diverged shape still stops", func(t *testing.T) {
+		// The F2 case: before the widening this routed to smartAutoMigrate and
+		// the migration ran, measured on a real clone at ahead=1, behind=1.
+		fa := &fakeAdopter{withAheadBehind: true, aheadResult: 1, behindResult: 1}
+		err := route(t, fa, false)
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("a diverged, behind clone reaches the same wedge and must not auto-migrate, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonDataBehind {
+			t.Fatalf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonDataBehind)
+		}
+		if !gateErr.DataDiverged {
+			t.Error("DataDiverged = false, want true (ahead >= 1 means the pull merges)")
+		}
+		msg := gateErr.UserMessage()
+		if !strings.Contains(msg, "MERGES") {
+			t.Errorf("a diverged clone must be told its pull merges rather than fast-forwards:\n%s", msg)
+		}
+		if strings.Contains(msg, "pure fast-forward") {
+			t.Errorf("a diverged clone must NOT be promised a fast-forward:\n%s", msg)
+		}
+	})
+
+	t.Run("purely ahead: still the safe first-mover auto-migrate", func(t *testing.T) {
+		// Nothing to pull, so nothing to wedge. Refusing here would be the
+		// over-refusal a patch line must not ship.
+		fa := &fakeAdopter{withAheadBehind: true, aheadResult: 3, behindResult: 0}
+		if err := route(t, fa, false); err != nil {
+			t.Fatalf("a clone with only unpushed local commits must still auto-migrate, got %v", err)
+		}
+	})
+
+	t.Run("level: still the safe first-mover auto-migrate", func(t *testing.T) {
+		fa := &fakeAdopter{withAheadBehind: true, aheadResult: 0, behindResult: 0}
+		if err := route(t, fa, false); err != nil {
+			t.Fatalf("a level clone must still auto-migrate, got %v", err)
+		}
+	})
+
+	t.Run("ahead/behind read error: blunt block, never the automatic migrate", func(t *testing.T) {
+		fa := &fakeAdopter{withAheadBehind: true, aheadBehindErr: errors.New("dolt_log AS OF: branch not found")}
+		err := route(t, fa, false)
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("an inconclusive read must fall back to the blunt block, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonUnreadableState {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
+		}
+	})
+
+	t.Run("no AheadBehind wired: falls back to the strict-ancestor fact", func(t *testing.T) {
+		// An injection site that wired only the older callback keeps the
+		// pre-widening (narrower) behavior rather than losing the stop
+		// altogether: a strict ancestor is by definition ahead == 0, so the
+		// shape it reports is never "diverged".
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := route(t, fa, false)
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected the data-behind stop via the fallback, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonDataBehind {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonDataBehind)
+		}
+		if gateErr.DataDiverged {
+			t.Error("DataDiverged = true; the IsStrictAncestor fallback can only report ahead == 0")
+		}
+		if fa.aheadBehindCalls != 0 {
+			t.Errorf("AheadBehind calls = %d, want 0 (not wired)", fa.aheadBehindCalls)
+		}
+		if fa.ancestorCalls != 1 {
+			t.Errorf("IsStrictAncestor calls = %d, want 1", fa.ancestorCalls)
+		}
+	})
+}
+
+// TestDataBehindRemedySurfaces pins the review's F1/F3/F4 findings on the
+// message and agent contract: every surface has to name the ONE remedy that
+// was measured to work, the shared-store consequence has to survive the
+// precedence choice that made data-behind outrank shared-store, and the blunt
+// migrate-or-adopt options must not be offered — in this state
+// `bd migrate --force` is the bug (and its follow-up `bd dolt push` is
+// rejected non-fast-forward while the clone is still behind) while
+// `bd bootstrap` no-ops against an existing workspace.
+func TestDataBehindRemedySurfaces(t *testing.T) {
+	base := func(shared, diverged bool) *RemoteMigrateGateError {
+		return &RemoteMigrateGateError{
+			CurrentVersion: 66, LatestVersion: 67, Pending: 1,
+			FallbackReason: fallbackReasonDataBehind,
+			Shared:         shared,
+			DataDiverged:   diverged,
+		}
+	}
+
+	t.Run("only the pull is offered", func(t *testing.T) {
+		for _, diverged := range []bool{false, true} {
+			e := base(false, diverged)
+			opts := e.Options()
+			if len(opts) != 1 || opts[0].ID != "pull-first" {
+				t.Fatalf("diverged=%v: Options() = %+v, want exactly one pull-first option", diverged, opts)
+			}
+			if len(opts[0].Commands) != 1 || opts[0].Commands[0] != DataBehindRemedyCommand {
+				t.Errorf("diverged=%v: option commands = %v, want [%q]", diverged, opts[0].Commands, DataBehindRemedyCommand)
+			}
+			for _, o := range opts {
+				for _, c := range o.Commands {
+					if c == "bd migrate --force" || c == "bd bootstrap" {
+						t.Errorf("diverged=%v: option %q offers %q, which was measured not to work in this state", diverged, o.ID, c)
+					}
+				}
+			}
+			if d := e.AgentDirective(); !strings.Contains(d, DataBehindRemedyCommand) {
+				t.Errorf("diverged=%v: AgentDirective must name the remedy:\n%s", diverged, d)
+			}
+			if body := e.userBody(); strings.Contains(body, "bd bootstrap") {
+				t.Errorf("diverged=%v: the body must not send the operator to a no-op bootstrap:\n%s", diverged, body)
+			}
+		}
+	})
+
+	t.Run("shared store keeps the #5920 lockout warning", func(t *testing.T) {
+		// F3: before this, Shared+data-behind rendered with neither
+		// "co-resident" nor "#5920" anywhere, because data-behind outranks
+		// fallbackReasonSharedStore (whose note carried them) and Options()'
+		// sharedRisk only ever decorated the adopt option.
+		msg := base(true, false).UserMessage()
+		for _, want := range []string{"co-resident", "#5920", SharedConsentCommand} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("shared data-behind message is missing %q:\n%s", want, msg)
+			}
+		}
+		if strings.Contains(msg, "proceeds on its own") {
+			t.Errorf("a shared store must not be promised an automatic retry:\n%s", msg)
+		}
+		opts := base(true, false).Options()
+		if len(opts) != 2 || opts[0].ID != "pull-first" || opts[1].ID != "migrate-shared-after-pulling" {
+			t.Fatalf("shared Options() = %+v, want pull-first then the consent step", opts)
+		}
+		if d := base(true, false).AgentDirective(); !strings.Contains(d, "#5920") {
+			t.Errorf("shared AgentDirective must carry the co-resident consequence:\n%s", d)
+		}
+	})
+
+	t.Run("non-shared store IS promised the automatic retry", func(t *testing.T) {
+		msg := base(false, false).UserMessage()
+		if !strings.Contains(msg, "proceeds on its own") {
+			t.Errorf("an ordinary clone's retry DOES auto-resolve and should say so:\n%s", msg)
+		}
+		if strings.Contains(msg, SharedConsentCommand) {
+			t.Errorf("a non-shared clone must not be sent to the shared consent verb:\n%s", msg)
+		}
+	})
+
+	t.Run("IsDataBehind is exactly this stop", func(t *testing.T) {
+		// The store opens key their one narrow exemption on this predicate, so
+		// it must not widen to any other refusal.
+		if !base(false, false).IsDataBehind() {
+			t.Error("IsDataBehind() = false for the data-behind stop")
+		}
+		for _, reason := range []string{
+			fallbackReasonUnreadableState, fallbackReasonBelowFloor,
+			fallbackReasonOptedOut, fallbackReasonUnparseableEnv, fallbackReasonSharedStore, "",
+		} {
+			e := base(false, false)
+			e.FallbackReason = reason
+			if e.IsDataBehind() {
+				t.Errorf("IsDataBehind() = true for FallbackReason %q", reason)
+			}
+		}
+		// A tailored decision is never this stop either, whatever the reason
+		// field happens to hold.
+		e := base(false, false)
+		e.Decision = gateDecisionForkSkew
+		if e.IsDataBehind() {
+			t.Error("IsDataBehind() = true for a fork-skew decision")
+		}
+		if (*RemoteMigrateGateError)(nil).IsDataBehind() {
+			t.Error("IsDataBehind() = true on a nil receiver")
 		}
 	})
 }

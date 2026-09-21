@@ -94,15 +94,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status` reads clean — and the clone can no longer fetch the very commits it
   was behind on. Upgrading from a 1.1-era database is the ordinary way in, so
   this release's upgrade audience is the exposed one. The gate now reads the
-  branch-ancestry fact its callers already supply and stops with a note naming
-  the remedy: run `bd dolt pull`, then retry, and the migrate proceeds as a true
-  first-mover. A clone that is level with the remote, or that has unpushed local
-  commits of its own, still auto-migrates exactly as before; only a strictly
-  behind clone is refused. Both existing workarounds keep working unchanged:
-  `BD_SMART_GATE=0` opts out of the smart gate entirely, and running `bd dolt
-  pull` before the first open after upgrading avoids the state to begin with.
-  `bd migrate --force` / `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before
-  the gate and still override it.
+  branch position its callers already supply and stops with guidance naming the
+  remedy: run `bd dolt pull`, then re-run what you were blocked on, and the
+  migrate proceeds as a true first-mover.
+
+  The stop applies whenever the clone has commits left to pull, whether or not
+  it also has commits of its own. bd auto-commits every write, so a clone that
+  is both behind and ahead is the ordinary multi-machine state, and it reaches
+  the same wedge; it is told its pull will *merge* rather than fast-forward, and
+  how to resolve conflicts if it reports them. A clone that is level with the
+  remote, or that only has unpushed local commits with nothing to pull, still
+  auto-migrates exactly as before.
+
+  **`bd dolt pull` works from the refused state.** It opens the store too, so
+  on a refused clone it would otherwise hit the very refusal that prescribes
+  it — and an embedded workspace has no external `dolt` binary to fall back to,
+  which would leave `BD_ALLOW_REMOTE_MIGRATE=1` (performing the migration the
+  stop exists to prevent) as the only way forward. `bd dolt pull` now opens
+  leniently for this one refusal, the way `bd dolt commit` does for the
+  dirty-working-set refusal
+  ([#4566](https://github.com/gastownhall/beads/issues/4566)); every other gate
+  refusal still fails that open. This supersedes the [1.3.0] upgrade note's
+  statement that the pending-migration gate refuses `bd dolt pull` as well as
+  `bd dolt push`: for the data-behind stop it does not, by design.
+
+  `--json` callers get the same remedy the terminal does: `observed`,
+  `expected` and `options` describe the pull (a single `pull-first` option)
+  rather than the migrate-or-adopt decision that does not apply here, plus a
+  `data_behind_shape` of `fast-forward` or `diverged`. `fallback_reason` stays
+  `data-behind`. On a shared Dolt sql-server the guidance carries #5920's
+  consequence — migrating promotes the schema for every co-resident client, and
+  clients still on an older bd refuse the database until upgraded — and names
+  the `bd migrate schema` consent step the retry needs there.
+
+  Both existing workarounds keep working unchanged: `BD_SMART_GATE=0` opts out
+  of the smart gate entirely (which means the blunt gate applies to `bd dolt
+  pull` too — that is what opting out is), and running `bd dolt pull` before the
+  first open after upgrading avoids the state to begin with. `bd migrate
+  --force` / `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before the gate and
+  still override it.
 
 - **A dotted config key now round-trips: what `bd config set` writes,
   `bd config get` and bd's own readers find**

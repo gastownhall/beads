@@ -122,6 +122,29 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			if e.FallbackReason != "" {
 				gate["fallback_reason"] = e.FallbackReason
 			}
+			// gastownhall/beads#6575: the data-behind stop is a blunt stop with
+			// a specific, verified, one-command remedy, and the blunt
+			// observed/expected pair above describes a decision that does not
+			// apply to it. Leaving them in place pointed an agent at
+			// `bd migrate --force` (the bug) followed by a `bd dolt push` that
+			// is guaranteed to be rejected non-fast-forward while the clone is
+			// still behind. e.Options() already returns the pull-first option
+			// for this reason, so options/hint are correct above; these two
+			// fields are what was still lying. decision stays absent — the
+			// stop has no Decision, and fallback_reason is the key an agent
+			// matches on.
+			if e.IsDataBehind() {
+				observed := "this clone is level with the remote on schema but is BEHIND it in commits it has not pulled, so the pending migration would land on a history missing them (#6575, #6368)"
+				if e.DataDiverged {
+					observed += "; it also has commits of its own, so pulling merges rather than fast-forwards"
+					gate["data_behind_shape"] = "diverged"
+				} else {
+					observed += "; it has no commits of its own, so pulling is a pure fast-forward"
+					gate["data_behind_shape"] = "fast-forward"
+				}
+				gate["observed"] = observed
+				gate["expected"] = "run `" + schema.DataBehindRemedyCommand + "` first; the migration is only allowed once this clone has nothing left to pull"
+			}
 		}
 		m["remote_migrate_gate"] = gate
 	}
