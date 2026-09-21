@@ -447,6 +447,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		externalTLSServerName, _ := cmd.Flags().GetString("proxied-server-external-tls-server-name")
 		externalTLSSkipVerify, _ := cmd.Flags().GetBool("proxied-server-external-tls-skip-verify")
 		externalKeepAlive, _ := cmd.Flags().GetDuration("proxied-server-external-keep-alive")
+		externalAllowCleartextPassword, _ := cmd.Flags().GetBool("proxied-server-external-allow-cleartext-password")
 		if os.Getenv("BEADS_DOLT_PROXIED_SERVER") == "1" {
 			initProxiedServer = true
 		}
@@ -526,7 +527,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		externalProvided := externalHost != "" || externalPort != 0 || externalSocketPath != "" ||
 			externalUser != "" ||
 			externalTLS || externalTLSCACertPath != "" || externalTLSCertPath != "" || externalTLSKeyPath != "" ||
-			externalTLSServerName != "" || externalTLSSkipVerify || externalKeepAlive != 0
+			externalTLSServerName != "" || externalTLSSkipVerify || externalKeepAlive != 0 ||
+			externalAllowCleartextPassword
 		if externalProvided && !initProxiedServer {
 			return fmt.Errorf("--proxied-server-external-* flags require --proxied-server")
 		}
@@ -539,17 +541,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		var externalConfig *configfile.ExternalDoltConfig
 		if externalProvided {
 			cfg := configfile.ExternalDoltConfig{
-				Host:            externalHost,
-				Port:            externalPort,
-				Socket:          externalSocketPath,
-				User:            externalUser,
-				TLSRequired:     externalTLS,
-				TLSCACert:       externalTLSCACertPath,
-				TLSCert:         externalTLSCertPath,
-				TLSKey:          externalTLSKeyPath,
-				TLSServerName:   externalTLSServerName,
-				TLSSkipVerify:   externalTLSSkipVerify,
-				KeepAlivePeriod: externalKeepAlive,
+				Host:                   externalHost,
+				Port:                   externalPort,
+				Socket:                 externalSocketPath,
+				User:                   externalUser,
+				TLSRequired:            externalTLS,
+				TLSCACert:              externalTLSCACertPath,
+				TLSCert:                externalTLSCertPath,
+				TLSKey:                 externalTLSKeyPath,
+				TLSServerName:          externalTLSServerName,
+				TLSSkipVerify:          externalTLSSkipVerify,
+				KeepAlivePeriod:        externalKeepAlive,
+				AllowCleartextPassword: externalAllowCleartextPassword,
 			}
 			if err := cfg.Validate(); err != nil {
 				return fmt.Errorf("--proxied-server-external-*: %v", err)
@@ -1370,18 +1373,19 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			initPortShared = true
 		}
 		doltCfg := &dolt.Config{
-			Path:                   storagePath,
-			BeadsDir:               beadsDir,
-			Database:               dbName,
-			ServerPort:             initPort,
-			ServerPortSource:       initPortSource,
-			ServerPortSharedServer: initPortShared,
-			ServerMode:             initServerMode,
-			ProxiedServer:          initProxiedServer,
-			CreateIfMissing:        true, // bd init is the only path that should create databases
-			OpenedByInit:           true, // shapes the identity-mismatch advice (GH#5558)
-			AutoStart:              initServerMode && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
-			ServerTLS:              initDoltServerTLSFromEnv(),
+			Path:                         storagePath,
+			BeadsDir:                     beadsDir,
+			Database:                     dbName,
+			ServerPort:                   initPort,
+			ServerPortSource:             initPortSource,
+			ServerPortSharedServer:       initPortShared,
+			ServerMode:                   initServerMode,
+			ProxiedServer:                initProxiedServer,
+			CreateIfMissing:              true, // bd init is the only path that should create databases
+			OpenedByInit:                 true, // shapes the identity-mismatch advice (GH#5558)
+			AutoStart:                    initServerMode && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+			ServerTLS:                    initDoltServerTLSFromEnv(),
+			ServerAllowCleartextPassword: initDoltServerAllowCleartextPasswordFromEnv(),
 		}
 		if serverHost != "" {
 			doltCfg.ServerHost = serverHost
@@ -2368,6 +2372,7 @@ func init() {
 	initCmd.Flags().String("proxied-server-external-tls-server-name", "", "[EXPERIMENTAL] Server name to verify in the external dolt sql-server's TLS certificate. Defaults to the external host. Required with a unix socket unless --proxied-server-external-tls-skip-verify is set.")
 	initCmd.Flags().Bool("proxied-server-external-tls-skip-verify", false, "[EXPERIMENTAL] Skip TLS certificate verification for the external dolt sql-server. Insecure; testing only.")
 	initCmd.Flags().Duration("proxied-server-external-keep-alive", 0, "[EXPERIMENTAL] TCP keepalive period for the proxy→external connection. Zero uses the package default (30s).")
+	initCmd.Flags().Bool("proxied-server-external-allow-cleartext-password", false, "[EXPERIMENTAL] Allow mysql_clear_password auth on the proxy→external connection (proxied-server mode only); requires --proxied-server-external-tls. Needed when a byte-relay proxy in front of the external dolt sql-server (e.g. a Warpgate MySQL listener) always demands mysql_clear_password.")
 
 	rootCmd.AddCommand(initCmd)
 }
@@ -2573,7 +2578,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				password := cfg.GetDoltServerPassword()
 				user := cfg.GetDoltServerUser()
 
-				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS())
+				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS(), cfg.GetDoltServerAllowCleartextPassword())
 				if result.Reachable && !result.Exists && result.Err == nil {
 					// Server is up but DB doesn't exist. Since we also know
 					// doltDirExists==false, this is a fresh clone — there's no
@@ -3354,6 +3359,10 @@ func promoteExplicitServerConnFlags(cmd *cobra.Command) (func(), error) {
 
 func initDoltServerTLSFromEnv() bool {
 	return (&configfile.Config{}).GetDoltServerTLS()
+}
+
+func initDoltServerAllowCleartextPasswordFromEnv() bool {
+	return (&configfile.Config{}).GetDoltServerAllowCleartextPassword()
 }
 
 func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, serverSocket, serverUser, dbName string) *configfile.Config {

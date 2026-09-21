@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -28,13 +29,17 @@ type initGuardDBCheck struct {
 //
 // Returns Reachable=false when the server cannot be reached (FR-030), so the
 // caller can fall through to existing "already initialized" behavior.
-func checkDatabaseOnServer(host string, port int, user, password, dbName string, tls bool) initGuardDBCheck {
+func checkDatabaseOnServer(host string, port int, user, password, dbName string, tls, allowCleartext bool) initGuardDBCheck {
+	if err := configfile.ValidateServerAuthConfig(allowCleartext, tls); err != nil {
+		return initGuardDBCheck{Reachable: false, Err: err}
+	}
 	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      tls,
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		TLS:                     tls,
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", dsn)

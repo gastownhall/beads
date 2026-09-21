@@ -523,12 +523,17 @@ func isExpectedProbeError(err error) bool {
 
 func openServerCatalogDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	port := doltserver.DefaultConfig(beadsDir).Port
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return nil, err
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     cfg.GetDoltServerHost(),
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    cfg.GetDoltServerHost(),
+		Port:                    port,
+		User:                    cfg.GetDoltServerUser(),
+		Password:                cfg.GetDoltServerPasswordForPort(port),
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 	return sql.Open("mysql", connStr)
 }

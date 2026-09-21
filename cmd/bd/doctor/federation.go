@@ -42,6 +42,7 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 		dolt.ApplyResolvedServerPort(beadsDir, cfg)
 		cfg.ServerUser = bcfg.GetDoltServerUser()
 		cfg.ServerTLS = bcfg.GetDoltServerTLS()
+		cfg.ServerAllowCleartextPassword = bcfg.GetDoltServerAllowCleartextPassword()
 		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
 	}
 	dolt.ApplyCLIAutoStart(beadsDir, cfg)

@@ -2354,15 +2354,14 @@ func isExternalServerHost(host string) bool {
 // listener) always demand mysql_clear_password; ServerAllowCleartextPassword
 // opts into answering that, but only ever together with ServerTLS. Called
 // from New, so every path that opens a server-mode store is covered.
+//
+// The refusal text is owned by configfile.ValidateServerAuthConfig — every
+// other server-DSN builder in cmd/bd and internal/storage/uow calls that
+// directly (or configfile.Config.GetDoltServerAllowCleartextPasswordChecked,
+// when it already has a *configfile.Config in hand) so the error an operator
+// sees is the same regardless of which code path opened the connection.
 func validateServerAuthConfig(cfg *Config) error {
-	if cfg.ServerAllowCleartextPassword && !cfg.ServerTLS {
-		return fmt.Errorf(
-			"dolt_server_allow_cleartext_password is set without dolt_server_tls: " +
-				"refusing to send the MySQL password in the clear. " +
-				"Enable TLS (dolt_server_tls / BEADS_DOLT_SERVER_TLS=1) or unset " +
-				"dolt_server_allow_cleartext_password (BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD)")
-	}
-	return nil
+	return configfile.ValidateServerAuthConfig(cfg.ServerAllowCleartextPassword, cfg.ServerTLS)
 }
 
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
