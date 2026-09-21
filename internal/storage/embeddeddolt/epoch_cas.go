@@ -14,7 +14,7 @@ import (
 // CurrentAddressFor give this leg R20's epoch-transition enforcement
 // (gastownhall/beads#5898 revision 9, this slice: be-x5jqd.4 / #6136),
 // backed by store_epoch (migration 0067) and epoch_minted_addresses
-// (migration 0069). See internal/storage/dolt/epoch_cas.go's matching
+// (migration 0070). See internal/storage/dolt/epoch_cas.go's matching
 // header comment for why these are direct methods on *EmbeddedDoltStore
 // rather than a wrapper struct or root-storage-package types.
 

@@ -906,10 +906,16 @@ func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx co
 		t.Errorf("StillServes(record-b's prior-epoch address) = true, want false: record-b was never minted again, so it did not survive the epoch transition")
 	}
 
+	// stillServed/noLongerServed are pinned to addrA/addrB directly, not
+	// discovered from servesA/servesB and swapped to match
+	// (gastownhall/beads#6664, bee-ghosttrack review 5268699223, item B6):
+	// the assertions immediately above already require servesA true and
+	// servesB false, so a backend that gets the direction backwards fails
+	// there and must not be able to recover by having this line quietly
+	// swap stillServed/noLongerServed to whatever it actually observed —
+	// that would let the Resolve/CurrentAddressFor assertions below pass
+	// against the wrong address pair instead of catching the reversal too.
 	stillServed, noLongerServed := addrA, addrB
-	if servesB && !servesA {
-		stillServed, noLongerServed = addrB, addrA
-	}
 
 	voidedAnswer, err := fixture.Resolve(ctx, store, noLongerServed)
 	if err != nil {
