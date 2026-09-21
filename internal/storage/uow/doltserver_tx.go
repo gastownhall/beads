@@ -30,6 +30,16 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
 	}
+	// dolt.auto-commit=batch/off (GH#4995): defer the Dolt version commit to a
+	// later explicit commit point (bd dolt commit), the same as the embedded
+	// and direct SQL-server backends already do at their own commit sites
+	// (bd-4wamg) — persist the write into the working set via a plain SQL
+	// COMMIT below, without minting Dolt history, regardless of what message
+	// the caller named. issueOpsContext sets this on the context before the
+	// proxied CLI dispatch opens its unit of work.
+	if message != "" && issueops.VersionCommitDeferred(ctx) {
+		message = ""
+	}
 	// An empty message selects the EPHEMERAL commit form (bd-aq0ql): a plain
 	// SQL COMMIT persists the transaction's writes into the working set
 	// without minting a Dolt commit or history. This exists for work that

@@ -14,7 +14,7 @@ var historyCapabilityMatrix = map[string]HistoryCapabilityClass{
 	"history": HistoryProxySupported,
 	"branch":  HistoryDirectOnly, "conflicts": HistoryDirectOnly, "repo": HistoryDirectOnly,
 	"federation": HistoryDirectOnly, "vc": HistoryDirectOnly, "flatten": HistoryDirectOnly,
-	"dolt push": HistoryDirectOnly, "dolt pull": HistoryDirectOnly, "dolt commit": HistoryDirectOnly,
+	"dolt push": HistoryDirectOnly, "dolt pull": HistoryDirectOnly, "dolt commit": HistoryProxySupported,
 	"dolt remote": HistoryDirectOnly, "dolt remote add": HistoryDirectOnly, "dolt remote list": HistoryDirectOnly,
 	"dolt remote reset-data": HistoryDirectOnly, "dolt remote remove": HistoryProxySupported,
 	"sync": HistoryDirectOnly,

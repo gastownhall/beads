@@ -125,7 +125,6 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"admin reset":            refused("proxy.admin.unsupported", "admin reset is not supported in proxied-server mode"),
 	"dolt push":              refused("proxy.dolt_push.unsupported", "dolt push is not supported in proxied-server mode"),
 	"dolt pull":              refused("proxy.dolt_pull.unsupported", "dolt pull is not supported in proxied-server mode"),
-	"dolt commit":            refused("proxy.dolt_commit.unsupported", "dolt commit is not supported in proxied-server mode"),
 	"dolt remote":            refused("proxy.dolt_remote.unsupported", "dolt remote is not supported in proxied-server mode"),
 	"dolt remote add":        refused("proxy.dolt_remote.unsupported", "dolt remote add is not supported in proxied-server mode"),
 	"dolt remote list":       refused("proxy.dolt_remote.unsupported", "dolt remote list is not supported in proxied-server mode"),
