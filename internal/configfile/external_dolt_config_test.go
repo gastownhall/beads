@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,6 +75,22 @@ func TestExternalDoltConfig_Validate_TLS(t *testing.T) {
 			if err := c.Validate(); err == nil {
 				t.Fatalf("expected error for TLS material without TLSRequired: %+v", c)
 			}
+		}
+	})
+
+	t.Run("allow cleartext password without tls required is rejected", func(t *testing.T) {
+		err := ExternalDoltConfig{Host: "db", Port: 3306, AllowCleartextPassword: true}.Validate()
+		if err == nil {
+			t.Fatal("expected error for AllowCleartextPassword without TLSRequired")
+		}
+		if !strings.Contains(err.Error(), "AllowCleartextPassword") || !strings.Contains(err.Error(), "TLSRequired") {
+			t.Errorf("error should name both settings, got: %v", err)
+		}
+	})
+
+	t.Run("allow cleartext password with tls required is accepted", func(t *testing.T) {
+		if err := (ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSServerName: "db", AllowCleartextPassword: true}).Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }

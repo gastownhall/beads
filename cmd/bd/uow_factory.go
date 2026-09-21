@@ -405,6 +405,16 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 				"or set the port explicitly (BEADS_DOLT_SERVER_PORT or dolt.port in config.yaml)", beadsDir)
 	}
 	external.TLSRequired = conn.ServerTLS
+	// resolveDoltServerConnection already resolved this the same way it
+	// resolved ServerTLS above; mirror it into the topology this HTTP
+	// gateway actually dials with. Without this, `bd serve` in front of a
+	// server reached through a cleartext-demanding proxy (e.g. Warpgate)
+	// could not open at all, while CLI commands in the same workspace — which
+	// go through dolt.New's own gate — could. external.Validate() (called by
+	// NewExternalDoltServerUOWProvider, downstream of this topology) refuses
+	// this combination without TLSRequired, the same invariant
+	// validateServerAuthConfig enforces for the CLI's own connection.
+	external.AllowCleartextPassword = conn.ServerAllowCleartextPassword
 
 	// --global selects the shared-server global database, exactly as it does for
 	// the store the CLI opens (main.go rejects the flag outside shared-server
