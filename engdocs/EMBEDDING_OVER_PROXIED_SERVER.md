@@ -453,8 +453,8 @@ joins its data directory as `<beadsDir>/embeddeddolt` and does so in three
 places — `newStore`, the open cache's `cacheKey`, and `HasRepository` — with no
 way for a caller to redirect it. The proxy's `dolt sql-server`, meanwhile,
 serves the proxied root, which defaults to `<beadsDir>/dolt`
-(`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback is
-commented "Always use \"dolt\"").
+(`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback joins
+the literal `dolt`, with a comment saying always to).
 
 So an embedder that calls `OpenBestAvailable` on a proxied workspace does not
 fight the running server for its files — it silently opens **a separate database**
