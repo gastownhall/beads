@@ -149,11 +149,21 @@ Then, each only when its value is non-empty:
 --config <path>  --logpath <path>  --dolt-bin <path>  --database <name>
 ```
 
-And, only for the external backend:
+And, only when `--backend` is `external` — and then, like the group above, each
+only when its own value is set (non-empty string, non-zero number or duration):
 
 ```
 --external-host <host>  --external-port <n>  --external-socket-path <path>  --external-keep-alive <dur>
 ```
+
+Both conditions matter, because neither alone predicts the argv. The group is
+skipped wholesale on the other two backends, and inside it you never see all
+four: `ExternalDoltConfig.Validate` rejects a socket set alongside a host or
+port, and refuses a host without a port, so a socket topology carries only
+`--external-socket-path` and a TCP one carries `--external-host` *and*
+`--external-port` together. `--external-keep-alive` is the one flag whose
+absence is a default rather than a gap — the child's flag help documents 30s —
+so read a missing one as "unset", not as "off".
 
 `--root`, `--port` and `--backend` are the required flags. `--backend` takes one
 of `local-server`, `external`, or `local-shared-server` — the last is declared
@@ -191,8 +201,18 @@ literal `"root"` and `""` to the provider, commented "proxy is loopback-only, no
 auth". The generated `dolt sql-server` config (`renderProxiedServerConfig` in
 `cmd/bd/proxied_server.go`) binds `127.0.0.1` on a free port, sets log level
 `info` and auto-GC archive level `0`, and declares no users section, so Dolt's
-default `root` with an empty password applies. `DoltServer`'s own readiness
-probe uses the same credentials.
+default `root` with an empty password applies. The same pair turns up once more
+inside the proxy's own process tree, in `DoltServer`'s shutdown-GC connection
+(`internal/storage/dbproxy/server/doltserver.go`).
+
+**The readiness probes prove nothing about credentials.** Both of them —
+`DoltServer.waitReady` and the proxy's `waitForServerReady`
+(`internal/storage/dbproxy/proxy/server.go`) — poll `DatabaseServer.Dial`, which
+is a bare `net.Dialer` connect to the backend's host/port or socket, closed again
+the moment it succeeds. No handshake is attempted and no credentials are
+supplied, so "ready" here means only that something is listening. That is worth
+knowing in both directions: it is why the probes cannot be cited as evidence of
+the auth posture, and it is the same shallowness §11 turns on.
 
 **What an embedder can observe.** On a managed-local proxied workspace, a
 plain MySQL client connecting to `127.0.0.1:<port from proxy.pid>` as `root`
@@ -240,10 +260,11 @@ the command calls `proxy.Shutdown(rootDir)`, which:
    flight abort terminally rather than retry;
 2. acquires `proxy.lock`, re-reads `proxy.pid`, validates it against the
    workspace, and **kills the recorded process** — `procid.Handle.Kill` is
-   `SIGKILL` on Linux and `os.Kill` on Windows;
+   `SIGKILL` on Linux and macOS, `os.Kill` on Windows;
 3. waits only for that *process* to be gone (`max(remaining of 5s, 2s)`), then
    removes the record;
-4. repeats the same sequence for `proxy-child.pid`.
+4. repeats steps 2 and 3 for `proxy-child.pid` — the stop epoch is advanced once
+   for the whole call, not per record.
 
 There is no drain phase, no notification to connected clients and no wait on
 `activeConns` anywhere in that path. An embedder's in-flight query is severed
@@ -341,7 +362,8 @@ The mechanics matter, because they are not "a command that applies a migration":
   satisfies the shared-store gate in §7.
 - The **provider open then performs the migration**, before `RunE` runs.
 - `RunE`'s proxied arm (`reportProxiedSchemaMigrate` in `cmd/bd/migrate.go`)
-  therefore only reports, in the same shape the direct path uses:
+  therefore only reports, and it reports a **different JSON shape** from the
+  direct path:
 
 ```json
 {
@@ -353,8 +375,14 @@ The mechanics matter, because they are not "a command that applies a migration":
 ```
 
 (`latest_version` is `schema.LatestVersion()`, shown here illustratively — read
-the value, do not hard-code it.) No applied count is reported, because by the
-time `RunE` runs the work belongs to an open that has already returned.
+the value, do not hard-code it.) The direct path emits `{"status", "applied",
+"latest_version"}`; the proxied arm drops `applied` and adds `mode` and `note`,
+so only `status` and `latest_version` are common to both. No applied count is
+reported because by the time `RunE` runs the work belongs to an open that has
+already returned — there is no number for it to have. An embedder decoding this
+payload into one struct across both topologies should treat `applied` as
+absent-not-zero on the proxied route, and should not infer "nothing was applied"
+from its absence.
 
 **What an embedder can observe.** The DDL lands under co-resident clients that
 already hold connections and prepared state, with no coordination of any kind —
@@ -365,9 +393,10 @@ beneath it and re-establish its connections; in practice, restart.
 **What is changing in 1.3.1.** Refusing `bd migrate schema` on a proxied
 workspace is approved for 1.3.1: a flat typed refusal by default, with `--force`
 emitting a **generic** warning to close co-resident library clients first. The
-warning will not enumerate connected clients, for the reason above — the proxy
-does not track them, so there is nothing truthful to list. This had not landed
-at `d487b9796`, and there is no tracking issue for it at the time of writing.
+approved scope is a generic warning with no enumeration of connected clients, for
+the reason above — the proxy does not track them, so there is nothing truthful to
+list. This had not landed at `d487b9796`, and there is no tracking issue for it
+at the time of writing.
 
 So an embedder should expect the verb to stop working on proxied workspaces
 rather than build a workflow on it, and should not read the absence of a refusal
@@ -416,12 +445,31 @@ copy has a proxied-server arm. Both dispatch on `cfg.IsDoltServerMode()`, and
 `configfile.IsDoltServerMode` and `IsDoltProxiedServerMode` are mutually
 exclusive — proxied workspaces are explicitly exempt from the host-based
 server-mode inference. So on a proxied-server workspace `OpenBestAvailable` falls
-through to `embeddeddolt.Open` over `.beads/dolt`, which is the same directory
-the proxy's `dolt sql-server` is serving. It does not connect through the proxy,
-and nothing in the open path refuses on that ground. *Not verified by running:*
-what an embedded open does while a `dolt sql-server` holds that directory was not
-exercised here. An embedder that wants the proxied endpoint should connect to the
-data port (§3) rather than expect this function to find it.
+through to `embeddeddolt.Open`, and it does not connect through the proxy.
+
+The consequence is not contention over the directory the proxy is serving. It is
+that the two paths look at **different directories entirely**. `embeddeddolt`
+joins its data directory as `<beadsDir>/embeddeddolt` and does so in three
+places — `newStore`, the open cache's `cacheKey`, and `HasRepository` — with no
+way for a caller to redirect it. The proxy's `dolt sql-server`, meanwhile,
+serves the proxied root, which defaults to `<beadsDir>/dolt`
+(`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback is
+commented "Always use \"dolt\"").
+
+So an embedder that calls `OpenBestAvailable` on a proxied workspace does not
+fight the running server for its files — it silently opens **a separate database**
+beside it. `newStore` `MkdirAll`s `.beads/embeddeddolt`, and `initSchema` issues
+`CREATE DATABASE IF NOT EXISTS` and migrates, so the open creates and writes a
+second database rather than failing. What it contains depends on the workspace's
+history: empty on one initialised straight into proxied mode, and whatever
+`.beads/embeddeddolt` still holds on one that was ever embedded, since none of
+the mode-migration verbs removes that directory. The second case is the nastier
+one — stale issues that look real.
+
+Nothing in the open path refuses on that ground and no error comes back. The
+store is genuine; it is just not the one the workspace's issues are in. An
+embedder that wants the proxied endpoint should connect to the data port (§3)
+rather than expect this function to find it.
 
 `SetEventsJournalEnabled(enabled bool)` is **not a method on the `Storage`
 interface.** `beads.Storage` aliases `internal/beads.Storage`, which aliases
@@ -481,9 +529,10 @@ and wrapped on the way out.
 rejected because the Dolt circuit breaker is open. `ErrCommitIndeterminate`
 identifies a commit whose outcome is unknown — the distinction that lets a
 caller decline to retry a write that may already have landed. Match with
-`errors.Is`, not on message text. These two are the surface here least likely to
-move, since matching on them is the only way a caller can tell those conditions
-apart at all; but the note at the top of this document still applies.
+`errors.Is`, not on message text — matching on these values is currently the only
+discriminator a caller has for those two conditions, so there is nothing else to
+write against. That is a statement about today's surface, not about its
+longevity; the note at the top of this document still applies.
 
 ## 10. `bd dolt status --json` on a proxied workspace — reshaped in 1.3.1
 
@@ -500,9 +549,13 @@ The proxied payload is `proxiedDoltStatus` in
 
 The full key set is `mode`, `root`, `running`, `proxy_pid`, `proxy_port`,
 `backend_managed`, `backend_running`, `backend_pid`, `backend_port`,
-`backend_endpoint`, `idle_timeout`. Only `mode`, `root`, `running` and
-`backend_managed` are always present; the rest carry `omitempty`, so absent means
-zero — including `proxy_pid`/`proxy_port` when the proxy is down.
+`backend_endpoint`, `idle_timeout`. Five are always present: `mode`, `root`,
+`running`, `backend_managed` and `backend_running`. None of the three `bool`s
+carries `omitempty` — for a bool, `false` is the answer rather than the absence
+of one, and `backend_running: false` in the external example below is that rule
+in action. The other six (`proxy_pid`, `proxy_port`, `backend_pid`,
+`backend_port`, `backend_endpoint`, `idle_timeout`) do carry `omitempty`, so
+absent means zero — including `proxy_pid`/`proxy_port` when the proxy is down.
 
 A managed-local workspace with both processes up, whose sidecar carries an
 explicit positive timeout:
@@ -554,11 +607,10 @@ Reading the fields:
   which is why neither example above could show the default. That is the
   observation §5's 1.3.1 change is about.
 
-The command has no lifecycle side effects, which is what makes it safe for an
-embedder to poll instead of parsing `proxy.pid`: `proxy.ReadStatus` reads the
-two records and verifies the recorded processes without starting, stopping or
-adopting anything. A record that fails any check reports nothing rather than a
-PID a caller might act on.
+The command has no lifecycle side effects, which is why polling it beats parsing
+`proxy.pid`: `proxy.ReadStatus` reads the two records and verifies the recorded
+processes without starting, stopping or adopting anything. A record that fails
+any check reports nothing rather than a PID a caller might act on.
 
 ## 11. A clean backend exit — changing in 1.3.1
 
@@ -623,11 +675,10 @@ interface can disappear without a compile error anywhere.
 
 **Less likely to move, for a reason:** §9's two error sentinels, because
 `errors.Is` on them is the only way a caller can tell those two conditions
-apart. §10's payload, because it was *just* reshaped deliberately and a second
-reshape would break the same consumers twice. §3's loopback byte-pump behaviour,
-because the proxy's whole design is to not understand the protocol — though the
-credentials half of §3 is a property of a generated config file, which is a much
-softer thing than the byte-pump half.
+apart. §10's payload, because it was *just* reshaped deliberately. §3's loopback
+byte-pump behaviour, because the proxy's whole design is to not understand the
+protocol — though the credentials half of §3 is a property of a generated config
+file, which is a much softer thing than the byte-pump half.
 
 **A caveat on that ranking.** It is a reading of the direction of current work,
 not a schedule and not a promise. A surface in the third group can still change
@@ -648,11 +699,13 @@ live proxy to confirm end to end, and are therefore inferred from the code:
   succeeds against the data port on a managed-local workspace (§3). The
   credentials, the loopback bind and the absence of protocol handling in the
   proxy are all read directly from the source; the end-to-end connection is not.
-- What `OpenBestAvailable`'s embedded fall-through (§8) actually does on a
-  proxied workspace whose `dolt sql-server` currently holds `.beads/dolt`. The
-  *routing* — that it takes the embedded arm, because proxied mode is exempt
-  from `IsDoltServerMode` — is read off the source and is not in doubt; the
-  outcome of the open is not tested here.
+- That `OpenBestAvailable`'s embedded fall-through (§8) completes and hands back
+  a usable but separate store, rather than failing somewhere in the create and
+  migrate steps. The *routing* (it takes the embedded arm, because proxied mode
+  is exempt from `IsDoltServerMode`) and the *directory* (`embeddeddolt` joins
+  `<beadsDir>/embeddeddolt`, the proxy serves `<beadsDir>/dolt`) are read off the
+  source and are not in doubt; the open itself was not run against a live
+  proxied workspace.
 
 Everything else — field names, JSON keys and their types, argv and flag
 spellings, exported Go symbols, default values, and which code path decides
