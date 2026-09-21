@@ -138,10 +138,7 @@ func TestRepairMultiplePrefixesPreservesSuffix(t *testing.T) {
 
 	ctx := context.Background()
 
-	testStore, err := dolt.New(ctx, &dolt.Config{Path: testDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	testStore := newTestStoreWithPrefix(t, testDBPath, "kb")
 	defer testStore.Close()
 
 	oldStore := store
@@ -155,10 +152,6 @@ func TestRepairMultiplePrefixesPreservesSuffix(t *testing.T) {
 		actor = oldActor
 		dbPath = oldDBPath
 	}()
-
-	if err := testStore.SetConfig(ctx, "issue_prefix", "kb"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
 
 	// No two incorrect-prefix issues share a suffix, and none collide with
 	// an already-correct kb-* id — the common case the issue reports (only
@@ -211,10 +204,7 @@ func TestRepairMultiplePrefixesFallsBackOnCollision(t *testing.T) {
 
 	ctx := context.Background()
 
-	testStore, err := dolt.New(ctx, &dolt.Config{Path: testDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	testStore := newTestStoreWithPrefix(t, testDBPath, "kb")
 	defer testStore.Close()
 
 	oldStore := store
@@ -228,10 +218,6 @@ func TestRepairMultiplePrefixesFallsBackOnCollision(t *testing.T) {
 		actor = oldActor
 		dbPath = oldDBPath
 	}()
-
-	if err := testStore.SetConfig(ctx, "issue_prefix", "kb"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
 
 	// kb-1 already exists under the target prefix; both incorrect-prefix
 	// issues below would naively rewrite to kb-1 too (a same-batch and a
