@@ -84,7 +84,7 @@ func TestInitGuard_RecreateMissingE2ECreatesMissingServerDB(t *testing.T) {
 	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
 		t.Fatalf("write local version: %v", err)
 	}
-	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", "myproject", false); !check.Reachable || check.Exists {
+	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", "myproject", false, false); !check.Reachable || check.Exists {
 		t.Fatalf("precondition: server must be reachable and lack the database, got %+v", check)
 	}
 
@@ -103,7 +103,7 @@ func TestInitGuard_RecreateMissingE2ECreatesMissingServerDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bd init --recreate-missing must create the missing database, got %v:\n%s", err, out)
 	}
-	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", "myproject", false); !check.Reachable || !check.Exists {
+	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", "myproject", false, false); !check.Reachable || !check.Exists {
 		t.Fatalf("bd init --recreate-missing reported success but the database is not on the server: %+v\n%s", check, out)
 	}
 }

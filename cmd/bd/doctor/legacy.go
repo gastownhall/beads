@@ -491,7 +491,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			// "Fresh clone detected" warnings (bd-tzo9).
 			password := cfg.GetDoltServerPasswordForPort(port)
 			dbName := cfg.GetDoltDatabase()
-			result := checkFreshCloneDB(host, port, user, password, dbName, cfg.GetDoltServerTLS())
+			result := checkFreshCloneDB(host, port, user, password, dbName, cfg.GetDoltServerTLS(), cfg.GetDoltServerAllowCleartextPassword())
 			if result.Reachable {
 				syncRemote := config.GetStringFromDir(beadsDir, "sync.remote")
 				if syncRemote == "" {

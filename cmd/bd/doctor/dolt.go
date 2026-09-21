@@ -47,13 +47,18 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	// regular CRUD commands succeed (bd-h5k7).
 	password := cfg.GetDoltServerPasswordForPort(port)
 
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return nil, nil, err
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Database: database,
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		Database:                database,
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", connStr)
