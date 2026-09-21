@@ -146,7 +146,7 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// alike. issue_versions is always present here -- 0067 runs earlier
 		// in the same fresh-bundle series -- never carries attribution_status
 		// yet, and still has durable_state as the JSON type 0067 gave it, so
-		// both of 0068's steps always fire on a fresh bundle.
+		// all three of 0068's steps always fire on a fresh bundle.
 		return cliMigration0068AddAttributionStatus
 	default:
 		return sqlText
@@ -259,17 +259,23 @@ CREATE TABLE IF NOT EXISTS store_epoch (
 ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;`
 
-// cliMigration0068AddAttributionStatus is 0068 with its two guarded PREPARE
-// blocks replaced by the direct ALTERs they would run on a fresh database:
-// step 6's ADD COLUMN attribution_status, and step 7's MODIFY COLUMN
+// cliMigration0068AddAttributionStatus is 0068 with its three guarded
+// PREPARE blocks replaced by the direct ALTERs they would run on a fresh
+// database: step 6's ADD COLUMN attribution_status, step 7's MODIFY COLUMN
 // durable_state LONGBLOB (the byte-preserving type the review on
 // gastownhall/beads#6358 item 4 asked for -- see the migration's step 7
-// header). issue_versions is created earlier in the same series by 0067,
-// which still creates durable_state as JSON and whose override is left
-// untouched: 0068 is what retypes it. So the column always needs adding and
-// the retype always fires here; no wisps twin exists for this table.
+// header), and step 8's MODIFY COLUMN change_at/removed_at DATETIME(6) (the
+// microsecond widen be-hs42e.8 / gastownhall/beads#6132 asks for -- see the
+// migration's step 8 header). issue_versions is created earlier in the same
+// series by 0067, which still creates durable_state as JSON and
+// change_at/removed_at as plain DATETIME, and whose override is left
+// untouched: 0068 is what retypes all three columns. So the column always
+// needs adding and all three retypes always fire here; no wisps twin exists
+// for this table.
 const cliMigration0068AddAttributionStatus = `ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;
-ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;`
+ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;
+ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL;
+ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6);`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');
