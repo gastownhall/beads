@@ -55,7 +55,12 @@ store:
 
   BD_VERSIONED_HISTORY_ENABLED=1 bd versions <id>
 
-Either source turning it on is enough; neither can switch the other off.
+Either source turning it on is enough; neither can switch the other off. The
+consequence worth knowing: once the store setting says on,
+BD_VERSIONED_HISTORY_ENABLED=0 will not turn recording off for one run. Turn
+it off where it was turned on:
+
+  bd config set versioned-history.enabled false
 
 Versions are recorded from the moment recording is turned on. It does not
 backfill, so a bead edited yesterday shows nothing until it is edited again.
