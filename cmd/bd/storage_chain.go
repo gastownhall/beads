@@ -32,7 +32,7 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 	if store == nil {
 		return nil
 	}
-	applyVersionedHistoryConfig(store, versionedHistoryEnabled(context.Background(), store))
+	applyVersionedHistoryConfig(store, versionedHistoryEnabledForWiring(store))
 	store = telemetry.WrapStorage(store)
 	store = wireExternalDependencyPolicy(store)
 	if hookRunner != nil && !hooksDisabled {
