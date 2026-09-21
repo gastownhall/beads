@@ -19,15 +19,12 @@ buildGoModule {
   # proxyVendor avoids vendor/modules.txt consistency checks when the vendored
   # tree lags go.mod/go.sum.
   proxyVendor = true;
-  # TODO(1.3.1-rc.2): recompute this hash before merge. Neither the release
-  # branch's own value nor #5931's is correct here: the branch already carried
-  # an independent dependency bump (d594092eb), so this cherry-pick lands on a
-  # vendor set that has existed on neither side. The value below is #5931's and
-  # is known-stale; it is a placeholder. Run `nix build .#default` on this
-  # branch and substitute the `got:` hash. (No nix on the machine that made this
-  # commit, and a guessed hash fails the build loudly, so it is left explicit
-  # rather than fabricated.)
-  vendorHash = "sha256-wDU1tw/4t2CetwQl4+zUhlDI70dSasLLI2Gy66ZyhQQ=";
+  # Recomputed for this branch: neither release/1.3.0's value nor #5931's is
+  # right here, because the branch already carried an independent dependency
+  # bump (d594092eb), so the #5931 cherry-pick lands on a vendor set that
+  # existed on neither side. Value taken from the `got:` hash the nix-build lane
+  # reported on this branch.
+  vendorHash = "sha256-DQdauEx5g48Xbxrz4wGLx4vkrQoYQX3FUx+7N/Y6YV4=";
 
   # Match go.mod to the selected Nix Go toolchain. buildGoModule also builds
   # vendored dependencies in the Nix sandbox, where toolchain downloads are not
