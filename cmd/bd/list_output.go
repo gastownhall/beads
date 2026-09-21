@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/template"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -18,8 +19,23 @@ func printTruncationHint(truncated bool, effectiveLimit int) {
 	if !truncated || effectiveLimit <= 0 || !ui.IsStderrTerminal() {
 		return
 	}
-	msg := fmt.Sprintf("\nShowing %d issues; more results matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", effectiveLimit)
-	fmt.Fprint(os.Stderr, ui.RenderWarn(msg))
+	fmt.Fprint(os.Stderr, formatTruncationHint(effectiveLimit))
+}
+
+func truncationHintText(effectiveLimit int) string {
+	return fmt.Sprintf("Showing %d issues; more results matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.", effectiveLimit)
+}
+
+func formatTruncationHint(effectiveLimit int) string {
+	return composeTruncationHint(ui.RenderWarn, truncationHintText(effectiveLimit))
+}
+
+// composeTruncationHint keeps newlines outside the renderer. lipgloss pads
+// blank lines to the widest-line width (alignTextHorizontal shortAmount =
+// widestLine - lineWidth) and drops the trailing newline (GH#5685).
+func composeTruncationHint(render func(string) string, text string) string {
+	rendered := strings.TrimRight(render(text), " \t\r\n")
+	return "\n" + rendered + "\n"
 }
 
 func outputDotFormat(out io.Writer, issues []*types.Issue, depsByIssueID map[string][]*types.Dependency) error {
