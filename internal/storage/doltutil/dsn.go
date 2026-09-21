@@ -40,6 +40,9 @@ type ServerDSN struct {
 	Database string        // optional; empty connects without selecting a database
 	Timeout  time.Duration // connect timeout; 0 defaults to 5s
 	TLS      bool
+	// AllowCleartextPasswords: set only alongside TLS; the gate is
+	// internal/storage/dolt.validateServerAuthConfig.
+	AllowCleartextPasswords bool
 }
 
 // String builds the MySQL DSN string. Always sets parseTime=true,
@@ -92,9 +95,10 @@ func (d ServerDSN) String() string {
 		// See maxAllowedPacketBytes for why the value is the Dolt server's own
 		// 1 GiB ceiling rather than the driver's 64 MiB default: pinning must
 		// not shrink what the client is willing to send.
-		MaxAllowedPacket:     maxAllowedPacketBytes,
-		Timeout:              timeout,
-		AllowNativePasswords: true,
+		MaxAllowedPacket:        maxAllowedPacketBytes,
+		Timeout:                 timeout,
+		AllowNativePasswords:    true,
+		AllowCleartextPasswords: d.AllowCleartextPasswords,
 	}
 	if d.TLS {
 		cfg.TLSConfig = "true"
