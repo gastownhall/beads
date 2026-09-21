@@ -161,6 +161,14 @@ const (
 	// auto-executing it would promote the schema for every co-resident client.
 	// Structural, not a routing outcome — it outranks the other reasons.
 	fallbackReasonSharedStore = "shared-store"
+	// fallbackReasonDataBehind (gastownhall/beads#6575): schema parity with
+	// the cached remote ref held, but this clone's local HEAD is a strict
+	// ancestor of that ref — it is behind the remote in data commits it has
+	// not pulled, so it is not the first-mover the smart gate may
+	// auto-resolve. Unlike the reasons above, this one has a one-command
+	// remedy the operator can run right now (`bd dolt pull`), after which the
+	// migrate is a true first-mover.
+	fallbackReasonDataBehind = "data-behind"
 )
 
 func (e *RemoteMigrateGateError) Error() string {
@@ -229,6 +237,16 @@ func (e *RemoteMigrateGateError) fallbackReasonNote() string {
 		why = SmartGateEnv + "=" + e.UnrecognizedSmartGateEnv + " is set but was not recognized (only boolean values enable/disable it), so it stayed enabled by default but still could not resolve this stop"
 	case fallbackReasonSharedStore:
 		why = "this store is shared (dolt sql-server); the first-mover auto-migrate is disabled here because it would lock out co-resident clients (#5920)"
+	case fallbackReasonDataBehind:
+		why = "this clone is behind the remote in data commits it has not pulled, so it is not the first-mover it looks like on schema alone — migrating in place would diverge from those commits, and can leave every later `bd dolt pull` refusing to merge (#6575, #6368). Run `bd dolt pull` first, then retry: this clone is then the true first-mover it looked like"
+		// Only promise the retry resolves itself where it actually does. On a
+		// shared store the first-mover auto-migrate is suppressed regardless
+		// (fallbackReasonSharedStore, #5920), so pulling clears THIS stop but
+		// the retry still needs explicit consent — saying otherwise would send
+		// the operator in a loop.
+		if !e.Shared {
+			why += " and the migrate proceeds on its own"
+		}
 	default:
 		return ""
 	}
@@ -669,6 +687,19 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 				Decision:        gateDecisionForkSkew,
 				SkewVersions:    skew,
 			}
+		case smartDataBehind:
+			// gastownhall/beads#6575: schema parity held but this clone's HEAD
+			// is a strict ancestor of the cached remote ref. Blunt stop plus
+			// the pull-first note — no new Decision, so the JSON/agent
+			// contract is unchanged.
+			//
+			// This reason is reported even on a shared store, where
+			// fallbackReasonSharedStore would otherwise outrank it: that one
+			// says the gate WOULD have resolved and was overruled, which is
+			// not true here. The gate refuses this state on its own merits,
+			// and the pull-first remedy is a precondition the operator has to
+			// satisfy either way.
+			fallbackReason = fallbackReasonDataBehind
 		case smartBelowFloor:
 			fallbackReason = fallbackReasonBelowFloor
 		case smartUndetermined:
@@ -679,9 +710,15 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 		// fact for the operator than the technical routing outcome, so it
 		// takes priority as the surfaced reason. Not over shared-store: that
 		// one is structural (the gate WOULD have resolved, and was overruled),
-		// so fixing the env value would not change the outcome.
+		// so fixing the env value would not change the outcome. Not over
+		// data-behind either, for the same reason (gastownhall/beads#6575):
+		// that stop stands whatever BD_SMART_GATE says, and it is the one
+		// reason carrying a remedy the operator can act on right now, so
+		// burying it behind an env-value complaint would cost them the fix.
 		envState, envValue := smartGateEnvValue()
-		if envState == smartGateEnvUnparseable && fallbackReason != fallbackReasonSharedStore {
+		if envState == smartGateEnvUnparseable &&
+			fallbackReason != fallbackReasonSharedStore &&
+			fallbackReason != fallbackReasonDataBehind {
 			fallbackReason = fallbackReasonUnparseableEnv
 			unrecognizedSmartGateEnv = envValue
 		}

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The smart migrate gate no longer auto-migrates a clone whose data is behind
+  the remote** ([#6575](https://github.com/gastownhall/beads/issues/6575)). The
+  gate's first-mover verdict was computed from schema facts alone, so a clone
+  level with the remote on schema but behind it in unpulled data commits was
+  classified a safe first-mover and migrated in place — minting local-only
+  schema commits on a HEAD missing those commits, which can leave every later
+  `bd dolt pull` refusing to merge
+  ([#6368](https://github.com/gastownhall/beads/issues/6368)). The equal-version
+  path now reads the branch-ancestry fact its callers already supply and stops
+  with a pull-first remedy instead. A clone that is level, or that has unpushed
+  local commits, still auto-migrates as before. Both existing escape hatches are
+  unchanged: `BD_SMART_GATE=0` opts out of the smart gate, and running
+  `bd dolt pull` before the first open after upgrading avoids the state
+  entirely.
+
 ### Added
 
 - **`bd count` supports repeatable `--metadata-field key=value` filters**

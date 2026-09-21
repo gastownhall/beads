@@ -12,9 +12,10 @@ import (
 // gate would fire, it consults the remote's cached schema state and
 // auto-resolves the one provably-safe case (first-mover migrate), while still
 // stopping — with sharper guidance — on the cases that genuinely need a human.
-// Every fallback path (unreadable remote state, below the convergence floor)
-// degrades to the blunt #4515 block, so the default is never less safe than
-// the blunt gate; it only resolves cases the blunt gate cannot distinguish.
+// Every fallback path (unreadable remote state, below the convergence floor,
+// a clone behind the remote in data commits) degrades to the blunt #4515
+// block, so the default is never less safe than the blunt gate; it only
+// resolves cases the blunt gate cannot distinguish.
 //
 // Set BD_SMART_GATE=0 (or any boolean false) to opt out and keep the blunt
 // #4515 behavior unconditionally: any remote-backed database with pending
@@ -128,6 +129,17 @@ const (
 	// a TOCTOU miss, or the merge itself refusing) falls through to the
 	// plain smartAdopt directive instead, never forcing the write.
 	smartAdoptFastForward
+	// smartDataBehind (gastownhall/beads#6575): schema parity with the cached
+	// remote ref holds — the first-mover precondition — but local HEAD is a
+	// strict ancestor of that ref, so this clone is behind the remote in DATA
+	// commits it has not pulled. Migrating in place here mints local-only
+	// schema commits on a HEAD that lacks those commits; when the pending
+	// batch moves a tracked table onto the dolt_ignore plane (0062's events),
+	// every subsequent `bd dolt pull` then refuses (#6368) and the clone can
+	// no longer fetch the very commits it was behind on. Stop, and direct the
+	// operator to pull first — after which the same open auto-migrates as a
+	// true first-mover.
+	smartDataBehind
 )
 
 // FastForwardAdopter injects the driver-side fast-forward primitives that
@@ -192,6 +204,27 @@ func routeAdoptFastForward(ctx context.Context, db DBConn, ref string, adopt *Fa
 		return false
 	}
 	return true
+}
+
+// localIsDataBehind reports whether local HEAD is strictly behind ref in the
+// commit graph — ahead == 0 and behind >= 1 — using the same
+// IsStrictAncestor callback routeAdoptFastForward consults on the
+// remote-ahead path (gastownhall/beads#6575). It is the equal-version path's
+// only ancestry fact, and it does its own narrowing: a level clone
+// (ahead == 0, behind == 0) and a clone with unpushed local commits
+// (ahead > 0) both read false, so neither is refused.
+//
+// adopt may be nil, or have no IsStrictAncestor wired (the shared
+// unit-of-work provider's injection site) — then there is no ancestry fact
+// to read and routing stays exactly as it was before this check existed.
+// Unlike routeAdoptFastForward, a query error is NOT folded into "false":
+// here false means "permit the more automatic action", so an inconclusive
+// read has to be reported to the caller and degrade to the blunt block.
+func localIsDataBehind(ctx context.Context, db DBConn, ref string, adopt *FastForwardAdopter) (bool, error) {
+	if adopt == nil || adopt.IsStrictAncestor == nil {
+		return false, nil
+	}
+	return adopt.IsStrictAncestor(ctx, db, ref)
 }
 
 // canAutoFastForward reports whether adopt is actually able to EXECUTE the
@@ -319,6 +352,23 @@ func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteN
 
 	// remote == local on every shared version and at the same max version: a first-mover.
 	if current >= LastNonDeterministicMigration {
+		// Schema parity is not proof of first-mover status
+		// (gastownhall/beads#6575). It says nothing about where this clone's
+		// branch sits relative to the ref the hashes just came from: a clone
+		// that is level on schema and behind on DATA satisfies every
+		// precondition above. Read the ancestry fact the caller already wired
+		// for the remote-ahead path before granting the automatic migrate.
+		behind, err := localIsDataBehind(ctx, db, ref, adopt)
+		if err != nil {
+			// Inconclusive ancestry read on a ref whose content hashes just
+			// resolved. Degrade to the blunt block rather than assume level:
+			// the gate's contract is that every fallback is at least as safe
+			// as #4515.
+			return smartUndetermined, nil, "", false
+		}
+		if behind {
+			return smartDataBehind, nil, ref, false
+		}
 		return smartAutoMigrate, nil, ref, false
 	}
 	return smartBelowFloor, nil, ref, false
