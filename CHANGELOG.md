@@ -57,6 +57,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setting one in a file whose top level is not a mapping. A script that
   tolerated the old exit 0 now has to handle the failure.
 
+- **`bd ready` and `bd list --ready` now return issues whose custom status is in
+  the `active` category** ([#5918](https://github.com/gastownhall/beads/pull/5918),
+  [#5831](https://github.com/gastownhall/beads/issues/5831)). The ready query
+  treated its `open` pin as an exact match, so a workspace that defined, say,
+  `triaged:active` never saw those issues in ready work — even though
+  `bd statuses`, the `ready_issues` view, and claim eligibility all already
+  counted that category as ready. **The ready set grows on upgrade** for any
+  workspace using custom active statuses: counts and dashboards will read higher,
+  and `bd ready` can hand out issues it used to withhold. Custom
+  `wip`/`done`/`frozen`/unspecified statuses stay out, and `in_progress` stays
+  out, both unchanged.
+
+- **`bd list --wisp-type <t>` with no plane admitted is now a refusal instead of
+  an empty listing** ([#6098](https://github.com/gastownhall/beads/pull/6098)).
+  `--wisp-type` narrows an admitted plane rather than admitting one, so alone it
+  could not match any row and exited 0 with an empty result for every input. It
+  now fails with a hint naming `--include-ephemeral`. A script that ran it and
+  read the empty output as "no such wisps" now sees an error — which is the
+  point: the old success answered a question it had not asked. The refusal is
+  CLI-only; the equivalent API request stays lawful and still composes to an
+  empty page.
+
+- **The `--ready` footer names the status pin that actually applied**
+  ([#5924](https://github.com/gastownhall/beads/pull/5924)). With no `--status`
+  (or `--status all`) the line is unchanged: `open only — --ready excludes
+  in_progress`. With an explicit `--status` it now reads `<selector> only`
+  instead of reusing the default-open sentence, which is no longer true once the
+  selector is honored (see **Fixed**). Anything scraping that parenthetical for
+  a `--status`-plus-`--ready` run sees new text — though that combination also
+  returned the wrong rows before this release. Note that the default sentence now
+  understates the set, since custom active statuses join it (above); the footer
+  and `--ready` help text are corrected upstream on main
+  ([#6187](https://github.com/gastownhall/beads/issues/6187),
+  [#6188](https://github.com/gastownhall/beads/issues/6188)).
+
+- **`bd doctor` reports a new missing gitignore pattern on every workspace
+  created before this release, until `bd doctor --fix` is run**
+  ([#5978](https://github.com/gastownhall/beads/pull/5978)).
+  `.beads/dolt-server-config.yaml` joined the required `.beads/.gitignore`
+  patterns (see **Fixed**), so a workspace that was clean a moment ago now
+  warns. `bd doctor --fix` appends the rule and silences it; workspaces
+  initialised after this release get it from the template and never warn.
+
+- **Opening a store against an unreachable Dolt server now takes up to ~30s to
+  fail instead of failing at once**
+  ([#6003](https://github.com/gastownhall/beads/pull/6003)). The bootstrap ping
+  is retried for up to 30 seconds, each attempt capped at 10s, so a server still
+  coming up is waited out rather than turned into a hard failure (see
+  **Fixed**). The cost is that a genuinely dead or misconfigured endpoint no
+  longer errors immediately: an interactive command against a stopped server, and
+  any script or CI step that counted on a fast failure, now waits out the retry
+  budget first. Durable rejections — bad credentials, unknown database, a
+  hostname that does not resolve — are still reported immediately without
+  retrying.
+
+- **A backup sync that would leave the backup's manifest ahead of its chunk
+  files now fails at that point instead of corrupting the backup quietly**
+  ([#5931](https://github.com/gastownhall/beads/pull/5931),
+  [#4070](https://github.com/gastownhall/beads/issues/4070)). The Dolt bump
+  brings upstream's defense, which rejects a manifest update referencing a
+  missing table file. Previously that update was accepted and only some later
+  sync failed, confusingly, with `table file not found` — and stayed broken. A
+  sync that used to appear to succeed can now report a failure; that failure is
+  the corruption being caught at the moment it happens. This is a mitigation,
+  not a root-cause fix: backup file-and-manifest publish is still non-atomic,
+  and **backups already in the manifest-ahead state are not repaired** by
+  upgrading — they surface as a failing sync and have to be re-seeded.
+
 ### Fixed
 
 - **`bd dolt start` no longer puts a second sql-server over a proxied
@@ -95,6 +163,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including dotted ones somebody else put there, are left exactly as they are.
   Two consequences of the nested write — the flat-key migration and two new
   failure exits — are under **Changed** above.
+
+- **`bd list --status <s> --ready` honors `--status`**
+  ([#5924](https://github.com/gastownhall/beads/pull/5924),
+  [#5832](https://github.com/gastownhall/beads/issues/5832)). Combining the two
+  silently dropped `--status` and returned the unfiltered ready set, because the
+  ready path pinned `open` in two places regardless of what was asked for, so a
+  custom status or `in_progress` never reached the ready query. An explicit
+  `--status` is now the ready-work status selector, matching how the other list
+  filters already compose with `--ready`. `--ready` with no `--status` still
+  defaults to open, and `--status all` remains the no-filter spelling. The footer
+  wording moves with it — see **Changed**.
+
+- **`bd list --wisp-type` can reach rows at all**
+  ([#6098](https://github.com/gastownhall/beads/pull/6098)). `bd list` now
+  registers `--include-ephemeral`, the plane knob `--wisp-type` needs, off by
+  default so the default listing is byte-identical. `bd list
+  --include-ephemeral --wisp-type heartbeat` is the working spelling. Before
+  this, the only way to admit the wisp plane from `bd list` was `--type
+  <infra-type>`, which also lifts the infra-type exclusions and changes template
+  treatment — three decisions for a caller who wanted one classification. Bare
+  `--wisp-type` is now refused rather than empty; see **Changed**.
+
+- **`bd doctor` knows about the generated `.beads/dolt-server-config.yaml`**
+  ([#5978](https://github.com/gastownhall/beads/pull/5978)).
+  `doltserver.Start()` writes that file when the resolved dolt binary supports
+  `auto_gc_behavior.archive_level`, but the hyphenated name falls outside the
+  `dolt-server.` prefix its five sibling server-state entries share, so neither
+  the gitignore template nor the required-pattern list covered it. It holds an
+  absolute `cfg_dir` and a per-machine port, so committing it breaks every other
+  clone — the same reason the template already gives for `redirect`. It shows up
+  as untracked in every consumer repo whose dolt supports `archive_level`. It is
+  now in both lists: the template covers new workspaces, and the required
+  patterns are what `bd doctor --fix` appends to an existing
+  `.beads/.gitignore` — see **Changed** for the warning that implies.
+
+- **The missing-prefix error stops recommending a config key that does nothing**
+  ([#5936](https://github.com/gastownhall/beads/pull/5936),
+  [#5916](https://github.com/gastownhall/beads/issues/5916)). When the database's
+  `issue_prefix` config row was absent, the error advised using the
+  `issue-prefix` key in `config.yaml` — but that gate only reads the database's
+  config table, so following the advice produced a tracked config field that
+  changed nothing and misled the next reader. The message now points at
+  `bd init --prefix` or `bd bootstrap`, which is what writes the row, and says
+  plainly which store the check reads. Error text only; resolution behaviour is
+  unchanged.
+
+- **`bd create --file` says that it creates one issue per `##` heading**
+  ([#5921](https://github.com/gastownhall/beads/pull/5921)). The usage string was
+  "Create multiple issues from markdown file", which named neither the per-H2
+  semantics nor `--body-file`. Someone wanting "one issue, description loaded
+  from a file" reached for the shortest flag and got a silent bulk import — a
+  briefing file with `## Problem` / `## Context` / `## Acceptance Criteria`
+  became three issues. The usage now names the behaviour, and the existing
+  rejection of a positional title combined with `--file` carries a `--body-file`
+  hint. `--file` alone on a section-headed file is unchanged: bd cannot tell that
+  apart from a genuine batch file by content.
+
+- **The list truncation hint no longer leaves a padded blank line under the
+  shell prompt** ([#5927](https://github.com/gastownhall/beads/pull/5927),
+  [#5685](https://github.com/gastownhall/beads/issues/5685)). The hint passed its
+  surrounding newlines through the warning renderer, which treats them as a
+  block, pads the blank lines out to the widest line's width, and drops the
+  trailing newline — so the next prompt printed on top of a run of spaces. The
+  newlines are kept outside the renderer now, leaving one coloured line with a
+  real trailing newline.
+
+- **`bd setup claude` and `bd init` stop rewriting `.claude/settings.json` on
+  every run** ([#5944](https://github.com/gastownhall/beads/pull/5944),
+  [#5693](https://github.com/gastownhall/beads/issues/5693)). The settings map
+  was marshaled without a trailing newline and written unconditionally, so each
+  run stripped the newline Claude Code's own writes leave behind and rewrote the
+  file even when no hook had changed. Because `bd init` git-adds that file, it
+  surfaced as a staged diff with no semantic content. The write now keeps the
+  trailing newline and is skipped when the bytes match what is already on disk,
+  at all four call sites — the settings write and the `settings.local.json`
+  migration on install, and both again on remove.
+
+- **`bd gate check` resolves bead gates whose target lives in a prefix-routed
+  rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
+  miss, the evaluator follows the target bead ID through `routes.jsonl` and reads
+  the owning store without writing to it; previously such a gate stayed pending
+  until someone resolved it manually. This covers explicit gate checks in
+  embedded, server, and proxied-server command paths. The legacy
+  `<rig>:<bead-id>` await value remains accepted for compatibility, a malformed
+  cross-rig value is rejected, and when prefix routing is unavailable the original
+  local not-found error is preserved.
+
+- **A transient connection drop while opening a Dolt store is retried instead of
+  failing the command**
+  ([#6003](https://github.com/gastownhall/beads/pull/6003)). The bootstrap ping
+  in the unit-of-work provider was unretried, so a server still finishing startup
+  — or one that reset the connection mid-handshake — became a hard failure.
+  Connection-level shapes (`driver.ErrBadConn`, `mysql.ErrInvalidConn`, EOF, any
+  `*net.OpError`) are now retried for up to 30s, each attempt capped at 10s so a
+  server that accepts TCP and then stalls cannot block for the caller's whole
+  context. Durable rejections and an unresolvable hostname still fail without
+  retrying. See **Changed** for the latency this adds against a dead endpoint.
 
 ## [1.3.0] - 2026-09-15
 
