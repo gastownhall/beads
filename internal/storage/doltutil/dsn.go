@@ -18,6 +18,9 @@ type ServerDSN struct {
 	Database string        // optional; empty connects without selecting a database
 	Timeout  time.Duration // connect timeout; 0 defaults to 5s
 	TLS      bool
+	// AllowCleartextPasswords: set only alongside TLS; the gate is
+	// internal/storage/dolt.validateServerAuthConfig.
+	AllowCleartextPasswords bool
 }
 
 // String builds the MySQL DSN string. Always sets parseTime=true,
@@ -55,9 +58,10 @@ func (d ServerDSN) String() string {
 		// extra round-trip when interpolation is safe. Independent of
 		// MultiStatements. The driver rejects it only with custom unsafe
 		// collations, which this DSN never sets.
-		InterpolateParams:    true,
-		Timeout:              timeout,
-		AllowNativePasswords: true,
+		InterpolateParams:       true,
+		Timeout:                 timeout,
+		AllowNativePasswords:    true,
+		AllowCleartextPasswords: d.AllowCleartextPasswords,
 	}
 	if d.TLS {
 		cfg.TLSConfig = "true"

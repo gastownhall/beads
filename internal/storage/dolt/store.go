@@ -392,12 +392,13 @@ type Config struct {
 	RemoteSyncOpen bool
 
 	// Server connection options
-	ServerSocket   string // Unix domain socket path (overrides Host/Port when set)
-	ServerHost     string // Server host (default: 127.0.0.1)
-	ServerPort     int    // Server port (default: 3307)
-	ServerUser     string // MySQL user (default: root)
-	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
-	ServerTLS      bool   // Enable TLS for server connections (required for Hosted Dolt)
+	ServerSocket                 string // Unix domain socket path (overrides Host/Port when set)
+	ServerHost                   string // Server host (default: 127.0.0.1)
+	ServerPort                   int    // Server port (default: 3307)
+	ServerUser                   string // MySQL user (default: root)
+	ServerPassword               string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
+	ServerTLS                    bool   // Enable TLS for server connections (required for Hosted Dolt)
+	ServerAllowCleartextPassword bool   // Allow mysql_clear_password auth (needs ServerTLS; see validateServerAuthConfig)
 
 	// ServerPortSource records which step of doltserver's port-resolution
 	// chain (or the caller-explicit/env-var reads in applyConfigDefaults)
@@ -1591,6 +1592,10 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	applyConfigDefaults(cfg)
 
+	if err := validateServerAuthConfig(cfg); err != nil {
+		return nil, err
+	}
+
 	// Hard guard: tests must NEVER connect to the production Dolt server.
 	// applyConfigDefaults rewrites a production port to 1 in BEADS_TEST_MODE=1
 	// for fail-loud-but-continue behavior; this panic is defense-in-depth for
@@ -2344,18 +2349,35 @@ func isExternalServerHost(host string) bool {
 	return true
 }
 
+// validateServerAuthConfig refuses a config that would send a MySQL password
+// in the clear. Some proxies in front of a Dolt server (e.g. an SSH-bastion
+// listener) always demand mysql_clear_password; ServerAllowCleartextPassword
+// opts into answering that, but only ever together with ServerTLS. Called
+// from New, so every path that opens a server-mode store is covered.
+func validateServerAuthConfig(cfg *Config) error {
+	if cfg.ServerAllowCleartextPassword && !cfg.ServerTLS {
+		return fmt.Errorf(
+			"dolt_server_allow_cleartext_password is set without dolt_server_tls: " +
+				"refusing to send the MySQL password in the clear. " +
+				"Enable TLS (dolt_server_tls / BEADS_DOLT_SERVER_TLS=1) or unset " +
+				"dolt_server_allow_cleartext_password (BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD)")
+	}
+	return nil
+}
+
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
 // If database is empty, connects without selecting a database (for init operations).
 // Adds ReadTimeout/WriteTimeout for long-lived connection pools.
 func buildServerDSN(cfg *Config, database string) string {
 	base := doltutil.ServerDSN{
-		Socket:   cfg.ServerSocket,
-		Host:     cfg.ServerHost,
-		Port:     cfg.ServerPort,
-		User:     cfg.ServerUser,
-		Password: cfg.ServerPassword,
-		Database: database,
-		TLS:      cfg.ServerTLS,
+		Socket:                  cfg.ServerSocket,
+		Host:                    cfg.ServerHost,
+		Port:                    cfg.ServerPort,
+		User:                    cfg.ServerUser,
+		Password:                cfg.ServerPassword,
+		Database:                database,
+		TLS:                     cfg.ServerTLS,
+		AllowCleartextPasswords: cfg.ServerAllowCleartextPassword,
 	}
 	// Parse the base DSN and add pool-specific timeouts.
 	parsed, err := mysql.ParseDSN(base.String())

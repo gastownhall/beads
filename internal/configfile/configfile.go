@@ -26,16 +26,17 @@ type Config struct {
 	// Dolt connection mode configuration (bd-dolt.2.2)
 	// "embedded" (default for standalone) runs Dolt in-process.
 	// "server" connects to an external dolt sql-server (required for orchestrator / multi-writer).
-	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
-	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
-	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
-	DoltServerSocket   string `json:"dolt_server_socket,omitempty"`   // Unix domain socket path (overrides host/port)
-	DoltServerUser     string `json:"dolt_server_user,omitempty"`     // MySQL user (default: root)
-	DoltDatabase       string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
-	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
-	DoltDataDir        string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
-	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
-	DoltTeamServer     bool   `json:"dolt_team_server,omitempty"`     // Schema is managed by beads-team-server (bts); bd never runs migrations (proxied-server mode only)
+	DoltMode                         string `json:"dolt_mode,omitempty"`                            // "embedded" (default) or "server"
+	DoltServerHost                   string `json:"dolt_server_host,omitempty"`                     // Server host (default: 127.0.0.1)
+	DoltServerPort                   int    `json:"dolt_server_port,omitempty"`                     // Server port (default: 3307)
+	DoltServerSocket                 string `json:"dolt_server_socket,omitempty"`                   // Unix domain socket path (overrides host/port)
+	DoltServerUser                   string `json:"dolt_server_user,omitempty"`                     // MySQL user (default: root)
+	DoltDatabase                     string `json:"dolt_database,omitempty"`                        // SQL database name (default: beads)
+	DoltServerTLS                    bool   `json:"dolt_server_tls,omitempty"`                      // Enable TLS for server connections (required for Hosted Dolt)
+	DoltServerAllowCleartextPassword bool   `json:"dolt_server_allow_cleartext_password,omitempty"` // Allow mysql_clear_password auth for server connections (needs dolt_server_tls)
+	DoltDataDir                      string `json:"dolt_data_dir,omitempty"`                        // Custom dolt data directory (absolute path; default: .beads/dolt)
+	DoltRemotesAPIPort               int    `json:"dolt_remotesapi_port,omitempty"`                 // Dolt remotesapi port for federation (default: 8080)
+	DoltTeamServer                   bool   `json:"dolt_team_server,omitempty"`                     // Schema is managed by beads-team-server (bts); bd never runs migrations (proxied-server mode only)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
 	// Deprecated backend fields are retained only to round-trip metadata written by
@@ -617,6 +618,16 @@ func (c *Config) GetDoltServerTLS() bool {
 		return t == "1" || strings.ToLower(t) == "true"
 	}
 	return c.DoltServerTLS
+}
+
+// GetDoltServerAllowCleartextPassword mirrors GetDoltServerTLS (env
+// BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD, then config). Reports the
+// configured value; the TLS gate is internal/storage/dolt.validateServerAuthConfig.
+func (c *Config) GetDoltServerAllowCleartextPassword() bool {
+	if t := os.Getenv("BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD"); t != "" {
+		return t == "1" || strings.ToLower(t) == "true"
+	}
+	return c.DoltServerAllowCleartextPassword
 }
 
 // GetDoltDataDir returns the custom dolt data directory path.

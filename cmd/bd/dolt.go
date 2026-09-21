@@ -72,8 +72,11 @@ Configuration keys for 'bd dolt set':
 Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
 (keeps secrets out of metadata.json). Configure them with:
 
-  BEADS_DOLT_PASSWORD       Server password (highest priority)
-  BEADS_DOLT_SERVER_TLS     Enable TLS (set to "1" or "true")
+  BEADS_DOLT_PASSWORD                      Server password (highest priority)
+  BEADS_DOLT_SERVER_TLS                    Enable TLS (set to "1" or "true")
+  BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD
+                                            Allow mysql_clear_password auth
+                                            ("1"/"true"); requires BEADS_DOLT_SERVER_TLS=1
   BEADS_DOLT_SERVER_USER    MySQL user override (else use 'bd dolt set user')
   BEADS_CREDENTIALS_FILE    Optional path to credentials file
 
@@ -94,6 +97,7 @@ Examples:
   bd dolt set host 192.168.1.100 --update-config
   bd dolt set data-dir /home/user/.beads-dolt/myproject
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
+  export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1 BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD=1
   bd dolt test`,
 }
 
@@ -124,8 +128,10 @@ Keys:
 There is no 'password' or 'tls' key here on purpose — secrets and TLS must
 not land in metadata.json. Use environment variables or the credentials file:
 
-  BEADS_DOLT_PASSWORD     Server password (highest priority)
-  BEADS_DOLT_SERVER_TLS   Enable TLS ("1" or "true")
+  BEADS_DOLT_PASSWORD                         Server password (highest priority)
+  BEADS_DOLT_SERVER_TLS                       Enable TLS ("1" or "true")
+  BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD  Allow mysql_clear_password auth
+                                               ("1" or "true"); requires TLS
   BEADS_CREDENTIALS_FILE  Optional override path for credentials
 
   Default credentials file: ~/.config/beads/credentials
@@ -1992,6 +1998,7 @@ func showDoltConfig(testConnection bool) error {
 				result["port"] = showPort
 				result["user"] = cfg.GetDoltServerUser()
 				result["tls"] = cfg.GetDoltServerTLS()
+				result["allow_cleartext_password"] = cfg.GetDoltServerAllowCleartextPassword()
 				result["shared_server"] = doltserver.IsSharedServerMode()
 				if testConnection {
 					result["connection_ok"] = testServerConnection(showHost, showPort)
@@ -2020,6 +2027,7 @@ func showDoltConfig(testConnection bool) error {
 		fmt.Printf("  Port:     %d\n", showPort)
 		fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
 		fmt.Printf("  TLS:      %t\n", cfg.GetDoltServerTLS())
+		fmt.Printf("  Cleartext password auth: %t\n", cfg.GetDoltServerAllowCleartextPassword())
 		if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode:     shared server")
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {

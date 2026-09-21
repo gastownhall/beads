@@ -288,6 +288,7 @@ func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *
 	// and runtime port can diverge (e.g., tunnel on 3308 vs local on 3307).
 	doltCfg.ServerPassword = fileCfg.GetDoltServerPasswordForPort(doltCfg.ServerPort)
 	doltCfg.ServerTLS = fileCfg.GetDoltServerTLS()
+	doltCfg.ServerAllowCleartextPassword = fileCfg.GetDoltServerAllowCleartextPassword()
 	return nil
 }
 

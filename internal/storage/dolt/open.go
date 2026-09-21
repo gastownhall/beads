@@ -314,6 +314,9 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if !cfg.ServerTLS {
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
+	if !cfg.ServerAllowCleartextPassword {
+		cfg.ServerAllowCleartextPassword = fileCfg.GetDoltServerAllowCleartextPassword()
+	}
 
 	// Pool size: env var > config.yaml > caller override > default (10).
 	// Useful for shared-server setups with many worktrees (GH#3140).

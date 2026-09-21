@@ -268,6 +268,7 @@ func collectMetadataEntries() []configEntry {
 	add("dolt_server_user", cfg.DoltServerUser)
 	add("dolt_database", cfg.DoltDatabase)
 	addBool("dolt_server_tls", cfg.DoltServerTLS)
+	addBool("dolt_server_allow_cleartext_password", cfg.DoltServerAllowCleartextPassword)
 	add("dolt_data_dir", cfg.DoltDataDir)
 	addInt("dolt_remotesapi_port", cfg.DoltRemotesAPIPort)
 	add("project_id", cfg.ProjectID)
