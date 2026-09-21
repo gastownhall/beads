@@ -800,6 +800,244 @@ func TestSmartGateRoutingFastForward(t *testing.T) {
 	})
 }
 
+// TestSmartGateRoutingDataBehind covers the equal-version path's ancestry
+// check (gastownhall/beads#6575): schema parity with the cached remote ref is
+// not proof of first-mover status, because a clone can be level on schema and
+// behind on data commits. These subtests pin the ROUTING around canned
+// ancestry results; the genuinely data-behind clone — two real clones, a
+// file:// remote, a real DOLT_FETCH, the ancestry fact measured rather than
+// stubbed — lives in internal/storage/dolt
+// (TestDoltNew_SmartRemoteMigrateGate_DataBehindBlocks_RealDolt).
+func TestSmartGateRoutingDataBehind(t *testing.T) {
+	floor := LastNonDeterministicMigration
+
+	t.Run("data-behind clone: blunt block naming the pull-first remedy", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor - 1: "h1", floor: "h2"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("a data-behind clone must not auto-migrate, got %v", err)
+		}
+		if gateErr.Decision != "" {
+			t.Errorf("Decision = %q, want \"\" (the blunt #4515 stop — no new JSON/agent contract)", gateErr.Decision)
+		}
+		if gateErr.FallbackReason != fallbackReasonDataBehind {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonDataBehind)
+		}
+		if !strings.Contains(gateErr.UserMessage(), "Run `bd dolt pull` first") {
+			t.Errorf("UserMessage should name the pull-first remedy:\n%s", gateErr.UserMessage())
+		}
+		if fa.ancestorCalls != 1 {
+			t.Errorf("IsStrictAncestor calls = %d, want 1", fa.ancestorCalls)
+		}
+		// Deliberately NOT part of the equal-version precondition: a dirty
+		// working set on a level clone is not the #6575 wedge state, and
+		// refusing it would broaden the gate beyond the field-hit bug.
+		if fa.cleanCalls != 0 {
+			t.Errorf("WorkingSetClean calls = %d, want 0 (the equal-version path must not require a clean working set)", fa.cleanCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("level clone: still the safe first-mover auto-migrate", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		// ancestorResult false covers BOTH non-behind shapes the predicate
+		// collapses: HEAD == ref (level) and ahead > 0 (unpushed local
+		// commits). Neither is refused.
+		fa := &fakeAdopter{ancestorResult: false, cleanResult: true}
+		if err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter()); err != nil {
+			t.Fatalf("a clone that is not behind must still auto-migrate, got %v", err)
+		}
+		if fa.ancestorCalls != 1 {
+			t.Errorf("IsStrictAncestor calls = %d, want 1", fa.ancestorCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("ancestry read error: blunt block, never the automatic migrate", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		fa := &fakeAdopter{ancestorErr: errors.New("dolt_log AS OF: branch not found")}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("an inconclusive ancestry read must fall back to the blunt block, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonUnreadableState {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("no adopter wired: routing is unchanged", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		// The unit-of-work provider's injection site passes nil (and is
+		// shared, where the first-mover arm is suppressed anyway). With no
+		// ancestry fact to read, the verdict stays exactly what it was.
+		if err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, nil); err != nil {
+			t.Fatalf("a nil adopter must not change the first-mover verdict, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("below the convergence floor: outcome and reads unchanged", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		current := floor - 1
+		expectSmartFiringGate(mock, current)
+		hashes := map[int]string{current: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonBelowFloor {
+			t.Errorf("FallbackReason = %q, want %q (below-floor outcomes must stay byte-identical)", gateErr.FallbackReason, fallbackReasonBelowFloor)
+		}
+		if fa.ancestorCalls != 0 {
+			t.Errorf("IsStrictAncestor calls = %d, want 0 (the ancestry read must not fire below the floor)", fa.ancestorCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("shared store: data-behind outranks the shared-store suppression reason", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		SetForceAllowRemoteMigrate(false)
+		SetSharedMigrateConsent(false)
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		// Both facts hold, and either one blocks. The shared-store reason
+		// says "the gate WOULD have resolved and was overruled", which is not
+		// true here — and the pull-first remedy is a precondition this
+		// operator has to satisfy either way.
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := CheckSharedStoreMigrateGate(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonDataBehind {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonDataBehind)
+		}
+		if !gateErr.Shared {
+			t.Error("Shared should still be set on a shared-store refusal")
+		}
+		// But the note must NOT promise the retry resolves itself here: on a
+		// shared store the first-mover auto-migrate stays suppressed (#5920),
+		// so pulling clears this stop and the retry still needs consent.
+		msg := gateErr.UserMessage()
+		if !strings.Contains(msg, "Run `bd dolt pull` first") {
+			t.Errorf("shared store should still get the pull-first remedy:\n%s", msg)
+		}
+		if strings.Contains(msg, "proceeds on its own") {
+			t.Errorf("shared store must not be promised an automatic retry (the first-mover arm is suppressed here):\n%s", msg)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("non-shared store IS promised the automatic retry", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if msg := gateErr.UserMessage(); !strings.Contains(msg, "proceeds on its own") {
+			t.Errorf("an ordinary clone's retry DOES auto-resolve and should say so:\n%s", msg)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	// An unparseable BD_SMART_GATE value normally outranks the routing reason,
+	// but it must not bury data-behind: that stop stands whatever the env says,
+	// and it is the only reason carrying a remedy the operator can act on now.
+	t.Run("unparseable BD_SMART_GATE does not bury the pull-first remedy", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "yes")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonDataBehind {
+			t.Errorf("FallbackReason = %q, want %q (the env complaint must not outrank it)", gateErr.FallbackReason, fallbackReasonDataBehind)
+		}
+		if msg := gateErr.UserMessage(); !strings.Contains(msg, "Run `bd dolt pull` first") {
+			t.Errorf("UserMessage lost the pull-first remedy:\n%s", msg)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
 // TestSmartGateEnabled pins the default-on contract: unset and unparseable
 // values keep the smart gate active; only an explicit boolean false opts out.
 func TestSmartGateEnabled(t *testing.T) {

@@ -79,6 +79,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without starting either. The `--json` payload changes shape to carry that —
   see **Changed** above before parsing it.
 
+- **The smart migrate gate no longer auto-migrates a clone whose data is behind
+  the remote** ([#6575](https://github.com/gastownhall/beads/issues/6575)). The
+  gate's first-mover verdict was computed from schema facts alone — equal
+  migration content hashes against the cached remote ref, at the same version,
+  at or above the convergence floor — and none of those say where the clone's
+  branch sits relative to that ref. A clone level with the remote on *schema*
+  but behind it in unpulled *data* commits satisfied every precondition, was
+  classified a safe first-mover, and migrated in place, minting local-only
+  schema commits on a HEAD missing those commits. When the pending batch moves
+  a tracked table onto the `dolt_ignore` plane, every later `bd dolt pull` then
+  refuses with `local changes would be stomped by merge: events`
+  ([#6368](https://github.com/gastownhall/beads/issues/6368)) while `dolt
+  status` reads clean — and the clone can no longer fetch the very commits it
+  was behind on. Upgrading from a 1.1-era database is the ordinary way in, so
+  this release's upgrade audience is the exposed one. The gate now reads the
+  branch-ancestry fact its callers already supply and stops with a note naming
+  the remedy: run `bd dolt pull`, then retry, and the migrate proceeds as a true
+  first-mover. A clone that is level with the remote, or that has unpushed local
+  commits of its own, still auto-migrates exactly as before; only a strictly
+  behind clone is refused. Both existing workarounds keep working unchanged:
+  `BD_SMART_GATE=0` opts out of the smart gate entirely, and running `bd dolt
+  pull` before the first open after upgrading avoids the state to begin with.
+  `bd migrate --force` / `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before
+  the gate and still override it.
+
 - **A dotted config key now round-trips: what `bd config set` writes,
   `bd config get` and bd's own readers find**
   ([#6578](https://github.com/gastownhall/beads/pull/6578), bd-zj95). Setting a
