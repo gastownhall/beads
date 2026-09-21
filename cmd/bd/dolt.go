@@ -102,7 +102,9 @@ Examples:
   bd dolt set data-dir /home/user/.beads-dolt/myproject
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1 BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD=1
-  bd dolt test`,
+  bd list           # bd dolt test only probes an unauthenticated TCP greeting;
+                     # it confirms neither setting. bd list (or bd doctor, once
+                     # plumbed) does.`,
 }
 
 var doltShowCmd = &cobra.Command{
@@ -137,6 +139,12 @@ not land in metadata.json. Use environment variables or the credentials file:
   BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD  Allow mysql_clear_password auth
                                                ("1" or "true"); requires TLS
   BEADS_CREDENTIALS_FILE  Optional override path for credentials
+
+dolt_server_allow_cleartext_password IS intended as a metadata.json key too
+(mirroring dolt_server_tls): unlike password, it is not a secret, so it round-
+trips through 'bd dolt show' / 'bd config show' and can be set directly in
+metadata.json or config.yaml — 'bd dolt set' just doesn't write either of
+these two, same reasoning as tls.
 
   Default credentials file: ~/.config/beads/credentials
   Format:
@@ -1508,10 +1516,16 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 	// host:port or did not dial.
 	var socket string
 
+	// A refused auth config (cleartext without TLS) is reported the same way
+	// as any other connection failure below, rather than skipping straight
+	// to "not reachable" with no explanation.
+	allowCleartext, authErr := ep.CleartextAuth()
 	if unresolved := ep.UnresolvedError(); unresolved != nil {
 		// No port resolved and no socket: nothing to dial. Give the store's
 		// advice for this server, not a dial of 127.0.0.1:0.
 		connErr = unresolved
+	} else if authErr != nil {
+		connErr = authErr
 	} else {
 		// The connection the store makes, over its transport: a live unix
 		// socket first, else TCP (doltserver.Endpoint.Transport). Resolved
@@ -1520,13 +1534,14 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 		// does not run, it advised pinning a port instead (#7874 review).
 		socket = ep.Transport()
 		running, version, connErr = pingExternalDoltServer(doltutil.ServerDSN{
-			Socket:   socket,
-			Host:     host,
-			Port:     port,
-			User:     user,
-			Password: password,
-			TLS:      tls,
-			Timeout:  5 * time.Second,
+			Socket:                  socket,
+			Host:                    host,
+			Port:                    port,
+			User:                    user,
+			Password:                password,
+			TLS:                     tls,
+			AllowCleartextPasswords: allowCleartext,
+			Timeout:                 5 * time.Second,
 		}.String())
 	}
 
@@ -1538,6 +1553,7 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 			"tls":      tls,
 			"running":  running,
 		}
+		result["allow_cleartext_password"] = allowCleartext
 		if socket != "" {
 			result["socket"] = socket
 		} else {
@@ -1570,6 +1586,7 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 	fmt.Printf("  Database: %s\n", remedy.PrintedValue(database))
 	fmt.Printf("  User:     %s\n", remedy.PrintedValue(user))
 	fmt.Printf("  TLS:      %t\n", tls)
+	fmt.Printf("  Cleartext password auth: %t\n", allowCleartext)
 	if version != "" {
 		fmt.Printf("  Version:  %s\n", version)
 	}
@@ -2732,12 +2749,17 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	user := cfg.GetDoltServerUser()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return nil, nil, HandleError("%v", err)
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", connStr)

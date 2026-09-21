@@ -41,25 +41,27 @@ var resolveBootstrapAuthoritativeMetadata = fix.ResolveAuthoritativeServerMetada
 // bootstrapServerProbeConfig is the endpoint bd bootstrap dials on a Dolt
 // server: the existence probe dials it, and so does the server clone.
 type bootstrapServerProbeConfig struct {
-	socket   string
-	host     string
-	port     int
-	user     string
-	pass     string
-	database string
-	tls      bool
+	socket         string
+	host           string
+	port           int
+	user           string
+	pass           string
+	database       string
+	tls            bool
+	allowCleartext bool
 }
 
 // dsn is the connection string for ep with no database selected: the probe
 // lists the server's databases, and DOLT_CLONE creates one.
 func (ep bootstrapServerProbeConfig) dsn() string {
 	return doltutil.ServerDSN{
-		Socket:   ep.socket,
-		Host:     ep.host,
-		Port:     ep.port,
-		User:     ep.user,
-		Password: ep.pass,
-		TLS:      ep.tls,
+		Socket:                  ep.socket,
+		Host:                    ep.host,
+		Port:                    ep.port,
+		User:                    ep.user,
+		Password:                ep.pass,
+		TLS:                     ep.tls,
+		AllowCleartextPasswords: ep.allowCleartext,
 	}.String()
 }
 
@@ -94,6 +96,9 @@ var probeGitRemoteDoltData = gitRemoteHasDoltDataRefStatus
 
 var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
 	dbName := probeCfg.database
+	if err := configfile.ValidateServerAuthConfig(probeCfg.allowCleartext, probeCfg.tls); err != nil {
+		return bootstrapServerDBCheck{Reachable: false, Err: err}
+	}
 	db, err := sql.Open("mysql", probeCfg.dsn())
 	if err != nil {
 		return bootstrapServerDBCheck{Reachable: false, Err: err}
@@ -1799,6 +1804,9 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 // data directory, which is the correct behavior for externally managed
 // servers where bd does not know the filesystem layout.
 func cloneViaServer(ctx context.Context, remoteURL, dbName string, ep bootstrapServerProbeConfig) error {
+	if err := configfile.ValidateServerAuthConfig(ep.allowCleartext, ep.tls); err != nil {
+		return fmt.Errorf("clone via server: %w", err)
+	}
 	db, err := sql.Open("mysql", ep.dsn())
 	if err != nil {
 		return fmt.Errorf("connect to dolt server for clone: %w", err)
@@ -1878,13 +1886,14 @@ func bootstrapUnresolvedServer(ep doltserver.Endpoint) error {
 // port (GetDoltServerPasswordForPort), as the store looks it up.
 func serverDialEndpoint(cfg *configfile.Config, port int) bootstrapServerProbeConfig {
 	return bootstrapServerProbeConfig{
-		socket:   cfg.GetDoltServerSocket(),
-		host:     cfg.GetDoltServerHost(),
-		port:     port,
-		user:     cfg.GetDoltServerUser(),
-		pass:     cfg.GetDoltServerPasswordForPort(port),
-		database: cfg.GetDoltDatabase(),
-		tls:      cfg.GetDoltServerTLS(),
+		socket:         cfg.GetDoltServerSocket(),
+		host:           cfg.GetDoltServerHost(),
+		port:           port,
+		user:           cfg.GetDoltServerUser(),
+		pass:           cfg.GetDoltServerPasswordForPort(port),
+		database:       cfg.GetDoltDatabase(),
+		tls:            cfg.GetDoltServerTLS(),
+		allowCleartext: cfg.GetDoltServerAllowCleartextPassword(),
 	}
 }
 

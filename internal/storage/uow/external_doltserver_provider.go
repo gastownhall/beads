@@ -70,7 +70,9 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	// external.Validate() above already refused AllowCleartextPassword set
+	// without TLSRequired, so this can never carry the flag without TLS.
+	return openAndInitSchema(ctx, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, external.AllowCleartextPassword, teamServer, expectedProjectID, resolved)
 }
 
 // externalBackendAddress names the external server behind the proxy: its

@@ -513,7 +513,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			if err != nil {
 				return freshCloneServerUnreachableResult(dbName, host, port, socket, err)
 			}
-			result := checkFreshCloneDB(host, port, socket, user, password, dbName, cfg.GetDoltServerTLS())
+			result := checkFreshCloneDB(host, port, socket, user, password, dbName, cfg.GetDoltServerTLS(), ep.AllowCleartextPassword)
 			if result.Reachable {
 				syncRemote := config.GetStringFromDir(beadsDir, "sync.remote")
 				if syncRemote == "" {
