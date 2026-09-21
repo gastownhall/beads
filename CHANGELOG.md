@@ -164,6 +164,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without starting either. The `--json` payload changes shape to carry that —
   see **Changed** above before parsing it.
 
+- **The smart migrate gate no longer auto-migrates a clone whose data is behind
+  the remote** ([#6575](https://github.com/gastownhall/beads/issues/6575)). The
+  gate's first-mover verdict was computed from schema facts alone — equal
+  migration content hashes against the cached remote ref, at the same version,
+  at or above the convergence floor — and none of those say where the clone's
+  branch sits relative to that ref. A clone level with the remote on *schema*
+  but behind it in unpulled *data* commits satisfied every precondition, was
+  classified a safe first-mover, and migrated in place, minting local-only
+  schema commits on a HEAD missing those commits. When the pending batch moves
+  a tracked table onto the `dolt_ignore` plane, every later `bd dolt pull` then
+  refuses with `local changes would be stomped by merge: events`
+  ([#6368](https://github.com/gastownhall/beads/issues/6368)) while `dolt
+  status` reads clean — and the clone can no longer fetch the very commits it
+  was behind on. Upgrading from a 1.1-era database is the ordinary way in, so
+  this release's upgrade audience is the exposed one. The gate now reads the
+  branch position its callers already supply and stops with guidance naming the
+  remedy: run `bd dolt pull`, then re-run what you were blocked on, and the
+  migrate proceeds as a true first-mover.
+
+  The stop applies whenever the clone has commits left to pull, whether or not
+  it also has commits of its own. bd auto-commits every write, so a clone that
+  is both behind and ahead is the ordinary multi-machine state, and it reaches
+  the same wedge; it is told its pull will *merge* rather than fast-forward, and
+  how to resolve conflicts if it reports them. A clone that is level with the
+  remote, or that only has unpushed local commits with nothing to pull, still
+  auto-migrates exactly as before.
+
+  **`bd dolt pull` works from the refused state.** It opens the store too, so
+  on a refused clone it would otherwise hit the very refusal that prescribes
+  it — and an embedded workspace has no external `dolt` binary to fall back to,
+  which would leave `BD_ALLOW_REMOTE_MIGRATE=1` (performing the migration the
+  stop exists to prevent) as the only way forward. `bd dolt pull` now opens
+  leniently for this one refusal, the way `bd dolt commit` does for the
+  dirty-working-set refusal
+  ([#4566](https://github.com/gastownhall/beads/issues/4566)); every other gate
+  refusal still fails that open. This supersedes the [1.3.0] upgrade note's
+  statement that the pending-migration gate refuses `bd dolt pull` as well as
+  `bd dolt push`: for the data-behind stop it does not, by design.
+
+  Commands that keep working through the stop say the same thing. `bd list`,
+  `bd ready` and `bd show` succeed against the old schema, and `bd dolt commit`
+  still commits the working set; on embedded storage all of them used to print
+  the blunt migrate-or-adopt coordination bullets while doing so — naming
+  `bd migrate --force && bd dolt push`, which on a data-behind clone applies
+  the migration this stop exists to prevent and then fails the push
+  non-fast-forward, and `bd bootstrap`, which no-ops against an existing
+  workspace. They now print the pull-first guidance, shape-branched the same
+  way the fatal refusal is, alongside the note that the command in hand
+  continued at the current schema. Refusals that are *not* the data-behind stop
+  keep the coordination bullets, which are right for them.
+
+  `--json` callers get the same remedy the terminal does: `observed`,
+  `expected` and `options` describe the pull (a single `pull-first` option)
+  rather than the migrate-or-adopt decision that does not apply here, plus a
+  `data_behind_shape` of `fast-forward` or `diverged`. `fallback_reason` stays
+  `data-behind`. For the fast-forward shape on a non-shared store — one
+  unconditional option, no local commits, nothing discarded —
+  `human_decision_required` is now `false`, so an agent can run the pull
+  instead of stalling for approval of a step the same payload calls riskless.
+  It stays `true` for the diverged shape (the pull merges and can need conflict
+  resolution) and on a shared store (the follow-up consent step needs an
+  operator who can confirm every co-resident client is upgraded). On a shared
+  Dolt sql-server the guidance carries #5920's consequence — migrating promotes
+  the schema for every co-resident client, and clients still on an older bd
+  refuse the database until upgraded — and names the `bd migrate schema`
+  consent step the retry needs there.
+
+  Both existing workarounds keep working unchanged: `BD_SMART_GATE=0` opts out
+  of the smart gate entirely (which means the blunt gate applies to `bd dolt
+  pull` too — that is what opting out is), and running `bd dolt pull` before the
+  first open after upgrading avoids the state to begin with. `bd migrate
+  --force` / `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before the gate and
+  still override it.
+
 - **A dotted config key now round-trips: what `bd config set` writes,
   `bd config get` and bd's own readers find**
   ([#6578](https://github.com/gastownhall/beads/pull/6578), bd-zj95). Setting a
