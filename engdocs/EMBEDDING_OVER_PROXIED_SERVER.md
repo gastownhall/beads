@@ -197,8 +197,8 @@ probe uses the same credentials.
 **What an embedder can observe.** On a managed-local proxied workspace, a
 plain MySQL client connecting to `127.0.0.1:<port from proxy.pid>` as `root`
 with no password reaches the same database bd does, and the proxy passes the
-handshake through untouched. That is what makes a library-over-proxy embedding
-possible at all.
+handshake through untouched. That is what lets an embedder read and write the
+workspace's live database without standing up a server of its own.
 
 Three qualifications worth carrying:
 
