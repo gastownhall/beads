@@ -254,19 +254,29 @@ func (e *DependencyEndpointNotFoundError) Error() string {
 func (e *DependencyEndpointNotFoundError) Unwrap() error { return e.Err }
 
 // DependencyHierarchyConflictError is returned when a blocking dependency
-// would gate an issue on one of its own ancestors or descendants. Either shape
-// can never clear under the parent-child close/blocking semantics.
+// would gate an issue on one of its own ancestors or descendants. Neither
+// shape is how the hierarchy expresses "wait for what is under me".
 type DependencyHierarchyConflictError struct {
 	IssueID           string
 	BlockerID         string
 	BlockerIsAncestor bool
 }
 
+// Error states the DESCENDANT refusal as a modeling refusal, not a
+// consequence of the cascade.
+//
+// It used to read "blocked status cascades to descendants, so <blocker> would
+// inherit the block and never close". That was true until
+// gastownhall/beads#6506: a parent-child edge now propagates only the parent's
+// EXOGENOUS blockedness, so a parent that blocks on something in its own
+// subtree no longer darkens it, and the sentence described a deadlock that no
+// longer happens. The refusal itself stands — a blocks edge is not the way to
+// say "I close after my children" — so the reason has to say what is.
 func (e *DependencyHierarchyConflictError) Error() string {
 	if e.BlockerIsAncestor {
 		return fmt.Sprintf("%s cannot be blocked by its ancestor %s: %s cannot close until its descendants finish, so the gate would never clear",
 			e.IssueID, e.BlockerID, e.BlockerID)
 	}
-	return fmt.Sprintf("%s cannot be blocked by its descendant %s: blocked status cascades to descendants, so %s would inherit the block and never close",
-		e.IssueID, e.BlockerID, e.BlockerID)
+	return fmt.Sprintf("%s cannot be blocked by its descendant %s: waiting on your own subtree is a close gate, not a blocks edge — use a waits-for gate over the children (bd gate)",
+		e.IssueID, e.BlockerID)
 }
