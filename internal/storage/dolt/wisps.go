@@ -347,7 +347,8 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	// Edges are journaled before the row goes, while their source snapshots can
 	// still be read. An active wisp is a bead like any other, so its delete is
 	// a journalled mutation, not silent cleanup.
-	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}); err != nil {
+	// The wisp delete surface carries no actor, so these record none.
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}, ""); err != nil {
 		return fmt.Errorf("journal dependency removals for wisp %s: %w", id, err)
 	}
 
@@ -447,7 +448,8 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	}
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
-	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, deletedIDs); err != nil {
+	// The batched wisp delete surface carries no actor, so these record none.
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, deletedIDs, ""); err != nil {
 		return 0, fmt.Errorf("journal dependency removals for batched wisp delete: %w", err)
 	}
 

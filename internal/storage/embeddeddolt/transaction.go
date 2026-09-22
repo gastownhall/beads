@@ -152,7 +152,8 @@ func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error 
 	for _, cascaded := range issueops.DeleteCascadeTables(issueops.IsActiveWispInTx(ctx, t.tx, id)) {
 		t.dirty.MarkDirty(cascaded)
 	}
-	return issueops.DeleteIssueInTx(ctx, t.tx, id)
+	// storage.Tx.DeleteIssue carries no actor, so the journal rows record none.
+	return issueops.DeleteIssueInTx(ctx, t.tx, id, "")
 }
 
 func (t *embeddedTransaction) GetIssue(ctx context.Context, id string) (*types.Issue, error) {

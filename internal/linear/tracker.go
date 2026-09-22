@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -26,7 +25,7 @@ func init() {
 type Tracker struct {
 	clients   map[string]*Client // keyed by team ID
 	config    *MappingConfig
-	store     storage.Storage
+	store     tracker.Store
 	teamIDs   []string // ordered list of configured team IDs
 	projectID string
 }
@@ -41,7 +40,7 @@ func (t *Tracker) Name() string         { return "linear" }
 func (t *Tracker) DisplayName() string  { return "Linear" }
 func (t *Tracker) ConfigPrefix() string { return "linear" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	// Resolve authentication: OAuth client-credentials takes precedence over API key.
@@ -808,7 +807,7 @@ func BuildLabelCacheFromTracker(ctx context.Context, t *Tracker) (*LabelCache, e
 // configLoaderAdapter wraps storage.Storage to implement linear.ConfigLoader.
 type configLoaderAdapter struct {
 	ctx   context.Context
-	store storage.Storage
+	store tracker.Store
 }
 
 func (c *configLoaderAdapter) GetAllConfig() (map[string]string, error) {

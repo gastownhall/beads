@@ -137,17 +137,25 @@ type sqlServerUOWTopology struct {
 	rootPassword      string
 }
 
-// previewProviderOptions is the CLI-side half of the preview policy: it turns
-// the root pre-run's previewMode bool into the uow.ProviderOption slice the
-// proxied-server provider is opened with. Extracted (rather than inlined at
-// the call site) so the wiring — preview=true must produce uow.WithPreview(),
-// preview=false must produce nothing — has something to unit test; the
+// rootProviderOptions is the CLI-side half of the open-posture policy: it
+// turns the root pre-run's two classifications into the uow.ProviderOption
+// slice the proxied-server provider is opened with. Extracted (rather than
+// inlined at the call site) so the wiring has something to unit test; the
 // previous inline form had no test that would fail if a refactor dropped it.
-func previewProviderOptions(preview bool) []uow.ProviderOption {
-	if !preview {
+//
+// The two are not exclusive but preview is stronger, and passing both would
+// say two different things about an open that can only have one posture:
+// preview neither creates nor migrates, while readOnly opens normally and only
+// changes how a refused migration is handled. Preview wins.
+func rootProviderOptions(preview, readOnly bool) []uow.ProviderOption {
+	switch {
+	case preview:
+		return []uow.ProviderOption{uow.WithPreview()}
+	case readOnly:
+		return []uow.ProviderOption{uow.WithReadOnly()}
+	default:
 		return nil
 	}
-	return []uow.ProviderOption{uow.WithPreview()}
 }
 
 // newProxiedServerUOWProvider opens the proxied-server provider and, in

@@ -17,8 +17,8 @@ closes. Gates close in one of two ways:
 
 - **Manually** — `bd gate resolve <gate-id>` (human gates always close this
   way).
-- **Via `bd gate check`** — evaluates open timer and GitHub gates against
-  the real world and closes the ones whose condition is met.
+- **Via `bd gate check`** — evaluates open timer, GitHub, and bead gates
+  against the real world and closes the ones whose condition is met.
 
 ```bash
 bd gate list                 # open gates
@@ -37,7 +37,7 @@ bd gate resolve <gate-id>    # close a gate manually
 | `timer` | a duration after gate creation | `bd gate check` once the timeout elapses |
 | `gh:run` | a GitHub Actions workflow to complete successfully | `bd gate check` (uses `gh run view`) |
 | `gh:pr` | a pull request to merge | `bd gate check` (uses `gh pr view`) |
-| `bead` | a bead in another rig to close | cannot be checked because multi-rig routing was removed; resolve these gates manually |
+| `bead` | a bead to close — a plain ID names a bead in this rig, the cross-rig form is `<rig>:<bead-id>` | `bd gate check` for plain local IDs; cross-rig values cannot be checked — resolve those manually |
 
 Timeouts use Go duration syntax: `30m`, `1h`, `24h` (there is no `d` unit —
 write `24h`, not `1d`).
@@ -50,6 +50,26 @@ blocks; `human`/`timer`/`bead` gates do not, since `metadata.repo` is
 unrelated, ordinary metadata for those types. `bd gate check` rejects
 malformed repository values instead of falling back to the current
 repository.
+
+### Known limitations: multi-rig and proxied-server topologies
+
+Bead gates and prefix routing (`routes.jsonl`) do not work in every
+topology. Three limitations to expect, all tracked in
+[#5861](https://github.com/gastownhall/beads/issues/5861):
+
+- **Cross-rig bead gates never resolve on their own.** A `<rig>:<bead-id>`
+  await value reports `cannot be checked (multi-rig routing removed)` and
+  stays pending regardless of the awaited bead's status. Close it with
+  `bd gate resolve`.
+- **`bd close` cannot verify a bead gate in the experimental proxied-server
+  mode.** Proxied-server commands never open a local store, so closing the
+  gate refuses with `no local store available` even when the awaited bead is
+  closed. Run `bd gate check`, which evaluates bead gates in proxied-server
+  mode and closes the satisfied ones, or `bd close --force`.
+- **Prefix routing cannot open a proxied-server target rig.** A routed
+  lookup into a rig that is itself in proxied-server mode fails with
+  `proxy server store needs to be uow provider`, so an all-proxied
+  shared-server topology cannot resolve routed targets at all.
 
 ## Gates in formulas
 

@@ -104,8 +104,20 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage,
 		// Working-set-reconcile commands (bd dolt commit, bd vc commit) must
 		// not be bricked by a pending-migration dirty-table refusal: that
 		// refusal's documented recovery is exactly the commit these commands
-		// run, so failing the open here would deadlock (#4566).
+		// run, so failing the open here would deadlock (#4566). The server
+		// arm above honors the same cfg.LenientOpen inside dolt.New; this
+		// branch is the embedded half of one policy, not the whole of it.
 		return embeddeddolt.OpenForWorkingSetReconcile(ctx, cfg.BeadsDir, cfg.Database, "main")
+	}
+	if cfg.RemoteSyncOpen {
+		// `bd dolt pull` must not be bricked by the #6575 data-behind gate
+		// refusal, because that refusal's entire remedy IS this pull: the gate
+		// stops a clone that is behind the remote from migrating and tells the
+		// operator to pull first, and an embedded clone has no external dolt
+		// binary to do it with. Same deadlock as #4566, and this open tolerates
+		// only that one gate reason (see openRemoteSync). The server arm above
+		// honors the same cfg.RemoteSyncOpen inside dolt.New.
+		return embeddeddolt.OpenForRemoteSync(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	return embeddeddolt.Open(ctx, cfg.BeadsDir, cfg.Database, "main")
 }
@@ -152,7 +164,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
-	if err := validateConfiguredBackend(cfg); err != nil {
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
 	cfg = normalizeLoadedConfig(cfg)
@@ -260,7 +272,7 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 		// "database not found" the embedded open would produce.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
-	if err := validateConfiguredBackend(cfg); err != nil {
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
 	cfg = normalizeLoadedConfig(cfg)

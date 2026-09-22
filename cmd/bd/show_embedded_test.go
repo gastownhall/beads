@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdShowRaw runs "bd show" with the given args and returns raw stdout.
@@ -57,6 +59,41 @@ func bdShowDetails(t *testing.T, bd, dir, id string) map[string]interface{} {
 		t.Fatalf("parse show JSON: %v\n%s", err, s)
 	}
 	return m
+}
+
+// assertLiveRevisionToken holds a `revision` read off a `bd show --json` detail
+// view to the wire contract the token carries: a decimal STRING, never a JSON
+// number.
+//
+// THE TYPE IS ASSERTED BEFORE THE VALUE, and that ordering is the point. The
+// token spans the full int64 range, and a JSON number past 2^53 is rounded by
+// every double-based consumer — jq, JavaScript, Go's own `any` — so a guard
+// composed from one is refused against a row nothing else touched. Decoding a
+// detail view into `map[string]any` is exactly the shape that hides it, which is
+// why both callers here go through this helper instead of a local cast.
+//
+// "LIVE" IS THE SECOND HALF. A row the caller just created carries a freshly
+// minted token, so "0" — the migration-0054 backfill value — means the producer
+// published a member it never filled in: the one failure a legacy-zero row makes
+// otherwise indistinguishable from success.
+func assertLiveRevisionToken(t *testing.T, value any) {
+	t.Helper()
+	token, ok := value.(string)
+	if !ok {
+		t.Errorf("revision = %#v (%T), want the decimal string the wire contract declares", value, value)
+		return
+	}
+	parsed, err := types.ParseRevisionToken(token)
+	if err != nil {
+		t.Errorf("revision = %q, which is not a decimal token: %v", token, err)
+		return
+	}
+	if got := types.RevisionToken(parsed); got != token {
+		t.Errorf("revision = %q does not round-trip through the token codec (got %q back)", token, got)
+	}
+	if parsed == 0 {
+		t.Errorf("revision = %q on a row this test just created; the token was not read off the row", token)
+	}
 }
 
 // bdShowFail2 runs "bd show" expecting failure.
@@ -129,9 +166,7 @@ func TestEmbeddedShow(t *testing.T) {
 		if m["description"] != "A description" {
 			t.Errorf("expected description, got %v", m["description"])
 		}
-		if revision, ok := m["revision"].(float64); !ok || revision == 0 {
-			t.Errorf("expected non-zero revision, got %v", m["revision"])
-		}
+		assertLiveRevisionToken(t, m["revision"])
 	})
 
 	t.Run("show_json_includes_labels", func(t *testing.T) {

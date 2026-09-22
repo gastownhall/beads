@@ -414,71 +414,75 @@ func (r *dependencySQLRepositoryImpl) ListByIssueIDs(ctx context.Context, issueI
 		Outgoing: make(map[string][]*types.Dependency),
 		Incoming: make(map[string][]*types.Dependency),
 	}
-	if len(issueIDs) == 0 {
-		return result, nil
-	}
-
-	idPlaceholders, idArgs := buildInPlaceholders(issueIDs)
 	typeWhere, typeArgs := buildTypeFilter(opts.Types)
 	table := pickDepTable(opts.UseWispsTable)
 
-	if opts.Direction == domain.DepDirectionBoth || opts.Direction == domain.DepDirectionOut {
-		//nolint:gosec // G201: table and depSelectColumns are hardcoded
-		q := fmt.Sprintf(
-			`SELECT %s FROM %s WHERE issue_id IN (%s)%s ORDER BY issue_id`,
-			depSelectColumns, table, idPlaceholders, typeWhere,
-		)
-		args := combineArgs(idArgs, typeArgs)
-		if err := r.queryDeps(ctx, q, args, result.Outgoing, true); err != nil {
-			return domain.DepBulkResult{}, fmt.Errorf("db: DependencySQLRepository.ListByIssueIDs (out): %w", err)
-		}
-	}
+	err := forEachIDBatch(issueIDs, func(batch []string) error {
+		idPlaceholders, idArgs := buildInPlaceholders(batch)
 
-	if opts.Direction == domain.DepDirectionBoth || opts.Direction == domain.DepDirectionIn {
-		//nolint:gosec // G201: table, depSelectColumns, depTargetExpr are hardcoded
-		q := fmt.Sprintf(
-			`SELECT %s FROM %s WHERE %s IN (%s)%s ORDER BY issue_id`,
-			depSelectColumns, table, depTargetExpr, idPlaceholders, typeWhere,
-		)
-		args := combineArgs(idArgs, typeArgs)
-		if err := r.queryDeps(ctx, q, args, result.Incoming, false); err != nil {
-			return domain.DepBulkResult{}, fmt.Errorf("db: DependencySQLRepository.ListByIssueIDs (in): %w", err)
+		if opts.Direction == domain.DepDirectionBoth || opts.Direction == domain.DepDirectionOut {
+			//nolint:gosec // G201: table and depSelectColumns are hardcoded
+			q := fmt.Sprintf(
+				`SELECT %s FROM %s WHERE issue_id IN (%s)%s ORDER BY issue_id`,
+				depSelectColumns, table, idPlaceholders, typeWhere,
+			)
+			args := combineArgs(idArgs, typeArgs)
+			if err := r.queryDeps(ctx, q, args, result.Outgoing, true); err != nil {
+				return fmt.Errorf("db: DependencySQLRepository.ListByIssueIDs (out): %w", err)
+			}
 		}
-	}
 
+		if opts.Direction == domain.DepDirectionBoth || opts.Direction == domain.DepDirectionIn {
+			//nolint:gosec // G201: table, depSelectColumns, depTargetExpr are hardcoded
+			q := fmt.Sprintf(
+				`SELECT %s FROM %s WHERE %s IN (%s)%s ORDER BY issue_id`,
+				depSelectColumns, table, depTargetExpr, idPlaceholders, typeWhere,
+			)
+			args := combineArgs(idArgs, typeArgs)
+			if err := r.queryDeps(ctx, q, args, result.Incoming, false); err != nil {
+				return fmt.Errorf("db: DependencySQLRepository.ListByIssueIDs (in): %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.DepBulkResult{}, err
+	}
 	return result, nil
 }
 
 func (r *dependencySQLRepositoryImpl) CountsByIssueIDs(ctx context.Context, issueIDs []string, opts domain.DepCountsOpts) (map[string]*types.DependencyCounts, error) {
 	result := make(map[string]*types.DependencyCounts)
-	if len(issueIDs) == 0 {
-		return result, nil
-	}
 	for _, id := range issueIDs {
 		result[id] = &types.DependencyCounts{}
 	}
-
-	idPlaceholders, idArgs := buildInPlaceholders(issueIDs)
 	table := pickDepTable(opts.UseWispsTable)
 
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	outQ := fmt.Sprintf(
-		`SELECT issue_id, COUNT(*) FROM %s WHERE issue_id IN (%s) AND type = 'blocks' GROUP BY issue_id`,
-		table, idPlaceholders,
-	)
-	if err := scanCounts(ctx, r.runner, outQ, idArgs, result, func(c *types.DependencyCounts, n int) { c.DependencyCount = n }); err != nil {
-		return nil, fmt.Errorf("db: DependencySQLRepository.CountsByIssueIDs (out): %w", err)
-	}
+	err := forEachIDBatch(issueIDs, func(batch []string) error {
+		idPlaceholders, idArgs := buildInPlaceholders(batch)
 
-	//nolint:gosec // G201: table and depTargetExpr are hardcoded
-	inQ := fmt.Sprintf(
-		`SELECT %s AS depends_on_id, COUNT(*) FROM %s WHERE %s IN (%s) AND type = 'blocks' GROUP BY %s`,
-		depTargetExpr, table, depTargetExpr, idPlaceholders, depTargetExpr,
-	)
-	if err := scanCounts(ctx, r.runner, inQ, idArgs, result, func(c *types.DependencyCounts, n int) { c.DependentCount = n }); err != nil {
-		return nil, fmt.Errorf("db: DependencySQLRepository.CountsByIssueIDs (in): %w", err)
-	}
+		//nolint:gosec // G201: table is one of two hardcoded constants
+		outQ := fmt.Sprintf(
+			`SELECT issue_id, COUNT(*) FROM %s WHERE issue_id IN (%s) AND type = 'blocks' GROUP BY issue_id`,
+			table, idPlaceholders,
+		)
+		if err := scanCounts(ctx, r.runner, outQ, idArgs, result, func(c *types.DependencyCounts, n int) { c.DependencyCount = n }); err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.CountsByIssueIDs (out): %w", err)
+		}
 
+		//nolint:gosec // G201: table and depTargetExpr are hardcoded
+		inQ := fmt.Sprintf(
+			`SELECT %s AS depends_on_id, COUNT(*) FROM %s WHERE %s IN (%s) AND type = 'blocks' GROUP BY %s`,
+			depTargetExpr, table, depTargetExpr, idPlaceholders, depTargetExpr,
+		)
+		if err := scanCounts(ctx, r.runner, inQ, idArgs, result, func(c *types.DependencyCounts, n int) { c.DependentCount = n }); err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.CountsByIssueIDs (in): %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -493,26 +497,41 @@ func (r *dependencySQLRepositoryImpl) GetBlockingInfo(ctx context.Context, issue
 	}
 
 	table := pickDepTable(opts.UseWispsTable)
-	idPlaceholders, idArgs := buildInPlaceholders(issueIDs)
 
-	//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-	outQ := fmt.Sprintf(
-		"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE issue_id IN (%s) AND type IN ('blocks', 'parent-child')",
-		depTargetExpr, table, idPlaceholders,
-	)
-	outRows, err := r.scanBlockingRows(ctx, outQ, idArgs)
-	if err != nil {
-		return domain.BlockingInfo{}, fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: outbound: %w", err)
-	}
+	// Both legs are batched at queryBatchSize and their rows concatenated.
+	// Each leg keys its result by a column the IN list constrains — outbound
+	// by issue_id, inbound by the dependency target — and an id lands in
+	// exactly one batch, so every row that shares a key comes from the same
+	// batch and the merge below is unchanged by the split.
+	var outRows, inRows []blockingRow
+	err := forEachIDBatch(issueIDs, func(batch []string) error {
+		idPlaceholders, idArgs := buildInPlaceholders(batch)
 
-	//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-	inQ := fmt.Sprintf(
-		"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE %s IN (%s) AND type = 'blocks'",
-		depTargetExpr, table, depTargetExpr, idPlaceholders,
-	)
-	inRows, err := r.scanBlockingRows(ctx, inQ, idArgs)
+		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
+		outQ := fmt.Sprintf(
+			"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE issue_id IN (%s) AND type IN ('blocks', 'parent-child')",
+			depTargetExpr, table, idPlaceholders,
+		)
+		batchOut, err := r.scanBlockingRows(ctx, outQ, idArgs)
+		if err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: outbound: %w", err)
+		}
+		outRows = append(outRows, batchOut...)
+
+		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
+		inQ := fmt.Sprintf(
+			"SELECT issue_id, %s AS depends_on_id, type FROM %s WHERE %s IN (%s) AND type = 'blocks'",
+			depTargetExpr, table, depTargetExpr, idPlaceholders,
+		)
+		batchIn, err := r.scanBlockingRows(ctx, inQ, idArgs)
+		if err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: inbound: %w", err)
+		}
+		inRows = append(inRows, batchIn...)
+		return nil
+	})
 	if err != nil {
-		return domain.BlockingInfo{}, fmt.Errorf("db: DependencySQLRepository.GetBlockingInfo: inbound: %w", err)
+		return domain.BlockingInfo{}, err
 	}
 
 	statusIDs := make(map[string]struct{})
@@ -607,12 +626,19 @@ func (r *dependencySQLRepositoryImpl) loadStatusByID(ctx context.Context, idSet 
 	for id := range idSet {
 		ids = append(ids, id)
 	}
-	placeholders, args := buildInPlaceholders(ids)
 	sourceByID := make(map[string]string, len(idSet))
+	// Each table is read in ceil(len(ids)/queryBatchSize) statements. The
+	// cross-table duplicate check is unaffected: an id lands in exactly one
+	// batch per table, so it is still recorded under `issues` before the
+	// `wisps` pass reaches it.
 	for _, table := range []string{"issues", "wisps"} {
-		//nolint:gosec // G201: table is a hardcoded constant
-		q := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, placeholders)
-		if err := r.scanStatusRows(ctx, q, args, table, statusByID, sourceByID); err != nil {
+		err := forEachIDBatch(ids, func(batch []string) error {
+			placeholders, args := buildInPlaceholders(batch)
+			//nolint:gosec // G201: table is a hardcoded constant
+			q := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, placeholders)
+			return r.scanStatusRows(ctx, q, args, table, statusByID, sourceByID)
+		})
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -735,7 +761,7 @@ func combineArgs(a, b []any) []any {
 	return out
 }
 
-func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids []string, opts domain.DepInsertOpts) (int, error) {
+func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids []string, opts domain.DepInsertOpts, actor string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -762,7 +788,7 @@ func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids [
 		ph := strings.Join(placeholders, ",")
 		// Journal the edges this batch is about to remove, while they and their
 		// source snapshots are still readable.
-		if err := issueops.RecordDependencyRemovalsForTableInTx(ctx, r.runner, table, batch); err != nil {
+		if err := issueops.RecordDependencyRemovalsForTableInTx(ctx, r.runner, table, batch, actor); err != nil {
 			return total, fmt.Errorf("db: DependencySQLRepository.DeleteAllForIDs journal removals from %s: %w", table, err)
 		}
 		//nolint:gosec // G201: table is one of two hardcoded constants; ? placeholders only.

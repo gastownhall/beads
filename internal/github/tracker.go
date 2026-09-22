@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -32,7 +31,7 @@ var ghShorthandPattern = regexp.MustCompile(`^github:([1-9]\d*)$`)
 type Tracker struct {
 	client *Client
 	config *MappingConfig
-	store  storage.Storage
+	store  tracker.Store
 }
 
 // LinkResolver returns a relationship resolver bound to this tracker's
@@ -50,7 +49,7 @@ func (t *Tracker) Name() string         { return "github" }
 func (t *Tracker) DisplayName() string  { return "GitHub" }
 func (t *Tracker) ConfigPrefix() string { return "github" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	token := t.getConfig(ctx, "github.token", "GITHUB_TOKEN")

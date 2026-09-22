@@ -623,10 +623,15 @@ func (c *Config) GetDoltServerTLS() bool {
 // When set, dolt stores its data in this directory instead of .beads/dolt/.
 // This is useful on WSL where the project lives on a slow NTFS mount (9P)
 // but dolt data can be placed on native ext4 for significantly better I/O.
-// Checks BEADS_DOLT_DATA_DIR env var first, then config.
+// Checks BEADS_DOLT_DATA_DIR env var first, then config. Nil-safe, like
+// GetBackend: rejection paths resolve the data dir for workspaces whose config
+// may not have loaded, and the env override still applies to those.
 func (c *Config) GetDoltDataDir() string {
 	if d := os.Getenv("BEADS_DOLT_DATA_DIR"); d != "" {
 		return d
+	}
+	if c == nil {
+		return ""
 	}
 	return c.DoltDataDir
 }
