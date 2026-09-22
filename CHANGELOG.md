@@ -119,6 +119,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks in embedded, server, and proxied-server command paths; the legacy
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
+### Fixed
+
+- **`bd gate check` no longer reports an unreadable store as "pending".** The
+  bead arm of the check dropped the lookup error on the floor, so with dolt
+  down (or any backend or transport failure on the awaited bead's read) every
+  bead gate printed as still waiting and the command exited 0 — the same
+  output as a healthy, genuinely pending gate. A read that fails for any
+  reason other than not-found is now an error row (`✗ <gate>: error checking -
+  ...`), counted in the summary, and `bd gate check` exits non-zero whenever
+  any gate could not be checked, on the classic and proxied routes alike. A
+  missing bead still stays pending. `bd close` on such a gate keeps refusing
+  (`could not check bead gate`, `--force` to override) rather than letting a
+  dead store read as satisfied.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
