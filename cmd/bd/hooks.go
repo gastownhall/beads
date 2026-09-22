@@ -69,6 +69,11 @@ const hookTimeoutSeconds = 300
 //   - Only GNU coreutils timeout and uutils coreutils timeout (same command
 //     line, same exit 124; GH#5541) are selected, by --version banner; Windows
 //     timeout.exe has the same name but an incompatible command line (GH#5503).
+//     The banner match holds under the gtimeout candidate too: GNU prints a
+//     fixed program name (Homebrew's gtimeout reports "timeout (GNU
+//     coreutils) ..."), and the uutils multicall dispatches on the argv[0]
+//     suffix and then prints the canonical name ("timeout (uutils coreutils)
+//     ..." when invoked as gtimeout). checks.nix runs that case.
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
 func generateHookSection(hookName string) string {
