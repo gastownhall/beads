@@ -22,8 +22,9 @@ let
   # deadline of wall time and independent of the Go build.
   #
   # Each case: one hook, one shell (the `sh`s a `#!/usr/bin/env sh` hook meets
-  # in the wild), a PATH of exactly one timeout implementation plus optionally
-  # perl, BEADS_HOOK_TIMEOUT=1, and a fake `bd` that blocks on a held-open fifo
+  # in the wild), a PATH of exactly one timeout implementation — under the
+  # name `timeout`, or for the multicall ones also under `gtimeout` alone —
+  # plus optionally perl, BEADS_HOOK_TIMEOUT=1, and a fake `bd` that blocks on a held-open fifo
   # until a helper kills it. The fake records the signal that killed it, which
   # is how the check asserts the backend and not just "it finished":
   #   coreutils backend → TERM from timeout, shim reports the deadline, exit 0
@@ -49,6 +50,48 @@ let
     busybox = pkgs.busybox;
     toybox = pkgs.toybox;
   };
+
+  # The shim probes `timeout` first and `gtimeout` second (Homebrew's prefixed
+  # GNU coreutils on macOS). Whether a helper is accepted under the second name
+  # depends on what its banner does with argv[0]. The multicall implementations
+  # dispatch on it and then print the CANONICAL utility name: uutils'
+  # src/bin/coreutils.rs matches `argv[0].ends_with(<util>)`, so `gtimeout`
+  # (or `mytimeout`) is `timeout` to it and reports "timeout (uutils
+  # coreutils) <version>" — accepted (measured on 0.8.0, this flake's
+  # nixos-25.11 pin, and on 0.11.0); busybox and toybox know no `gtimeout`
+  # applet and fail the probe outright — rejected either way. These variants put each multicall on PATH under the name `gtimeout`
+  # ONLY, so the second candidate is the one that runs. GNU has no variant:
+  # nixpkgs' coreutils is a single-binary multicall that refuses a name it does
+  # not know ("coreutils: unknown program 'gtimeout'"), while Homebrew's
+  # gtimeout is a separate binary whose banner is the fixed "timeout (GNU
+  # coreutils) 9.11" — GNU is immune by construction, not by measurement here.
+  asGtimeout =
+    impl: pkg:
+    pkgs.runCommand "${impl}-as-gtimeout" { } ''
+      mkdir -p "$out/bin"
+      ln -s ${pkg}/bin/timeout "$out/bin/gtimeout"
+    '';
+
+  # What goes on a case's PATH: every implementation as itself, and the
+  # multicalls once more under the other candidate name. `impl` is what the
+  # model reasons about; `label` is what the case is called.
+  installs = lib.concatLists (
+    lib.mapAttrsToList (
+      impl: pkg:
+      [
+        {
+          inherit impl;
+          label = impl;
+          dirs = lib.optional (pkg != null) "${pkg}/bin";
+        }
+      ]
+      ++ lib.optional (pkg != null && impl != "gnu-coreutils") {
+        inherit impl;
+        label = "${impl}-as-gtimeout";
+        dirs = [ "${asGtimeout impl pkg}/bin" ];
+      }
+    ) implementations
+  );
 
   shells = {
     dash = "${pkgs.dash}/bin/dash";
@@ -76,30 +119,28 @@ let
       "none";
 
   # One `run_case` line per point in the matrix, all backgrounded.
-  cases = lib.concatLists (
-    lib.mapAttrsToList (
-      impl: pkg:
-      lib.concatMap
-        (
-          withPerl:
-          lib.concatLists (
-            lib.mapAttrsToList (
-              shellName: shell:
-              map (hook: {
-                name = "${hook}/${shellName}/${impl}${lib.optionalString withPerl "+perl"}";
-                inherit hook shell;
-                backend = backendFor impl withPerl;
-                path = lib.optional (pkg != null) "${pkg}/bin" ++ lib.optional withPerl "${pkgs.perl}/bin";
-              }) hooks
-            ) shells
-          )
+  cases = lib.concatMap (
+    install:
+    lib.concatMap
+      (
+        withPerl:
+        lib.concatLists (
+          lib.mapAttrsToList (
+            shellName: shell:
+            map (hook: {
+              name = "${hook}/${shellName}/${install.label}${lib.optionalString withPerl "+perl"}";
+              inherit hook shell;
+              backend = backendFor install.impl withPerl;
+              path = install.dirs ++ lib.optional withPerl "${pkgs.perl}/bin";
+            }) hooks
+          ) shells
         )
-        [
-          false
-          true
-        ]
-    ) implementations
-  );
+      )
+      [
+        false
+        true
+      ]
+  ) installs;
 
   caseLine =
     c:
@@ -171,7 +212,7 @@ in
           # `|| rc=$?`: the builder runs under set -e, and a bare assignment
           # from a failing command would end this subshell before it reports.
           rc=0
-          out=$(timeout 10 env PATH="$path" BEADS_HOOK_TIMEOUT=1 \
+          case_out=$(timeout 10 env PATH="$path" BEADS_HOOK_TIMEOUT=1 \
                   FAKE_BD_BLOCK="$block" FAKE_BD_SIGNAL="$signal_file" \
                   "$case_dir/bin/sh" "$shims/$hook" origin https://example.invalid 2>&1 <&3) || rc=$?
           signal=$(cat "$signal_file" 2>/dev/null || true)
@@ -179,19 +220,19 @@ in
           if [ "$rc" -eq 124 ]; then
             verdict="FAIL: nothing killed the fake bd (harness safety net fired)"
           elif [ "$rc" -ne 0 ]; then
-            verdict="FAIL: hook exit $rc (would block the push): $out"
+            verdict="FAIL: hook exit $rc (would block the push): $case_out"
           else
             case "$backend" in
               coreutils)
-                case "$out" in *"timed out after 1s"*) ;; *) verdict="FAIL: no deadline report: $out" ;; esac
+                case "$case_out" in *"timed out after 1s"*) ;; *) verdict="FAIL: no deadline report: $case_out" ;; esac
                 [ "$signal" = TERM ] || verdict="FAIL: expected coreutils timeout (TERM), fake saw '$signal'"
                 ;;
               perl)
-                case "$out" in *"timed out after 1s"*) ;; *) verdict="FAIL: no deadline report: $out" ;; esac
+                case "$case_out" in *"timed out after 1s"*) ;; *) verdict="FAIL: no deadline report: $case_out" ;; esac
                 [ "$signal" = ALRM ] || verdict="FAIL: expected perl alarm (ALRM), fake saw '$signal'"
                 ;;
               none)
-                case "$out" in *"running without timeout"*) ;; *) verdict="FAIL: no unbounded warning: $out" ;; esac
+                case "$case_out" in *"running without timeout"*) ;; *) verdict="FAIL: no unbounded warning: $case_out" ;; esac
                 ;;
             esac
           fi
