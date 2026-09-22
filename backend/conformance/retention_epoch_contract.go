@@ -845,6 +845,18 @@ func RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange(t *testing.T, ct
 // that lapses and is only later, coincidentally, reused by a fresh mint
 // sharing the same id (gastownhall/beads#6664, bee-ghosttrack review
 // 5268699223, item B1).
+//
+// A third, independent phase (again its own store) pins the direction the
+// second phase's single gap cannot: a mapping carried forward through
+// EVERY intervening epoch across more than one hop must stay Live, not
+// just after a single bump — the first phase above only ever bumps once,
+// so it cannot by itself rule out a backend whose retained-mapping check
+// only ever looks at a single hop (gastownhall/beads#6664 FINDING 1). This
+// phase bumps two more epochs past the minting epoch and re-mints at EVERY
+// intervening epoch, leaving no gap anywhere, then asserts the original,
+// first-epoch Address is still Live: a single-hop-only check wrongly
+// reports it GoneReorganization once more than one hop separates it from
+// the current epoch.
 func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx context.Context, fixture EpochFixture) {
 	t.Helper()
 	if fixture.MintUnderEpoch == nil {
@@ -997,6 +1009,69 @@ func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx co
 		t.Fatal("Resolve(record-gap's first-epoch address).Epoch = nil, want the current epoch populated")
 	} else if *gapAnswer.Epoch != gapNewEpoch {
 		t.Errorf("Resolve(record-gap's first-epoch address).Epoch = %d, want the current epoch %d", *gapAnswer.Epoch, gapNewEpoch)
+	}
+
+	// Third phase (continuous multi-hop): a mapping carried forward through
+	// EVERY intervening epoch — not just one hop — must still resolve Live.
+	// The first phase above only bumps once, so (per this function's own
+	// doc comment) it cannot structurally distinguish a backend that checks
+	// an unbroken chain from one that merely checks bare existence of a row
+	// at the current epoch; the second (gap) phase proves a GAP voids
+	// correctly, but proves nothing about a continuous chain longer than
+	// one hop — a single-hop-only arithmetic guard (epoch-priorEpoch == 1)
+	// would pass both existing phases and still be wrong. This phase bumps
+	// two more epochs past the minting epoch and re-mints record-continuous
+	// at EVERY intervening epoch, leaving no gap anywhere, then asserts the
+	// ORIGINAL, first-epoch address still resolves Live.
+	continuousStore := epochStore(fixture, "voids-continuous")
+
+	continuousAddr1, err := fixture.MintUnderEpoch(ctx, continuousStore, "record-continuous")
+	if err != nil {
+		t.Fatalf("MintUnderEpoch(record-continuous) [continuous phase, first epoch]: %v", err)
+	}
+
+	if _, err := fixture.BumpEpoch(ctx, continuousStore, EpochBumpTriggerRestore); err != nil {
+		t.Fatalf("BumpEpoch [continuous phase, second epoch]: %v", err)
+	}
+	if _, err := fixture.MintUnderEpoch(ctx, continuousStore, "record-continuous"); err != nil {
+		t.Fatalf("MintUnderEpoch(record-continuous) [continuous phase, carry into second epoch]: %v", err)
+	}
+
+	continuousFinalEpoch, err := fixture.BumpEpoch(ctx, continuousStore, EpochBumpTriggerRestore)
+	if err != nil {
+		t.Fatalf("BumpEpoch [continuous phase, third epoch]: %v", err)
+	}
+	if _, err := fixture.MintUnderEpoch(ctx, continuousStore, "record-continuous"); err != nil {
+		t.Fatalf("MintUnderEpoch(record-continuous) [continuous phase, carry into third epoch]: %v", err)
+	}
+
+	continuousServes, err := fixture.StillServes(ctx, continuousStore, continuousAddr1)
+	if err != nil {
+		t.Fatalf("StillServes(%s) [continuous phase]: %v", continuousAddr1, err)
+	}
+	if !continuousServes {
+		t.Errorf("StillServes(record-continuous's first-epoch address) = false, want true: record-continuous was re-minted at EVERY intervening epoch with no gap, so its first-epoch address must still resolve through R20-n's retained mapping across the full chain, not just one hop")
+	}
+
+	continuousAnswer, err := fixture.Resolve(ctx, continuousStore, continuousAddr1)
+	if err != nil {
+		t.Fatalf("Resolve(%s) [continuous phase]: %v", continuousAddr1, err)
+	}
+	if continuousAnswer.Restriction != RestrictionLive {
+		t.Errorf("Resolve(record-continuous's first-epoch address, carried forward through 2 intervening bumps with no gap) = %s, want RestrictionLive: a backend that only checks one hop (epoch-priorEpoch == 1) wrongly reports this GoneReorganization", continuousAnswer.Restriction)
+	}
+	if continuousAnswer.Epoch == nil {
+		t.Fatal("Resolve(record-continuous's first-epoch address).Epoch = nil, want the current epoch populated")
+	} else if *continuousAnswer.Epoch != continuousFinalEpoch {
+		t.Errorf("Resolve(record-continuous's first-epoch address).Epoch = %d, want the current epoch %d", *continuousAnswer.Epoch, continuousFinalEpoch)
+	}
+
+	continuousNewAddr, err := fixture.CurrentAddressFor(ctx, continuousStore, continuousAddr1)
+	if err != nil {
+		t.Fatalf("CurrentAddressFor(%s) [continuous phase]: %v", continuousAddr1, err)
+	}
+	if continuousNewAddr == "" {
+		t.Error("CurrentAddressFor(record-continuous's first-epoch address) [continuous phase] returned an empty Address, want a real one under the current epoch")
 	}
 }
 

@@ -159,6 +159,58 @@ func TestStillServesInTxReportsFalseForALapsedMappingEvenAfterALaterRemint(t *te
 	}
 }
 
+// TestStillServesInTxHonorsAContinuousMultiHopRetainedMapping is the
+// positive counterpart to
+// TestStillServesInTxReportsFalseForALapsedMappingEvenAfterALaterRemint: a
+// mapping carried forward through EVERY intervening epoch — not just one
+// hop — must still report Live. TestStillServesInTxHonorsARetainedMapping
+// above only ever bumps once, so it cannot structurally distinguish a
+// correct unbroken-chain check from a single-hop-only arithmetic guard
+// (today's bug: `epoch-priorEpoch == 1`); both answer the same way after
+// one hop. This case bumps three epochs past the minting epoch, with
+// record-a re-minted at every intervening epoch and no gap anywhere.
+//
+// The mock below targets TODAY's query shape (a single COUNT(*) at the
+// current epoch, gated by a Go-side epoch-priorEpoch==1 check), not the
+// range query the fix introduces: mintedIDHasAddressAtEpochInTx never
+// queries the intervening epochs at all today, so a row existing at the
+// current epoch is the only fact today's code has — this is the minimal
+// reproduction of the bug against the CURRENT implementation.
+func TestStillServesInTxHonorsAContinuousMultiHopRetainedMapping(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	const storeID = "multihop-store"
+	const oldAddress = "epch:multihop-store:record-a:1"
+
+	mock.ExpectQuery(`SELECT store_id, minted_id, minted_epoch FROM epoch_minted_addresses WHERE address = \?`).
+		WithArgs(oldAddress).
+		WillReturnRows(sqlmock.NewRows([]string{"store_id", "minted_id", "minted_epoch"}).AddRow(storeID, "record-a", 1))
+	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(4))
+	// record-a DOES have a row at the current epoch (4): it was re-minted
+	// there, having also been re-minted at every intervening epoch (2, 3)
+	// with no gap — a genuinely continuous chain, unlike the lapsed-then-
+	// reused B1 case above. Today's code cannot see the difference: it
+	// never queries epochs 2/3, so this row's mere existence at epoch 4 is
+	// the only fact it has; what SHOULD make this retained (the unbroken
+	// chain) instead gets rejected by the arithmetic guard below.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch = \?`).
+		WithArgs(storeID, "record-a", int64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	got, err := StillServesInTx(context.Background(), tx, storeID, oldAddress)
+	if err != nil {
+		t.Fatalf("StillServesInTx: %v", err)
+	}
+	if !got {
+		t.Fatal("StillServesInTx(a prior-epoch address whose id was carried forward through 3 intervening epochs with no gap) = false, want true: R20-n's retained-mapping exception is not limited to a single hop (today's epoch-priorEpoch==1 guard wrongly rejects any chain longer than one hop, gastownhall/beads#6664 FINDING 1)")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet multi-hop retained-mapping SQL expectations: %v", err)
+	}
+}
+
 // TestEpochAddressNeverCollidesAcrossDifferentStoreIDBoundaries is the
 // regression test for gastownhall/beads#6664 (bee-ghosttrack, maintainer
 // review 5268699223, item B2, first part): epochAddress's ":"-joined
