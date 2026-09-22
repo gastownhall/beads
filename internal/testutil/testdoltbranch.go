@@ -178,12 +178,12 @@ func SetupSharedTestDB(port int, dbName string) (*sql.DB, error) {
 		}
 	}
 
-	// Synchronize on the new database being visible to a fresh connection
-	// before returning. Without this, a sibling pool from dolt.New() — opened
-	// inside initSharedSchema — can race the Dolt server's catalog refresh
-	// and fail with "Error 1049 (HY000): database not found: <dbName>"
-	// (be-nx7 external-port path). Poll USE on the same db handle until it
-	// succeeds: the same retry condition the dolt package uses (GH-1851).
+	// Wait for the new database to become visible on this connection before
+	// returning — not a guarantee for every connection in db's pool (see
+	// waitForDatabaseVisible's doc). Without this, a sibling pool from
+	// dolt.New() — opened inside initSharedSchema — can race the Dolt
+	// server's catalog refresh and fail with "Error 1049 (HY000): database
+	// not found: <dbName>" (be-nx7 external-port path).
 	if err := waitForDatabaseVisible(ctx, db, dbName); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("SetupSharedTestDB: wait for visibility: %w", err)
@@ -331,33 +331,28 @@ func commitAllowEmpty(ctx context.Context, db doltBranchSQL, message string) err
 	return nil
 }
 
-// waitForDatabaseVisible polls USE <dbName> on db with exponential backoff
-// until the query succeeds. Success means the connection that ran it has
-// observed the server's catalog refresh for dbName — not a guarantee for
-// every connection in db's pool, and USE also mutates that connection's
-// session default database as a side effect. Bounded to ~10s — far longer
+// waitForDatabaseVisible polls SHOW DATABASES on db with exponential backoff
+// until dbName appears via exact-match iteration — the same check
+// databaseExistsOnServer (internal/storage/dolt/store.go) uses, and the one
+// dolt.New() actually depends on. Success means the connection that ran the
+// query has observed the server's catalog refresh for dbName — not a
+// guarantee for every connection in db's pool. Bounded to ~10s — far longer
 // than any catalog-refresh window observed in practice — so a real failure
 // surfaces a clear error instead of hanging the test binary.
 func waitForDatabaseVisible(ctx context.Context, db *sql.DB, dbName string) error {
 	const maxElapsed = 10 * time.Second
 	deadline := time.Now().Add(maxElapsed)
 	delay := 50 * time.Millisecond
-	var lastErr error
 	for {
-		//nolint:gosec // G201: dbName comes from test infrastructure
-		_, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName))
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		errLower := strings.ToLower(err.Error())
-		// Catalog races surface as "unknown database" or "database not found";
-		// any other failure is permanent and should bubble up immediately.
-		if !strings.Contains(errLower, "unknown database") && !strings.Contains(errLower, "database not found") {
+		found, err := databaseVisibleNow(ctx, db, dbName)
+		if err != nil {
 			return err
 		}
+		if found {
+			return nil
+		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("database %q not visible after %s: %w", dbName, maxElapsed, lastErr)
+			return fmt.Errorf("database %q not visible after %s", dbName, maxElapsed)
 		}
 		select {
 		case <-ctx.Done():
@@ -371,4 +366,27 @@ func waitForDatabaseVisible(ctx context.Context, db *sql.DB, dbName string) erro
 			delay *= 2
 		}
 	}
+}
+
+// databaseVisibleNow reports whether dbName appears in SHOW DATABASES, via
+// exact-match iteration — mirrors databaseExistsOnServer in
+// internal/storage/dolt/store.go. SHOW DATABASES LIKE has wildcard issues
+// with underscores in database names, which test database names contain.
+func databaseVisibleNow(ctx context.Context, db *sql.DB, dbName string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if name == dbName {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
