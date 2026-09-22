@@ -537,8 +537,8 @@ The value must be a positive whole number of seconds. Invalid values and zero
 warn and fall back to 300 seconds. Beads accepts `timeout` or `gtimeout` only
 when a successful version probe identifies GNU coreutils or uutils coreutils;
 native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
-nor Perl is available,
-the hook warns that it is running directly without a deadline.
+nor Perl is available, the hook warns that it is running directly without a
+deadline.
 
 GNU timeout sends `TERM`; on POSIX hosts, Perl's alarm applies to the direct
 `bd` process. Git for Windows Perl does not guarantee that alarm across
