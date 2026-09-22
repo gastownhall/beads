@@ -18,6 +18,33 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
+func TestSyncFailureTextDistinguishesSSHDialTimeoutFromAuth(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	gitText := timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"
+	timeout := fmt.Errorf("pull: %w", errors.New(gitText))
+	if !strings.Contains(timeout.Error(), "ssh-add") {
+		t.Fatal("fixture did not reproduce Dolt's misleading auth hint")
+	}
+	got := syncFailureText(timeout)
+	if !strings.Contains(got, timeoutLine) || !strings.Contains(got, "could not be reached") {
+		t.Fatalf("dial timeout not explained: %q", got)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(got, misleading) {
+			t.Errorf("dial timeout retained auth hint %q: %q", misleading, got)
+		}
+	}
+
+	auth := fmt.Errorf("pull: %w", errors.New("git@host: Permission denied (publickey).\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"))
+	if got := syncFailureText(auth); got != auth.Error() {
+		t.Errorf("real auth failure changed: got %q, want %q", got, auth.Error())
+	}
+	plainTimeout := errors.New("database query: Operation timed out")
+	if got := syncFailureText(plainTimeout); got != plainTimeout.Error() {
+		t.Errorf("non-SSH timeout changed: got %q, want %q", got, plainTimeout.Error())
+	}
+}
+
 // syncOpsRecorder builds a syncOps whose steps are scripted per attempt and
 // which records how many times each step ran. Scripts are indexed by call
 // number; a call past the end of a script reuses the script's last entry, so a
