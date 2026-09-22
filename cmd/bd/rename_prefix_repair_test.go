@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -17,11 +16,7 @@ func TestRepairMultiplePrefixes(t *testing.T) {
 
 	ctx := context.Background()
 
-	testStore, err := dolt.New(ctx, &dolt.Config{Path: testDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, testDBPath)
 
 	// Set globals following TestRenamePrefixCommand pattern
 	oldStore := store
@@ -35,11 +30,6 @@ func TestRepairMultiplePrefixes(t *testing.T) {
 		actor = oldActor
 		dbPath = oldDBPath
 	}()
-
-	// Set initial prefix
-	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
 
 	// Create issues with multiple prefixes (simulating corruption).
 	// CreateIssue accepts explicit IDs without prefix validation,

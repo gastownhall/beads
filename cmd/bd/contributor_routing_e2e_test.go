@@ -100,11 +100,7 @@ func TestContributorRoutingTracer(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		projectStore, err := dolt.New(ctx, &dolt.Config{Path: projectDBPath})
-		if err != nil {
-			t.Skipf("skipping: Dolt server not available: %v", err)
-		}
-		defer projectStore.Close()
+		projectStore := newTestStoreIsolatedDB(t, projectDBPath, "test")
 
 		// Set routing config in project store (canonical keys)
 		if err := projectStore.SetConfig(ctx, "routing.mode", "auto"); err != nil {
@@ -151,16 +147,7 @@ func TestContributorRoutingTracer(t *testing.T) {
 
 		// Initialize planning database and verify we can create issues there
 		planningDBPath := filepath.Join(planningBeadsDir, "beads.db")
-		planningStore, err := dolt.New(ctx, &dolt.Config{Path: planningDBPath})
-		if err != nil {
-			t.Skipf("skipping: Dolt server not available: %v", err)
-		}
-		defer planningStore.Close()
-
-		// Initialize planning store with required config
-		if err := planningStore.SetConfig(ctx, "issue_prefix", "plan-"); err != nil {
-			t.Fatalf("failed to set issue_prefix in planning store: %v", err)
-		}
+		planningStore := newTestStoreIsolatedDB(t, planningDBPath, "plan-")
 
 		// Create a test issue in planning store (simulating what Phase 2 will do)
 		issue := &types.Issue{
@@ -205,11 +192,7 @@ func TestBackwardCompatContributorConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
+	store := newTestStoreIsolatedDB(t, dbPath, "test")
 
 	// Set LEGACY contributor.* keys (what old versions of bd init --contributor would set)
 	if err := store.SetConfig(ctx, "contributor.auto_route", "true"); err != nil {
