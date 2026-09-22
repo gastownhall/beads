@@ -275,24 +275,33 @@ func MintUnderEpochInTx(ctx context.Context, tx DBTX, storeID, id string) (strin
 // bee-ghosttrack review 5268699223, item B1): a mapping that lapses at an
 // intermediate epoch and is only later reused — an unrelated later mint
 // that happens to share the same id — would satisfy it too, wrongly
-// retaining an already-superseded address across the gap. Requiring
-// epoch == priorEpoch + 1 pins this to the single hop immediately following
-// priorEpoch, which an unbroken carry-forward always satisfies (every epoch
-// bump that keeps serving mintedID re-mints it at the new current epoch,
-// one hop at a time) and a lapsed-then-reused mapping never does. mintedID
-// is never recomputed from a bumped store_epoch (see the package doc
-// above), so this is a lookup for a second, later row sharing the same id,
-// not a derivation.
+// retaining an already-superseded address across the gap. Nor is a
+// single-hop check enough (gastownhall/beads#6664 FINDING 1): a mapping
+// carried forward through every intervening epoch across MORE than one hop
+// is just as validly retained, and epoch == priorEpoch + 1 wrongly rejects
+// it. Requiring an exact COUNT(DISTINCT minted_epoch) match against the
+// full range width (priorEpoch, epoch] pins this to an UNBROKEN CHAIN
+// across every intervening epoch: since epochAddress is deterministic per
+// (storeID, id, epoch) and upsertEpochMintedAddressInTx's exists-branch is
+// a no-op, there is at most one row per (storeID, mintedID, minted_epoch),
+// so a row exists at every one of the range's (epoch-priorEpoch) possible
+// values iff the distinct count equals that width — an exact pigeonhole
+// match, not a bound, so it still correctly rejects a gap (no epoch in the
+// range is missing from the count, no matter how many epochs follow it)
+// while now accepting any chain length >= 1, subsuming the old width=1
+// single-hop case. mintedID is never recomputed from a bumped store_epoch
+// (see the package doc above), so this is a lookup across a range of
+// later rows sharing the same id, not a derivation.
 func mintedIDHasAddressAtEpochInTx(ctx context.Context, tx DBTX, storeID, mintedID string, priorEpoch, epoch int) (bool, error) {
 	var count int
 	err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM epoch_minted_addresses WHERE store_id = ? AND minted_id = ? AND minted_epoch = ?`,
-		storeID, mintedID, epoch,
+		`SELECT COUNT(DISTINCT minted_epoch) FROM epoch_minted_addresses WHERE store_id = ? AND minted_id = ? AND minted_epoch > ? AND minted_epoch <= ?`,
+		storeID, mintedID, priorEpoch, epoch,
 	).Scan(&count)
 	if err != nil {
-		return false, fmt.Errorf("epoch CAS: check retained mapping for %s at epoch %d: %w", mintedID, epoch, err)
+		return false, fmt.Errorf("epoch CAS: check retained mapping for %s across epochs (%d, %d]: %w", mintedID, priorEpoch, epoch, err)
 	}
-	return count > 0 && epoch-priorEpoch == 1, nil
+	return count == epoch-priorEpoch, nil
 }
 
 // StillServesInTx reports whether address is still served under storeID's

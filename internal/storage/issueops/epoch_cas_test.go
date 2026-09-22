@@ -29,8 +29,8 @@ func TestStillServesInTxHonorsARetainedMapping(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"store_id", "minted_id", "minted_epoch"}).AddRow(storeID, "record-a", 1))
 	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(2))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch = \?`).
-		WithArgs(storeID, "record-a", int64(2)).
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT minted_epoch\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch > \? AND minted_epoch <= \?`).
+		WithArgs(storeID, "record-a", int64(1), int64(2)).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
 	got, err := StillServesInTx(context.Background(), tx, storeID, oldAddress)
@@ -61,8 +61,8 @@ func TestStillServesInTxReportsFalseWhenIDWasNotCarriedForward(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"store_id", "minted_id", "minted_epoch"}).AddRow(storeID, "record-b", 1))
 	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(2))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch = \?`).
-		WithArgs(storeID, "record-b", int64(2)).
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT minted_epoch\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch > \? AND minted_epoch <= \?`).
+		WithArgs(storeID, "record-b", int64(1), int64(2)).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
 	got, err := StillServesInTx(context.Background(), tx, storeID, oldAddress)
@@ -93,8 +93,8 @@ func TestResolveEpochInTxHonorsARetainedMapping(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"store_id", "minted_id", "minted_epoch"}).AddRow(storeID, "record-a", 1))
 	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(2))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch = \?`).
-		WithArgs(storeID, "record-a", int64(2)).
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT minted_epoch\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch > \? AND minted_epoch <= \?`).
+		WithArgs(storeID, "record-a", int64(1), int64(2)).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
 	got, err := ResolveEpochInTx(context.Background(), tx, storeID, oldAddress)
@@ -140,11 +140,11 @@ func TestStillServesInTxReportsFalseForALapsedMappingEvenAfterALaterRemint(t *te
 		WillReturnRows(sqlmock.NewRows([]string{"store_id", "minted_id", "minted_epoch"}).AddRow(storeID, "record-a", 1))
 	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(3))
-	// record-a DOES have a row at the current epoch (3): it was re-minted
-	// there, after lapsing at epoch 2. A bare-existence check sees this row
-	// and wrongly concludes the epoch-1 mapping was retained.
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch = \?`).
-		WithArgs(storeID, "record-a", int64(3)).
+	// record-a has a row at the current epoch (3) but NOT at epoch 2: the
+	// range query sees the gap directly (distinct count 1 != range width 2)
+	// and correctly reports not-retained.
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT minted_epoch\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch > \? AND minted_epoch <= \?`).
+		WithArgs(storeID, "record-a", int64(1), int64(3)).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
 	got, err := StillServesInTx(context.Background(), tx, storeID, oldAddress)
@@ -166,16 +166,16 @@ func TestStillServesInTxReportsFalseForALapsedMappingEvenAfterALaterRemint(t *te
 // hop — must still report Live. TestStillServesInTxHonorsARetainedMapping
 // above only ever bumps once, so it cannot structurally distinguish a
 // correct unbroken-chain check from a single-hop-only arithmetic guard
-// (today's bug: `epoch-priorEpoch == 1`); both answer the same way after
+// (the prior bug: `epoch-priorEpoch == 1`, which rejected any chain longer
+// than one hop regardless of continuity); both answer the same way after
 // one hop. This case bumps three epochs past the minting epoch, with
 // record-a re-minted at every intervening epoch and no gap anywhere.
 //
-// The mock below targets TODAY's query shape (a single COUNT(*) at the
-// current epoch, gated by a Go-side epoch-priorEpoch==1 check), not the
-// range query the fix introduces: mintedIDHasAddressAtEpochInTx never
-// queries the intervening epochs at all today, so a row existing at the
-// current epoch is the only fact today's code has — this is the minimal
-// reproduction of the bug against the CURRENT implementation.
+// The mock targets the range-query shape mintedIDHasAddressAtEpochInTx now
+// uses: COUNT(DISTINCT minted_epoch) over (priorEpoch, epoch]. A continuous
+// three-hop chain (epochs 2, 3, 4 all present) yields a distinct count that
+// matches the full range width, which is exactly what distinguishes this
+// case from the single-hop-only guard the fix replaces.
 func TestStillServesInTxHonorsAContinuousMultiHopRetainedMapping(t *testing.T) {
 	t.Parallel()
 
@@ -188,16 +188,13 @@ func TestStillServesInTxHonorsAContinuousMultiHopRetainedMapping(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"store_id", "minted_id", "minted_epoch"}).AddRow(storeID, "record-a", 1))
 	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(4))
-	// record-a DOES have a row at the current epoch (4): it was re-minted
-	// there, having also been re-minted at every intervening epoch (2, 3)
-	// with no gap — a genuinely continuous chain, unlike the lapsed-then-
-	// reused B1 case above. Today's code cannot see the difference: it
-	// never queries epochs 2/3, so this row's mere existence at epoch 4 is
-	// the only fact it has; what SHOULD make this retained (the unbroken
-	// chain) instead gets rejected by the arithmetic guard below.
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch = \?`).
-		WithArgs(storeID, "record-a", int64(4)).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	// record-a was re-minted at every intervening epoch (2, 3, 4) with no
+	// gap — a genuinely continuous chain, unlike the lapsed-then-reused B1
+	// case above. The range query's distinct count (3) matches the full
+	// width (4-1=3), so the fix correctly reports this retained.
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT minted_epoch\) FROM epoch_minted_addresses WHERE store_id = \? AND minted_id = \? AND minted_epoch > \? AND minted_epoch <= \?`).
+		WithArgs(storeID, "record-a", int64(1), int64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 
 	got, err := StillServesInTx(context.Background(), tx, storeID, oldAddress)
 	if err != nil {
