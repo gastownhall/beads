@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,14 +92,31 @@ func TestPersistentPreRunRefusesWhenIdentityPreviewFailsForNonBootstrapReason(t 
 	rootCmd.AddCommand(probe)
 	t.Cleanup(func() { rootCmd.RemoveCommand(probe) })
 
+	oldStderr := os.Stderr
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe: %v", pipeErr)
+	}
+	os.Stderr = w
+
 	err := rootCmd.PersistentPreRunE(probe, nil)
+
+	w.Close()
+	os.Stderr = oldStderr
+	var captured bytes.Buffer
+	io.Copy(&captured, r) //nolint:errcheck // best-effort drain of a test pipe
+
 	if err == nil {
 		t.Fatal("expected PersistentPreRunE to fail against an unreachable server-mode database; test-environment precondition broken")
 	}
 
+	// HandleError's returned error carries only "exit code N" in its own
+	// Error() string -- the real message goes to stderr (see HandleError in
+	// errors.go) -- so the marker must be asserted against captured stderr,
+	// not err.Error().
 	const wantMarker = "could not verify workspace identity"
-	if !strings.Contains(err.Error(), wantMarker) {
-		t.Errorf("PersistentPreRunE error = %q, want it to contain %q -- a preview-open failure for a reason other than first-time bootstrap must refuse before the real, mutating store open runs (be-0gfcs: the guard cannot prevent what it is guarding against if it silently no-ops here)", err.Error(), wantMarker)
+	if !strings.Contains(captured.String(), wantMarker) {
+		t.Errorf("PersistentPreRunE stderr = %q, want it to contain %q -- a preview-open failure for a reason other than first-time bootstrap must refuse before the real, mutating store open runs (be-0gfcs: the guard cannot prevent what it is guarding against if it silently no-ops here)", captured.String(), wantMarker)
 	}
 	if store != nil {
 		t.Error("PersistentPreRunE must not have opened the real store after refusing on an unverifiable identity preview")

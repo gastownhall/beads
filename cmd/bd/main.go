@@ -1866,11 +1866,8 @@ var rootCmd = &cobra.Command{
 		// _project_id without running (or needing) the migration this check
 		// must complete ahead of.
 		//
-		// Gated on previewErr, not on idStore's own nilness: a failed peek
-		// (no database yet, unloadable config, absent server-mode
-		// connection, ...) is treated as nothing-to-validate and skipped
-		// outright, the same bootstrap tolerance this check has always had
-		// — but idStore itself cannot be trusted to signal that on its own.
+		// Dispatches on previewErr, not on idStore's own nilness: even the
+		// success case can't trust idStore to signal failure on its own.
 		// openNonMutatingStoreFromConfig's dolt-server-mode branch returns
 		// dolt.NewFromConfigWithOptions's result straight through, and on a
 		// failed connection that is a nil *dolt.DoltStore boxed into a
@@ -1883,13 +1880,30 @@ var rootCmd = &cobra.Command{
 		// server-mode database). Checking previewErr first sidesteps the
 		// trap entirely, matching the ordinary (value, err) contract every
 		// other caller of this pair already trusts.
+		//
+		// A failed peek still has to be told apart from a legitimate first
+		// run: isBootstrapPreviewErr recognizes "no local database yet" (a
+		// wrapped os.ErrNotExist from the embedded store's own data-dir
+		// check), and only that case is skipped silently — the bootstrap
+		// tolerance this check has always had. Any other previewErr
+		// (unreachable server-mode endpoint, unloadable config, a
+		// registered backend refusing the read-only open, ...) used to be
+		// swallowed the same way, which let a preview failure wave the
+		// real, mutating open through unexamined — the one thing this check
+		// exists to prevent (be-3bt2e). Those cases now refuse instead.
 		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			if idStore, previewErr := newPreviewStoreFromConfig(rootCtx, beadsDir); previewErr == nil {
+			idStore, previewErr := newPreviewStoreFromConfig(rootCtx, beadsDir)
+			switch {
+			case previewErr == nil:
 				checkErr := validateWorkspaceIdentity(rootCtx, idStore, beadsDir)
 				_ = idStore.Close()
 				if checkErr != nil {
 					return checkErr
 				}
+			case isBootstrapPreviewErr(previewErr):
+				debug.Logf("workspace identity check: skipping, no local database yet (%v)\n", previewErr)
+			default:
+				return HandleError("could not verify workspace identity before opening the database: %v (set BEADS_SKIP_IDENTITY_CHECK=1 to override)", previewErr)
 			}
 		}
 
@@ -2372,6 +2386,15 @@ func flushBatchCommitOnShutdown() {
 	}
 
 	fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
+}
+
+// isBootstrapPreviewErr reports whether err is the identity check's preview
+// open failing because no local database exists yet — a legitimate first
+// run, not a workspace problem. It must stay narrow: any other previewErr
+// (unreachable server, bad config, ...) has to refuse rather than silently
+// wave the real, mutating open through (be-3bt2e).
+func isBootstrapPreviewErr(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // validateWorkspaceIdentity checks that the project identity from metadata.json

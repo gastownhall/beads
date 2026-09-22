@@ -57,6 +57,14 @@ func TestPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace(t *t
 	oldStore := store
 	t.Cleanup(func() { store = oldStore })
 
+	// PersistentPreRunE itself calls debug.SetVerbose(verboseFlag) before
+	// reaching the identity check (main.go), which would silently overwrite
+	// this with the zero-value verboseFlag=false -- this test calls
+	// PersistentPreRunE directly, bypassing the cobra flag parsing that
+	// would otherwise populate verboseFlag from a real -v/--verbose flag.
+	oldVerboseFlag := verboseFlag
+	verboseFlag = true
+	t.Cleanup(func() { verboseFlag = oldVerboseFlag })
 	debug.SetVerbose(true)
 	t.Cleanup(func() { debug.SetVerbose(false) })
 
@@ -64,8 +72,21 @@ func TestPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace(t *t
 		t.Fatal("rootCmd.PersistentPreRunE must be set")
 	}
 
+	// Named "import", not a distinct probe name: beads.FindDatabasePath()
+	// legitimately returns "" for this exact on-disk state (metadata.json
+	// present, no .beads/embeddeddolt/ yet -- see findDatabaseInBeadsDir),
+	// and PersistentPreRunE's earlier, unrelated "no beads database found"
+	// gate (main.go) refuses any command whose name isn't "import" or
+	// "setup" before it ever reaches the identity check under test here.
+	// "import" is also the realistic case: it is the one command documented
+	// to auto-initialize a missing database, so it is the command a fresh
+	// embedded workspace's first invocation would actually be. rootCmd
+	// already has a real import command registered under the same name;
+	// that's harmless here since PersistentPreRunE only ever compares
+	// cmd.Name() as a string (never looks a sibling up by name), and
+	// RemoveCommand below matches this probe by pointer identity, not name.
 	probe := &cobra.Command{
-		Use:  "identity-gate-bootstrap-probe",
+		Use:  "import",
 		RunE: func(*cobra.Command, []string) error { return nil },
 	}
 	rootCmd.AddCommand(probe)
@@ -86,7 +107,7 @@ func TestPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace(t *t
 	io.Copy(&captured, r) //nolint:errcheck // best-effort drain of a test pipe
 
 	if err != nil {
-		t.Fatalf("PersistentPreRunE on a fresh embedded workspace: %v", err)
+		t.Fatalf("PersistentPreRunE on a fresh embedded workspace: %v\nstderr:\n%s", err, captured.String())
 	}
 
 	const wantMarker = "workspace identity check: skipping"
