@@ -26,6 +26,21 @@ func bdSearch(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// bdSearchStreams runs "bd search" and returns stdout and stderr separately,
+// for assertions about which stream a line lands on.
+func bdSearchStreams(t *testing.T, bd, dir string, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"search"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd search %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String(), stderr.String()
+}
+
 // bdSearchFail runs "bd search" and returns combined output from an expected failure.
 func bdSearchFail(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -414,6 +429,117 @@ func TestEmbeddedSearch(t *testing.T) {
 		results := bdSearchJSON(t, bd, dir, "sr-", "--type", "task", "--assignee", "alice", "--label", "urgent")
 		if len(results) != 1 || results[0]["id"] != taskA.ID {
 			t.Errorf("expected only %s with combined filters, got %d results", taskA.ID, len(results))
+		}
+	})
+
+	// ===== All-Fields Search (GH#2883) =====
+
+	// One fixture whose distinctive terms live only in a comment, and one
+	// whose term lives only in the description. The reproduction from the
+	// issue thread: bd comments add <id> "Root cause: env var lookup ...",
+	// then bd search "env var" returns nothing.
+	commentIssue := bdCreate(t, bd, dir, "All-fields comment fixture", "--type", "task")
+	bdRunOK(t, bd, dir, "comments", "add", commentIssue.ID, "Root cause: quorbex flimzil lookup on every init call")
+	descIssue := bdCreate(t, bd, dir, "All-fields description fixture", "--type", "task", "--description", "mentions the snorfle protocol here")
+	percentIssue := bdCreate(t, bd, dir, "Progress is 100% complete", "--type", "task")
+	underscoreIssue := bdCreate(t, bd, dir, "literal_under_score", "--type", "task")
+	pathIssue := bdCreate(t, bd, dir, "Windows cleanup", "--type", "task", "--description", `Open C:\Temp\cache file`)
+
+	t.Run("all_fields_default_stays_blind_to_comments", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "quorbex flimzil")
+		if len(results) != 0 {
+			t.Errorf("default search should not match comment text, got %d results", len(results))
+		}
+	})
+
+	t.Run("all_fields_finds_comment_match_with_provenance", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "quorbex flimzil", "--all-fields")
+		if len(results) != 1 {
+			t.Fatalf("expected 1 all-fields result for comment text, got %d", len(results))
+		}
+		if results[0]["id"] != commentIssue.ID {
+			t.Errorf("expected %s, got %v", commentIssue.ID, results[0]["id"])
+		}
+		if results[0]["matched_in"] != "comments" {
+			t.Errorf("expected matched_in=comments, got %v", results[0]["matched_in"])
+		}
+	})
+
+	t.Run("all_fields_finds_description_match_with_provenance", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "snorfle protocol", "--all-fields")
+		if len(results) != 1 {
+			t.Fatalf("expected 1 all-fields result for description text, got %d", len(results))
+		}
+		if results[0]["id"] != descIssue.ID {
+			t.Errorf("expected %s, got %v", descIssue.ID, results[0]["id"])
+		}
+		if results[0]["matched_in"] != "description" {
+			t.Errorf("expected matched_in=description, got %v", results[0]["matched_in"])
+		}
+	})
+
+	t.Run("all_fields_treats_LIKE_metacharacters_as_literals", func(t *testing.T) {
+		for _, tc := range []struct {
+			query, wantID, matchedIn string
+		}{
+			{query: "%", wantID: percentIssue.ID, matchedIn: "title"},
+			{query: "_", wantID: underscoreIssue.ID, matchedIn: "title"},
+			{query: `C:\Temp`, wantID: pathIssue.ID, matchedIn: "description"},
+		} {
+			t.Run(tc.query, func(t *testing.T) {
+				results := bdSearchJSON(t, bd, dir, tc.query, "--all-fields")
+				if len(results) != 1 {
+					t.Fatalf("expected exactly one literal match for %q, got %d: %v", tc.query, len(results), results)
+				}
+				if results[0]["id"] != tc.wantID || results[0]["matched_in"] != tc.matchedIn {
+					t.Errorf("literal search %q = %v, want id=%s matched_in=%s", tc.query, results[0], tc.wantID, tc.matchedIn)
+				}
+			})
+		}
+	})
+
+	t.Run("all_fields_title_match_keeps_working", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "All-fields comment fixture", "--all-fields")
+		found := false
+		for _, r := range results {
+			if r["id"] == commentIssue.ID {
+				found = true
+				if r["matched_in"] != "title" {
+					t.Errorf("expected matched_in=title, got %v", r["matched_in"])
+				}
+			}
+		}
+		if !found {
+			t.Errorf("expected to find %s by title under --all-fields", commentIssue.ID)
+		}
+	})
+
+	t.Run("all_fields_json_omits_matched_in_when_off" /* shape guard */, func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "All-fields comment fixture")
+		if len(results) == 0 {
+			t.Fatal("expected title match without --all-fields")
+		}
+		if _, present := results[0]["matched_in"]; present {
+			t.Errorf("matched_in must not appear without --all-fields: %v", results[0])
+		}
+	})
+
+	t.Run("empty_result_hints_at_all_fields", func(t *testing.T) {
+		// The hint is advice, not a result: it goes to stderr so a caller
+		// parsing text output sees no new stdout line (PR review).
+		out, errOut := bdSearchStreams(t, bd, dir, "quorbex flimzil")
+		if !strings.Contains(errOut, "--all-fields") {
+			t.Errorf("empty default-scope result should hint at --all-fields on stderr, got stderr:\n%s", errOut)
+		}
+		if strings.Contains(out, "--all-fields") {
+			t.Errorf("hint must not land on stdout, got stdout:\n%s", out)
+		}
+		if !strings.Contains(out, "No issues found") {
+			t.Errorf("stdout should still carry the no-results line, got:\n%s", out)
+		}
+		outAll, errAll := bdSearchStreams(t, bd, dir, "zz-nonexistent-zz", "--all-fields")
+		if strings.Contains(outAll+errAll, "retry with --all-fields") {
+			t.Errorf("hint must not appear when --all-fields already set, got stdout:\n%s\nstderr:\n%s", outAll, errAll)
 		}
 	})
 
