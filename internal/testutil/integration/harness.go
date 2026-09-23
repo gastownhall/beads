@@ -133,6 +133,7 @@ func (r *SubprocessRunner) Build(t *testing.T) string {
 		build.Stderr = &stderr
 		if err := build.Run(); err != nil {
 			r.buildErr = fmt.Errorf("failed to build test binary: %w\nstderr: %s", err, stderr.String())
+			return
 		}
 		if err := os.Chmod(r.testBin, 0700); err != nil {
 			r.buildErr = fmt.Errorf("failed to chmod test binary: %w", err)
