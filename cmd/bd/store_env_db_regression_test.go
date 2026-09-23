@@ -220,6 +220,9 @@ func TestStorePathEnvDBTargetRoutesProxiedServerWorkspace(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proxiedBeadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
 		t.Fatalf("write proxied metadata: %v", err)
 	}
+	// Routing bd list here auto-starts the proxy and its backend dolt
+	// sql-server under <beadsDir>/dolt; stop them before the suite sweep.
+	stopProxiedServerCleanup(t, filepath.Join(proxiedBeadsDir, "dolt"))
 
 	for _, envVar := range []string{"BEADS_DB", "BD_DB"} {
 		t.Run(envVar, func(t *testing.T) {
