@@ -66,6 +66,11 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, request issueops.ClaimNext
 		write := func() (*types.Issue, error) {
 			var claimed *types.Issue
 			err := c.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storageissueops.ChangedTables, string, error) {
+				// Reset on every attempt: withRetryTx replays this body, and a
+				// replay that finds nothing ready must not leak the previous
+				// attempt's selection into the verify pass (which would verify an
+				// issue this call did not claim and fail loudly and falsely).
+				claimed = nil
 				attempt, tables, err := storageissueops.ExecuteClaimNext(ctx, tx, request.Actor, filter)
 				if err != nil {
 					return nil, "", err
@@ -78,6 +83,10 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, request issueops.ClaimNext
 				// The message names the claimed issue because that is the one `bd
 				// dolt log` affordance callers actually grep, and it is what the
 				// store's own ClaimReadyIssue wrote before the claim moved here.
+				// Post-tx ordering caveat: a concurrent writer's commit can absorb
+				// this one (nothing-to-commit), in which case the claim appears
+				// under the OTHER writer's message — the grep is best-effort
+				// evidence of a claim, and its absence is not proof of failure.
 				return tables, storageissueops.ClaimNextCommitMessage(attempt.Claimed.ID), nil
 			})
 			return claimed, err

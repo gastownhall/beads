@@ -457,8 +457,13 @@ func TestGetIssuePublishesTheRevisionToken(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read body: %v", err)
 			}
+			// Decoded as the STRING the document declares. The first case is
+			// the point of the shape: 2^53+1 is the smallest token a
+			// double-based parser cannot hold, so a number-typed member would
+			// hand a browser client a value one off the row's and its next
+			// guard would 409 against a row nobody touched.
 			var body struct {
-				Revision *int64 `json:"revision"`
+				Revision *string `json:"revision"`
 			}
 			if err := json.Unmarshal(raw, &body); err != nil {
 				t.Fatalf("decode %q: %v", raw, err)
@@ -466,8 +471,8 @@ func TestGetIssuePublishesTheRevisionToken(t *testing.T) {
 			if body.Revision == nil {
 				t.Fatalf("the detail response carries no `revision`: %s", raw)
 			}
-			if *body.Revision != tc.token {
-				t.Errorf("revision = %d, want the row's token %d", *body.Revision, tc.token)
+			if *body.Revision != types.RevisionToken(tc.token) {
+				t.Errorf("revision = %q, want the row's token %q", *body.Revision, types.RevisionToken(tc.token))
 			}
 			// The storage spelling never rides along: row_lock is json:"-" on
 			// the issue for a reason that still holds, and `revision` is the

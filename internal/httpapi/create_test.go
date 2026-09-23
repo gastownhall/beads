@@ -280,6 +280,51 @@ func TestCreateAnswersTheStoredRow(t *testing.T) {
 	}
 }
 
+// TestCreateEchoesSubSecondTimestamps pins that the create response carries the
+// role's timestamps at FULL precision, as the text a consumer parses.
+//
+// The role's snapshot is where the sub-second stamp comes from — that is the
+// storage-side contract RunLifecycleCreateEchoesSubSecondTimestamps holds — and
+// this is the half that says the wire does not round it away on the way out. A
+// handler that re-rendered the time through a second-granular layout would print
+// the same instant with the fraction gone, and every same-second create through
+// POST /v0/beads/issues would tie.
+func TestCreateEchoesSubSecondTimestamps(t *testing.T) {
+	stored := createdIssue("bd-nano")
+	stored.CreatedAt = time.Date(2026, 8, 1, 9, 0, 0, 123456789, time.UTC)
+	stored.UpdatedAt = time.Date(2026, 8, 1, 9, 0, 1, 987654321, time.UTC)
+	lifecycle := &roleLifecycle{createResult: issueops.CreateResult{Issue: stored}}
+	ts := newCreateServer(t, lifecycle)
+
+	resp := ts.createIssue(t, `{"actor":"alice","title":"as sent"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	for _, member := range []struct {
+		name string
+		want time.Time
+	}{
+		{"created_at", stored.CreatedAt},
+		{"updated_at", stored.UpdatedAt},
+	} {
+		text, ok := body[member.name].(string)
+		if !ok {
+			t.Errorf("%s = %v, want an RFC3339 string", member.name, body[member.name])
+			continue
+		}
+		got, err := time.Parse(time.RFC3339Nano, text)
+		if err != nil {
+			t.Errorf("%s = %q, which does not parse as RFC3339Nano: %v", member.name, text, err)
+			continue
+		}
+		if !got.Equal(member.want) {
+			t.Errorf("%s = %q, want %v exactly — the fraction the role stored must survive the wire",
+				member.name, text, member.want)
+		}
+	}
+}
+
 // TestCreateRefusesAnOccupiedExplicitID pins the 409 and its `param`. It is a
 // conflict rather than a 400 because the body is well-formed and stays
 // well-formed: the identical request succeeded before the id was taken.

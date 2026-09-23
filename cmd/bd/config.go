@@ -645,10 +645,14 @@ var configUnsetCmd = &cobra.Command{
 		// specific false claim than the message this fix removed, and, with no
 		// project config.yaml, failed the command after the database row was
 		// already gone.
+		//
+		// A config.yaml the unset refuses to edit (a flow-style mapping, a
+		// block value) is reported as exactly that: the row is already gone,
+		// but the key is still effective from the file, so this still fails.
 		location := "database"
 		yamlCleared, err := config.UnsetYamlConfig(result.Key)
 		if err != nil {
-			return HandleError("deleting config from config.yaml: %v", err)
+			return HandleError("unset %s in the database, but it is still set in config.yaml: %v", result.Key, err)
 		}
 		if yamlCleared {
 			location = "database, config.yaml"

@@ -138,13 +138,18 @@ func runConcludeCommand(t *testing.T, commandStore storage.DoltStorage, asJSON b
 	defer func() { os.Stdout, os.Stderr = oldStdout, oldStderr }()
 	store, rootCtx, jsonOutput = commandStore, context.Background(), asJSON
 	conflictsConclude = true
+	// Deferred, like the stdio restore above it: RunE below can panic or
+	// t.Fatal, and a plain statement after the call would then leave jsonOutput
+	// set to asJSON — which callers pass as true — for the rest of the package.
+	defer func() {
+		store, rootCtx, jsonOutput = oldStore, oldRootCtx, oldJSON
+		conflictsConclude = oldConclude
+	}()
 
 	commandErr := conflictsResolveCmd.RunE(conflictsResolveCmd, nil)
 
 	_ = wOut.Close()
 	_ = wErr.Close()
-	store, rootCtx, jsonOutput = oldStore, oldRootCtx, oldJSON
-	conflictsConclude = oldConclude
 
 	var stdout, stderr bytes.Buffer
 	_, _ = stdout.ReadFrom(rOut)

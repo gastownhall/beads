@@ -7,13 +7,36 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
+// suiteRootPrefix is this suite's PinSuiteTempRoot pattern without its random
+// tail. SweepDeadSuiteRoots globs for it, so the two must not drift.
+const suiteRootPrefix = "beads-internal-tests-"
+
+var suiteTempRoot string
+
 func TestMain(m *testing.M) {
-	root, err := os.MkdirTemp("", "beads-internal-tests-*")
+	// Clear out the roots of earlier runs of this suite whose process is
+	// gone, before claiming one of our own. A `go test -timeout` panic skips
+	// every cleanup below AND the post-run sweep, so the servers such a run
+	// started outlive everything this process installs and nothing ever looks
+	// at that run's tree again (wy-j2zc8q). Roots with no owner marker, and
+	// roots whose owner is still running, are left untouched.
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
+	root, err := testutil.PinSuiteTempRoot(suiteRootPrefix + "*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create test temp dir: %v\n", err)
 		os.Exit(1)
+	}
+
+	suiteTempRoot = root
+
+	// Claim the root for this process so the NEXT run can tell our debris
+	// from a concurrent run's live tree.
+	if err := doltserver.WriteSuiteOwnerMarker(root); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", root, err)
 	}
 
 	home := filepath.Join(root, "home")
@@ -47,7 +70,8 @@ func TestMain(m *testing.M) {
 	// suite's temp root (e.g. auto-started by the BEADS_TEST_BD_BINARY
 	// this TestMain builds, if a SIGKILLed run left one behind) — see
 	// gastownhall/beads mybd-q6cz.
-	doltserver.SweepOrphanedTestServers(root)
+	swept := doltserver.SweepSuiteTestServers(root)
+	code = doltserver.ApplyLeakPolicy("internal/beads", code, swept)
 
 	integrationCleanup()
 	_ = os.RemoveAll(root)

@@ -1,6 +1,9 @@
 package doltserver
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -20,14 +23,44 @@ type serverCandidate struct {
 	cwdDeleted bool
 }
 
-// selectOrphanTestServerPIDs returns the PIDs of candidates that are safe to
-// reap as leaked test debris. A candidate qualifies only when its cmdline
-// names a dolt sql-server AND either:
+// SweptServer names one leaked `dolt sql-server` a sweep selected: the PID it
+// signaled and the working directory that process was serving.
 //
-//   - its working directory has been deleted (the temp dir it was serving
-//     no longer exists — this is the signature of a SIGKILLed test run
-//     whose t.TempDir() cleanup ran on top of a still-live server), or
-//   - its working directory sits under one of suiteRoots.
+// The cwd is the whole reason this type exists. A sweep report of bare PIDs
+// ("swept 1 orphaned test dolt sql-server process(es): [21881]") says a
+// fixture leaked but not WHICH one, and the PID is gone by the time anyone
+// reads the log — so a CI failure on a package with hundreds of tests left
+// the reader nothing to grep for. A leaked server's cwd is the .beads/dolt
+// directory under the suite's own temp tree, and Go names those after the
+// test that made them (a t.TempDir() is <root>/TestSomeName1234/001), so the
+// directory identifies the leaking test directly.
+type SweptServer struct {
+	// PID is the process that was signaled.
+	PID int
+	// Cwd is the working directory the process was serving. Never empty for
+	// a selected server: selectServers skips candidates with no known cwd,
+	// because unknown is not provably debris.
+	Cwd string
+}
+
+// String renders a swept server as "<pid> cwd=<dir>", which is what the
+// sweep's stderr lines print for each entry (fmt applies this to every
+// element of a []SweptServer formatted with %v).
+func (s SweptServer) String() string {
+	if s.Cwd == "" {
+		return strconv.Itoa(s.PID)
+	}
+	return strconv.Itoa(s.PID) + " cwd=" + s.Cwd
+}
+
+// selectOrphanTestServers returns the candidates that are safe to reap as
+// leaked test debris, each carrying the working directory it was serving. A
+// candidate qualifies only when its cmdline names a dolt sql-server AND
+// either:
+//
+//   - its working directory sits under one of suiteRoots, or
+//   - its working directory has been deleted AND the path it used to name
+//     sits under one of tempRoots.
 //
 // suiteRoots MUST be directories owned by the calling test suite alone
 // (e.g. that suite's own testTempRoot) — never a shared/global temp dir
@@ -38,28 +71,204 @@ type serverCandidate struct {
 // data dirs live somewhere under os.TempDir() too. Passing a global root
 // here would turn this safety net into a cross-suite server killer.
 //
+// tempRoots (see tempDirRoots) bounds the deleted-cwd arm to throwaway
+// directories. A deleted working directory is a strong leak signal — a
+// t.TempDir() cleanup ran on top of a still-live detached server — but it is
+// NOT by itself proof of a TEST server: a production server is spawned with
+// cmd.Dir = <workspace>/.beads/dolt, so a developer who moved or deleted that
+// workspace, or whose external volume was unmounted, would have their live
+// server reaped by any test run on the box. Requiring the deleted path to
+// have been under a temp dir keeps the arm pointed at test debris only.
+//
 // This is intentionally conservative in the "never kill production" sense:
-// a real shared server's data directory is a persistent, non-temp path that
-// still exists and is never one of a test suite's own scoped roots, so it
-// matches neither condition and is left alone.
-func selectOrphanTestServerPIDs(candidates []serverCandidate, suiteRoots []string) []int {
-	var pids []int
-	for _, c := range candidates {
-		if !isDoltServerCmdline(c.cmdline) {
-			continue
-		}
-		if c.cwdDeleted {
-			pids = append(pids, c.pid)
-			continue
-		}
-		if c.cwd == "" {
-			continue
-		}
+// a real shared server's data directory is a persistent, non-temp path, so it
+// is neither under a suite's scoped roots nor — deleted or not — under a temp
+// root, and matches neither condition.
+func selectOrphanTestServers(candidates []serverCandidate, suiteRoots, tempRoots []string) []SweptServer {
+	return selectServers(candidates, func(c serverCandidate) bool {
 		if underAnyRoot(c.cwd, suiteRoots) {
-			pids = append(pids, c.pid)
+			return true
+		}
+		return c.cwdDeleted && underAnyRoot(c.cwd, tempRoots)
+	})
+}
+
+// selectServersUnderRoots returns the candidates whose working directory sits
+// under one of roots, and nothing else. It is the strictly
+// root-scoped selection: no deleted-cwd arm, so it can never reach a process
+// outside the caller's own trees.
+//
+// SweepDeadSuiteRoots uses it because that sweep runs at suite START, while
+// sibling packages (go test -p N) are mid-run: whatever it reaps must be
+// provably inside the one dead root it is cleaning up, never merely
+// "somewhere temporary".
+func selectServersUnderRoots(candidates []serverCandidate, roots []string) []SweptServer {
+	return selectServers(candidates, func(c serverCandidate) bool {
+		return underAnyRoot(c.cwd, roots)
+	})
+}
+
+// selectServers applies want to every candidate that is a dolt sql-server
+// with a known working directory, returning the survivors as SweptServers. A
+// candidate whose cwd could not be resolved is always skipped: unknown is not
+// provably debris — which is also why every SweptServer it returns has a
+// non-empty Cwd for the sweep's report to name.
+func selectServers(candidates []serverCandidate, want func(serverCandidate) bool) []SweptServer {
+	var selected []SweptServer
+	for _, c := range candidates {
+		if !isDoltServerCmdline(c.cmdline) || c.cwd == "" {
+			continue
+		}
+		if want(c) {
+			selected = append(selected, SweptServer{PID: c.pid, Cwd: c.cwd})
 		}
 	}
-	return pids
+	return selected
+}
+
+// tempDirRoots is the set of directories under which a deleted working
+// directory is credible evidence of leaked TEST debris rather than a moved
+// production workspace: the process temp dir (honoring TMPDIR, which the
+// suites pin to their own root) and /tmp, which os.MkdirTemp uses when TMPDIR
+// is unset and which several suites hardcode.
+//
+// Roots too broad to be evidence of anything are dropped — see
+// isCredibleTempRoot. TMPDIR is an environment variable, so "/" or a home
+// directory can land here, and a root that broad would restore exactly the
+// unbounded deleted-cwd arm this bound exists to remove.
+func tempDirRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	var roots []string
+	for _, root := range canonicalRoots([]string{os.TempDir(), "/tmp"}) {
+		if !isCredibleTempRoot(root, home) {
+			continue
+		}
+		roots = append(roots, root)
+	}
+	return roots
+}
+
+// isCredibleTempRoot reports whether root is narrow enough to bound the
+// deleted-cwd arm. It rejects the filesystem root, a relative or empty path,
+// and any directory that IS the user's home or contains it — "/", "/Users",
+// "/home", $HOME itself. Everything a real temp dir looks like (/tmp,
+// /private/tmp, /var/folders/xx/yy/T, a pinned suite root) passes.
+//
+// The home test doubles as the breadth test: a directory holding the user's
+// home holds their workspaces too, so a deleted .beads/dolt under it would
+// again look like test debris.
+//
+// The one home that anchors no workspaces is a SANDBOX home: CI harnesses
+// (scripts/ci/lib/test-env.sh) export HOME under a mktemp -d root so a test
+// can never read or write the runner's real dotfiles, and several suites pin
+// HOME to a t.TempDir() for the same reason. Such a home lives under a fixed
+// system temp location (isSandboxHome), and without this carve-out it would
+// disqualify that location itself, leaving tempDirRoots empty and the
+// deleted-cwd arm silently disabled on exactly the boxes whose killed runs it
+// exists to clean up after. A root that merely contains a sandbox home stays
+// credible; a root that IS the home does not, whatever the home looks like.
+func isCredibleTempRoot(root, home string) bool {
+	cleaned := filepath.Clean(root)
+	if cleaned == "" || cleaned == "." || cleaned == string(filepath.Separator) {
+		return false
+	}
+	if !filepath.IsAbs(cleaned) {
+		return false
+	}
+	if home == "" {
+		return true
+	}
+	for _, h := range canonicalRoots([]string{home}) {
+		h = filepath.Clean(h)
+		if h == cleaned {
+			return false
+		}
+		if isUnderDir(h, cleaned) && !isSandboxHome(h) {
+			return false
+		}
+	}
+	return true
+}
+
+// isSandboxHome reports whether home lives inside a FIXED system temp
+// location — the shape a test harness's throwaway HOME takes. It is judged
+// against hardcoded locations, never os.TempDir(), so TMPDIR cannot vote on
+// its own credibility: TMPDIR=/home with HOME=/home/runner must still read as
+// a real home under an overbroad root (TestTempDirRootsRejectsOverbroadTMPDIR).
+func isSandboxHome(home string) bool {
+	return isUnderFixedTempRoots(home, runtime.GOOS)
+}
+
+// isUnderFixedTempRoots reports whether path lies under one of the temp
+// locations goos puts at a FIXED, non-configurable place. goos is a parameter
+// rather than a read of runtime.GOOS so the platform table is testable from
+// any platform (TestFixedTempRootsAreCredibleSandboxHomes).
+//
+// The list is deliberately hardcoded — see isSandboxHome — and canonicalRoots
+// expands each entry so macOS's /private/var/folders form matches too.
+func isUnderFixedTempRoots(path, goos string) bool {
+	return underAnyRoot(path, canonicalRoots(fixedTempRoots(goos)))
+}
+
+// fixedTempRoots is the platform table behind isUnderFixedTempRoots.
+//
+// /tmp is everywhere: it is os.MkdirTemp's fallback when TMPDIR is unset, and
+// CI harnesses (scripts/ci/lib/test-env.sh) mktemp -d their sandbox HOME under
+// it. macOS additionally gives every user a per-user temp tree under
+// /var/folders and points TMPDIR at it, so a suite that pins HOME to a
+// t.TempDir() (cmd/bd/test_repo_beads_guard_test.go, internal/beads/testmain_test.go)
+// puts HOME under /var/folders/xx/yy/T — which without this entry disqualified
+// os.TempDir() itself and left the deleted-cwd arm inert on every Mac
+// (wy-j2zc8q).
+//
+// The darwin row spells out the symlink-RESOLVED forms ("/private/tmp",
+// "/private/var/folders") literally instead of leaving them to canonicalRoots.
+// canonicalRoots resolves with filepath.EvalSymlinks, which reads the HOST's
+// filesystem: on a Mac it turns /tmp and /var/folders into their /private/…
+// targets, and on a Linux runner it adds nothing at all. But this table is a
+// claim ABOUT darwin that any platform may be asked to judge — the platform
+// row is pinned from Linux CI by TestSandboxHomeUnderPerUserTempRoot, and a
+// Mac's lsof reports cwds in the /private/… form — so the answer must not
+// depend on where the judging happens. canonicalRoots dedups, so on a real
+// Mac these literals cost nothing: they are exactly what it would have added.
+func fixedTempRoots(goos string) []string {
+	roots := []string{"/tmp"}
+	if goos == "darwin" {
+		roots = append(roots, "/private/tmp", "/var/folders", "/private/var/folders")
+	}
+	return roots
+}
+
+// canonicalRoots expands each non-empty root into every form a process's
+// working directory may be reported in: the path as given and, when it
+// differs, its symlink-resolved form. macOS is why — os.MkdirTemp hands back
+// /var/folders/… while lsof reports the /private/var/folders/… that symlink
+// points at — but /tmp is a symlink to /private/tmp there too, and on Linux
+// /tmp can be a symlink as well. Roots that cannot be resolved are kept
+// as-is; duplicates are dropped.
+func canonicalRoots(roots []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(roots)*2)
+	add := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		add(root)
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			add(resolved)
+		}
+	}
+	return out
 }
 
 // isDoltServerCmdline reports whether cmdline looks like a dolt sql-server

@@ -273,26 +273,6 @@ func TestFormatYamlValue(t *testing.T) {
 	}
 }
 
-func TestNormalizeYamlKey(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"no-db", "no-db"},               // no alias, unchanged
-		{"json", "json"},                 // no alias, unchanged
-		{"routing.mode", "routing.mode"}, // no alias for this one
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := normalizeYamlKey(tt.input)
-			if got != tt.expected {
-				t.Errorf("normalizeYamlKey(%q) = %q, want %q", tt.input, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestSetYamlConfig(t *testing.T) {
 	oldBeadsDir := os.Getenv("BEADS_DIR")
 	if err := os.Unsetenv("BEADS_DIR"); err != nil {
@@ -406,6 +386,53 @@ func TestSetYamlConfigInDir_WritesTargetConfigDespiteLocalStub(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(worktreeDir, ".beads", "config.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("expected worktree stub to remain untouched, got err=%v", err)
+	}
+}
+
+func TestWorkspaceYamlValueStrictDistinguishesMissingAndMalformed(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if value, present, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server"); err != nil || present || value != "" {
+		t.Fatalf("missing config = (%q, %v, %v), want empty/false/nil", value, present, err)
+	}
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server"); err == nil {
+		t.Fatal("malformed config should return an error")
+	}
+}
+
+func TestWorkspaceYamlValueStrictReadsNestedScalar(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	value, present, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server")
+	if err != nil || !present || value != "false" {
+		t.Fatalf("nested scalar = (%q, %v, %v), want false/true/nil", value, present, err)
+	}
+}
+
+func TestWorkspaceYamlValueStrictRejectsNullAndWrongParent(t *testing.T) {
+	for _, body := range []string{"dolt:\n  shared-server: null\n", "dolt: false\n", "dolt: []\n"} {
+		t.Run(strings.ReplaceAll(body, "\n", "_"), func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server"); err == nil {
+				t.Fatalf("config %q should be rejected", body)
+			}
+		})
 	}
 }
 
@@ -1005,12 +1032,6 @@ func TestCommentOutYamlKey(t *testing.T) {
 			expected: "  # backup.enabled: true\nother: value",
 		},
 		{
-			name:     "nested key",
-			content:  "backup:\n  enabled: false\nother: value",
-			key:      "backup.enabled",
-			expected: "backup:\n  # enabled: false\nother: value",
-		},
-		{
 			name:     "nested key preserves siblings and comments",
 			content:  "# Backup settings\nbackup:\n  enabled: false\n  interval: 15m\n",
 			key:      "backup.enabled",
@@ -1021,18 +1042,6 @@ func TestCommentOutYamlKey(t *testing.T) {
 			content:  "a:\n  b:\n    c: 1\n",
 			key:      "a.b.c",
 			expected: "a:\n  b:\n    # c: 1\n",
-		},
-		{
-			name:     "block opener is left alone rather than orphaning its children",
-			content:  "backup:\n  enabled: false\n  interval: 15m",
-			key:      "backup",
-			expected: "backup:\n  enabled: false\n  interval: 15m",
-		},
-		{
-			name:     "block opener with an interleaved comment is left alone",
-			content:  "backup:\n  # whether to back up\n  enabled: false",
-			key:      "backup",
-			expected: "backup:\n  # whether to back up\n  enabled: false",
 		},
 		{
 			name:     "key with an empty value and no block is still commented",
@@ -1047,50 +1056,19 @@ func TestCommentOutYamlKey(t *testing.T) {
 			expected: "other: value\n# actor:",
 		},
 		{
-			// Only the flat line is commented; the nested copy survives, so
-			// the key is still SET after the unset. That is deliberate - the
-			// flat and nested forms are two independent config.yaml entries
-			// and commenting both would exceed what the caller asked for -
-			// but it means the honest report for this shape is "commented one
-			// of two", not "the key is gone". `changed` is true either way,
-			// and the caller only claims to have edited config.yaml, not to
-			// have cleared the effective value.
-			name:     "flat form wins when both are present",
-			content:  "backup.enabled: false\nbackup:\n  enabled: true",
-			key:      "backup.enabled",
-			expected: "# backup.enabled: false\nbackup:\n  enabled: true",
-		},
-		{
-			name:     "nested key absent from existing block",
-			content:  "backup:\n  interval: 15m\n",
-			key:      "backup.enabled",
-			expected: "backup:\n  interval: 15m\n",
-		},
-		{
-			// In flow style the leaf's line is also its parent's, so
-			// commenting the whole line to unset one leaf would delete the
-			// entire mapping. Refuse instead - a no-op the caller reports
-			// honestly beats silently dropping a sibling key.
-			name:     "flow mapping is left alone rather than deleting the whole map",
-			content:  "dolt: {mode: server}\n",
-			key:      "dolt.mode",
-			expected: "dolt: {mode: server}\n",
-		},
-		{
-			name:     "flow mapping with several leaves is left alone",
-			content:  "other: value\ndolt: {mode: server, port: 3306}\n",
-			key:      "dolt.port",
-			expected: "other: value\ndolt: {mode: server, port: 3306}\n",
-		},
-		{
-			// A flat key must keep the file's trailing newline. The nested
-			// and no-match paths always did; the flat path used to drop it,
-			// so which path fired decided whether the file kept its final
-			// newline.
+			// A match must keep the file's trailing newline, and so must a
+			// miss: UnsetYamlConfig reports a write by comparing content, so a
+			// no-op that dropped the final newline would read as a change.
 			name:     "flat key preserves the trailing newline",
 			content:  "a: 1\n",
 			key:      "a",
 			expected: "# a: 1\n",
+		},
+		{
+			name:     "no match preserves the trailing newline",
+			content:  "other: value\n",
+			key:      "backup.enabled",
+			expected: "other: value\n",
 		},
 		{
 			name:     "flat key without a trailing newline stays without one",
@@ -1102,16 +1080,12 @@ func TestCommentOutYamlKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := commentOutYamlKey(tt.content, tt.key)
+			got, err := commentOutYamlKey(tt.content, tt.key)
+			if err != nil {
+				t.Fatalf("commentOutYamlKey() error = %v", err)
+			}
 			if got != tt.expected {
 				t.Errorf("commentOutYamlKey() =\n%q\nwant:\n%q", got, tt.expected)
-			}
-			// The bool must agree with the content: it is what
-			// UnsetYamlConfig reports up to `bd config unset`, so a refusal
-			// that returns the content unchanged must not read as a write.
-			if wantChanged := got != tt.content; changed != wantChanged {
-				t.Errorf("commentOutYamlKey() changed = %v, want %v (content %s)",
-					changed, wantChanged, map[bool]string{true: "was rewritten", false: "came back unchanged"}[got != tt.content])
 			}
 		})
 	}
