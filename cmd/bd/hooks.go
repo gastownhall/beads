@@ -1530,7 +1530,7 @@ func exportJSONLForCommit() {
 	if exportPath == "" {
 		exportPath = "issues.jsonl"
 	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := preCommitExportPath(beadsDir, exportPath, hookWorkTreeRoot())
 
 	// If the export file is staged for deletion (user ran `git rm`), do not
 	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
@@ -1552,20 +1552,21 @@ func exportJSONLForCommit() {
 	warnJSONLWithoutDoltRemote("pre-commit auto-export")
 
 	// Shell out to `bd export` which initializes its own store.
-	// Clear BD_GIT_HOOK from the subprocess env so that its
-	// PersistentPostRun auto-export path does not also fire.
+	// Keep BD_GIT_HOOK=1 in the subprocess environment. The explicit export
+	// command must run, but its PersistentPostRun auto-export must stay
+	// suppressed; otherwise it also writes and stages the shared primary
+	// checkout's JSONL when this hook belongs to a linked worktree.
 	//
-	// NOTE: we intentionally preserve GIT_DIR et al. in the subprocess
-	// env. The subprocess's PostRun eventually routes through the same
-	// gitAddFile as the parent, which relies on the inherited GIT_DIR to
-	// identify the hook's worktree and apply the cross-worktree staging
-	// guard (GH#3311 part 2). Scrubbing here would disable that guard.
+	// NOTE: we intentionally preserve GIT_DIR et al. in the subprocess env so
+	// it retains the hook's selected Git context. The parent stages fullPath
+	// after the subprocess returns, using that same context for the
+	// cross-worktree guard (GH#3311 part 2).
 	// Run from the project root, not .beads/. Embedded Dolt discovery starts
 	// from cwd, so cwd=.beads/ can make the export subprocess look for a
 	// nested .beads/.beads workspace and warn on every commit (GH#3454).
 	cmd := exec.Command("bd", "export", "-o", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
-	cmd.Env = filterEnv(os.Environ(), "BD_GIT_HOOK")
+	cmd.Env = preCommitExportEnv(os.Environ())
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "beads: pre-commit export warning: %v\n", err)
@@ -1582,6 +1583,21 @@ func exportJSONLForCommit() {
 			debug.Logf("pre-commit: git add failed: %v\n", err)
 		}
 	}
+}
+
+// preCommitExportPath keeps database discovery separate from export ownership.
+// A linked worktree may use the primary checkout's .beads directory for its
+// shared store, but the JSONL snapshot belongs to the worktree being committed.
+func preCommitExportPath(beadsDir, exportPath, hookRoot string) string {
+	if hookRoot != "" {
+		return filepath.Join(hookRoot, ".beads", exportPath)
+	}
+	return filepath.Join(beadsDir, exportPath)
+}
+
+func preCommitExportEnv(env []string) []string {
+	// Return an owned slice while preserving BD_GIT_HOOK and Git routing.
+	return append([]string(nil), env...)
 }
 
 // isExportFileStagedForDeletion reports whether the beads export file at
