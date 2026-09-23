@@ -58,6 +58,7 @@ var storeConstructors = map[string]map[string]bool{
 		"OpenForReadOnlyCommand":     true,
 		"OpenForPreviewCommand":      true,
 		"OpenForWorkingSetReconcile": true,
+		"OpenForRemoteSync":          true,
 	},
 	"github.com/steveyegge/beads/internal/storage/uow": {
 		"NewDoltServerUOWProvider":         true,

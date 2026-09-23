@@ -21,7 +21,10 @@ on:
     paths:
       - 'cmd/bd/proxied_local_*'
       - 'cmd/bd/proxied_server*.go'
+      - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
+      - 'cmd/bd/*managed_local*'
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
@@ -39,7 +42,10 @@ on:
     paths:
       - 'cmd/bd/proxied_local_*'
       - 'cmd/bd/proxied_server*.go'
+      - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
+      - 'cmd/bd/*managed_local*'
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
@@ -104,7 +110,11 @@ jobs:
             TestManagedLocalProxiedLegacyRecordFailClosed \
             TestManagedLocalProxiedOrphanBackendReaped \
             TestManagedLocalProxiedNProcessColdStartConvergence \
-            TestManagedLocalProxiedStopStartInterleave
+            TestManagedLocalProxiedStopStartInterleave \
+            TestManagedLocalProxiedDoltStatusReportsLiveTopology \
+            TestManagedLocalProxiedDoltStartRefusesOverLiveProxy \
+            TestManagedLocalProxiedDoltStartRefusesWithProxyDown \
+            TestManagedLocalProxiedDoltLifecycleLeavesOtherTopologiesAlone
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2
