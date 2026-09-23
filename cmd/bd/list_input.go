@@ -65,6 +65,14 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	if strings.EqualFold(in.formatStr, "json") {
 		jsonOutput = true
 		in.formatStr = ""
+	} else if in.formatStr != "" && cmd.Flags().Changed("format") && !commandJSONFlagChanged(cmd) {
+		// A --format the caller typed outranks a json default from config or
+		// the environment (GH#6278). The root pre-run promotes `json: true`
+		// into jsonOutput unless the ROOT --format changed, but this command's
+		// own --format shadows the root one, so that check never sees it and
+		// the JSON branch would replace the requested graph or template. An
+		// explicit --json still wins, as the --format help says.
+		jsonOutput = false
 	}
 	in.jsonOutput = jsonOutput
 
