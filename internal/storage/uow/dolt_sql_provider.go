@@ -22,6 +22,7 @@ import (
 	db "github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 const (
@@ -52,6 +53,10 @@ type doltSQLProvider struct {
 	// preview it still bootstraps and migrates normally — it only changes what
 	// happens when the migration gate REFUSES; see providerOptions.readOnly.
 	readOnly bool
+	// proxiedServerMode: the workspace that opened this provider is in
+	// proxied-server mode, so the commands the proxied front door refuses are
+	// off the table for its operator; see providerOptions.proxiedServerMode.
+	proxiedServerMode bool
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
@@ -122,6 +127,17 @@ type providerOptions struct {
 	// working through the upgrade window. That is the same warn-and-continue
 	// contract embeddeddolt gives its read-only-command intent.
 	readOnly bool
+	// proxiedServerMode records that the WORKSPACE is in proxied-server mode,
+	// which this provider cannot infer: it is the single funnel for the
+	// proxied CLI and for `bd serve`'s own provider on a SERVER-mode
+	// workspace, and both front a Dolt sql-server through the same dbproxy.
+	// The distinction matters to exactly one thing — which commands the front
+	// door refuses. In proxied mode `bd dolt pull` is rejected before it opens
+	// anything (proxy.dolt_pull.unsupported), so the #6575 data-behind stop
+	// has to name where that pull can be run; on a server-mode workspace the
+	// same command works, and saying otherwise would be the same class of
+	// wrong guidance in the other direction.
+	proxiedServerMode bool
 }
 
 // WithPreview opens the provider for a non-mutating preview command.
@@ -132,6 +148,13 @@ func WithPreview() ProviderOption {
 // WithReadOnly opens the provider for a command that only reads.
 func WithReadOnly() ProviderOption {
 	return func(o *providerOptions) { o.readOnly = true }
+}
+
+// WithProxiedServerMode marks the open as belonging to a proxied-server-mode
+// workspace. See providerOptions.proxiedServerMode: only the refusal guidance
+// depends on it, and only the proxied CLI open may set it.
+func WithProxiedServerMode() ProviderOption {
+	return func(o *providerOptions) { o.proxiedServerMode = true }
 }
 
 func applyProviderOptions(opts []ProviderOption) providerOptions {
@@ -264,10 +287,18 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		// database by the time it runs, so a fresh bootstrap reads version 0
 		// and passes.
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
-			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, nil)
+			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly))
 		})); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if errors.As(err, &gateErr) {
+			// The gate reads the database, never the workspace, so it cannot
+			// know which commands this operator's front door will refuse. Only
+			// a proxied-server-mode workspace refuses `bd dolt pull`, and this
+			// provider also serves `bd serve` on a server-mode workspace,
+			// where that pull works — so the flag is the caller's, not a
+			// property of being behind a proxy (gastownhall/beads#6575
+			// follow-up).
+			gateErr.Proxied = p.proxiedServerMode
 			if p.readOnly {
 				return readThroughRefusedMigration(ctx, conn, database, gateErr)
 			}
@@ -279,6 +310,39 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		return classifyInitSchemaError(err)
 	}
 	return nil
+}
+
+// dataBehindAdopter injects the one ancestry fact the smart gate's #6575
+// data-behind check needs on this path. Without it localDataBehind short-
+// circuits on a nil adopter, so a proxied store that is level on schema and
+// BEHIND the remote in data could never route to smartDataBehind: it reported
+// the blunt shared-store refusal instead, whose body names `bd migrate --force`
+// and `bd dolt push` — the designated-migrator recipe, which in this state is
+// the #6368 wedge the stop exists to prevent. The refusal itself was always
+// safe here (the shared arm suppresses the first-mover auto-migrate whatever
+// the ancestry says); the guidance it printed was not.
+//
+// Only AheadBehind is wired, deliberately. It is the complete data-behind
+// predicate (behind >= 1 whatever ahead is, plus which shape), so the stop is
+// fully covered — while leaving IsStrictAncestor/WorkingSetClean nil keeps
+// routeAdoptFastForward returning false, so the remote-AHEAD arm still routes
+// to the same plain adopt directive it does today. Nothing but the data-behind
+// state changes message. FastForward stays nil for a stronger reason: the
+// fast-forward is a WRITE that would promote the schema for every co-resident
+// client of this server, which is exactly what the shared gate refuses to do
+// unattended (#5920), and CheckSharedStoreMigrateGate suppresses it on a
+// shared store regardless.
+func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
+	return &schema.FastForwardAdopter{
+		AheadBehind: func(ctx context.Context, db schema.DBConn, ref string) (int, int, error) {
+			return versioncontrolops.LocalAheadBehind(ctx, db, ref)
+		},
+		// No FastForward is wired above, so canAutoFastForward is already
+		// false and this flag changes nothing today. Set anyway so the
+		// adopter's safety invariant ("ReadOnly means cannot write here")
+		// does not come to depend on that coincidence.
+		ReadOnly: readOnly,
+	}
 }
 
 // readThroughRefusedMigration serves a read command from a database the
@@ -305,6 +369,19 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 		// The gate refused AND the database cannot even be attached: report
 		// the refusal, which is the actionable half.
 		return backoff.Permanent(gateErr)
+	}
+	// #6575: the data-behind stop's remedy is the pull, and the consent verb
+	// this template names does not unlock a remote-backed shared store at all
+	// (schema.SharedConsentCommandForced). Print that stop's own block, which
+	// REPLACES the migrate-or-adopt framing rather than decorating it, and say
+	// only what read-through adds on top.
+	if gateErr.IsDataBehind() {
+		fmt.Fprintf(os.Stderr,
+			"Warning: %[1]s"+
+				"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
+				"  Writes stay blocked until the steps above are done.\n",
+			gateErr.UserMessage(), gateErr.CurrentVersion)
+		return nil
 	}
 	fmt.Fprintf(os.Stderr,
 		"Warning: %[1]v\n"+
@@ -686,6 +763,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		expectedProjectID: expectedProjectID,
 		preview:           opts.preview,
 		readOnly:          opts.readOnly,
+		proxiedServerMode: opts.proxiedServerMode,
 	}
 
 	if err := initProvider.initSchema(ctx, database); err != nil {
@@ -719,5 +797,6 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		expectedProjectID: expectedProjectID,
 		preview:           opts.preview,
 		readOnly:          opts.readOnly,
+		proxiedServerMode: opts.proxiedServerMode,
 	}, nil
 }

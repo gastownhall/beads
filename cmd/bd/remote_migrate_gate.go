@@ -87,12 +87,13 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		if globalFlag {
 			sharedConsent = schema.SharedConsentCommandGlobal
 		}
-		// The #6575 data-behind stop on a SHARED store carries the same consent
-		// verb in its second option (migrate-shared-after-pulling), so it needs
-		// the same retarget: under --global the project-scoped verb would
-		// consent the wrong database and leave the refusal in place. It reaches
-		// here through the default arm (empty Decision), so the Decision test
-		// alone would miss it.
+		// The #6575 data-behind stop on a SHARED store carries a consent verb in
+		// its second option (migrate-shared-after-pulling) too — the forced one,
+		// since that stop is always remote-backed — so it needs the same
+		// retarget: under --global the project-scoped verb would consent the
+		// wrong database and leave the refusal in place. It reaches here through
+		// the default arm (empty Decision), so the Decision test alone would
+		// miss it.
 		retargetShared := globalFlag && (e.Decision == "shared-no-remote" || (e.IsDataBehind() && e.Shared))
 
 		opts := make([]map[string]interface{}, 0, len(e.Options()))
@@ -105,9 +106,18 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 				// "expected" would still hand it the wrong-target command.
 				retargeted := make([]string, len(commands))
 				for i, c := range commands {
-					if c == schema.SharedConsentCommand {
+					switch c {
+					case schema.SharedConsentCommand:
 						retargeted[i] = schema.SharedConsentCommandGlobal
-					} else {
+					case schema.SharedConsentCommandForced:
+						// The data-behind arm's consent step is the FORCED
+						// verb (that stop is remote-backed by construction,
+						// where the bare verb's consent is never read), so it
+						// needs its own global form — matching only the bare
+						// verb would leave this option pointing at the
+						// project database.
+						retargeted[i] = schema.SharedConsentCommandForcedGlobal
+					default:
 						retargeted[i] = c
 					}
 				}

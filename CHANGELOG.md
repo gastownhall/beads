@@ -228,8 +228,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator who can confirm every co-resident client is upgraded). On a shared
   Dolt sql-server the guidance carries #5920's consequence — migrating promotes
   the schema for every co-resident client, and clients still on an older bd
-  refuse the database until upgraded — and names the `bd migrate schema`
-  consent step the retry needs there.
+  refuse the database until upgraded — and names the consent step the retry
+  needs there: `bd migrate schema --force`. It is the forced form because this
+  stop always has a remote configured (behind-ness is read from the
+  remote-tracking ref), and the bare `bd migrate schema` consent is only read
+  for a shared database with *no* remote; the flag consents to migrating a
+  remote-backed shared store, and by then the pull has landed the commits the
+  clone was missing.
+
+  **Proxied-server mode reaches the stop too, and is told where to run the
+  remedy.** The store-open gate on that path supplied no branch-position
+  callback, so a proxied clone that was level on schema and behind in data
+  could never be classified data-behind: it got the blunt shared-store refusal,
+  whose body is the designated-migrator recipe — `bd migrate --force` then
+  `bd dolt push` — which in this state is the wedge the stop exists to prevent.
+  It now routes to the same data-behind stop as every other topology. Because
+  `bd dolt pull` is refused at the proxied front door
+  (`proxy.dolt_pull.unsupported`), along with `bd dolt push`, `bd migrate` and
+  `bd conflicts`, the guidance there names the machine the pull has to run on
+  rather than printing a command this binary rejects; the `--json` option is
+  `pull-first-on-server-host`, carrying the same command with that
+  precondition. The warning against forcing past the stop also names
+  `BD_ALLOW_REMOTE_MIGRATE=1` on this topology, since it is the one consent
+  surface the proxy does not refuse. Read-only proxied opens print the same
+  pull-first block instead of the shared-consent template.
 
   Both existing workarounds keep working unchanged: `BD_SMART_GATE=0` opts out
   of the smart gate entirely (which means the blunt gate applies to `bd dolt

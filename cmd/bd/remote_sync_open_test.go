@@ -212,8 +212,10 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 		}
 		consent, _ := rawOpts[1].(map[string]interface{})
 		cmds, _ := consent["commands"].([]interface{})
-		if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandGlobal {
-			t.Errorf("consent option commands = %v, want [%q] under --global", cmds, schema.SharedConsentCommandGlobal)
+		// The forced form, not the bare one: this stop is remote-backed by
+		// construction and the bare verb's consent is never read there.
+		if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandForcedGlobal {
+			t.Errorf("consent option commands = %v, want [%q] under --global", cmds, schema.SharedConsentCommandForcedGlobal)
 		}
 		// The pull is target-agnostic and must NOT be rewritten.
 		pull, _ := rawOpts[0].(map[string]interface{})

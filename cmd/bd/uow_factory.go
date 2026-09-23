@@ -197,6 +197,13 @@ func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverrid
 	if err != nil {
 		return nil, err
 	}
+	// This is the one entry point that is proxied-server mode by definition;
+	// the funnel below is shared with `bd serve`'s SERVER-mode provider, which
+	// must not be told it is proxied. The distinction reaches exactly one
+	// thing: a migration-gate refusal whose remedy is `bd dolt pull` has to
+	// say where that pull can be run, because proxied mode refuses it at the
+	// front door (proxy.dolt_pull.unsupported) and server mode does not.
+	opts = append(append([]uow.ProviderOption{}, opts...), uow.WithProxiedServerMode())
 	return newSQLServerUOWProvider(ctx, beadsDir, topology, opts...)
 }
 
