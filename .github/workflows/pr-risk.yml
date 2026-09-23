@@ -70,7 +70,7 @@ jobs:
     needs: [detect-ci-tier, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -106,6 +106,7 @@ jobs:
         run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test proxied-server cmd shard
+        timeout-minutes: 16
         env:
           BEADS_TEST_PROXIED_SERVER: "1"
           BEADS_TEST_BD_BINARY: /tmp/bd-proxied
