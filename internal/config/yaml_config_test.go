@@ -1043,6 +1043,15 @@ func TestCommentOutYamlKey(t *testing.T) {
 		},
 		{
 			// Nor refuse on one: the nested `mode:` block is not this key's.
+			// A dedent ends the value: `k:` has nothing beneath it, since the
+			// next content line belongs to the parent's level, so it is
+			// commented like any empty-valued key.
+			name:     "empty nested key followed by a dedent is still commented",
+			content:  "outer:\n  k:\nz: 1\n",
+			key:      "outer.k",
+			expected: "outer:\n  # k:\nz: 1\n",
+		},
+		{
 			name:     "single-segment key ignores a nested block of the same name",
 			content:  "dolt:\n  mode:\n    x: 1\n",
 			key:      "mode",

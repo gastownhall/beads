@@ -1214,10 +1214,11 @@ func (w *nestedKeyWalk) step(name string, indent int) bool {
 // never there has always been a successful no-op, and staying silent about a
 // shape nobody asked to touch is the point.
 func unsupportedUnsetShape(content, key string) error {
+	// Single-segment keys are checked too. The database-backed unset clears
+	// the config.yaml layer for every key, so `notes: |` with an indented body
+	// reaches this path, and commenting its key line out orphans the body
+	// exactly as it does for a dotted key.
 	segments := strings.Split(key, ".")
-	if len(segments) < 2 {
-		return nil
-	}
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(content), &root); err != nil || len(root.Content) == 0 {
 		// Nothing to walk. A file yaml.v3 cannot parse is not this function's

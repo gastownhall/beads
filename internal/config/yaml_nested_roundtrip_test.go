@@ -498,6 +498,11 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		{name: "trailing comment on a mapping-valued key", seed: "backup:  # note\n  enabled: false\n", key: "backup", want: "lines beneath it"},
 		{name: "anchored mapping-valued key", seed: "base: &b\n  c: 1\n", key: "base", want: "lines beneath it"},
 		{name: "anchored mapping-valued key with a comment", seed: "base: &b  # shared\n  c: 1\n", key: "base", want: "lines beneath it"},
+		// A tag alone after the colon still leaves the value below.
+		{name: "tagged mapping-valued key", seed: "m: !!map\n  a: 1\n", key: "m", want: "lines beneath it"},
+		// A single-segment key's block scalar is refused like a dotted one's:
+		// the database-backed unset reaches this path for every key.
+		{name: "single-segment block scalar", seed: "notes: |\n  hi\nnode_id: mini\n", key: "notes", want: "block scalar"},
 		// A plain scalar continued on the next line is orphaned the same way.
 		{name: "plain scalar on the next line", seed: "dolt.mode:\n  server\n", key: "dolt.mode", want: "lines beneath it"},
 		// A CRLF blank line is a lone carriage return, not content at column 0.
