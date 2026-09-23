@@ -295,7 +295,7 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 			// shared sql-server — and returning nil below would silently
 			// drop it. Surface it instead of discarding it.
 			if pullErr != nil && len(merged) == 0 {
-				out.DiscardedPullError = pullErr.Error()
+				out.DiscardedPullError = syncFailureText(pullErr)
 			}
 			return out, nil
 		}

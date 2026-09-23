@@ -329,8 +329,10 @@ func TestRunSyncLoopConflictWinsOverPullError(t *testing.T) {
 // `merged` empty — the conflict branch still fires (from the live check), and
 // the unrelated error must not vanish silently.
 func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	pullErr := errors.New(timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes")
 	r := &syncOpsRecorder{
-		pullErrs:     []error{errors.New("dial tcp: connection refused")},
+		pullErrs:     []error{pullErr},
 		conflictsSeq: [][]string{nil, {"issues"}},
 	}
 	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
@@ -340,8 +342,13 @@ func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
 	if out.Status != syncStatusConflict {
 		t.Fatalf("status = %q, want %q", out.Status, syncStatusConflict)
 	}
-	if out.DiscardedPullError != "dial tcp: connection refused" {
-		t.Errorf("DiscardedPullError = %q, want the unrelated pull error preserved", out.DiscardedPullError)
+	if !strings.Contains(out.DiscardedPullError, "could not be reached") || !strings.Contains(out.DiscardedPullError, timeoutLine) {
+		t.Errorf("DiscardedPullError does not explain the dial timeout: %q", out.DiscardedPullError)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(out.DiscardedPullError, misleading) {
+			t.Errorf("DiscardedPullError retained auth hint %q: %q", misleading, out.DiscardedPullError)
+		}
 	}
 }
 
