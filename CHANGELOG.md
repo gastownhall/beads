@@ -204,6 +204,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`routes.jsonl` prefixes containing a hyphen now route**
+  ([#5048](https://github.com/gastownhall/beads/issues/5048)). Prefix routing
+  cut the bead ID at its first `-` and required an exact match, so a route
+  such as `claude-os-` could never match `claude-os-76l` and the lookup fell
+  through to "not found". Routing now picks the longest route prefix the ID
+  starts with. Single-hyphen routes behave as before; where both `hq-` and
+  `hq-cv-` are configured, `hq-cv-*` IDs now take the `hq-cv-` route instead
+  of `hq-`.
+
 - **A dotted config key now round-trips: what `bd config set` writes,
   `bd config get` and bd's own readers find**
   ([#6574](https://github.com/gastownhall/beads/pull/6574),
