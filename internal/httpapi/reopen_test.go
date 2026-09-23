@@ -347,8 +347,8 @@ func TestReopenForwardsTheVersionGuard(t *testing.T) {
 		body string
 		want *int64
 	}{
-		{"a guard is forwarded", `{"actor":"alice","expected_version":9007199254740993}`, guard(guardToken)},
-		{"the never-written version is a real guard", `{"actor":"alice","expected_version":0}`, guard(0)},
+		{"a guard is forwarded", `{"actor":"alice","expected_version":"9007199254740993"}`, guard(guardToken)},
+		{"the never-written version is a real guard", `{"actor":"alice","expected_version":"0"}`, guard(0)},
 		{"an absent guard stays nil", `{"actor":"alice"}`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -423,7 +423,7 @@ func TestReopenRefusesAStaleGuard(t *testing.T) {
 	lifecycle := &roleLifecycle{reopenErr: fmt.Errorf("reopen bd-1: %w", issueops.ErrVersionMismatch)}
 	ts := newReopenServer(t, lifecycle)
 
-	resp := ts.reopenIssue(t, reopenPath, `{"actor":"alice","expected_version":9007199254740993}`)
+	resp := ts.reopenIssue(t, reopenPath, `{"actor":"alice","expected_version":"9007199254740993"}`)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
 	}
@@ -442,11 +442,15 @@ func TestReopenRefusesAStaleGuard(t *testing.T) {
 	}
 }
 
-// TestReopenRefusesAMalformedGuard: the token is an integer and nothing else,
-// refused at the edge before any database work.
+// TestReopenRefusesAMalformedGuard: the token is a decimal STRING and nothing
+// else — including not the bare number the member used to be — refused at the
+// edge before any database work.
 func TestReopenRefusesAMalformedGuard(t *testing.T) {
 	for _, body := range []string{
-		`{"actor":"alice","expected_version":"41"}`,
+		`{"actor":"alice","expected_version":41}`,
+		`{"actor":"alice","expected_version":9007199254740993}`,
+		`{"actor":"alice","expected_version":"41.5"}`,
+		`{"actor":"alice","expected_version":"not-a-token"}`,
 		`{"actor":"alice","expected_version":null}`,
 		`{"actor":"alice","expected_version":[]}`,
 	} {

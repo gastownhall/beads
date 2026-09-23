@@ -807,7 +807,9 @@ func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 	if isWisp {
 		table = "wisps"
 	}
-	if err := issueops.DeleteIssueInTx(ctx, t.txFor(table), id); err != nil {
+	// storage.Tx.DeleteIssue carries no actor (it is the actorless system
+	// surface), so the journal rows record none — 0066's "system/unknown".
+	if err := issueops.DeleteIssueInTx(ctx, t.txFor(table), id, ""); err != nil {
 		return wrapExecError("delete issue in tx", err)
 	}
 	// Mark every table the ON DELETE CASCADE fans out to, not just the row's

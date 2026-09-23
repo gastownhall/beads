@@ -421,6 +421,15 @@ func applyUpdateItem(prefix string, encoded json.RawMessage, raw map[string]json
 	if offender, unknown := unknownMember(raw, applyUpdateItemMembers); unknown {
 		return nil, applyUnknownMember(prefix, offender, applyUpdateItemMembers)
 	}
+	// The guard is read BEFORE the whole-item decode, and through the same
+	// reader every other operation uses. It is the one member of this item whose
+	// wire type is not its Go type — a decimal string standing for an int64 —
+	// so letting the struct decode reach it first would answer a mistyped token
+	// with the item-level "wrong JSON type" instead of a 400 naming the member.
+	expectedVersion, res := applyVersionGuardMember(raw, prefix)
+	if res != nil {
+		return nil, res
+	}
 	var wire apigen.ApplyUpdateItem
 	if err := json.Unmarshal(encoded, &wire); err != nil {
 		res := InvalidArgument(applyParam(prefix, ""), ReasonInvalidValue, "an `update` member carries the wrong JSON type")
@@ -447,7 +456,7 @@ func applyUpdateItem(prefix string, encoded json.RawMessage, raw map[string]json
 		return nil, res
 	}
 
-	item := &issueops.UpdateItem{Target: target, Patch: patch, ExpectedVersion: wire.ExpectedVersion}
+	item := &issueops.UpdateItem{Target: target, Patch: patch, ExpectedVersion: expectedVersion}
 	if wire.ExpectedStatus != nil {
 		status := issueops.Status(*wire.ExpectedStatus)
 		item.ExpectedStatus = &status
@@ -842,7 +851,7 @@ func applyBatchResponse(result issueops.ApplyBatchResult) apigen.ApplyBatchRespo
 			Kind:     apigen.ApplyItemResultKind(item.Kind),
 			IssueId:  item.IssueID,
 			Changed:  item.Changed,
-			Revision: item.RowVersion,
+			Revision: types.RevisionToken(item.RowVersion),
 		}
 		if item.DependsOnID != "" {
 			dependsOn := item.DependsOnID
@@ -1219,15 +1228,21 @@ func applyBoolMember(raw map[string]json.RawMessage, prefix, member string) (boo
 	return *value, nil
 }
 
-// applyVersionGuardMember is the family's int64 reader, and it names the member
-// itself rather than taking one.
+// applyVersionGuardMember is the family's revision-token reader, and it names
+// the member itself rather than taking one.
 //
 // Its siblings above are generic because they read many members; this one has
-// read exactly one on every operation that has ever published a 64-bit member —
-// the row-version guard — so the member name lives in the function instead of
-// at five call sites that could disagree about how to spell it. A second int64
-// member would re-generalize it, which is a two-line change and not a reason to
-// carry a parameter nothing varies.
+// read exactly one on every operation that publishes a row-version guard, so the
+// member name lives in the function instead of at five call sites that could
+// disagree about how to spell it.
+//
+// THE TOKEN IS A STRING ON THE WIRE AND AN int64 INSIDE. It is opaque and
+// equality-only, and it spans the full int64 range, which a JSON number does not
+// survive in an IEEE-754-double parser; responses emit it as a decimal string
+// (types.RevisionToken) and this is where it comes back. STRING ONLY, with no
+// number-or-string transitional spelling: this API refuses unknown members by
+// name and keeps one spelling of the guard, and a numeric token accepted here
+// would be a value the client rounded before it ever reached the server.
 //
 // prefix stays, because a batch item's guard is reported qualified by the item
 // that carried it where a single operation's is spelled bare.
@@ -1236,13 +1251,20 @@ func applyVersionGuardMember(raw map[string]json.RawMessage, prefix string) (*in
 	if !ok {
 		return nil, nil
 	}
-	var value *int64
-	if err := json.Unmarshal(encoded, &value); err != nil || value == nil {
+	refuse := func() (*int64, *Result) {
 		res := InvalidArgument(prefix+expectedVersionMember, ReasonInvalidValue,
-			"`"+expectedVersionMember+"` must be an integer")
+			"`"+expectedVersionMember+"` must be a string: the `revision` token a response carried, echoed verbatim")
 		return nil, &res
 	}
-	return value, nil
+	var value *string
+	if err := json.Unmarshal(encoded, &value); err != nil || value == nil {
+		return refuse()
+	}
+	parsed, err := types.ParseRevisionToken(*value)
+	if err != nil {
+		return refuse()
+	}
+	return &parsed, nil
 }
 
 // applyBoundedText applies the bounds a stored string carries wherever it is

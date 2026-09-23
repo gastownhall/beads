@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -8,12 +9,14 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var migrateCmd = &cobra.Command{
@@ -633,6 +636,19 @@ func handleSchemaMigrate() error {
 			}
 			return SilentExit()
 		}
+		var dirtyErr *schema.DirtyTablesError
+		if errors.As(err, &dirtyErr) {
+			// The dirty guard's own remedy is `bd dolt commit`, which on a
+			// shared server opens writably, hits the migrate gate, and is told
+			// to run this command — the two messages point at each other and
+			// the operator loops (gastownhall/beads#5920 review). Name the
+			// sequence that actually terminates.
+			return HandleErrorWithHint(
+				fmt.Sprintf("schema migration failed: %v", err),
+				"in server mode `bd dolt commit` is itself gated, so commit the working set on the server first "+
+					"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
+					schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
+		}
 		return HandleError("schema migration failed: %v", err)
 	}
 
@@ -641,6 +657,14 @@ func handleSchemaMigrate() error {
 	if applied > 0 {
 		status = "applied"
 		commandDidWrite.Store(true)
+		// Stamp the version markers the refused version-bump reconciliation
+		// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
+		// is the only automatic writer of bd_version, it was refused by the
+		// gate this command just satisfied, and its one-shot .local_version
+		// signal is already consumed — so without this, `bd doctor` and the
+		// git-hook health check keep reporting a version mismatch after the
+		// operator has done everything the refusal told them to.
+		stampWorkspaceVersionAfterMigrate(store)
 	}
 
 	if jsonOutput {
@@ -656,6 +680,54 @@ func handleSchemaMigrate() error {
 		return nil
 	}
 	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
+	return nil
+}
+
+// stampWorkspaceVersionAfterMigrate records this binary's version through the
+// store's own reconciler, exactly as autoMigrateOnVersionBump would have.
+//
+// Best-effort by design, and deliberately not fatal: the migration itself has
+// already succeeded and been reported, so a marker write that fails must not
+// turn a successful migration into a failed command. A stale marker is a
+// cosmetic doctor warning; a false "schema migration failed" is not.
+func stampWorkspaceVersionAfterMigrate(store storage.DoltStorage) {
+	reconciler, err := store.VersionReconciler()
+	if err != nil {
+		debug.Logf("migrate schema: version markers unavailable: %v", err)
+		return
+	}
+	if _, err := reconciler.ReconcileVersion(rootCtx, issueops.VersionReconcileRequest{CLIVersion: Version}); err != nil {
+		debug.Logf("migrate schema: failed to record workspace version: %v", err)
+	}
+}
+
+// reportProxiedSchemaMigrate is `bd migrate schema`'s proxied-server arm. The
+// provider open already reconciled the schema under this verb's consent, so
+// there is nothing left to do but say so — and say it in the same shape the
+// direct path uses, since a caller parsing --json should not have to branch on
+// the workspace's storage mode.
+//
+// The open reports its own failures: a gate refusal or a failed migration
+// aborts the command in root pre-run and never reaches RunE, so arriving here
+// means the schema is reconciled. The applied count is not observable from
+// here (it belongs to an open that has already returned), hence the "current"
+// status rather than a count.
+//
+// No version stamping here, unlike the direct path: reconcileVersionProxiedServer
+// already runs in the root pre-run after a successful provider open, so the
+// marker the gate refusal held back is written as soon as the open succeeds.
+func reportProxiedSchemaMigrate() error {
+	latest := schema.LatestVersion()
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"status":         "current",
+			"latest_version": latest,
+			"mode":           "proxied-server",
+			"note":           "schema reconciled during provider open",
+		})
+	}
+	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf(
+		"✓ Schema reconciled during provider open (proxied-server mode); schema now at v%d", latest)))
 	return nil
 }
 
@@ -820,7 +892,12 @@ Example:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("migrate schema is not supported in proxied-server mode")
+			// Proxied mode has no store-level SchemaMigrator to call: the
+			// provider open IS the migration, and by the time RunE runs it has
+			// already happened — with this verb's consent, which the root
+			// pre-run set before the open (schema.SetSharedMigrateConsent).
+			// So report, rather than refuse a verb that just did its job.
+			return reportProxiedSchemaMigrate()
 		}
 		CheckReadonly("migrate schema")
 

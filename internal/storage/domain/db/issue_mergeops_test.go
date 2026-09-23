@@ -57,7 +57,7 @@ func (s *testSuite) issueUpdateSetMetadataMerges() {
 	got := s.readMetadataMap("bd-mo-set", domain.IssueTableOpts{})
 	s.Equal("yes", got["existing"], "pre-existing key must survive a set-metadata edit")
 	s.Equal("gold", got["tier"])
-	s.Equal("99", got["score"], "--set-metadata values are stored as JSON strings (GH#4146)")
+	s.Equal(float64(99), got["score"], "--set-metadata infers scalar types: 99 is stored as a JSON number (v1.2.2 contract)")
 }
 
 func (s *testSuite) issueUpdateMergeMetadataOverlays() {
@@ -161,7 +161,7 @@ func (s *testSuite) issueUpdateMergeOpsWispRouting() {
 	got := map[string]any{}
 	s.Require().NoError(json.Unmarshal(out.Metadata, &got))
 	s.Equal("wisp", got["kind"], "wisp's pre-existing metadata key must survive")
-	s.Equal("1", got["extra"])
+	s.Equal(float64(1), got["extra"])
 }
 
 // TestIssueUseCase_ApplyUpdateMergeOps proves the ops flow through the domain
@@ -185,7 +185,7 @@ func (s *testSuite) iucApplyUpdateSetMetadata() {
 	got := map[string]any{}
 	s.Require().NoError(json.Unmarshal(updated.Metadata, &got))
 	s.Equal("safe", got["sibling"])
-	s.Equal("1", got["mine"])
+	s.Equal(float64(1), got["mine"])
 }
 
 func (s *testSuite) iucApplyUpdateAppendNotes() {

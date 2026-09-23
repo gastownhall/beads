@@ -56,7 +56,9 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if usesProxiedServer() {
-				return HandleErrorRespectJSON("backup status is not supported in proxied-server mode")
+				if err := requireLocalProxiedBackup("backup status"); err != nil {
+					return err
+				}
 			}
 			evt := metrics.NewCommandEvent("backup-status")
 			defer func() {
