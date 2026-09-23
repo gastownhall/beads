@@ -172,6 +172,28 @@ func TestListBriefIsRefusedWhereItCannotBeHonored(t *testing.T) {
 	}
 }
 
+// TestListWatchRefusesFormat pins GH#6277: --watch always re-renders the pretty
+// listing, so a --format template would be dropped silently. The refusal lives
+// in gatherListInput, ahead of the route split, so the direct route answers
+// the way the proxied route used to on its own.
+func TestListWatchRefusesFormat(t *testing.T) {
+	pinJSONOutput(t, false)
+	_, err, shown := runGatherListInput(t, newListFlagsCommand(t, "--watch", "--format", "digraph"))
+	if err == nil {
+		t.Fatal("gatherListInput(--watch --format digraph) = nil, want a usage error")
+	}
+	if want := "--format cannot be combined with --watch"; !strings.Contains(shown, want) {
+		t.Errorf("output = %q, want it to name %q", shown, want)
+	}
+
+	// The control: --watch alone and --format alone are both still accepted.
+	for _, args := range [][]string{{"--watch"}, {"--format", "digraph"}} {
+		if _, err := gatherListInput(newListFlagsCommand(t, args...)); err != nil {
+			t.Errorf("gatherListInput(%v) = %v, want no error", args, err)
+		}
+	}
+}
+
 // TestListBriefIsAcceptedOnThePageRoutes is the negative control: the modes
 // above are refusals, not a blanket one. --long is here on purpose, since it is
 // the text rendering that prints an omitted field and is allowed precisely

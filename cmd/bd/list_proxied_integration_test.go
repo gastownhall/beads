@@ -719,7 +719,7 @@ func TestProxiedServerList(t *testing.T) {
 
 	t.Run("reject_format_with_watch", func(t *testing.T) {
 		out := bdProxiedListFail(t, bd, p, "--watch", "--format", "dot")
-		if !strings.Contains(out, "--format under --proxied-server --watch is not supported") {
+		if !strings.Contains(out, "--format cannot be combined with --watch") {
 			t.Errorf("expected --format+--watch rejection message, got: %s", out)
 		}
 	})
