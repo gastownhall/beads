@@ -176,6 +176,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not exempt a row cap the proxied route cannot enforce either way.
   `bd create` is the only command that registers `--repo`, so it is the only
   command this refusal applies to.
+- **`bd ready --gated` runs under `--proxied-server` with a row cap set**
+  ([#6697](https://github.com/gastownhall/beads/pull/6697)). It was refused
+  whenever `--max-rows` or `BEADS_MAX_ROWS` resolved to a positive cap, while
+  `bd mol ready --gated` — the documented alias for the same gate-resume scan —
+  was not, so one command line behaved differently under its two spellings. The
+  gated arm lists molecules whose gate closed rather than ready rows and threads
+  no cap on either route, so it no longer consults one; a cap passed alongside
+  `--gated` is ignored, matching what the direct route has always done. Every
+  other `bd ready` arm still refuses an active cap, `--claim` included.
 - **The proxied `bd admin compact` refusal names the command it means**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). The message is now
   "only 'bd admin compact --dolt' is supported in proxied-server mode"; it read
