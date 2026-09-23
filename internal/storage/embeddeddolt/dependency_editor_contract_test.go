@@ -51,6 +51,12 @@ func TestEmbeddedDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion
 	conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemmeta"))
 }
 
+func TestEmbeddedDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemmetasame"))
+}
+
 func TestEmbeddedDependencyEditorRepeatsWithinOneRequestCollapse(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

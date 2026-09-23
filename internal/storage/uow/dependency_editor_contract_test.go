@@ -31,6 +31,7 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "AddedEchoesTheRequestOrder", run: conformance.RunDependencyEditorAddedEchoesTheRequestOrder},
 		{name: "SameTypeReAddIsIdempotent", run: conformance.RunDependencyEditorSameTypeReAddIsIdempotent},
 		{name: "SameTypeReAddWithChangedMetadataMintsOneVersion", run: conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion},
+		{name: "SameTypeReAddWithIdenticalMetadataIsANoOp", run: conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp},
 		{name: "RepeatsWithinOneRequestCollapse", run: conformance.RunDependencyEditorRepeatsWithinOneRequestCollapse},
 		{name: "AttributesItsEventsToTheActor", run: conformance.RunDependencyEditorAttributesItsEventsToTheActor},
 		{name: "RetypeRefusalLeavesTheOriginalEdge", run: conformance.RunDependencyEditorRetypeRefusalLeavesTheOriginalEdge},

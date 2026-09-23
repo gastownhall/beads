@@ -246,6 +246,7 @@ var roleContractCases = []roleContract{
 		RunDependencyEditorAddedEchoesTheRequestOrder,
 		RunDependencyEditorSameTypeReAddIsIdempotent,
 		RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion,
+		RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp,
 		RunDependencyEditorRepeatsWithinOneRequestCollapse,
 		RunDependencyEditorAttributesItsEventsToTheActor,
 		RunDependencyEditorRetypeRefusalLeavesTheOriginalEdge,
