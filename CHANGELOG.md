@@ -235,6 +235,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of its own. Unsetting a key that is not set remains a successful no-op in
   every shape.
 
+- **Push `--dry-run` now honors `--create-only`**
+  ([#6337](https://github.com/gastownhall/beads/issues/6337)). The sequential
+  tracker push previewed "Would update" for every already-linked issue, even
+  though a real `--create-only` run skips them, so the preview over-reported
+  updates and under-reported skips (reachable today via
+  `bd jira sync --push --create-only --dry-run`). The dry-run now applies the
+  same `--create-only` gate as the real run and the batch path, so both report
+  the same created/updated/skipped counts.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery

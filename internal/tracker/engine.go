@@ -1063,6 +1063,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Created++
+			} else if opts.CreateOnly && !forceIDs[issue.ID] {
+				// A real --create-only run leaves linked issues alone, so the
+				// preview must skip them too (gastownhall/beads#6337).
+				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this
 				// issue, so the preview must say so too (gastownhall/beads#4214).
