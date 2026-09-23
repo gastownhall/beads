@@ -58,6 +58,9 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunBatchCreatorDoesNotMutateTheCallerRequest(t, ctx, fixture)
 	})
+	t.Run("EchoesSubSecondTimestamps", func(t *testing.T) {
+		conformance.RunBatchCreatorEchoesSubSecondTimestamps(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchCreatorFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchCreatorFixture {

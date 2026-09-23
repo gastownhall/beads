@@ -112,6 +112,7 @@ func (o *issueOperations) Create(ctx context.Context, request publicops.CreateRe
 		if err != nil {
 			return publicops.CreateResult{}, "", err
 		}
+		storageissueops.OverlayCreateTimestamps(issue, created.Issue)
 		return publicops.CreateResult{Issue: issue}, "create issue", nil
 	})
 }

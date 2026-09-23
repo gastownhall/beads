@@ -691,6 +691,19 @@ type GarbageCollector interface {
 	DoltGC(ctx context.Context) error
 }
 
+// FullGarbageCollector provides a full Dolt garbage collection, which collects
+// the old generation as well as the new one.
+//
+// Dolt GC is generational: each pass promotes the chunks reachable at that
+// moment into the old generation, and DoltGC only visits the new generation.
+// After a history rewrite (Flatten, Compact) the orphaned commit chain usually
+// lives in the old generation, so DoltGC reclaims nothing and callers must use
+// DoltGCFull. Prefer DoltGC for periodic hygiene, where a full pass costs
+// minutes on large stores for no extra reclaim.
+type FullGarbageCollector interface {
+	DoltGCFull(ctx context.Context) error
+}
+
 // Flattener squashes all Dolt commit history into a single commit.
 // Callers should type-assert to this interface for history compaction.
 type Flattener interface {

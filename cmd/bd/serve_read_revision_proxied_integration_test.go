@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strconv"
 	"testing"
 )
 
@@ -74,13 +73,13 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 		// mean the handler published a field it never filled in rather than
 		// the row's value — the one failure that a legacy-zero row makes
 		// otherwise indistinguishable from success.
-		if read == 0 {
-			t.Fatalf("revision = 0 on a row this test just created; the token was not read off the row: %s", raw)
+		if read == "0" {
+			t.Fatalf("revision = \"0\" on a row this test just created; the token was not read off the row: %s", raw)
 		}
 
 		// The guard the read sourced. It lands, which is half the claim.
 		writeStatus, written := sp.updateIssueRaw(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(read, 10)+`,"patch":{"title":"guarded by a read"}}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(read)+`,"patch":{"title":"guarded by a read"}}`)
 		if writeStatus != http.StatusOK {
 			t.Fatalf("guarded write: status = %d, want 200: %s", writeStatus, written)
 		}
@@ -95,14 +94,14 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 		// diverged from here on.
 		wrote := revisionOf(t, written)
 		if wrote == read {
-			t.Fatalf("revision = %d after a write; a write that does not move the token makes every guard vacuous", wrote)
+			t.Fatalf("revision = %q after a write; a write that does not move the token makes every guard vacuous", wrote)
 		}
 		reStatus, reRaw := sp.getIssueRaw(t, issue.ID)
 		if reStatus != http.StatusOK {
 			t.Fatalf("re-read: status = %d, want 200: %s", reStatus, reRaw)
 		}
 		if reRead := revisionOf(t, reRaw); reRead != wrote {
-			t.Errorf("the read answers %d and the write answered %d; the two must be one token", reRead, wrote)
+			t.Errorf("the read answers %q and the write answered %q; the two must be one token", reRead, wrote)
 		}
 
 		// THE OTHER HALF: a concurrent actor moves the row, and the token the
@@ -117,7 +116,7 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 		}
 
 		conflictStatus, problem := sp.updateIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(wrote, 10)+`,"patch":{"title":"never"}}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(wrote)+`,"patch":{"title":"never"}}`)
 		if conflictStatus != http.StatusConflict {
 			t.Fatalf("stale guard: status = %d, want 409: %v", conflictStatus, problem)
 		}
@@ -139,7 +138,7 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 		}
 		fresh := revisionOf(t, freshRaw)
 		retryStatus, retry := sp.updateIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(fresh, 10)+`,"patch":{"title":"retried"}}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(fresh)+`,"patch":{"title":"retried"}}`)
 		if retryStatus != http.StatusOK {
 			t.Fatalf("the retry: status = %d, want 200: %v", retryStatus, retry)
 		}
@@ -164,7 +163,7 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 		read := revisionOf(t, raw)
 
 		closeStatus, closed := sp.closeIssueRaw(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(read, 10)+`}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(read)+`}`)
 		if closeStatus != http.StatusOK {
 			t.Fatalf("guarded close: status = %d, want 200: %s", closeStatus, closed)
 		}
@@ -180,7 +179,7 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 			t.Fatalf("read after close: status = %d, want 200: %s", afterStatus, afterRaw)
 		}
 		if got, want := revisionOf(t, afterRaw), revisionOf(t, closed); got != want {
-			t.Errorf("the read answers %d and the close answered %d; the two must be one token", got, want)
+			t.Errorf("the read answers %q and the close answered %q; the two must be one token", got, want)
 		}
 	})
 
@@ -199,9 +198,9 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 			t.Fatalf("GET wisp: status = %d, want 200: %s", status, raw)
 		}
 		var body struct {
-			ID        string `json:"id"`
-			Ephemeral bool   `json:"ephemeral"`
-			Revision  *int64 `json:"revision"`
+			ID        string  `json:"id"`
+			Ephemeral bool    `json:"ephemeral"`
+			Revision  *string `json:"revision"`
 		}
 		if err := json.Unmarshal(raw, &body); err != nil {
 			t.Fatalf("decode wisp detail %q: %v", raw, err)
@@ -212,8 +211,9 @@ func TestProxiedServerServeReadRevision(t *testing.T) {
 		if body.Revision == nil {
 			t.Fatalf("the wisp detail carries no `revision`: %s", raw)
 		}
-		if *body.Revision == 0 {
-			t.Errorf("revision = 0 on a wisp this test just created; the fallback read the wrong plane's token: %s", raw)
+		if *body.Revision == "0" {
+			t.Errorf("revision = %q on a wisp this test just created; the fallback read the wrong plane's token: %s",
+				*body.Revision, raw)
 		}
 	})
 }

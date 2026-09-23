@@ -74,11 +74,7 @@ func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -140,11 +136,7 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	external := configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt}
 
@@ -228,11 +220,7 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
 	// Fire exactly once, right after migration step 1 (create issues) has
@@ -319,11 +307,7 @@ func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t 
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

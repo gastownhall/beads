@@ -86,7 +86,10 @@ jobs:
           ci_time "install golangci-lint" -- go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
           status=0
           ci_time "pr-policy wrapper" -- make ci-pr-policy || status=$?
-          ci_time "pr-core gotestsum" -- gotestsum --junitfile artifacts/pr-core-junit.xml --format testdox -- -race -short -skip '^TestEmbedded' ./... || status=$?
+          # -timeout=30m keeps this in step with the lane it measures
+          # (scripts/ci/pr-core.sh). Without it ./cmd/bd can die on `go test`'s
+          # 10m default and the measurement reports a panic instead of a duration.
+          ci_time "pr-core gotestsum" -- gotestsum --junitfile artifacts/pr-core-junit.xml --format testdox -- -race -short -timeout=30m -skip '^TestEmbedded' ./... || status=$?
           ci_time "pr-lint wrapper" -- make ci-pr-lint || status=$?
           exit "$status"
 
@@ -128,7 +131,10 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "macos short go test" -- go test -v -race -short -skip '^TestEmbedded' ./...
+          # -timeout=30m matches the macOS lanes this measures (pr.yml, main.yml).
+          # This is the job that produced the ./cmd/bd duration distribution, and
+          # at 10m it clips its own longest samples into timeout panics.
+          ci_time "macos short go test" -- go test -v -race -short -timeout=30m -skip '^TestEmbedded' ./...
 
   macos-candidates:
     name: Measure macOS no-short candidates

@@ -8,7 +8,12 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testutil"
 )
+
+const integrationSuiteRootPrefix = "beads-doltserver-tests-"
+
+var integrationSuiteTempRoot string
 
 // TestMain covers the integration-tagged tests in this file's package
 // (lifecycle_integration_test.go, dirty_state_test.go, port_race_test.go,
@@ -29,21 +34,50 @@ import (
 // the case Pdeathsig is meant to protect. See procattr_linux.go for why
 // this is a narrower, separate flag from BEADS_TEST_MODE.
 func TestMain(m *testing.M) {
+	os.Exit(runIntegrationTests(m))
+}
+
+func runIntegrationTests(m *testing.M) int {
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), integrationSuiteRootPrefix)
+	root, err := testutil.PinSuiteTempRoot(integrationSuiteRootPrefix + "*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: suite temp root: %v\n", err)
+		return 1
+	}
+	integrationSuiteTempRoot = root
+	defer os.RemoveAll(root)
+	if err := doltserver.WriteSuiteOwnerMarker(root); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", root, err)
+	}
+
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Setenv("BEADS_TEST_PDEATHSIG", "1")
 
 	code := m.Run()
 
-	// No suite root passed: each test here owns its own t.TempDir(), not a
-	// shared package-level root, so this relies solely on the cwdDeleted
-	// signal (a leaked server's temp dir was already cleaned up out from
-	// under it) rather than any cwd-under-root match.
-	killed := doltserver.SweepOrphanedTestServers()
-	if len(killed) > 0 {
-		fmt.Fprintf(os.Stderr, "doltserver integration tests: swept %d orphaned dolt sql-server process(es)\n", len(killed))
-	}
+	// Pinning both temporary-directory APIs above gives this sweep ownership
+	// even after a test has deleted the leaked server's working directory.
+	killed := doltserver.SweepSuiteTestServers(root)
+	code = doltserver.ApplyLeakPolicy("internal/doltserver (integration)", code, killed)
 
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_TEST_PDEATHSIG")
-	os.Exit(code)
+	return code
+}
+
+func TestTempDirLandsUnderSuiteSweepRoot(t *testing.T) {
+	if integrationSuiteTempRoot == "" {
+		t.Fatal("TestMain did not pin integrationSuiteTempRoot")
+	}
+	if dir := t.TempDir(); !testutil.PathUnderSuiteRoot(dir, integrationSuiteTempRoot) {
+		t.Fatalf("t.TempDir() %q is outside suite root %q", dir, integrationSuiteTempRoot)
+	}
+	dir, err := os.MkdirTemp("", "guard-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if !testutil.PathUnderSuiteRoot(dir, integrationSuiteTempRoot) {
+		t.Fatalf("os.MkdirTemp() %q is outside suite root %q", dir, integrationSuiteTempRoot)
+	}
 }

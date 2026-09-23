@@ -144,7 +144,13 @@ func runImport(cmd *cobra.Command, args []string) error {
 	// CheckReadonly at all (a separate, pre-existing gap — readonlyMode
 	// doesn't gate bd import either), so it can't pick up the freeze check
 	// folded into CheckReadonly the way create/update/close/remember do.
-	CheckMigrationFreeze("import")
+	// The path that makes this call load-bearing rather than redundant is
+	// `bd import --dry-run`: a preview sets useReadOnly, so it skips the early
+	// gate in PersistentPreRunE, and runImport is the only chokepoint left.
+	// Plain `bd import` is already stopped by that early gate.
+	if err := migrationFreezeGateFor(cmd, "import"); err != nil {
+		return err
+	}
 
 	evt := metrics.NewCommandEvent("import")
 	defer func() {

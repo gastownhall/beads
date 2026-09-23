@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -383,12 +384,18 @@ func TestEmbeddedInit(t *testing.T) {
 				t.Fatalf("init without git origin should not configure a Dolt remote; remote list:\n%s", out)
 			}
 
-			configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+			// Asserted by reading it back, not by matching a spelling. The
+			// writer nests (bd-zj95), so "the substring `sync.remote:` is
+			// absent" is now satisfied by a config.yaml that DOES persist a
+			// remote — this guard would have sailed past the regression it
+			// exists to catch.
+			beadsDir := filepath.Join(dir, ".beads")
+			configYAML, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
 			if err != nil {
 				t.Fatalf("read config.yaml: %v", err)
 			}
-			if strings.Contains(string(configYAML), "sync.remote:") || strings.Contains(string(configYAML), "sync-remote:") {
-				t.Fatalf("init without git origin should not persist sync.remote; config.yaml:\n%s", configYAML)
+			if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != "" {
+				t.Fatalf("init without git origin persisted sync.remote = %q; config.yaml:\n%s", got, configYAML)
 			}
 		}
 	})
@@ -924,12 +931,15 @@ func TestEmbeddedInit(t *testing.T) {
 				t.Fatalf("stealth init should not synthesize a Dolt remote; remote list:\n%s", out)
 			}
 
-			configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+			// Read back rather than grep for a spelling: see the same guard in
+			// the no-git-origin case above.
+			beadsDir := filepath.Join(dir, ".beads")
+			configYAML, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
 			if err != nil {
 				t.Fatalf("read config.yaml: %v", err)
 			}
-			if strings.Contains(string(configYAML), "sync.remote:") || strings.Contains(string(configYAML), "sync-remote:") {
-				t.Fatalf("stealth init should not persist sync.remote; config.yaml:\n%s", configYAML)
+			if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != "" {
+				t.Fatalf("stealth init persisted sync.remote = %q; config.yaml:\n%s", got, configYAML)
 			}
 		}
 

@@ -102,6 +102,47 @@ func TestOpenBestAvailableRejectsRemovedBackends(t *testing.T) {
 	}
 }
 
+// TestOpenBestAvailableOffersHealWhenDoltDataExists covers the public open path
+// for the case D-8 exists for: metadata names a removed backend, but the
+// workspace holds a Dolt database that bd v1.2.x opened happily. The library
+// error must carry the same metadata heal the CLI gives — proving beadsDir and
+// the config reach configuredBackendUnavailable in both the cgo and non-cgo
+// builds — instead of the export/reinitialize path that destroys the database.
+func TestOpenBestAvailableOffersHealWhenDoltDataExists(t *testing.T) {
+	for _, backend := range []string{"postgres", "mysql", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			beadsDir := writeBackendMetadata(t, backend)
+			doltDir := filepath.Join(beadsDir, "embeddeddolt", "beads")
+			if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0o750); err != nil {
+				t.Fatalf("plant dolt database: %v", err)
+			}
+
+			store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+			if store != nil {
+				_ = store.Close()
+				t.Fatalf("removed backend %q returned a store", backend)
+			}
+			if err == nil {
+				t.Fatal("removed backend with live Dolt data unexpectedly opened")
+			}
+			for _, want := range []string{
+				"no longer supported",
+				filepath.Join(beadsDir, "metadata.json"),
+				`"backend": "dolt"`,
+				doltDir,
+				"no storage database was opened or modified",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("public open error missing %q: %v", want, err)
+				}
+			}
+			if strings.Contains(strings.ToLower(err.Error()), "export") {
+				t.Errorf("public open error offered the destructive export path despite live Dolt data: %v", err)
+			}
+		})
+	}
+}
+
 func TestOpenBestAvailableRejectsUnknownBackend(t *testing.T) {
 	beadsDir := writeBackendMetadata(t, "mystery")
 	store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
