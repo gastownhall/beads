@@ -54,22 +54,25 @@ func (sp *serveProcess) updateIssue(t *testing.T, id, body string) (int, map[str
 	return status, m
 }
 
-// revisionOf decodes the `revision` token as the 64-BIT INTEGER the document
-// declares it to be, which is the whole reason this reads the raw bytes.
+// revisionOf decodes the `revision` token as the decimal STRING the document
+// declares it to be, and hands it back unparsed — which is exactly what a
+// client is supposed to do with it.
 //
-// Decoding it into an `any` yields a float64, and live tokens run past 5e17
-// where a float64's ulp is already 64 — so the value that comes back is NEAR
-// the token and is not it, and a guard composed from it is refused against a
-// row nothing else touched. That is not hypothetical: it is how the first
-// version of the case below failed.
+// It reads the raw bytes rather than going through an `any`, and that is still
+// the point: `any` would hand back the string's text now, but it handed back a
+// float64 when the member was a number, and live tokens run past 5e17 where a
+// float64's ulp is already 64 — so the value that came back was NEAR the token
+// and was not it, and a guard composed from it was refused against a row
+// nothing else touched. That is not hypothetical: it is how the first version
+// of the case below failed, and it is why the member is a string.
 //
 // NEVER ORDER IT AND NEVER COMPUTE ONE. The token is opaque and compared for
 // EQUALITY alone, so "the previous revision" is not `revision - 1`; it is the
 // value an earlier write answered with, which is what the case below uses.
-func revisionOf(t *testing.T, raw []byte) int64 {
+func revisionOf(t *testing.T, raw []byte) string {
 	t.Helper()
 	var body struct {
-		Revision *int64 `json:"revision"`
+		Revision *string `json:"revision"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("decode revision from %q: %v", raw, err)
@@ -79,6 +82,11 @@ func revisionOf(t *testing.T, raw []byte) int64 {
 	}
 	return *body.Revision
 }
+
+// revisionGuard spells a token as the JSON member a request carries, quotes and
+// all, so a case composes its guard by splicing the response's own value in
+// rather than by re-rendering a parsed one.
+func revisionGuard(token string) string { return strconv.Quote(token) }
 
 func TestProxiedServerServeUpdate(t *testing.T) {
 	requireSharedProxiedServer(t)
@@ -393,11 +401,11 @@ func TestProxiedServerServeUpdate(t *testing.T) {
 		}
 		second := revisionOf(t, concurrent)
 		if second == first {
-			t.Fatalf("revision = %d after a second write; a write that does not move the token makes every guard vacuous", second)
+			t.Fatalf("revision = %q after a second write; a write that does not move the token makes every guard vacuous", second)
 		}
 
 		conflictStatus, problem := sp.updateIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(first, 10)+`,"patch":{"title":"never"}}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(first)+`,"patch":{"title":"never"}}`)
 		if conflictStatus != http.StatusConflict {
 			t.Fatalf("stale guard: status = %d, want 409: %v", conflictStatus, problem)
 		}
@@ -414,7 +422,7 @@ func TestProxiedServerServeUpdate(t *testing.T) {
 		// The loop closes: re-read the token the last write answered with and
 		// the guarded write lands.
 		freshStatus, fresh := sp.updateIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`,"patch":{"title":"guarded"}}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(second)+`,"patch":{"title":"guarded"}}`)
 		if freshStatus != http.StatusOK {
 			t.Fatalf("guarded update: status = %d, want 200: %v", freshStatus, fresh)
 		}

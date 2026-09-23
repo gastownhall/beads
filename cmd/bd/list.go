@@ -202,6 +202,13 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
+			// An error that already carries an exit code came from a handler
+			// that has already rendered it (the typed --repo refusal writes
+			// its JSON to stdout). Re-wrapping would print a second line,
+			// "Error: exit code 1", after the real message.
+			if _, rendered := exitCodeFromError(err); rendered {
+				return err
+			}
 			return HandleError("%v", err)
 		}
 		return nil

@@ -761,7 +761,7 @@ func combineArgs(a, b []any) []any {
 	return out
 }
 
-func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids []string, opts domain.DepInsertOpts) (int, error) {
+func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids []string, opts domain.DepInsertOpts, actor string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -788,7 +788,7 @@ func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids [
 		ph := strings.Join(placeholders, ",")
 		// Journal the edges this batch is about to remove, while they and their
 		// source snapshots are still readable.
-		if err := issueops.RecordDependencyRemovalsForTableInTx(ctx, r.runner, table, batch); err != nil {
+		if err := issueops.RecordDependencyRemovalsForTableInTx(ctx, r.runner, table, batch, actor); err != nil {
 			return total, fmt.Errorf("db: DependencySQLRepository.DeleteAllForIDs journal removals from %s: %w", table, err)
 		}
 		//nolint:gosec // G201: table is one of two hardcoded constants; ? placeholders only.

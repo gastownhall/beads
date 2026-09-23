@@ -167,6 +167,14 @@ func recordTipShown(store tipMetadataWriter, tipID string) {
 		return
 	}
 
+	// dc-6jaq: with dolt auto-commit off this writes to the store immediately
+	// rather than deferring to PersistentPostRunE, so the freeze guard there
+	// does not cover it. Showing a tip is never worth a write into a workspace
+	// someone is migrating, and the tip itself still prints.
+	if commandFreeze.Frozen() {
+		return
+	}
+
 	// If dolt auto-commit is enabled, defer the metadata write so it can be
 	// committed as a separate Dolt commit in PostRun.
 	// This avoids tip metadata getting bundled into the main command commit.

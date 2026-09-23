@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/atomicfile"
@@ -39,8 +40,27 @@ const doltWorkingRef = "WORKING"
 // exceeds this prints a one-line stderr tip pointing at the fix levers.
 const slowExportWarnThreshold = 3 * time.Second
 
+// exportAutoStateVersion is the format version stamped into
+// .beads/export-state.json. BUMP IT whenever the MEANING of a persisted
+// field changes — LastDiffAnchor's semantics above all — so a newer binary's
+// state file is discarded by an older one instead of being reinterpreted.
+// Adding a purely additive optional field does not need a bump.
+//
+// Discarding is only safe because of the deletion proofs in
+// proveDeletedIssueIDs: dropping the state drops the diff anchor, and before
+// GH#5896 an absent anchor plus a pending delete was itself a permanent
+// wedge, which made "invalidate the state file" a cure worse than the
+// disease. Now an anchorless cycle just proves what it can from history and
+// re-anchors on the way out.
+const exportAutoStateVersion = 1
+
 // exportAutoState tracks auto-export state to avoid redundant work.
 type exportAutoState struct {
+	// FormatVersion is exportAutoStateVersion at write time. Absent (0) means
+	// a file written before versioning existed; those are field-for-field
+	// identical to v1 and load as-is.
+	FormatVersion int `json:"v,omitempty"`
+
 	LastDoltCommit string    `json:"last_dolt_commit"`
 	Timestamp      time.Time `json:"timestamp"`
 	Issues         int       `json:"issues"`
@@ -128,21 +148,31 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		return nil
 	}
 
+	// Reconcile the existing JSONL against the store ONCE, and let BOTH
+	// fail-safe guards below read the same answer. A deletion this store can
+	// prove is not divergence for either of them: the empty-overwrite guard
+	// fires first, so without a shared verdict `bd delete <last issue>`
+	// wedges there before the orphan guard ever gets to prove anything
+	// (GH#5896).
+	var provenDeleted []string
 	if !allowEmptyOverwrite {
-		if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, fullPath); err != nil {
+		rec, err := reconcileAutoExportJSONL(ctx, fullPath, state.LastDiffAnchor)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
+			return nil
+		}
+		provenDeleted = rec.provenDeleted
+
+		if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, rec); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
 			return nil
 		} else if skip {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
 			return nil
 		}
-	}
-	if !allowEmptyOverwrite {
-		if missingIDs, err := missingJSONLIssueIDsInStore(ctx, fullPath, state.LastDiffAnchor); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
-			return nil
-		} else if len(missingIDs) > 0 {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, len(missingIDs), strings.Join(sampleStrings(missingIDs, 5), ", "))
+
+		if len(rec.unproven) > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, len(rec.unproven), strings.Join(sampleStrings(rec.unproven, 5), ", "))
 			return nil
 		}
 	}
@@ -167,8 +197,14 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		debug.Logf("auto-export: failed to resolve diff anchor (%v); preserving previous anchor\n", anchorErr)
 		anchorCommit = state.LastDiffAnchor
 	}
+	// provenDeleted rides along as FORCED removals: an id proved by the
+	// in-process handoff or by store history is invisible to
+	// dolt_diff(anchor, WORKING), so an incremental patch would faithfully
+	// preserve its stale JSONL line forever even though the guard just
+	// cleared the export to run. A full export needs nothing — it rewrites
+	// from the store.
 	issueCount, memoryCount, dirtyIDs, didIncremental, err := tryIncrementalExport(
-		ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs,
+		ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs, provenDeleted,
 	)
 	if err != nil {
 		debug.Logf("auto-export: incremental failed (%v); falling back to full\n", err)
@@ -180,6 +216,13 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 			return nil
 		}
 		dirtyIDs = nil
+	}
+
+	// Never heal silently. The user asked for a delete and is getting a line
+	// removed from a git-tracked file; say so, and name what went.
+	if len(provenDeleted) > 0 {
+		fmt.Fprintf(os.Stderr, "auto-export: reconciled %d deleted issue(s) out of %s (deleted from store: %s)\n",
+			len(provenDeleted), fullPath, strings.Join(sampleStrings(provenDeleted, 5), ", "))
 	}
 
 	if dur := time.Since(exportStart); dur > slowExportWarnThreshold && !didIncremental {
@@ -265,12 +308,15 @@ func shouldExport(state *exportAutoState, interval time.Duration) bool {
 	return time.Since(state.Timestamp) >= interval
 }
 
-func shouldSkipEmptyAutoExport(ctx context.Context, path string) (bool, int, error) {
-	existingCount, err := countIssueRecordsInJSONL(path)
-	if err != nil {
-		return false, 0, err
-	}
-	if existingCount == 0 {
+// shouldSkipEmptyAutoExport is the "store would write 0 issues over a
+// populated file" fail-safe. It reads the shared reconciliation rather than
+// re-parsing the JSONL so that ids already proven deleted don't count as
+// records worth protecting — deleting the last exported issue is the shape
+// that used to wedge here, one guard earlier than the orphan guard everyone
+// blamed (GH#5896).
+func shouldSkipEmptyAutoExport(ctx context.Context, rec *autoExportReconciliation) (bool, int, error) {
+	existingCount := rec.jsonlIssueCount - len(rec.provenDeleted)
+	if existingCount <= 0 {
 		return false, 0, nil
 	}
 
@@ -282,15 +328,37 @@ func shouldSkipEmptyAutoExport(ctx context.Context, path string) (bool, int, err
 	return len(issues) == 0, existingCount, nil
 }
 
-func countIssueRecordsInJSONL(path string) (int, error) {
-	ids, err := issueIDsInJSONL(path)
-	if err != nil {
-		return 0, err
-	}
-	return len(ids), nil
+// historyProofMaxCandidates caps how many JSONL-only ids the store-history
+// proof will ask about in one export. A divergence wider than this is not a
+// delete pattern — it is GH#4988 territory (a torn, stale, or foreign JSONL),
+// where the conservative refusal is the right answer and a 100-way history
+// scan is wasted work on the way to it.
+const historyProofMaxCandidates = 100
+
+// autoExportReconciliation is the single comparison of the existing JSONL
+// against the live store that both pre-export guards read.
+type autoExportReconciliation struct {
+	// jsonlIssueCount is every issue record in the file, in auto-export
+	// scope or not — the number the empty-overwrite guard reports.
+	jsonlIssueCount int
+	// provenDeleted are in-scope JSONL ids absent from the store that some
+	// proof source accounted for as real deletions. The export must drop
+	// their lines; neither guard may refuse over them.
+	provenDeleted []string
+	// unproven are in-scope JSONL ids absent from the store that nothing
+	// could account for. The orphan guard refuses over these, unchanged.
+	unproven []string
 }
 
-func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) ([]string, error) {
+// reconcileAutoExportJSONL compares the on-disk export against the store and
+// splits the JSONL-only issue ids into proven deletions and unexplained
+// divergence.
+//
+// fromCommit is the previous cycle's diff anchor, used by one of the three
+// proof sources; the other two need no anchor, which is what lets a store
+// wedged by an earlier binary (no anchor, or an anchor that no longer
+// resolves) recover on its first run under this code.
+func reconcileAutoExportJSONL(ctx context.Context, path, fromCommit string) (*autoExportReconciliation, error) {
 	// GH#4988: only refuse when *in-scope* JSONL issue records are absent from
 	// the store. Ephemeral wisps, templates, and infra types are outside
 	// auto-export scope (buildAutoExportFilter / GH#3649). Compaction can
@@ -300,8 +368,9 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) (
 	if err != nil {
 		return nil, err
 	}
+	rec := &autoExportReconciliation{jsonlIssueCount: len(existing)}
 	if len(existing) == 0 {
-		return nil, nil
+		return rec, nil
 	}
 
 	// Store-side query stays unfiltered and MaxRows: 0 (opts out of
@@ -321,24 +390,49 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) (
 	}
 
 	candidates := make([]string, 0)
-	for _, rec := range existing {
-		if rec.Ephemeral || rec.IsTemplate || infraTypeSet[string(rec.IssueType)] {
+	for _, record := range existing {
+		if record.Ephemeral || record.IsTemplate || infraTypeSet[string(record.IssueType)] {
 			continue
 		}
-		if _, ok := localIDs[rec.ID]; !ok {
-			candidates = append(candidates, rec.ID)
+		if _, ok := localIDs[record.ID]; !ok {
+			candidates = append(candidates, record.ID)
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, nil
+		return rec, nil
 	}
 
-	// Before treating a JSONL-only id as an orphan/corruption, ask dolt_diff
-	// whether the deletion is real and already recorded — a normal `bd
-	// delete` since the last export's diff anchor, not data loss. Without an
-	// anchor (cold start / no successful export yet) there is nothing to
-	// diff against, so every candidate falls through to the conservative
-	// "missing" verdict below, same as before this check existed.
+	rec.provenDeleted, rec.unproven = proveDeletedIssueIDs(ctx, candidates, fromCommit)
+	return rec, nil
+}
+
+// proveDeletedIssueIDs splits JSONL-only candidate ids into the ones a proof
+// source accounts for as real deletions and the ones nothing can explain.
+//
+// Sources run cheapest-first, and each one only sees what the previous could
+// not prove:
+//
+//  1. the in-process delete handoff — this very command deleted the id a few
+//     milliseconds ago. Free, and the only source that can see a create and a
+//     delete that both sit uncommitted in the working set.
+//  2. dolt_diff against the previous export's anchor (GH#5806) — a DoltStore
+//     fast path that also covers deletions that arrived from a peer.
+//  3. the store's own committed history (GH#5896) — anchor-free, works on
+//     both stores, and the only source that can heal a store some earlier
+//     binary already wedged.
+//
+// Whatever survives all three is unexplained divergence, and the caller keeps
+// refusing to overwrite: that is GH#4988's fail-safe, unchanged.
+func proveDeletedIssueIDs(ctx context.Context, candidates []string, fromCommit string) (proven, unproven []string) {
+	unproven = candidates
+
+	// P1 — same-process delete handoff.
+	proven, unproven = splitProvenDeletions(proven, unproven, commandDeletedIssueIDs.has)
+	if len(unproven) == 0 {
+		return proven, unproven
+	}
+
+	// P2 — dolt_diff against the last export's anchor.
 	//
 	// The anchor must still be on the CURRENT HEAD's history for that proof
 	// to mean anything. dolt_diff(anchor, WORKING) reports a row as "removed"
@@ -349,14 +443,11 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) (
 	// there would silently drop a live record from issues.jsonl, which is
 	// exactly #4988's corruption class this guard exists to prevent. So the
 	// deletion proof is accepted only when the anchor is reachable from HEAD
-	// (CommitExists queries dolt_log, i.e. HEAD's forward history); otherwise
-	// we keep refusing, which is the conservative pre-existing behavior.
+	// (CommitExists queries dolt_log, i.e. HEAD's forward history).
 	//
-	// Residual, deliberately not fixed here (tracked by #5896): an anchor
-	// that has become unresolvable — after a history squash or GC — combined
-	// with a pending delete is a permanent wedge. The guard refuses, so the
-	// export skips, so state is never saved, so the anchor never refreshes.
-	// Recovery is `bd init --from-jsonl` or moving issues.jsonl aside.
+	// A missing anchor, an off-history anchor, a diff error, or a store with
+	// no DiffStore at all (embedded mode — the default) all just fall through
+	// to P3 now, instead of ending the search.
 	if fromCommit != "" && diffAnchorOnCurrentHistory(ctx, fromCommit) {
 		if ds, ok := storage.UnwrapStore(store).(storage.DiffStore); ok {
 			if changed, diffErr := ds.ChangedIssueIDs(ctx, fromCommit, doltWorkingRef); diffErr == nil {
@@ -364,25 +455,101 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) (
 				for _, id := range changed.Removed {
 					removed[id] = struct{}{}
 				}
-				proven := candidates[:0]
-				for _, id := range candidates {
-					if _, ok := removed[id]; !ok {
-						proven = append(proven, id)
-					}
-				}
-				candidates = proven
+				proven, unproven = splitProvenDeletions(proven, unproven, func(id string) bool {
+					_, ok := removed[id]
+					return ok
+				})
+			} else {
+				debug.Logf("auto-export: anchor diff %s..%s failed (%v); falling through to the history proof\n",
+					fromCommit, doltWorkingRef, diffErr)
 			}
-			// A diff error (e.g. anchor unreachable after history rewrite)
-			// leaves candidates untouched — we can't prove the deletion, so
-			// fall back to refusing, exactly as before this check existed.
 		}
 	}
+	if len(unproven) == 0 {
+		return proven, unproven
+	}
 
-	return candidates, nil
+	// P3 — the store's own committed history. "Was here, is gone" is a
+	// deletion this store recorded; "was never here" is data this store never
+	// had, which stays unproven. See storage.HistoryPresence for why that
+	// asymmetry is what keeps #4988's guarantee intact.
+	if len(unproven) > historyProofMaxCandidates {
+		debug.Logf("auto-export: %d unproven JSONL-only ids exceeds the history-proof cap %d; refusing without asking\n",
+			len(unproven), historyProofMaxCandidates)
+		return proven, unproven
+	}
+	hp, ok := storage.UnwrapStore(store).(storage.HistoryPresence)
+	if !ok {
+		debug.Logf("auto-export: store does not implement HistoryPresence; JSONL-only ids stay unproven\n")
+		return proven, unproven
+	}
+	historical, err := hp.HistoricalIssueIDs(ctx, unproven)
+	if err != nil {
+		debug.Logf("auto-export: history proof failed (%v); treating JSONL-only ids as unproven\n", err)
+		return proven, unproven
+	}
+	proven, unproven = splitProvenDeletions(proven, unproven, func(id string) bool {
+		_, ok := historical[id]
+		return ok
+	})
+	return proven, unproven
+}
+
+// splitProvenDeletions moves the ids isProven accepts from unproven onto
+// proven, preserving order on both sides.
+func splitProvenDeletions(proven, unproven []string, isProven func(string) bool) ([]string, []string) {
+	remaining := make([]string, 0, len(unproven))
+	for _, id := range unproven {
+		if isProven(id) {
+			proven = append(proven, id)
+			continue
+		}
+		remaining = append(remaining, id)
+	}
+	return proven, remaining
+}
+
+// deletedIssueIDSet is the in-process handoff from the delete commands to
+// auto-export: "this process just hard-deleted these ids, they are supposed to
+// be gone". Deliberately NOT persisted — a cross-process ledger would mean the
+// delete path read-modify-writes export-state.json underneath a concurrent
+// exporter, and a lost entry there silently re-wedges. When the handoff misses
+// (throttled export, separate invocation, peer's delete), the history proof
+// picks the id up as soon as the deletion is committed.
+type deletedIssueIDSet struct {
+	mu  sync.Mutex
+	ids map[string]struct{}
+}
+
+func (s *deletedIssueIDSet) add(ids ...string) {
+	if len(ids) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ids == nil {
+		s.ids = make(map[string]struct{}, len(ids))
+	}
+	for _, id := range ids {
+		s.ids[id] = struct{}{}
+	}
+}
+
+func (s *deletedIssueIDSet) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ids = nil
+}
+
+func (s *deletedIssueIDSet) has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.ids[id]
+	return ok
 }
 
 // commitHistoryChecker is the narrow slice of storage.VersionControl that
-// missingJSONLIssueIDsInStore needs. It is declared locally and asserted
+// reconcileAutoExportJSONL needs. It is declared locally and asserted
 // separately from storage.DiffStore so a store implementing one but not the
 // other still degrades to the conservative verdict instead of panicking.
 type commitHistoryChecker interface {
@@ -392,7 +559,7 @@ type commitHistoryChecker interface {
 // diffAnchorOnCurrentHistory reports whether anchor is still reachable from
 // the current HEAD. It is the ancestry precondition on trusting a dolt_diff
 // "removed" verdict as proof of a real `bd delete` rather than a history
-// rewind — see missingJSONLIssueIDsInStore. Fails closed: a store that
+// rewind — see reconcileAutoExportJSONL. Fails closed: a store that
 // cannot answer, or an error while asking, yields false so the caller keeps
 // refusing to overwrite.
 func diffAnchorOnCurrentHistory(ctx context.Context, anchor string) bool {
@@ -493,18 +660,6 @@ func issueRecordsInJSONL(path string) ([]jsonlIssueRecord, error) {
 
 	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
 	return records, nil
-}
-
-func issueIDsInJSONL(path string) ([]string, error) {
-	records, err := issueRecordsInJSONL(path)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, len(records))
-	for i, rec := range records {
-		ids[i] = rec.ID
-	}
-	return ids, nil
 }
 
 func sampleStrings(values []string, limit int) []string {
@@ -693,7 +848,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 // safe to drop when its id is no longer in the store (a TTL-compacted wisp,
 // GH#4988); if the store still has it, dropping it repeats #4069's data
 // loss. Deliberately unfiltered + MaxRows: 0, for the same reason as
-// missingJSONLIssueIDsInStore's store-side query: this guard's failure mode
+// reconcileAutoExportJSONL's store-side query: this guard's failure mode
 // is a permanent wedge, so the query must stay maximally permissive.
 func storeKnownIssueIDs(ctx context.Context) (map[string]struct{}, error) {
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
@@ -809,11 +964,19 @@ func loadExportAutoState(beadsDir string) *exportAutoState {
 			path, len(data), err, string(data[:min(len(data), 200)]))
 		return &exportAutoState{}
 	}
+	if state.FormatVersion > exportAutoStateVersion {
+		debug.Logf("auto-export: state file %s is format v%d, this binary understands v%d; starting from empty state\n",
+			path, state.FormatVersion, exportAutoStateVersion)
+		return &exportAutoState{}
+	}
 	return &state
 }
 
 func saveExportAutoState(beadsDir string, state *exportAutoState) {
 	path := filepath.Join(beadsDir, exportAutoStateFile)
+	// Stamped here rather than at the call sites so there is exactly one
+	// place that decides what version a written file claims to be.
+	state.FormatVersion = exportAutoStateVersion
 	data, err := json.Marshal(state)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export: failed to marshal state: %v\n", err)
@@ -1034,12 +1197,19 @@ func pathInsideDir(path, dir string) bool {
 // didIncremental=false when any precondition fails so the caller can fall
 // back to a full export.
 //
+// forcedRemovals are ids the caller has already proven deleted by some means
+// the diff cannot see (the in-process delete handoff, or the store's committed
+// history — see proveDeletedIssueIDs). They are unioned into the diff's own
+// removals, because a proven-deleted id is by definition absent at BOTH diff
+// endpoints in the cases that matter, so the patch would otherwise carry its
+// stale line forward forever.
+//
 // dirtyIDs returns the RAW diff's upserted ids (never carryIDs) for the
 // caller to persist as next cycle's carryIDs. Carrying only the
 // freshly-diffed ids — not the ones merely carried-in — makes a stable
 // no-op cycle self-heal: a carried id that produces no new diff simply
 // drops out instead of accumulating forever.
-func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit string, carryIDs []string) (issueCount, memoryCount int, dirtyIDs []string, didIncremental bool, err error) {
+func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit string, carryIDs, forcedRemovals []string) (issueCount, memoryCount int, dirtyIDs []string, didIncremental bool, err error) {
 	if fromCommit == "" {
 		debug.Logf("auto-export: incremental skipped — no prior commit hash recorded\n")
 		return 0, 0, nil, false, nil
@@ -1069,8 +1239,16 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 	// from last cycle (e.g. a working-set value that reverted between two
 	// diff anchors nets to "no change" against the anchor, but the live row
 	// still needs re-fetching to correct a stale patch from last cycle).
+	removed := make(map[string]bool, len(changed.Removed)+len(forcedRemovals))
+	for _, id := range changed.Removed {
+		removed[id] = true
+	}
+	for _, id := range forcedRemovals {
+		removed[id] = true
+	}
+
 	upsertIDs := unionStrings(changed.Upserted, carryIDs)
-	total := len(upsertIDs) + len(changed.Removed)
+	total := len(upsertIDs) + len(removed)
 	if total == 0 {
 		// Nothing changed and nothing carried over. Still a valid
 		// "incremental" outcome: no issues to rewrite, just refresh the
@@ -1135,10 +1313,6 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 		// changed.Removed from the issues-table diff; rely on that.
 	}
 
-	removed := make(map[string]bool, len(changed.Removed)+len(droppedByFilter))
-	for _, id := range changed.Removed {
-		removed[id] = true
-	}
 	for id := range droppedByFilter {
 		removed[id] = true
 	}

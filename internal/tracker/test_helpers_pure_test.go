@@ -79,14 +79,14 @@ func (m *mockExternalRefTracker) BuildExternalRef(issue *TrackerIssue) string {
 	return m.mockTracker.BuildExternalRef(issue)
 }
 
-func (m *mockTracker) Name() string                                    { return m.name }
-func (m *mockTracker) DisplayName() string                             { return m.name }
-func (m *mockTracker) ConfigPrefix() string                            { return m.name }
-func (m *mockTracker) Init(_ context.Context, _ storage.Storage) error { return nil }
-func (m *mockTracker) Validate() error                                 { return nil }
-func (m *mockTracker) Close() error                                    { return nil }
-func (m *mockTracker) FieldMapper() FieldMapper                        { return m.fieldMapper }
-func (m *mockTracker) IsExternalRef(ref string) bool                   { return len(ref) > 0 }
+func (m *mockTracker) Name() string                          { return m.name }
+func (m *mockTracker) DisplayName() string                   { return m.name }
+func (m *mockTracker) ConfigPrefix() string                  { return m.name }
+func (m *mockTracker) Init(_ context.Context, _ Store) error { return nil }
+func (m *mockTracker) Validate() error                       { return nil }
+func (m *mockTracker) Close() error                          { return nil }
+func (m *mockTracker) FieldMapper() FieldMapper              { return m.fieldMapper }
+func (m *mockTracker) IsExternalRef(ref string) bool         { return len(ref) > 0 }
 func (m *mockTracker) ExtractIdentifier(ref string) string {
 	if i := strings.LastIndex(ref, "/"); i >= 0 {
 		return ref[i+1:]

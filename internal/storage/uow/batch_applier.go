@@ -192,6 +192,7 @@ func (r *uowApplyRun) applyCreate(ctx context.Context, index int, item *publicop
 	if err != nil {
 		return err
 	}
+	storageissueops.OverlayCreateTimestamps(issue, created.Issue)
 	if item.Key != "" {
 		r.keys[item.Key] = issue.ID
 		r.result.Keys[item.Key] = issue.ID

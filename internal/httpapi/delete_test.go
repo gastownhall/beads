@@ -314,13 +314,13 @@ func TestDeleteForwardsTheVersionGuard(t *testing.T) {
 		body string
 		want *int64
 	}{
-		{"a guard is forwarded", `{"ids":["bd-1"],"expected_version":9007199254740993}`, guard(guardToken)},
-		{"the never-written version is a real guard", `{"ids":["bd-1"],"expected_version":0}`, guard(0)},
+		{"a guard is forwarded", `{"ids":["bd-1"],"expected_version":"9007199254740993"}`, guard(guardToken)},
+		{"the never-written version is a real guard", `{"ids":["bd-1"],"expected_version":"0"}`, guard(0)},
 		{"an absent guard stays nil", `{"ids":["bd-1"]}`, nil},
 		// Cascade and force bypass POLICY, never a precondition. Both travel
 		// beside the guard rather than instead of it.
-		{"cascade does not displace it", `{"ids":["bd-1"],"cascade":true,"expected_version":41}`, guard(41)},
-		{"force does not displace it", `{"ids":["bd-1"],"force":true,"expected_version":41}`, guard(41)},
+		{"cascade does not displace it", `{"ids":["bd-1"],"cascade":true,"expected_version":"41"}`, guard(41)},
+		{"force does not displace it", `{"ids":["bd-1"],"force":true,"expected_version":"41"}`, guard(41)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			deleter := &roleDeleter{}
@@ -358,7 +358,7 @@ func TestDeleteRefusesAGuardBesideSeveralIDs(t *testing.T) {
 	deleter := &roleDeleter{}
 	ts := newTestServer(t, rolesConfig(Config{Deleter: deleter}))
 
-	resp := ts.delete(t, `{"ids":["bd-1","bd-2"],"expected_version":41}`)
+	resp := ts.delete(t, `{"ids":["bd-1","bd-2"],"expected_version":"41"}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 	}
@@ -401,7 +401,7 @@ func TestDeleteCountsDistinctIDsForTheGuard(t *testing.T) {
 			deleter := &roleDeleter{}
 			ts := newTestServer(t, rolesConfig(Config{Deleter: deleter}))
 
-			resp := ts.delete(t, `{"ids":`+tc.ids+`,"expected_version":41}`)
+			resp := ts.delete(t, `{"ids":`+tc.ids+`,"expected_version":"41"}`)
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
 			}
@@ -432,7 +432,7 @@ func TestDeleteCountsDistinctIDsForTheGuard(t *testing.T) {
 // list came out broken.
 func TestDeleteRefusesABlankID(t *testing.T) {
 	for _, body := range []string{
-		`{"ids":["   ","bd-1"],"expected_version":41}`,
+		`{"ids":["   ","bd-1"],"expected_version":"41"}`,
 		`{"ids":["bd-1",""]}`,
 	} {
 		deleter := &roleDeleter{}
@@ -464,7 +464,7 @@ func TestDeleteRefusesAStaleGuard(t *testing.T) {
 	deleter := &roleDeleter{err: fmt.Errorf("delete bd-1: %w", issueops.ErrVersionMismatch)}
 	ts := newTestServer(t, rolesConfig(Config{Deleter: deleter}))
 
-	resp := ts.delete(t, `{"ids":["bd-1"],"expected_version":9007199254740993}`)
+	resp := ts.delete(t, `{"ids":["bd-1"],"expected_version":"9007199254740993"}`)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
 	}
@@ -483,10 +483,15 @@ func TestDeleteRefusesAStaleGuard(t *testing.T) {
 	}
 }
 
-// TestDeleteRefusesAMalformedGuard: the token is an integer and nothing else.
+// TestDeleteRefusesAMalformedGuard: the token is a decimal STRING and nothing
+// else — including not the bare number the member used to be, which is the
+// spelling a double-based client would have already rounded.
 func TestDeleteRefusesAMalformedGuard(t *testing.T) {
 	for _, body := range []string{
-		`{"ids":["bd-1"],"expected_version":"41"}`,
+		`{"ids":["bd-1"],"expected_version":41}`,
+		`{"ids":["bd-1"],"expected_version":9007199254740993}`,
+		`{"ids":["bd-1"],"expected_version":"41.5"}`,
+		`{"ids":["bd-1"],"expected_version":"not-a-token"}`,
 		`{"ids":["bd-1"],"expected_version":null}`,
 		`{"ids":["bd-1"],"expected_version":{}}`,
 	} {

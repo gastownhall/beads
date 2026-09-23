@@ -253,6 +253,25 @@ stop at that step, and an abandoned merge is left without its rollback. See
 [Which Dolt version to install](#which-dolt-version-to-install) for the check
 and the fix.
 
+### Why a garbage collection can reclaim nothing
+
+Dolt's garbage collector is **generational**. Every pass moves the data
+reachable at that moment into an *old generation*, and a default pass only
+examines the *new generation* — data written since the last collection. So the
+second collection on a store never revisits what the first one kept, however
+much of it has since become unreachable. Squashing history and then running a
+default `dolt gc` is the case where this bites: the orphaned commit chain
+usually sits in the old generation, and the pass frees almost nothing.
+
+`dolt gc --full` collects both generations. It frees everything a default pass
+frees, plus the old generation, so it is never worth running a default pass
+first to save time. If a full collection frees nothing, the remaining bytes are
+still referenced — by a branch, a tag, or a cached remote-tracking ref — and
+the fix is to remove the reference, not to collect again. The
+[History Bloat runbook](/recovery/history-squash) walks through that diagnosis;
+[`bd flatten`](/cli-reference/flatten), [`bd compact`](/cli-reference/compact),
+and [`bd gc`](/cli-reference/gc) document the collection each one runs.
+
 ## Migrating Between Backends
 
 You can migrate data between embedded mode and server mode using `bd backup`.
