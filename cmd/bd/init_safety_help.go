@@ -80,7 +80,8 @@ EXIT CODES
         (interactive mode only)
   12    refused: destructive re-init (--discard-remote, or --reinit-local
         over existing issues) without a valid --destroy-token
-        (non-interactive mode)
+        (non-interactive mode); also returned when the interactive
+        --discard-remote typed-token confirmation is declined
 
 RECOVERY
 

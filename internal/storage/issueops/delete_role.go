@@ -151,7 +151,10 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 
 	// No guard argument to pass: this body has ALREADY answered the guard
 	// question above, and DeleteResolvedSetInTx deletes what it is handed.
-	deleted, err := DeleteResolvedSetInTx(ctx, tx, set, req.DryRun)
+	// req.Actor goes with it: the journal rows for this delete — including the
+	// cascade's — name the identity that asked for it, the same identity the
+	// reference rewrite below is attributed to.
+	deleted, err := DeleteResolvedSetInTx(ctx, tx, set, req.DryRun, req.Actor)
 	if err != nil {
 		return publicops.DeleteResult{}, err
 	}

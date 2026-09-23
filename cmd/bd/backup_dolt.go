@@ -46,10 +46,13 @@ DoltHub (recommended for cloud backup):
 
 After adding, run 'bd backup sync' to push your data.`,
 	Args: cobra.ExactArgs(1),
+	// As on `backup status`: the failures here are configuration and I/O
+	// errors, not usage errors, and cobra's default prints the message, then
+	// "Error: exit code 1", then the whole usage block — three things where one
+	// was wanted, and on --json it lands after the JSON object.
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("backup init is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("backup-init")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -59,6 +62,10 @@ After adding, run 'bd backup sync' to push your data.`,
 
 		ctx := rootCtx
 		rawPath := args[0]
+
+		if usesProxiedServer() {
+			return runBackupInitProxied(ctx, rawPath)
+		}
 
 		if store == nil {
 			return fmt.Errorf("no store available")
@@ -124,10 +131,9 @@ backup location configured with 'bd backup init'.
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 
 Run 'bd backup init <path>' first to configure a destination.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("backup sync is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("backup-sync")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -136,6 +142,9 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		}()
 
 		ctx := rootCtx
+		if usesProxiedServer() {
+			return runBackupSyncProxied(ctx)
+		}
 		if store == nil {
 			return fmt.Errorf("no store available")
 		}
@@ -358,7 +367,14 @@ func showDoltBackupStatusJSON() map[string]interface{} {
 // doltBackupSize returns the active database size when the current store
 // instance can measure its storage locally. Unsupported backends preserve the
 // optional status-field contract instead of failing the command.
+//
+// Proxied mode has no store to ask — the provider owns the connection — so the
+// fork lives here, where "which backend measures this database" is already the
+// question being answered.
 func doltBackupSize(ctx context.Context) (int64, bool, error) {
+	if usesProxiedServer() {
+		return doltBackupSizeProxied(ctx)
+	}
 	if store == nil {
 		return 0, false, fmt.Errorf("no storage backend is open")
 	}
@@ -405,11 +421,10 @@ var backupRemoveCmd = &cobra.Command{
 
 This unregisters the backup remote from Dolt and removes the local
 backup configuration. The backup data at the destination is not deleted.`,
-	Aliases: []string{"rm"},
+	Aliases:       []string{"rm"},
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("backup remove is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("backup-remove")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -418,6 +433,9 @@ backup configuration. The backup data at the destination is not deleted.`,
 		}()
 
 		ctx := rootCtx
+		if usesProxiedServer() {
+			return runBackupRemoveProxied(ctx)
+		}
 		if store == nil {
 			return fmt.Errorf("no store available")
 		}

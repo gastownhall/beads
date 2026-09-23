@@ -56,6 +56,11 @@ jobs:
             cache-identity: v1.1.0-b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34
           - version: v1.1.2
             cache-identity: v1.1.2-a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2
+          # The v1.1.2 tree re-tagged by the recovery release, so it adds no new
+          # storage regime — but it is the tag field upgrades actually start
+          # from, and it was never in this corpus.
+          - version: v1.2.2
+            cache-identity: v1.2.2-8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -98,7 +103,10 @@ jobs:
           sudo timeout 180 apt-get install -y jq libicu74
 
       - name: Install Dolt test runtime
-        if: contains(fromJSON('["v0.55.4","v0.56.1","v0.57.0","v0.62.0"]'), matrix.version)
+        # v0.55.4-v0.62.0 host their fixture on this server; v1.0.1-v1.1.2 use
+        # the same pinned binary as a read-only oracle over the wisp plane,
+        # which has no `bd dolt sql` equivalent.
+        if: contains(fromJSON('["v0.55.4","v0.56.1","v0.57.0","v0.62.0","v1.0.1","v1.1.0","v1.1.2","v1.2.2"]'), matrix.version)
         run: |
           archive="$RUNNER_TEMP/dolt-linux-amd64.tar.gz"
           runtime="$RUNNER_TEMP/dolt-runtime"

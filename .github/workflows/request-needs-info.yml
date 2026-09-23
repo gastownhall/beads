@@ -1,0 +1,82 @@
+name: Request repro or info from reporter
+
+on:
+  issues:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  post-request:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Post visible request comment for needs-repro or needs-info
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const needsLabels = ['status/needs-info', 'status/needs-repro'];
+            const label = context.payload.label?.name;
+            if (!needsLabels.includes(label)) return;
+
+            const number = context.payload.issue?.number;
+            if (!number) {
+              core.setFailed('Unable to determine issue number');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const reporter = context.payload.issue?.user?.login;
+
+            const events = await github.paginate(github.rest.issues.listEvents, {
+              owner,
+              repo,
+              issue_number: number,
+              per_page: 100,
+            });
+            const labelEvents = events.filter(e => e.event === 'labeled' && e.label?.name === label);
+            const labeledAt = labelEvents.length
+              ? new Date(Math.max(...labelEvents.map(e => new Date(e.created_at).getTime())))
+              : null;
+
+            const existingComments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: number,
+              ...(labeledAt ? { since: labeledAt.toISOString() } : {}),
+              per_page: 100,
+            });
+
+            const hasVisibleRequest = existingComments.some(c => {
+              if (reporter && c.user?.login === reporter) return false;
+              const lower = (c.body || '').toLowerCase();
+              if (lower.includes('closing')) return false;
+              if (!/14\s*-?\s*days?/.test(lower)) return false;
+              if (!lower.includes('reply') && !lower.includes('respond')) return false;
+              if (label === 'status/needs-repro') return lower.includes('repro') || lower.includes('reproduction');
+              return lower.includes('info') || lower.includes('information') || lower.includes('details');
+            });
+
+            if (hasVisibleRequest) {
+              console.log(`Visible request already exists for #${number}, skipping.`);
+              return;
+            }
+
+            const requestBodies = {
+              'status/needs-repro':
+                'Thanks for the report! To help us investigate, please reply with a minimal reproduction within 14 days.\n\n' +
+                'If there is no response in that window, this issue may be closed — but you are welcome to respond or reopen it at any time.',
+              'status/needs-info':
+                'Thanks for the report! To help us investigate, please reply with the requested information or details within 14 days.\n\n' +
+                'If there is no response in that window, this issue may be closed — but you are welcome to respond or reopen it at any time.',
+            };
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: number,
+              body: requestBodies[label],
+            });
+            console.log(`Posted needs request for #${number} (${label})`);
