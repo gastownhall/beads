@@ -1008,6 +1008,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				}
 				return stats, nil
 			}
+			// No batch dry-runner (e.g. Linear): preview sequentially below,
+			// but only over the issues the batch filter kept. It has already
+			// counted every other issue as Skipped, and iterating all issues
+			// would count those skips a second time (gastownhall/beads#6712).
+			issues = keepBatchPushIssues(issues, pushIssues)
 		} else {
 			batchResult, err := batchTracker.BatchPush(ctx, pushIssues, forceIDs)
 			if err != nil {
@@ -1219,6 +1224,24 @@ func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions,
 		pushIssues = append(pushIssues, e.formatPushIssue(issue))
 	}
 	return pushIssues, skipped
+}
+
+// keepBatchPushIssues returns the original (unformatted) issues whose IDs
+// collectBatchPushIssues kept, in their original order. The sequential dry-run
+// needs the originals: pushIssues may carry FormatDescription copies, which
+// would change the content hash the stored-push-hash skip compares against.
+func keepBatchPushIssues(issues, pushIssues []*types.Issue) []*types.Issue {
+	kept := make(map[string]bool, len(pushIssues))
+	for _, issue := range pushIssues {
+		kept[issue.ID] = true
+	}
+	out := make([]*types.Issue, 0, len(pushIssues))
+	for _, issue := range issues {
+		if kept[issue.ID] {
+			out = append(out, issue)
+		}
+	}
+	return out
 }
 
 func (e *Engine) formatPushIssue(issue *types.Issue) *types.Issue {
