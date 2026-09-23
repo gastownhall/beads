@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`notion.token` is kept out of the Dolt database**
+  ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
+  from the yaml-only key list that holds the other tracker secrets, so
+  `bd config set notion.token` — the command `bd notion status` recommends —
+  wrote it to the database, whose contents `bd dolt push` sends to the remote.
+  It is now written to `config.yaml` like `github.token`, `gitlab.token` and
+  the other tracker secrets, and refused on a git-tracked `config.yaml` with a
+  pointer to `NOTION_TOKEN`. A token an older bd already stored in the database
+  is still read, after `config.yaml` and before `NOTION_TOKEN`, so existing
+  setups keep authenticating. This change does not remove that stored value:
+  `bd config unset notion.token` now clears `config.yaml` only, and a token
+  that has already been pushed should be rotated.
+
 - **`bd -C dir prime` now describes the target workspace instead of the launch
   directory** ([#5509](https://github.com/gastownhall/beads/issues/5509)). `-C`
   resolves `BEADS_DIR` but never changes directory, so prime's cwd-relative
@@ -75,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plain and its proxied transaction), `bd cook`, `bd mol squash`,
   `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
   updates, deletes and demote-to-wisp.
+
 
 - **`bd list --watch --format` is refused instead of silently dropping the
   format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).
