@@ -1230,6 +1230,8 @@ func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions,
 // collectBatchPushIssues kept, in their original order. The sequential dry-run
 // needs the originals: pushIssues may carry FormatDescription copies, which
 // would change the content hash the stored-push-hash skip compares against.
+// That is defensive today - the one batch-only tracker, Linear, sets no
+// ContentHash - but keeps the preview honest for one that does.
 func keepBatchPushIssues(issues, pushIssues []*types.Issue) []*types.Issue {
 	kept := make(map[string]bool, len(pushIssues))
 	for _, issue := range pushIssues {

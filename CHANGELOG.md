@@ -242,8 +242,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates and under-reported skips. This affected `bd jira sync` and
   `bd linear sync` with `--push --create-only --dry-run`. The dry-run now
   applies the same `--create-only` gate as the real run. Linear's dry-run also
-  no longer counts an issue its batch filter skipped (create-only, parent, type,
-  or conflict) as skipped twice. Notion's batch dry-run was already correct.
+  no longer counts an issue its batch filter skipped (create-only, a `ShouldPush`
+  hook, parent, type, or conflict) as skipped twice. Notion's batch dry-run was already correct.
 
 ## [1.3.0] - 2026-09-15
 
