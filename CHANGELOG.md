@@ -76,6 +76,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd backup` works on a proxied-server workspace bd runs the Dolt server
+  for.** `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
+  over the proxied provider; before this, a proxied workspace — the default
+  topology since 1.3.0 — had no backup path at all. `bd backup restore` stops
+  the proxy and its Dolt child before replacing the database and leaves the
+  workspace quiescent, so the next command relaunches against the restored
+  data.
+
+  The family stays **refused by design** on a proxied workspace pointed at a
+  Dolt server bd does not own (an external host, socket, or a beads-team-server
+  database): `CALL DOLT_BACKUP('add', …)` registers the backup remote on the
+  *server*, where it is global to every client connected to it, so one
+  workspace's backup decision would silently become everyone's — the shape
+  `bd backup`'s own help text already warns about for auto-backup. A `file://`
+  destination has a second problem on top, since the server resolves that path
+  on its own filesystem. The refusal keeps the `proxy.backup.unsupported` code
+  and now carries `"reason": "design"`; a backup story for those deployments
+  belongs to whoever runs the server. Whether a *remote-scheme* destination
+  (DoltHub, `aws://`, `gs://`) should eventually be allowed there is recorded as
+  an open question rather than settled — the server pushes those over the
+  network from its own environment, which is the same credential question the
+  next slice has to answer for `dolt push`.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every
@@ -133,6 +156,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A command with no proxied-server route now fails with a typed error**
   (`proxy.store.unrouted`) instead of the bare string `proxy server store
   should be uow provider`.
+- **`bd backup restore --json` prints a result object on every topology**
+  (`{"restored": true, "source": "<dir>"}`). It previously printed nothing at
+  all, which left a caller unable to tell a completed restore from a silently
+  skipped one. This applies to direct/embedded workspaces too, not only proxied
+  ones.
+- **`bd backup init`, `sync`, `remove` and `restore` no longer print a usage
+  block after a failure.** They now silence cobra's own error and usage
+  rendering like the rest of the CLI, so a failure is one error line on stderr
+  instead of the message followed by `Error: exit code 1` and the full usage
+  text. Exit statuses are unchanged; this applies on every topology.
 
 - **Proxied `--repo` and row-cap refusals are typed again**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). `bd list --repo`
@@ -160,6 +193,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads the owning store without writing to it. This covers explicit gate
   checks in embedded, server, and proxied-server command paths; the legacy
   `<rig>:<bead-id>` await value remains accepted for compatibility.
+
+### Fixed
+
+- **A dotted config key now round-trips: what `bd config set` writes,
+  `bd config get` and bd's own readers find**
+  ([#6574](https://github.com/gastownhall/beads/pull/6574),
+  [#6594](https://github.com/gastownhall/beads/issues/6594), bd-zj95). Setting a
+  key like `sync.remote` or `dolt.host` into a `config.yaml` with no matching
+  section appended a key whose *name* contained the dot — a top-level
+  `sync.remote: "..."` — instead of nesting it under `sync:`. Viper finds a key
+  spelled that way; the direct reader `GetStringFromDir` splits on the dot and
+  walks nested mappings, so it does not. The value was set and invisible at the
+  same time depending on which reader asked, and `bd init --remote` in a fresh
+  workspace was the ordinary way in: the remote was recorded and then not found.
+  New dotted keys are written nested now. An existing flat spelling is updated
+  in place for compatibility with other writers of the shared config file —
+  rewriting that one line and nothing else, the comment on it included — and
+  bd's direct reader recognizes both forms with the same precedence as Viper.
+  `bd doctor` warns when both forms coexist. `bd config unset` removes the
+  nested form — it only ever matched the flat spelling, so unsetting
+  `sync.remote` silently left the remote live. Keys the write does not own,
+  including dotted ones somebody else put there, are left exactly as they are.
+
+  Four things that used to succeed now report an error instead, because each one
+  produced a value no reader could see, or claimed to remove a value it had
+  left live. On `bd config set`: a key under a parent that already holds a value
+  (`sync: enabled`, then `bd config set sync.remote`), and a key in a file whose
+  top level is not a mapping. On `bd config unset`: a key inside a flow-style
+  mapping (`sync: {remote: "..."}`), which bd matches by line and so cannot
+  edit, and a key whose value is a block scalar (`remote: |`, in either
+  spelling), where commenting the key out would leave the body behind as a value
+  of its own. Unsetting a key that is not set remains a successful no-op in
+  every shape.
 
 ## [1.3.0] - 2026-09-15
 

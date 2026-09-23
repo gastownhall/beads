@@ -109,38 +109,12 @@ func TestProxyCapabilityRegistryHasNoDuplicateRows(t *testing.T) {
 // refusal with no tracking item is a gap nobody owns.
 func TestProxyCapabilityRegistryRowInvariants(t *testing.T) {
 	for _, row := range proxyCapabilityRegistry {
-		switch row.Rule.Outcome {
-		case ProxyOutcomeRefused:
-			if row.Rule.Code == "" || row.Rule.Message == "" || row.Rule.ExitCode != 1 {
-				t.Errorf("%s: refusal must carry a code, a message and exit 1, got %#v", row.display(), row.Rule)
-			}
-			if row.Rule.Mutates {
-				t.Errorf("%s: a refusal never mutates", row.display())
-			}
-			if !strings.HasPrefix(row.Rule.Code, "proxy.") {
-				t.Errorf("%s: code %q must be in the stable proxy.* namespace", row.display(), row.Rule.Code)
-			}
-		case ProxyOutcomeRefusedInRunE:
-			if row.Rule.Code != "" {
-				t.Errorf("%s: an untyped RunE refusal has no code; if it has one it belongs in the gate", row.display())
-			}
-		case ProxyOutcomeHonored:
-			if row.Rule.Reason != "" {
-				t.Errorf("%s: Reason explains a refusal; an honored row must not carry one", row.display())
-			}
-		default:
-			t.Errorf("%s: unexpected outcome %q", row.display(), row.Rule.Outcome)
-		}
-
-		refusal := row.Rule.Outcome == ProxyOutcomeRefused || row.Rule.Outcome == ProxyOutcomeRefusedInRunE
-		if refusal {
-			switch row.Rule.Reason {
-			case ProxyReasonDesign, ProxyReasonUnimplemented:
-			default:
-				t.Errorf("%s: refusal must declare Reason design or unimplemented, got %q", row.display(), row.Rule.Reason)
-			}
-			if row.Rule.Reason == ProxyReasonUnimplemented && row.Rule.Tracking == "" {
-				t.Errorf("%s: an unimplemented refusal needs a Tracking item naming who closes it", row.display())
+		assertCapabilityRuleInvariants(t, row.display(), row.Rule)
+		for topology, rule := range row.Topology {
+			assertCapabilityRuleInvariants(t, row.display()+" on "+string(topology), rule)
+			if topology == ProxyTopologyUnknown {
+				t.Errorf("%s: a row must not name the unknown topology; unknown exists so an unclassifiable "+
+					"workspace INHERITS the refusal, and exempting it would invert that", row.display())
 			}
 		}
 		if row.History == HistoryDirectOnly && row.Rule.Outcome != ProxyOutcomeRefused {
@@ -148,6 +122,46 @@ func TestProxyCapabilityRegistryRowInvariants(t *testing.T) {
 		}
 		if row.History == HistoryProxySupported && row.Rule.Outcome != ProxyOutcomeHonored {
 			t.Errorf("%s: classified proxy-supported but the gate refuses it", row.display())
+		}
+	}
+}
+
+// assertCapabilityRuleInvariants checks one rule — a row's default or one of
+// its per-topology overrides. Both have to satisfy the same contract: a
+// topology override is policy a consumer sees, not a footnote.
+func assertCapabilityRuleInvariants(t *testing.T, where string, rule proxyCapabilityRule) {
+	t.Helper()
+	switch rule.Outcome {
+	case ProxyOutcomeRefused:
+		if rule.Code == "" || rule.Message == "" || rule.ExitCode != 1 {
+			t.Errorf("%s: refusal must carry a code, a message and exit 1, got %#v", where, rule)
+		}
+		if rule.Mutates {
+			t.Errorf("%s: a refusal never mutates", where)
+		}
+		if !strings.HasPrefix(rule.Code, "proxy.") {
+			t.Errorf("%s: code %q must be in the stable proxy.* namespace", where, rule.Code)
+		}
+	case ProxyOutcomeRefusedInRunE:
+		if rule.Code != "" {
+			t.Errorf("%s: an untyped RunE refusal has no code; if it has one it belongs in the gate", where)
+		}
+	case ProxyOutcomeHonored:
+		if rule.Reason != "" {
+			t.Errorf("%s: Reason explains a refusal; an honored row must not carry one", where)
+		}
+	default:
+		t.Errorf("%s: unexpected outcome %q", where, rule.Outcome)
+	}
+
+	if rule.Outcome == ProxyOutcomeRefused || rule.Outcome == ProxyOutcomeRefusedInRunE {
+		switch rule.Reason {
+		case ProxyReasonDesign, ProxyReasonUnimplemented:
+		default:
+			t.Errorf("%s: refusal must declare Reason design or unimplemented, got %q", where, rule.Reason)
+		}
+		if rule.Reason == ProxyReasonUnimplemented && rule.Tracking == "" {
+			t.Errorf("%s: an unimplemented refusal needs a Tracking item naming who closes it", where)
 		}
 	}
 }
@@ -271,6 +285,16 @@ func TestProxyCapabilityRegistryReasonsAreAssignedIndividually(t *testing.T) {
 		"migrate": true, "migrate sync": true, "migrate issues": true,
 		"migrate-issues": true, "migrate-personal": true,
 		"admin cleanup": true, "admin reset": true,
+		// The backup family's DEFAULT rule is the design refusal; managed-local
+		// overrides it to honored (TestProxiedBackupHonoredOnlyOnManagedLocal).
+		// It is design because a backup remote is registered on the SERVER,
+		// where it is global to every client of that server — true of every
+		// destination scheme, unlike the filesystem half, which is a file://
+		// property only. These rows carry a Tracking item anyway
+		// (backupRemoteSchemeTracking): the outcome is settled, the
+		// remote-scheme case is an open question and must not read as closed.
+		"backup": true, "backup init": true, "backup sync": true,
+		"backup remove": true, "backup status": true, "backup restore": true,
 	}
 
 	gotDesign := map[string]bool{}
@@ -364,7 +388,7 @@ func TestProxyRefusalJSONCarriesReason(t *testing.T) {
 			cmd := &cobra.Command{Use: tc.path}
 			root.AddCommand(cmd)
 			out := captureStdout(t, func() error {
-				_ = validateProxyRegistryBeforeProvider(cmd)
+				_ = validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 				return nil
 			})
 			for _, want := range []string{

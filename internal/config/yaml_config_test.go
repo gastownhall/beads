@@ -273,26 +273,6 @@ func TestFormatYamlValue(t *testing.T) {
 	}
 }
 
-func TestNormalizeYamlKey(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"no-db", "no-db"},               // no alias, unchanged
-		{"json", "json"},                 // no alias, unchanged
-		{"routing.mode", "routing.mode"}, // no alias for this one
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := normalizeYamlKey(tt.input)
-			if got != tt.expected {
-				t.Errorf("normalizeYamlKey(%q) = %q, want %q", tt.input, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestSetYamlConfig(t *testing.T) {
 	oldBeadsDir := os.Getenv("BEADS_DIR")
 	if err := os.Unsetenv("BEADS_DIR"); err != nil {
@@ -1055,7 +1035,10 @@ func TestCommentOutYamlKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := commentOutYamlKey(tt.content, tt.key)
+			got, err := commentOutYamlKey(tt.content, tt.key)
+			if err != nil {
+				t.Fatalf("commentOutYamlKey() error = %v", err)
+			}
 			if got != tt.expected {
 				t.Errorf("commentOutYamlKey() =\n%q\nwant:\n%q", got, tt.expected)
 			}

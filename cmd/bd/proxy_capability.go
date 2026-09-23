@@ -25,10 +25,11 @@ const (
 	ProxyModeProxied ProxyMode = "proxied-server"
 )
 
-// ProxyTopology distinguishes the provider deployment shape. Capability
-// policy is currently identical across proxied shapes, but retaining this
-// dimension prevents an external TCP server from being conflated with a local
-// managed one as more surfaces are added.
+// ProxyTopology distinguishes the provider deployment shape. The backup family
+// is the first policy that genuinely differs across these: a Dolt backup
+// destination is resolved on the machine running dolt, so "the server bd
+// spawned itself" and "a server somebody else runs" are different answers to
+// the same command (see capability_registry.go's backup rows).
 type ProxyTopology string
 
 const (
@@ -36,6 +37,17 @@ const (
 	ProxyTopologyManagedLocal ProxyTopology = "managed-local"
 	ProxyTopologyExternalTCP  ProxyTopology = "external-tcp"
 	ProxyTopologyExternalUnix ProxyTopology = "external-unix"
+	// ProxyTopologyTeamServer is a workspace whose database is owned by
+	// beads-team-server. It is a shape rather than a transport: bts owns the
+	// store's schema and identity whether bd reaches it over a port, a socket,
+	// or a child bd started, so the ownership fact decides capability policy and
+	// the transport does not.
+	ProxyTopologyTeamServer ProxyTopology = "team-server"
+	// ProxyTopologyUnknown is what a workspace bd cannot classify reports. It is
+	// never honored by a topology-keyed row, which is the fail-closed half of
+	// the policy: a workspace that cannot prove it owns its Dolt server does not
+	// get the privileges of one that can.
+	ProxyTopologyUnknown ProxyTopology = "unknown"
 )
 
 // ProxyCapabilityOutcome describes what the front door does with a feature.

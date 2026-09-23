@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -13,10 +14,11 @@ import (
 )
 
 type engineUOWState struct {
-	issues  map[string]*types.Issue
-	wisps   map[string]*types.Issue
-	configs map[string]string
-	commits int
+	issues     map[string]*types.Issue
+	wisps      map[string]*types.Issue
+	configs    map[string]string
+	commits    int
+	updateSpec domain.UpdateSpec
 	// uows counts units of work handed out by the provider, so a test can pin
 	// how many read transactions one logical lookup is allowed to span.
 	uows int
@@ -85,6 +87,7 @@ func (u *engineIssueUC) UpdateIssue(_ context.Context, id string, fields map[str
 	return nil
 }
 func (u *engineIssueUC) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
+	u.s.updateSpec = spec
 	if err := u.UpdateIssue(ctx, id, spec.Fields, actor); err != nil {
 		return nil, err
 	}
@@ -275,6 +278,33 @@ func TestUOWStoreGetIssueByExternalRefUsesOneReadTransaction(t *testing.T) {
 
 			if state.uows != 1 {
 				t.Fatalf("both plane reads must share one unit of work: opened %d, want 1", state.uows)
+			}
+		})
+	}
+}
+
+func TestUOWStoreApplyIssueUpdateNormalizesLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		want   *[]string
+	}{
+		{name: "normalize", labels: []string{" z ", " bug ", "", "bug", "z"}, want: &[]string{"bug", "z"}},
+		{name: "omitted"},
+		{name: "clear", labels: []string{}, want: &[]string{}},
+		{name: "all_blank", labels: []string{" ", ""}, want: &[]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &engineUOWState{issues: map[string]*types.Issue{"bd-1": {ID: "bd-1"}}}
+			st := NewUOWStore(&engineUOWProvider{state: state}).(IssueUpdater)
+			if err := st.ApplyIssueUpdate(context.Background(), "bd-1", nil, tc.labels, "test"); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(state.updateSpec.SetLabels, tc.want) {
+				t.Fatalf("SetLabels = %v, want %v", state.updateSpec.SetLabels, tc.want)
+			}
+			if state.commits != 1 {
+				t.Fatalf("commits = %d, want 1", state.commits)
 			}
 		})
 	}

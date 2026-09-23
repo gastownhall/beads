@@ -1284,17 +1284,17 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
+			if beadsDir == "" {
+				beadsDir = beads.FindBeadsDir()
+			}
 			if commandRegistryPath(cmd) == "doctor" && usesProxiedServer() {
 				// Refuse only on a real refusal. The registry validator
 				// returns nil for doctor subcommands, and returning early on
 				// that would skip the legacy-store guard and autocommit-mode
 				// resolution every other skipsStoreInit command still runs.
-				if err := validateProxyRegistryBeforeProvider(cmd); err != nil {
+				if err := validateProxyRegistryBeforeProvider(cmd, resolveProxiedTopology(beadsDir)); err != nil {
 					return err
 				}
-			}
-			if beadsDir == "" {
-				beadsDir = beads.FindBeadsDir()
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
 				isMigrationCommand := false
@@ -1502,7 +1502,7 @@ var rootCmd = &cobra.Command{
 			if err := validateProxyCapabilitiesBeforeProvider(cmd); err != nil {
 				return err
 			}
-			if err := validateProxyRegistryBeforeProvider(cmd); err != nil {
+			if err := validateProxyRegistryBeforeProvider(cmd, resolveProxiedTopology(beadsDir)); err != nil {
 				return err
 			}
 		}
