@@ -16,6 +16,13 @@ const (
 	// database, many clients of one server, and the question is whether they
 	// are all upgraded.
 	sharedServersDocsURL = "https://github.com/gastownhall/beads/blob/main/docs/getting-started/upgrading.md#shared-servers"
+	// dataBehindDocsURL covers the #6575 data-behind stop. It needs its own
+	// anchor for the same reason sharedServersDocsURL does: the remote-backed
+	// section's recipe is migrate-or-adopt coordination, and its ordering rule
+	// says `bd dolt pull` is refused on every pending-migration open — which is
+	// exactly the command this stop's options prescribe. An agent following the
+	// default link would be steered off the one command that works.
+	dataBehindDocsURL = "https://github.com/gastownhall/beads/blob/main/docs/getting-started/upgrading.md#clone-behind-the-remote"
 )
 
 // humanDecisionRequired reports whether this refusal is one an agent must stop
@@ -87,12 +94,13 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		if globalFlag {
 			sharedConsent = schema.SharedConsentCommandGlobal
 		}
-		// The #6575 data-behind stop on a SHARED store carries the same consent
-		// verb in its second option (migrate-shared-after-pulling), so it needs
-		// the same retarget: under --global the project-scoped verb would
-		// consent the wrong database and leave the refusal in place. It reaches
-		// here through the default arm (empty Decision), so the Decision test
-		// alone would miss it.
+		// The #6575 data-behind stop on a SHARED store carries a consent verb in
+		// its second option (migrate-shared-after-pulling) too — the forced one,
+		// since that stop is always remote-backed — so it needs the same
+		// retarget: under --global the project-scoped verb would consent the
+		// wrong database and leave the refusal in place. It reaches here through
+		// the default arm (empty Decision), so the Decision test alone would
+		// miss it.
 		retargetShared := globalFlag && (e.Decision == "shared-no-remote" || (e.IsDataBehind() && e.Shared))
 
 		opts := make([]map[string]interface{}, 0, len(e.Options()))
@@ -105,9 +113,17 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 				// "expected" would still hand it the wrong-target command.
 				retargeted := make([]string, len(commands))
 				for i, c := range commands {
-					if c == schema.SharedConsentCommand {
+					switch c {
+					case schema.SharedConsentCommand:
 						retargeted[i] = schema.SharedConsentCommandGlobal
-					} else {
+					case schema.SharedConsentCommandForced:
+						// The data-behind arm's consent step is the FORCED verb (that
+						// stop is remote-backed by construction, where the bare verb's
+						// consent is never read), so it needs its own global form —
+						// matching only the bare verb would leave this option pointing
+						// at the project database.
+						retargeted[i] = schema.SharedConsentCommandForcedGlobal
+					default:
 						retargeted[i] = c
 					}
 				}
@@ -193,6 +209,13 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 				}
 				gate["observed"] = observed
 				gate["expected"] = "run `" + schema.DataBehindRemedyCommand + "` first; the migration is only allowed once this clone has nothing left to pull"
+				// The docs pointer is set once above alongside the blunt
+				// observed/expected pair, and has to move with them: the section it
+				// names tells the reader `bd dolt pull` is refused on every
+				// pending-migration open, which contradicts the single option this
+				// payload carries. Same move, for the same reason, as
+				// shared-no-remote's retarget above.
+				gate["docs"] = dataBehindDocsURL
 			}
 		}
 		m["remote_migrate_gate"] = gate

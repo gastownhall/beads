@@ -1246,10 +1246,22 @@ func TestDataBehindRemedySurfaces(t *testing.T) {
 		// fallbackReasonSharedStore (whose note carried them) and Options()'
 		// sharedRisk only ever decorated the adopt option.
 		msg := base(true, false).UserMessage()
-		for _, want := range []string{"co-resident", "#5920", SharedConsentCommand} {
+		for _, want := range []string{"co-resident", "#5920", SharedConsentCommandForced} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("shared data-behind message is missing %q:\n%s", want, msg)
 			}
+		}
+		// This stop always has a remote (that is where behind-ness is read
+		// from), so the bare verb is a dead end here: its consent is read only
+		// by sharedNoRemoteGate, on the !hasRemote branch. Asserting the forced
+		// form above is not enough — every forced form CONTAINS the bare form
+		// as a substring, so a regression to the bare verb would still satisfy
+		// it. Remove the forms that do work, then require nothing prescribing
+		// the bare one is left.
+		scrubbed := strings.ReplaceAll(msg, SharedConsentCommandForcedGlobal, "")
+		scrubbed = strings.ReplaceAll(scrubbed, SharedConsentCommandForced, "")
+		if strings.Contains(scrubbed, SharedConsentCommand) {
+			t.Errorf("shared data-behind message prescribes the bare verb, which cannot succeed with a remote configured:\n%s", msg)
 		}
 		if strings.Contains(msg, "proceeds on its own") {
 			t.Errorf("a shared store must not be promised an automatic retry:\n%s", msg)

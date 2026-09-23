@@ -142,6 +142,14 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 			if strings.Contains(expected, "designated clone migrates") {
 				t.Errorf("expected = %q, still the blunt migrate-or-adopt framing", expected)
 			}
+			// The docs pointer is part of the same payload and was the one
+			// field the observed/expected rewrite left behind: the default
+			// anchor's ordering rule says `bd dolt pull` is refused on every
+			// pending-migration open, contradicting the option above. Pin it
+			// so the next rewrite of this arm cannot drop the pointer again.
+			if got, _ := obj["docs"].(string); got != dataBehindDocsURL {
+				t.Errorf("docs = %v, want the data-behind anchor %q", obj["docs"], dataBehindDocsURL)
+			}
 			// options must be the single measured remedy, and must not hand an
 			// agent either of the two dead ends.
 			rawOpts, ok := obj["options"].([]interface{})
@@ -212,8 +220,10 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 		}
 		consent, _ := rawOpts[1].(map[string]interface{})
 		cmds, _ := consent["commands"].([]interface{})
-		if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandGlobal {
-			t.Errorf("consent option commands = %v, want [%q] under --global", cmds, schema.SharedConsentCommandGlobal)
+		// The forced form, not the bare one: this stop is remote-backed by
+		// construction and the bare verb's consent is never read there.
+		if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandForcedGlobal {
+			t.Errorf("consent option commands = %v, want [%q] under --global", cmds, schema.SharedConsentCommandForcedGlobal)
 		}
 		// The pull is target-agnostic and must NOT be rewritten.
 		pull, _ := rawOpts[0].(map[string]interface{})

@@ -257,6 +257,14 @@ pending migrations is gated on **every** open — `bd dolt push` and `bd dolt
 pull` are refused too, not just `bd migrate`. So do all syncing with your
 **current** binary, *before* you install the new one.
 
+There is one exception, and the gate names it when it applies: if the stop is
+the *data-behind* one — this clone is level with the remote on schema but is
+missing commits it has not pulled — then `bd dolt pull` is the remedy and is
+allowed through, because migrating before that pull is what wedges the clone.
+See [Clone behind the remote](#clone-behind-the-remote). Every other
+pending-migration refusal still blocks the pull, so the ordering rule above is
+what to plan for.
+
 **Back up before you migrate.** Schema migrations assume the database matches
 the shape the previous migrations left behind; real databases sometimes drift
 (interrupted writes, tooling bugs, very old bootstraps). A JSONL export is
@@ -323,6 +331,56 @@ schema has already forked — follow the recovery playbook:
 schema against the cached remote ref — a useful post-upgrade verification.
 It runs in both server and embedded modes.
 </Note>
+
+### Clone behind the remote
+
+This is the one pending-migration stop whose remedy is a `bd dolt pull`, and
+the one the gate links here rather than to the migrate-or-adopt recipe above.
+
+It fires when the clone is **level with the remote on schema but behind it in
+data** — the remote has commits this clone has not pulled. On schema alone the
+clone looks like a safe first-mover, so before
+[#6575](https://github.com/gastownhall/beads/issues/6575) the gate let it
+migrate; the new schema commits then landed on a history missing those
+commits, and once a migration moves a tracked table onto Dolt's ignore plane
+every later `bd dolt pull` refuses to merge
+([#6368](https://github.com/gastownhall/beads/issues/6368)). The clone can no
+longer fetch what it was already behind on.
+
+The remedy is the pull, and nothing else:
+
+```bash
+bd dolt pull        # allowed through this stop, unlike other refusals
+# then re-run the command that was refused
+```
+
+Nothing local is discarded: with no commits of its own the pull is a pure
+fast-forward, and if the clone has diverged the pull merges (resolve any
+conflicts, or decide them in bulk with `bd dolt pull --strategy ours|theirs`
+on embedded storage / `bd conflicts resolve` on a server store). Once there is
+nothing left to pull, the clone is the first-mover it looked like and the
+migration proceeds on its own.
+
+Do **not** force past this stop. `bd migrate --force` applies the migration
+while the clone is still behind — precisely the state the stop exists to
+prevent — and the `bd dolt push` that would follow is rejected as a
+non-fast-forward anyway.
+
+**On a shared server**, the pull is still the first step, but the migration
+after it needs explicit consent, because it promotes the schema for every
+co-resident client at once (see [Shared servers](#shared-servers)). Confirm
+those clients are upgraded, then:
+
+```bash
+bd dolt pull                     # first, as above
+bd migrate schema --force        # add --global for the shared global database
+```
+
+`--force` is the consent form here because this stop always has a remote
+configured — the behind-ness is read from the remote-tracking ref — and the
+bare `bd migrate schema` consent applies only to a shared database with *no*
+remote. It is safe at this point and only at this point: the pull has already
+landed the commits the clone was missing.
 
 ### Shared servers
 

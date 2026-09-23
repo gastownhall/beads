@@ -283,7 +283,7 @@ func (e *RemoteMigrateGateError) fallbackReasonNote() string {
 			// lockout; data-behind now outranks it, so without this clause the
 			// operator loses the warning that promoting the schema on a shared
 			// server locks out every co-resident client still on an older bd.
-			why += " — but on this shared store the migrate still needs explicit consent (`" + SharedConsentCommand + "`), because it promotes the schema for every co-resident bd client at once and clients still on an older binary will refuse this database until they are upgraded (#5920)"
+			why += " — but on this shared store the migrate still needs explicit consent (`" + SharedConsentCommandForced + "`), because it promotes the schema for every co-resident bd client at once and clients still on an older binary will refuse this database until they are upgraded (#5920)"
 		}
 	default:
 		return ""
@@ -327,15 +327,19 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 		"  Then re-run what you just ran.\n"
 	if e.Shared {
 		// #5920: on a shared store the first-mover auto-migrate stays
-		// suppressed after the pull, so the retry needs the consent verb.
+		// suppressed after the pull, so the retry needs explicit consent.
 		// Saying "it proceeds on its own" here would loop the operator.
+		// The command is the FORCED verb, not the bare one: this stop always
+		// has a remote (that is where behind-ness is read from), and the bare
+		// verb's consent is only read on the no-remote arm — see
+		// SharedConsentCommandForced.
 		body += "" +
 			"  This database is served to co-resident bd clients, so the migration itself\n" +
 			"  still needs explicit consent afterwards — it promotes the schema for EVERY\n" +
 			"  client at once, and clients still on an older bd will refuse this database\n" +
-			"  until they are upgraded (#5920):\n" +
-			"        " + SharedConsentCommand + "\n" +
-			"        (" + SharedConsentCommandGlobal + " for the shared global database)\n"
+			"  until they are upgraded (#5920). Once the pull above has completed:\n" +
+			"        " + SharedConsentCommandForced + "\n" +
+			"        (" + SharedConsentCommandForcedGlobal + " for the shared global database)\n"
 	} else {
 		body += "" +
 			"  The migration then runs on its own: with nothing left to pull, this clone\n" +
@@ -347,6 +351,14 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 		"  while this clone is still behind — the exact state this stop exists to\n" +
 		"  prevent — and the `bd dolt push` that would follow is rejected as a\n" +
 		"  non-fast-forward, because the clone is still missing the remote's commits.\n"
+	if e.Shared {
+		// The consent command this arm prescribes is itself a forced migrate,
+		// so the warning above has to say what makes that one different: the
+		// pull having already landed, not the flag.
+		body += "" +
+			"  The same goes for the consent command above until the pull has finished:\n" +
+			"  what makes it safe is that there is nothing left to pull by then.\n"
+	}
 	return body
 }
 
@@ -473,9 +485,10 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			d += " This clone has no commits of its own, so that pull is a pure fast-forward and discards nothing."
 		}
 		if e.Shared {
-			d += " After the pull the migration still needs the operator's explicit consent (" + SharedConsentCommand +
-				"): this database is shared with co-resident bd clients and migrating promotes the schema for all of " +
-				"them at once (#5920). Do NOT auto-run it."
+			d += " After the pull the migration still needs the operator's explicit consent (" + SharedConsentCommandForced +
+				" — this store is remote-backed, so the bare verb does not unlock it; see SharedConsentCommandForced): " +
+				"this database is shared with co-resident bd clients and migrating promotes the schema for all of " +
+				"them at once (#5920). Do NOT auto-run it, and do NOT run it before the pull has completed."
 		} else {
 			d += " After the pull, re-running the original command migrates on its own; nothing else is needed."
 		}
@@ -564,12 +577,16 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 		if e.Shared {
 			// The pull itself is still safe; what the shared store changes is
 			// what happens AFTER it, so the consent step becomes a second
-			// option rather than a footnote on the first (#5920).
+			// option rather than a footnote on the first (#5920). It carries
+			// the FORCED verb because this stop is always remote-backed and
+			// the bare verb's consent is read only on the no-remote arm — an
+			// option whose command cannot succeed in the state that printed it
+			// is worse than no option (see SharedConsentCommandForced).
 			return []GateOption{pull, {
 				ID:       "migrate-shared-after-pulling",
 				When:     "the pull above has completed AND every co-resident bd client of this server is upgraded to this binary (confirmed with the operator)",
-				Commands: []string{SharedConsentCommand},
-				Risk:     "co-resident clients still on an older bd will refuse this database until upgraded; running it before the pull completes is the wedge this stop prevents",
+				Commands: []string{SharedConsentCommandForced},
+				Risk:     "co-resident clients still on an older bd will refuse this database until upgraded; running it before the pull completes is the wedge this stop prevents. Its --force consents to migrating a remote-backed shared store (the bare verb's consent is read only with no remote configured); it does not make migrating while behind safe",
 			}}
 		}
 		return []GateOption{pull}
@@ -973,6 +990,32 @@ const SharedConsentCommand = "bd migrate schema"
 // their own database, so the remedy they print must carry the flag or it
 // migrates the wrong one.
 const SharedConsentCommandGlobal = SharedConsentCommand + " --global"
+
+// SharedConsentCommandForced is the consent command for a shared database that
+// IS remote-backed. Every #6575 data-behind stop is in that state by
+// construction — behind-ness is read from `remotes/<name>/<branch>`, so there
+// is always a remote — and there the bare verb above is a dead end:
+// sharedMigrateConsent has exactly one reader, sharedNoRemoteGate, which
+// checkRemoteMigrateGate reaches only on the !hasRemote branch. With a remote
+// configured the retry routes through forceOrEnvConsent instead, so typing the
+// bare verb sets a consent nothing reads and the operator lands on the blunt
+// shared-store refusal, whose body prescribes the `bd migrate --force` this
+// stop's own body tells them not to use.
+//
+// The fix is deliberately the command, not the gate: widening
+// sharedNoRemoteGate's verb consent to the remote-backed arm would drop the
+// designated-migrator confirmation that #4259's cross-clone fork risk demands
+// whenever a remote exists, which is the very thing sharedNoRemoteGate's
+// comment says is intentional. `--force` is what forceOrEnvConsent honors, and
+// the CLI accepts it on this verb (cmd/bd.isForcedMigrate covers both
+// `bd migrate` and `bd migrate schema`), so this is the narrowest command that
+// still names the schema migration AND actually unlocks the retry.
+const SharedConsentCommandForced = SharedConsentCommand + " --force"
+
+// SharedConsentCommandForcedGlobal is SharedConsentCommandForced aimed at the
+// shared global database, for the same reason SharedConsentCommandGlobal
+// exists.
+const SharedConsentCommandForcedGlobal = SharedConsentCommandGlobal + " --force"
 
 // sharedNoRemoteGate decides the shared-store-without-a-remote arm
 // (gastownhall/beads#5920). There is no remote, so none of the #4259

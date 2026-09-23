@@ -66,7 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step needs an operator who can confirm every co-resident client is upgraded).
   On a shared Dolt sql-server the guidance still carries #5920's consequence —
   migrating promotes the schema for every co-resident client — and names the
-  `bd migrate schema` consent step the retry needs there.
+  consent step the retry needs there: `bd migrate schema --force`. It is the
+  forced form because this stop always has a remote configured (behind-ness is
+  read from the remote-tracking ref), and the bare `bd migrate schema` consent
+  is only read for a shared database with *no* remote; the flag consents to
+  migrating a remote-backed shared store, and by then the pull has landed the
+  commits the clone was missing. The payload's `docs` link points at the
+  data-behind section rather than the migrate-or-adopt recipe, and that
+  section — plus the upgrade and init-safety ordering rules — now records the
+  `bd dolt pull` exception instead of stating the pull is always refused.
 
   Both existing escape hatches are unchanged: `bd migrate --force` /
   `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before the smart gate, and
