@@ -88,7 +88,7 @@ The full namespaces routed to YAML are:
 
 Plus these individual keys:
 
-`no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`.
+`no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
 
@@ -395,7 +395,7 @@ federation:
 
 ## Integration Configuration
 
-Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `ado.pat`) are YAML-routed and better supplied as environment variables. Every tracker records `<tracker>.last_sync` automatically after a sync, enabling incremental syncs.
+Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `ado.pat`, `notion.token`) are YAML-routed and better supplied as environment variables. Every tracker records `<tracker>.last_sync` automatically after a sync, enabling incremental syncs.
 
 ### Jira
 

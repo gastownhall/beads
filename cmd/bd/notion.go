@@ -197,10 +197,7 @@ func resolveNotionAuth(ctx context.Context) (*notion.ResolvedAuth, error) {
 			return notion.ResolveAuth(ctx, tempStore)
 		}
 	}
-	if token := strings.TrimSpace(os.Getenv("NOTION_TOKEN")); token != "" {
-		return &notion.ResolvedAuth{Token: token, Source: notion.AuthSourceEnv}, nil
-	}
-	return nil, nil
+	return notion.ResolveAuth(ctx, nil)
 }
 
 func validateNotionConfig(cfg notionConfig, auth *notion.ResolvedAuth) error {

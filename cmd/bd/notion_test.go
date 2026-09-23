@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/notion"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -430,6 +431,45 @@ func TestResolveNotionAuthPrefersConfigTokenOverEnv(t *testing.T) {
 		t.Fatalf("auth = %+v", auth)
 	}
 	assertNotionConfigCalls(t, recorder, []notionConfigCall{{key: "notion.token"}}, nil, nil)
+}
+
+// TestResolveNotionAuthPrefersConfigYamlOverStore pins GH#6676: notion.token
+// lives in config.yaml, so a yaml token is used without consulting the
+// database, where only a token written by an older bd can be found.
+func TestResolveNotionAuthPrefersConfigYamlOverStore(t *testing.T) {
+	recorder := &notionConfigRecorder{}
+	installNotionRecorderStore(t, recorder, false)
+	initConfigForTest(t)
+	config.Set("notion.token", "yaml-token")
+	t.Setenv("NOTION_TOKEN", "env-token")
+
+	auth, err := resolveNotionAuth(context.Background())
+	if err != nil {
+		t.Fatalf("resolveNotionAuth returned error: %v", err)
+	}
+	if auth == nil || auth.Token != "yaml-token" || auth.Source != notion.AuthSourceConfigToken {
+		t.Fatalf("auth = %+v", auth)
+	}
+	assertNotionConfigCalls(t, recorder, nil, nil, nil)
+}
+
+// TestResolveNotionAuthReadsConfigYamlWithoutStore verifies the yaml token is
+// found even when no store is open and no database path is known.
+func TestResolveNotionAuthReadsConfigYamlWithoutStore(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	initConfigForTest(t)
+	store = nil
+	dbPath = ""
+	config.Set("notion.token", "yaml-token")
+	t.Setenv("NOTION_TOKEN", "env-token")
+
+	auth, err := resolveNotionAuth(context.Background())
+	if err != nil {
+		t.Fatalf("resolveNotionAuth returned error: %v", err)
+	}
+	if auth == nil || auth.Token != "yaml-token" || auth.Source != notion.AuthSourceConfigToken {
+		t.Fatalf("auth = %+v", auth)
+	}
 }
 
 func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {

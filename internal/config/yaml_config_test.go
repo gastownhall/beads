@@ -51,6 +51,7 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		// Secret keys (stored in yaml to avoid leaking via Dolt push)
 		{"github.token", true},
 		{"linear.api_key", true},
+		{"notion.token", true}, // GH#6676
 
 		// Non-yaml keys (should return false)
 		{"jira.url", false},
@@ -859,6 +860,7 @@ func TestSecretKeyEnvVarHint(t *testing.T) {
 	}{
 		{"linear.api_key", "LINEAR_API_KEY"},
 		{"github.token", "GITHUB_TOKEN"},
+		{"notion.token", "NOTION_TOKEN"},
 		{"ai.api_key", "ANTHROPIC_API_KEY"},
 		{"custom.secret-token", "BD_CUSTOM_SECRET_TOKEN"},
 	}
@@ -899,18 +901,23 @@ func TestCheckSecretKeyGitSafety_RefusesGitTrackedSecret(t *testing.T) {
 	}
 
 	// checkSecretGitTracked should refuse a secret key
-	err := checkSecretGitTracked(configPath, "linear.api_key")
-	if err == nil {
-		t.Fatal("expected error for secret key on git-tracked config, got nil")
-	}
-	if !strings.Contains(err.Error(), "refusing to write secret key") {
-		t.Fatalf("expected 'refusing to write' error, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "LINEAR_API_KEY") {
-		t.Fatalf("expected env var hint in error, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "--force-git-tracked") {
-		t.Fatalf("expected --force-git-tracked hint in error, got: %v", err)
+	for key, envVar := range map[string]string{
+		"linear.api_key": "LINEAR_API_KEY",
+		"notion.token":   "NOTION_TOKEN", // GH#6676
+	} {
+		err := checkSecretGitTracked(configPath, key)
+		if err == nil {
+			t.Fatalf("expected error for secret key %q on git-tracked config, got nil", key)
+		}
+		if !strings.Contains(err.Error(), "refusing to write secret key") {
+			t.Fatalf("expected 'refusing to write' error for %q, got: %v", key, err)
+		}
+		if !strings.Contains(err.Error(), envVar) {
+			t.Fatalf("expected env var hint %s in error, got: %v", envVar, err)
+		}
+		if !strings.Contains(err.Error(), "--force-git-tracked") {
+			t.Fatalf("expected --force-git-tracked hint in error, got: %v", err)
+		}
 	}
 }
 
@@ -938,7 +945,7 @@ func TestCheckSecretKeyGitSafety_AllowsDatabaseBackedSecretKey(t *testing.T) {
 	}
 
 	// Secret-looking keys that are not YAML-backed do not write to config.yaml.
-	err := checkSecretGitTracked(configPath, "notion.token")
+	err := checkSecretGitTracked(configPath, "custom.api_token")
 	if err != nil {
 		t.Fatalf("expected no error for database-backed secret key, got: %v", err)
 	}
