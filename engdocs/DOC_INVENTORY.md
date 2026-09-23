@@ -38,7 +38,7 @@ freshness source.
 | `SERVE_RUNBOOK.md` | `Last reviewed:` marker tied to the operating-envelope constants in `internal/httpapi/server.go` and the log fields in its `event`/`request` emitters. |
 | `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to the CI audit, workflow files, wrapper scripts, `Makefile`, package manifests, and maintainer decision review. |
 | `design/otel/otel-data-model.md` | `Last reviewed:` marker tied to telemetry, Dolt storage, hooks, and AI call sites. |
-| `EMBEDDING_OVER_PROXIED_SERVER.md` | `Last reviewed:` marker naming the commit it was read at, tied to `internal/storage/dbproxy/`, `internal/storage/uow/`, `internal/storage/schema/` gate and lock, `cmd/bd/dolt_proxied_lifecycle.go`, and the root `beads*.go` open path. Re-read against those sources per release; the doc describes observed behaviour, so a stale marker makes it wrong rather than merely old. |
+| `EMBEDDING_OVER_PROXIED_SERVER.md` | `Last reviewed:` marker naming the commit it was read at, tied to `internal/storage/dbproxy/`, `internal/storage/uow/`, `internal/storage/schema/` gate and lock, `cmd/bd/dolt_proxied_lifecycle.go`, and the root `beads*.go` open path down into `internal/storage/dolt/` and `internal/storage/embeddeddolt/`. Re-read against those sources per release; the doc describes observed behaviour, so a stale marker makes it wrong rather than merely old. |
 
 Follow-up automation should replace marker-only checks with generated or
 `--check` blocks where a clean code source exists.

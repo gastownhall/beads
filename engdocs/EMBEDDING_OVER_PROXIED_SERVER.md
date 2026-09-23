@@ -1,10 +1,11 @@
 # Embedding over a proxied-server workspace: observed behaviour at 1.3.1
 
-Last reviewed: 2026-09-21
+Last reviewed: 2026-09-23
 
-Read at: `d487b9796` (v1.3.1-rc.1). Because this document describes observed
-behaviour rather than a contract, a stale marker makes it wrong, not merely old.
-Re-read it against the sources below before trusting it against a later build.
+Read at: `e1e1158dd` (`v1.3.1-rc.1-2-ge1e1158dd`). Because this document
+describes observed behaviour rather than a contract, a stale marker makes it
+wrong, not merely old. Re-read it against the sources below before trusting it
+against a later build.
 
 Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
 `internal/storage/dbproxy/proxy/` (`endpoint.go`, `server.go`, `shutdown.go`,
@@ -15,10 +16,14 @@ Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
 `internal/storage/uow/doltserver_provider.go`,
 `internal/storage/uow/dolt_sql_provider.go`,
 `internal/storage/schema/remote_migrate_gate.go`,
+`internal/storage/schema/smart_remote_migrate_gate.go`,
 `internal/storage/schema/lock.go`, `internal/storage/storage.go`,
+`internal/storage/dolt/store.go` (the server-mode shared-gate call site),
+`internal/storage/embeddeddolt/` (`store.go`, `cache.go`, `detection.go`),
 `cmd/bd/db_proxy_child.go`, `cmd/bd/dolt.go`,
 `cmd/bd/dolt_proxied_lifecycle.go`, `cmd/bd/migrate.go`, `cmd/bd/main.go`,
 `cmd/bd/proxied_server.go`, `cmd/bd/proxy_capability.go`,
+`cmd/bd/remote_migrate_gate.go`, `cmd/bd/store_factory.go`,
 `cmd/bd/uow_factory.go`, `beads.go`, `beads_cgo.go`, `beads_nocgo.go`.
 
 ## What this document is, and is not
@@ -33,12 +38,12 @@ what the code actually does instead of guessing.
 It is not a compatibility contract. Nothing here is a published interface with a
 deprecation policy behind it. Every surface below is an implementation detail
 that bd's own code reaches through, and each one may change in any release,
-including a patch release. Four of the eleven are moving in 1.3.1 itself and say
-so in place: §10 has landed and is described in its new shape, and §5, §6 and
-§11 are decided for 1.3.1 but had not landed at the commit above, so each is
-given as before/after with the current behaviour marked as current. Read this as
-a snapshot with the commit it was taken at, and re-read it against the source
-before an upgrade.
+including a patch release. Five of the eleven are moving in 1.3.1 itself and say
+so in place: §7 and §10 have landed and are described in their new shape, and
+§5, §6 and §11 are decided for 1.3.1 but had not landed at the commit above, so
+each is given as before/after with the current behaviour marked as current. Read
+this as a snapshot with the commit it was taken at, and re-read it against the
+source before an upgrade.
 
 Two things follow for anyone building on this:
 
@@ -50,7 +55,7 @@ Two things follow for anyone building on this:
   unexpected `schema` number, a new argv flag — treat these as "this bd is not
   the one I was written against", not as a default to paper over.
 
-Everything below was checked by reading the source at `d487b9796`. Where a claim
+Everything below was checked by reading the source at `e1e1158dd`. Where a claim
 would need a running proxy to confirm end to end, it says so.
 
 ## The topology being described
@@ -219,6 +224,12 @@ plain MySQL client connecting to `127.0.0.1:<port from proxy.pid>` as `root`
 with no password reaches the same database bd does, and the proxy passes the
 handshake through untouched. That is what lets an embedder read and write the
 workspace's live database without standing up a server of its own.
+*Not verified by running:* this is the composition of three separately-read
+facts — the credential pair, the generated config's loopback bind with no users
+section, and the proxy's lack of protocol handling — not an observed connection.
+The proxy dials the backend per accepted connection and closes the client on any
+dial or handshake failure, so treat a successful connect as the thing to check
+first, not as given.
 
 Three qualifications worth carrying:
 
@@ -332,7 +343,7 @@ The external provider does the same. So, at the sidecar layer:
 **What is changing in 1.3.1.** Writing the *effective* `idle_timeout`
 explicitly, rather than letting `omitempty` drop it and relying on the
 provider-side default, is approved for 1.3.1. It had not landed at
-`d487b9796`, and there is no tracking issue for it at the time of writing.
+`e1e1158dd`, and there is no tracking issue for it at the time of writing.
 
 Before (observed at this commit): a workspace on the default timeout has **no**
 `idle_timeout` key in its sidecar, and "default" is therefore indistinguishable
@@ -345,21 +356,49 @@ should read an absent key as "ask this bd, do not assume", not as "no timeout".
 
 ## 6. `bd migrate schema` on a proxied workspace — changing in 1.3.1
 
-**Observed at this commit: it is permitted, and it migrates.**
+**Observed at this commit: the verb is permitted, and on a served database with
+no remote it migrates. With a remote configured it is still permitted — it
+reaches the store open — but the §7 gate refuses the migration there, because
+the verb's own consent is not read on that arm.**
 
 `proxyMaintenanceRefusals` in `cmd/bd/proxy_capability.go` refuses the bare
 `migrate` command with code `proxy.migrate.unsupported`, and its `init()`
-expands child rows for `migrate hooks` and `migrate issues`. `migrate schema` is
-in none of those tables, and `validateProxyMaintenanceBeforeProvider` returns
-`nil` for any unmatched multi-word command path — so the verb reaches the store
-open.
+expands child rows for `migrate hooks` and `migrate issues`. The same table
+carries `migrate sync`, `migrate-personal` and `migrate-issues` as rows of their
+own — the `migrate` neighbourhood is enumerated, not covered by a prefix rule.
+`migrate schema` is in none of it.
+
+Two gates then stand between an unmatched path and the store open, and only the
+second is a fall-through: `validateProxyMaintenanceBeforeProvider` consults
+`LookupHistoryCapability` first and refuses anything classed `HistoryDirectOnly`
+with `proxy.history.unsupported`; *after* that it returns `nil` for any
+unmatched multi-word command path. `migrate schema` matches neither gate, so the
+verb reaches the store open. A reader predicting some other multi-word verb from
+this section should apply both gates in that order — the multi-word `return nil`
+on its own over-predicts "permitted".
 
 The mechanics matter, because they are not "a command that applies a migration":
 
 - `cmd/bd/main.go` sets `schema.SetSharedMigrateConsent(...)` in the root
   pre-run for this one verb (`isSchemaMigrateVerb` matches `bd migrate schema`
-  and deliberately nothing else in the `migrate` tree). That consent is what
-  satisfies the shared-store gate in §7.
+  and deliberately nothing else in the `migrate` tree). That consent satisfies
+  the shared-store gate in §7 on **one arm only**. Its single non-test read site
+  is `sharedNoRemoteGate`, reached from that gate's `if !hasRemote` branch, and
+  the comment there scopes it deliberately: the verb "unlocks ONLY here: with a
+  remote configured, #4259's cross-clone fork risk still demands the stronger
+  designated-migrator confirmation". When the served database *does* have a
+  remote — on the proxied path that is read from its own `dolt_remotes` alone,
+  because `dolt_sql_provider.go` calls the gate as
+  `CheckSharedStoreMigrateGate(ctx, c, "", nil, nil)` and so supplies no on-disk
+  fallback probe — the gate takes the other arm, which consults only `--force`
+  (`bd migrate schema --force` trips `isForcedMigrate`; `bd migrate --force`
+  trips it too, but only off a proxied workspace, since the bare verb is
+  refused before the store open per the refusal above) and the
+  `BD_ALLOW_REMOTE_MIGRATE` environment override.
+  Without one of those, a main-lane pending migration is refused at the store
+  open, carrying the shared-store reason wherever the smart gate would otherwise
+  have auto-migrated. The public twin of this knob,
+  `beads.AllowSharedSchemaMigration`, documents the same scope.
 - The **provider open then performs the migration**, before `RunE` runs.
 - `RunE`'s proxied arm (`reportProxiedSchemaMigrate` in `cmd/bd/migrate.go`)
   therefore only reports, and it reports a **different JSON shape** from the
@@ -395,14 +434,14 @@ workspace is approved for 1.3.1: a flat typed refusal by default, with `--force`
 emitting a **generic** warning to close co-resident library clients first. The
 approved scope is a generic warning with no enumeration of connected clients, for
 the reason above — the proxy does not track them, so there is nothing truthful to
-list. This had not landed at `d487b9796`, and there is no tracking issue for it
+list. This had not landed at `e1e1158dd`, and there is no tracking issue for it
 at the time of writing.
 
 So an embedder should expect the verb to stop working on proxied workspaces
 rather than build a workflow on it, and should not read the absence of a refusal
 today as the absence of one tomorrow.
 
-## 7. The shared-store migration gate looks only at the main lane
+## 7. The shared-store migration gate — main lane only, new stop in 1.3.1
 
 `schema.CheckSharedStoreMigrateGate`
 (`internal/storage/schema/remote_migrate_gate.go`) is the gate for a database
@@ -432,6 +471,107 @@ through: a fresh database (`current == 0`) always migrates, on the reasoning tha
 creating a database is consent for its schema, and a fresh-bootstrap heal
 authority from the same logical open bypasses the gate entirely.
 
+**What changed in 1.3.1: a third refusal shape arrives from underneath.** #6575
+(landed at this commit) added `fallbackReasonDataBehind` to
+`checkRemoteMigrateGate`. It is not a fourth item in the "two refusals" list
+above — that count is the shared form's delta over the remote-backed flow, and it
+is unchanged. This stop lives in the flow *both* forms delegate to, so the
+shared gate inherits it rather than adding it.
+
+**Whether it can fire is a property of the call site, not of the gate.** The
+stop's only input is an ancestry fact the *caller* injects: `localDataBehind`
+(`internal/storage/schema/smart_remote_migrate_gate.go`) reads
+`FastForwardAdopter.AheadBehind`, and reports "not behind" whenever the adopter
+is nil or wires neither callback. Its own comment names "the shared unit-of-work
+provider's injection site" as exactly that case, where "routing stays exactly as
+it was before this check existed". At this commit there are two production
+callers of `CheckSharedStoreMigrateGate`:
+
+- `internal/storage/dolt`'s store open — the **server-mode** open — wires
+  `AheadBehind` (added expressly for #6575), so the stop is live there.
+- `internal/storage/uow/dolt_sql_provider.go` passes `nil`, and per
+  `cmd/bd/uow_factory.go` that funnel is "the proxied CLI path AND `bd serve`'s
+  own provider". A **proxied** workspace therefore reaches the shared gate with
+  no ancestry fact at all.
+
+So do not expect this refusal on a proxied workspace. A proxied, remote-backed
+clone that is data-behind at schema parity reads as level, the smart gate routes
+to `smartAutoMigrate`, and the shared arm then returns the ordinary
+`fallbackReasonSharedStore` refusal — the one whose framing ("the gate would
+have resolved and was overruled") the data-behind comment says is *not* true of
+this state. Embedded mode reaches the stop by a different route: it calls
+`CheckRemoteMigrateGateWithAdopt` with a fully-wired adopter
+(`internal/storage/embeddeddolt/store.go`), which is why the `OpenForRemoteSync`
+carve-out below has anything to carve. That the proxied injection site reads no
+ancestry is base behaviour at this commit — #6575's protection is absent on the
+path this section is about — and it is not this document's to fix.
+
+Where the stop *is* live, it fires when schema parity with the cached remote ref
+holds but this clone's local HEAD is **missing commits the cached ref has**
+(`behind >= 1`, whatever `ahead` is — a strict ancestor only when this clone has
+no commits of its own). The clone is behind in data commits it has not pulled,
+so it is not the first-mover the smart gate may auto-resolve. The wide predicate
+is deliberate: because bd auto-commits every write, `localDataBehind` reasons
+that "has local commits AND is behind" is the ordinary multi-machine state, so
+stopping only at `ahead == 0` "would leave the larger half of the affected
+cohort unprotected". Two details make it matter more than its size suggests to
+an embedder classifying gate errors:
+
+- **It is reported on shared stores too.** The `smartDataBehind` /
+  `smartDataDiverged` arms set this reason ahead of `fallbackReasonSharedStore`,
+  which would ordinarily outrank it. The comment gives the reason: the
+  shared-store reason says the gate *would* have resolved and was overruled,
+  which is not true here — the gate refuses this state on its own merits.
+- **Its options collapse.** `Options()` returns a single `pull-first` option
+  whose command is `DataBehindRemedyCommand` (`bd dolt pull`), instead of the
+  usual migrate-or-adopt pair; on a shared store a second
+  `migrate-shared-after-pulling` option follows it. The `DataDiverged` variant
+  is the same reason and the same command; it is the `ahead >= 1` shape — the
+  clone also has commits of its own — which is *why* its pull **merges** (and
+  can report conflicts) rather than fast-forwarding.
+
+**What an embedder can observe.** This is the one gate refusal with a
+one-command operator remedy, and it is the one the gate exports API for:
+`(*schema.RemoteMigrateGateError).IsDataBehind()` and the
+`schema.DataBehindRemedyCommand` constant. Code that classifies gate errors
+should test `IsDataBehind()` before treating a `RemoteMigrateGateError` as
+fatal — the doc's own "fail loudly on a shape you do not recognise" rule cuts
+the other way here, because this shape *is* recoverable and the exported
+predicate exists precisely to say so.
+
+The remedy is itself a store-opening command, so bd carves a path for it:
+`isRemoteSyncCommand` in `cmd/bd/main.go` matches `bd dolt pull` alone and sets
+`RemoteSyncOpen`, which routes the embedded open to
+`embeddeddolt.OpenForRemoteSync` (`cmd/bd/store_factory.go`) — a lenient open
+for this gate reason and no other. That carve-out is CLI-only, and an embedder
+cannot replicate it in-process: both `embeddeddolt.OpenForRemoteSync` and the
+`dolt.Config.RemoteSyncOpen` field live under `internal/`, unimportable from
+outside `github.com/steveyegge/beads`, and none of the public open paths
+(`OpenBestAvailable`, `Open`, `OpenFromConfig`, `OpenGated`) takes an option
+that could request the lenient open. The embedder's remedy is therefore
+out-of-process: run `bd dolt pull` (and, per the first observation below,
+outside proxied mode), then re-open. A normal in-process open will hit the same
+refusal that prescribed the command.
+
+Two observations worth carrying, neither of them this document's to fix:
+
+- On a **proxied** workspace the pull is still the precondition, the workspace
+  still refuses the verb, and the gate never names it.
+  `proxyMaintenanceRefusals` in `cmd/bd/proxy_capability.go` holds
+  `"dolt pull"` with code `proxy.dolt_pull.unsupported`, so the one command a
+  data-behind clone needs is declined by that same workspace. And because the
+  proxied call site wires no ancestry adopter (above), the gate does not
+  prescribe it there either: the operator gets the shared-store refusal, with no
+  mention of the data they are missing. That is the worse of the two shapes — a
+  named remedy you must route around is at least diagnosable. An embedder that
+  surfaces gate remedies to users should expect to detect the data-behind state
+  itself on this path, and to pull outside proxied mode to clear it.
+- The shared store's second option names `SharedConsentCommand`
+  (`bd migrate schema`), whose own declaration scopes it to "a shared database
+  that has **no** remote". Do not read that option as a confirmed unlock for the
+  remote-backed shared case; treat the pull as the part of the remedy this
+  document vouches for.
+
 ## 8. `SetEventsJournalEnabled` on `OpenBestAvailable`'s `Storage`
 
 `OpenBestAvailable` is the public open path in package `beads` at the module
@@ -449,22 +589,31 @@ through to `embeddeddolt.Open`, and it does not connect through the proxy.
 
 The consequence is not contention over the directory the proxy is serving. It is
 that the two paths look at **different directories entirely**. `embeddeddolt`
-joins its data directory as `<beadsDir>/embeddeddolt` and does so in three
-places — `newStore`, the open cache's `cacheKey`, and `HasRepository` — with no
-way for a caller to redirect it. The proxy's `dolt sql-server`, meanwhile,
-serves the proxied root, which defaults to `<beadsDir>/dolt`
+joins its data directory as `<beadsDir>/embeddeddolt` and does so in four
+non-test places — `newStore`, `openReadOnly`, the open cache's `cacheKey`, and
+`HasRepository` — with no way for a caller to redirect it. The proxy's
+`dolt sql-server`, meanwhile, serves the proxied root, which defaults to
+`<beadsDir>/dolt`
 (`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback joins
 the literal `dolt`, with a comment saying always to).
 
 So an embedder that calls `OpenBestAvailable` on a proxied workspace does not
 fight the running server for its files — it silently opens **a separate database**
-beside it. `newStore` `MkdirAll`s `.beads/embeddeddolt`, and `initSchema` issues
+beside it. On the read-write path — the one `OpenBestAvailable` takes —
+`newStore` `MkdirAll`s `.beads/embeddeddolt`, and `initSchema` issues
 `CREATE DATABASE IF NOT EXISTS` and migrates, so the open creates and writes a
 second database rather than failing. What it contains depends on the workspace's
 history: empty on one initialised straight into proxied mode, and whatever
 `.beads/embeddeddolt` still holds on one that was ever embedded, since none of
 the mode-migration verbs removes that directory. The second case is the nastier
 one — stale issues that look real.
+
+The read-only join site behaves the other way, which is worth knowing before
+generalising the paragraph above: `openReadOnly` does **not** create. It
+`os.Stat`s the same directory and returns
+`embeddeddolt: no embedded database at …` when it is absent, so a caller
+arriving through the read-only open on a workspace that was never embedded gets
+an error instead of an empty database.
 
 Nothing in the open path refuses on that ground and no error comes back. The
 store is genuine; it is just not the one the workspace's issues are in. An
@@ -648,7 +797,7 @@ rather than observed.
 **What is changing in 1.3.1.** Two fixes are approved under #6651: treating
 **any** `cmd.Wait()` return as a backend exit, rather than relying on errgroup's
 nil-means-keep-going semantics, and making adoption **probe the backend** rather
-than only the proxy. Neither had landed at `d487b9796`. After they land, a clean
+than only the proxy. Neither had landed at `e1e1158dd`. After they land, a clean
 backend exit is expected to tear the proxy down like any other backend loss, and
 adoption is expected to decline a proxy whose backend is gone — so an embedder
 should not build recovery logic that depends on the zombie persisting, nor on
@@ -687,7 +836,7 @@ checking.
 
 ## Not verified by running
 
-This document was written by reading the source at `d487b9796`. No proxy was
+This document was written by reading the source at `e1e1158dd`. No proxy was
 started and no test suite was run while writing it. The claims that would need a
 live proxy to confirm end to end, and are therefore inferred from the code:
 
