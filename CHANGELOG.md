@@ -163,9 +163,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   broken out of `TotalIssues` rather than removed from it, so the buckets still
   do not sum to the total in either direction. `bd status --assigned` gets the
   same breakdown, which it needs for the same reason against `bd list
-  --assignee`. Not yet covered: durable rows carrying a configured infra type
-  (GH#6439), which need the workspace's `types.infra` set that the portable
-  count has no seam to read.
+  --assignee`.
+
+  The third suppression is covered too
+  ([#6439](https://github.com/gastownhall/beads/issues/6439)): durable rows
+  whose type is in the workspace's configured `types.infra` set, reported as
+  `N infra-typed issues (--include-infra)` and as `infra_issues` in `--json`.
+  Such rows exist because changing `types.infra` never moves rows already
+  written, and because a configured set replaces the built-in names rather than
+  extending them. So the count reads the configured set, the same one `bd list`
+  reads, and not the built-in names.
 
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`

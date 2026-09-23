@@ -7077,8 +7077,21 @@ components:
             as `gate_issues` and likewise already counted in `total_issues`.
 
 
-            Do not sum the two: a row can be both a gate and a template, and
-            would be counted once in each.
+            Do not sum the breakdowns: a row can be both a gate and a template,
+            and would be counted once in each.
+        infra_issues:
+          type: integer
+          description: >-
+            Durable rows whose type is in the workspace's configured
+            `types.infra` set, suppressed by the default `bd list` on the same
+            terms as `gate_issues` and likewise already counted in
+            `total_issues`.
+
+
+            The set is the configured one, not the built-in names, and changing
+            it moves no rows, so a durable row of a type that has since become
+            infra is counted here. May overlap `gate_issues` and
+            `template_issues` when the configured set names `gate`.
     # The two cycle schemas are pinned like the seven above, and to the same end,
     # but to the canonical types in `issueops` rather than in `internal/types`:
     # the role's own result IS the CLI's `--json` element, so `bd dep cycles`

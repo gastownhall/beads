@@ -59,6 +59,10 @@ type StatsReporterFixture struct {
 	// A nil hook means "this backend cannot observe history", and the case
 	// that needs it SKIPS with that reason rather than passing quietly.
 	CountHistory func(context.Context) (int, error)
+	// SetConfig writes one workspace config key. The infra-type cases use it to
+	// change types.infra between seeding and counting, which is the only way a
+	// durable row of an infra type comes to exist. A nil hook SKIPS those cases.
+	SetConfig func(context.Context, string, string) error
 }
 
 // RunStatsReporterCountsEveryDurableRowByStatus pins statsreporter.go:92-98:
@@ -160,6 +164,39 @@ func RunStatsReporterBreaksOutAGateThatIsAlsoATemplate(t *testing.T, ctx context
 	assertStatsReporterDelta(t, before, after, statsReporterCounts{
 		total: 1, open: 1, gates: 1, templates: 1,
 	})
+}
+
+// RunStatsReporterBreaksOutDurableRowsOfAConfiguredInfraType pins InfraIssues,
+// the third suppression a default `bd list` applies (GH#6439): durable rows
+// whose type is in the workspace's CONFIGURED types.infra set.
+//
+// Such a row is reachable only through configuration, and the case walks that
+// path rather than inserting one by hand. A configured set replaces the
+// built-in one, so with types.infra = message an agent-typed create is
+// durable, which is the path the issue-operations contract already pins for
+// creates. Changing the set afterwards moves no rows, so once agent is named
+// again that same durable row is one `bd list` hides and `bd status` counts.
+//
+// The first delta is the control. With agent not infra, the row must NOT move
+// InfraIssues, which a backend counting the built-in names would get wrong.
+// The second delta moves ONLY InfraIssues, with no new rows, which shows the
+// count follows configuration at query time.
+func RunStatsReporterBreaksOutDurableRowsOfAConfiguredInfraType(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	setStatsReporterInfraTypes(t, ctx, fixture, "message")
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	seedStatsReporterIssue(t, ctx, fixture, statsReporterSeed(fixture, "infra-plain", types.StatusOpen))
+	agent := statsReporterSeed(fixture, "infra-agent", types.StatusOpen)
+	agent.IssueType = types.IssueType("agent")
+	seedStatsReporterIssue(t, ctx, fixture, agent)
+
+	evicted := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, evicted, statsReporterCounts{total: 2, open: 2})
+
+	setStatsReporterInfraTypes(t, ctx, fixture, "agent,message")
+	named := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, evicted, named, statsReporterCounts{infra: 1})
 }
 
 // RunStatsReporterAStatusOutsideTheTalliesIsCountedOnlyInTotal pins the second
@@ -548,6 +585,37 @@ func RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows(t *testing.T, ctx c
 	}
 }
 
+// RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows is the scoped half
+// of the infra case. The fold tests each of the actor's rows against the
+// configured set, so the same reclassification has to move this answer too, as
+// it moves `bd list --assignee`.
+func RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	assignee := statsReporterAssignee(fixture, "ainfra")
+	setStatsReporterInfraTypes(t, ctx, fixture, "message")
+
+	plain := statsReporterSeed(fixture, "ainfra-plain", types.StatusOpen)
+	plain.Assignee = assignee
+	seedStatsReporterIssue(t, ctx, fixture, plain)
+	agent := statsReporterSeed(fixture, "ainfra-agent", types.StatusOpen)
+	agent.Assignee = assignee
+	agent.IssueType = types.IssueType("agent")
+	seedStatsReporterIssue(t, ctx, fixture, agent)
+
+	if got := statsReporterAssigneeSummary(t, ctx, fixture, assignee).InfraIssues; got != 0 {
+		t.Errorf("InfraIssues = %d with agent evicted from types.infra, want 0 - the count must follow the configured set, not the built-in names", got)
+	}
+
+	setStatsReporterInfraTypes(t, ctx, fixture, "agent,message")
+	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
+	if summary.TotalIssues != 2 {
+		t.Fatalf("TotalIssues = %d, want 2 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
+	}
+	if summary.InfraIssues != 1 {
+		t.Errorf("InfraIssues = %d, want 1 - the actor's agent row is in this answer but not in `bd list --assignee`", summary.InfraIssues)
+	}
+}
+
 // RunStatsReporterAssigneeStatsPopulatesBothPointers pins the clause
 // FoldStatsAssigneeSummary exists to guarantee: on this path BlockedIssues and
 // ReadyIssues are ALWAYS non-nil, including for an actor with no rows at all.
@@ -597,6 +665,7 @@ type statsReporterCounts struct {
 	blocked    int
 	gates      int
 	templates  int
+	infra      int
 }
 
 // assertStatsReporterDelta compares two summaries field by field against the
@@ -619,6 +688,7 @@ func assertStatsReporterDelta(t *testing.T, before, after types.Statistics, want
 		{"PinnedIssues", before.PinnedIssues, after.PinnedIssues, want.pinned},
 		{"GateIssues", before.GateIssues, after.GateIssues, want.gates},
 		{"TemplateIssues", before.TemplateIssues, after.TemplateIssues, want.templates},
+		{"InfraIssues", before.InfraIssues, after.InfraIssues, want.infra},
 	} {
 		if got := field.after - field.before; got != field.want {
 			t.Errorf("%s moved by %d (%d -> %d), want %d", field.name, got, field.before, field.after, field.want)
@@ -647,6 +717,36 @@ func statsReporterSeed(fixture StatsReporterFixture, suffix string, status types
 // statsReporterAssignee namespaces an actor to this fixture.
 func statsReporterAssignee(fixture StatsReporterFixture, suffix string) string {
 	return fixture.IssuePrefix + "-actor-" + suffix
+}
+
+// setStatsReporterInfraTypes writes types.infra for the rest of the case. An
+// agent row has to stay creatable once agent is evicted from the infra set, so
+// it also names agent in types.custom, as the issue-operations create contract
+// does for the same path.
+func setStatsReporterInfraTypes(t *testing.T, ctx context.Context, fixture StatsReporterFixture, value string) {
+	t.Helper()
+	setStatsReporterConfig(t, ctx, fixture, "types.custom", "agent")
+	setStatsReporterConfig(t, ctx, fixture, "types.infra", value)
+}
+
+// setStatsReporterConfig writes one config key for the rest of the case and
+// restores the unconfigured value when it ends. Every backend reads an empty
+// types.infra or types.custom as unconfigured (built-in infra set, no custom
+// types), so the cases sharing this database see the configuration they would
+// have without this one.
+func setStatsReporterConfig(t *testing.T, ctx context.Context, fixture StatsReporterFixture, key, value string) {
+	t.Helper()
+	if fixture.SetConfig == nil {
+		t.Skipf("this fixture has no SetConfig hook, so it cannot configure %s", key)
+	}
+	if err := fixture.SetConfig(ctx, key, value); err != nil {
+		t.Fatalf("SetConfig(%s, %q): %v", key, value, err)
+	}
+	t.Cleanup(func() {
+		if err := fixture.SetConfig(context.WithoutCancel(ctx), key, ""); err != nil {
+			t.Errorf("restore %s: %v", key, err)
+		}
+	})
 }
 
 func seedStatsReporterIssue(t *testing.T, ctx context.Context, fixture StatsReporterFixture, issue *types.Issue) {

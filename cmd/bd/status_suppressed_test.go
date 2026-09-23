@@ -40,6 +40,16 @@ func TestSuppressedTypeSummary(t *testing.T) {
 			stats: &types.Statistics{TotalIssues: 5, TemplateIssues: 1},
 			want:  "1 template (--include-templates)",
 		},
+		{
+			name:  "one infra-typed issue",
+			stats: &types.Statistics{TotalIssues: 2, InfraIssues: 1},
+			want:  "1 infra-typed issue (--include-infra)",
+		},
+		{
+			name:  "all three, in listing order",
+			stats: &types.Statistics{TotalIssues: 9, GateIssues: 2, TemplateIssues: 1, InfraIssues: 3},
+			want:  "2 gates (--include-gates), 1 template (--include-templates), 3 infra-typed issues (--include-infra)",
+		},
 	}
 
 	for _, tt := range tests {
