@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -47,17 +46,24 @@ const (
 	ProxyOutcomeRefused   ProxyCapabilityOutcome = "refused"
 	ProxyOutcomeDelegated ProxyCapabilityOutcome = "delegated"
 	ProxyOutcomeNA        ProxyCapabilityOutcome = "N/A"
+	// ProxyOutcomeRefusedInRunE records a path the gate permits and that the
+	// command then refuses itself, untyped, from RunE. It is inventory, not
+	// policy: nothing enforces it. See capability_registry.go.
+	ProxyOutcomeRefusedInRunE ProxyCapabilityOutcome = "refused-in-run"
 )
 
 // proxyCapabilityRule is the stable contract for one command/argument/topology
 // capability. Mutates is false for all refusals; ExitCode is used by the CLI
-// when rendering a typed refusal.
+// when rendering a typed refusal. Reason and Tracking say why a refusal exists
+// and who closes it — see the header of capability_registry.go.
 type proxyCapabilityRule struct {
 	Outcome  ProxyCapabilityOutcome
 	Code     string
 	Message  string
 	ExitCode int
 	Mutates  bool
+	Reason   ProxyRefusalReason
+	Tracking string
 }
 
 // ProxyCapabilityError is a machine-identifiable front-door refusal.
@@ -66,12 +72,39 @@ type ProxyCapabilityError struct {
 	Message  string
 	ExitCode int
 	Mutates  bool
+	Reason   ProxyRefusalReason
 }
 
 func (e *ProxyCapabilityError) Error() string { return e.Message }
 
-func refused(code, message string) proxyCapabilityRule {
-	return proxyCapabilityRule{Outcome: ProxyOutcomeRefused, Code: code, Message: message, ExitCode: 1}
+// errProxiedStoreUnrouted is the backstop for a command that the front door
+// permitted and that then asked for a classic store on a proxied-server
+// workspace. The proxied topology has no such store — the provider owns the
+// connection — so the factory refuses rather than opening the proxied root a
+// second time behind the proxy's back, which is the one failure mode every
+// slice of this work must not regress.
+//
+// Reaching this is a routing gap in the command, not a policy decision: the
+// registry says the gate permits the path, and permitting a path is not a
+// promise that a proxied route exists for it. The owner is therefore whichever
+// slice routes the command that landed here, which is why the reason is
+// "unimplemented" and no single tracking item fits. It is typed so that a
+// caller can classify it; before the registry there was no way to tell this
+// apart from a genuine store failure.
+func errProxiedStoreUnrouted() error {
+	return &ProxyCapabilityError{
+		Code:     "proxy.store.unrouted",
+		Message:  "this command has no proxied-server route; bd will not open a proxied-server workspace as a direct store",
+		ExitCode: 1,
+		Reason:   ProxyReasonUnimplemented,
+	}
+}
+
+func refused(code, message string, reason ProxyRefusalReason, tracking string) proxyCapabilityRule {
+	return proxyCapabilityRule{
+		Outcome: ProxyOutcomeRefused, Code: code, Message: message, ExitCode: 1,
+		Reason: reason, Tracking: tracking,
+	}
 }
 
 func honored() proxyCapabilityRule {
@@ -82,7 +115,7 @@ func notApplicable() proxyCapabilityRule { return proxyCapabilityRule{Outcome: P
 
 // ProxyCapabilityKey identifies a command's flag/argument on a topology.
 // Command is the command's path below the root ("dep tree", "mol ready"),
-// never its cobra leaf name — see proxyCommandPath. Argument is intentionally
+// never its cobra leaf name — see commandRegistryPath. Argument is intentionally
 // explicit (for example, "--watch"), allowing callers and tests to
 // distinguish a command that lacks a flag (N/A) from one that refuses it.
 type ProxyCapabilityKey struct {
@@ -96,114 +129,6 @@ type ProxyCapabilityKey struct {
 type ProxyCapabilityRow struct {
 	ProxyCapabilityKey
 	Rule proxyCapabilityRule
-}
-
-var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
-	"doctor":           refused("proxy.doctor.unsupported", "doctor is not supported in proxied-server mode"),
-	"backup":           refused("proxy.backup.unsupported", "backup is not supported in proxied-server mode"),
-	"restore":          refused("proxy.restore.unsupported", "restore is not supported in proxied-server mode"),
-	"diff":             refused("proxy.diff.unsupported", "diff is not supported in proxied-server mode"),
-	"flatten":          refused("proxy.flatten.unsupported", "flatten is not supported in proxied-server mode"),
-	"migrate":          refused("proxy.migrate.unsupported", "migrate is not supported in proxied-server mode"),
-	"migrate-personal": refused("proxy.migrate.unsupported", "migrate-personal is not supported in proxied-server mode"),
-	"branch":           refused("proxy.branch.unsupported", "branch is not supported in proxied-server mode"),
-	"conflicts":        refused("proxy.conflicts.unsupported", "conflicts is not supported in proxied-server mode"),
-	"vc":               refused("proxy.vc.unsupported", "vc is not supported in proxied-server mode"),
-	"federation":       refused("proxy.federation.unsupported", "federation is not supported in proxied-server mode"),
-	"repo":             refused("proxy.repo.unsupported", "repo is not supported in proxied-server mode"),
-	// The wording deliberately names the real command path. The long-standing
-	// compact.go refusal this gate short-circuits said "compact --dolt", which
-	// reads as the root `bd compact` — a different command with no --dolt flag
-	// and its own proxied route. compact.go carries the corrected string too,
-	// so the gate and its fallback cannot drift apart again.
-	"admin compact":          refused("proxy.compact.unsupported", "only 'bd admin compact --dolt' is supported in proxied-server mode"),
-	"backup init":            refused("proxy.backup.unsupported", "backup init is not supported in proxied-server mode"),
-	"backup sync":            refused("proxy.backup.unsupported", "backup sync is not supported in proxied-server mode"),
-	"backup remove":          refused("proxy.backup.unsupported", "backup remove is not supported in proxied-server mode"),
-	"backup status":          refused("proxy.backup.unsupported", "backup status is not supported in proxied-server mode"),
-	"backup restore":         refused("proxy.backup.unsupported", "backup restore is not supported in proxied-server mode"),
-	"migrate sync":           refused("proxy.migrate.unsupported", "migrate sync is not supported in proxied-server mode"),
-	"migrate-issues":         refused("proxy.migrate.unsupported", "migrate-issues is not supported in proxied-server mode"),
-	"gate discover":          refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
-	"admin cleanup":          refused("proxy.admin.unsupported", "admin cleanup is not supported in proxied-server mode"),
-	"admin reset":            refused("proxy.admin.unsupported", "admin reset is not supported in proxied-server mode"),
-	"dolt push":              refused("proxy.dolt_push.unsupported", "dolt push is not supported in proxied-server mode"),
-	"dolt pull":              refused("proxy.dolt_pull.unsupported", "dolt pull is not supported in proxied-server mode"),
-	"dolt commit":            refused("proxy.dolt_commit.unsupported", "dolt commit is not supported in proxied-server mode"),
-	"dolt remote":            refused("proxy.dolt_remote.unsupported", "dolt remote is not supported in proxied-server mode"),
-	"dolt remote add":        refused("proxy.dolt_remote.unsupported", "dolt remote add is not supported in proxied-server mode"),
-	"dolt remote list":       refused("proxy.dolt_remote.unsupported", "dolt remote list is not supported in proxied-server mode"),
-	"cook":                   refused("proxy.formula.unsupported", "cook is not supported in proxied-server mode"),
-	"ship":                   refused("proxy.formula.unsupported", "ship is not supported in proxied-server mode"),
-	"swarm create":           refused("proxy.swarm.unsupported", "swarm create is not supported in proxied-server mode"),
-	"swarm list":             refused("proxy.swarm.unsupported", "swarm list is not supported in proxied-server mode"),
-	"merge-slot create":      refused("proxy.merge_slot.unsupported", "merge-slot create is not supported in proxied-server mode"),
-	"merge-slot check":       refused("proxy.merge_slot.unsupported", "merge-slot check is not supported in proxied-server mode"),
-	"merge-slot acquire":     refused("proxy.merge_slot.unsupported", "merge-slot acquire is not supported in proxied-server mode"),
-	"merge-slot release":     refused("proxy.merge_slot.unsupported", "merge-slot release is not supported in proxied-server mode"),
-	"dolt remote reset-data": refused("proxy.dolt_remote.unsupported", "dolt remote reset-data is not supported in proxied-server mode"),
-	"sync":                   refused("proxy.sync.unsupported", "sync is not supported in proxied-server mode"),
-}
-
-func init() {
-	for parent, children := range map[string][]string{
-		"vc":         {"merge", "commit", "status"},
-		"federation": {"sync", "status", "add-peer", "remove-peer", "list-peers"},
-		"repo":       {"add", "remove", "list", "sync"},
-		"conflicts":  {"list", "show", "resolve"},
-		"migrate":    {"hooks", "issues"},
-	} {
-		rule := proxyMaintenanceRefusals[parent]
-		for _, child := range children {
-			path := parent + " " + child
-			proxyMaintenanceRefusals[path] = refused(rule.Code, path+" is not supported in proxied-server mode")
-		}
-	}
-}
-
-// proxyCommandPath returns a command's path below the root: "dolt remote add"
-// for `bd dolt remote add`, "ready" for `bd ready`, "" for the bare root.
-//
-// Every front-door policy table is keyed on this rather than on cobra's
-// Name(), which is only the leaf: two commands in different subtrees can
-// share one, and `bd ready` and `bd mol ready --gated` do. A Name()-keyed
-// rule silently applies to both, so a refusal written for one command lands
-// on an unrelated command that no policy row authorizes.
-func proxyCommandPath(cmd *cobra.Command) string {
-	if cmd == nil {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
-}
-
-// validateProxyMaintenanceBeforeProvider rejects known direct-only commands
-// before migrations, auto-start, or provider construction.
-func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
-	if cmd == nil {
-		return nil
-	}
-	path := proxyCommandPath(cmd)
-	if path == "admin compact" {
-		// `bd admin compact --dolt` is the one supported shape. Root `bd
-		// compact` is a different command (the Dolt history compaction) with
-		// its own proxied route and no --dolt flag; keying on the path rather
-		// than the leaf name is what keeps the two apart.
-		if dolt, _ := cmd.Flags().GetBool("dolt"); dolt {
-			return nil
-		}
-		rule := proxyMaintenanceRefusals[path]
-		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
-	}
-	if rule, ok := proxyMaintenanceRefusals[path]; ok {
-		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
-	}
-	if class, ok := LookupHistoryCapability(path); ok && class == HistoryDirectOnly {
-		// Paths the refusal table names explicitly already returned above, so
-		// this is the generic direct-only refusal for the rest.
-		rule := refused("proxy.history.unsupported", path+" is not supported in proxied-server mode")
-		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode, Mutates: rule.Mutates})
-	}
-	return nil
 }
 
 // LookupProxyCapabilityFor returns the command/argument-specific rule. An
@@ -223,21 +148,50 @@ func LookupProxyCapabilityFor(command, argument string, mode ProxyMode) (proxyCa
 	return LookupProxyCapability(mode, capability)
 }
 
+// Shared by the mode-wide rule and its per-command overrides, so a command that
+// refuses one of these refuses it with the same words and the same reason.
+var (
+	// The cap is refused rather than silently dropped, which is right; the fix
+	// is threading it through the UOW reader the way `list` already does, so
+	// the refusal itself is the gap.
+	maxRowsRefusal = refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode", ProxyReasonUnimplemented, trackLongTail)
+	// `list --watch` is routed, so watching is possible over the provider;
+	// nothing else has been wired to it.
+	watchRefusal = refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode", ProxyReasonUnimplemented, trackLongTail)
+	// --repo routes to another workspace, bypassing the proxied root entirely,
+	// which is why it is design rather than a gap. `bd list` honors a repo
+	// override and refuses it at runtime, so its row specializes this rule
+	// instead of claiming the flag is absent.
+	repoRefusal = refused("proxy.repo.unsupported", "--repo is not supported with --proxied-server", ProxyReasonDesign, "")
+)
+
+// proxyCapabilityMatrix is the flag-keyed half of the policy; the path-keyed
+// half is the registry in capability_registry.go. Reasons follow the same rule
+// there and here.
+//
+// Strict --readonly is the one capability that needs real backend work rather
+// than routing: it is a GUARANTEE, the proxied provider carries no read-only
+// posture, and the only honest implementation is a read-only SQL principal on
+// the backend — which on external topologies is the operator's configuration,
+// not bd's. A best-effort version would betray exactly the workflows that ask
+// for it, so it is refused by design until that principal exists. --repo is
+// design for a simpler reason: it routes to another workspace, bypassing the
+// proxied root entirely.
 var proxyCapabilityMatrix = map[ProxyMode]map[ProxyCapability]proxyCapabilityRule{
 	ProxyModeDirect: {
 		ProxyCapReadonly: honored(), ProxyCapMaxRows: honored(),
 		ProxyCapWatch: honored(), ProxyCapRepo: honored(),
 	},
 	ProxyModeProxied: {
-		ProxyCapReadonly: refused("proxy.readonly.unsupported", "strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access"),
-		ProxyCapMaxRows:  refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode"),
-		ProxyCapWatch:    refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode"),
-		ProxyCapRepo:     refused("proxy.repo.unsupported", "--repo is not supported with --proxied-server"),
+		ProxyCapReadonly: refused("proxy.readonly.unsupported", "strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access", ProxyReasonDesign, "1.4 candidate: read-only SQL principal on the backend"),
+		ProxyCapMaxRows:  maxRowsRefusal,
+		ProxyCapWatch:    watchRefusal,
+		ProxyCapRepo:     repoRefusal,
 	},
 }
 
 // proxyCommandCapabilities overrides the mode-wide default for one command.
-// Keys are command paths (proxyCommandPath), so a row lands on the command it
+// Keys are command paths (commandRegistryPath), so a row lands on the command it
 // was written for and on nothing else. The "mol ready" row is a documentation
 // pin rather than the guard: path keying is what stops `bd mol ready --gated`
 // from inheriting the refusal `bd ready` carries on their shared leaf name
@@ -245,13 +199,13 @@ var proxyCapabilityMatrix = map[ProxyMode]map[ProxyCapability]proxyCapabilityRul
 // refuse. TestProxyCapabilityPolicyKeysResolveInRealCommandTree keeps the pin
 // honest by failing if the path it names stops existing.
 var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]proxyCapabilityRule{
-	"show":            {ProxyModeProxied: {ProxyCapWatch: refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode")}},
-	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: refused("proxy.repo.unsupported", "--repo is not supported with --proxied-server")}},
+	"show":            {ProxyModeProxied: {ProxyCapWatch: watchRefusal}},
+	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: repoRefusal}},
 	"dep tree":        {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
-	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")}},
+	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
 	"mol ready":       {ProxyModeProxied: {ProxyCapMaxRows: notApplicable()}},
-	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")}},
-	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")}},
+	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
+	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
 }
 
 // proxyCapabilityRows materializes the policy for every supported proxied
@@ -326,13 +280,17 @@ func proxyCapabilityAllowed(outcome ProxyCapabilityOutcome) bool {
 // Error() is the empty string, which the CLI prints as a bare "Error: " with
 // exit 1 — the least debuggable failure available — so it falls back to a
 // generic message no matter how a future rule is written.
+// It builds the typed error through proxyCapabilityErrorFor so a rule's Reason
+// reaches the JSON refusal here exactly as it does from the registry half; a
+// local struct literal would silently drop it.
 func proxyCapabilityRuleError(rule proxyCapabilityRule, capability ProxyCapability, mode ProxyMode) error {
 	if rule.Code != "" {
-		message := rule.Message
-		if message == "" {
-			message = fmt.Sprintf("%s is not supported in %s mode", capability, mode)
+		if rule.Message == "" {
+			// rule is a copy, so this fills the fallback in for this render
+			// only and never edits the policy table.
+			rule.Message = fmt.Sprintf("%s is not supported in %s mode", capability, mode)
 		}
-		return &ProxyCapabilityError{Code: rule.Code, Message: message, ExitCode: rule.ExitCode, Mutates: rule.Mutates}
+		return proxyCapabilityErrorFor(rule)
 	}
 	if rule.Message != "" {
 		return fmt.Errorf("%s", rule.Message)
@@ -341,7 +299,7 @@ func proxyCapabilityRuleError(rule proxyCapabilityRule, capability ProxyCapabili
 }
 
 // AssertProxyCommandCapability checks a command-specific capability rule.
-// command is a command path (proxyCommandPath), not a cobra leaf name.
+// command is a command path (commandRegistryPath), not a cobra leaf name.
 func AssertProxyCommandCapability(command string, mode ProxyMode, capability ProxyCapability) error {
 	if commands, ok := proxyCommandCapabilities[command]; ok {
 		if modes, ok := commands[mode]; ok {
@@ -366,7 +324,7 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 	if cmd == nil {
 		return nil
 	}
-	path := proxyCommandPath(cmd)
+	path := commandRegistryPath(cmd)
 	if path == "create" && cmd.Flags().Changed("repo") {
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}

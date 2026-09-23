@@ -70,9 +70,7 @@ func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readO
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, s, err) }()
 	if cfg.ProxiedServer {
-		// TODO: this should not be a store
-		// it should be a uow provider
-		return nil, fmt.Errorf("proxy server store should be uow provider")
+		return nil, errProxiedStoreUnrouted()
 	}
 	if cfg.ServerMode {
 		return dolt.New(ctx, cfg)
@@ -108,6 +106,16 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage,
 		// arm above honors the same cfg.LenientOpen inside dolt.New; this
 		// branch is the embedded half of one policy, not the whole of it.
 		return embeddeddolt.OpenForWorkingSetReconcile(ctx, cfg.BeadsDir, cfg.Database, "main")
+	}
+	if cfg.RemoteSyncOpen {
+		// `bd dolt pull` must not be bricked by the #6575 data-behind gate
+		// refusal, because that refusal's entire remedy IS this pull: the gate
+		// stops a clone that is behind the remote from migrating and tells the
+		// operator to pull first, and an embedded clone has no external dolt
+		// binary to do it with. Same deadlock as #4566, and this open tolerates
+		// only that one gate reason (see openRemoteSync). The server arm above
+		// honors the same cfg.RemoteSyncOpen inside dolt.New.
+		return embeddeddolt.OpenForRemoteSync(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	return embeddeddolt.Open(ctx, cfg.BeadsDir, cfg.Database, "main")
 }
@@ -162,13 +170,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 		return backend.Open(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store should be uow provider")
-		// 	return newProxiedServerStore(ctx, &dolt.Config{
-		// 		BeadsDir:      beadsDir,
-		// 		Database:      cfg.GetDoltDatabase(),
-		// 		ProxiedServer: true,
-		// 	})
+		return nil, errProxiedStoreUnrouted()
 	}
 	if cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfig(ctx, beadsDir)
@@ -270,14 +272,7 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 		return backend.OpenReadOnly(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store needs to be uow provider")
-		// return newProxiedServerStore(ctx, &dolt.Config{
-		// 	BeadsDir:      beadsDir,
-		// 	Database:      cfg.GetDoltDatabase(),
-		// 	ProxiedServer: true,
-		// 	ReadOnly:      true,
-		// })
+		return nil, errProxiedStoreUnrouted()
 	}
 	if cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})

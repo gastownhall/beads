@@ -50,7 +50,7 @@ func realCommandPaths(t *testing.T) map[string]bool {
 	paths := map[string]bool{}
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
-		if path := proxyCommandPath(c); path != "" {
+		if path := commandRegistryPath(c); path != "" {
 			paths[path] = true
 		}
 		for _, child := range c.Commands() {
@@ -70,24 +70,26 @@ func realCommandAtPath(t *testing.T, path string) *cobra.Command {
 	if err != nil {
 		t.Fatalf("resolve %q in the real command tree: %v", path, err)
 	}
-	if got := proxyCommandPath(found); got != path {
+	if got := commandRegistryPath(found); got != path {
 		t.Fatalf("resolve %q in the real command tree = %q", path, got)
 	}
 	return found
 }
 
 // TestProxyCapabilityPolicyKeysResolveInRealCommandTree is the drift guard for
-// both policy tables. Every key must name a command that exists, so a renamed
-// or removed command turns into a test failure instead of a rule that silently
-// stops applying.
+// the flag-keyed policy table. Every key must name a command that exists, so a
+// renamed or removed command turns into a test failure instead of a rule that
+// silently stops applying.
 func TestProxyCapabilityPolicyKeysResolveInRealCommandTree(t *testing.T) {
 	paths := realCommandPaths(t)
 	for _, table := range []struct {
 		name string
 		keys []string
 	}{
+		// The path-keyed half (proxyCapabilityRegistry) has its own drift guard
+		// in TestProxyCapabilityRegistryHasNoStaleRows, so only the flag-keyed
+		// table is checked here.
 		{"proxyCommandCapabilities", slices.Sorted(maps.Keys(proxyCommandCapabilities))},
-		{"proxyMaintenanceRefusals", slices.Sorted(maps.Keys(proxyMaintenanceRefusals))},
 	} {
 		for _, key := range table.keys {
 			if !paths[key] {
@@ -99,7 +101,7 @@ func TestProxyCapabilityPolicyKeysResolveInRealCommandTree(t *testing.T) {
 
 // TestProxyFrontDoorBranchesUseRealCommandPaths pins the command paths the
 // three front-door branches key on by hand: the two validators, plus the
-// skipsStoreInit route into validateProxyMaintenanceBeforeProvider in main.go.
+// skipsStoreInit route into validateProxyRegistryBeforeProvider in main.go.
 // This is the assertion that would have failed on the leaf-name keying: a
 // branch written for `bd ready` must name a path, because "ready" as a leaf
 // name is also `bd mol ready --gated`.
@@ -156,7 +158,7 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 			stderr := captureStderr(t, func() {
 				err = validateProxyCapabilitiesBeforeProvider(cmd)
 				if err == nil {
-					err = validateProxyMaintenanceBeforeProvider(cmd)
+					err = validateProxyRegistryBeforeProvider(cmd)
 				}
 			})
 			if tc.wantRefuse {
@@ -338,7 +340,7 @@ func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
 		root.AddCommand(parent)
 		parent.AddCommand(child)
 		out := captureStdout(t, func() error {
-			_ = validateProxyMaintenanceBeforeProvider(child)
+			_ = validateProxyRegistryBeforeProvider(child)
 			return nil
 		})
 		if !strings.Contains(out, `"code":`) {
@@ -358,7 +360,7 @@ func TestProxyFormulaSwarmMergeSlotRefusals(t *testing.T) {
 			cmd.AddCommand(child)
 			cmd = child
 		}
-		err := validateProxyMaintenanceBeforeProvider(cmd)
+		err := validateProxyRegistryBeforeProvider(cmd)
 		if err == nil {
 			t.Fatalf("%s unexpectedly allowed", path)
 		}
@@ -396,7 +398,7 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 			if !ok || row.Code != tc.code || row.Message != tc.message || row.ExitCode != 1 || row.Mutates {
 				t.Fatalf("row = %#v, ok=%v", row, ok)
 			}
-			var typed *ProxyCapabilityError = &ProxyCapabilityError{Code: row.Code, Message: row.Message, ExitCode: row.ExitCode, Mutates: row.Mutates}
+			typed := proxyCapabilityErrorFor(row)
 			if typed.Code != tc.code || typed.Message != tc.message || typed.ExitCode != 1 || typed.Mutates {
 				t.Fatalf("typed refusal = %#v", typed)
 			}
@@ -419,7 +421,7 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 			oldDidWrite := commandDidWrite.Load()
 			commandDidWrite.Store(false)
 			t.Cleanup(func() { commandDidWrite.Store(oldDidWrite) })
-			out := captureStdout(t, func() error { _ = validateProxyMaintenanceBeforeProvider(cmd); return nil })
+			out := captureStdout(t, func() error { _ = validateProxyRegistryBeforeProvider(cmd); return nil })
 			var got map[string]any
 			if err := json.Unmarshal([]byte(out), &got); err != nil || got["code"] != tc.code || got["error"] != tc.message {
 				t.Fatalf("JSON refusal = %q (%v)", out, err)
@@ -438,8 +440,8 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 }
 
 func lookupProxyMaintenanceRuleForTest(path string) (proxyCapabilityRule, bool) {
-	rule, ok := proxyMaintenanceRefusals[path]
-	return rule, ok
+	row, ok := LookupCapabilityRow(path, "")
+	return row.Rule, ok
 }
 
 func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
@@ -456,7 +458,7 @@ func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
 	oldProvider := uowProvider
 	uowProvider = nil
 	t.Cleanup(func() { uowProvider = oldProvider })
-	err := validateProxyMaintenanceBeforeProvider(hooks)
+	err := validateProxyRegistryBeforeProvider(hooks)
 	if err == nil {
 		t.Fatal("expected typed maintenance refusal")
 	}
@@ -485,7 +487,7 @@ func newWatchShowCommand(t *testing.T) *cobra.Command {
 	if err := cmd.Flags().Set("watch", "true"); err != nil {
 		t.Fatal(err)
 	}
-	if got := proxyCommandPath(cmd); got != "show" {
+	if got := commandRegistryPath(cmd); got != "show" {
 		t.Fatalf("test command path = %q, want %q", got, "show")
 	}
 	return cmd

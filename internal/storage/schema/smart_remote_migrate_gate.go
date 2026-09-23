@@ -12,9 +12,10 @@ import (
 // gate would fire, it consults the remote's cached schema state and
 // auto-resolves the one provably-safe case (first-mover migrate), while still
 // stopping — with sharper guidance — on the cases that genuinely need a human.
-// Every fallback path (unreadable remote state, below the convergence floor)
-// degrades to the blunt #4515 block, so the default is never less safe than
-// the blunt gate; it only resolves cases the blunt gate cannot distinguish.
+// Every fallback path (unreadable remote state, below the convergence floor,
+// a clone behind the remote in data commits) degrades to the blunt #4515
+// block, so the default is never less safe than the blunt gate; it only
+// resolves cases the blunt gate cannot distinguish.
 //
 // Set BD_SMART_GATE=0 (or any boolean false) to opt out and keep the blunt
 // #4515 behavior unconditionally: any remote-backed database with pending
@@ -128,6 +129,28 @@ const (
 	// a TOCTOU miss, or the merge itself refusing) falls through to the
 	// plain smartAdopt directive instead, never forcing the write.
 	smartAdoptFastForward
+	// smartDataBehind (gastownhall/beads#6575): schema parity with the cached
+	// remote ref holds — the first-mover precondition — but local HEAD is
+	// BEHIND that ref with no local commits of its own (ahead == 0,
+	// behind >= 1), so this clone is missing DATA commits it has not pulled.
+	// Migrating in place here mints local-only schema commits on a HEAD that
+	// lacks those commits; when the pending batch moves a tracked table onto
+	// the dolt_ignore plane (0062's events), every subsequent `bd dolt pull`
+	// then refuses (#6368) and the clone can no longer fetch the very commits
+	// it was behind on. Stop, and direct the operator to pull first — a pure
+	// fast-forward in this shape — after which the same open auto-migrates as
+	// a true first-mover.
+	smartDataBehind
+	// smartDataDiverged is smartDataBehind's other shape: behind >= 1 AND
+	// ahead >= 1, i.e. this clone has unpushed local commits as well as
+	// unpulled remote ones. It reaches the identical wedge — the pending
+	// migration lands on a HEAD missing the remote's commits either way — so
+	// it stops for the same reason. It is a separate verdict only because the
+	// remedy behaves differently: `bd dolt pull` MERGES here rather than
+	// fast-forwarding, and can report conflicts the operator has to resolve
+	// before it completes. bd auto-commits every write, so this is the
+	// ORDINARY multi-machine shape, not an exotic one.
+	smartDataDiverged
 )
 
 // FastForwardAdopter injects the driver-side fast-forward primitives that
@@ -149,6 +172,20 @@ type FastForwardAdopter struct {
 	// IsStrictAncestor reports whether local HEAD is a strict ancestor of
 	// ref (versioncontrolops.LocalIsStrictAncestorOf).
 	IsStrictAncestor func(ctx context.Context, db DBConn, ref string) (bool, error)
+	// AheadBehind reports the raw commit counts behind IsStrictAncestor:
+	// how many commits local HEAD has that ref lacks, and how many ref has
+	// that local lacks (versioncontrolops.LocalAheadBehind). The
+	// data-behind stop (gastownhall/beads#6575) needs behind >= 1 whatever
+	// ahead is, which IsStrictAncestor's ahead == 0 && behind >= 1 cannot
+	// express, and needs to tell the two shapes apart so the remedy it
+	// prints matches the pull the operator will actually get (fast-forward
+	// vs merge).
+	//
+	// A nil AheadBehind is safe: localDataBehind falls back to
+	// IsStrictAncestor, which reports only the ahead == 0 shape — the
+	// narrower, pre-#6575-widening behavior — so an injection site that
+	// wires only the older callback keeps working.
+	AheadBehind func(ctx context.Context, db DBConn, ref string) (ahead, behind int, err error)
 	// WorkingSetClean reports whether the working set has no uncommitted
 	// changes, dolt-ignored wisp tables excepted
 	// (versioncontrolops.WorkingSetClean).
@@ -192,6 +229,54 @@ func routeAdoptFastForward(ctx context.Context, db DBConn, ref string, adopt *Fa
 		return false
 	}
 	return true
+}
+
+// localDataBehind reports whether local HEAD is missing commits that ref has
+// (behind >= 1) and, when it is, whether the clone ALSO has commits of its own
+// that ref lacks (ahead >= 1 — the diverged shape). It is the equal-version
+// path's only ancestry fact (gastownhall/beads#6575).
+//
+// The predicate is behind >= 1 regardless of ahead, not the narrower strict-
+// ancestor relation the remote-ahead path uses. Both shapes reach the same
+// wedge: the migration lands on a HEAD missing the remote's commits either
+// way, and the ignore-plane flip then refuses every later `bd dolt pull`.
+// Since bd auto-commits every write, "has local commits AND is behind" is the
+// ordinary multi-machine state, so restricting the stop to ahead == 0 would
+// leave the larger half of the affected cohort unprotected. A level clone
+// (behind == 0) and a purely-ahead clone (behind == 0, ahead >= 1) are still
+// permitted — they are genuine first-movers with nothing to pull.
+//
+// adopt may be nil, or wire neither callback (the shared unit-of-work
+// provider's injection site) — then there is no ancestry fact to read and
+// routing stays exactly as it was before this check existed. With only
+// IsStrictAncestor wired, the fact narrows to the ahead == 0 shape; the
+// diverged shape then reads "not behind", which is the pre-widening
+// behavior rather than a new hazard.
+//
+// Unlike routeAdoptFastForward, a query error is NOT folded into "false":
+// here false means "permit the more automatic action", so an inconclusive
+// read has to be reported to the caller and degrade to the blunt block.
+func localDataBehind(ctx context.Context, db DBConn, ref string, adopt *FastForwardAdopter) (behind bool, diverged bool, err error) {
+	if adopt == nil {
+		return false, false, nil
+	}
+	if adopt.AheadBehind != nil {
+		ahead, behindCount, err := adopt.AheadBehind(ctx, db, ref)
+		if err != nil {
+			return false, false, err
+		}
+		return behindCount >= 1, behindCount >= 1 && ahead >= 1, nil
+	}
+	if adopt.IsStrictAncestor == nil {
+		return false, false, nil
+	}
+	ancestor, err := adopt.IsStrictAncestor(ctx, db, ref)
+	if err != nil {
+		return false, false, err
+	}
+	// A strict ancestor is by definition ahead == 0, so this fallback can
+	// only ever report the non-diverged shape.
+	return ancestor, false, nil
 }
 
 // canAutoFastForward reports whether adopt is actually able to EXECUTE the
@@ -319,6 +404,29 @@ func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteN
 
 	// remote == local on every shared version and at the same max version: a first-mover.
 	if current >= LastNonDeterministicMigration {
+		// Schema parity is not proof of first-mover status
+		// (gastownhall/beads#6575). It says nothing about where this clone's
+		// branch sits relative to the ref the hashes just came from: a clone
+		// that is level on schema and behind on DATA satisfies every
+		// precondition above. Read the ancestry fact the caller already wired
+		// for the remote-ahead path before granting the automatic migrate.
+		behind, diverged, err := localDataBehind(ctx, db, ref, adopt)
+		if err != nil {
+			// Inconclusive ancestry read on a ref whose content hashes just
+			// resolved. Degrade to the blunt block rather than assume level:
+			// the gate's contract is that every fallback is at least as safe
+			// as #4515.
+			return smartUndetermined, nil, "", false
+		}
+		if behind {
+			// Same stop, same remedy command; the two verdicts differ only in
+			// what that command DOES (fast-forward vs merge), which the
+			// operator-facing text has to get right.
+			if diverged {
+				return smartDataDiverged, nil, ref, false
+			}
+			return smartDataBehind, nil, ref, false
+		}
 		return smartAutoMigrate, nil, ref, false
 	}
 	return smartBelowFloor, nil, ref, false
