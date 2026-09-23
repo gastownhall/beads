@@ -114,6 +114,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd show` counts a wisp's comments instead of reporting `comment_count: 0`**
+  ([#5565](https://github.com/gastownhall/beads/issues/5565)). On the
+  direct/embedded path, `CountIssueComments` always queried the permanent
+  `comments` table, while `GetIssueComments` routes an active wisp to
+  `wisp_comments`, so `--include-comments` returned rows the count said did
+  not exist and `comments_omitted` was never set. The count now routes by wisp
+  status the same way, matching proxied-server mode.
+
 - **`bd dolt start` no longer puts a second sql-server over a proxied
   workspace's data directory.** On a proxied-server workspace the default root
   IS `.beads/dolt`, and `bd dolt start` knew nothing about proxied mode: with
