@@ -145,8 +145,9 @@ func openStatsReporter() (issueops.StatsReporter, error) {
 // WORKSPACE-CONFIGURED types.infra set, which is what the listing reads: that
 // set replaces the built-in names, and changing it never moves rows already
 // written, so durable rows of a type that has since become infra are counted
-// here and hidden there. Its remedy names --all for the same reason the other
-// two do.
+// here and hidden there. Under --assigned the count covers the actor's rows of
+// those types on both planes, matching what that route's total counts. Its
+// remedy names --all for the same reason the other two do.
 func suppressedTypeSummary(stats *types.Statistics) string {
 	var parts []string
 	if stats.GateIssues > 0 {
