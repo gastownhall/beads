@@ -76,6 +76,78 @@ func TestReadyRefusesMaxRowsUnderProxiedServerOnClaim(t *testing.T) {
 	}
 }
 
+// TestReadyGatedSkipsMaxRowsRefusalUnderProxiedServer pins the third arm.
+// `bd ready --gated` and `bd mol ready --gated` are documented as the same
+// gate-resume scan, and on the proxied route they literally are one:
+// runReadyProxiedGated discards its readyInput and calls the same
+// findGateReadyMolecules as runMolReadyGatedProxiedServer. Neither threads a
+// row cap, so a cap must not refuse either spelling -- refusing only the
+// `bd ready` one split a single documented command line in half for anyone
+// with BEADS_MAX_ROWS exported.
+//
+// This goes through RunE rather than calling the helper, because RunE is where
+// the second refusal site lives: the pre-provider front door is pinned
+// separately against the real command tree in
+// TestProxyCapabilityFrontDoorAllowsSupportedCommands, and exempting one site
+// without the other just moves the refusal rather than removing it.
+//
+// The assertion is two-sided on purpose. A guard that swallowed the error
+// entirely would pass a "no refusal" check alone, so the test also requires
+// RunE to have reached the proxied dispatch -- uowProvider is nil here, so
+// runReadyProxiedServer's own message is the proof it got that far.
+func TestReadyGatedSkipsMaxRowsRefusalUnderProxiedServer(t *testing.T) {
+	pinProxiedServerMode(t)
+	pinJSONOutput(t, false)
+
+	if uowProvider != nil {
+		t.Fatal("precondition: uowProvider must be nil so the dispatch cannot open a real proxied connection")
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  string
+	}{
+		{name: "flag", args: []string{"--gated", "--max-rows", "5"}},
+		{name: "env", args: []string{"--gated"}, env: "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(maxRowsEnvVar, tc.env)
+			cmd := newReadyFlagsCommand(t, tc.args...)
+
+			var err error
+			stderr := captureStderr(t, func() { err = readyCmd.RunE(cmd, nil) })
+
+			if strings.Contains(stderr, "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode") {
+				t.Fatalf("proxied `bd ready %s` was refused for a cap the gated arm never uses: %q",
+					strings.Join(tc.args, " "), stderr)
+			}
+			if !strings.Contains(stderr, "proxied-server UOW provider not initialized") {
+				t.Fatalf("proxied `bd ready %s` did not reach the proxied dispatch: err=%v stderr=%q",
+					strings.Join(tc.args, " "), err, stderr)
+			}
+		})
+	}
+}
+
+// TestReadyClaimGatedKeepsMaxRowsRefusalUnderProxiedServer is the boundary of
+// the exemption above. `--claim --gated` is a usage error rather than a gated
+// run, so it must not pick up the gated arm's pass: the claim arm is the one
+// invocation that mutates on the far side of this guard, and it keeps the
+// refusal on every path into it. Without this, widening the exemption to a bare
+// `--gated` check would look correct.
+func TestReadyClaimGatedKeepsMaxRowsRefusalUnderProxiedServer(t *testing.T) {
+	pinProxiedServerMode(t)
+	pinJSONOutput(t, false)
+	t.Setenv(maxRowsEnvVar, "5")
+
+	err := rejectReadyMaxRowsUnderProxiedServer(newReadyFlagsCommand(t, "--claim", "--gated"))
+	if err == nil {
+		t.Fatal("proxied `bd ready --claim --gated` under a live cap was allowed; want the refusal the claim arm is owed")
+	}
+	assertExitCode(t, err, 1)
+}
+
 // TestReadyClaimWithoutLiveCapIsNotRefusedUnderProxiedServer is the other half:
 // the refusal is conditioned on a live cap, not on --claim. Without it, a guard
 // that rejected every proxied --claim would pass the test above.

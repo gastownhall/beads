@@ -64,7 +64,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			// this safety limit; malformed values remain usage errors. The
 			// pre-provider front door refuses the same cap first, so this is
 			// its backstop — both raise proxy.max_rows.unsupported.
-			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+			//
+			// --gated is skipped here as well as at the front door, and it has
+			// to be skipped in both places: this backstop calls
+			// AssertProxyCapability with an empty command, so it always
+			// resolves the mode-wide refusal and cannot honor the
+			// command-specific allow the front door's path-keyed assert reads.
+			// Exempting only the front door would move the split from one
+			// refusal site to the other, not close it.
+			if err := rejectReadyMaxRowsUnderProxiedServer(cmd); err != nil {
 				return err
 			}
 			return runReadyProxiedServer(cmd, rootCtx)
@@ -269,6 +277,50 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		maybeShowTip(store)
 		return nil
 	},
+}
+
+// readyGatedArm reports whether this `bd ready` invocation dispatches to the
+// gate-resume arm — the same scan `bd mol ready --gated` runs, and the reason
+// the row cap does not apply to it. Both proxied refusal sites call this, so
+// the exemption cannot land on one and miss the other.
+//
+// The arm lists molecules whose gate closed, never ready rows: on the direct
+// route --gated reaches runMolReadyGatedCore above any cap resolution, and on
+// the proxied route runReadyProxiedGated discards its readyInput and calls the
+// same findGateReadyMolecules as runMolReadyGatedProxiedServer. `mol ready`,
+// the documented alias, carries a notApplicable() cap row for exactly that
+// reason; keying the refusal on `bd ready` alone split one documented command
+// line across its two spellings.
+//
+// --claim is excluded deliberately. `--claim --gated` is a usage error
+// (gatherReadyInput), not a gated run, so the claim arm keeps the refusal it is
+// owed on every code path and this exemption cannot reopen it.
+func readyGatedArm(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if gated, _ := cmd.Flags().GetBool("gated"); !gated {
+		return false
+	}
+	claim, _ := cmd.Flags().GetBool("claim")
+	return !claim
+}
+
+// rejectReadyMaxRowsUnderProxiedServer is `bd ready`'s in-RunE backstop for the
+// row cap the proxied ready role cannot enforce. It exists as a named function
+// rather than an inline `if` so the exemption is reachable from a unit test:
+// the front door's half runs against the real command tree in
+// TestProxyCapabilityFrontDoorAllowsSupportedCommands, but this half sits
+// behind usesProxiedServer() and would otherwise be pinned only by the
+// env-gated proxied e2e lane.
+//
+// Call it in place of rejectMaxRowsUnderProxiedServer on this command; every
+// other capped command wants the unconditional form.
+func rejectReadyMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
+	if readyGatedArm(cmd) {
+		return nil
+	}
+	return rejectMaxRowsUnderProxiedServer(cmd)
 }
 
 // blockedFilterFromFlags builds the blocked-issue filter from blockedCmd's

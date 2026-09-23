@@ -22,11 +22,16 @@ import (
 
 func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer, in listInput) error {
 	if in.repoOverrideSet {
-		// The one live (non-shadowed) --repo refusal: the pre-provider gate
-		// covers `create` only, so this is the site the contract is read from.
-		// Typed, so the proxyCommandCapabilities["list"] row is the single
-		// source of the message and --json still gets code/mutates on stdout.
-		return HandleProxyCapabilityError(AssertProxyCommandCapability("list", ProxyModeProxied, ProxyCapRepo))
+		// Unreachable from the CLI: listCmd registers no --repo flag, so
+		// gatherListInput's Changed("repo") is always false. Kept as a
+		// defensive guard for the day one is added, and deliberately NOT keyed
+		// on proxyCommandCapabilities["list"] -- that row reads
+		// notApplicable() precisely because the flag is absent, so a
+		// command-keyed assert would resolve it to "allowed" and let a repo
+		// override through. The mode-wide rule is the one that still means
+		// something here, and it renders the same typed code/mutates on stdout
+		// under --json.
+		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
 	switch {
 	case in.watchMode:

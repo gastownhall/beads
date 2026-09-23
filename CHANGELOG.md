@@ -168,12 +168,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text. Exit statuses are unchanged; this applies on every topology.
 
 - **Proxied `--repo` and row-cap refusals are typed again**
-  ([#6293](https://github.com/gastownhall/beads/pull/6293)). `bd list --repo`
+  ([#6293](https://github.com/gastownhall/beads/pull/6293)). `bd create --repo`
   under `--proxied-server` answers `--json` with the stable
   `{"code": "proxy.repo.unsupported", …, "mutates": false}` on stdout rather
   than prose on stderr, and `bd ready --claim --max-rows N` refuses with the
   same `proxy.max_rows.unsupported` shape as `bd ready --max-rows N`: `--claim`
   does not exempt a row cap the proxied route cannot enforce either way.
+  `bd create` is the only command that registers `--repo`, so it is the only
+  command this refusal applies to.
 - **The proxied `bd admin compact` refusal names the command it means**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). The message is now
   "only 'bd admin compact --dolt' is supported in proxied-server mode"; it read
