@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -64,6 +65,8 @@ Examples:
 			"mode":          "direct",
 		}
 
+		suppressHookWarning := false
+
 		if store != nil {
 			ctx := rootCtx
 
@@ -86,6 +89,8 @@ Examples:
 				if filtered := workapi.FilterSettingsEnumeration(configMap); len(filtered) > 0 {
 					info["config"] = filtered
 				}
+				// GH#6027: honor the same doctor.suppress.git-hooks bd doctor does.
+				suppressHookWarning = doctor.SuppressedChecksFromConfig(configMap)[doctor.CheckNameToSlug("Git Hooks")]
 			}
 
 			if schemaFlag {
@@ -98,7 +103,7 @@ Examples:
 			}
 		}
 
-		return renderInfo(info, schemaFlag, absDBPath)
+		return renderInfo(info, schemaFlag, absDBPath, suppressHookWarning)
 	},
 }
 
@@ -140,7 +145,7 @@ func buildInfoSchema(schemaVersion, prefix string, issues []*types.Issue) map[st
 	}
 }
 
-func renderInfo(info map[string]interface{}, schemaFlag bool, absDBPath string) error {
+func renderInfo(info map[string]interface{}, schemaFlag bool, absDBPath string, suppressHookWarning bool) error {
 	if jsonOutput {
 		return outputJSON(info)
 	}
@@ -172,9 +177,11 @@ func renderInfo(info map[string]interface{}, schemaFlag bool, absDBPath string) 
 		}
 	}
 
-	hookStatuses := CheckGitHooks()
-	if warning := FormatHookWarnings(hookStatuses); warning != "" {
-		fmt.Printf("\n%s\n", warning)
+	if !suppressHookWarning {
+		hookStatuses := CheckGitHooks()
+		if warning := FormatHookWarnings(hookStatuses); warning != "" {
+			fmt.Printf("\n%s\n", warning)
+		}
 	}
 
 	fmt.Println()

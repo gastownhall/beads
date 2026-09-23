@@ -126,6 +126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its backend's lifecycle — it starts on demand and `bd dolt stop` shuts it
   down. Direct-server and embedded workspaces are unaffected.
 
+- **`bd info` honors `doctor.suppress.git-hooks`**
+  ([#6027](https://github.com/gastownhall/beads/issues/6027)). `bd info`
+  printed the "Git hooks not installed" / "outdated" warning unconditionally,
+  so suppressing the check for `bd doctor` left it nagging on every `bd info`.
+  It now reads the same `doctor.suppress.*` config through the doctor helper
+  and skips the warning when `git-hooks` is suppressed. `bd info --json` never
+  carried the warning and is unchanged.
+
 - **`bd dolt status` tells the truth on a proxied workspace.** It read the
   classic PID file, which proxied mode never writes, and so reported `Dolt
   server: not running` while the proxy was serving CRUD — the wrong answer
