@@ -2015,9 +2015,10 @@ type Statistics struct {
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 
 	// GateIssues, TemplateIssues and InfraIssues count rows the default
-	// `bd list` suppresses on account of what they are. They are already part of TotalIssues, which
-	// counts the database rather than the listing; they are broken out so the
-	// two commands can be reconciled instead of silently disagreeing.
+	// `bd list` suppresses on account of what they are. They are already part
+	// of TotalIssues, which counts the database rather than the listing; they
+	// are broken out so the two commands can be reconciled instead of silently
+	// disagreeing.
 	//
 	// THE POPULATION IS EVERY STATUS, exactly TotalIssues': a CLOSED gate is
 	// counted in GateIssues, and the two overlap the status buckets the way

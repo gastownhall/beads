@@ -659,6 +659,7 @@ var roleContractCases = []roleContract{
 		RunStatsReporterAssigneeStatsMergesTheWispTier,
 		RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows,
 		RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows,
+		RunStatsReporterAssigneeStatsCountsTheActorsInfraTypedWisps,
 		RunStatsReporterAssigneeStatsPopulatesBothPointers,
 		RunStatsReporterAssigneeStatsRefusesAnEmptyAssignee,
 	),
