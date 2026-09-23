@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -995,13 +997,15 @@ func TestNewIssueDetailsProjectsTheRevisionToken(t *testing.T) {
 		token int64
 		want  string
 	}{
-		{"a mutated row", 123456789, `"revision":123456789`},
-		{"a legacy un-mutated row", 0, `"revision":0`},
+		{"a mutated row", 123456789, `"revision":"123456789"`},
+		{"a legacy un-mutated row", 0, `"revision":"0"`},
+		{"a negative token", -3819021935081927, `"revision":"-3819021935081927"`},
+		{"a token past 2^53", 9007199254740993, `"revision":"9007199254740993"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			details := NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: tc.token})
-			if details.Revision != tc.token {
-				t.Errorf("Revision = %d, want %d", details.Revision, tc.token)
+			if details.Revision != RevisionToken(tc.token) {
+				t.Errorf("Revision = %q, want %q", details.Revision, RevisionToken(tc.token))
 			}
 
 			b, err := json.Marshal(details)
@@ -1018,6 +1022,79 @@ func TestNewIssueDetailsProjectsTheRevisionToken(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRevisionTokenIsAJSONString is the JS-safety pin: whatever the token, the
+// marshaled member is a QUOTED decimal, so no consumer that decodes JSON numbers
+// as IEEE-754 doubles can round it.
+//
+// It matches the bytes with a regexp rather than comparing a decoded value,
+// because a decoded value is exactly what the defect hides behind — Go's own
+// `any` decode of a JSON number is a float64 too, so a test that unmarshaled and
+// compared would agree with the broken wire shape for small tokens and disagree
+// with it for large ones for the wrong reason.
+func TestRevisionTokenIsAJSONString(t *testing.T) {
+	member := regexp.MustCompile(`"revision":"-?\d+"`)
+	for _, token := range []int64{0, 1, -1, 123456789, math.MaxInt64, math.MinInt64, 1 << 53, (1 << 53) + 1} {
+		b, err := json.Marshal(NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: token}))
+		if err != nil {
+			t.Fatalf("marshal with token %d: %v", token, err)
+		}
+		if !member.Match(b) {
+			t.Errorf("token %d marshaled to %s, want a quoted decimal `revision` member", token, b)
+		}
+	}
+}
+
+// TestRevisionTokenRoundTrips pins that the wire spelling is lossless across the
+// whole int64 range — the property the string exists for. A JSON number would
+// fail this above 2^53 in any double-based consumer.
+func TestRevisionTokenRoundTrips(t *testing.T) {
+	for _, token := range []int64{
+		math.MinInt64, -3819021935081927, -(1 << 53) - 1, -1, 0, 1,
+		1 << 53, (1 << 53) + 1, 9007199254740993, math.MaxInt64,
+	} {
+		got, err := ParseRevisionToken(RevisionToken(token))
+		if err != nil {
+			t.Errorf("ParseRevisionToken(RevisionToken(%d)): %v", token, err)
+			continue
+		}
+		if got != token {
+			t.Errorf("ParseRevisionToken(RevisionToken(%d)) = %d, want %d", token, got, token)
+		}
+	}
+}
+
+// TestRevisionTokenSurvivesAJavaScriptRealisticParse walks the round trip a
+// browser client actually performs — marshal, decode the member as the string it
+// is, parse it back — and proves the token that motivated this shape survives it.
+//
+// The float64 leg is the control: it is what a consumer got when the member was
+// a JSON number, and it is WRONG by 1 for this token. Without it the test would
+// pass on a broken wire shape too.
+func TestRevisionTokenSurvivesAJavaScriptRealisticParse(t *testing.T) {
+	const token = int64(9007199254740993) // 2^53 + 1, the smallest int64 a double cannot hold
+
+	b, err := json.Marshal(NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: token}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("decode revision as a string: %v (a number-typed member would fail here): %s", err, b)
+	}
+	got, err := ParseRevisionToken(decoded.Revision)
+	if err != nil {
+		t.Fatalf("ParseRevisionToken(%q): %v", decoded.Revision, err)
+	}
+	if got != token {
+		t.Errorf("round trip gave %d, want %d", got, token)
+	}
+	if lossy := int64(float64(token)); lossy == token {
+		t.Fatalf("the control is broken: %d survives a float64 round trip, so this test proves nothing", token)
 	}
 }
 

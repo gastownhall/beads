@@ -22,7 +22,11 @@ import (
 
 func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer, in listInput) error {
 	if in.repoOverrideSet {
-		return errors.New("--repo is not supported with --proxied-server")
+		// The one live (non-shadowed) --repo refusal: the pre-provider gate
+		// covers `create` only, so this is the site the contract is read from.
+		// Typed, so the proxyCommandCapabilities["list"] row is the single
+		// source of the message and --json still gets code/mutates on stdout.
+		return HandleProxyCapabilityError(AssertProxyCommandCapability("list", ProxyModeProxied, ProxyCapRepo))
 	}
 	switch {
 	case in.watchMode:

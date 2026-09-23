@@ -13,6 +13,7 @@ type journalRow struct {
 	Seq        int64
 	Op         string
 	IssueID    string
+	Actor      string
 	Issue      *types.Issue
 	Dep        *issueops.EventDep
 	Comment    *issueops.EventComment
@@ -30,9 +31,16 @@ func (s *testSuite) enableJournalForTest() {
 	s.T().Cleanup(func() { s.journalEnabled = false })
 }
 
+// clearJournal drops the rows written so far, so an assertion reads only what
+// the mutation under test produced.
+func (s *testSuite) clearJournal() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM bd_events_journal")
+	s.Require().NoError(err)
+}
+
 func (s *testSuite) readJournal() []journalRow {
 	rows, err := s.Runner().QueryContext(s.Ctx(),
-		`SELECT seq, op, issue_id, issue_json, dep_json, comment_json FROM bd_events_journal ORDER BY seq ASC`)
+		`SELECT seq, op, issue_id, actor, issue_json, dep_json, comment_json FROM bd_events_journal ORDER BY seq ASC`)
 	s.Require().NoError(err)
 	defer rows.Close()
 
@@ -44,7 +52,7 @@ func (s *testSuite) readJournal() []journalRow {
 			depJS     []byte
 			commentJS []byte
 		)
-		s.Require().NoError(rows.Scan(&jr.Seq, &jr.Op, &jr.IssueID, &issueJS, &depJS, &commentJS))
+		s.Require().NoError(rows.Scan(&jr.Seq, &jr.Op, &jr.IssueID, &jr.Actor, &issueJS, &depJS, &commentJS))
 		if len(issueJS) > 0 {
 			jr.HasIssue = true
 			var iss types.Issue
@@ -90,7 +98,7 @@ func (s *testSuite) TestEventsJournal_UOWPlumbing() {
 	s.Require().NoError(err)
 	_, err = ir.Close(ctx, "bd-mj-1", domain.CloseRowParams{Reason: "done"}, "actor", domain.IssueTableOpts{})
 	s.Require().NoError(err)
-	s.Require().NoError(ir.Delete(ctx, "bd-mj-2", domain.IssueTableOpts{}))
+	s.Require().NoError(ir.Delete(ctx, "bd-mj-2", domain.IssueTableOpts{}, "actor"))
 
 	got := s.readJournal()
 	wantOps := []string{
@@ -243,7 +251,7 @@ func (s *testSuite) TestEventsJournal_NoPhantomDeletes() {
 	s.Require().NoError(err)
 
 	// Delete a mix: two real ids and two that do not exist.
-	n, err := ir.DeleteByIDs(ctx, []string{"bd-pd-1", "bd-pd-missing-a", "bd-pd-2", "bd-pd-missing-b"}, domain.IssueTableOpts{})
+	n, err := ir.DeleteByIDs(ctx, []string{"bd-pd-1", "bd-pd-missing-a", "bd-pd-2", "bd-pd-missing-b"}, domain.IssueTableOpts{}, "actor")
 	s.Require().NoError(err)
 	s.Equal(2, n, "only the two present ids are deleted")
 
@@ -254,6 +262,96 @@ func (s *testSuite) TestEventsJournal_NoPhantomDeletes() {
 	}
 	s.Equal(map[string]bool{"bd-pd-1": true, "bd-pd-2": true}, deleted,
 		"journal must record a delete only for ids that removed a row, no phantoms")
+}
+
+// TestEventsJournal_DeleteActorAttribution pins the repository seam the UOW
+// door bottoms out in: IssueSQLRepository.Delete / DeleteByIDs and
+// DependencySQLRepository.DeleteAllForIDs each journal under the actor they are
+// handed, not the empty string (#5985).
+//
+// It asserts at the repository rather than through the use case because that is
+// where the actor was being dropped — deleteMany had it in hand the whole time.
+// The empty-actor half of the contract stays pinned by the derived-maintenance
+// rows in TestEventsJournal_UOWPlumbing.
+func (s *testSuite) TestEventsJournal_DeleteActorAttribution() {
+	s.enableJournalForTest()
+	ctx := s.Ctx()
+	ir := s.issueRepo()
+	dr := s.depRepo()
+
+	for _, id := range []string{"bd-da-single", "bd-da-bulk-1", "bd-da-bulk-2", "bd-da-edge-src", "bd-da-edge-tgt"} {
+		s.Require().NoError(ir.Insert(ctx, newTestIssue(id, "t"), "creator", domain.InsertIssueOpts{}))
+	}
+	s.Require().NoError(dr.Insert(ctx, &types.Dependency{
+		IssueID: "bd-da-edge-src", DependsOnID: "bd-da-edge-tgt", Type: types.DepBlocks,
+	}, "linker", domain.DepInsertOpts{}))
+
+	actorOf := func(op, id string) string {
+		s.T().Helper()
+		for _, r := range s.readJournal() {
+			if r.Op == op && r.IssueID == id {
+				return r.Actor
+			}
+		}
+		s.Failf("no journal row", "op %q for %q", op, id)
+		return ""
+	}
+
+	// The bulk edge delete: its dep_remove row belongs to the delete that caused
+	// it, journaled under the edge's source.
+	s.clearJournal()
+	_, err := dr.DeleteAllForIDs(ctx, []string{"bd-da-edge-tgt"}, domain.DepInsertOpts{}, "edge-remover")
+	s.Require().NoError(err)
+	s.Equal("edge-remover", actorOf("dep_remove", "bd-da-edge-src"))
+
+	s.clearJournal()
+	s.Require().NoError(ir.Delete(ctx, "bd-da-single", domain.IssueTableOpts{}, "single-deleter"))
+	s.Equal("single-deleter", actorOf("delete", "bd-da-single"))
+
+	s.clearJournal()
+	n, err := ir.DeleteByIDs(ctx, []string{"bd-da-bulk-1", "bd-da-bulk-2"}, domain.IssueTableOpts{}, "bulk-deleter")
+	s.Require().NoError(err)
+	s.Equal(2, n)
+	s.Equal("bulk-deleter", actorOf("delete", "bd-da-bulk-1"))
+	s.Equal("bulk-deleter", actorOf("delete", "bd-da-bulk-2"))
+}
+
+// TestEventsJournal_CascadeDeleteAttribution is the same promise one level up,
+// where a user's `bd delete --cascade` actually enters: every row a cascade
+// produces — the named bead, the beads the cascade reached, and the edges that
+// went with them — carries the REQUESTING actor. A consumer resolving a delete
+// conflict reads this column, and an empty one there would read as a system
+// write it must not overrule.
+func (s *testSuite) TestEventsJournal_CascadeDeleteAttribution() {
+	s.enableJournalForTest()
+	ctx := s.Ctx()
+	ir := s.issueRepo()
+	dr := s.depRepo()
+
+	s.Require().NoError(ir.Insert(ctx, newTestIssue("bd-cda-parent", "t"), "creator", domain.InsertIssueOpts{}))
+	s.Require().NoError(ir.Insert(ctx, newTestIssue("bd-cda-child", "t"), "creator", domain.InsertIssueOpts{}))
+	s.Require().NoError(dr.Insert(ctx, &types.Dependency{
+		IssueID: "bd-cda-child", DependsOnID: "bd-cda-parent", Type: types.DepParentChild,
+	}, "linker", domain.DepInsertOpts{}))
+	s.clearJournal()
+
+	_, err := s.issueUseCase().DeleteIssues(ctx,
+		domain.DeleteIssuesParams{IDs: []string{"bd-cda-parent"}, Cascade: true}, "cascade-deleter")
+	s.Require().NoError(err)
+
+	var deletes, depRemoves int
+	for _, r := range s.readJournal() {
+		switch r.Op {
+		case "delete":
+			deletes++
+			s.Equalf("cascade-deleter", r.Actor, "delete row for %s", r.IssueID)
+		case "dep_remove":
+			depRemoves++
+			s.Equalf("cascade-deleter", r.Actor, "dep_remove row for %s", r.IssueID)
+		}
+	}
+	s.Equal(2, deletes, "the named bead and the one the cascade reached")
+	s.GreaterOrEqual(depRemoves, 1, "the parent-child edge must be journaled")
 }
 
 // TestEventsJournal_DisabledWritesNothing asserts the default-off knob writes
@@ -339,7 +437,7 @@ func (s *testSuite) TestEventsJournal_ReplayFromZeroReconstructsLiveSet() {
 	}, "actor", domain.DepInsertOpts{}))
 	_, err := ir.Close(ctx, "bd-rp-2", domain.CloseRowParams{Reason: "done"}, "actor", domain.IssueTableOpts{})
 	s.Require().NoError(err)
-	s.Require().NoError(ir.Delete(ctx, "bd-rp-4", domain.IssueTableOpts{}))
+	s.Require().NoError(ir.Delete(ctx, "bd-rp-4", domain.IssueTableOpts{}, "actor"))
 
 	// Replay: create/update/close/comment/dep_* set the snapshot, delete drops it.
 	replay := map[string]*types.Issue{}

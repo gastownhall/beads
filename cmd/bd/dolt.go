@@ -773,7 +773,12 @@ The server runs in the background on a per-project port derived from the
 project path. PID and logs are stored in .beads/.
 
 The server auto-starts transparently when needed, so manual start is rarely
-required. Use this command for explicit control or diagnostics.`,
+required. Use this command for explicit control or diagnostics.
+
+Not available in proxied-server mode: there the proxy owns its dolt backend's
+lifecycle and starts it on demand, so a server started here would be a second,
+unsupervised one over the same data directory. Use 'bd dolt status' to see what
+is running and 'bd dolt stop' to shut it down.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -783,6 +788,26 @@ required. Use this command for explicit control or diagnostics.`,
 		if err != nil {
 			return HandleError("%v", err)
 		}
+		// A proxied workspace already has a server manager. The proxy spawns
+		// its dolt child on demand and reaps the whole tree when idle, so
+		// there is no state for bd to add here — only a second one to
+		// collide with. With the tree down, doltserver.Start resolves the
+		// proxied root's own configured port and launches an unsupervised
+		// sql-server directly over .beads/dolt, and the next ordinary bd
+		// command then fails because the relaunched proxy finds a foreign
+		// server on its port; with the tree up, Start instead adopts the
+		// proxy's child into bd's classic PID/port records, leaving two
+		// managers for one process. Refused rather than routed: the proxy
+		// owns its child's lifecycle, and an idle reaper means a "started"
+		// postcondition bd cannot honor for more than the idle window.
+		//
+		// Both the process-wide mode and the selected workspace's own
+		// metadata are consulted, and this runs before the embedded guard:
+		// over-refusing costs an operator one error message, under-refusing
+		// costs them the datastore.
+		if usesProxiedServer() || fileCfg.IsDoltProxiedServerMode() {
+			return HandleProxyCapabilityError(proxiedDoltStartRefusal())
+		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt start' is not supported in embedded mode (no Dolt server)")
 		}
@@ -790,7 +815,7 @@ required. Use this command for explicit control or diagnostics.`,
 		// server lifecycle (GH#3545/GH#3518): starting a repo-local
 		// server here would write local PID/port state that shadows the
 		// configured remote endpoint.
-		if host := fileCfg.GetDoltServerHost(); !usesProxiedServer() && !configfile.IsLocalHostString(host) {
+		if host := fileCfg.GetDoltServerHost(); !configfile.IsLocalHostString(host) {
 			return HandleError("the configured Dolt server host is remote (%s); 'bd dolt start' only manages a local server.\nStart the server on that host, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to run one locally", host)
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
@@ -1067,7 +1092,12 @@ PID, port, and data directory from the local PID file. For externally-
 managed servers — a shared server (dolt.shared-server: true), a remote
 dolt_server_host, or a local server managed outside bd (dolt.auto-start:
 false, e.g. an orchestrator-shared sql-server) — pings the configured
-endpoint via SQL and reports reachability, server version, and database.`,
+endpoint via SQL and reports reachability, server version, and database.
+
+In proxied-server mode, reports the proxy (the endpoint every bd command
+connects through) and the dolt backend behind it separately, read from the
+proxy's own process records. Reporting starts nothing: a quiesced workspace
+is shown as not running, and the next bd command launches it.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -1080,7 +1110,7 @@ endpoint via SQL and reports reachability, server version, and database.`,
 		if cfg == nil {
 			cfg = configfile.DefaultConfig()
 		}
-		if err := validateConfiguredBackend(cfg); err != nil {
+		if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 			return HandleError("%v", err)
 		}
 		// A non-Dolt backend (SQLite or a removed-backend tombstone) has no Dolt engine;
@@ -1088,6 +1118,21 @@ endpoint via SQL and reports reachability, server version, and database.`,
 		// (parity with `bd dolt show`, which already special-cases this).
 		if cfg.GetBackend() != configfile.BackendDolt {
 			fmt.Printf("Backend: %s (no Dolt engine)\n", cfg.GetBackend())
+			return nil
+		}
+		// Neither branch below describes a proxied workspace. It writes no
+		// classic PID file, so the bd-managed path reports "not running"
+		// while the proxy is serving CRUD, and shouldUseExternalDoltStatus
+		// deliberately excludes proxied so the SQL-probe path never sees it
+		// either. Keyed on the loaded config rather than the process-wide
+		// mode so `bd --db <proxied workspace> dolt status` describes the
+		// workspace it was pointed at.
+		if cfg.IsDoltProxiedServerMode() {
+			status, err := collectProxiedDoltStatus(beadsDir)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			renderProxiedDoltStatus(status)
 			return nil
 		}
 		if !usesSQLServer() {
@@ -1920,7 +1965,7 @@ func showDoltConfig(testConnection bool) error {
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
-	if err := validateConfiguredBackend(cfg); err != nil {
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return HandleError("%v", err)
 	}
 

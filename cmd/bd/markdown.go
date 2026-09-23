@@ -368,6 +368,15 @@ func buildMarkdownBatchRequest(templates []*IssueTemplate, in createInput) (issu
 		if err != nil {
 			return issueops.CreateBatchRequest{}, HandleError("%v", err)
 		}
+		// Resolved per template, not once for the file: the plan-wide flag
+		// applies to every item, but the per-type storage-class.<type> default
+		// keys on the template's own type, and the ephemeral spelling moves that
+		// item to the wisp plane. A conflict refuses the whole file here, before
+		// any transaction opens.
+		storageClass, ephemeral, err := resolveCreateStorageClass(in.storageClassFlag, template.IssueType, in.ephemeral, in.noHistory)
+		if err != nil {
+			return issueops.CreateBatchRequest{}, HandleError("template %q: %v", template.Title, err)
+		}
 		items = append(items, issueops.BatchCreateItem{
 			Issue: &types.Issue{
 				Title:              template.Title,
@@ -379,8 +388,9 @@ func buildMarkdownBatchRequest(templates []*IssueTemplate, in createInput) (issu
 				IssueType:          template.IssueType,
 				Assignee:           template.Assignee,
 				Labels:             template.Labels,
-				Ephemeral:          in.ephemeral,
+				Ephemeral:          ephemeral,
 				NoHistory:          in.noHistory,
+				StorageClass:       storageClass,
 				MolType:            in.molType,
 				CreatedBy:          in.createdBy,
 				Owner:              in.owner,
