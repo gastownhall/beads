@@ -40,7 +40,12 @@ Auto-backup default:
   dir and full-sync the whole database — a self-amplifying storm. To back up
   a shared server, run 'bd backup' explicitly (or set backup.enabled=true and
   coordinate destinations). 'bd config get backup.enabled' shows the effective
-  value and its source.`,
+  value and its source.
+
+  On a proxied-server workspace that opt-in does not apply: auto-backup has
+  no post-command hook on that path, so backup.enabled=true is inert there.
+  The five backup verbs above are honored on a managed-local proxied server —
+  run 'bd backup sync' explicitly to back one up.`,
 	GroupID: "sync",
 }
 
@@ -126,14 +131,9 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			// Show config (effective values with source)
 			enabled := isBackupAutoEnabled()
 			interval := config.GetDuration("backup.interval")
-			enabledSource := config.GetValueSource("backup.enabled")
 			enabledNote := ""
-			if enabledSource == config.SourceDefault {
-				if enabled {
-					enabledNote = " (auto: git remote detected)"
-				} else {
-					enabledNote = " (auto: no git remote)"
-				}
+			if note := backupAutoStatusNote(enabled); note != "" {
+				enabledNote = " (" + note + ")"
 			}
 			fmt.Printf("\nConfig: enabled=%v%s interval=%s\n",
 				enabled, enabledNote, interval)

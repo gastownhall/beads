@@ -40,6 +40,43 @@ func isBackupAutoEnabled() bool {
 	return primeHasGitRemote()
 }
 
+// backupAutoStatusNote returns the parenthetical `bd backup status`
+// prints after the effective backup.enabled value, or "" when the value
+// speaks for itself. Callers pass the value isBackupAutoEnabled()
+// already computed so the note cannot disagree with the number beside
+// it — and so status does not re-run the git-remote probe.
+//
+// The note narrates the reason the decision actually used. Proxied-server
+// is checked first and ignores the config source, because on that topology
+// auto-backup cannot run at all whatever backup.enabled says: the proxied
+// arm of PersistentPostRunE never calls runPostRunAutoBackup (main.go), so
+// an explicit backup.enabled=true is inert and reporting a bare
+// "enabled=true" would send the operator away believing backups happen.
+// The five backup verbs are honored on managed-local (the only proxied
+// shape that reaches this line — every other one is refused by
+// requireLocalProxiedBackup), so `bd backup sync` is the real answer there.
+//
+// Every other sql-server shape keeps its post-run hook, so there the
+// default is merely off — the reason `bd config get backup.enabled`
+// already reports for the same condition. Before this arm existed, status
+// attributed that OFF to a missing git remote, which is untrue: server
+// mode short-circuits isBackupAutoEnabled whether or not a remote exists.
+func backupAutoStatusNote(enabled bool) string {
+	if usesProxiedServer() {
+		return "auto-backup does not run on proxied-server; use 'bd backup sync'"
+	}
+	if config.GetValueSource("backup.enabled") != config.SourceDefault {
+		return ""
+	}
+	if usesSQLServer() {
+		return "auto: off in sql-server mode"
+	}
+	if enabled {
+		return "auto: git remote detected"
+	}
+	return "auto: no git remote"
+}
+
 // clientServerShareFilesystem reports whether the configured Dolt
 // server runs on a filesystem the bd client can also see — i.e.
 // whether a file:// URL constructed on the client is meaningful to
