@@ -50,8 +50,30 @@ func (r *statsReporter) Stats(ctx context.Context, _ publicops.StatsRequest) (pu
 		if summary == nil {
 			return publicops.StatsResult{}, nil
 		}
+		// The one breakdown GetStatistics cannot compute, because it needs
+		// the configured infra set; see workapi.CountStatsInfraIssues.
+		cfg, err := statsListConfig(ctx, uw)
+		if err != nil {
+			return publicops.StatsResult{}, err
+		}
+		byType, err := uw.IssueUseCase().CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
+		if err != nil {
+			return publicops.StatsResult{}, fmt.Errorf("count infra-typed issues: %w", err)
+		}
+		summary.InfraIssues = workapi.CountStatsInfraIssues(byType, cfg)
 		return publicops.StatsResult{Summary: *summary}, nil
 	})
+}
+
+// statsListConfig reads the configured infra set the same way the listing
+// does, so the infra breakdown and `bd list`'s suppression agree on which
+// types are infra.
+func statsListConfig(ctx context.Context, uw UnitOfWork) (workapi.ListConfig, error) {
+	infraSet, err := uw.ConfigUseCase().GetInfraTypes(ctx)
+	if err != nil {
+		return workapi.ListConfig{}, fmt.Errorf("load infra types: %w", err)
+	}
+	return workapi.ListConfig{InfraSet: infraSet}, nil
 }
 
 // AssigneeStats folds one actor's rows and ready work into a summary, through
@@ -76,6 +98,10 @@ func (r *statsReporter) AssigneeStats(ctx context.Context, req publicops.Assigne
 		if ready, readyErr := uw.IssueUseCase().GetReadyWork(ctx, workapi.BuildStatsAssigneeWorkFilter(assignee)); readyErr == nil {
 			readyCount = len(ready.Items)
 		}
-		return publicops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(page.Items, readyCount)}, nil
+		cfg, err := statsListConfig(ctx, uw)
+		if err != nil {
+			return publicops.StatsResult{}, err
+		}
+		return publicops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(page.Items, readyCount, cfg)}, nil
 	})
 }

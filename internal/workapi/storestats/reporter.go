@@ -10,6 +10,7 @@ package storestats
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -55,7 +56,30 @@ func (r *storeStatsReporter) Stats(ctx context.Context, req issueops.StatsReques
 		// summary becomes.
 		return issueops.StatsResult{}, nil
 	}
+	infra, err := r.infraIssues(ctx)
+	if err != nil {
+		return issueops.StatsResult{}, err
+	}
+	summary.InfraIssues = infra
 	return issueops.StatsResult{Summary: *summary}, nil
+}
+
+// infraIssues counts the durable rows of the configured infra types, the one
+// breakdown GetStatistics cannot compute because it needs configuration. See
+// workapi.CountStatsInfraIssues.
+func (r *storeStatsReporter) infraIssues(ctx context.Context) (int, error) {
+	byType, err := r.store.CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
+	if err != nil {
+		return 0, fmt.Errorf("count infra-typed issues: %w", err)
+	}
+	return workapi.CountStatsInfraIssues(byType, r.listConfig(ctx)), nil
+}
+
+// listConfig is the slice of the listing's configuration the infra breakdown
+// needs: the configured infra set, with the listing's own fallback to the
+// built-in names when none is configured.
+func (r *storeStatsReporter) listConfig(ctx context.Context) workapi.ListConfig {
+	return workapi.ListConfig{InfraSet: r.store.GetInfraTypes(ctx)}
 }
 
 // AssigneeStats asks storage its two questions and folds them through the
@@ -83,5 +107,5 @@ func (r *storeStatsReporter) AssigneeStats(ctx context.Context, req issueops.Ass
 		readyCount = len(ready)
 	}
 
-	return issueops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(issues, readyCount)}, nil
+	return issueops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(issues, readyCount, r.listConfig(ctx))}, nil
 }
