@@ -1032,6 +1032,23 @@ func TestCommentOutYamlKey(t *testing.T) {
 			expected: "  # backup.enabled: true\nother: value",
 		},
 		{
+			// A flat key is a top-level key. A single-segment key must not
+			// match the same name nested under some other section: that is a
+			// different key, and the database-backed unset path would
+			// otherwise comment out backup.enabled to unset `enabled`.
+			name:     "single-segment key does not match a nested line",
+			content:  "backup:\n  enabled: true\n",
+			key:      "enabled",
+			expected: "backup:\n  enabled: true\n",
+		},
+		{
+			// Nor refuse on one: the nested `mode:` block is not this key's.
+			name:     "single-segment key ignores a nested block of the same name",
+			content:  "dolt:\n  mode:\n    x: 1\n",
+			key:      "mode",
+			expected: "dolt:\n  mode:\n    x: 1\n",
+		},
+		{
 			name:     "nested key preserves siblings and comments",
 			content:  "# Backup settings\nbackup:\n  enabled: false\n  interval: 15m\n",
 			key:      "backup.enabled",

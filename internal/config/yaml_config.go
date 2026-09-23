@@ -1028,6 +1028,13 @@ func commentOutYamlKey(content, key string) (string, error) {
 	// newline, and the unset callers could not tell "nothing matched" from a
 	// write by comparing content.
 	lines := strings.Split(content, "\n")
+	// A flat key is a TOP-LEVEL key whose name contains the dots, so it only
+	// matches at the document's top-level indentation. Without this, a
+	// single-segment key such as `enabled` matched a nested `  enabled:` line
+	// under some other section and commented out a key the caller never named.
+	// The top level is usually column 0, but yaml.v3 accepts a document whose
+	// whole mapping is indented, so it is read from the first key line.
+	topIndent := yamlTopLevelIndent(lines)
 	for i, line := range lines {
 		if blockIndent >= 0 {
 			if strings.TrimSpace(line) == "" || lineIndent(line) > blockIndent {
@@ -1038,7 +1045,7 @@ func commentOutYamlKey(content, key string) (string, error) {
 		}
 		blockIndent = blockScalarIndent(line)
 
-		if matches := flatPattern.FindStringSubmatch(line); matches != nil {
+		if matches := flatPattern.FindStringSubmatch(line); matches != nil && len(matches[1]) == topIndent {
 			if err := mappingValueUnsetRefusal(lines, i, len(matches[1]), key); err != nil {
 				return "", err
 			}
@@ -1059,29 +1066,70 @@ func commentOutYamlKey(content, key string) (string, error) {
 	return strings.Join(result, "\n"), nil
 }
 
-// mappingValueUnsetRefusal refuses a matched key line whose value is the
-// indented block beneath it (a mapping or a list) rather than a scalar on the
-// same line. Commenting
-// that one line out would orphan the block's lines at an indentation no key
-// introduces, leaving a config.yaml that no longer parses. The block is judged
-// by the first following line that carries content, so a key with an empty
-// value and nothing nested under it is still commented as before.
+// mappingValueUnsetRefusal refuses a matched key line whose value continues on
+// the lines beneath it rather than sitting on the key's own line: a nested
+// mapping, a list, or a plain scalar continued on the next line. Commenting
+// that one line out would orphan those lines, leaving a config.yaml that no
+// longer parses. The value is judged by the first following line that carries
+// content, so a key with an empty value and nothing under it is still
+// commented as before.
+//
+// Nothing on the key's own line but a comment, an anchor or a tag (`b:  #
+// note`, `base: &b`, `m: !!map`) still leaves the value to the lines beneath.
+// A list may sit at the key's OWN indentation (`types.custom:` then `- step`),
+// which YAML allows for a sequence value, so a `-` item at that indentation
+// belongs to the key too.
 func mappingValueUnsetRefusal(lines []string, idx, indent int, key string) error {
 	_, rest, _ := strings.Cut(strings.TrimLeft(lines[idx], " \t"), ":")
-	if strings.TrimSpace(rest) != "" {
+	if !valueContinuesBelow(rest) {
 		return nil
 	}
 	for _, next := range lines[idx+1:] {
-		trimmed := strings.TrimLeft(next, " \t")
+		// TrimSpace, not TrimLeft: a CRLF file's blank line is a lone "\r",
+		// which must not read as content at column 0 and end the value early.
+		trimmed := strings.TrimSpace(next)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if lineIndent(next) <= indent {
+		nextIndent := lineIndent(next)
+		if nextIndent < indent {
 			return nil
 		}
-		return fmt.Errorf("cannot unset %q: its value is the indented block beneath it (a mapping or list), and commenting the key out would orphan that block; unset its keys individually or remove the block by hand", key)
+		if nextIndent == indent && trimmed != "-" && !strings.HasPrefix(trimmed, "- ") {
+			return nil
+		}
+		return fmt.Errorf("cannot unset %q: its value continues on the lines beneath it, and commenting the key out would orphan them; remove it by hand, or unset its keys individually if it is a mapping", key)
 	}
 	return nil
+}
+
+// valueContinuesBelow reports whether the text after a key's colon leaves the
+// value to the following lines: it is empty once a trailing comment is dropped,
+// or holds only anchors and tags.
+func valueContinuesBelow(rest string) bool {
+	rest = strings.TrimSpace(rest)
+	if i := strings.Index(rest, " #"); i >= 0 {
+		rest = rest[:i]
+	} else if strings.HasPrefix(rest, "#") {
+		rest = ""
+	}
+	for _, tok := range strings.Fields(rest) {
+		if !strings.HasPrefix(tok, "&") && !strings.HasPrefix(tok, "!") {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlTopLevelIndent is the indentation of the document's first key line, which
+// every top-level key shares, or 0 when the document declares no key.
+func yamlTopLevelIndent(lines []string) int {
+	for _, line := range lines {
+		if _, indent, ok := yamlKeyOnLine(line); ok {
+			return indent
+		}
+	}
+	return 0
 }
 
 // nestedKeyWalk tracks how much of a dotted key a line-by-line scan has matched

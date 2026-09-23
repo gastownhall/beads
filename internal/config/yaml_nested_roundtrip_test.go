@@ -485,10 +485,23 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// A key whose value is the mapping beneath it: commenting its line out
 		// orphans the children at an indentation no key introduces, and the
 		// file stops parsing. Nested, flat single-segment, and a list value.
-		{name: "mapping-valued nested key", seed: "dolt:\n    limits:\n        host: mini\n", key: "dolt.limits", want: "indented block"},
-		{name: "mapping-valued single-segment key", seed: "backup:\n  enabled: false\n  interval: 15m\n", key: "backup", want: "indented block"},
-		{name: "mapping-valued key behind a comment", seed: "backup:\n  # whether to back up\n  enabled: false\n", key: "backup", want: "indented block"},
-		{name: "list-valued nested key", seed: "sync:\n    remotes:\n        - a\n        - b\n", key: "sync.remotes", want: "indented block"},
+		{name: "mapping-valued nested key", seed: "dolt:\n    limits:\n        host: mini\n", key: "dolt.limits", want: "lines beneath it"},
+		{name: "mapping-valued single-segment key", seed: "backup:\n  enabled: false\n  interval: 15m\n", key: "backup", want: "lines beneath it"},
+		{name: "mapping-valued key behind a comment", seed: "backup:\n  # whether to back up\n  enabled: false\n", key: "backup", want: "lines beneath it"},
+		{name: "list-valued nested key", seed: "sync:\n    remotes:\n        - a\n        - b\n", key: "sync.remotes", want: "lines beneath it"},
+		// YAML lets a sequence value sit at the key's own indentation; the
+		// items still belong to the key, and orphaning them leaves a file that
+		// every later command fails to parse (#5760 review).
+		{name: "list at the key's own indentation", seed: "types.custom:\n- step\n- slot\n", key: "types.custom", want: "lines beneath it"},
+		// Only a comment, an anchor or a tag after the colon still leaves the
+		// value to the lines beneath.
+		{name: "trailing comment on a mapping-valued key", seed: "backup:  # note\n  enabled: false\n", key: "backup", want: "lines beneath it"},
+		{name: "anchored mapping-valued key", seed: "base: &b\n  c: 1\n", key: "base", want: "lines beneath it"},
+		{name: "anchored mapping-valued key with a comment", seed: "base: &b  # shared\n  c: 1\n", key: "base", want: "lines beneath it"},
+		// A plain scalar continued on the next line is orphaned the same way.
+		{name: "plain scalar on the next line", seed: "dolt.mode:\n  server\n", key: "dolt.mode", want: "lines beneath it"},
+		// A CRLF blank line is a lone carriage return, not content at column 0.
+		{name: "mapping behind a CRLF blank line", seed: "backup:\r\n\r\n  enabled: false\r\n", key: "backup", want: "lines beneath it"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
