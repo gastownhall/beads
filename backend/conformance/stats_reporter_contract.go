@@ -181,6 +181,11 @@ func RunStatsReporterBreaksOutAGateThatIsAlsoATemplate(t *testing.T, ctx context
 // InfraIssues, which a backend counting the built-in names would get wrong.
 // The second delta moves ONLY InfraIssues, with no new rows, which shows the
 // count follows configuration at query time.
+//
+// The message WISP pins the durable-only filter (StatsInfraCountFilter). Its
+// type is infra in both sets, so a count that merged the ephemeral tier would
+// move InfraIssues in the first delta, where it must stay zero. A task-typed
+// wisp, as RunStatsReporterExcludesTheWispTier seeds, cannot catch that.
 func RunStatsReporterBreaksOutDurableRowsOfAConfiguredInfraType(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
 	t.Helper()
 	setStatsReporterInfraTypes(t, ctx, fixture, "message")
@@ -190,6 +195,10 @@ func RunStatsReporterBreaksOutDurableRowsOfAConfiguredInfraType(t *testing.T, ct
 	agent := statsReporterSeed(fixture, "infra-agent", types.StatusOpen)
 	agent.IssueType = types.IssueType("agent")
 	seedStatsReporterIssue(t, ctx, fixture, agent)
+	wisp := statsReporterSeed(fixture, "infra-wisp", types.StatusOpen)
+	wisp.IssueType = types.IssueType("message")
+	wisp.Ephemeral = true
+	seedStatsReporterWisp(t, ctx, fixture, wisp)
 
 	evicted := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
 	assertStatsReporterDelta(t, before, evicted, statsReporterCounts{total: 2, open: 2})
@@ -616,6 +625,36 @@ func RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows(t *testing.T, ctx
 	}
 }
 
+// RunStatsReporterAssigneeStatsCountsTheActorsInfraTypedWisps pins the scope
+// InfraIssues has on this route, which is NOT the workspace-wide one. The fold
+// covers the actor's rows on both planes, as its TotalIssues does, so an
+// infra-typed wisp assigned to the actor counts here - and `bd list --assignee
+// X --include-infra` shows that row - while the workspace-wide answer, durable
+// rows only, does not move for it. The built-in infra set names message, so no
+// configuration is needed.
+func RunStatsReporterAssigneeStatsCountsTheActorsInfraTypedWisps(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	assignee := statsReporterAssignee(fixture, "ainfrawisp")
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	wisp := statsReporterSeed(fixture, "ainfrawisp-message", types.StatusOpen)
+	wisp.Assignee = assignee
+	wisp.IssueType = types.IssueType("message")
+	wisp.Ephemeral = true
+	seedStatsReporterWisp(t, ctx, fixture, wisp)
+
+	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, after, statsReporterCounts{})
+
+	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
+	if summary.TotalIssues != 1 {
+		t.Fatalf("TotalIssues = %d, want 1 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
+	}
+	if summary.InfraIssues != 1 {
+		t.Errorf("InfraIssues = %d, want 1 - the actor's message wisp is in this answer's total and hidden by `bd list --assignee`, so it is broken out on both planes", summary.InfraIssues)
+	}
+}
+
 // RunStatsReporterAssigneeStatsPopulatesBothPointers pins the clause
 // FoldStatsAssigneeSummary exists to guarantee: on this path BlockedIssues and
 // ReadyIssues are ALWAYS non-nil, including for an actor with no rows at all.
@@ -730,10 +769,15 @@ func setStatsReporterInfraTypes(t *testing.T, ctx context.Context, fixture Stats
 }
 
 // setStatsReporterConfig writes one config key for the rest of the case and
-// restores the unconfigured value when it ends. Every backend reads an empty
-// types.infra or types.custom as unconfigured (built-in infra set, no custom
-// types), so the cases sharing this database see the configuration they would
-// have without this one.
+// restores the unconfigured value when it ends.
+//
+// It restores "" rather than the prior value because the fixture has no read
+// hook, and "" IS the prior value here in effect: this helper is the only
+// writer of these keys on a StatsReporter fixture, the backends start with
+// neither configured, and every backend reads an empty types.infra or
+// types.custom as unconfigured (built-in infra set, no custom types). So the
+// cases sharing this database see the configuration they would have without
+// this one.
 func setStatsReporterConfig(t *testing.T, ctx context.Context, fixture StatsReporterFixture, key, value string) {
 	t.Helper()
 	if fixture.SetConfig == nil {

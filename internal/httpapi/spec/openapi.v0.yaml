@@ -7082,10 +7082,12 @@ components:
         infra_issues:
           type: integer
           description: >-
-            Durable rows whose type is in the workspace's configured
-            `types.infra` set, suppressed by the default `bd list` on the same
-            terms as `gate_issues` and likewise already counted in
-            `total_issues`.
+            Rows whose type is in the workspace's configured `types.infra`
+            set, suppressed by the default `bd list` on the same terms as
+            `gate_issues` and likewise already counted in `total_issues`. On
+            the workspace-wide summary these are durable rows only; on the
+            `--assigned` summary they are the actor's rows on both the durable
+            and the ephemeral plane, matching what its `total_issues` counts.
 
 
             The set is the configured one, not the built-in names, and changing

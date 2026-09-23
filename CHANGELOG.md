@@ -166,13 +166,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --assignee`.
 
   The third suppression is covered too
-  ([#6439](https://github.com/gastownhall/beads/issues/6439)): durable rows
-  whose type is in the workspace's configured `types.infra` set, reported as
+  ([#6439](https://github.com/gastownhall/beads/issues/6439)): rows whose type
+  is in the workspace's configured `types.infra` set, reported as
   `N infra-typed issues (--include-infra)` and as `infra_issues` in `--json`.
-  Such rows exist because changing `types.infra` never moves rows already
-  written, and because a configured set replaces the built-in names rather than
-  extending them. So the count reads the configured set, the same one `bd list`
-  reads, and not the built-in names.
+  The workspace-wide summary counts durable rows only; `bd status --assigned`
+  counts the actor's rows of those types on both planes, wisps included,
+  matching what its total counts. Durable infra-typed rows exist because
+  changing `types.infra` never moves rows already written, and because a
+  configured set replaces the built-in names rather than extending them. So
+  the count reads the configured set, the same one `bd list` reads, and not
+  the built-in names.
 
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`

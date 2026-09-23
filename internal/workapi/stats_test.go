@@ -147,14 +147,18 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 			// A configured types.infra REPLACES the built-in set, and the
 			// breakdown must follow it: agent is an ordinary type here and
 			// gate is infra, so a gate lands in both the gate and infra
-			// counts, as the listing suppresses it on both grounds.
+			// counts, as the listing suppresses it on both grounds. The rows
+			// are chosen so the two sets DISAGREE - two gates and one agent
+			// give 2 under the configured set and 1 under the built-in one -
+			// so a fold that ignored cfg fails here.
 			name: "a configured infra set replaces the built-in one",
 			issues: []*types.Issue{
 				{Status: types.StatusOpen, IssueType: types.IssueType("agent")},
 				{Status: types.StatusOpen, IssueType: types.TypeGate},
+				{Status: types.StatusClosed, IssueType: types.TypeGate},
 			},
 			cfg:   ListConfig{InfraSet: map[string]bool{"gate": true}},
-			ready: 0, total: 2, open: 2, gates: 1, infra: 1,
+			ready: 0, total: 3, open: 2, closed: 1, gates: 2, infra: 2,
 		},
 	}
 

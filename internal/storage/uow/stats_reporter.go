@@ -50,19 +50,28 @@ func (r *statsReporter) Stats(ctx context.Context, _ publicops.StatsRequest) (pu
 		if summary == nil {
 			return publicops.StatsResult{}, nil
 		}
-		// The one breakdown GetStatistics cannot compute, because it needs
-		// the configured infra set; see workapi.CountStatsInfraIssues.
-		cfg, err := statsListConfig(ctx, uw)
-		if err != nil {
-			return publicops.StatsResult{}, err
-		}
-		byType, err := uw.IssueUseCase().CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
-		if err != nil {
-			return publicops.StatsResult{}, fmt.Errorf("count infra-typed issues: %w", err)
-		}
-		summary.InfraIssues = workapi.CountStatsInfraIssues(byType, cfg)
+		summary.InfraIssues = statsInfraIssues(ctx, uw)
 		return publicops.StatsResult{Summary: *summary}, nil
 	})
+}
+
+// statsInfraIssues is the one breakdown GetStatistics cannot compute, because
+// it needs the configured infra set; see workapi.CountStatsInfraIssues.
+//
+// A failure to compute it - reading the set or counting by type - leaves it
+// zero rather than failing the summary, as the store-backed body does and as
+// AssigneeStats treats a ready-count failure: a disclosure line is not worth
+// every other number `bd status` prints.
+func statsInfraIssues(ctx context.Context, uw UnitOfWork) int {
+	cfg, err := statsListConfig(ctx, uw)
+	if err != nil {
+		return 0
+	}
+	byType, err := uw.IssueUseCase().CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
+	if err != nil {
+		return 0
+	}
+	return workapi.CountStatsInfraIssues(byType, cfg)
 }
 
 // statsListConfig reads the configured infra set the same way the listing
@@ -98,10 +107,13 @@ func (r *statsReporter) AssigneeStats(ctx context.Context, req publicops.Assigne
 		if ready, readyErr := uw.IssueUseCase().GetReadyWork(ctx, workapi.BuildStatsAssigneeWorkFilter(assignee)); readyErr == nil {
 			readyCount = len(ready.Items)
 		}
-		cfg, err := statsListConfig(ctx, uw)
-		if err != nil {
-			return publicops.StatsResult{}, err
+		// An unreadable infra set leaves InfraIssues zero rather than failing
+		// the summary, as the workspace-wide answer does (statsInfraIssues).
+		cfg, cfgErr := statsListConfig(ctx, uw)
+		summary := workapi.FoldStatsAssigneeSummary(page.Items, readyCount, cfg)
+		if cfgErr != nil {
+			summary.InfraIssues = 0
 		}
-		return publicops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(page.Items, readyCount, cfg)}, nil
+		return publicops.StatsResult{Summary: summary}, nil
 	})
 }

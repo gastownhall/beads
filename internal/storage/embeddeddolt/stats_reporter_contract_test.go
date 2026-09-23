@@ -80,6 +80,9 @@ func TestStatsReporterContract(t *testing.T) {
 	t.Run("AssigneeStatsBreaksOutConfiguredInfraRows", func(t *testing.T) {
 		conformance.RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows(t, ctx, fixture)
 	})
+	t.Run("AssigneeStatsCountsTheActorsInfraTypedWisps", func(t *testing.T) {
+		conformance.RunStatsReporterAssigneeStatsCountsTheActorsInfraTypedWisps(t, ctx, fixture)
+	})
 	t.Run("AssigneeStatsPopulatesBothPointers", func(t *testing.T) {
 		conformance.RunStatsReporterAssigneeStatsPopulatesBothPointers(t, ctx, fixture)
 	})

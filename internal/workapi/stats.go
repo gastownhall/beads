@@ -94,6 +94,13 @@ func BuildStatsAssigneeWorkFilter(assignee string) types.WorkFilter {
 // Which types are infra is cfg's answer - the workspace's configured set, as
 // the listing reads it - not the built-in names.
 //
+// InfraIssues here spans BOTH planes, unlike the workspace-wide count, which is
+// durable rows only (StatsInfraCountFilter). These rows include the actor's
+// wisps, which TotalIssues counts too, so an infra-typed wisp assigned to the
+// actor is broken out here - it is the row `bd list --assignee X
+// --include-infra` adds back. Filtering the fold to durable rows would make the
+// breakdown disagree with the total it is a breakdown of.
+//
 // BlockedIssues and ReadyIssues are always non-nil here, including for an actor
 // with no rows at all. The nil pointers are the workspace-wide answer's
 // skipped-scan signal (issueops.StatsRequest.SkipBlocked) and mean "not
