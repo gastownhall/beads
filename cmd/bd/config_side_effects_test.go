@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -153,4 +154,21 @@ func TestPrintConfigSideEffects(t *testing.T) {
 		{Message: "no command hint"},
 		{Message: "with command", Command: "bd apply"},
 	})
+}
+
+func TestCheckConfigSetSideEffects_SyncRemoteRef(t *testing.T) {
+	effects := checkConfigSetSideEffects("sync.remote-ref", "refs/dolt/units/team-12542")
+	if len(effects) != 1 {
+		t.Fatalf("expected 1 effect, got %d", len(effects))
+	}
+	if !strings.Contains(effects[0].Message, "refs/dolt/units/team-12542") || !strings.Contains(effects[0].Command, "--ref refs/dolt/units/team-12542") {
+		t.Fatalf("effect should name the ref and the re-add command: %+v", effects[0])
+	}
+}
+
+func TestCheckConfigUnsetSideEffects_SyncRemoteRef(t *testing.T) {
+	effects := checkConfigUnsetSideEffects("sync.remote-ref")
+	if len(effects) != 1 || !strings.Contains(effects[0].Message, "refs/dolt/data") {
+		t.Fatalf("expected one effect naming the default ref, got %+v", effects)
+	}
 }

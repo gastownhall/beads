@@ -76,6 +76,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A git-backed Dolt remote can keep its data on a ref other than
+  `refs/dolt/data`** ([#6261](https://github.com/gastownhall/beads/issues/6261)).
+  `bd dolt remote add <name> <url> --ref refs/heads/<branch>` serves a git
+  host that only accepts pushes under `refs/heads/`; `--ref
+  refs/dolt/units/<key>` keeps several databases in one repository, each on
+  its own ref. Only a full ref is accepted. For `origin` the ref is saved as
+  `sync.remote-ref` beside `sync.remote`, and `bd bootstrap` (also with
+  `--ref`), `bd init`, and the origin probe read it; bootstrap probes a git
+  repository for Dolt data on that ref before cloning, and a fresh database
+  it creates is wired to `origin` on it. `bd dolt remote list` shows the ref
+  and `bd dolt remote reset-data` rebuilds the configured one. Re-adding a
+  remote on a different ref asks first and needs `--yes` without a terminal.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every

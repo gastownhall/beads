@@ -27,6 +27,7 @@ func runContextProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	}
 
 	view := contextInfoView(info)
+	view.SyncRemoteRef = resolveSyncRemoteRefFromDir(view.BeadsDir)
 	if jsonOutput {
 		return outputJSON(view)
 	}

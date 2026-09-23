@@ -198,9 +198,14 @@ func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message s
 }
 
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
+	return s.AddRemoteWithRef(ctx, name, url, "")
+}
+
+// AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
+// see storage.RemoteStore.
+func (s *EmbeddedDoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
-		return err
+		return versioncontrolops.AddRemote(ctx, db, name, url, ref)
 	})
 }
 

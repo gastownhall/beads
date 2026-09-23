@@ -76,6 +76,56 @@ bd dolt remote add origin git+https://github.com/org/repo.git
 # See DOLT.md for all remote types
 ```
 
+#### Keeping the data on another git ref
+
+A git-backed remote keeps the issue data on one git ref of the repository,
+`refs/dolt/data` by default. Two situations call for a different ref, and
+`--ref` names it; only a full ref starting with `refs/` is accepted.
+
+A git host that only accepts pushes under `refs/heads/` rejects
+`refs/dolt/data` (the push fails with HTTP 403). Keep the data on a branch of
+its own instead; that branch holds Dolt storage, not source code, so never
+check it out or merge it. Name a branch that does not exist yet: the first
+push replaces the branch's tip with Dolt storage, so bd refuses the
+repository's default branch and asks before an existing branch (`--yes`
+answers without a terminal). When the Dolt remote is the repository you are
+working in, its URL matches your git origin, which `bd dolt remote add`
+refuses unless you say so:
+
+```bash
+bd dolt remote add origin git+https://github.com/org/repo.git --ref refs/heads/beads-data --allow-git-origin
+bd dolt push
+```
+
+A branch is visible to everything on the host that watches branches, which
+`refs/dolt/data` never was. A workflow that triggers on pushes to all
+branches runs on every `bd dolt push`. A ruleset or protection rule that
+covers all branches blocks the push, and blocks `bd dolt remote reset-data`,
+which deletes and force-pushes the branch. Every `git clone` and `git fetch`
+of the repository transfers the data branch too, since the default refspec
+covers all of `refs/heads/`, and stale-branch cleanup (automation or a
+tidy colleague) can delete it. Scope such rules, triggers, and cleanups to
+your code branches, and never make the data branch the default branch.
+
+One repository can also hold several Dolt databases, each on its own ref, so
+that one project carries one issue database per unit of work:
+
+```bash
+bd dolt remote add origin git+ssh://git@host/org/ledgers.git --ref refs/dolt/units/team-a
+```
+
+For the remote named `origin`, `bd dolt remote add --ref` also writes
+`sync.remote-ref` to `.beads/config.yaml` next to `sync.remote`. Commit that
+file: `bd bootstrap` and `bd init` on other clones read the key, look for
+the data on that ref, and clone from it. `bd dolt remote list` shows the ref
+of each remote, and `bd dolt remote reset-data` rebuilds the configured ref.
+To go back to the default, re-add origin with `--ref refs/dolt/data`, which
+clears the key (`bd bootstrap --ref refs/dolt/data` does the same for the
+workspace it bootstraps). `bd dolt remote remove origin` keeps the key, so
+removing and re-adding origin lands on the same ref. Re-adding a remote on a
+different ref changes where its data is pushed, so bd asks first and, without
+a terminal, requires `--yes`.
+
 ### 4. Push your issues
 
 ```bash
@@ -122,7 +172,13 @@ cd repo
 bd bootstrap
 ```
 
-`bd bootstrap` auto-detects `refs/dolt/data` on origin, clones the Dolt database, and configures the remote. Verify with:
+`bd bootstrap` auto-detects `refs/dolt/data` on origin, clones the Dolt database, and configures the remote. When the data lives on another ref (see [Keeping the data on another git ref](#keeping-the-data-on-another-git-ref)), bootstrap reads `sync.remote-ref` from the committed `.beads/config.yaml`; for a clone whose config does not carry the key yet, name the ref yourself and bootstrap persists it:
+
+```bash
+bd bootstrap --ref refs/heads/beads-data
+```
+
+Verify with:
 
 ```bash
 bd list       # should show your issues

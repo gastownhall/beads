@@ -116,23 +116,32 @@ func resetDataGitURL(url string) string {
 }
 
 // lsRemoteDoltDataRefs returns which of the Dolt data-plane refs currently
-// exist on the git remote at gitURL.
-func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) {
+// exist on the git remote at gitURL. dataRef is the ref the remote keeps its
+// data on ("" = refs/dolt/data).
+func lsRemoteDoltDataRefs(ctx context.Context, gitURL, dataRef string) ([]string, error) {
+	want := storage.EffectiveGitDataRef(dataRef)
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, want, gitDoltInfoRef) // #nosec G204 -- URL and ref from the configured remote
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-remote %s failed: %s: %w", gitURL, strings.TrimSpace(string(out)), err)
 	}
+	return parseDoltDataRefs(out, want), nil
+}
+
+// parseDoltDataRefs keeps, out of ls-remote output, only the exact data ref
+// and the info ref: git ls-remote matches its arguments as patterns, and
+// only those two refs may ever be deleted.
+func parseDoltDataRefs(out []byte, dataRef string) []string {
 	var refs []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 {
+		if len(fields) == 2 && (fields[1] == dataRef || fields[1] == gitDoltInfoRef) {
 			refs = append(refs, fields[1])
 		}
 	}
-	return refs, nil
+	return refs
 }
 
 // deleteGitDoltDataRefs deletes refs on the git remote at gitURL. Git
@@ -198,9 +207,10 @@ Dolt remotes accumulate chunks monotonically, so the remote keeps the full
 pre-squash store. This command rebuilds the remote's data plane so it holds
 only live chunks:
 
-  - Git-backed remotes (issue data riding a git remote under refs/dolt/data):
-    deletes the Dolt data refs on the git remote, then force-pushes to
-    rebuild a fresh store. Code branches are untouched.
+  - Git-backed remotes (issue data riding a git remote under refs/dolt/data,
+    or under the ref the remote was added with --ref): deletes the Dolt data
+    refs on the git remote, then force-pushes to rebuild a fresh store. Code
+    branches are untouched.
   - Native file remotes (file:// paths): clears the store directory, then
     force-pushes to rebuild it.
   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
@@ -243,10 +253,11 @@ Examples:
 		if err != nil {
 			return HandleError("listing remotes: %v", err)
 		}
-		var url string
+		var url, dataRef string
 		for _, r := range remotes {
 			if r.Name == name {
 				url = r.URL
+				dataRef = r.Ref
 				break
 			}
 		}
@@ -310,7 +321,7 @@ Examples:
 		switch kind {
 		case resetDataGitBacked:
 			gitURL := resetDataGitURL(url)
-			refs, lerr := lsRemoteDoltDataRefs(ctx, gitURL)
+			refs, lerr := lsRemoteDoltDataRefs(ctx, gitURL, dataRef)
 			if lerr != nil {
 				return HandleError("%v", lerr)
 			}

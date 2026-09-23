@@ -101,10 +101,17 @@ func setupSyncRemoteConfig(t *testing.T, beadsDir, remote string) func() {
 // whatever host the fixture URL names.
 //
 // A configured sync.remote also suppresses the git-origin auto-detect leg
-// (gitOriginHasDoltDataRef, which is not behind this seam), so these tests
+// (gitRemoteHasDoltDataRefAt, which is not behind this seam), so these tests
 // cannot reach the network through that path either — including the
 // fall-through cases, whose whole point is to keep going after the probe.
 func stubProbeGitRemoteDoltData(t *testing.T, fn func(string) (bool, error)) {
+	t.Helper()
+	stubProbeGitRemoteDoltDataAt(t, func(url, _ string) (bool, error) { return fn(url) })
+}
+
+// stubProbeGitRemoteDoltDataAt is stubProbeGitRemoteDoltData for a stub that
+// also sees the git data ref the probe was asked for ("" = refs/dolt/data).
+func stubProbeGitRemoteDoltDataAt(t *testing.T, fn func(url, ref string) (bool, error)) {
 	t.Helper()
 	orig := probeGitRemoteDoltData
 	probeGitRemoteDoltData = fn
