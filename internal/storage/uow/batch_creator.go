@@ -115,5 +115,10 @@ func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.Creat
 	if err != nil {
 		return nil, storageissueops.ClassifyPublicCreateError(err)
 	}
-	return hydrateIssueOperation(ctx, uw, created.Issue, false, false)
+	hydrated, err := hydrateIssueOperation(ctx, uw, created.Issue, false, false)
+	if err != nil {
+		return nil, err
+	}
+	storageissueops.OverlayCreateTimestamps(hydrated, created.Issue)
+	return hydrated, nil
 }

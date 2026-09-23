@@ -314,6 +314,18 @@ func (s *spyDiffStore) GetStateHash(ctx context.Context) (string, error) {
 	return sh.GetStateHash(ctx)
 }
 
+// Forwarded for the same reason as the two above: the spy hides the concrete
+// store from UnwrapStore, so any capability it does not re-declare simply
+// vanishes from the guard's point of view. Without this the orphan guard's
+// history proof silently degrades to "unproven" under the spy (GH#5896).
+func (s *spyDiffStore) HistoricalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	hp, ok := storage.UnwrapStore(s.DoltStorage).(storage.HistoryPresence)
+	if !ok {
+		return nil, fmt.Errorf("spyDiffStore: wrapped store does not implement HistoryPresence")
+	}
+	return hp.HistoricalIssueIDs(ctx, ids)
+}
+
 func autoExportTestDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -1222,7 +1234,11 @@ func TestShouldExport(t *testing.T) {
 	}
 }
 
-func TestCountIssueRecordsInJSONL(t *testing.T) {
+// TestIssueRecordsInJSONL_CountsAndOrdersInScopeIDs pins the parse the
+// pre-export guards read: exactly one record per id, memories and tombstones
+// and id-less lines skipped, sorted by id. Both guards now take their counts
+// and their candidate list from this one call.
+func TestIssueRecordsInJSONL_CountsAndOrdersInScopeIDs(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "issues.jsonl")
 	data := strings.Join([]string{
@@ -1238,20 +1254,19 @@ func TestCountIssueRecordsInJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := countIssueRecordsInJSONL(path)
+	records, err := issueRecordsInJSONL(path)
 	if err != nil {
-		t.Fatalf("countIssueRecordsInJSONL: %v", err)
+		t.Fatalf("issueRecordsInJSONL: %v", err)
 	}
-	if got != 2 {
-		t.Fatalf("countIssueRecordsInJSONL = %d, want 2", got)
+	if len(records) != 2 {
+		t.Fatalf("issueRecordsInJSONL returned %d records, want 2: %v", len(records), records)
 	}
-
-	ids, err := issueIDsInJSONL(path)
-	if err != nil {
-		t.Fatalf("issueIDsInJSONL: %v", err)
+	ids := make([]string, len(records))
+	for i, rec := range records {
+		ids[i] = rec.ID
 	}
 	if got := strings.Join(ids, ","); got != "bd-1,bd-2" {
-		t.Fatalf("issueIDsInJSONL = %q, want bd-1,bd-2", got)
+		t.Fatalf("issueRecordsInJSONL ids = %q, want bd-1,bd-2", got)
 	}
 }
 
@@ -1686,7 +1701,7 @@ func TestTryIncrementalExport_PatchesChangedIssuesAndDropsRemoved(t *testing.T) 
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	issueCount, memoryCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	issueCount, memoryCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport returned error: %v", err)
 	}
@@ -1742,7 +1757,7 @@ func TestTryIncrementalExport_DropsIssueWhenFlippedToTemplate(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "promote to template")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -1770,7 +1785,7 @@ func TestTryIncrementalExport_FallsBackWhenFileMissing(t *testing.T) {
 	// No existing file → must return didIncremental=false and leave the
 	// disk untouched so the caller falls back to the full-export path.
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	issueCount, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	issueCount, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1810,7 +1825,7 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 	h.mustCreateBatch(t, ctx, incrementalExportThreshold+1, "thr-")
 	c2 := h.mustCommit(t, ctx, "flood")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1875,7 +1890,7 @@ func TestMaybeAutoExport_SecondRunTakesIncrementalPath_ServerMode(t *testing.T) 
 	}
 
 	// Both ChangedIssueIDs call sites must have fired: the orphan guard's
-	// proof-of-deletion probe (missingJSONLIssueIDsInStore, which runs
+	// proof-of-deletion probe (reconcileAutoExportJSONL, which runs
 	// because deleting e2e-b leaves it JSONL-only) and tryIncrementalExport's
 	// own diff. A bare "called at least once" check is NOT sufficient and was
 	// the PR #5806 round-5 review finding: the guard's own call satisfies it
@@ -2055,7 +2070,7 @@ func TestTryIncrementalExport_NeverLeaksMemoriesIntoAutoExport(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, memCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, memCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2105,7 +2120,7 @@ func TestTryIncrementalExport_PreservesPreExistingMemoryAcrossPatch(t *testing.T
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2206,7 +2221,7 @@ func TestTryIncrementalExport_ExcludesConfiguredOwnerFromPatchedIssues(t *testin
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2239,7 +2254,7 @@ func TestTryIncrementalExport_PatchedLinesIncludeTypeField(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}

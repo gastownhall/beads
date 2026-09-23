@@ -2093,6 +2093,12 @@ func TestInitDatabaseFlag(t *testing.T) {
 		bareDir, worktreeDir := setupBareParentInitWorktree(t)
 		bareBeadsDir := filepath.Join(bareDir, ".beads")
 
+		// Shared-server init daemonizes a dolt sql-server that nothing here
+		// stopped; it outlived the suite whose temp HOME it served
+		// (wy-j2zc8q). Registered before the first subprocess so the
+		// t.Fatalf paths are covered too.
+		stopSharedServerCleanup(t)
+
 		cmd := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
 		cmd.Dir = worktreeDir
 		cmd.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
@@ -2315,6 +2321,9 @@ func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
 	bareDir, worktreeDir := setupBareParentInitWorktree(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
 	sharedEnv := append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+
+	// Same daemonized shared server, same missing stop (wy-j2zc8q).
+	stopSharedServerCleanup(t)
 
 	initCmd := exec.Command(bd, "init", "--prefix", "bare-core", "--skip-hooks", "--quiet")
 	initCmd.Dir = worktreeDir

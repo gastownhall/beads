@@ -80,11 +80,13 @@ func ApplyResolvedServerPort(beadsDir string, cfg *Config) {
 // requireDoltBackend keeps metadata-driven callers from bypassing the storage
 // factory and interpreting another backend's workspace as Dolt. Removed backend
 // identifiers deliberately remain recognizable in metadata so this check can fail
-// closed instead of opening a new, empty Dolt database.
-func requireDoltBackend(fileCfg *configfile.Config) error {
+// closed instead of opening a new, empty Dolt database. beadsDir is the workspace
+// the config came from, so the refusal can offer the metadata heal when that
+// workspace already holds a Dolt database.
+func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 	switch fileCfg.Backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
-		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetail(fileCfg.Backend))
+		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetailAt(fileCfg.Backend, beadsDir, fileCfg))
 	}
 	if !configfile.IsSupportedBackend(fileCfg.Backend) {
 		return fmt.Errorf("configured storage backend %q in metadata.json is not recognized and cannot be opened as Dolt; %s", fileCfg.Backend, configfile.BackendNotOpenedGuarantee)
@@ -114,7 +116,7 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	if err := requireDoltBackend(fileCfg); err != nil {
+	if err := requireDoltBackend(fileCfg, beadsDir); err != nil {
 		return nil, err
 	}
 
@@ -144,7 +146,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	if err := requireDoltBackend(fileCfg); err != nil {
+	if err := requireDoltBackend(fileCfg, beadsDir); err != nil {
 		return nil, err
 	}
 

@@ -45,4 +45,9 @@
 // cursor. A front door that prints them sorts the keys, and both do today. If
 // this plane ever grows to thousands of rows, a paged reader is a new role
 // conversation and not a retrofit of this one.
+//
+// # Stability
+//
+// EXPERIMENTAL. This package is not yet covered by the project's compatibility
+// promise and may change in a minor release. Pin an exact beads version.
 package memoryops

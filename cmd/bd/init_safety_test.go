@@ -358,6 +358,12 @@ func TestShouldWireInitRemote(t *testing.T) {
 			want:              false,
 		},
 		{
+			// Keep this true. The URL is the supported pre-first-push wiring:
+			// the first `bd dolt push` creates refs/dolt/data on that same git
+			// remote, and bootstrap resolves the persisted value by probing
+			// for that ref (#5743). Do not "fix" a bootstrap failure by
+			// un-persisting here — that leaves every already-committed
+			// .beads/config.yaml in the wild broken.
 			name:           "plain git origin without dolt data",
 			syncURL:        "git+https://github.com/org/plain-source.git",
 			syncURLFromGit: true,

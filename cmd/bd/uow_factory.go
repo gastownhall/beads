@@ -137,17 +137,25 @@ type sqlServerUOWTopology struct {
 	rootPassword      string
 }
 
-// previewProviderOptions is the CLI-side half of the preview policy: it turns
-// the root pre-run's previewMode bool into the uow.ProviderOption slice the
-// proxied-server provider is opened with. Extracted (rather than inlined at
-// the call site) so the wiring — preview=true must produce uow.WithPreview(),
-// preview=false must produce nothing — has something to unit test; the
+// rootProviderOptions is the CLI-side half of the open-posture policy: it
+// turns the root pre-run's two classifications into the uow.ProviderOption
+// slice the proxied-server provider is opened with. Extracted (rather than
+// inlined at the call site) so the wiring has something to unit test; the
 // previous inline form had no test that would fail if a refactor dropped it.
-func previewProviderOptions(preview bool) []uow.ProviderOption {
-	if !preview {
+//
+// The two are not exclusive but preview is stronger, and passing both would
+// say two different things about an open that can only have one posture:
+// preview neither creates nor migrates, while readOnly opens normally and only
+// changes how a refused migration is handled. Preview wins.
+func rootProviderOptions(preview, readOnly bool) []uow.ProviderOption {
+	switch {
+	case preview:
+		return []uow.ProviderOption{uow.WithPreview()}
+	case readOnly:
+		return []uow.ProviderOption{uow.WithReadOnly()}
+	default:
 		return nil
 	}
-	return []uow.ProviderOption{uow.WithPreview()}
 }
 
 // newProxiedServerUOWProvider opens the proxied-server provider and, in
@@ -163,11 +171,24 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride
 	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, assertWorkspaceIdentity, opts...)
 }
 
-// newProxiedServerUOWProviderAdopting skips that assertion. Only two callers
-// legitimately have no workspace identity to assert: `bd init --team-server`,
-// which ADOPTS the identity the shared database already carries (asserting the
-// locally-minted placeholder would reject every correct init), and server-wide
-// database maintenance, which is not scoped to one project's database.
+// newProxiedServerUOWProviderAdopting skips that assertion. Three callers
+// legitimately have no workspace identity to assert:
+//
+//   - `bd init --team-server`, which ADOPTS the identity the shared database
+//     already carries (asserting the locally-minted placeholder would reject
+//     every correct init);
+//   - server-wide database maintenance, which is not scoped to one project's
+//     database;
+//   - withQuiescedProxiedProvider (backup_proxied_server.go), the post-restore
+//     reopen. A restore is precisely the operation after which the workspace's
+//     recorded project id and the database's may legitimately differ, and it is
+//     the connection whose job is to reconcile them — asserting the pre-restore
+//     identity would refuse the one open that can fix the mismatch. The full
+//     reasoning is at that function's doc comment.
+//
+// Anything else reaching this constructor is bypassing an identity assertion
+// that exists to stop a workspace writing into another project's database. Add
+// a fourth entry here, with its reason, or use newProxiedServerUOWProvider.
 func newProxiedServerUOWProviderAdopting(ctx context.Context, beadsDir, databaseOverride string, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
 	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, adoptWorkspaceIdentity, opts...)
 }
