@@ -1311,15 +1311,10 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
 	start := utils.CanonicalizePath(filepath.Dir(filepath.Dir(beadsDir)))
 	homeDir, _ := os.UserHomeDir()
-	tempRoot := utils.CanonicalizePath(os.TempDir())
-
-	for dir := start; dir != "/" && dir != "."; {
-		// A temp-root .beads is shared ambient state, not a parent workspace.
-		// Stop before inspecting it, while retaining discovery for real nested
-		// projects beneath the temp root.
-		if tempRoot != "" && utils.PathsEqual(dir, tempRoot) {
-			break
-		}
+	homeDir = utils.CanonicalizePath(homeDir)
+	origin := utils.CanonicalizePath(filepath.Dir(beadsDir))
+	walk := beads.NewAncestorDirWalk(start, origin)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		candidate := filepath.Join(dir, ".beads")
 		cfg, err := configfile.LoadForDiscovery(candidate)
 		if err != nil {
@@ -1337,11 +1332,6 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 			break
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 	return nil, nil
 }

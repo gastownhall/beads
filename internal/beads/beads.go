@@ -445,21 +445,13 @@ func findLocalBeadsDir() string {
 		return ""
 	}
 
-	for dir := cwd; dir != "/" && dir != "."; {
+	walk := NewAncestorDirWalk(cwd, cwd)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root (works on both Unix and Windows)
-			// On Unix: filepath.Dir("/") returns "/"
-			// On Windows: filepath.Dir("C:\\") returns "C:\\"
-			break
-		}
-		dir = parent
 	}
 
 	return ""
@@ -630,13 +622,8 @@ func FindBeadsDirFrom(startDir string) string {
 		}
 	}
 
-	for dir := startDir; dir != "/" && dir != "."; {
-		// The OS temp directory is a shared staging area, not a project
-		// boundary. A stale .beads there must never capture unrelated projects
-		// created beneath it (notably mktemp workspaces and test sandboxes).
-		if isOSTempRoot(dir) {
-			break
-		}
+	walk := NewAncestorDirWalk(startDir, startDir)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
@@ -655,11 +642,6 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 
 	if fallbackBeadsDir != "" {
@@ -715,12 +697,77 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	return false
 }
 
-// isOSTempRoot reports whether dir is the operating system's temp root.
-// Canonicalization is required on macOS, where TMPDIR may use /var while
-// Getwd and symlink resolution produce the equivalent /private/var path.
-func isOSTempRoot(dir string) bool {
-	tempRoot := utils.CanonicalizePath(os.TempDir())
-	return tempRoot != "" && utils.PathsEqual(dir, tempRoot)
+// AncestorDirWalk yields canonical directories from startDir upward. The OS
+// temp root is an exclusive ancestor ceiling: a walk that starts below it does
+// not yield it, while a caller whose actual discovery origin is the temp root
+// may inspect that starting directory exactly once. This keeps a deliberately
+// initialized /tmp workspace usable without letting ambient /tmp/.beads state
+// capture projects below it. Both paths are canonicalized once so macOS
+// /var -> /private/var aliases cannot bypass the ceiling.
+type AncestorDirWalk struct {
+	next     string
+	origin   string
+	tempRoot string
+	done     bool
+}
+
+// NewAncestorDirWalk constructs an upward directory walk. originDir is the
+// caller's actual discovery start even when startDir begins a later segment of
+// a bounded walk.
+func NewAncestorDirWalk(startDir, originDir string) *AncestorDirWalk {
+	return &AncestorDirWalk{
+		next:     canonicalizeAncestorWalkPath(startDir),
+		origin:   canonicalizeAncestorWalkPath(originDir),
+		tempRoot: canonicalizeAncestorWalkPath(os.TempDir()),
+	}
+}
+
+// canonicalizeAncestorWalkPath resolves the longest existing ancestor and
+// reattaches any missing tail. Discovery often starts from a not-yet-created
+// project path; a bare EvalSymlinks would leave /var unresolved while the
+// existing temp root resolves to /private/var, defeating the ceiling.
+func canonicalizeAncestorWalkPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	cur := filepath.Clean(abs)
+	remainder := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			resolved = utils.CanonicalizePath(resolved)
+			if remainder == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, remainder)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(abs)
+		}
+		remainder = filepath.Join(filepath.Base(cur), remainder)
+		cur = parent
+	}
+}
+
+// Next returns the next directory permitted by the temp-root ceiling.
+func (w *AncestorDirWalk) Next() (string, bool) {
+	if w == nil || w.done || w.next == "" || w.next == "." {
+		return "", false
+	}
+	dir := w.next
+	if w.tempRoot != "" && dir == w.tempRoot && dir != w.origin {
+		w.done = true
+		return "", false
+	}
+
+	parent := filepath.Dir(dir)
+	if parent == dir || (w.tempRoot != "" && dir == w.tempRoot) {
+		w.done = true
+	} else {
+		w.next = parent
+	}
+	return dir, true
 }
 
 // hasBeadsDatabase is the strict counterpart to hasBeadsProjectFiles: it
@@ -833,7 +880,8 @@ func FindBeadsDir() string {
 	if walkBoundary != "" {
 		walkBoundaryCanonical = utils.CanonicalizePath(walkBoundary)
 	}
-	for dir := cwdCanonical; dir != "/" && dir != "."; {
+	walk := NewAncestorDirWalk(cwdCanonical, cwdCanonical)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		// Stop at the walk boundary (exclusive — don't check this directory).
 		// For worktrees: stops before worktree root so step 3 handles it.
 		// For non-worktrees: stops before git root (which is checked below in the
@@ -841,10 +889,6 @@ func FindBeadsDir() string {
 		if walkBoundaryCanonical != "" && dir == walkBoundaryCanonical {
 			break
 		}
-		if isOSTempRoot(dir) {
-			break
-		}
-
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			beadsDir = FollowRedirect(beadsDir)
@@ -853,11 +897,6 @@ func FindBeadsDir() string {
 			}
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 
 	// 3. Worktree-specific fallback: redirect, own .beads, shared .beads.
@@ -985,10 +1024,8 @@ func FindBeadsDir() string {
 			extendedRootCanonical = utils.CanonicalizePath(extendedRoot)
 		}
 
-		for dir := walkBoundaryCanonical; dir != "/" && dir != "."; {
-			if isOSTempRoot(dir) {
-				break
-			}
+		extendedWalk := NewAncestorDirWalk(walkBoundaryCanonical, cwdCanonical)
+		for dir, ok := extendedWalk.Next(); ok; dir, ok = extendedWalk.Next() {
 			beadsDir := filepath.Join(dir, ".beads")
 			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 				beadsDir = FollowRedirect(beadsDir)
@@ -1002,11 +1039,6 @@ func FindBeadsDir() string {
 				break
 			}
 
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
 		}
 	}
 
@@ -1265,7 +1297,8 @@ func findDatabaseInTree() string {
 	}
 
 	// Walk up directory tree (regular repository or worktree fallback)
-	for {
+	walk := NewAncestorDirWalk(dir, dir)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			// Follow redirect if present
@@ -1277,19 +1310,10 @@ func findDatabaseInTree() string {
 			}
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-
 		// Stop at git root to avoid finding unrelated databases
 		if gitRootCanonical != "" && dir == gitRootCanonical {
 			break
 		}
-
-		dir = parent
 	}
 
 	return ""
@@ -1312,10 +1336,11 @@ func FindAllDatabases() []DatabaseInfo {
 	}
 
 	// Find git root to limit the search
-	gitRoot := findGitRoot()
+	gitRoot := utils.CanonicalizePath(findGitRoot())
 
 	// Walk up directory tree
-	for {
+	walk := NewAncestorDirWalk(dir, dir)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			// Follow redirect if present
@@ -1343,12 +1368,6 @@ func FindAllDatabases() []DatabaseInfo {
 
 				// Skip if we've already seen this database (via symlink or other path)
 				if seen[canonicalPath] {
-					// Move up one directory
-					parent := filepath.Dir(dir)
-					if parent == dir {
-						break
-					}
-					dir = parent
 					continue
 				}
 				seen[canonicalPath] = true
@@ -1364,19 +1383,10 @@ func FindAllDatabases() []DatabaseInfo {
 			}
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-
 		// Stop at git root to avoid finding unrelated databases
 		if gitRoot != "" && dir == gitRoot {
 			break
 		}
-
-		dir = parent
 	}
 
 	return databases

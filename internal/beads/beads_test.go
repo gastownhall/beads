@@ -461,6 +461,68 @@ func TestFindBeadsDirFromPreservesNestedProjectUnderOSTempRoot(t *testing.T) {
 	}
 }
 
+func TestDiscoveryResolversDoNotAdoptOSTempRootAncestor(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(rootBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(tempRoot, "fixture", "nested")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(child)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	if got := FindDatabasePath(); got != "" {
+		t.Errorf("FindDatabasePath() = %q, want no temp-root ancestor", got)
+	}
+	if got := FindBeadsDir(); got != "" {
+		t.Errorf("FindBeadsDir() = %q, want no temp-root ancestor", got)
+	}
+	if got := findLocalBeadsDir(); got != "" {
+		t.Errorf("findLocalBeadsDir() = %q, want no temp-root ancestor", got)
+	}
+	if got := FindAllDatabases(); len(got) != 0 {
+		t.Errorf("FindAllDatabases() = %+v, want no temp-root ancestor", got)
+	}
+}
+
+func TestDiscoveryResolversHonorStoreAtOSTempRootStart(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(rootBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tempRoot)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	if got := FindDatabasePath(); got == "" {
+		t.Error("FindDatabasePath() = empty, want temp-root start store")
+	}
+	if got := FindBeadsDir(); !utils.PathsEqual(got, rootBeadsDir) {
+		t.Errorf("FindBeadsDir() = %q, want %q", got, rootBeadsDir)
+	}
+	if got := findLocalBeadsDir(); !utils.PathsEqual(got, rootBeadsDir) {
+		t.Errorf("findLocalBeadsDir() = %q, want %q", got, rootBeadsDir)
+	}
+	if got := FindAllDatabases(); len(got) != 1 {
+		t.Errorf("FindAllDatabases() = %+v, want temp-root start store", got)
+	}
+}
+
 // TestFindBeadsDirValidatesBeadsDirEnv verifies that BEADS_DIR env var
 // is validated for project files (bd-420)
 func TestFindBeadsDirValidatesBeadsDirEnv(t *testing.T) {
