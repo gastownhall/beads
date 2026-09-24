@@ -129,20 +129,26 @@ func selectServers(candidates []serverCandidate, want func(serverCandidate) bool
 // tempDirRoots is the set of directories under which a deleted working
 // directory is credible evidence of leaked TEST debris rather than a moved
 // production workspace: the process temp dir (honoring TMPDIR, which the
-// suites pin to their own root) and /tmp, which os.MkdirTemp uses when TMPDIR
-// is unset and which several suites hardcode.
+// suites pin to their own root), GOTMPDIR, and /tmp, which os.MkdirTemp uses
+// when TMPDIR is unset and which several suites hardcode.
+//
+// GOTMPDIR is where testing.T.TempDir roots every test's directories when it
+// is set (Go 1.26+), independently of TMPDIR, while os.TempDir() reads TMPDIR
+// alone. A host whose go tooling pins GOTMPDIR to a disk path and leaves
+// TMPDIR unset puts every t.TempDir() — and every test server's data dir under
+// it — outside both os.TempDir() and /tmp (TestTempDirRootsCoverGOTMPDIR).
 //
 // Roots too broad to be evidence of anything are dropped — see
-// isCredibleTempRoot. TMPDIR is an environment variable, so "/" or a home
-// directory can land here, and a root that broad would restore exactly the
-// unbounded deleted-cwd arm this bound exists to remove.
+// isCredibleTempRoot. TMPDIR and GOTMPDIR are environment variables, so "/"
+// or a home directory can land here, and a root that broad would restore
+// exactly the unbounded deleted-cwd arm this bound exists to remove.
 func tempDirRoots() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
 	}
 	var roots []string
-	for _, root := range canonicalRoots([]string{os.TempDir(), "/tmp"}) {
+	for _, root := range canonicalRoots([]string{os.TempDir(), os.Getenv("GOTMPDIR"), "/tmp"}) {
 		if !isCredibleTempRoot(root, home) {
 			continue
 		}
