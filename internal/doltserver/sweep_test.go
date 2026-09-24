@@ -658,3 +658,78 @@ func TestSandboxHomeUnderPerUserTempRoot(t *testing.T) {
 		}
 	})
 }
+
+// TestSandboxHomeUnderVarTmpTMPDIR is the /var/tmp counterpart to
+// TestSandboxHomeUnderPerUserTempRoot: a Linux gate host can point TMPDIR at
+// a disk-backed /var/tmp path instead of a tmpfs /tmp, and
+// scripts/ci/lib/test-env.sh mktemp -ds the sandbox HOME under WHATEVER
+// TMPDIR is, not a hardcoded /tmp. Judging sandbox-ness against /tmp alone
+// left that HOME disqualifying os.TempDir() itself, so tempDirRoots()
+// collapsed to [/tmp] and stranded every t.TempDir() actually rooted under
+// TMPDIR (TestTempDirRootsBoundTheOrphanArm, be-n9ile / be-35sef).
+func TestSandboxHomeUnderVarTmpTMPDIR(t *testing.T) {
+	t.Run("fixed temp roots include /var/tmp", func(t *testing.T) {
+		cases := []struct {
+			path string
+			goos string
+			want bool
+		}{
+			{"/var/tmp/beads-test-env-abc123/home", "linux", true},
+			{"/var/tmp/beads-test-env-abc123/home", "darwin", true},
+			{"/private/var/tmp/beads-test-env-abc123/home", "darwin", true},
+			// The invariant still holds: a real home is never a sandbox
+			// home, whatever TMPDIR says.
+			{"/home/runner", "linux", false},
+			{"/home/runner", "darwin", false},
+		}
+		for _, tc := range cases {
+			if got := isUnderFixedTempRoots(tc.path, tc.goos); got != tc.want {
+				t.Errorf("isUnderFixedTempRoots(%q, %q) = %v, want %v", tc.path, tc.goos, got, tc.want)
+			}
+		}
+
+		linuxRoots := fixedTempRoots("linux")
+		if !slices.Contains(linuxRoots, "/var/tmp") {
+			t.Errorf("fixedTempRoots(%q) = %v, missing %q", "linux", linuxRoots, "/var/tmp")
+		}
+		darwinRoots := fixedTempRoots("darwin")
+		if !slices.Contains(darwinRoots, "/private/var/tmp") {
+			t.Errorf("fixedTempRoots(%q) = %v, missing the literal %q", "darwin", darwinRoots, "/private/var/tmp")
+		}
+	})
+
+	// End to end: TMPDIR pointed at a disk-backed /var/tmp path, with the
+	// sandbox HOME nested under it exactly the way test-env.sh builds one.
+	// os.TempDir() must survive as a root, or the deleted-cwd arm goes inert
+	// on every host that sets TMPDIR this way.
+	t.Run("HOME inside a /var/tmp-rooted TMPDIR keeps it a root", func(t *testing.T) {
+		const tmpdir = "/var/tmp/beads-gate-probe"
+		t.Setenv("TMPDIR", tmpdir)
+		t.Setenv("HOME", tmpdir+"/beads-test-env-abc123/home")
+
+		roots := tempDirRoots()
+		if len(roots) == 0 {
+			t.Fatal("tempDirRoots() is empty; the deleted-cwd arm could never fire")
+		}
+		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v with TMPDIR=%s, want it still covered", roots, tmpdir)
+		}
+	})
+
+	// Safety bound: crediting the process's OWN TMPDIR-rooted sandbox must
+	// not widen the arm into crediting every /var/tmp path on the box. A
+	// SIBLING /var/tmp tree the process knows nothing about — another
+	// user's production server, say — must stay out of tempDirRoots(),
+	// exactly as an unrelated /Users workspace already does for /tmp.
+	t.Run("does not credit a sibling /var/tmp path outside TMPDIR", func(t *testing.T) {
+		const tmpdir = "/var/tmp/beads-gate-probe"
+		t.Setenv("TMPDIR", tmpdir)
+		t.Setenv("HOME", tmpdir+"/beads-test-env-abc123/home")
+
+		roots := tempDirRoots()
+		const sibling = "/var/tmp/some-other-users-production-server/.beads/dolt"
+		if underAnyRoot(sibling, roots) {
+			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
+		}
+	})
+}
