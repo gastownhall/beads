@@ -237,20 +237,38 @@ func isUnderFixedTempRoots(path, goos string) bool {
 // os.TempDir() itself and left the deleted-cwd arm inert on every Mac
 // (wy-j2zc8q).
 //
+// /var/tmp is the same story on a Linux gate host whose TMPDIR points at a
+// disk-backed path there instead of a tmpfs /tmp: test-env.sh mktemp -ds the
+// sandbox HOME under WHATEVER TMPDIR is, not a hardcoded /tmp. Without this
+// entry, isSandboxHome only recognized /tmp on Linux, so that sandbox HOME
+// read as a real home containing os.TempDir(), isCredibleTempRoot
+// disqualified os.TempDir() itself, and tempDirRoots() collapsed to [/tmp] —
+// stranding every t.TempDir() actually rooted under the /var/tmp-based TMPDIR
+// (TestTempDirRootsBoundTheOrphanArm, be-n9ile / be-35sef).
+//
 // The darwin row spells out the symlink-RESOLVED forms ("/private/tmp",
-// "/private/var/folders") literally instead of leaving them to canonicalRoots.
-// canonicalRoots resolves with filepath.EvalSymlinks, which reads the HOST's
-// filesystem: on a Mac it turns /tmp and /var/folders into their /private/…
-// targets, and on a Linux runner it adds nothing at all. But this table is a
-// claim ABOUT darwin that any platform may be asked to judge — the platform
-// row is pinned from Linux CI by TestSandboxHomeUnderPerUserTempRoot, and a
-// Mac's lsof reports cwds in the /private/… form — so the answer must not
-// depend on where the judging happens. canonicalRoots dedups, so on a real
-// Mac these literals cost nothing: they are exactly what it would have added.
+// "/private/var/folders", "/private/var/tmp") literally instead of leaving
+// them to canonicalRoots. canonicalRoots resolves with filepath.EvalSymlinks,
+// which reads the HOST's filesystem: on a Mac it turns /tmp, /var/folders,
+// and /var/tmp into their /private/… targets, and on a Linux runner it adds
+// nothing at all. But this table is a claim ABOUT darwin that any platform
+// may be asked to judge — the platform row is pinned from Linux CI by
+// TestSandboxHomeUnderPerUserTempRoot, and a Mac's lsof reports cwds in the
+// /private/… form — so the answer must not depend on where the judging
+// happens. canonicalRoots dedups, so on a real Mac these literals cost
+// nothing: they are exactly what it would have added.
+//
+// This table only feeds isSandboxHome's home-containment carve-out inside
+// isCredibleTempRoot — it is never unioned into tempDirRoots()'s own output
+// (canonicalRoots([os.TempDir(), "/tmp"])). Adding /var/tmp here cannot make
+// an unrelated /var/tmp path (say, another user's production server) a
+// credible orphan-sweep root; it only stops a legitimately-nested sandbox
+// HOME from disqualifying the process's own os.TempDir()
+// (TestSandboxHomeUnderVarTmpTMPDIR).
 func fixedTempRoots(goos string) []string {
-	roots := []string{"/tmp"}
+	roots := []string{"/tmp", "/var/tmp"}
 	if goos == "darwin" {
-		roots = append(roots, "/private/tmp", "/var/folders", "/private/var/folders")
+		roots = append(roots, "/private/tmp", "/var/folders", "/private/var/folders", "/private/var/tmp")
 	}
 	return roots
 }
