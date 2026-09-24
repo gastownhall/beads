@@ -2309,7 +2309,7 @@ func init() {
 	initCmd.Flags().BoolP("quiet", "q", false, "Suppress output (quiet mode)")
 	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
 	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
-	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
+	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)")
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude/Codex/Cursor setup generation")
