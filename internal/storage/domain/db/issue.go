@@ -567,35 +567,33 @@ func (r *issueSQLRepositoryImpl) Get(ctx context.Context, id string, opts domain
 }
 
 func (r *issueSQLRepositoryImpl) GetByIDs(ctx context.Context, ids []string, opts domain.IssueTableOpts) ([]*types.Issue, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
 	table := pickIssueTable(opts.UseWispsTable)
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	q := fmt.Sprintf("SELECT %s FROM %s %s WHERE id IN (%s)",
-		issueSelectColumns, table, sqlbuild.LeaseJoin(table), strings.Join(placeholders, ","))
-	rows, err := r.runner.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("db: GetByIDs: %w", err)
-	}
-	defer rows.Close()
-
 	var out []*types.Issue
-	for rows.Next() {
-		issue, err := scanIssue(rows)
+	err := forEachIDBatch(ids, func(batch []string) error {
+		placeholders, args := buildInPlaceholders(batch)
+		//nolint:gosec // G201: table is one of two hardcoded constants
+		q := fmt.Sprintf("SELECT %s FROM %s %s WHERE id IN (%s)",
+			issueSelectColumns, table, sqlbuild.LeaseJoin(table), placeholders)
+		rows, err := r.runner.QueryContext(ctx, q, args...)
 		if err != nil {
-			return nil, fmt.Errorf("db: GetByIDs: scan: %w", err)
+			return fmt.Errorf("db: GetByIDs: %w", err)
 		}
-		out = append(out, issue)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("db: GetByIDs: rows: %w", err)
+		defer rows.Close()
+
+		for rows.Next() {
+			issue, err := scanIssue(rows)
+			if err != nil {
+				return fmt.Errorf("db: GetByIDs: scan: %w", err)
+			}
+			out = append(out, issue)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("db: GetByIDs: rows: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -945,14 +943,14 @@ func (r *issueSQLRepositoryImpl) GetReadyWorkWithCounts(ctx context.Context, fil
 	return r.getReadyWorkWithCountsUnion(ctx, filter)
 }
 
-func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts domain.IssueTableOpts) error {
+func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts domain.IssueTableOpts, actor string) error {
 	table := "issues"
 	if opts.UseWispsTable {
 		table = "wisps"
 	}
 	// Edges are journaled before the row goes, while its snapshot can still be
 	// read.
-	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}); err != nil {
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}, actor); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.Delete %s: journal dependency removals: %w", id, err)
 	}
 	//nolint:gosec // G201: table is a hardcoded constant.
@@ -971,12 +969,11 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
 		return err
 	}
-	// The rows==0 return above keeps this actually-deleted-only. The repository
-	// Delete surface carries no actor, so the row records none.
-	return issueops.RecordDeleteInTx(ctx, r.runner, id, "")
+	// The rows==0 return above keeps this actually-deleted-only.
+	return issueops.RecordDeleteInTx(ctx, r.runner, id, actor)
 }
 
-func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, opts domain.IssueTableOpts) (int, error) {
+func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, opts domain.IssueTableOpts, actor string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -994,7 +991,7 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	}
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
-	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs); err != nil {
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs, actor); err != nil {
 		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependency removals: %w", err)
 	}
 	total := 0
@@ -1032,9 +1029,8 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 			}
 		}
 	}
-	// The repository DeleteByIDs surface carries no actor, so the rows record none.
 	for _, id := range actualIDs {
-		if err := issueops.RecordDeleteInTx(ctx, r.runner, id, ""); err != nil {
+		if err := issueops.RecordDeleteInTx(ctx, r.runner, id, actor); err != nil {
 			return total, err
 		}
 	}

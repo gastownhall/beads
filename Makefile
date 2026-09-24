@@ -75,8 +75,16 @@ export CGO_ENABLED := 1
 # When go.mod requires a newer Go version than the locally installed one,
 # GOTOOLCHAIN=auto downloads the right compiler but coverage instrumentation
 # may still use the local toolchain's compile tool, causing version mismatch.
-# Force the go.mod version to ensure all tools match.
+# Force one exact version so all tools match.
+#
+# The `toolchain` directive wins over the `go` directive when present: `go` is
+# the floor we promise importers, `toolchain` is what we actually build with,
+# and reading `go` here would silently downgrade every make target below the
+# toolchain the release binaries are built with.
+GO_VERSION := $(shell sed -n 's/^toolchain go//p' go.mod)
+ifeq ($(GO_VERSION),)
 GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
+endif
 ifneq ($(GO_VERSION),)
 export GOTOOLCHAIN := go$(GO_VERSION)
 endif

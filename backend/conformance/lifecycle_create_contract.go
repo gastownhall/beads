@@ -565,6 +565,79 @@ func assertLifecycleCreateMembers(t *testing.T, id, label string, issue *types.I
 	}
 }
 
+// RunLifecycleCreateEchoesSubSecondTimestamps pins that a create RESULT carries
+// the timestamps the write actually sent, at full precision, rather than the
+// whole seconds a read of the row answers with.
+//
+// created_at/updated_at are DATETIME(0) columns, so any snapshot built by
+// re-reading the row it just wrote comes back rounded. That is fine for every
+// read verb — show and list have always answered whole seconds — but create is
+// different: its echo is the ONLY record a caller has of the instant the row was
+// written, and agents order same-second creates by it. A backend that hydrates
+// its create result and stops there silently loses that ordering, which is
+// exactly the regression this case exists for.
+//
+// THE PRECISION PIN IS THE EXPLICIT ARM, not the auto-stamped one. A create that
+// names no time is stamped from the clock, and whether that stamp happens to
+// carry a non-zero fraction is not something a test can require without being
+// flaky by a billionth; a caller-supplied time with nanoseconds in it is
+// deterministic, and PrepareIssueForInsert preserves a non-zero input. The
+// auto-stamp arm is kept as a bounded smoke check that the overlay did not
+// replace the stamp with something unrelated.
+//
+// The stored ROW is deliberately NOT asserted here. What it rounds to is the
+// column's business, and a later widening to DATETIME(6) must not have to edit
+// this case.
+func RunLifecycleCreateEchoesSubSecondTimestamps(t *testing.T, ctx context.Context, fixture LifecycleCreateFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lcc-nanoecho"
+	createdAt := time.Date(2019, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	updatedAt := time.Date(2019, 3, 4, 5, 6, 8, 987654321, time.UTC)
+	created, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue: &types.Issue{
+			ID: id, Title: "sub-second echo", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			CreatedAt: createdAt, UpdatedAt: updatedAt,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create %s with sub-second timestamps: %v", id, err)
+	}
+	if created.Issue == nil {
+		t.Fatalf("create %s returned no issue", id)
+	}
+	if !created.Issue.CreatedAt.Equal(createdAt) {
+		t.Errorf("%s create result created_at = %v, want %v exactly — the echo is the caller's only record of when the row was written, and rounding it to the second makes same-second creates unorderable",
+			id, created.Issue.CreatedAt.UTC(), createdAt)
+	}
+	if !created.Issue.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("%s create result updated_at = %v, want %v exactly", id, created.Issue.UpdatedAt.UTC(), updatedAt)
+	}
+
+	// The auto-stamped arm: no precision requirement, only that the overlay
+	// still hands back a stamp from this call rather than a stale or zero one.
+	stamped := fixture.IssuePrefix + "-lcc-nanoauto"
+	lower := time.Now().UTC().Add(-lifecycleCreateClockSlack)
+	auto, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue:         lifecycleCreateIssue(stamped),
+	})
+	if err != nil {
+		t.Fatalf("create %s without timestamps: %v", stamped, err)
+	}
+	upper := time.Now().UTC().Add(lifecycleCreateClockSlack)
+	if auto.Issue == nil {
+		t.Fatalf("create %s returned no issue", stamped)
+	}
+	echoed := auto.Issue.CreatedAt.UTC()
+	if echoed.Before(lower) || echoed.After(upper) {
+		t.Errorf("%s create result created_at = %v, want a stamp from this call between %v and %v", stamped, echoed, lower, upper)
+	}
+}
+
 // lifecycleCreateClockSlack widens the window the auto-stamp arm allows around a
 // creation time the implementation wrote from its own clock. Every backend here
 // stamps in Go, in this process, so the two clocks are the same one; the slack
