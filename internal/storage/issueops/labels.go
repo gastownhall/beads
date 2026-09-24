@@ -149,9 +149,33 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 			eventTable = et
 		}
 	}
-	//nolint:gosec // G201: labelTable is from WispTableRouting ("labels" or "wisp_labels")
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label); err != nil {
+	useWisps, err := labelTableUsesWisps(labelTable)
+	if err != nil {
 		return fmt.Errorf("add label: %w", err)
+	}
+	//nolint:gosec // G201: labelTable is from WispTableRouting ("labels" or "wisp_labels")
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label)
+	if err != nil {
+		return fmt.Errorf("add label: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("add label: rows affected: %w", err)
+	}
+	if rows == 0 {
+		issueTable := "issues"
+		if useWisps {
+			issueTable = "wisps"
+		}
+		var count int
+		//nolint:gosec // G201: issueTable is one of two hardcoded constants.
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", issueTable), issueID).Scan(&count); err != nil {
+			return fmt.Errorf("add label: verify issue: %w", err)
+		}
+		if count == 0 {
+			return fmt.Errorf("add label: issue %s does not exist", issueID)
+		}
+		return nil
 	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -167,7 +191,7 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	// rejection, and LWW merge are all blind to label-only churn (#5442).
 	// Must run before RecordEventInTx below so the journal snapshot below
 	// captures the bumped value, matching UpdateIssueInTx's own ordering.
-	if err := touchUpdatedAtInTx(ctx, tx, issueTableFor(labelTable), issueID); err != nil {
+	if err := TouchIssueUpdatedAtInTx(ctx, tx, issueID, useWisps); err != nil {
 		return fmt.Errorf("add label: %w", err)
 	}
 	// A label is part of the bead snapshot, so a label write journals as an
@@ -191,8 +215,20 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 			eventTable = et
 		}
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label); err != nil {
+	useWisps, err := labelTableUsesWisps(labelTable)
+	if err != nil {
 		return fmt.Errorf("remove label: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label)
+	if err != nil {
+		return fmt.Errorf("remove label: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("remove label: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return nil
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -203,27 +239,27 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	}); err != nil {
 		return fmt.Errorf("remove label: record event: %w", err)
 	}
-	if err := touchUpdatedAtInTx(ctx, tx, issueTableFor(labelTable), issueID); err != nil {
+	if err := TouchIssueUpdatedAtInTx(ctx, tx, issueID, useWisps); err != nil {
 		return fmt.Errorf("remove label: %w", err)
 	}
 	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
 }
 
-// issueTableFor returns the issue table ("issues" or "wisps") that owns
-// labelTable ("labels" or "wisp_labels"). WispTableRouting only ever
-// produces these two pairings, so the mapping is exhaustive -- deriving it
-// this way avoids an extra IsActiveWispInTx probe query when the caller
-// already resolved and passed in labelTable/eventTable explicitly (e.g.
-// embeddeddolt/dolt Transaction.AddLabel, which also need the routed table
-// name for their own dirty-table tracking).
-func issueTableFor(labelTable string) string {
-	if labelTable == "wisp_labels" {
-		return "wisps"
+// labelTableUsesWisps validates the exhaustive label-table routing contract.
+// Failing loudly protects future routing additions from silently touching the
+// permanent issues table.
+func labelTableUsesWisps(labelTable string) (bool, error) {
+	switch labelTable {
+	case "labels":
+		return false, nil
+	case "wisp_labels":
+		return true, nil
+	default:
+		return false, fmt.Errorf("unexpected label table %q", labelTable)
 	}
-	return "issues"
 }
 
-// touchUpdatedAtInTx bumps an issue's updated_at without touching any other
+// TouchIssueUpdatedAtInTx bumps an issue's updated_at without touching any other
 // column. Callers that mutate an issue through a side channel other than
 // UpdateIssueInTx -- label add/remove write directly to the labels/
 // wisp_labels table, bypassing the normal field-update path entirely --
@@ -232,7 +268,11 @@ func issueTableFor(labelTable string) string {
 // every other issues/wisps content write (see the freshRowLock invariant in
 // lease.go) -- otherwise this write would be invisible to RowVersion-gated
 // optimistic-concurrency checks.
-func touchUpdatedAtInTx(ctx context.Context, tx DBTX, issueTable, issueID string) error {
+func TouchIssueUpdatedAtInTx(ctx context.Context, tx DBTX, issueID string, useWisps bool) error {
+	issueTable := "issues"
+	if useWisps {
+		issueTable = "wisps"
+	}
 	rowLockClause, rowLockArgs := RowLockClause()
 	args := append([]interface{}{time.Now().UTC()}, rowLockArgs...)
 	args = append(args, issueID)

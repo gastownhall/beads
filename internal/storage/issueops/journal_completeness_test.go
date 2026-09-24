@@ -164,6 +164,7 @@ var beadDMLExemptions = map[string]string{
 	"InsertDerivedComment":                   "raw comment insert; the calling comment/create entry point journals it",
 	"PersistLabels":                          "constituent label write of a create; the create entry point journals it",
 	"PersistComments":                        "constituent comment write of a create; the create entry point journals it",
+	"TouchIssueUpdatedAtInTx":                "constituent snapshot touch; each label mutation caller journals the complete post-mutation issue",
 	"UpdateWispIDInDependenciesInTx":         "rewrites dep rows during a rename; UpdateIssueIDInTx journals the rename",
 	"UpdateIssueIDInDependenciesInTx":        "rewrites dep rows during a rename; UpdateIssueIDInTx journals the rename",
 	"RetargetInboundDependenciesToWispInTx":  "rewrites dep rows during promote; PromoteFromEphemeralInTx journals it",
