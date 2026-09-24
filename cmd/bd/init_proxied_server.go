@@ -466,9 +466,16 @@ func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) 
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
+// defaultProxiedServerIdleTimeout mirrors uow.defaultProxyIdleTimeout
+// (internal/storage/uow/dolt_sql_provider.go): an omitted
+// --proxied-server-idle-timeout resolves to this at proxy-startup time, so
+// the sidecar must persist that same effective value rather than a bare
+// zero a later reader could mistake for "never".
+const defaultProxiedServerIdleTimeout = 30 * time.Second
+
 func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int, idleTimeout time.Duration, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
-	if rootPath == "" && configPath == "" && logPath == "" && port == 0 && idleTimeout == 0 && external == nil {
-		return nil, nil
+	if idleTimeout == 0 {
+		idleTimeout = defaultProxiedServerIdleTimeout
 	}
 	clean := func(p string) (string, error) {
 		if p == "" {
