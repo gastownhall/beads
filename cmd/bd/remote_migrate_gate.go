@@ -61,6 +61,22 @@ func humanDecisionRequired(e *schema.RemoteMigrateGateError) bool {
 	return !(e.IsDataBehind() && !e.DataDiverged && !e.Shared)
 }
 
+// dataBehindExpectedField renders the data-behind stop's `expected` field.
+//
+// On a proxied workspace the remedy is the same command in a different PLACE,
+// and `expected` is what a single-field agent reader keys on. The option id,
+// its when/risk and the hint all carry that qualifier, so leaving it off here
+// alone would hand such a reader a command its own front door refuses
+// (proxy.dolt_pull.unsupported). Kept out of handleRemoteMigrateGateJSON so
+// the qualifier does not add another branch to that already-deep switch.
+func dataBehindExpectedField(proxied bool) string {
+	const tail = "; the migration is only allowed once this clone has nothing left to pull"
+	if proxied {
+		return "run `" + schema.DataBehindRemedyCommand + "` on the machine that hosts this database first — this workspace is in proxied-server mode, where it is refused (proxy.dolt_pull.unsupported)" + tail
+	}
+	return "run `" + schema.DataBehindRemedyCommand + "` first" + tail
+}
+
 // handleRemoteMigrateGateJSON renders the #4259 remote-migrate gate error as a
 // structured JSON error block for agent consumption.
 //
@@ -87,12 +103,13 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		if globalFlag {
 			sharedConsent = schema.SharedConsentCommandGlobal
 		}
-		// The #6575 data-behind stop on a SHARED store carries the same consent
-		// verb in its second option (migrate-shared-after-pulling), so it needs
-		// the same retarget: under --global the project-scoped verb would
-		// consent the wrong database and leave the refusal in place. It reaches
-		// here through the default arm (empty Decision), so the Decision test
-		// alone would miss it.
+		// The #6575 data-behind stop on a SHARED store carries a consent verb in
+		// its second option (migrate-shared-after-pulling) too — the forced one,
+		// since that stop is always remote-backed — so it needs the same
+		// retarget: under --global the project-scoped verb would consent the
+		// wrong database and leave the refusal in place. It reaches here through
+		// the default arm (empty Decision), so the Decision test alone would
+		// miss it.
 		retargetShared := globalFlag && (e.Decision == "shared-no-remote" || (e.IsDataBehind() && e.Shared))
 
 		opts := make([]map[string]interface{}, 0, len(e.Options()))
@@ -105,9 +122,18 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 				// "expected" would still hand it the wrong-target command.
 				retargeted := make([]string, len(commands))
 				for i, c := range commands {
-					if c == schema.SharedConsentCommand {
+					switch c {
+					case schema.SharedConsentCommand:
 						retargeted[i] = schema.SharedConsentCommandGlobal
-					} else {
+					case schema.SharedConsentCommandForced:
+						// The data-behind arm's consent step is the FORCED
+						// verb (that stop is remote-backed by construction,
+						// where the bare verb's consent is never read), so it
+						// needs its own global form — matching only the bare
+						// verb would leave this option pointing at the
+						// project database.
+						retargeted[i] = schema.SharedConsentCommandForcedGlobal
+					default:
 						retargeted[i] = c
 					}
 				}
@@ -192,7 +218,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 					gate["data_behind_shape"] = "fast-forward"
 				}
 				gate["observed"] = observed
-				gate["expected"] = "run `" + schema.DataBehindRemedyCommand + "` first; the migration is only allowed once this clone has nothing left to pull"
+				gate["expected"] = dataBehindExpectedField(e.Proxied)
 			}
 		}
 		m["remote_migrate_gate"] = gate

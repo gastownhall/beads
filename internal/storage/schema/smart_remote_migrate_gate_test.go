@@ -1246,10 +1246,22 @@ func TestDataBehindRemedySurfaces(t *testing.T) {
 		// fallbackReasonSharedStore (whose note carried them) and Options()'
 		// sharedRisk only ever decorated the adopt option.
 		msg := base(true, false).UserMessage()
-		for _, want := range []string{"co-resident", "#5920", SharedConsentCommand} {
+		for _, want := range []string{"co-resident", "#5920", SharedConsentCommandForced} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("shared data-behind message is missing %q:\n%s", want, msg)
 			}
+		}
+		// This stop always has a remote (that is where behind-ness is read
+		// from), so the bare verb is a dead end here: its consent is read only
+		// by sharedNoRemoteGate, on the !hasRemote branch. Asserting the forced
+		// form above is not enough — every forced form CONTAINS the bare form
+		// as a substring, so a regression to the bare verb would still satisfy
+		// it. Remove the forms that do work, then require nothing prescribing
+		// the bare one is left.
+		scrubbed := strings.ReplaceAll(msg, SharedConsentCommandForcedGlobal, "")
+		scrubbed = strings.ReplaceAll(scrubbed, SharedConsentCommandForced, "")
+		if strings.Contains(scrubbed, SharedConsentCommand) {
+			t.Errorf("shared data-behind message prescribes the bare verb, which cannot succeed with a remote configured:\n%s", msg)
 		}
 		if strings.Contains(msg, "proceeds on its own") {
 			t.Errorf("a shared store must not be promised an automatic retry:\n%s", msg)
@@ -1298,6 +1310,63 @@ func TestDataBehindRemedySurfaces(t *testing.T) {
 		}
 		if (*RemoteMigrateGateError)(nil).IsDataBehind() {
 			t.Error("IsDataBehind() = true on a nil receiver")
+		}
+	})
+
+	// Proxied-server mode is the one topology where the remedy command is
+	// correct and unrunnable at the same time: `bd dolt pull` is refused at the
+	// front door (proxy.dolt_pull.unsupported), as are `bd dolt push`,
+	// `bd migrate` and `bd conflicts`. Naming it unqualified there hands the
+	// operator a command their own binary rejects, which is how they end up
+	// reaching for the one hatch the proxy does NOT refuse.
+	t.Run("proxied surfaces say where the pull can be run", func(t *testing.T) {
+		proxied := func(shared bool) *RemoteMigrateGateError {
+			e := base(shared, false)
+			e.Proxied = true
+			return e
+		}
+
+		for _, shared := range []bool{false, true} {
+			msg := proxied(shared).UserMessage()
+			for _, want := range []string{
+				"proxied-server mode", "proxy.dolt_pull.unsupported", "server host",
+				DataBehindRemedyCommand, AllowRemoteMigrateEnv + "=1",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("shared=%v: proxied body missing %q:\n%s", shared, want, msg)
+				}
+			}
+			d := proxied(shared).AgentDirective()
+			for _, want := range []string{"proxy.dolt_pull.unsupported", "do NOT attempt it here"} {
+				if !strings.Contains(d, want) {
+					t.Errorf("shared=%v: proxied AgentDirective missing %q:\n%s", shared, want, d)
+				}
+			}
+			opts := proxied(shared).Options()
+			if opts[0].ID != "pull-first-on-server-host" {
+				t.Errorf("shared=%v: pull option id = %q, want the host-qualified id", shared, opts[0].ID)
+			}
+			// The command itself is unchanged — it is the right command — so an
+			// agent that reads only Commands must find the qualification in the
+			// precondition it is required to check.
+			if len(opts[0].Commands) != 1 || opts[0].Commands[0] != DataBehindRemedyCommand {
+				t.Errorf("shared=%v: pull option commands = %v, want [%q]", shared, opts[0].Commands, DataBehindRemedyCommand)
+			}
+			if !strings.Contains(opts[0].When, "proxy.dolt_pull.unsupported") {
+				t.Errorf("shared=%v: pull option precondition must name the refusal:\n%s", shared, opts[0].When)
+			}
+		}
+
+		// Nothing above may leak into the ordinary embedded/server-mode stop,
+		// whose remedy IS runnable where it is printed.
+		direct := base(true, false).UserMessage()
+		for _, forbidden := range []string{"proxied-server mode", "server host"} {
+			if strings.Contains(direct, forbidden) {
+				t.Errorf("non-proxied body gained %q:\n%s", forbidden, direct)
+			}
+		}
+		if base(true, false).Options()[0].ID != "pull-first" {
+			t.Error("non-proxied pull option id changed")
 		}
 	})
 }

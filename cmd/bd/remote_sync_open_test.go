@@ -101,18 +101,27 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name      string
-		diverged  bool
-		wantShape string
+		name         string
+		diverged     bool
+		proxied      bool
+		wantShape    string
+		wantOptionID string
 	}{
-		{name: "fast-forward shape", diverged: false, wantShape: "fast-forward"},
-		{name: "diverged shape", diverged: true, wantShape: "diverged"},
+		{name: "fast-forward shape", diverged: false, wantShape: "fast-forward", wantOptionID: "pull-first"},
+		{name: "diverged shape", diverged: true, wantShape: "diverged", wantOptionID: "pull-first"},
+		// On a proxied workspace the remedy is the same command in a different
+		// PLACE, and observed/expected are what a single-field reader keys on.
+		// The qualifier reached the option id and the hint an iteration before
+		// it reached expected, which is the divergence this case exists to
+		// catch: all three are asserted together below.
+		{name: "proxied qualifies every remedy field", proxied: true, wantShape: "fast-forward", wantOptionID: "pull-first-on-server-host"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gate := &schema.RemoteMigrateGateError{
 				CurrentVersion: 66, LatestVersion: 67, Pending: 1,
 				FallbackReason: "data-behind",
 				DataDiverged:   tc.diverged,
+				Proxied:        tc.proxied,
 			}
 			parsed := capture(t, gate)
 			obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
@@ -149,8 +158,8 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 				t.Fatalf("options = %v, want exactly one (the pull)", obj["options"])
 			}
 			o, _ := rawOpts[0].(map[string]interface{})
-			if id, _ := o["id"].(string); id != "pull-first" {
-				t.Errorf("option id = %v, want \"pull-first\"", o["id"])
+			if id, _ := o["id"].(string); id != tc.wantOptionID {
+				t.Errorf("option id = %v, want %q", o["id"], tc.wantOptionID)
 			}
 			cmds, _ := o["commands"].([]interface{})
 			if len(cmds) != 1 || cmds[0] != schema.DataBehindRemedyCommand {
@@ -170,6 +179,21 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 			}
 			if hint == gate.EscapeHint() {
 				t.Errorf("hint must not be the runnable escape command %q", gate.EscapeHint())
+			}
+			// The location qualifier is all-or-nothing across the three fields
+			// an agent may read on their own: an `expected`-only reader on this
+			// topology would otherwise be handed a command its own front door
+			// refuses, while `options` and `hint` said where to run it.
+			if tc.proxied {
+				for name, surface := range map[string]string{"expected": expected, "hint": hint} {
+					for _, want := range []string{"proxied-server mode", "proxy.dolt_pull.unsupported"} {
+						if !strings.Contains(surface, want) {
+							t.Errorf("proxied %s = %q, want it to carry %q the way options[0] does", name, surface, want)
+						}
+					}
+				}
+			} else if strings.Contains(expected, "proxied-server mode") {
+				t.Errorf("expected = %q carries the proxied qualifier on a direct workspace, where the pull is runnable here", expected)
 			}
 			// Nothing anywhere in the block may offer the migrate/push pair or
 			// the no-op bootstrap for this state.
@@ -212,8 +236,10 @@ func TestHandleRemoteMigrateGateJSON_DataBehind(t *testing.T) {
 		}
 		consent, _ := rawOpts[1].(map[string]interface{})
 		cmds, _ := consent["commands"].([]interface{})
-		if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandGlobal {
-			t.Errorf("consent option commands = %v, want [%q] under --global", cmds, schema.SharedConsentCommandGlobal)
+		// The forced form, not the bare one: this stop is remote-backed by
+		// construction and the bare verb's consent is never read there.
+		if len(cmds) != 1 || cmds[0] != schema.SharedConsentCommandForcedGlobal {
+			t.Errorf("consent option commands = %v, want [%q] under --global", cmds, schema.SharedConsentCommandForcedGlobal)
 		}
 		// The pull is target-agnostic and must NOT be rewritten.
 		pull, _ := rawOpts[0].(map[string]interface{})
