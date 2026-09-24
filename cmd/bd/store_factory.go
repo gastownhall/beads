@@ -293,7 +293,7 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		return nil, errProxiedStoreUnrouted()
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(cfg) {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	database := configfile.DefaultDoltDatabase

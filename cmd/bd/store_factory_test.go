@@ -3,12 +3,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -68,6 +71,48 @@ func TestEffectiveServerMode(t *testing.T) {
 	}
 	if !effectiveServerMode(&configfile.Config{}) {
 		t.Error("effectiveServerMode(cfg not naming server) = false under BEADS_DOLT_SHARED_SERVER=1, want true (GH#6551)")
+	}
+}
+
+// TestOpenNonMutatingStoreHonorsSharedServerConfig pins the read-only factory
+// call site, not just effectiveServerMode in isolation. A linked worktree can
+// have config.yaml tracked while metadata.json is absent; in that shape the
+// active shared server must win over the embedded read-only fallback.
+func TestOpenNonMutatingStoreHonorsSharedServerConfig(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n  auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("HOME", t.TempDir())
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !effectiveServerMode(nil) {
+		t.Fatal("test setup: config.yaml did not enable shared-server mode")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	store, err := openNonMutatingStoreFromConfig(ctx, beadsDir, false)
+	if err == nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatal("openNonMutatingStoreFromConfig unexpectedly succeeded without a server")
+	}
+	if !strings.Contains(err.Error(), "Dolt server") || strings.Contains(err.Error(), "embeddeddolt") {
+		t.Fatalf("read-only factory did not select shared-server mode; got: %v", err)
 	}
 }
 
