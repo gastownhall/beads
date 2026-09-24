@@ -14,20 +14,6 @@ import (
 // Allows dots and slashes for branch names like "release/v2.0" or "feature/auth.flow".
 var validRefPattern = regexp.MustCompile(`^[a-zA-Z0-9_./-]+$`)
 
-// truncatedHashPattern matches strings that could plausibly be a truncated
-// Dolt commit hash: 16-31 characters, entirely within Dolt's base32 hash
-// alphabet (see doltCommitHashRE in blocked_merge.go for the full 32-char
-// form). This is a heuristic, not a certainty, so the lower bound matters:
-// an earlier version of this pattern started at 1 character and caught real
-// short branch names spelled entirely with digits and the letters a-v (e.g.
-// "main", "dev", "cafe") as false positives. Raising the floor to 16 trades
-// away the specific error for very short hand-typed truncations (e.g. the
-// 8-char prefix `bd history` used to print) in exchange for never
-// false-positiving on a real short branch name again -- an accepted
-// tradeoff, since the 8-char case was already fixed at its source (bd
-// history now prints the full hash) and no longer needs catching here.
-var truncatedHashPattern = regexp.MustCompile(`^[0-9a-v]{16,31}$`)
-
 // ValidateRef checks if a ref string is safe to use in AS OF queries.
 // Refs must be non-empty, <= 128 chars, and match [a-zA-Z0-9_./-]+.
 func ValidateRef(ref string) error {
@@ -39,9 +25,6 @@ func ValidateRef(ref string) error {
 	}
 	if !validRefPattern.MatchString(ref) {
 		return fmt.Errorf("invalid ref format: %s", ref)
-	}
-	if truncatedHashPattern.MatchString(ref) {
-		return fmt.Errorf("%q looks like a truncated commit hash -- Dolt's AS OF does not support hash-prefix resolution; use the full 32-character hash (bd history --json) or an exact branch name", ref)
 	}
 	return nil
 }
