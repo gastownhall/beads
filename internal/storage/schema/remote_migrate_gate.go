@@ -282,7 +282,16 @@ func (e *RemoteMigrateGateError) fallbackReasonNote() string {
 	case fallbackReasonSharedStore:
 		why = "this store is shared (dolt sql-server); the first-mover auto-migrate is disabled here because it would lock out co-resident clients (#5920)"
 	case fallbackReasonDataBehind:
-		why = "this clone is behind the remote in data commits it has not pulled, so it is not the first-mover it looks like on schema alone — migrating in place would diverge from those commits, and can leave every later `bd dolt pull` refusing to merge (#6575, #6368). Run `" + DataBehindRemedyCommand + "` first, then retry: this clone is then the true first-mover it looked like"
+		// UserMessage prints this note AFTER userBody, so on a proxied
+		// workspace an unqualified remedy makes the LAST paragraph tell the
+		// operator to type here the command the paragraph above just said the
+		// front door refuses. Gate it the same way dataBehindBody and
+		// Options() already do.
+		remedy := "Run `" + DataBehindRemedyCommand + "` first, then retry"
+		if e.Proxied {
+			remedy = "Run `" + DataBehindRemedyCommand + "` on the server host first (this workspace is in proxied-server mode, which refuses it — proxy.dolt_pull.unsupported), then retry here"
+		}
+		why = "this clone is behind the remote in data commits it has not pulled, so it is not the first-mover it looks like on schema alone — migrating in place would diverge from those commits, and can leave every later `bd dolt pull` refusing to merge (#6575, #6368). " + remedy + ": this clone is then the true first-mover it looked like"
 		// Only promise the retry resolves itself where it actually does. On a
 		// shared store the first-mover auto-migrate is suppressed regardless
 		// (fallbackReasonSharedStore, #5920), so pulling clears THIS stop but
@@ -348,9 +357,9 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 			"\n" +
 			"  That pull cannot be run from here: this workspace is in proxied-server mode,\n" +
 			"  which refuses `" + DataBehindRemedyCommand + "` at the front door (proxy.dolt_pull.unsupported),\n" +
-			"  along with `bd dolt push`, `bd migrate` and `bd conflicts`. Run it — and any\n" +
-			"  conflict resolution it needs — where the database lives: on the server host,\n" +
-			"  from a workspace with direct access to that database.\n"
+			"  along with `bd dolt push`, the bare `bd migrate` and `bd conflicts`. Run\n" +
+			"  it — and any conflict resolution it needs — where the database lives: on\n" +
+			"  the server host, from a workspace with direct access to that database.\n"
 	}
 	body += "" +
 		"\n" +
@@ -371,11 +380,24 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 			"        " + SharedConsentCommandForced + "\n" +
 			"        (" + SharedConsentCommandForcedGlobal + " for the shared global database)\n"
 		if e.Proxied {
-			// `bd migrate` is refused through the proxy too, so the consent
-			// step lands on the server host alongside the pull.
+			// Unlike the pull, this consent step is NOT refused here, and
+			// saying otherwise would be wrong in the unsafe direction. The
+			// proxied refusal table keys on the command path
+			// (cmd/bd.proxyMaintenanceRefusals): it registers the bare
+			// `migrate` verb and its hooks/issues/sync children, but has no
+			// `migrate schema` row, so the two-word path falls through
+			// validateProxyMaintenanceBeforeProvider to a proxied arm that
+			// reports the migration the provider open just applied under this
+			// verb's consent. A reader told it is blocked here tries it to
+			// confirm — and forceOrEnvConsent is honored BEFORE this stop is
+			// ever routed, so the wedge lands on the one topology that can
+			// still take it. State the real precondition instead: not where,
+			// but when.
 			body += "" +
-				"  That consent step is a `bd migrate` invocation, so it is refused through\n" +
-				"  the proxy as well — run it on the server host, after the pull.\n"
+				"  Unlike the pull, that consent step CAN be run from here: the proxied front\n" +
+				"  door refuses the bare `bd migrate` verb, not `" + SharedConsentCommandForced + "`,\n" +
+				"  and the provider open applies the migration under it. That is exactly why\n" +
+				"  it has to wait — run it only after the pull on the server host completes.\n"
 		}
 	} else {
 		body += "" +
@@ -399,15 +421,20 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 			"  finished: what makes it safe is that there is nothing left to pull by then.\n"
 	}
 	if e.Proxied {
-		// `bd migrate --force` is itself refused through the proxy, so the
-		// warning above names a command this operator cannot run — but the
-		// consent it carries has a second surface that IS reachable here, and
-		// naming only the unreachable one would leave the wedge open on the
-		// one topology that can still take it.
+		// Only the BARE `bd migrate` the warning above names is refused here.
+		// Two other surfaces carry the same forced consent and are both
+		// reachable from this workspace: the two-word `migrate schema` path,
+		// which no proxy refusal row matches, and the env hatch, which no
+		// command dispatch touches at all. forceOrEnvConsent reads both before
+		// this stop is routed, so a proxied warning that implies the topology
+		// already blocks the wedge would leave it open on the one topology
+		// that can still take it.
 		body += "" +
-			"  `bd migrate` is refused here anyway, but " + AllowRemoteMigrateEnv + "=1 is not:\n" +
-			"  it grants the same consent to ANY command, including the one you just ran.\n" +
-			"  Do not reach for it to get past this stop.\n"
+			"  Being in proxied-server mode does not put that out of reach: the front door\n" +
+			"  refuses the bare `bd migrate` verb, not `" + SharedConsentCommandForced + "`, and\n" +
+			"  " + AllowRemoteMigrateEnv + "=1 grants the same consent to ANY command, including\n" +
+			"  the one you just ran. Both are honored before this stop is even reached, so\n" +
+			"  do not reach for either to get past it.\n"
 	}
 	return body
 }
@@ -653,7 +680,15 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 			consentWhen := "the pull above has completed AND every co-resident bd client of this server is upgraded to this binary (confirmed with the operator)"
 			consentRisk := "co-resident clients still on an older bd will refuse this database until upgraded; running it before the pull completes is the wedge this stop prevents. Its --force consents to migrating a remote-backed shared store (the bare verb's consent is read only with no remote configured); it does not make migrating while behind safe"
 			if e.Proxied {
-				consentWhen += ", and like the pull it runs on the server host — bd migrate is refused in proxied-server mode (proxy.migrate.unsupported)"
+				// Unlike the pull, this command is NOT refused here: the
+				// refusal table has no "migrate schema" row, so the two-word
+				// path falls through and the provider open applies the
+				// migration under its consent. The precondition is therefore
+				// temporal, not locational — and it is the only thing between
+				// an agent on this topology and the wedge, because forced
+				// consent is honored before this stop is routed at all.
+				consentWhen += ". Unlike the pull this one IS runnable from this proxied workspace — the front door refuses the bare `bd migrate`, not this two-word path — so the pull-first half of this precondition is load-bearing here, not a formality"
+				consentRisk += ". Running it from this proxied workspace does NOT fail closed the way the pull does: the consent is honored before this stop is routed, and the provider open applies the migration"
 			}
 			return []GateOption{pull, {
 				ID:       "migrate-shared-after-pulling",

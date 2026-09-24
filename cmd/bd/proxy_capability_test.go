@@ -9,7 +9,77 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
+
+// TestProxyMaintenanceAllowsTheSharedConsentVerb pins the capability fact the
+// #6575 proxied data-behind guidance is written against: the consent command
+// that guidance prescribes is NOT refused at the proxied front door.
+//
+// The refusal table keys on the full command path. It has rows for the bare
+// `migrate` verb and for `migrate hooks` / `migrate issues` / `migrate sync`,
+// but none for `migrate schema` — so that path falls through
+// validateProxyMaintenanceBeforeProvider's multi-word arm to `bd migrate
+// schema`'s own proxied arm, which reports the migration the provider open
+// already applied under this verb's consent.
+//
+// An earlier revision of that guidance asserted the opposite on three runtime
+// surfaces and nothing failed, because no test called this function with this
+// command. The wording is not cosmetic: forceOrEnvConsent honors `--force`
+// BEFORE the data-behind stop is routed, so an operator told "it is refused
+// here anyway" who types it to confirm takes the exact wedge the stop exists
+// to prevent.
+//
+// The command is resolved from the constant the gate prescribes rather than
+// retyped here, so drift on either side has to face this test.
+func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	args := strings.Fields(strings.TrimPrefix(schema.SharedConsentCommandForced, "bd "))
+	target, _, err := rootCmd.Find(args)
+	if err != nil || target == rootCmd {
+		t.Fatalf("the gate prescribes %q, which does not resolve to a subcommand: %v",
+			schema.SharedConsentCommandForced, err)
+	}
+	path := strings.TrimSpace(strings.TrimPrefix(target.CommandPath(), rootCmd.Name()))
+	if path != "migrate schema" {
+		t.Fatalf("prescribed consent command resolves to path %q, want %q", path, "migrate schema")
+	}
+
+	var allowErr error
+	out := captureStdout(t, func() error {
+		allowErr = validateProxyMaintenanceBeforeProvider(target)
+		return nil
+	})
+	if allowErr != nil {
+		t.Errorf("%q is refused before the provider (%v), but the #6575 proxied data-behind guidance tells the operator it can be run from this workspace",
+			path, allowErr)
+	}
+	if out != "" {
+		t.Errorf("a non-refusal still emitted a typed error: %s", out)
+	}
+
+	// The counterfactual, so "only the bare `bd migrate` verb is refused here"
+	// is a claim and not a vacuous one.
+	bare, _, err := rootCmd.Find([]string{"migrate"})
+	if err != nil || bare == rootCmd {
+		t.Fatalf("bd migrate does not resolve: %v", err)
+	}
+	var bareErr error
+	refusal := captureStdout(t, func() error {
+		bareErr = validateProxyMaintenanceBeforeProvider(bare)
+		return nil
+	})
+	if bareErr == nil {
+		t.Fatal("bare `bd migrate` is no longer refused in proxied-server mode; the data-behind guidance names it as the one form that is")
+	}
+	if !strings.Contains(refusal, `"code": "proxy.migrate.unsupported"`) {
+		t.Errorf("bare migrate refusal = %q, want proxy.migrate.unsupported", refusal)
+	}
+}
 
 func TestProxyCapabilityMatrix(t *testing.T) {
 	for _, cap := range []ProxyCapability{ProxyCapReadonly, ProxyCapMaxRows} {

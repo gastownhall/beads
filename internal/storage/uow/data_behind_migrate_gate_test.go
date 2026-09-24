@@ -130,11 +130,17 @@ func TestInitSchemaProxiedDataBehind(t *testing.T) {
 				t.Errorf("proxied body missing %q:\n%s", want, body)
 			}
 		}
-		// The env hatch is the one consent surface the proxy does NOT refuse,
-		// so a warning that names only `bd migrate --force` leaves the wedge
-		// reachable on exactly this topology.
-		if !strings.Contains(body, schema.AllowRemoteMigrateEnv+"=1") {
-			t.Errorf("proxied body must warn about the env hatch too:\n%s", body)
+		// The env hatch is not the only consent surface that stays reachable
+		// here: the proxy refusal table keys on the command path and has no
+		// `migrate schema` row, so the forced schema verb falls through too
+		// (pinned in cmd/bd by TestProxyMaintenanceAllowsTheSharedConsentVerb).
+		// Both are read by forceOrEnvConsent before this stop is routed, so a
+		// warning that names only the refused bare `bd migrate --force` leaves
+		// the wedge reachable on exactly this topology.
+		for _, want := range []string{schema.AllowRemoteMigrateEnv + "=1", schema.SharedConsentCommandForced} {
+			if !strings.Contains(body, want) {
+				t.Errorf("proxied body must warn about the reachable consent surface %q:\n%s", want, body)
+			}
 		}
 
 		opts := gateErr.Options()
