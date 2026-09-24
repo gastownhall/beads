@@ -7,19 +7,34 @@ import "testing"
 // so a short 0-9a-v-alphabet ref (e.g. the 8-char prefix `bd history` used
 // to print) always fails confusingly deep inside a SQL error. Rejecting it
 // early with a specific, actionable message is the fix.
+//
+// be-3phh0 round 2: round 1's heuristic (`^[0-9a-v]{1,31}$`) was too broad --
+// it also rejected real short branch names ("main") and pre-existing
+// alphanumeric test values ("abc123def456"), breaking the PRE-EXISTING
+// internal/storage/dolt/dolt_test.go:TestValidateRef "valid hash"/"valid
+// branch" subtests (not owned by this diff, not to be edited). The narrowed
+// heuristic (`^[0-9a-v]{16,31}$`) only fires at 16+ chars -- well past
+// "main"(4) or "abc123def456"(12) -- trading away the specific error for
+// short hand-typed truncations (the original 8-char example; disclosed,
+// accepted tradeoff since FIX A already removed the only first-party source
+// of an 8-char truncated hash) in exchange for never false-positiving on a
+// real short branch name again.
 
 // TestValidateRefRejectsTruncatedHash covers acceptance criterion #2: a
-// synthetic short string drawn from Dolt's commit-hash alphabet ([0-9a-v],
-// see doltCommitHashRE in blocked_merge.go) must be rejected with the exact
-// message specified for this fix, not the generic format error.
+// synthetic 16-31 character string drawn from Dolt's commit-hash alphabet
+// ([0-9a-v], see doltCommitHashRE in blocked_merge.go) must be rejected with
+// the exact message specified for this fix, not the generic format error.
+// Cases below span the narrowed round-2 range (16-31); shorter strings that
+// round 1 wrongly rejected are covered instead by
+// TestValidateRefAcceptsExistingValidRefs.
 func TestValidateRefRejectsTruncatedHash(t *testing.T) {
 	cases := []struct {
 		name string
 		ref  string
 	}{
-		{"8-char prefix (old bd history truncation)", "01234567"},
+		{"16-char, new minimum length for the truncated-hash heuristic", "0123456789abcdef"},
+		{"24-char, mid-range example", "0123456789abcdefghijklmn"},
 		{"31-char, one short of a full hash", "0123456789abcdefghijklmnopqrstu"},
-		{"single character", "a"},
 	}
 
 	for _, tc := range cases {
@@ -38,16 +53,22 @@ func TestValidateRefRejectsTruncatedHash(t *testing.T) {
 
 // TestValidateRefAcceptsExistingValidRefs is a regression guard for the FIX B
 // heuristic: it must not start rejecting refs that were already valid and
-// are not plausibly truncated hashes. Branch names here deliberately include
-// a character outside Dolt's [0-9a-v] hash alphabet (a slash or dot) so they
-// cannot collide with the new heuristic regex `^[0-9a-v]{1,31}$` -- a bare
-// short alphanumeric branch name (e.g. "main") is a known false-positive of
-// that heuristic and is intentionally not asserted here.
+// are not plausibly truncated hashes. Most branch names here deliberately
+// include a character outside Dolt's [0-9a-v] hash alphabet (a slash or dot)
+// so they cannot collide with the heuristic regex regardless of its length
+// bounds. "main" is the exception, added deliberately: round 1's
+// `^[0-9a-v]{1,31}$` heuristic rejected it (a known false-positive the round
+// 1 version of this test admitted to and intentionally did not assert
+// against) and it is exactly the case the pre-existing
+// internal/storage/dolt/dolt_test.go:TestValidateRef/valid_branch subtest
+// caught. Asserting it here (be-3phh0 round 2) closes that gap so a future
+// change to the heuristic's lower bound cannot silently reopen it.
 func TestValidateRefAcceptsExistingValidRefs(t *testing.T) {
 	valid := []string{
 		"release/v2.0",
 		"feature/auth.flow",
 		"wip/my-feature",
+		"main",                             // bare short alphanumeric branch name: round 1's false-positive case
 		"0123456789abcdefghijklmnopqrstuv", // full 32-char hash: must NOT be flagged as truncated
 	}
 
