@@ -154,6 +154,11 @@ func TestHistoryRemoteAllowPathFrontDoorMatrix(t *testing.T) {
 		capRefused bool
 	}{
 		{name: "mol ready --gated", args: []string{"mol", "ready", "--gated"}},
+		// The documented alias for the row above, running the identical
+		// gate-resume scan. It belongs beside it: keying the cap refusal on
+		// `bd ready` rather than on the arm left this spelling refused while
+		// the `mol` one worked, which is the same split one level down.
+		{name: "ready --gated", args: []string{"ready", "--gated"}},
 		{name: "ready", args: []string{"ready"}, capRefused: true},
 		{name: "list", args: []string{"list"}},
 		{name: "dep tree", args: []string{"dep", "tree", sentinel.ID}},
