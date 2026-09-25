@@ -182,6 +182,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of the message followed by `Error: exit code 1` and the full usage
   text. Exit statuses are unchanged; this applies on every topology.
 
+- **`bd label remove` and `bd label add` no longer claim a no-op edit**
+  ([#5988](https://github.com/gastownhall/beads/issues/5988)). Removing a
+  label the issue never had printed `✓ Removed label 'x' from <id>`, and
+  adding one it already had printed `✓ Added label`, so a real edit could not
+  be told from a no-op. Such a label is now reported as
+  `• Label 'x' was not on <id>` / `• <id> already has label 'x'`, with JSON
+  status `unchanged` instead of `removed`/`added`; a multi-label edit reports
+  each label by what actually happened to it. The exit code is still 0, so
+  idempotent callers are unaffected.
+
 - **Proxied `--repo` and row-cap refusals are typed again**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). `bd create --repo`
   under `--proxied-server` answers `--json` with the stable
