@@ -82,8 +82,10 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}
-	if err := issueops.TouchIssueUpdatedAtInTx(ctx, r.runner, issueID, opts.UseWispsTable); err != nil {
-		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
+	if !opts.SkipUpdatedAtTouch {
+		if err := issueops.TouchIssueUpdatedAtInTx(ctx, r.runner, issueID, opts.UseWispsTable); err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
+		}
 	}
 	// A label is part of the bead snapshot; the idempotent no-op path above
 	// returns without writing and journals nothing.
