@@ -3,6 +3,7 @@ package validation
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
@@ -14,23 +15,92 @@ type MissingSection struct {
 	Hint    string // Guidance for what to include
 }
 
+// FieldLength describes a text field that exceeds its configured
+// lint.max-chars.<field> limit.
+type FieldLength struct {
+	Field string `json:"field"` // Issue JSON field name, e.g., "design"
+	Chars int    `json:"chars"` // Actual length in characters (runes)
+	Max   int    `json:"max"`   // Configured limit
+}
+
 // TemplateError is returned when template validation fails.
-// It contains all missing sections for a single error report.
+// It contains all missing sections and over-length fields for a single
+// error report.
 type TemplateError struct {
 	IssueType types.IssueType
 	Missing   []MissingSection
+	TooLong   []FieldLength
 }
 
 func (e *TemplateError) Error() string {
-	if len(e.Missing) == 0 {
+	if len(e.Missing) == 0 && len(e.TooLong) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "missing required sections for %s:", e.IssueType)
-	for _, m := range e.Missing {
-		fmt.Fprintf(&b, "\n  - %s (%s)", m.Heading, m.Hint)
+	if len(e.Missing) > 0 {
+		fmt.Fprintf(&b, "missing required sections for %s:", e.IssueType)
+		for _, m := range e.Missing {
+			fmt.Fprintf(&b, "\n  - %s (%s)", m.Heading, m.Hint)
+		}
+	}
+	if len(e.TooLong) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "fields over %s<field> for %s:", LintMaxCharsConfigPrefix, e.IssueType)
+		for _, f := range e.TooLong {
+			fmt.Fprintf(&b, "\n  - %s: %d chars (max %d)", f.Field, f.Chars, f.Max)
+		}
 	}
 	return b.String()
+}
+
+// LintMaxCharsConfigPrefix is the config namespace for per-field length
+// limits: lint.max-chars.<field> caps the character count of that text field
+// on every issue, e.g.
+//
+//	bd config set lint.max-chars.design 4000
+//
+// <field> is one of lintMaxCharsFields. Unset, zero, negative, or
+// non-numeric values mean no limit.
+const LintMaxCharsConfigPrefix = "lint.max-chars."
+
+// lintMaxCharsFields lists the text fields lint.max-chars.<field> applies to,
+// in report order. Names match the issue JSON fields.
+var lintMaxCharsFields = []string{"title", "description", "design", "acceptance_criteria", "notes"}
+
+// lintFieldText returns the value of the named text field.
+func lintFieldText(issue *types.Issue, field string) string {
+	switch field {
+	case "title":
+		return issue.Title
+	case "description":
+		return issue.Description
+	case "design":
+		return issue.Design
+	case "acceptance_criteria":
+		return issue.AcceptanceCriteria
+	case "notes":
+		return issue.Notes
+	}
+	return ""
+}
+
+// OverLengthFields returns the issue's text fields that exceed their
+// configured lint.max-chars.<field> limit. Length counts characters (runes),
+// not bytes. Returns nil when no limit is configured or none is exceeded.
+func OverLengthFields(issue *types.Issue) []FieldLength {
+	var out []FieldLength
+	for _, field := range lintMaxCharsFields {
+		limit := config.GetInt(LintMaxCharsConfigPrefix + field)
+		if limit <= 0 {
+			continue
+		}
+		if n := utf8.RuneCountInString(lintFieldText(issue, field)); n > limit {
+			out = append(out, FieldLength{Field: field, Chars: n, Max: limit})
+		}
+	}
+	return out
 }
 
 // LintSectionsConfigPrefix is the config namespace for per-issue-type
@@ -160,16 +230,37 @@ func ValidateTemplate(issueType types.IssueType, description string) error {
 	return nil
 }
 
-// LintIssue checks an existing issue for missing template sections.
-// Unlike ValidateTemplate, this operates on a full Issue struct.
-// It checks both Description and AcceptanceCriteria fields.
-// A non-empty AcceptanceCriteria field satisfies the "Acceptance Criteria"
-// (or "Success Criteria" for epics) requirement without needing a heading. (GH#2468)
-// Returns nil if the issue passes validation or has no requirements.
+// LintIssue checks an existing issue for missing template sections and for
+// text fields over their lint.max-chars.<field> limit. Both kinds of finding
+// are reported in one *TemplateError. Unlike ValidateTemplate, this operates
+// on a full Issue struct. Returns nil if the issue passes validation or has
+// no requirements.
 func LintIssue(issue *types.Issue) error {
 	if issue == nil {
 		return nil
 	}
+	err := lintSections(issue)
+	tooLong := OverLengthFields(issue)
+	if len(tooLong) == 0 {
+		return err
+	}
+	if err == nil {
+		return &TemplateError{IssueType: issue.IssueType, TooLong: tooLong}
+	}
+	templateErr, ok := err.(*TemplateError)
+	if !ok {
+		return err
+	}
+	templateErr.TooLong = tooLong
+	return templateErr
+}
+
+// lintSections checks an issue for missing template sections.
+// It checks both Description and AcceptanceCriteria fields.
+// A non-empty AcceptanceCriteria field satisfies the "Acceptance Criteria"
+// (or "Success Criteria" for epics) requirement without needing a heading. (GH#2468)
+// Returns nil if the issue has all sections or has no requirements.
+func lintSections(issue *types.Issue) error {
 	text := issue.Description
 	if issue.AcceptanceCriteria != "" {
 		text = text + "\n" + issue.AcceptanceCriteria
