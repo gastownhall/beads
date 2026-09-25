@@ -13,6 +13,7 @@ from beads_mcp.models import (
     ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
+    Issue,
     ListCommentsParams,
     ListIssuesParams,
     ReadyWorkParams,
@@ -914,3 +915,115 @@ async def test_list_comments_invalid_response(bd_client, mock_process):
         comments = await bd_client.list_comments(params)
 
     assert comments == []
+
+
+@pytest.mark.asyncio
+async def test_create_passes_due_and_recurrence_flags(bd_client, mock_process):
+    """create forwards due and recurrence to the CLI's own flags."""
+    issue_data = {
+        "id": "bd-r1",
+        "title": "Water the plants",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "chore",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2025-01-25T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        params = CreateIssueParams(
+            title="Water the plants",
+            issue_type="chore",
+            due="+3d",
+            repeat="+1w",
+            repeat_start="2026-01-01",
+            repeat_end="2026-12-31",
+        )
+        await bd_client.create(params)
+
+    call_args = mock_exec.call_args[0]
+    for flag, value in (
+        ("--due", "+3d"),
+        ("--repeat", "+1w"),
+        ("--repeat-start", "2026-01-01"),
+        ("--repeat-end", "2026-12-31"),
+    ):
+        assert flag in call_args, f"{flag} missing from {call_args}"
+        assert call_args[call_args.index(flag) + 1] == value
+
+
+@pytest.mark.asyncio
+async def test_update_passes_due_and_recurrence_flags(bd_client, mock_process):
+    """update forwards due and recurrence to the CLI's own flags."""
+    issue_data = [
+        {
+            "id": "bd-r2",
+            "title": "Weekly report",
+            "status": "open",
+            "priority": 2,
+            "issue_type": "chore",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2025-01-25T00:00:00Z",
+        }
+    ]
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        params = UpdateIssueParams(issue_id="bd-r2", due="+1w", repeat="0 9 * * 1")
+        await bd_client.update(params)
+
+    call_args = mock_exec.call_args[0]
+    assert call_args[call_args.index("--due") + 1] == "+1w"
+    assert call_args[call_args.index("--repeat") + 1] == "0 9 * * 1"
+
+
+@pytest.mark.asyncio
+async def test_update_empty_strings_clear_rather_than_being_dropped(bd_client, mock_process):
+    """An empty value is meaningful to the CLI: it clears a date and stops a
+    series. It must reach the command line, not be filtered out as falsey."""
+    issue_data = [
+        {
+            "id": "bd-r3",
+            "title": "Stops repeating",
+            "status": "open",
+            "priority": 2,
+            "issue_type": "chore",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2025-01-25T00:00:00Z",
+        }
+    ]
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        params = UpdateIssueParams(issue_id="bd-r3", repeat="", repeat_end="")
+        await bd_client.update(params)
+
+    call_args = mock_exec.call_args[0]
+    assert call_args[call_args.index("--repeat") + 1] == ""
+    assert call_args[call_args.index("--repeat-end") + 1] == ""
+    # An omitted field is still omitted.
+    assert "--due" not in call_args
+
+
+def test_issue_model_reads_back_due_and_recurrence():
+    """The read-back fields land on the model, so a caller can see what the
+    CLI stored without re-shelling."""
+    issue = Issue.model_validate(
+        {
+            "id": "bd-r4",
+            "title": "Weekly report",
+            "status": "open",
+            "priority": 2,
+            "issue_type": "chore",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2025-01-25T00:00:00Z",
+            "due_at": "2026-03-01T00:00:00Z",
+            "repeat_pattern": "+1w",
+            "repeat_start": "2026-01-01T00:00:00Z",
+            "repeat_end": "2026-12-31T00:00:00Z",
+        }
+    )
+    assert issue.repeat_pattern == "+1w"
+    assert issue.due_at is not None and issue.due_at.year == 2026
+    assert issue.repeat_start is not None and issue.repeat_end is not None

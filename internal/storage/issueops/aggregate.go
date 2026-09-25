@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -58,6 +59,9 @@ func UpdateFields(patch publicops.IssuePatch) map[string]interface{} {
 		{patch.ExternalRef.Set, "external_ref", patch.ExternalRef.Value},
 		{patch.DueAt.Set, "due_at", patch.DueAt.Value},
 		{patch.DeferUntil.Set, "defer_until", patch.DeferUntil.Value},
+		{patch.RepeatPattern.Set, "repeat_pattern", patch.RepeatPattern.Value},
+		{patch.RepeatStart.Set, "repeat_start", patch.RepeatStart.Value},
+		{patch.RepeatEnd.Set, "repeat_end", patch.RepeatEnd.Value},
 	} {
 		if field.set {
 			updates[field.key] = field.val
@@ -133,6 +137,21 @@ func ValidateScalarUpdates(ctx context.Context, tx DBTX, updates map[string]inte
 					return err
 				}
 			}
+		}
+	}
+	// A repeat pattern reaching the row unparsed would produce a bead that
+	// looks recurring and silently never respawns, so it is refused here —
+	// the same boundary that rejects an unknown issue type.
+	if raw, ok := updates["repeat_pattern"]; ok {
+		value, isString := raw.(string)
+		if !isString {
+			return fmt.Errorf("%w: invalid repeat pattern %v", storage.ErrValidation, raw)
+		}
+		if err := types.CheckFieldLen("repeat_pattern", value); err != nil {
+			return err
+		}
+		if _, err := timeparsing.ParseRepeat(value); err != nil {
+			return fmt.Errorf("%w: invalid repeat pattern: %w", storage.ErrValidation, err)
 		}
 	}
 	return nil

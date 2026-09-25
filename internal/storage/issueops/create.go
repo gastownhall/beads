@@ -107,6 +107,11 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	// The series anchor is recorded here, on the classic/store leg, because
+	// this is the one body every non-public create reaches (CLI create, quick
+	// capture, batch create). The public leg anchors in
+	// PreparePublicCreateRequest.
+	AnchorRecurrence(issue)
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
 		return result, err
 	}

@@ -25,6 +25,11 @@ type CloseResult struct {
 	// IssueRowsChanged reports whether this close changed a durable issues row,
 	// either directly or while recomputing a dependent's blocked state.
 	IssueRowsChanged bool
+	// Spawned reports the successor this close created for a recurring bead.
+	// Its ID is "" when the bead does not repeat or its series has ended. Its
+	// ChangedTables must be unioned into whatever the caller stages — a spawn
+	// writes labels as well as issues and events. See SpawnRecurrenceInTx.
+	Spawned SpawnResult
 }
 
 // CloseIssueInTx closes an issue within a transaction, setting status to closed
@@ -388,5 +393,17 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 		return nil, err
 	}
 
-	return &CloseResult{IsWisp: isWisp, IssueRowsChanged: !isWisp || recompute.IssueRowsChanged}, nil
+	// A recurring bead's successor is created by the close itself, inside the
+	// same transaction, so a series can never lose an instance to a crash
+	// between "closed" and "next one filed".
+	spawned, err := SpawnRecurrenceInTx(ctx, tx, id, actor)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CloseResult{
+		IsWisp:           isWisp,
+		IssueRowsChanged: !isWisp || recompute.IssueRowsChanged || spawned.ID != "",
+		Spawned:          spawned,
+	}, nil
 }

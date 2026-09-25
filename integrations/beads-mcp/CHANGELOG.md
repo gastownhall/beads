@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `due`, `repeat`, `repeat_start` and `repeat_end` parameters on
+  `beads_create_issue` and `beads_update_issue`, and `due_at`,
+  `repeat_pattern`, `repeat_start`, `repeat_end` on the returned issue. The CLI
+  has accepted `--due` for a while and now accepts `--repeat`, but MCP could
+  neither set them nor read them back, so an MCP-only agent could not give work
+  a deadline or make a chore recurring. Empty strings pass through, so an
+  update can clear a due date or stop a series.
 - New `comment`, `comments`, and `note` MCP tools, wrapping the existing
   `bd comment` / `bd comments` / `bd note` CLI commands. Previously the MCP
   server exposed no way to add or read comments, so MCP-only agents could only

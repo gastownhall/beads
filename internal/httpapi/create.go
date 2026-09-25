@@ -53,7 +53,8 @@ var (
 		"description", "design", "due_at", "ephemeral", "estimated_minutes",
 		"external_ref", "force_id_prefix", "id", "inherit_labels_from_parent",
 		"issue_type", "labels", createMetadataMember, "no_history", "notes", "owner",
-		"parent_id", "priority", "sender", "status", "title", "waits_for",
+		"parent_id", "priority", "repeat_end", "repeat_pattern", "repeat_start",
+		"sender", "status", "title", "waits_for",
 	}
 	createDependencyMembers = []string{"metadata", "reverse", "target_id", "type"}
 	createWaitsForMembers   = []string{"gate", "spawner_id"}
@@ -199,6 +200,9 @@ func (s *Server) createIssueRequest(w http.ResponseWriter, r *http.Request) (iss
 		ExternalRef:        wire.ExternalRef,
 		DueAt:              wire.DueAt,
 		DeferUntil:         wire.DeferUntil,
+		RepeatPattern:      derefString(wire.RepeatPattern),
+		RepeatStart:        wire.RepeatStart,
+		RepeatEnd:          wire.RepeatEnd,
 		Sender:             derefString(wire.Sender),
 		Ephemeral:          derefBool(wire.Ephemeral),
 		NoHistory:          derefBool(wire.NoHistory),
