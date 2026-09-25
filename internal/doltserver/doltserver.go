@@ -365,6 +365,11 @@ type Config struct {
 	// RemotesAPIPort is the configured Dolt remotesapi listener. Zero means
 	// disabled. Unlike the SQL port, bd never assigns this implicitly: opening a
 	// network replication endpoint must be an explicit operator decision.
+	//
+	// CAVEAT: dolt sql-server binds the remotesapi listener on all interfaces
+	// and serves it unauthenticated, unlike the managed SQL listener on
+	// cfg.Host (normally 127.0.0.1). Only enable it where a firewall, private
+	// interface, or tunnel bounds who can reach the port.
 	RemotesAPIPort int
 
 	// PortSource records which step of the precedence chain (see
@@ -1221,9 +1226,16 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return 0, false, err
 	}
 	if state.Running {
-		state, err = verifyRemotesAPIState(DefaultConfig(serverDir), state)
-		if err != nil {
-			return 0, false, err
+		if verified, verr := verifyRemotesAPIState(DefaultConfig(serverDir), state); verr != nil {
+			// BEADS_DOLT_REMOTESAPI_PORT predates this listener wiring as a
+			// federation-check knob, so a running server that has not been
+			// restarted since the setting appeared is an expected state, not a
+			// broken install. Keep the auto-start fast path serving SQL and
+			// surface the gap as a warning; the explicit lifecycle paths
+			// (Start, adoption) still fail hard with the stop/start remedy.
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", verr)
+		} else {
+			state = verified
 		}
 		_ = EnsurePortFile(serverDir, state.Port)
 		return state.Port, false, nil
@@ -1522,11 +1534,11 @@ func validateDistinctServerPorts(sqlPort, remotesAPIPort int) error {
 func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
 	state.RemotesAPIPort = cfg.RemotesAPIPort
 	if err := validateDistinctServerPorts(state.Port, cfg.RemotesAPIPort); err != nil {
-		return nil, fmt.Errorf("%w and run 'bd dolt restart'", err)
+		return nil, fmt.Errorf("%w and run 'bd dolt stop && bd dolt start'", err)
 	}
 	if cfg.RemotesAPIPort > 0 && !ProbeRemotesAPI(cfg.RemotesAPIPort) {
 		return nil, fmt.Errorf(
-			"Dolt server is running on SQL port %d, but configured remotesapi port %d is not reachable; run 'bd dolt restart' to apply the shared-server setting",
+			"Dolt server is running on SQL port %d, but configured remotesapi port %d is not reachable; run 'bd dolt stop && bd dolt start' to apply the shared-server setting",
 			state.Port,
 			cfg.RemotesAPIPort,
 		)

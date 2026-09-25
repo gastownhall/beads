@@ -639,8 +639,17 @@ func TestLifecycle_StartRequiresRestartForNewRemotesAPIConfig(t *testing.T) {
 	}
 
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
-	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt restart") {
-		t.Fatalf("Start after remotesapi config = %v, want actionable restart-required error", err)
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
+		t.Fatalf("Start after remotesapi config = %v, want actionable stop/start-required error", err)
+	}
+	// The auto-start fast path must NOT fail hard on the same gap:
+	// BEADS_DOLT_REMOTESAPI_PORT predates the listener wiring, so a server
+	// started before the setting appeared keeps serving SQL (with a warning)
+	// until an explicit stop/start applies it.
+	if port, startedByUs, err := doltserver.EnsureRunningDetailed(beadsDir); err != nil {
+		t.Fatalf("EnsureRunningDetailed with unapplied remotesapi config = %v, want warn-and-serve", err)
+	} else if startedByUs || port != sqlPort {
+		t.Fatalf("EnsureRunningDetailed = (port %d, startedByUs %v), want adopted server on %d", port, startedByUs, sqlPort)
 	}
 	if err := doltserver.Stop(beadsDir); err != nil {
 		t.Fatal(err)
@@ -678,8 +687,8 @@ func TestLifecycle_AdoptedServerRequiresConfiguredRemotesAPI(t *testing.T) {
 	}
 
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
-	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt restart") {
-		t.Fatalf("adopted Start = %v, want actionable restart-required error", err)
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
+		t.Fatalf("adopted Start = %v, want actionable stop/start-required error", err)
 	}
 	state, err := doltserver.IsRunning(beadsDir)
 	if err != nil {

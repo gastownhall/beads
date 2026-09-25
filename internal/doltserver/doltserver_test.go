@@ -2323,8 +2323,8 @@ func TestVerifyRemotesAPIState(t *testing.T) {
 	}
 	_ = listener.Close()
 	if _, err := verifyRemotesAPIState(&Config{RemotesAPIPort: port}, state); err == nil ||
-		!strings.Contains(err.Error(), "bd dolt restart") {
-		t.Fatalf("unreachable remotesapi verification = %v, want restart-required error", err)
+		!strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
+		t.Fatalf("unreachable remotesapi verification = %v, want stop/start-required error", err)
 	}
 }
 
