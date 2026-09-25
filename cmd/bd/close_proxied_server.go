@@ -122,9 +122,11 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	outcomes, closeReasons := closeProxiedOutcomes(&pre, result)
 	post := closeProxiedRunPostClose(ctx, args, in, outcomes)
 
+	failedCount := 0
 	for _, e := range pre.errors {
 		if e != "" {
 			fmt.Fprintln(os.Stderr, e)
+			failedCount++
 		}
 	}
 	for _, w := range post.warnings {
@@ -182,6 +184,10 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		}
 	}
 
+	if failedCount > 0 {
+		fmt.Fprintf(os.Stderr, "Error: %d of %d issues failed to close\n", failedCount, len(args))
+		return SilentExit()
+	}
 	if len(args) > 0 && len(outcomes) == 0 {
 		return SilentExit()
 	}

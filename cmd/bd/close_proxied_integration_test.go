@@ -363,6 +363,25 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
+	t.Run("close_partial_failure_exits_nonzero", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cpf")
+		closable := bdProxiedCreate(t, bd, p.dir, "Closable")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked", "--deps", "depends-on:"+blocker.ID)
+		out := bdProxiedCloseFail(t, bd, p.dir, closable.ID, blocked.ID)
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected partial-failure summary, got: %s", out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, closable.ID); got != types.StatusClosed {
+			t.Errorf("closable issue status = %q, want closed despite the refused sibling", got)
+		}
+		if got := readStatus(t, db, blocked.ID); got == types.StatusClosed {
+			t.Error("blocked issue should remain open without --force")
+		}
+	})
+
 	t.Run("close_pinned_refuses_without_force", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "cpr")
