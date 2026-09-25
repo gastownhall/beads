@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi/storereadycounter"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -184,6 +185,19 @@ func (s *Store) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFil
 	return s.inner.GetReadyWorkWithCounts(ctx, filter)
 }
 
+// GetReadyWorkWithCountsAndTotal applies the same external exclusions as
+// GetReadyWorkWithCounts, so the page and its total describe one ready set.
+// It must be overridden here: the embedded passthrough would reach the inner
+// store without the exclusions.
+func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	state, err := s.loadBlockingState(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	filter = withExternalExclusions(filter, state.refsByIssue)
+	return s.inner.GetReadyWorkWithCountsAndTotal(ctx, filter)
+}
+
 func withExternalExclusions(filter types.WorkFilter, refsByIssue map[string][]string) types.WorkFilter {
 	filter.ExcludeIDs = slices.Clone(filter.ExcludeIDs)
 	newIDs := make([]string, 0, len(refsByIssue))
@@ -214,6 +228,16 @@ func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (in
 		return 0, err
 	}
 	return len(issues), nil
+}
+
+// ReadyCounter sizes the ready set through CountReadyWork above, so the total
+// text-mode `bd ready` prints honors the same external exclusions as the page
+// and as the in-band total `bd ready --json` takes from
+// GetReadyWorkWithCountsAndTotal. It must be overridden here: the embedded
+// passthrough would hand back the inner store's counter, which counts
+// externally blocked issues as ready.
+func (s *Store) ReadyCounter() (publicops.ReadyCounter, error) {
+	return storereadycounter.New(s)
 }
 
 // ClaimReadyIssue resolves external blockers before using the existing local
