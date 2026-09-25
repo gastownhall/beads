@@ -351,27 +351,14 @@ pointless).`,
 		// Metadata flag (GH#1413)
 		if cmd.Flags().Changed("metadata") {
 			metadataValue, _ := cmd.Flags().GetString("metadata")
-			var metadataJSON string
-			if strings.HasPrefix(metadataValue, "@") {
-				// Read JSON from file
-				filePath := metadataValue[1:]
-				// #nosec G304 -- user explicitly provides file path via @file.json syntax
-				data, err := os.ReadFile(filePath)
-				if err != nil {
-					return HandleErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
-				}
-				metadataJSON = string(data)
-			} else {
-				metadataJSON = metadataValue
-			}
-			// Validate JSON
-			if !json.Valid([]byte(metadataJSON)) {
-				return HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
+			metadata, err := readMetadataFlag(metadataValue)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
 			}
 			// Passed as a merge OPERATION, not a pre-merged value: the storage
 			// layer re-reads and merges inside the mutation transaction so a
 			// concurrent writer's keys survive (lost-update fix).
-			updates[storageissueops.OpMergeMetadata] = json.RawMessage(metadataJSON)
+			updates[storageissueops.OpMergeMetadata] = metadata
 		}
 
 		// Incremental metadata edits (GH#1406)

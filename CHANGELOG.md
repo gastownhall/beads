@@ -148,6 +148,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `backend_managed` is false on external proxied topologies, where the dolt
   server is not bd's process to report on.
 
+- **`bd create --metadata` and `bd update --metadata` now require a JSON
+  object** ([#6035](https://github.com/gastownhall/beads/issues/6035)). Both
+  checked only that the value was valid JSON, so `bd create --metadata
+  '"oops"'` stored a bare string (or an array or number) as the issue's
+  metadata, while `bd update` refused the same value only late, in the
+  storage merge, with an internal unmarshal error. A shared check now refuses
+  a string, number, boolean, array or `null` up front on every create and
+  update path with `invalid --metadata: must be a JSON object`; `{}` is still
+  accepted. Values inside the object stay opaque, so a string value that
+  looks like JSON is kept as written.
+
 - **`bd mol ready --gated` no longer refuses under `--proxied-server` when
   `BEADS_MAX_ROWS` is set**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). The proxied
