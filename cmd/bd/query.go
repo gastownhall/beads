@@ -151,6 +151,11 @@ func gatherQueryInput(cmd *cobra.Command, args []string) (queryInput, error) {
 
 	in := queryInput{expression: strings.Join(args, " ")}
 	in.limit, _ = cmd.Flags().GetInt("limit")
+	if !cmd.Flags().Changed("limit") {
+		// bd list's policy for an unflagged limit: piped stdout is unlimited,
+		// agent mode is compact, a terminal gets the default (GH#6229).
+		in.limit = unflaggedLimit(in.limit)
+	}
 	in.longFormat, _ = cmd.Flags().GetBool("long")
 	in.parseOnly, _ = cmd.Flags().GetBool("parse-only")
 	in.offset, _ = cmd.Flags().GetInt("offset")

@@ -331,10 +331,8 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		in.effectiveLimit = 0
 	case listLimitConfigured:
 		in.effectiveLimit = limit
-	case !ui.IsTerminal():
-		in.effectiveLimit = 0 // Piped stdout should not truncate (GH#4094)
-	case ui.IsAgentMode():
-		in.effectiveLimit = 20
+	default:
+		in.effectiveLimit = unflaggedLimit(limit)
 	}
 	// The request carries the limit the caller receives. Which row limit that
 	// implies for the query - a sort SQL cannot express fetches everything and
@@ -388,4 +386,29 @@ func parseListTimeFlag(cmd *cobra.Command, name string) (*time.Time, error) {
 		return nil, HandleError("parsing --%s: %v", name, err)
 	}
 	return &t, nil
+}
+
+// agentModeLimit is the page size an unflagged listing gets in agent mode on a
+// terminal: ultra-compact output for an LLM context window.
+const agentModeLimit = 20
+
+// unflaggedLimit is the limit a listing command uses when the caller named
+// none: the part of the policy `bd list` and `bd query` share, so the two
+// cannot drift (GH#6229). Each command resolves its own earlier branches first
+// (an explicit --limit, `bd list`'s --all and list.limit) and hands its own
+// default here as fallback.
+func unflaggedLimit(fallback int) int {
+	return resolveUnflaggedLimit(fallback, ui.IsTerminal(), ui.IsAgentMode())
+}
+
+// resolveUnflaggedLimit is unflaggedLimit with the environment passed in, so
+// the terminal and agent-mode branches are testable from a piped `go test`.
+func resolveUnflaggedLimit(fallback int, stdoutIsTerminal, agentMode bool) int {
+	switch {
+	case !stdoutIsTerminal:
+		return 0 // Piped stdout should not truncate (GH#4094)
+	case agentMode:
+		return agentModeLimit
+	}
+	return fallback
 }

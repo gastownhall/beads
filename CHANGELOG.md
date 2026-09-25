@@ -206,6 +206,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "only 'compact --dolt'", which names the root `bd compact` — a different
   command, with no `--dolt` flag and its own proxied route. Scripts matching
   the old text need updating.
+- **`bd query` no longer silently stops at 50 rows when its output is piped**
+  ([#6229](https://github.com/gastownhall/beads/issues/6229)). `bd list` has
+  treated piped stdout as unlimited since GH#4094, but `bd query` read its
+  `--limit` default of 50 straight through, so `bd query '...' | consumer`
+  dropped every row past 50 with no hint. An unflagged `bd query` now resolves
+  through the same policy as `bd list`: an explicit `--limit` wins, piped
+  stdout is unlimited, agent mode on a terminal gets 20, and a terminal gets 50.
+
 - **`bd preflight` honors the `json` config default**
   ([#6293](https://github.com/gastownhall/beads/pull/6293)). Its `--json` flag
   is bound to the same global every sibling command binds, so `json: true` in
