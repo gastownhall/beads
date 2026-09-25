@@ -2045,7 +2045,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		if cfg.Database == doltserver.GlobalDatabaseName {
 			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
 		} else {
-			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir)
+			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir, cfg.CreateIfMissing)
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
@@ -2208,7 +2208,9 @@ func shouldPersistResolvedPortFile() bool {
 // verifyProjectIdentity checks that the database belongs to the expected project.
 // If both the local metadata.json and the database have a project_id, they must match.
 // Returns nil if verification passes or is not applicable (missing IDs = old setup).
-func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string) error {
+// creating is the open's CreateIfMissing: it only shapes the error's advice
+// (see projectIdentityMismatchError), never whether the check runs.
+func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, creating bool) error {
 	if beadsDir == "" {
 		return nil // can't verify without knowing beadsDir
 	}
@@ -2230,19 +2232,50 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string) 
 	}
 
 	if localID != dbID {
-		return fmt.Errorf(
-			"PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
-				"  Local project ID (metadata.json):  %s\n"+
-				"  Database project ID:               %s\n\n"+
-				"This means the Dolt server is serving a DIFFERENT project's database.\n"+
-				"This can happen when:\n"+
-				"  - Another project's server is running on the same port\n"+
-				"  - The server restarted with a different data directory\n\n"+
-				"To diagnose: bd dolt status\n"+
-				"Do NOT run 'bd init' — your data likely exists, just on a different server.",
-			localID, dbID)
+		return projectIdentityMismatchError(localID, dbID, s.database, creating)
 	}
 	return nil
+}
+
+// projectIdentityMismatchError builds verifyProjectIdentity's refusal when
+// metadata.json and the database disagree on project_id.
+//
+// creating is true for a CreateIfMissing open — bd init against a database that
+// already exists on the server (GH#4637 Part A). That caller IS bd init, so it
+// must not be told "Do NOT run 'bd init'" (GH#5558); it gets the remedies that
+// make sense from inside an init instead: target a different database or server,
+// or reconcile a stale metadata.json. Every other open keeps its original text.
+func projectIdentityMismatchError(localID, dbID, database string, creating bool) error {
+	if creating {
+		return fmt.Errorf(
+			"PROJECT IDENTITY MISMATCH — refusing to initialize against an existing database\n\n"+
+				"  Local project ID (metadata.json):  %s\n"+
+				"  Database %q project ID:            %s\n\n"+
+				"The Dolt server already has a database with this name, and it belongs to\n"+
+				"a DIFFERENT project. bd init will not adopt or write to it.\n"+
+				"This can happen when:\n"+
+				"  - Another project's server is running on the same port\n"+
+				"  - Another project already uses this database name on a shared server\n"+
+				"  - The server restarted with a different data directory\n\n"+
+				"To diagnose: bd dolt status\n"+
+				"To fix, re-run bd init against this project's data:\n"+
+				"  - a different database:  bd init --database <name>\n"+
+				"  - a different server:    bd init --server-host <host> --server-port <port>\n"+
+				"If this database really is this project's and metadata.json is stale,\n"+
+				"run 'bd doctor --fix' or 'bd bootstrap' to reconcile metadata.json with it.",
+			localID, database, dbID)
+	}
+	return fmt.Errorf(
+		"PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
+			"  Local project ID (metadata.json):  %s\n"+
+			"  Database project ID:               %s\n\n"+
+			"This means the Dolt server is serving a DIFFERENT project's database.\n"+
+			"This can happen when:\n"+
+			"  - Another project's server is running on the same port\n"+
+			"  - The server restarted with a different data directory\n\n"+
+			"To diagnose: bd dolt status\n"+
+			"Do NOT run 'bd init' — your data likely exists, just on a different server.",
+		localID, dbID)
 }
 
 func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir string) error {

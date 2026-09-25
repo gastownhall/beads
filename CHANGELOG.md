@@ -157,6 +157,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no `--max-rows` flag to refuse. Rules are keyed on the full command
   path now.
 
+- **`bd init` no longer tells you not to run `bd init` when it refuses a
+  foreign database** ([#5558](https://github.com/gastownhall/beads/issues/5558)).
+  Re-running `bd init` in a workspace whose `metadata.json` already records a
+  project ID, against a server whose database of that name belongs to another
+  project, correctly refuses with `PROJECT IDENTITY MISMATCH` — but the refusal
+  was the one written for ordinary opens, ending in "Do NOT run 'bd init'". The
+  init-time refusal now names the database and points at remedies that work
+  from there: re-run with `bd init --database <name>` or
+  `--server-host`/`--server-port` to target this project's data, or run
+  `bd doctor --fix` / `bd bootstrap` if `metadata.json` is the stale side.
+  Ordinary opens keep their existing message.
+
 ### Changed
 
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
