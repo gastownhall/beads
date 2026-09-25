@@ -269,8 +269,11 @@ var createCmd = &cobra.Command{
 		if validateTemplate || validationMode == "error" || validationMode == "warn" {
 			lintIssue := &types.Issue{
 				IssueType:          types.IssueType(issueType).Normalize(),
+				Title:              title,
 				Description:        description,
+				Design:             design,
 				AcceptanceCriteria: acceptance,
+				Notes:              notes,
 			}
 			if err := validation.LintIssue(lintIssue); err != nil {
 				if validateTemplate || validationMode == "error" {
