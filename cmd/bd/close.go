@@ -374,7 +374,9 @@ the flags appear in the command line.`,
 
 		totalAttempted := len(resolvedIDs)
 		if failedCount > 0 {
-			fmt.Fprintf(os.Stderr, "Error: %d of %d issues failed to close\n", failedCount, totalAttempted)
+			if totalAttempted > 1 {
+				fmt.Fprintf(os.Stderr, "Error: %d of %d issues failed to close\n", failedCount, totalAttempted)
+			}
 			return SilentExit()
 		}
 		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {

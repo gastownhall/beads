@@ -185,7 +185,9 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	}
 
 	if failedCount > 0 {
-		fmt.Fprintf(os.Stderr, "Error: %d of %d issues failed to close\n", failedCount, len(args))
+		if len(args) > 1 {
+			fmt.Fprintf(os.Stderr, "Error: %d of %d issues failed to close\n", failedCount, len(args))
+		}
 		return SilentExit()
 	}
 	if len(args) > 0 && len(outcomes) == 0 {

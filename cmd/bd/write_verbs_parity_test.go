@@ -28,7 +28,9 @@
 // flips one, the assertion is updated IN THAT COMMIT with a comment naming the
 // ruling. Any OTHER assertion in this file changing is a regression, not a
 // refactor. All four have now landed; every remaining assertion is unchanged
-// from the pre-rewire CLI and must stay that way.
+// from the pre-rewire CLI and must stay that way. Waiver: the close exit-code
+// contract (#6648: partial batch failure exits nonzero) intentionally flips
+// the TestParityClose* assertions that pinned exit 0.
 //
 // Harness: the commands' RunE functions are invoked in-process against a real
 // storage.DoltStorage, with stdout/stderr captured and the returned error
@@ -1619,7 +1621,7 @@ func TestParityClosePartialFailureExitsOne(t *testing.T) {
 
 // TestParityCloseNothingSettledExits1 pins the strict half of the same
 // contract: when NO id settled as closed, close returns SilentExit() — exit 1
-// with no extra stdout. Source: cmd/bd/close.go:377-380 and
+// with no extra stdout. Source: cmd/bd/close.go:382-384 and
 // cmd/bd/errors.go:119-121.
 func TestParityCloseNothingSettledExits1(t *testing.T) {
 	env := newParityEnv(t)
