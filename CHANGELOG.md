@@ -164,10 +164,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project, correctly refuses with `PROJECT IDENTITY MISMATCH` — but the refusal
   was the one written for ordinary opens, ending in "Do NOT run 'bd init'". The
   init-time refusal now names the database and points at remedies that work
-  from there: re-run with `bd init --database <name>` or
-  `--server-host`/`--server-port` to target this project's data, or run
-  `bd doctor --fix` / `bd bootstrap` if `metadata.json` is the stale side.
-  Ordinary opens keep their existing message.
+  from there: point `bd init` at this project's server
+  (`--server-host`/`--server-port`) or an unused database name
+  (`--database`), or run `bd doctor --fix` / `bd bootstrap` if `metadata.json`
+  is the stale side. Only `bd init`'s own open gets this wording; every other
+  open, including the library API, `bd doctor --fix` and `bd bootstrap`, keeps
+  the existing message.
 
 ### Changed
 
