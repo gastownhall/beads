@@ -812,7 +812,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 			return HandleError("failed to save metadata.json: %v", err)
 		}
 		if shared {
-			if err := config.SetMachineLocalYamlConfigInDir(beadsDir, "dolt.shared-server", "false"); err != nil {
+			if err := config.SetYamlConfigInDir(beadsDir, "dolt.shared-server", "false"); err != nil {
 				return HandleError("failed to disable dolt.shared-server: %v", err)
 			}
 		}
@@ -1170,7 +1170,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			return HandleError("failed to save metadata.json: %v", err)
 		}
 		if shared {
-			if err := config.SetMachineLocalYamlConfigInDir(beadsDir, "dolt.shared-server", "true"); err != nil {
+			if err := config.SetYamlConfigInDir(beadsDir, "dolt.shared-server", "true"); err != nil {
 				return HandleError("failed to enable dolt.shared-server: %v", err)
 			}
 		}
