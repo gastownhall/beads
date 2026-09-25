@@ -61,6 +61,21 @@ func TestLintMaxCharsConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("workspace hint is carried verbatim", func(t *testing.T) {
+		isolateLintConfig(t)
+		const hint = "Split into child issues; keep history in comments"
+		config.Set("lint.max-chars.design", 1)
+		config.Set("lint.max-chars-hint.design", "  "+hint+" ")
+		issue := &types.Issue{IssueType: types.TypeTask, Design: "xx", AcceptanceCriteria: acceptance}
+		te := lintTemplateError(t, LintIssue(issue))
+		if len(te.TooLong) != 1 || te.TooLong[0].Hint != hint {
+			t.Fatalf("TooLong = %v, want hint %q", te.TooLong, hint)
+		}
+		if msg := te.Error(); !strings.Contains(msg, "→ "+hint) {
+			t.Fatalf("error message %q does not carry the hint", msg)
+		}
+	})
+
 	t.Run("joins missing sections in one error", func(t *testing.T) {
 		isolateLintConfig(t)
 		config.Set("lint.max-chars.description", 3)

@@ -18,9 +18,10 @@ type MissingSection struct {
 // FieldLength describes a text field that exceeds its configured
 // lint.max-chars.<field> limit.
 type FieldLength struct {
-	Field string `json:"field"` // Issue JSON field name, e.g., "design"
-	Chars int    `json:"chars"` // Actual length in characters (runes)
-	Max   int    `json:"max"`   // Configured limit
+	Field string `json:"field"`          // Issue JSON field name, e.g., "design"
+	Chars int    `json:"chars"`          // Actual length in characters (runes)
+	Max   int    `json:"max"`            // Configured limit
+	Hint  string `json:"hint,omitempty"` // Workspace guidance from lint.max-chars-hint.<field>
 }
 
 // TemplateError is returned when template validation fails.
@@ -50,6 +51,9 @@ func (e *TemplateError) Error() string {
 		fmt.Fprintf(&b, "fields over %s<field> for %s:", LintMaxCharsConfigPrefix, e.IssueType)
 		for _, f := range e.TooLong {
 			fmt.Fprintf(&b, "\n  - %s: %d chars (max %d)", f.Field, f.Chars, f.Max)
+			if f.Hint != "" {
+				fmt.Fprintf(&b, "\n    → %s", f.Hint)
+			}
 		}
 	}
 	return b.String()
@@ -64,6 +68,15 @@ func (e *TemplateError) Error() string {
 // <field> is one of lintMaxCharsFields. Unset, zero, negative, or
 // non-numeric values mean no limit.
 const LintMaxCharsConfigPrefix = "lint.max-chars."
+
+// LintMaxCharsHintConfigPrefix is the config namespace for the guidance shown
+// with an over-length field: lint.max-chars-hint.<field> is free text the
+// workspace writes for its own workflow, e.g.
+//
+//	bd config set lint.max-chars-hint.design "Split into child issues; keep history in comments"
+//
+// bd shows the text verbatim and does not interpret it. Unset means no hint.
+const LintMaxCharsHintConfigPrefix = "lint.max-chars-hint."
 
 // lintMaxCharsFields lists the text fields lint.max-chars.<field> applies to,
 // in report order. Names match the issue JSON fields.
@@ -87,7 +100,8 @@ func lintFieldText(issue *types.Issue, field string) string {
 }
 
 // OverLengthFields returns the issue's text fields that exceed their
-// configured lint.max-chars.<field> limit. Length counts characters (runes),
+// configured lint.max-chars.<field> limit, each with its optional
+// lint.max-chars-hint.<field> guidance. Length counts characters (runes),
 // not bytes. Returns nil when no limit is configured or none is exceeded.
 func OverLengthFields(issue *types.Issue) []FieldLength {
 	var out []FieldLength
@@ -97,7 +111,12 @@ func OverLengthFields(issue *types.Issue) []FieldLength {
 			continue
 		}
 		if n := utf8.RuneCountInString(lintFieldText(issue, field)); n > limit {
-			out = append(out, FieldLength{Field: field, Chars: n, Max: limit})
+			out = append(out, FieldLength{
+				Field: field,
+				Chars: n,
+				Max:   limit,
+				Hint:  strings.TrimSpace(config.GetString(LintMaxCharsHintConfigPrefix + field)),
+			})
 		}
 	}
 	return out
