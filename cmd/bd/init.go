@@ -1786,7 +1786,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 
 			if debugMode {
-				if err := config.SetYamlConfig("dolt.debug", "true"); err != nil {
+				// dolt.debug is machine-local: it turns on this host's server
+				// log and CPU profile, and `bd config set dolt.debug` writes it
+				// to the sidecar. Writing it to the tracked config.yaml here
+				// would give the key two homes, and the sidecar wins on read --
+				// so a later `bd config unset dolt.debug` would clear the
+				// sidecar and silently reactivate the tracked true.
+				if err := config.SetMachineLocalYamlConfig("dolt.debug", "true"); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to persist dolt.debug: %v\n", err)
 				} else if !quiet {
 					serverDir := doltserver.ResolveServerDir(beadsDir)
@@ -2349,7 +2355,7 @@ func init() {
 	initCmd.Flags().String("server-user", "", "Dolt server MySQL user (default: root)")
 	initCmd.Flags().Bool("shared-server", false, "Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)")
 	initCmd.Flags().Bool("external", false, "Server is externally managed (skip server startup); use with --shared-server or --server")
-	initCmd.Flags().Bool("debug", false, "Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.yaml as dolt.debug. No effect on externally-managed servers.")
+	initCmd.Flags().Bool("debug", false, "Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.local.yaml as dolt.debug. No effect on externally-managed servers.")
 	initCmd.Flags().Bool("proxied-server", false, "[EXPERIMENTAL] Use a per-workspace proxied dolt sql-server (proxy + child dolt) rooted at .beads/dolt")
 	initCmd.Flags().Bool("team-server", false, "[EXPERIMENTAL] The shared database's schema is managed by beads-team-server (bts): bd never creates the database or runs schema migrations, only verifies the schema version (proxied-server mode only). Not related to --team.")
 	initCmd.Flags().String("proxied-server-config-path", "", "[EXPERIMENTAL] Absolute path to an existing dolt sql-server YAML config (proxied-server mode only). When set, bd uses this file instead of auto-generating one. Relative paths are rejected. Managed mode requires listener.host to be a numeric loopback IP (hostnames including localhost, non-loopback addresses, listener.socket, remotesapi, and cluster config are rejected); the same policy applies to BEADS_PROXIED_SERVER_CONFIG.")

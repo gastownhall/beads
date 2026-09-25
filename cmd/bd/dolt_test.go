@@ -379,6 +379,70 @@ func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 	}
 }
 
+// TestDoltSetConfigRoutesMachineLocalKeyToSidecar pins the destination, not
+// just the message. Every yaml key `bd dolt set --update-config` can reach --
+// host, port, socket, user, data-dir -- is machine-local, and the command
+// prints "(in config.local.yaml)" for them. It used to print that and then call
+// SetYamlConfig, which writes exactly where it is told: the tracked file. The
+// label was the only thing that moved.
+//
+// TestDoltSetConfigWithUpdateConfig above asserts the JSON flag, which is true
+// either way, so it cannot see this. The assertion has to be that the sidecar
+// HAS the value and config.yaml does NOT -- absence from config.yaml alone
+// would also hold if the write never happened at all.
+func TestDoltSetConfigRoutesMachineLocalKeyToSidecar(t *testing.T) {
+	const host = "100.64.0.7"
+
+	if !config.IsMachineLocalKey("dolt.host") {
+		t.Fatal("dolt.host is not machine-local; this test's premise is stale")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	configYamlPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configYamlPath, []byte("prefix: test\n"), 0o600); err != nil {
+		t.Fatalf("failed to create config.yaml: %v", err)
+	}
+
+	// Override BEADS_DIR so FindBeadsDir() returns our temp .beads, not the
+	// rig's (which happens in worktree environments).
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldCwd) })
+
+	output := captureDoltSetOutput(t, "host", host, true)
+
+	sidecar, err := os.ReadFile(filepath.Join(beadsDir, config.LocalConfigFileName))
+	if err != nil {
+		t.Fatalf("reading the sidecar: %v (command output: %s)", err, output)
+	}
+	if !strings.Contains(string(sidecar), host) {
+		t.Errorf("dolt.host did not reach %s:\n%s", config.LocalConfigFileName, sidecar)
+	}
+
+	tracked, err := os.ReadFile(configYamlPath)
+	if err != nil {
+		t.Fatalf("reading config.yaml: %v", err)
+	}
+	if strings.Contains(string(tracked), host) {
+		t.Errorf("dolt.host dirtied the tracked config.yaml, which is the defect this PR names:\n%s", tracked)
+	}
+}
+
 func TestTestServerConnection(t *testing.T) {
 	// Test the testServerConnection function with various configs
 	t.Run("unreachable host", func(t *testing.T) {

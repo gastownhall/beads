@@ -1410,11 +1410,14 @@ func commentOutYamlKeyAnyForm(content, key string) (string, error) {
 	// leaving a bare `dolt:` behind. commentOutYamlKey edits lines in place
 	// and adds none, so the indices stay valid for the output; the length
 	// check makes that assumption fail loudly rather than silently mis-index
-	// if it ever stops holding.
+	// if it ever stops holding. It returns an error rather than the
+	// uncleaned output: skipping the walk would leave the bare `dolt:` this
+	// function exists to prevent, and reporting that as a successful unset is
+	// the failure mode #6574 added unsupportedUnsetShape to avoid.
 	orig := strings.Split(content, "\n")
 	lines := strings.Split(out, "\n")
 	if len(lines) != len(orig) {
-		return out, nil
+		return "", fmt.Errorf("cannot unset %q: commenting it out changed the document from %d lines to %d, so the parent-key cleanup cannot be located; edit the file by hand", key, len(orig), len(lines))
 	}
 	path := findNestedKeyPath(orig, parts, 0, 0, len(orig), -1)
 	if path == nil {

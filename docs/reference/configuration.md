@@ -96,7 +96,9 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 
 A few of those YAML keys answer a question about *this machine* rather than about the project: which Dolt this host talks to, and whether this host takes backups. Storing one host's answer in the tracked `config.yaml` costs twice. It travels to everyone who pulls, and because bd rewrites `config.yaml` as a side effect of ordinary work, `git status` reports a change nobody made — which a release script, a pre-commit hook, or a CI clean-tree check then refuses on.
 
-So `bd config set` writes these keys to `.beads/config.local.yaml` instead, and keeps git from seeing that file.
+So bd writes these keys to `.beads/config.local.yaml` instead, and keeps git from seeing that file.
+Every command that persists one routes there: `bd config set`, `bd dolt set --update-config`, and
+`bd init --debug`.
 
 | Key | What it says about this host |
 |---|---|

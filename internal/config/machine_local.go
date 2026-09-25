@@ -122,7 +122,25 @@ func LocalConfigPathFor(configPath string) string {
 // setMachineLocalYamlConfig writes a machine-local key to the sidecar beside
 // configPath, first migrating any machine-local keys already sitting in the
 // tracked config.yaml.
+//
+// It refuses a key the registry does not classify as machine-local -- the
+// mirror of the refusal SaveConfigValue makes for the opposite mistake. With
+// both in place MachineLocalKeys is the single decision point in BOTH
+// directions: no caller can put a shared key in the sidecar by picking this
+// function, which is the only way the split this PR fixed could be recreated.
+//
+// It also runs validateYamlConfigValue, which SetYamlConfig and
+// SetYamlConfigInDir run. Without it, routing a key here would REMOVE a
+// refusal: `bd config set dolt.mode garbage` is rejected on the literal path
+// and dolt.mode, dolt.debug and dolt.shared-server all have validation cases.
+// A validator the caller escapes by choosing a destination is not a validator.
 func setMachineLocalYamlConfig(configPath, key, value string) error {
+	if !IsMachineLocalKey(key) {
+		return fmt.Errorf("%q is not a machine-local key; use SetYamlConfig (or SetYamlConfigInDir) to write it to the tracked config.yaml", key)
+	}
+	if err := validateYamlConfigValue(key, value); err != nil {
+		return err
+	}
 	localPath := LocalConfigPathFor(configPath)
 	if err := ensureLocalConfigFile(localPath); err != nil {
 		return err
@@ -139,6 +157,9 @@ func setMachineLocalYamlConfig(configPath, key, value string) error {
 // The tracked config.yaml is left alone: a value there is a shared default that
 // only an explicit edit should remove.
 func unsetMachineLocalYamlConfig(configPath, key string) error {
+	if !IsMachineLocalKey(key) {
+		return fmt.Errorf("%q is not a machine-local key; use UnsetYamlConfig to clear it from the tracked config.yaml", key)
+	}
 	localPath := LocalConfigPathFor(configPath)
 	// Unset has to migrate first. Before the migration has run, the live value
 	// is still the one in config.yaml; clearing only the sidecar would report
@@ -507,9 +528,12 @@ func MachineLocalYamlValue(key string) (string, bool) {
 // library's own writers -- SetYamlConfig, SetYamlConfigInDir, UnsetYamlConfig --
 // deliberately keep writing exactly where they are told, so a caller that names
 // a file gets that file and #6574's round-trip guarantees are unaffected. The
-// ROUTING decision belongs to the caller that knows the user's intent: `bd
-// config set` and the two migrate-dolt-mode writes, which pick between this and
-// SetYamlConfigInDir via IsMachineLocalKey.
+// ROUTING decision belongs to the caller that knows the user's intent. The
+// callers that route are `bd config set`/`bd config unset`, `bd dolt set
+// --update-config` and `bd init --debug`; each picks between this and a literal
+// writer via IsMachineLocalKey. The registry enforces the choice from both
+// sides -- this function refuses a key that is not machine-local, and
+// SaveConfigValue refuses one that is.
 func SetMachineLocalYamlConfigInDir(beadsDir, key, value string) error {
 	return setMachineLocalYamlConfig(filepath.Join(beadsDir, "config.yaml"), key, value)
 }

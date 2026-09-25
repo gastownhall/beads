@@ -829,3 +829,108 @@ func TestSaveConfigValueStillWritesSharedKeys(t *testing.T) {
 		t.Errorf("no-git-ops was not written to config.yaml:\n%s", readFile(t, configPath))
 	}
 }
+
+// TestSidecarWritersRefuseSharedKeys is the other half of the refusal above.
+// SaveConfigValue refuses to put a machine-local key in the tracked file; these
+// refuse to put a shared key in the sidecar. Together they make MachineLocalKeys
+// the single decision point in BOTH directions.
+//
+// Without this, the split is re-creatable by picking a function: the sidecar
+// writers used to write whatever key they were handed, which is how
+// `dolt.shared-server` -- deliberately left shared, asserted on in config.yaml
+// by the proxied-server migrations -- ended up in the sidecar and turned four
+// migrate tests red. The registry, not the caller's choice of function, decides.
+func TestSidecarWritersRefuseSharedKeys(t *testing.T) {
+	// Keys the registry deliberately leaves shared, named in the MachineLocalKeys
+	// doc comment. dolt.shared-server is the one that actually broke.
+	shared := []string{"dolt.shared-server", "dolt.auto-start", "dolt.max-conns", "backup.git-repo", "issue_prefix"}
+
+	for _, key := range shared {
+		t.Run(key, func(t *testing.T) {
+			if IsMachineLocalKey(key) {
+				t.Fatalf("%s is in MachineLocalKeys; this test's premise is stale", key)
+			}
+			beadsDir, configPath, localPath := newWorkspace(t, trackedConfigFixture)
+			before := readFile(t, configPath)
+
+			if err := SetMachineLocalYamlConfigInDir(beadsDir, key, sampleValueFor(key)); err == nil {
+				t.Errorf("SetMachineLocalYamlConfigInDir(%s) succeeded; it must refuse a shared key", key)
+			}
+			if err := UnsetMachineLocalYamlConfigInDir(beadsDir, key); err == nil {
+				t.Errorf("UnsetMachineLocalYamlConfigInDir(%s) succeeded; it must refuse a shared key", key)
+			}
+			if after := readFile(t, configPath); after != before {
+				t.Errorf("config.yaml was modified despite the refusal:\n%s", after)
+			}
+			if data, err := os.ReadFile(localPath); err == nil && strings.Contains(string(data), key) {
+				t.Errorf("%s reached the sidecar despite the refusal:\n%s", key, data)
+			}
+		})
+	}
+}
+
+// TestSidecarWritesAreValidatedLikeTrackedWrites pins that routing a key to the
+// sidecar does not cost it its validation.
+//
+// SetYamlConfig and SetYamlConfigInDir both run validateYamlConfigValue. Three
+// registry keys have cases there (dolt.mode, dolt.debug, and dolt.shared-server
+// which is shared), so a sidecar writer that skipped validation would REMOVE a
+// refusal `bd config set dolt.mode garbage` makes today -- and the bad value
+// would win on read, because the sidecar is merged last. A validator a caller
+// escapes by choosing a destination is not a validator.
+func TestSidecarWritesAreValidatedLikeTrackedWrites(t *testing.T) {
+	rejected := map[string]string{
+		"dolt.mode":  "garbage",   // neither server nor embedded
+		"dolt.debug": "sometimes", // neither true nor false
+		"dolt.port":  "not-a-port",
+	}
+
+	sawRejected := 0
+	for key, bad := range rejected {
+		t.Run(key, func(t *testing.T) {
+			if !IsMachineLocalKey(key) {
+				t.Fatalf("%s is not in MachineLocalKeys; this test's premise is stale", key)
+			}
+			// The control: the literal writer's verdict is the one to match.
+			// If it accepts the value, the sidecar writer accepting it is not
+			// a defect and this row proves nothing -- say so rather than pass.
+			beadsDir, _, localPath := newWorkspace(t, trackedConfigFixture)
+			trackedErr := SetYamlConfigInDir(beadsDir, key, bad)
+			localErr := SetMachineLocalYamlConfigInDir(beadsDir, key, bad)
+
+			if trackedErr == nil {
+				t.Skipf("SetYamlConfigInDir accepts %s=%q, so there is no refusal to match", key, bad)
+			}
+			sawRejected++
+			if localErr == nil {
+				t.Fatalf("SetYamlConfigInDir refused %s=%q (%v) but the sidecar writer accepted it", key, bad, trackedErr)
+			}
+			if data, err := os.ReadFile(localPath); err == nil && strings.Contains(string(data), bad) {
+				t.Errorf("rejected value reached the sidecar anyway:\n%s", data)
+			}
+		})
+	}
+	if sawRejected == 0 {
+		t.Fatal("no row exercised a refusal; the test proved nothing")
+	}
+}
+
+// TestSidecarWritersStillAcceptEveryRegistryKey is the control for both guards
+// above: it fails if the refusal or the validation is applied too broadly and
+// starts rejecting the keys the sidecar exists to hold.
+func TestSidecarWritersStillAcceptEveryRegistryKey(t *testing.T) {
+	for _, key := range sortedMachineLocalKeys() {
+		t.Run(key, func(t *testing.T) {
+			beadsDir, _, localPath := newWorkspace(t, trackedConfigFixture)
+			if err := SetMachineLocalYamlConfigInDir(beadsDir, key, sampleValueFor(key)); err != nil {
+				t.Fatalf("SetMachineLocalYamlConfigInDir(%s): %v", key, err)
+			}
+			if !strings.Contains(readFile(t, localPath), sampleValueFor(key)) {
+				t.Errorf("%s was not written to the sidecar:\n%s", key, readFile(t, localPath))
+			}
+			if err := UnsetMachineLocalYamlConfigInDir(beadsDir, key); err != nil {
+				t.Fatalf("UnsetMachineLocalYamlConfigInDir(%s): %v", key, err)
+			}
+		})
+	}
+}

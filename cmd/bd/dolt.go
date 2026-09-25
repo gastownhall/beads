@@ -2233,11 +2233,19 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 
 	// Also update config.yaml if requested
 	if updateConfig && yamlKey != "" {
+		// The CLI owns the routing decision; the library writers keep writing
+		// exactly where they are told (bd-zj95 / #6125). This command reaches
+		// both kinds of key -- host, port, socket, user and data-dir are
+		// machine-local, dolt.database is shared -- so the predicate picks the
+		// destination and the message TOGETHER. It used to pick the message
+		// alone and then write the tracked file either way.
 		yamlLocation := "config.yaml"
+		setYaml := config.SetYamlConfig
 		if config.IsMachineLocalKey(yamlKey) {
 			yamlLocation = config.LocalConfigFileName
+			setYaml = config.SetMachineLocalYamlConfig
 		}
-		if err := config.SetYamlConfig(yamlKey, value); err != nil {
+		if err := setYaml(yamlKey, value); err != nil {
 			fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update %s: %v", yamlLocation, err)))
 		} else {
 			fmt.Printf("Set %s = %s (in %s)\n", yamlKey, value, yamlLocation)

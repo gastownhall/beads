@@ -47,17 +47,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `300s` in the sidecar, that key reads `10s` before this change and `300s`
   after, matching what the CLI already returned.
 
+  Three commands persist one of these keys, and all three now route: `bd config
+  set` / `unset`, `bd dolt set host|port|socket|user|data-dir --update-config`,
+  and `bd init --debug` (which writes `dolt.debug`). The last two used to print
+  the sidecar's name and write the tracked file. That mattered beyond the label:
+  a key written to both files has two homes and the sidecar wins on read, so
+  `bd init --debug` followed by `bd config set dolt.debug false` and then
+  `bd config unset dolt.debug` silently brought the tracked `true` back to life.
+
   The routing decision sits with the CALLER, not the library writers.
   `SetYamlConfig`, `SetYamlConfigInDir` and `UnsetYamlConfig` keep writing
   exactly where they are told, so #6574's dotted-key round-trip guarantees hold
-  unchanged and a caller that names a file gets that file. `bd config set` /
-  `unset` and the two `migrate dolt-mode` writes pick between the tracked file
-  and `SetMachineLocalYamlConfigInDir` via `IsMachineLocalKey`. Reads are the
+  unchanged and a caller that names a file gets that file. Reads are the
   exception and must not be: `GetStringFromDir` consults the sidecar first
   regardless of which writer produced it, or a value bd itself wrote would never
-  be read back. `SaveConfigValue` refuses a machine-local key outright rather
-  than writing it to the tracked file, so the next key added to
-  `MachineLocalKeys` is caught at runtime instead of by whoever notices.
+  be read back.
+
+  `MachineLocalKeys` is the single decision point in BOTH directions, enforced
+  at runtime: `SaveConfigValue` refuses a machine-local key rather than writing
+  it to the tracked file, and the sidecar writers refuse a key that is not
+  machine-local. Without the second half a caller could re-create the split by
+  choosing a function — which is how `dolt.shared-server`, deliberately left
+  shared because the proxied-server migrations record and assert on it in
+  `config.yaml`, briefly reached the sidecar. The sidecar writers also run the
+  same `validateYamlConfigValue` the tracked writers run, so routing a key does
+  not cost it its validation: `bd config set dolt.mode garbage` is refused on
+  either path. A syntactic guard over the whole tree fails the build if any
+  literal writer is handed a machine-local key, which is what found the
+  `bd init --debug` call site.
 
 - **The smart migrate gate no longer auto-migrates a clone whose data is behind
   the remote, and `bd dolt pull` now works from that state**
