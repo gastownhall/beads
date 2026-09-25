@@ -58,21 +58,33 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 	p := &readyWorkProbe{}
 	excludeDeferred := !filter.IncludeDeferred
 
-	cols := []string{
-		"EXISTS (SELECT 1 FROM wisps)",
-		// Only the table REFERENCE matters here: the statement fails with a
-		// missing-table error when wisp_dependencies is absent, and an empty
-		// table still exists (optionalTableExistsInTx's contract). The value
-		// is not read.
-		"EXISTS (SELECT 1 FROM wisp_dependencies)",
+	// Which columns this statement carries depends on the filter, so each fact
+	// records the index it landed on as it is appended rather than the reader
+	// below counting appends back. Two of these columns are conditional, so a
+	// hardcoded index is a fact read from the wrong column the first time a
+	// new one is inserted above it — and the fact being misread would be the
+	// ready predicate.
+	cols := make([]string, 0, 5) // the two unconditional facts plus the three conditional ones
+	appendFact := func(sql string) int {
+		cols = append(cols, sql)
+		return len(cols) - 1
 	}
+
+	iWispsPresent := appendFact("EXISTS (SELECT 1 FROM wisps)")
+	// Only the table REFERENCE matters here: the statement fails with a
+	// missing-table error when wisp_dependencies is absent, and an empty
+	// table still exists (optionalTableExistsInTx's contract). The value
+	// is not read, so this fact keeps no index.
+	appendFact("EXISTS (SELECT 1 FROM wisp_dependencies)")
+
+	iIssuesDeferred, iWispsDeferred := -1, -1
 	if excludeDeferred {
-		cols = append(cols,
-			"EXISTS (SELECT 1 FROM issues WHERE "+futureDeferredPredicate+")",
-			"EXISTS (SELECT 1 FROM wisps WHERE "+futureDeferredPredicate+")")
+		iIssuesDeferred = appendFact("EXISTS (SELECT 1 FROM issues WHERE " + futureDeferredPredicate + ")")
+		iWispsDeferred = appendFact("EXISTS (SELECT 1 FROM wisps WHERE " + futureDeferredPredicate + ")")
 	}
+	iCollision := -1
 	if wantCollision {
-		cols = append(cols, "EXISTS (SELECT 1 FROM issues JOIN wisps ON wisps.id = issues.id)")
+		iCollision = appendFact("EXISTS (SELECT 1 FROM issues JOIN wisps ON wisps.id = issues.id)")
 	}
 	flags := make([]bool, len(cols))
 	dest := make([]any, len(cols))
@@ -84,16 +96,16 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 	err := tx.QueryRowContext(ctx, "SELECT "+strings.Join(cols, ", ")).Scan(dest...)
 	switch {
 	case err == nil:
-		p.wispsPresent = flags[0]
+		p.wispsPresent = flags[iWispsPresent]
 		// The statement ran, so every table it names exists.
 		p.wispDepsExist = true
-		next := 2
 		if excludeDeferred {
-			hasDeferredParent = flags[2] || flags[3]
-			next = 4
+			hasDeferredParent = flags[iIssuesDeferred] || flags[iWispsDeferred]
 		}
-		// Without a wisp row there is nothing to collide with.
-		p.idCollision = wantCollision && p.wispsPresent && flags[next]
+		if iCollision >= 0 {
+			// Without a wisp row there is nothing to collide with.
+			p.idCollision = p.wispsPresent && flags[iCollision]
+		}
 		if hasDeferredParent {
 			// Every table the child scan reads is known to exist, so its
 			// four legs can go out as one statement.

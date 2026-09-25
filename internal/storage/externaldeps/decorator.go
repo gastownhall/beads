@@ -236,8 +236,31 @@ func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (in
 // GetReadyWorkWithCountsAndTotal. It must be overridden here: the embedded
 // passthrough would hand back the inner store's counter, which counts
 // externally blocked issues as ready.
+//
+// Overriding costs the layers beneath their turn, though, and this accessor
+// cannot simply recurse the way IssueLifecycle above does: the exclusions live
+// on THIS store, so the counter has to be built over it. The inner store gets
+// its layer back by wrapping the finished counter — which is what
+// telemetry.InstrumentedStorage.WrapReadyCounter exists for, and why the
+// documented storage.ReadyCounter.CountReady span still appears for text-mode
+// `bd ready` in the cmd/bd chain (hooks -> externaldeps -> telemetry -> store).
 func (s *Store) ReadyCounter() (publicops.ReadyCounter, error) {
-	return storereadycounter.New(s)
+	counter, err := storereadycounter.New(s)
+	if err != nil {
+		return nil, err
+	}
+	if wrapper, ok := s.inner.(readyCounterWrapper); ok {
+		return wrapper.WrapReadyCounter(counter), nil
+	}
+	return counter, nil
+}
+
+// readyCounterWrapper is how a decorator beneath this one adds its layer to a
+// ready counter it did not construct. The shape is asserted rather than
+// imported so this package stays independent of which layers are wired below
+// it — telemetry's wrapper is absent entirely when telemetry is disabled.
+type readyCounterWrapper interface {
+	WrapReadyCounter(publicops.ReadyCounter) publicops.ReadyCounter
 }
 
 // ClaimReadyIssue resolves external blockers before using the existing local

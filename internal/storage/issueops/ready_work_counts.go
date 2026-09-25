@@ -333,7 +333,10 @@ func CountReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) (
 	issueCount, wispCount, err := countReadyFamiliesInTx(ctx, tx, issuePreds, wispPreds)
 	if err != nil {
 		if !missingOptionalWispTable(err) {
-			return 0, fmt.Errorf("count ready work: %w", err)
+			// Both families ride one statement now, so name it: the
+			// issues-only retry below reports `issues:`, and a reader
+			// otherwise cannot tell the combined statement from it.
+			return 0, fmt.Errorf("count ready work: issues+wisps: %w", err)
 		}
 		// A wisp plane the database may legitimately lack: issues-only, and
 		// the issues count has to be taken on its own.

@@ -253,6 +253,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of its own. Unsetting a key that is not set remains a successful no-op in
   every shape.
 
+### Changed
+
+- **`bd ready --json` answers a capped page and its total in one pass, and
+  `storage.Storage` gains a required `GetReadyWorkWithCountsAndTotal` method**
+  ([#6731](https://github.com/gastownhall/beads/pull/6731)). A full capped page
+  used to trigger a second counting pass in its own transaction, re-running the
+  expired-defer sweep and every wisp/deferred probe; the total now comes from
+  `COUNT(*) OVER ()` on the page's own query inside the same read transaction.
+  Two behaviors improve with it: the `--json` total honors external-dependency
+  exclusions (the old second pass counted externally blocked issues, so text and
+  `--json` could report different numbers), and the page and its total now come
+  from one snapshot instead of two, so "Showing N of M" can no longer be
+  internally inconsistent under concurrent writes. One contract change: a total
+  that fails now fails the command, where it previously could not — the total is
+  taken from the page's own query, so the page would have failed anyway.
+
+  **Out-of-tree storage backends must implement the new method to compile.**
+  Every in-tree implementer is updated, but `internal/storage/backends` is an
+  extension seam whose registrants are supplied by a downstream distribution and
+  return `storage.DoltStorage` directly. A registrant must implement
+  `GetReadyWorkWithCountsAndTotal(ctx, types.WorkFilter) ([]*types.IssueWithCounts, int, error)`:
+  the page identical to `GetReadyWorkWithCounts`, and the total identical to the
+  number `CountReadyWork` answers for the same filter (which ignores `Limit`),
+  resolved in the page's own read transaction. There is
+  deliberately no optional-interface fallback — a store that cannot size the
+  ready set should fail to compile rather than silently fall back to an
+  unbounded query.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery

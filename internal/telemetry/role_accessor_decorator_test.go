@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -384,6 +385,36 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 				t.Fatalf("%s() returned the inner surface uninstrumented, so every call on that role is unspanned and untimed", test.name)
 			}
 		})
+	}
+}
+
+// TestExternalDepsReadyCounterSurvivesThisLayer pins the span across the one
+// decorator above this one that CANNOT recurse. cmd/bd wires
+// hooks -> externaldeps -> telemetry -> store, and externaldeps has to build
+// its own ready counter over itself so the total honors its external-dependency
+// exclusions — recursing into the inner counter the way the accessors above do
+// would count externally blocked issues as ready. That leaves handing the
+// finished counter to WrapReadyCounter as the only way this layer keeps its
+// turn, so an externaldeps override that skips it silently drops the
+// storage.ReadyCounter.CountReady span for every text-mode `bd ready`.
+//
+// This is the only test that wires a real decorator above the instrumented
+// store, which is why WrapReadyCounter's sole caller outside this package is
+// the thing being pinned here.
+func TestExternalDepsReadyCounterSurvivesThisLayer(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	inner := &roleAccessorStore{surface: &roleAccessorSentinel{}}
+	instrumented, ok := WrapStorage(inner).(*InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage did not instrument the store; telemetry is disabled in this environment")
+	}
+
+	counter, err := externaldeps.New(instrumented, nil, nil).ReadyCounter()
+	if err != nil {
+		t.Fatalf("externaldeps ReadyCounter() error = %v", err)
+	}
+	if _, ok := counter.(*instrumentedReadyCounter); !ok {
+		t.Fatalf("externaldeps ReadyCounter() = %T, want it wrapped by this layer; the storage.ReadyCounter.CountReady span stops being emitted for text-mode bd ready", counter)
 	}
 }
 
