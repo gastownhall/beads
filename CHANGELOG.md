@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the sidecar overrides. The first machine-local write in a workspace lifts any
   such key already sitting in `config.yaml` into the sidecar and comments it
   out of the tracked file — one small diff, once, for the operator to commit.
+  That rewrite preserves the file's shape, including a trailing blank line: the
+  underlying helper reads with `bufio.Scanner`, which collapses a run of
+  trailing newlines, so the diff would otherwise carry an unrelated
+  end-of-file change on top of the line it meant to touch.
   bd also keeps git from seeing the sidecar: `bd init` lists it in
   `.beads/.gitignore`, and in a checkout made before that entry existed bd adds
   a per-clone line to `.git/info/exclude` the first time it writes there.

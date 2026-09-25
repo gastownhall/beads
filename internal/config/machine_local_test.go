@@ -934,3 +934,108 @@ func TestSidecarWritersStillAcceptEveryRegistryKey(t *testing.T) {
 		})
 	}
 }
+
+// TestCommentOutYamlKeyAnyFormPreservesTrailingNewlineRun pins the shape of the
+// file, not just the line it meant to touch.
+//
+// commentOutYamlKey reads with bufio.Scanner, which yields at most ONE empty
+// token for a run of trailing newlines. A wrapper that appends a single "\n"
+// repairs a file ending "\n" and leaves one ending "\n\n" a line short -- and
+// the ancestor-cleanup walk indexes the output by the ORIGINAL line numbers, so
+// a document that is short by one is not a cosmetic problem: it is either a
+// mis-index or, with the line-count check in place, a refusal on an ordinary
+// file shape. A blank line at the end of a YAML file is ordinary.
+func TestCommentOutYamlKeyAnyFormPreservesTrailingNewlineRun(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		trailing string
+	}{
+		{"one trailing newline", "issue_prefix: vp\ndolt:\n  mode: server\n", "\n"},
+		{"ends in a blank line", "issue_prefix: vp\ndolt:\n  mode: server\n\n", "\n\n"},
+		{"ends in two blank lines", "issue_prefix: vp\ndolt:\n  mode: server\n\n\n", "\n\n\n"},
+		{"blank line in the middle", "issue_prefix: vp\n\ndolt:\n  mode: server\n", "\n"},
+		{"no trailing newline", "issue_prefix: vp\ndolt:\n  mode: server", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := commentOutYamlKeyAnyForm(tc.content, "dolt.mode")
+			if err != nil {
+				t.Fatalf("commentOutYamlKeyAnyForm: %v", err)
+			}
+			if got := out[len(strings.TrimRight(out, "\n")):]; got != tc.trailing {
+				t.Errorf("trailing newline run = %q, want %q (whole output %q)", got, tc.trailing, out)
+			}
+			// The cleanup this function exists for still has to happen: the
+			// leaf commented out, and the parent with it so no bare `dolt:`
+			// (which parses as null) is left behind.
+			if !strings.Contains(out, "# mode: server") {
+				t.Errorf("leaf not commented out:\n%s", out)
+			}
+			if !strings.Contains(out, "# dolt:") {
+				t.Errorf("ancestor cleanup did not run, leaving a bare dolt::\n%s", out)
+			}
+		})
+	}
+}
+
+// TestSidecarWritesSurviveATrackedConfigEndingInABlankLine is the same defect
+// seen through the public API, which is where it would have reached users.
+//
+// commentOutYamlKeyAnyForm is called from unsetMachineLocalYamlConfig AND from
+// migrateMachineLocalKeys, which runs before EVERY sidecar write. So a refusal
+// there is not confined to unset: `bd config set dolt.port`, `bd dolt set
+// --update-config` and `bd init --debug` all fail on a hand-edited config.yaml
+// that happens to end in a blank line -- and fail after creating the sidecar,
+// so the workspace is left with a sidecar holding nothing.
+func TestSidecarWritesSurviveATrackedConfigEndingInABlankLine(t *testing.T) {
+	// A tracked file holding a machine-local key, so the one-time migration
+	// has something to lift and the ancestor walk something to clean.
+	const tracked = "issue_prefix: vp\ndolt:\n  host: 10.0.0.1\n\n"
+
+	t.Run("set", func(t *testing.T) {
+		beadsDir, configPath, localPath := newWorkspace(t, tracked)
+
+		if err := SetMachineLocalYamlConfigInDir(beadsDir, "dolt.port", "3307"); err != nil {
+			t.Fatalf("SetMachineLocalYamlConfigInDir: %v", err)
+		}
+
+		sidecar := readFile(t, localPath)
+		if !strings.Contains(sidecar, "3307") {
+			t.Errorf("the write did not happen; sidecar:\n%s", sidecar)
+		}
+		if !strings.Contains(sidecar, "10.0.0.1") {
+			t.Errorf("the migration did not lift dolt.host into the sidecar:\n%s", sidecar)
+		}
+
+		after := readFile(t, configPath)
+		if !strings.Contains(after, "# dolt:") {
+			t.Errorf("ancestor cleanup did not run; a bare dolt: is left in the tracked file:\n%s", after)
+		}
+		if !strings.HasSuffix(after, "\n\n") {
+			t.Errorf("the tracked file lost its trailing blank line: %q", after)
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		beadsDir, configPath, localPath := newWorkspace(t, tracked)
+
+		if err := UnsetMachineLocalYamlConfigInDir(beadsDir, "dolt.host"); err != nil {
+			t.Fatalf("UnsetMachineLocalYamlConfigInDir: %v", err)
+		}
+
+		// Unset has to migrate first, or the live value would still be the
+		// tracked one; the migration is the call site that fails on this shape.
+		if got, ok := yamlValueInContent(readFile(t, localPath), "dolt.host"); ok {
+			t.Errorf("dolt.host is still live in the sidecar as %q:\n%s", got, readFile(t, localPath))
+		}
+		after := readFile(t, configPath)
+		if !strings.Contains(after, "# dolt:") {
+			t.Errorf("ancestor cleanup did not run in the tracked file:\n%s", after)
+		}
+		if !strings.HasSuffix(after, "\n\n") {
+			t.Errorf("the tracked file lost its trailing blank line: %q", after)
+		}
+	})
+}

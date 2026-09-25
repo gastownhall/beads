@@ -1389,15 +1389,15 @@ func commentOutYamlKeyAnyForm(content, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// commentOutYamlKey drops the document's trailing newline (measured on
-	// origin/main 3c30a28d0, including for a key it does not find). Restoring
-	// it keeps an unset from showing up as a no-newline-at-end-of-file change
-	// on top of the line it meant to touch -- noise in exactly the diff this
-	// sidecar work exists to keep clean. Reported upstream separately; this
-	// only repairs the value this wrapper returns.
-	if strings.HasSuffix(content, "\n") && !strings.HasSuffix(out, "\n") {
-		out += "\n"
-	}
+	// No trailing-newline repair here any more. Earlier revisions of this PR
+	// carried one, because commentOutYamlKey dropped the document's trailing
+	// newline run and the line-count check below then read a legitimate
+	// blank-line file as a broken invariant and refused the write. #6749 fixed
+	// that in the primitive, which now re-attaches content's own run, so a
+	// repair here would re-trim and re-attach a run that already matches -- a
+	// no-op. The tests below still pin the property end-to-end, so if the
+	// primitive ever regresses this wrapper fails loudly rather than papering
+	// over it.
 
 	parts := strings.Split(key, ".")
 	if len(parts) < 2 {
