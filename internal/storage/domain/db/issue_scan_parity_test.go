@@ -42,7 +42,7 @@ func TestScanIssue_StringTimestamps(t *testing.T) {
 	for i := range cols {
 		cols[i] = strings.TrimSpace(cols[i])
 	}
-	require.Len(t, cols, 52)
+	require.Len(t, cols, 55)
 
 	row := []driver.Value{
 		"bd-test.1", nil, "title", "desc", "", "", "", // id..notes
@@ -54,12 +54,13 @@ func TestScanIssue_StringTimestamps(t *testing.T) {
 		nil,                // mol_type
 		nil, nil, nil, nil, // event_kind..payload
 		nil, nil, // due_at, defer_until
+		nil, nil, nil, // repeat_pattern, repeat_start, repeat_end
 		nil, nil, nil, // work_type, source_system, metadata
 		int64(12345),  // row_lock
 		nil,           // storage_class
 		nil, nil, nil, // lease_expires_at, heartbeat_at, granted_node
 	}
-	require.Len(t, row, 52)
+	require.Len(t, row, 55)
 
 	mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows(cols).AddRow(row...))
 

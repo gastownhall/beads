@@ -187,10 +187,18 @@ func TestParseCompactDuration_MonthBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Go's AddDate normalizes: Jan 31 + 1 month = March 3 (31 days into Feb)
-	// This is Go's default behavior, which we preserve
-	if got.Month() != time.March {
-		t.Logf("Note: Jan 31 + 1m = %v (Go's AddDate overflow behavior)", got)
+	// The step clamps to the last day of the shorter month rather than
+	// overflowing into March the way time.AddDate does.
+	want := time.Date(2025, 2, 28, 12, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("Jan 31 + 1m = %v, want %v", got, want)
+	}
+	leap, err := ParseCompactDuration("+1m", time.Date(2024, 1, 31, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wantLeap := time.Date(2024, 2, 29, 12, 0, 0, 0, time.UTC); !leap.Equal(wantLeap) {
+		t.Errorf("Jan 31 2024 + 1m = %v, want %v", leap, wantLeap)
 	}
 }
 
