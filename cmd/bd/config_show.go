@@ -226,6 +226,9 @@ func viperSourceLabel(key string, source config.ConfigSource) string {
 		}
 		return "env"
 	case config.SourceConfigFile:
+		if _, ok := config.MachineLocalYamlValue(key); ok {
+			return config.LocalConfigFileName
+		}
 		return "config.yaml"
 	default:
 		return "default"

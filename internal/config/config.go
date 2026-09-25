@@ -631,6 +631,20 @@ func LogOverride(override ConfigOverride) {
 // If no config file is currently loaded, it creates config.yaml in the given beadsDir.
 // Only the specified key is modified; other file contents are preserved.
 func SaveConfigValue(key string, value interface{}, beadsDir string) error {
+	// This writer is NOT routed to the machine-local sidecar, and refuses a
+	// machine-local key rather than silently writing it to the tracked
+	// config.yaml. Routing it would be wrong here for two reasons: it takes an
+	// interface{} value where the sidecar writers take the validated string
+	// form, and it re-marshals the whole document through viper, which is
+	// exactly the whole-file rewrite the sidecar path exists to avoid. Its one
+	// caller (cmd/bd/init.go, writing no-git-ops) is a genuine project key.
+	// The refusal keeps "every writer of the tracked config.yaml is accounted
+	// for" enforced at runtime for the next key added to MachineLocalKeys,
+	// instead of leaving it to whoever notices.
+	if IsMachineLocalKey(key) {
+		return fmt.Errorf("SaveConfigValue cannot write machine-local key %q to the tracked config.yaml; use SetMachineLocalYamlConfig (or SetMachineLocalYamlConfigInDir), which writes it to %s", key, LocalConfigFileName)
+	}
+
 	if v == nil {
 		return fmt.Errorf("config not initialized")
 	}
@@ -691,6 +705,13 @@ func GetString(key string) string {
 // numbers are coerced to their string representations ("true", "false", etc.).
 // Returns "" if the file is absent, the key is not found, or any error occurs.
 func GetStringFromDir(beadsDir, key string) string {
+	// The machine-local sidecar is consulted FIRST: a key routed there
+	// describes this host and overrides the shared default that may still sit
+	// in the tracked config.yaml. Reads must see it regardless of which writer
+	// put it there (bd-zj95 / #6125).
+	if v, ok := readYamlValueAtPath(filepath.Join(beadsDir, LocalConfigFileName), key); ok {
+		return v
+	}
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {

@@ -15,6 +15,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--format` template was ignored without a word, while `--proxied-server`
   already refused the combination. Both routes now fail with the same
   `--format cannot be combined with --watch` usage error.
+- **`bd config set` no longer dirties the checkout with one machine's answer.**
+  The keys that describe THIS host rather than the project — `dolt.mode`,
+  `dolt.host`, `dolt.port`, `dolt.socket`, `dolt.user`, `dolt.data-dir`,
+  `dolt.debug`, `backup.enabled`, `backup.interval` — are now written to the
+  untracked `.beads/config.local.yaml` instead of the git-tracked
+  `.beads/config.yaml`. Previously bd rewrote the tracked file as a side effect
+  of ordinary operation, so `git status` reported a change nobody made and a
+  release script, a pre-commit hook or a CI clean-tree step refused for a
+  reason no operator could fix by committing once — the next bd run wrote the
+  file again. The same value also propagated to every clone that pulled it.
+  Membership is an exact list, not a namespace: `dolt.auto-start`,
+  `dolt.max-conns`, `dolt.shared-server` and the rest stay shared project
+  settings, and a value left in `config.yaml` still works as a shared default
+  the sidecar overrides. The first machine-local write in a workspace lifts any
+  such key already sitting in `config.yaml` into the sidecar and comments it
+  out of the tracked file — one small diff, once, for the operator to commit.
+  bd also keeps git from seeing the sidecar: `bd init` lists it in
+  `.beads/.gitignore`, and in a checkout made before that entry existed bd adds
+  a per-clone line to `.git/info/exclude` the first time it writes there.
+  `bd config unset` on one of these keys clears the sidecar only; a shared
+  default in `config.yaml` is removed by an explicit edit.
+
+  Scope worth naming: the sidecar-first read added to `GetStringFromDir`
+  applies to EVERY key resolved through the directory path, not only the
+  machine-local list `bd config set` routes there. That is deliberate and is
+  the second half of #6443 — the store-open path resolves keys such as
+  `dolt.pool-read-timeout` through `GetStringFromDir` and never through
+  `Initialize`+`GetString`, so without it a workspace could answer one way at
+  the CLI and another inside the open. Measured: with `10s` in `config.yaml`
+  and `300s` in the sidecar, that key reads `10s` before this change and `300s`
+  after, matching what the CLI already returned.
+
+  The routing decision sits with the CALLER, not the library writers.
+  `SetYamlConfig`, `SetYamlConfigInDir` and `UnsetYamlConfig` keep writing
+  exactly where they are told, so #6574's dotted-key round-trip guarantees hold
+  unchanged and a caller that names a file gets that file. `bd config set` /
+  `unset` and the two `migrate dolt-mode` writes pick between the tracked file
+  and `SetMachineLocalYamlConfigInDir` via `IsMachineLocalKey`. Reads are the
+  exception and must not be: `GetStringFromDir` consults the sidecar first
+  regardless of which writer produced it, or a value bd itself wrote would never
+  be read back. `SaveConfigValue` refuses a machine-local key outright rather
+  than writing it to the tracked file, so the next key added to
+  `MachineLocalKeys` is caught at runtime instead of by whoever notices.
 
 - **The smart migrate gate no longer auto-migrates a clone whose data is behind
   the remote, and `bd dolt pull` now works from that state**
