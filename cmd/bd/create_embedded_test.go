@@ -251,7 +251,7 @@ func TestEmbeddedCreate(t *testing.T) {
 		if err := json.Unmarshal(target.Metadata, &metadata); err != nil || metadata["a"] != float64(1) {
 			t.Fatalf("object metadata = %q, err = %v", target.Metadata, err)
 		}
-		for _, value := range []string{`"oops"`, `[1,2]`, `42`} {
+		for _, value := range []string{`"oops"`, `[1,2]`, `42`, `true`, `null`} {
 			if out := bdCreateFail(t, bd, dir, "Bad metadata", "--metadata", value); !strings.Contains(out, want) {
 				t.Fatalf("create --metadata %s output = %s, want %q", value, out, want)
 			}
