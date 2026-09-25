@@ -136,6 +136,10 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		}
 		if insertOpts.CreateOnly {
 			if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
+				if wasAutoMinted && attempt < maxAttempts && errors.Is(err, storage.ErrAlreadyExists) {
+					issue.ID = ""
+					continue
+				}
 				return result, err
 			}
 		}
