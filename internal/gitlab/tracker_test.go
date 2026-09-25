@@ -56,6 +56,38 @@ func TestIsExternalRef(t *testing.T) {
 	}
 }
 
+func TestIsExternalRefSelfHostedURL(t *testing.T) {
+	tr := &Tracker{client: NewClient("tok", "https://nova.teachx.ai", "42")}
+	tests := []struct {
+		ref  string
+		want bool
+	}{
+		{"https://nova.teachx.ai/group/project/-/work_items/24", true},
+		{"https://nova.teachx.ai/group/project/-/issues/24", true},
+		{"https://NOVA.teachx.ai/group/project/-/issues/24", true},
+		{"https://nova.teachx.ai/group/project/-/milestones/5", true},
+		{"https://other.example.com/group/project/-/work_items/24", false},
+		{"https://github.com/org/repo/issues/1", false},
+		{"https://nova.teachx.ai/group/project/-/merge_requests/24", false},
+		{"gitlab:24", true},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := tr.IsExternalRef(tt.ref); got != tt.want {
+			t.Errorf("IsExternalRef(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+
+	// A GitLab served from a sub-path only claims URLs under that path.
+	sub := &Tracker{client: NewClient("tok", "https://corp.example.com/git", "42")}
+	if !sub.IsExternalRef("https://corp.example.com/git/g/p/-/issues/3") {
+		t.Error("sub-path host URL should be recognized")
+	}
+	if sub.IsExternalRef("https://corp.example.com/wiki/g/p/-/issues/3") {
+		t.Error("URL outside the configured sub-path should be rejected")
+	}
+}
+
 func TestExtractIdentifier(t *testing.T) {
 	tr := &Tracker{}
 	tests := []struct {

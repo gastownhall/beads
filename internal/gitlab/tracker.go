@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -513,10 +514,29 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 	if glShorthandPattern.MatchString(ref) {
 		return true
 	}
-	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") {
+	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") && !t.onConfiguredHost(ref) {
 		return false
 	}
 	return issueIIDPattern.MatchString(ref) || milestoneIDPattern.MatchString(ref)
+}
+
+// onConfiguredHost reports whether ref is a URL on the same host (and base
+// path, for GitLab served from a sub-path) as the configured gitlab.url.
+// Self-hosted instances need not have "gitlab" in their hostname.
+func (t *Tracker) onConfiguredHost(ref string) bool {
+	if t.client == nil || t.client.BaseURL == "" {
+		return false
+	}
+	base, err := url.Parse(t.client.BaseURL)
+	if err != nil || base.Host == "" {
+		return false
+	}
+	u, err := url.Parse(ref)
+	if err != nil || !strings.EqualFold(u.Host, base.Host) {
+		return false
+	}
+	basePath := strings.TrimRight(base.Path, "/")
+	return basePath == "" || u.Path == basePath || strings.HasPrefix(u.Path, basePath+"/")
 }
 
 // ExtractIdentifier extracts the issue IID from a GitLab URL or shorthand ref.
