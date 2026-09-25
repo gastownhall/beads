@@ -72,10 +72,9 @@ func testAuditEventValueNullability(t *testing.T, f Factory) {
 	}
 }
 
-// testAuditLabelEventNonIdempotent pins that label mutations are idempotent at the
-// row level (INSERT IGNORE / DELETE) yet NON-idempotent at the event level: the
-// label_added / label_removed event is emitted unconditionally.
-func testAuditLabelEventNonIdempotent(t *testing.T, f Factory) {
+// testAuditLabelEventIdempotent pins that no-op label mutations are idempotent
+// at both the row and event levels: only an actual label change emits an event.
+func testAuditLabelEventIdempotent(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-i", Title: "I"}), "a"))
@@ -90,8 +89,8 @@ func testAuditLabelEventNonIdempotent(t *testing.T, f Factory) {
 	evs, err := s.GetEvents(c, "test-i", 0)
 	must(t, err)
 	la := auditEventsOfType(evs, types.EventLabelAdded)
-	if len(la) != 2 {
-		t.Fatalf("label_added events after double-add = %d, want 2 (event-level NON-idempotent)", len(la))
+	if len(la) != 1 {
+		t.Fatalf("label_added events after double-add = %d, want 1 (event-level idempotent)", len(la))
 	}
 	for _, e := range la {
 		if e.Comment == nil || *e.Comment != "Added label: x" {
@@ -99,17 +98,14 @@ func testAuditLabelEventNonIdempotent(t *testing.T, f Factory) {
 		}
 	}
 
-	// Removing a never-present label: no error, but a spurious label_removed event.
+	// Removing a never-present label is also an event-level no-op.
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-j", Title: "J"}), "a"))
 	must(t, s.RemoveLabel(c, "test-j", "never-added", "a"))
 	evsJ, err := s.GetEvents(c, "test-j", 0)
 	must(t, err)
 	lr := auditEventsOfType(evsJ, types.EventLabelRemoved)
-	if len(lr) != 1 {
-		t.Fatalf("label_removed events after remove-of-absent = %d, want 1 (spurious event)", len(lr))
-	}
-	if lr[0].Comment == nil || *lr[0].Comment != "Removed label: never-added" {
-		t.Errorf("label_removed Comment = %v, want \"Removed label: never-added\"", lr[0].Comment)
+	if len(lr) != 0 {
+		t.Fatalf("label_removed events after remove-of-absent = %d, want 0 (event-level idempotent)", len(lr))
 	}
 }
 
@@ -296,7 +292,7 @@ func testAuditDirectWispLabelComment(t *testing.T, f Factory) {
 func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Helper()
 	t.Run("EventValueNullability", func(t *testing.T) { testAuditEventValueNullability(t, f) })
-	t.Run("LabelEventNonIdempotent", func(t *testing.T) { testAuditLabelEventNonIdempotent(t, f) })
+	t.Run("LabelEventIdempotent", func(t *testing.T) { testAuditLabelEventIdempotent(t, f) })
 	t.Run("CountCommentsWispAsymmetry", func(t *testing.T) { testAuditCountCommentsWispAsymmetry(t, f) })
 	t.Run("LabelCollationOrder", func(t *testing.T) { testAuditLabelCollationOrder(t, f) })
 	t.Run("EventsSinceStrictBoundary", func(t *testing.T) { testAuditEventsSinceStrictBoundary(t, f) })
