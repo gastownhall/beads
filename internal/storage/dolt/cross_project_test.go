@@ -770,6 +770,23 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.
 	if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
 		t.Fatalf("expected PROJECT IDENTITY MISMATCH error, got: %v", err)
 	}
+	// CreateIfMissing alone is not bd init: the library API, bd doctor --fix
+	// and bd bootstrap open this way too, and keep the ordinary-open advice
+	// (GH#5558). Only Config.OpenedByInit selects the init wording.
+	if strings.Contains(err.Error(), "refusing to initialize") {
+		t.Errorf("a non-init CreateIfMissing open got the bd init wording: %v", err)
+	}
+
+	initCfg := f.config()
+	initCfg.OpenedByInit = true
+	initStore, err := New(ctx, initCfg)
+	if err == nil {
+		initStore.Close()
+		t.Fatalf("expected identity mismatch error for the bd init open, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to initialize") || strings.Contains(err.Error(), "Do NOT run 'bd init'") {
+		t.Errorf("the bd init open did not get the init wording: %v", err)
+	}
 }
 
 // TestCrossProject_IdentityCheck_ExistingDatabase_MatchingSucceeds is the

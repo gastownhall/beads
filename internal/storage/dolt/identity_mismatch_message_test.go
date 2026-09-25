@@ -24,7 +24,7 @@ func TestProjectIdentityMismatchError_InitAdvice(t *testing.T) {
 			dbID,
 			`"` + database + `"`,
 			"bd dolt status",
-			"bd init --database <name>",
+			"bd init --database <other-name>",
 			"bd init --server-host <host> --server-port <port>",
 			"bd doctor --fix",
 			"bd bootstrap",

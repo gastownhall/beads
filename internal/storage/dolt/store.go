@@ -435,6 +435,14 @@ type Config struct {
 	// creation of shadow databases on the wrong server.
 	CreateIfMissing bool
 
+	// OpenedByInit marks the open `bd init` makes. It only shapes the advice in
+	// a project-identity mismatch error (GH#5558), never whether the check runs.
+	// It is a field of its own because CreateIfMissing does not identify init:
+	// the library API (beads.OpenFromConfig, beads.OpenGated), `bd doctor --fix`
+	// and `bd bootstrap` open with CreateIfMissing too, and must not be told to
+	// re-run bd init.
+	OpenedByInit bool
+
 	// ServerMode indicates this config targets an external dolt sql-server
 	// rather than the embedded Dolt engine. Set by the store factory based
 	// on metadata.json dolt_mode or BEADS_DOLT_SERVER_MODE env var.
@@ -2045,7 +2053,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		if cfg.Database == doltserver.GlobalDatabaseName {
 			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
 		} else {
-			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir, cfg.CreateIfMissing)
+			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir, cfg.OpenedByInit)
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
@@ -2208,9 +2216,9 @@ func shouldPersistResolvedPortFile() bool {
 // verifyProjectIdentity checks that the database belongs to the expected project.
 // If both the local metadata.json and the database have a project_id, they must match.
 // Returns nil if verification passes or is not applicable (missing IDs = old setup).
-// creating is the open's CreateIfMissing: it only shapes the error's advice
-// (see projectIdentityMismatchError), never whether the check runs.
-func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, creating bool) error {
+// openedByInit is Config.OpenedByInit: it only shapes the error's advice (see
+// projectIdentityMismatchError), never whether the check runs.
+func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, openedByInit bool) error {
 	if beadsDir == "" {
 		return nil // can't verify without knowing beadsDir
 	}
@@ -2232,7 +2240,7 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 	}
 
 	if localID != dbID {
-		return projectIdentityMismatchError(localID, dbID, s.database, creating)
+		return projectIdentityMismatchError(localID, dbID, s.database, openedByInit)
 	}
 	return nil
 }
@@ -2240,13 +2248,14 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 // projectIdentityMismatchError builds verifyProjectIdentity's refusal when
 // metadata.json and the database disagree on project_id.
 //
-// creating is true for a CreateIfMissing open — bd init against a database that
-// already exists on the server (GH#4637 Part A). That caller IS bd init, so it
-// must not be told "Do NOT run 'bd init'" (GH#5558); it gets the remedies that
-// make sense from inside an init instead: target a different database or server,
-// or reconcile a stale metadata.json. Every other open keeps its original text.
-func projectIdentityMismatchError(localID, dbID, database string, creating bool) error {
-	if creating {
+// openedByInit is true only for bd init's own open (Config.OpenedByInit), which
+// since GH#4637 Part A runs this check against a database that already exists
+// on the server. That caller IS bd init, so it must not be told "Do NOT run
+// 'bd init'" (GH#5558); it gets the remedies that make sense from inside an
+// init instead. Every other open, CreateIfMissing or not, keeps its original
+// text.
+func projectIdentityMismatchError(localID, dbID, database string, openedByInit bool) error {
+	if openedByInit {
 		return fmt.Errorf(
 			"PROJECT IDENTITY MISMATCH — refusing to initialize against an existing database\n\n"+
 				"  Local project ID (metadata.json):  %s\n"+
@@ -2258,9 +2267,10 @@ func projectIdentityMismatchError(localID, dbID, database string, creating bool)
 				"  - Another project already uses this database name on a shared server\n"+
 				"  - The server restarted with a different data directory\n\n"+
 				"To diagnose: bd dolt status\n"+
-				"To fix, re-run bd init against this project's data:\n"+
-				"  - a different database:  bd init --database <name>\n"+
-				"  - a different server:    bd init --server-host <host> --server-port <port>\n"+
+				"To fix, point bd init at this project's data instead:\n"+
+				"  - this project's server:  bd init --server-host <host> --server-port <port>\n"+
+				"  - an unused database:     bd init --database <other-name>\n"+
+				"    (if bd init then reports the workspace is already initialized, follow its steps)\n"+
 				"If this database really is this project's and metadata.json is stale,\n"+
 				"run 'bd doctor --fix' or 'bd bootstrap' to reconcile metadata.json with it.",
 			localID, database, dbID)
