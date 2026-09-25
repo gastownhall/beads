@@ -83,6 +83,20 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 	})
 
+	t.Run("remove_prefix", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lp")
+		issue := bdProxiedCreate(t, bd, p.dir, "Prefix remove target")
+		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "pool:refused:reason-a,pool:refused:reason-b,needs-human")
+
+		bdProxiedLabel(t, bd, p.dir, "remove", issue.ID, "--prefix", "pool:refused:")
+
+		got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID)
+		if len(got) != 1 || got[0] != "needs-human" {
+			t.Fatalf("labels after remove --prefix = %v, want [needs-human]", got)
+		}
+	})
+
 	t.Run("add_multiple_issues", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "lm")
