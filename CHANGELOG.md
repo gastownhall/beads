@@ -243,6 +243,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     transactions; `--json` then adds `remaining` and `has_more`. Loop while
     `has_more` is true.
 
+- **`bd lint` can cap text fields by length, with a workspace-written hint.**
+  `lint.max-chars.<field>` sets a character limit for `title`, `description`,
+  `design`, `acceptance_criteria` or `notes`; `lint.max-chars-hint.<field>`
+  adds guidance that bd shows verbatim with each finding (for example, that an
+  oversized issue should be split into children). Findings are reported by
+  `bd lint` (text and `--json` `too_long`), counted by the `bd doctor`
+  conventions check, and applied on create under `validation.on-create`.
+  Unset keys change nothing.
+
 - **`bd backup` works on a proxied-server workspace bd runs the Dolt server
   for.** `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
   over the proxied provider; before this, a proxied workspace — the default
