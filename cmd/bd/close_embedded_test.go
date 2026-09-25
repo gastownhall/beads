@@ -113,6 +113,27 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// A batch still closes the IDs it can close, but a caller must receive a
+	// nonzero exit when any sibling was refused. Otherwise an orchestrator can
+	// record the whole batch as complete while a blocked issue remains open.
+	t.Run("mixed_batch_refusal_exits_nonzero_after_closing_survivor", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Mixed batch blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Mixed batch blocked", "--type", "task")
+		closable := bdCreate(t, bd, dir, "Mixed batch closable", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, dir, closable.ID, blocked.ID)
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected partial-close summary, got: %s", out)
+		}
+		if got := bdShow(t, bd, dir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, dir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+	})
+
 	// Proves the S7 delegation: `bd close` on a blocked issue now surfaces the
 	// engine's atomic guard (storage.ErrCloseBlocked) rather than a duplicated
 	// CLI pre-check. The refusal must be atomic — the issue stays open because the

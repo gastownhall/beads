@@ -145,6 +145,7 @@ the flags appear in the command line.`,
 		closedIssues := []*types.Issue{}
 		closedCount := 0
 		alreadyClosed := 0
+		failedCount := 0
 		firstSettledID := ""
 
 		for i, id := range resolvedIDs {
@@ -153,10 +154,12 @@ the flags appear in the command line.`,
 				// The CLI's own close policy refused this argument, so the
 				// batch never saw it.
 				fmt.Fprintln(os.Stderr, plan.refusals[i])
+				failedCount++
 				continue
 			}
 			if res.Err != nil {
 				fmt.Fprintln(os.Stderr, closeDirectRefusal(id, res.Err))
+				failedCount++
 				continue
 			}
 
@@ -370,6 +373,10 @@ the flags appear in the command line.`,
 		}
 
 		totalAttempted := len(resolvedIDs)
+		if failedCount > 0 {
+			fmt.Fprintf(os.Stderr, "Error: %d of %d issues failed to close\n", failedCount, totalAttempted)
+			return SilentExit()
+		}
 		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
 			return SilentExit()
 		}
