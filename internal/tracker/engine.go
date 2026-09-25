@@ -1357,6 +1357,9 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		if fromIssue == nil || toIssue == nil {
 			continue // Not found (no error) — expected if issue wasn't imported
 		}
+		if dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
+			continue
+		}
 
 		d := &types.Dependency{
 			IssueID:     fromIssue.ID,
