@@ -70,6 +70,21 @@ func (s *EmbeddedDoltStore) GetReadyWorkWithCounts(ctx context.Context, filter t
 	return result, err
 }
 
+// GetReadyWorkWithCountsAndTotal returns the ready page and the size of the
+// whole ready set in one read transaction (and one defer-wake sweep), so a
+// capped `bd ready` needs no separate count pass.
+func (s *EmbeddedDoltStore) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	s.wakeExpiredDefers(ctx)
+	var result []*types.IssueWithCounts
+	var total int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, total, err = issueops.GetReadyWorkWithCountsAndTotalInTx(ctx, tx, filter)
+		return err
+	})
+	return result, total, err
+}
+
 // CountReadyWork returns the total ready-work count for filter. It is identical
 // to len(GetReadyWorkWithCounts(filter with Limit=0)) but sizes the total with
 // cheap indexed COUNT(*)s instead of re-running the counts mega-query. Backs the

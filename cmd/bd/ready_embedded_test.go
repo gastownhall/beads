@@ -107,6 +107,44 @@ func TestEmbeddedReady(t *testing.T) {
 		if !strings.Contains(stderr.String(), "Use --limit 0 for all") {
 			t.Fatalf("expected truncation hint on stderr, got: %q", stderr.String())
 		}
+
+		// The "of N" is the whole ready set, now taken in the page's own
+		// transaction: it must be exactly what an unbounded listing returns,
+		// in the hint and in the envelope's pagination alike.
+		all := exec.Command(bd, "ready", "--json", "--limit", "0")
+		all.Dir = dir
+		all.Env = bdEnv(dir)
+		allOut, err := all.Output()
+		if err != nil {
+			t.Fatalf("bd ready --json --limit 0 failed: %v", err)
+		}
+		var unbounded []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(allOut), &unbounded); err != nil {
+			t.Fatalf("parse unbounded ready JSON: %v\n%s", err, allOut)
+		}
+		wantHint := fmt.Sprintf("Showing 2 of %d ready issues.", len(unbounded))
+		if !strings.Contains(stderr.String(), wantHint) {
+			t.Fatalf("hint = %q, want it to contain %q", stderr.String(), wantHint)
+		}
+
+		env := exec.Command(bd, "ready", "--json", "--limit", "2")
+		env.Dir = dir
+		env.Env = append(bdEnv(dir), "BD_JSON_ENVELOPE=1")
+		envOut, err := env.Output()
+		if err != nil {
+			t.Fatalf("bd ready --json --limit 2 (envelope) failed: %v", err)
+		}
+		var envelope struct {
+			Data       []types.IssueWithCounts `json:"data"`
+			Pagination *PaginationMeta         `json:"pagination"`
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(envOut), &envelope); err != nil {
+			t.Fatalf("parse envelope: %v\n%s", err, envOut)
+		}
+		if envelope.Pagination == nil || !envelope.Pagination.Truncated ||
+			envelope.Pagination.Returned != 2 || envelope.Pagination.Total != len(unbounded) {
+			t.Fatalf("pagination = %+v, want returned=2 total=%d truncated", envelope.Pagination, len(unbounded))
+		}
 	})
 
 	t.Run("ready_claim_json", func(t *testing.T) {

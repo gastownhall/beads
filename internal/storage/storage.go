@@ -411,6 +411,12 @@ type Storage interface {
 	// Work queries
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error)
+	// GetReadyWorkWithCountsAndTotal is GetReadyWorkWithCounts plus the size
+	// of the whole ready set the page was cut from — the same number
+	// ReadyWorkCounter.CountReadyWork(filter) answers — resolved in the same
+	// read transaction and statements as the page. It is what lets
+	// `bd ready --limit N` print "Showing N of M" without a second pass.
+	GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error)
 	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 

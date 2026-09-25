@@ -64,7 +64,15 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		}
 		inputs.ParentDescendantIDs = descendantIDs
 	}
+	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
+}
 
+// buildReadyWorkPredicatesFrom renders the ready-work predicates for one table
+// family from ID sets the caller already resolved. It issues no SQL, which is
+// what lets a caller that renders BOTH families (and the total) resolve the
+// deferred-parent children and parent descendants once per transaction
+// instead of once per family.
+func buildReadyWorkPredicatesFrom(filter types.WorkFilter, tables FilterTables, inputs sqlbuild.ReadyWorkWhereInputs) (*readyWorkPredicates, error) {
 	whereSQL, whereArgs, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
 	if err != nil {
 		return nil, err
@@ -506,6 +514,60 @@ func queryReadyIssueIDPage(ctx context.Context, tx DBTX, query string, args []in
 	return issueIDs, nil
 }
 
+var (
+	deferredChildDepTables   = []string{"dependencies", "wisp_dependencies"}
+	deferredChildIssueTables = []string{"issues", "wisps"}
+)
+
+// deferredChildrenQuery selects the children, recorded in depTable, of parents
+// in issueTable whose defer_until is still in the future.
+func deferredChildrenQuery(depTable, issueTable string) string {
+	targetCol := "depends_on_issue_id"
+	if issueTable == "wisps" {
+		targetCol = "depends_on_wisp_id"
+	}
+	return fmt.Sprintf(`
+				SELECT dep.issue_id
+				FROM %s dep
+				JOIN %s parent ON parent.id = dep.%s
+				WHERE dep.type = 'parent-child'
+				  AND parent.defer_until IS NOT NULL
+				  AND parent.defer_until > UTC_TIMESTAMP()
+			`, depTable, issueTable, targetCol)
+}
+
+// getDeferredChildrenAllTablesInTx is getChildrenOfDeferredParentsInTx's
+// child scan for a database known to have the whole wisp plane: the four
+// dependency-table x parent-table legs go out as ONE statement (UNION ALL)
+// instead of four. Callers must already know every table exists — the
+// per-leg missing-table tolerance of the loop form cannot apply to a single
+// statement.
+func getDeferredChildrenAllTablesInTx(ctx context.Context, tx DBTX) ([]string, error) {
+	legs := make([]string, 0, len(deferredChildDepTables)*len(deferredChildIssueTables))
+	for _, depTable := range deferredChildDepTables {
+		for _, issueTable := range deferredChildIssueTables {
+			legs = append(legs, deferredChildrenQuery(depTable, issueTable))
+		}
+	}
+	rows, err := tx.QueryContext(ctx, strings.Join(legs, " UNION ALL "))
+	if err != nil {
+		return nil, fmt.Errorf("deferred parents: get deferred children: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var childIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("deferred parents: scan deferred child: %w", err)
+		}
+		childIDs = append(childIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("deferred parents: child rows: %w", err)
+	}
+	return childIDs, nil
+}
+
 // getChildrenOfDeferredParentsInTx returns IDs of issues whose parent has a
 // future defer_until. Works within an existing transaction.
 //
@@ -538,20 +600,9 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 	}
 
 	var childIDs []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		for _, issueTable := range []string{"issues", "wisps"} {
-			targetCol := "depends_on_issue_id"
-			if issueTable == "wisps" {
-				targetCol = "depends_on_wisp_id"
-			}
-			rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-				SELECT dep.issue_id
-				FROM %s dep
-				JOIN %s parent ON parent.id = dep.%s
-				WHERE dep.type = 'parent-child'
-				  AND parent.defer_until IS NOT NULL
-				  AND parent.defer_until > UTC_TIMESTAMP()
-			`, depTable, issueTable, targetCol))
+	for _, depTable := range deferredChildDepTables {
+		for _, issueTable := range deferredChildIssueTables {
+			rows, err := tx.QueryContext(ctx, deferredChildrenQuery(depTable, issueTable))
 			if err != nil {
 				// This FROM names two tables at once, so the gate has to key on
 				// which one the driver reports missing. The wisp plane is the
