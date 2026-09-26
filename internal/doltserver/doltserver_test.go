@@ -2666,3 +2666,39 @@ func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
 		}
 	})
 }
+
+func TestDoltStatusQuery(t *testing.T) {
+	tests := []struct {
+		name   string
+		dbName string
+		want   string
+	}{
+		{"plain", "beads_x", "SELECT COUNT(*) > 0 FROM `beads_x`.dolt_status"},
+		{"backtick", "evil`; DROP TABLE x", "SELECT COUNT(*) > 0 FROM `evil``; DROP TABLE x`.dolt_status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doltStatusQuery(tt.dbName); got != tt.want {
+				t.Errorf("doltStatusQuery(%q) = %q, want %q", tt.dbName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUseDatabaseStatement(t *testing.T) {
+	tests := []struct {
+		name   string
+		dbName string
+		want   string
+	}{
+		{"plain", "beads_x", "USE `beads_x`"},
+		{"backtick", "evil`; DROP TABLE x", "USE `evil``; DROP TABLE x`"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := useDatabaseStatement(tt.dbName); got != tt.want {
+				t.Errorf("useDatabaseStatement(%q) = %q, want %q", tt.dbName, got, tt.want)
+			}
+		})
+	}
+}

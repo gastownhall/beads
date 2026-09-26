@@ -281,9 +281,9 @@ func probeForCorrectDoltDatabase(db *sql.DB, skipDB string) string {
 
 	for _, dbName := range candidates {
 		var count int
-		//nolint:gosec // G201: dbName from SHOW DATABASES, not user input
+		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
 		err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", dbName)).Scan(&count)
+			fmt.Sprintf("SELECT COUNT(*) FROM %s.issues LIMIT 1", doltutil.QuoteIdentifierUnvalidated(dbName))).Scan(&count)
 		if err == nil {
 			return dbName
 		}
@@ -445,21 +445,20 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 		}
 		meta := serverDatabaseMetadata{Name: dbName}
 
-		// Escape backticks in database name to prevent SQL injection (` → ``)
-		safeName := strings.ReplaceAll(dbName, "`", "``")
+		quotedName := doltutil.QuoteIdentifierUnvalidated(dbName)
 
 		var count int
-		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
-		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", safeName)).Scan(&count); err == nil {
+		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.issues LIMIT 1", quotedName)).Scan(&count); err == nil {
 			meta.HasSchema = true
 		} else if !isExpectedProbeError(err) {
 			return nil, fmt.Errorf("probing database %q for schema: %w", dbName, err)
 		}
 
 		var projectID string
-		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
+		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
 		if err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT value FROM `%s`.metadata WHERE `key` = '_project_id' LIMIT 1", safeName),
+			fmt.Sprintf("SELECT value FROM %s.metadata WHERE `key` = '_project_id' LIMIT 1", quotedName),
 		).Scan(&projectID); err == nil {
 			meta.ProjectID = projectID
 		} else if !isExpectedProbeError(err) {

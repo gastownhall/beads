@@ -1703,7 +1703,7 @@ func FlushWorkingSet(host string, port int) error {
 	for _, dbName := range databases {
 		// Check for uncommitted changes via dolt_status
 		var hasChanges bool
-		row := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) > 0 FROM `%s`.dolt_status", dbName))
+		row := db.QueryRowContext(ctx, doltStatusQuery(dbName))
 		if err := row.Scan(&hasChanges); err != nil {
 			// dolt_status may not exist for non-beads databases; skip
 			continue
@@ -1713,7 +1713,7 @@ func FlushWorkingSet(host string, port int) error {
 		}
 
 		// Commit all uncommitted changes
-		_, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName))
+		_, err := db.ExecContext(ctx, useDatabaseStatement(dbName))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "flush: failed to USE %s: %v\n", dbName, err)
 			continue
@@ -2096,4 +2096,18 @@ func IsPreV56DoltDir(doltDir string) bool {
 	markerPath := filepath.Join(doltDir, bdDoltMarker)
 	_, err := os.Stat(markerPath)
 	return os.IsNotExist(err)
+}
+
+// doltStatusQuery builds the dolt_status probe for a SHOW DATABASES name,
+// identifier-quoting it so the name cannot break out of the identifier.
+func doltStatusQuery(dbName string) string {
+	//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+	return fmt.Sprintf("SELECT COUNT(*) > 0 FROM %s.dolt_status", doltutil.QuoteIdentifierUnvalidated(dbName))
+}
+
+// useDatabaseStatement builds a USE statement for a SHOW DATABASES name,
+// identifier-quoting it so the name cannot break out of the identifier.
+func useDatabaseStatement(dbName string) string {
+	//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+	return fmt.Sprintf("USE %s", doltutil.QuoteIdentifierUnvalidated(dbName))
 }
