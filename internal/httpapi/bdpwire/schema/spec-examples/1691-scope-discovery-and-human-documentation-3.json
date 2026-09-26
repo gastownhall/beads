@@ -1,0 +1,17 @@
+{
+  "bdpVersion": "0",
+  "profile": "transactional",
+  "scope": "https://beads.example/acme/",
+  "scopeEpoch": "opaque-scope-epoch",
+  "authorizationView": "opaque-authorization-view",
+  "headPosition": "opaque-position-42",
+  "minimumReplayPosition": "opaque-position-17",
+  "beads": "https://beads.example/acme/beads/",
+  "links": "https://beads.example/acme/links/",
+  "types": "https://beads.example/acme/types/",
+  "operations": "https://beads.example/acme/operations/",
+  "receipts": "https://beads.example/acme/receipts/",
+  "snapshot": "https://beads.example/acme/snapshot",
+  "changes": "https://beads.example/acme/changes/",
+  "events": "https://beads.example/acme/events/"
+}
