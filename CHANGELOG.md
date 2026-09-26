@@ -26,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   up, but it can flip auto-backup on or off for `-C` invocations whose launch
   directory and target differ in remote configuration.
 
+- **Generated git hooks accept uutils coreutils `timeout` as a deadline helper**
+  ([#5541](https://github.com/gastownhall/beads/issues/5541)). The managed hook
+  section probes `timeout` and `gtimeout` with `--version` and accepted only the
+  GNU coreutils banner, so a host whose `timeout` is uutils coreutils
+  (Ubuntu 25.10+, or a distribution configured with `uutils-coreutils` in place
+  of GNU) failed the probe and fell through. Where Perl was
+  installed the shim still got a deadline from the Perl `alarm` arm — which Git
+  for Windows Perl does not guarantee across `exec` — so the missing deadline
+  bit uutils hosts *without* Perl, which ran `bd hooks run` unbounded (with the
+  documented warning). The probe now also accepts the
+  `timeout (uutils coreutils) ` banner; native Windows `timeout.exe` stays
+  rejected ([#5503](https://github.com/gastownhall/beads/issues/5503)). The
+  widened probe ships in the generated hook section, which is rewritten only by
+  `bd hooks install` — hosts that already installed hooks must run it once to
+  pick up the fix.
+
 - **`bd close` now exits non-zero when any issue in a batch fails to close**
   ([#6648](https://github.com/gastownhall/beads/issues/6648)). A batch with one
   refused id used to exit 0 as long as another id closed, so scripts could not

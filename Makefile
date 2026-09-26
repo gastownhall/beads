@@ -290,10 +290,12 @@ corpus-regen:
 
 # The tracked .githooks/* carry the managed section cmd/bd/hooks.go generates;
 # TestTrackedManagedHookSectionsMatchGenerator holds them byte-equal. Run this
-# after changing the generator, then commit the regenerated hooks alongside it.
+# after changing the generator or after bumping Version in cmd/bd/version.go
+# (the section markers carry the version), then commit the regenerated hooks
+# alongside it.
 githooks-regen:
 	@echo "Regenerating managed sections in .githooks/*..."
-	BD_UPDATE_GOLDEN=1 go test -tags "$(BUILD_TAGS)" ./cmd/bd -run TestTrackedManagedHookSectionsMatchGenerator -count=1
+	BD_UPDATE_HOOKS_GOLDEN=1 go test -tags "$(BUILD_TAGS)" ./cmd/bd -run TestTrackedManagedHookSectionsMatchGenerator -count=1
 
 
 # Run performance benchmarks against Dolt storage backend

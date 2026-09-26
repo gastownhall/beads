@@ -153,13 +153,15 @@ BEADS_HOOK_TIMEOUT=600 git commit -m "..."
 The value must be a positive whole number of seconds. Invalid values and zero
 produce a warning and use the 300-second default. These are soft process
 deadlines, not process-tree containment: TERM-resistant work or descendants
-can outlive them. If neither GNU timeout nor Perl is available, the hook warns
-and runs directly without a deadline; that last-resort path can hang until the
-hook itself returns.
+can outlive them. If neither a coreutils timeout nor Perl is available, the hook
+warns and runs directly without a deadline; that last-resort path can hang until
+the hook itself returns.
 
-After upgrading from a release whose generated hooks used a name-only timeout
-check, run `bd hooks install` once to refresh already-installed canonical hook
-sections. Automatic generated-policy adoption is tracked separately.
+Already-installed hook sections are not refreshed automatically. After upgrading
+to a release that changed the generated timeout probe — the name-only check, or
+the uutils coreutils banner — run `bd hooks install` once to refresh
+already-installed canonical hook sections. Automatic generated-policy adoption is
+tracked separately.
 
 When the timeout is reached, beads prints a warning and lets the git
 operation proceed — the commit or push is not blocked.
