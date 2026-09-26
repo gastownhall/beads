@@ -2457,20 +2457,34 @@ func TestEngineCreateDependenciesSkipsExistingEdges(t *testing.T) {
 		t.Fatalf("createDependencies returned errCount=%d, warnings=%v", errCount, engine.warnings)
 	}
 
-	if len(counting.added) != 1 || counting.added[0].DependsOnID != "bd-edge-3" {
-		t.Fatalf("AddDependency calls = %+v, want only bd-edge-1 -> bd-edge-3", counting.added)
-	}
 	depRecords, err := store.GetDependencyRecords(ctx, "bd-edge-1")
 	if err != nil {
 		t.Fatalf("GetDependencyRecords error: %v", err)
 	}
+	// Metadata survival is the defect this guards: a same-type re-add takes the
+	// idempotent branch, which rewrites metadata to the incoming (empty) value.
+	// Assert it before the spy count, and with Errorf, so one run observes both.
+	foundExisting := false
 	for _, dep := range depRecords {
-		if dep.DependsOnID == "bd-edge-2" && dep.Metadata != existing.Metadata {
-			t.Fatalf("existing edge metadata = %q, want %q", dep.Metadata, existing.Metadata)
+		if dep.DependsOnID != "bd-edge-2" {
+			continue
+		}
+		foundExisting = true
+		if dep.Metadata != existing.Metadata {
+			t.Errorf("existing edge metadata = %q, want %q", dep.Metadata, existing.Metadata)
 		}
 	}
+	if !foundExisting {
+		t.Errorf("pre-existing edge bd-edge-1 -> bd-edge-2 missing from %+v", depRecords)
+	}
+	// Rows are keyed by a deterministic id, so this count is 2 with or without
+	// the skip; it guards against the skip dropping the pre-existing edge or
+	// double-writing bd-edge-3, not against the re-add itself.
 	if len(depRecords) != 2 {
-		t.Fatalf("expected 2 dependency records, got %+v", depRecords)
+		t.Errorf("dependency records = %+v, want the 2 distinct edges", depRecords)
+	}
+	if len(counting.added) != 1 || counting.added[0].DependsOnID != "bd-edge-3" {
+		t.Errorf("AddDependency calls = %+v, want only bd-edge-1 -> bd-edge-3", counting.added)
 	}
 }
 
