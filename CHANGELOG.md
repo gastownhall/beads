@@ -667,6 +667,24 @@ which dumps the entire release history.)
 
 ### Changed
 
+- **`bd ready` no longer offers an epic as claimable work beside its own open
+  children** (GH#5583). An epic is a container: its real work lives in the
+  children, which already appear on their own, so listing the parent next to
+  them sent an agent at the container record and cost it a cycle discovering
+  there was nothing there to do. `epic` now joins `merge-request`, `gate`,
+  `molecule`, `rig`, and the infra wisp types in the default ready-work type
+  exclusions, so the bare `bd ready` — the documented entry point — no longer
+  needs `--exclude-type epic` bolted on. `bd ready --type epic` still returns
+  epics, since an explicit `--type` skips the default exclusions entirely.
+  The exclusion list is shared by every caller of the ready-work API, so epics
+  also leave `bd list --ready`, `bd mol ready --gated`, and the per-assignee
+  ready counts in `bd stats` — a ready count that drops after this release has
+  shed a container, not lost work. `bd list` without `--ready` is unchanged.
+  One case the container argument does not cover: a **childless open epic**,
+  freshly filed and still awaiting decomposition, now leaves `bd ready` with no
+  children surfacing in its place. It stays visible in `bd list` and
+  `bd ready --type epic`; how that case should surface is left to follow-up.
+
 - Shared Dolt databases (sql-server mode) no longer auto-apply schema
   migrations on a version bump. Migrating a shared database promotes the
   schema for every connected bd client at once and locks out clients still
