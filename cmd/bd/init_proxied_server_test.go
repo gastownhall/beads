@@ -192,11 +192,12 @@ func TestBuildProxiedServerClientInfo(t *testing.T) {
 }
 
 // TestLoadProxiedServerClientInfo_LegacySidecarUnaffectedUntilReinit guards
-// AC4: a sidecar written before this fix has idle_timeout omitted from its
-// JSON (the field is `omitempty`, and pre-fix nothing ever wrote a sidecar
-// with only idle-timeout at its zero value). Loading it must not retroactively
-// promote idle_timeout to the 30s default -- that normalization belongs only
-// to buildProxiedServerClientInfo, applied at (re-)init time.
+// AC4: a sidecar written by an older bd can have idle_timeout omitted from its
+// JSON (the field was `omitempty` until #6673, and an unset idle timeout stayed
+// zero). Loading it must not retroactively promote idle_timeout to the 30s
+// default -- that normalization happens only when a sidecar is written
+// (buildProxiedServerClientInfo at (re-)init, SaveProxiedServerClientInfo on
+// every save since #6673), never on load.
 func TestLoadProxiedServerClientInfo_LegacySidecarUnaffectedUntilReinit(t *testing.T) {
 	dir := t.TempDir()
 	legacyJSON := []byte(`{"port": 3306}` + "\n")
