@@ -99,6 +99,129 @@ func GetRepoContext() (*RepoContext, error) {
 	return repoCtx, repoCtxErr
 }
 
+// NoRepoRootError reports that a .beads directory was found and cleared the
+// SEC-003 safe-boundary check, but git could not tell us a repository root for
+// it.
+//
+// "Git could not tell us", not "there is no repo": git.GetMainRepoRoot bottoms
+// out in a single `git rev-parse`, and every failure of that command arrives
+// here. The common case is the plain one — the workspace is not inside a git
+// repo — but a dangling gitfile, a dubious-ownership refusal, or git missing
+// from PATH all land here too. Recovering is equally safe in all of them (the
+// workspace is located and boundary-checked either way), but a caller
+// reporting on the workspace should not claim to know which it was. `bd
+// context` says so by leaving cwd_repo_root empty, and printContextText prints
+// "git: unavailable" for it.
+//
+// It is deliberately distinct from the other two failures buildRepoContext can
+// return ("no .beads directory found" and the unsafe-location rejection):
+// those mean bd does not know which workspace it is looking at, while this one
+// means it does. Only this failure is safe for a git-independent caller to
+// recover from, and only a typed error can say so — the unsafe-location
+// message embeds the offending path verbatim, so any substring test over the
+// message text is a path-controlled discriminator.
+type NoRepoRootError struct {
+	// BeadsDir is the resolved, boundary-checked .beads directory.
+	BeadsDir string
+	// Err is the underlying git failure.
+	Err error
+}
+
+func (e *NoRepoRootError) Error() string {
+	return fmt.Sprintf("cannot determine repository root: %v", e.Err)
+}
+
+func (e *NoRepoRootError) Unwrap() error { return e.Err }
+
+// GetRepoContextAllowingNoGit returns the repository context for callers that
+// only need to locate the workspace, not operate on git — `bd context` and the
+// context provider behind the proxied route, both of which read config files
+// and are documented to answer in degraded states.
+//
+// It behaves exactly like GetRepoContext except for NoRepoRootError, where it
+// synthesizes a context rooted at the .beads parent. Every other failure,
+// including the unsafe-location rejection, propagates untouched. Callers that
+// actually run git commands must keep using GetRepoContext, so that a missing
+// repository stays an error at the point where it matters (GH#4772).
+func GetRepoContextAllowingNoGit() (*RepoContext, error) {
+	return recoverNoGit(GetRepoContext())
+}
+
+// recoverNoGit is the selection itself, split out from
+// GetRepoContextAllowingNoGit so a test can drive the discriminator rather than
+// re-deriving errors.As over hand-built values — which is a property of the
+// standard library, not of this package's choice of discriminator.
+//
+// It returns (rc, err) untouched for every error that is not a
+// *NoRepoRootError, and a synthesized context for the one that is.
+func recoverNoGit(rc *RepoContext, err error) (*RepoContext, error) {
+	var noRoot *NoRepoRootError
+	if !errors.As(err, &noRoot) {
+		return rc, err
+	}
+	return &RepoContext{
+		BeadsDir:    noRoot.BeadsDir,
+		RepoRoot:    filepath.Dir(noRoot.BeadsDir),
+		CWDRepoRoot: git.GetRepoRoot(), // "" outside a git repo
+		// An explicitly-set BEADS_DIR is a redirect, and outside a git repo
+		// it is the only evidence available: isExternalBeadsDir compares git
+		// COMMON DIRS, and the CWD side of that comparison cannot be computed
+		// without a repo — which is exactly why this branch was reached. So
+		// the normal path's answer is unavailable here, and leaving the field
+		// zero would have `bd context` deny a redirect that is plainly in the
+		// environment, and `Role()` withhold the Contributor that
+		// "BEADS_DIR implies contributor (external repo mode)" promises.
+		//
+		// This mirrors FindBeadsDir's step 1, the same condition that chose
+		// the directory — but asked of the CALLER's environment, not the live
+		// one bd has already written to. A .beads found by the working
+		// directory walk leaves the field false, as it should.
+		//
+		// A redirect file cannot reach here to be missed: buildRepoContext
+		// checks GetRedirectInfo() at step 3, and a redirect sends it down the
+		// isExternal branch that never asks git for a root. So by construction
+		// the only redirect this branch can be looking at is a caller-named
+		// BEADS_DIR.
+		IsRedirected: beadsDirNamedByCaller(noRoot.BeadsDir),
+		// IsWorktree stays false: git.IsWorktree() needs a repository, and
+		// there is none.
+	}, nil
+}
+
+// beadsDirFromCaller is BEADS_DIR as the process INHERITED it, captured at
+// package initialization — which the language guarantees runs before main, and
+// so before any bd code exports a BEADS_DIR of its own.
+//
+// Reading the live environment instead is a different question and the wrong
+// one, because bd routinely answers it for itself first: `bd context` calls
+// prepareSelectedNoDBContext immediately before resolving (cmd/bd/
+// context_cmd.go), the root PersistentPreRunE does the same for every no-DB
+// command, and both end in os.Setenv("BEADS_DIR", <whatever discovery just
+// found>). A workspace found by walking up from the working directory would
+// therefore look like one the caller had named.
+//
+// This is the same snapshot, for the same reason, as beadsDirFromCaller in
+// package main (GH#4635) — provenance has to be captured before the process
+// starts overwriting the evidence.
+//
+// A package var so tests can stub it.
+var beadsDirFromCaller = os.Getenv("BEADS_DIR")
+
+// beadsDirNamedByCaller reports whether the caller's own BEADS_DIR names
+// beadsDir — i.e. whether FindBeadsDir picked this directory via its step 1
+// because the caller said so, rather than by walking up from the working
+// directory.
+//
+// It resolves the caller's value the same way FindBeadsDir does
+// (canonicalize, then follow a redirect file), so the comparison answers "is
+// this the directory they named" rather than "is the string equal".
+func beadsDirNamedByCaller(beadsDir string) bool {
+	if beadsDirFromCaller == "" || beadsDir == "" {
+		return false
+	}
+	return FollowRedirect(canonicalizeBeadsDirPath(beadsDirFromCaller)) == beadsDir
+}
+
 // buildRepoContext constructs the RepoContext by resolving all paths.
 // This is called once per process via sync.Once.
 func buildRepoContext() (*RepoContext, error) {
@@ -133,7 +256,12 @@ func buildRepoContext() (*RepoContext, error) {
 		var err error
 		repoRoot, err = git.GetMainRepoRoot()
 		if err != nil {
-			return nil, fmt.Errorf("cannot determine repository root: %w", err)
+			// Typed so callers that can work without git select this exact
+			// failure with errors.As instead of matching the message text.
+			// beadsDir is carried along because it has already cleared steps
+			// 1 and 2 above (found, and inside the safe boundary), which is
+			// precisely what makes the no-git fallback safe to take.
+			return nil, &NoRepoRootError{BeadsDir: beadsDir, Err: err}
 		}
 	}
 
