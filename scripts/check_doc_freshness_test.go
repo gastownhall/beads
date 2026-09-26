@@ -360,6 +360,30 @@ func TestDocFreshnessReportsInvalidTodayOverride(t *testing.T) {
 	}
 }
 
+func TestDocFreshnessRejectsMultipleLastReviewedMarkers(t *testing.T) {
+	tests := []struct {
+		name  string
+		dates []string
+	}{
+		{name: "two markers both fresh", dates: []string{"2026-01-10", "2026-01-12"}},
+		{name: "two markers one stale", dates: []string{"2026-01-15", "2020-01-01"}},
+		{name: "three markers", dates: []string{"2026-01-15", "2026-01-16", "2026-01-17"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := runDocFreshnessWithDuplicateMarker(t, "docs/reference/configuration.md", test.dates, "2026-01-31", "90")
+			if exitCode(run.err) != 1 {
+				t.Fatalf("exit = %d, want 1; error=%v\n%s", exitCode(run.err), run.err, run.output)
+			}
+			want := fmt.Sprintf("FAIL: found %d Last reviewed markers; expected exactly one", len(test.dates))
+			if !strings.Contains(run.output, want) {
+				t.Fatalf("missing %q:\n%s", want, run.output)
+			}
+		})
+	}
+}
+
 func runDocFreshness(t *testing.T, reviewed, today, maxAge string) freshnessRun {
 	t.Helper()
 	return runDocFreshnessWithDateFunction(t, reviewed, today, &maxAge, "")
@@ -380,11 +404,22 @@ func runDocFreshnessWithDefaultToday(t *testing.T, reviewed, maxAge, dateFunctio
 	return runDocFreshnessProcess(t, reviewed, nil, &maxAge, dateFunction)
 }
 
+func runDocFreshnessWithDuplicateMarker(t *testing.T, targetPath string, targetReviewedDates []string, today, maxAge string) freshnessRun {
+	t.Helper()
+	root := newDocFreshnessFixtureWithMarkers(t, "2026-01-15", targetPath, targetReviewedDates)
+	return runDocFreshnessProcessInRoot(t, root, &today, &maxAge, "")
+}
+
 func runDocFreshnessProcess(t *testing.T, reviewed string, today, maxAge *string, dateFunction string) freshnessRun {
+	t.Helper()
+	root := newDocFreshnessFixture(t, reviewed)
+	return runDocFreshnessProcessInRoot(t, root, today, maxAge, dateFunction)
+}
+
+func runDocFreshnessProcessInRoot(t *testing.T, root string, today, maxAge *string, dateFunction string) freshnessRun {
 	t.Helper()
 	bash := docFreshnessBash(t)
 
-	root := newDocFreshnessFixture(t, reviewed)
 	markerDir := t.TempDir()
 	pythonMarker := filepath.Join(markerDir, "python-invoked")
 	dateMarker := filepath.Join(markerDir, "date-invoked")
@@ -516,6 +551,45 @@ func newDocFreshnessFixture(t *testing.T, reviewed string) string {
 			reviewed,
 			strings.Join(document.sources, ";"),
 		))
+		for _, source := range document.sources {
+			createFreshnessSource(t, root, source)
+		}
+	}
+	writeFixtureFile(t, root, "engdocs/DOC_INVENTORY.md", inventory.String())
+	return root
+}
+
+// newDocFreshnessFixtureWithMarkers is like newDocFreshnessFixture, but the
+// document at targetPath gets one "Last reviewed:" line per entry in
+// targetReviewedDates instead of exactly one. Every other document keeps the
+// normal single marker at reviewed.
+func newDocFreshnessFixtureWithMarkers(t *testing.T, reviewed, targetPath string, targetReviewedDates []string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	repoRoot := sourceRepoRoot(t)
+	script, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "check-doc-freshness.sh"))
+	if err != nil {
+		t.Fatalf("read check-doc-freshness.sh: %v", err)
+	}
+	writeFixtureFile(t, root, "scripts/check-doc-freshness.sh", string(script))
+
+	var inventory strings.Builder
+	for _, document := range freshnessDocuments {
+		inventoryRef := strings.TrimPrefix(strings.TrimPrefix(document.path, "docs/"), "engdocs/")
+		fmt.Fprintf(&inventory, "- `%s`\n", inventoryRef)
+
+		var body strings.Builder
+		reviewedDates := []string{reviewed}
+		if document.path == targetPath {
+			reviewedDates = targetReviewedDates
+		}
+		for _, date := range reviewedDates {
+			fmt.Fprintf(&body, "Last reviewed: %s\n", date)
+		}
+		fmt.Fprintf(&body, "Freshness source: %s\n", strings.Join(document.sources, ";"))
+		writeFixtureFile(t, root, document.path, body.String())
+
 		for _, source := range document.sources {
 			createFreshnessSource(t, root, source)
 		}
