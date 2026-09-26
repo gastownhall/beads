@@ -85,7 +85,7 @@ func TestWorktreeRemoveProcessHelper(t *testing.T) {
 func runWorktreeRemoveHookGit(dir string, args ...string) error {
 	command := exec.Command("git", args...)
 	command.Dir = dir
-	command.Env = append(scrubWorktreeRemovalGitEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
+	command.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s failed: %w\n%s", strings.Join(args, " "), err, output)
@@ -157,18 +157,70 @@ func TestWorktreeRemoveE2EReportsRemovalSuccessCleanupFailure(t *testing.T) {
 	fixture.git(t, fixture.repo, "rev-parse", "--verify", "refs/heads/lane")
 }
 
-func TestScrubWorktreeRemovalGitEnv(t *testing.T) {
-	input := []string{"PATH=/trusted/bin", "HOME=/home/test", "GIT_DIR=/wrong", "git_work_tree=/wrong-case", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.worktree", "GIT_OBJECT_DIRECTORY=/wrong-objects", "GIT_EXEC_PATH=/wrong-exec"}
-	want := []string{"PATH=/trusted/bin", "HOME=/home/test"}
-	if got := scrubWorktreeRemovalGitEnv(input); !reflect.DeepEqual(got, want) {
-		t.Fatalf("scrubWorktreeRemovalGitEnv() = %#v, want %#v", got, want)
+func TestScrubWorktreeGitEnvUsesHostKeySemantics(t *testing.T) {
+	input := []string{
+		"PATH=/trusted/bin",
+		"HOME=/home/test",
+		"GIT_AUTHOR_NAME=Test User",
+		"GIT_DIR=/wrong",
+		"git_work_tree=/wrong-case",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=core.worktree",
+		"git_config_value_0=/wrong-case",
+		"GIT_OBJECT_DIRECTORY=/wrong-objects",
+		"GIT_EXEC_PATH=/wrong-exec",
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_OPTIONAL_LOCKS=1",
 	}
+	for _, test := range []struct {
+		name, goos string
+		want       []string
+	}{
+		{
+			name: "POSIX names are case-sensitive",
+			goos: "linux",
+			want: []string{"PATH=/trusted/bin", "HOME=/home/test", "GIT_AUTHOR_NAME=Test User", "git_work_tree=/wrong-case", "git_config_value_0=/wrong-case", "GIT_NO_REPLACE_OBJECTS=1", "GIT_OPTIONAL_LOCKS=1"},
+		},
+		{
+			name: "Windows names are case-insensitive",
+			goos: "windows",
+			want: []string{"PATH=/trusted/bin", "HOME=/home/test", "GIT_AUTHOR_NAME=Test User", "GIT_NO_REPLACE_OBJECTS=1", "GIT_OPTIONAL_LOCKS=1"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := scrubWorktreeGitRoutingEnvForOS(input, test.goos); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("scrubWorktreeGitRoutingEnvForOS() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNewWorktreeRemovalGitPinsExecutable(t *testing.T) {
+	t.Setenv("GIT_NO_REPLACE_OBJECTS", "0")
+	t.Setenv("GIT_OPTIONAL_LOCKS", "1")
 	runner, err := newWorktreeRemovalGit()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !filepath.IsAbs(runner.executable) {
 		t.Fatalf("git executable is not absolute: %q", runner.executable)
+	}
+	for key, want := range map[string]string{
+		"GIT_NO_REPLACE_OBJECTS": "1",
+		"GIT_OPTIONAL_LOCKS":     "0",
+	} {
+		matches := 0
+		for _, entry := range runner.env {
+			if strings.HasPrefix(entry, key+"=") {
+				matches++
+				if entry != key+"="+want {
+					t.Fatalf("%s = %q, want %q", key, entry, key+"="+want)
+				}
+			}
+		}
+		if matches != 1 {
+			t.Fatalf("%s occurs %d times in removal environment, want once", key, matches)
+		}
 	}
 }
 
@@ -181,7 +233,7 @@ func (result worktreeRemoveProcessResult) combined() string { return result.stdo
 func (result worktreeRemoveProcessResult) requireSuccess(t *testing.T) {
 	t.Helper()
 	if result.exitCode != 0 {
-		t.Fatalf("worktree remove failed with exit code %d\nstdout:\n%s\nstderr:\n%s", result.exitCode, result.stdout, result.stderr)
+		t.Fatalf("worktree command failed with exit code %d\nstdout:\n%s\nstderr:\n%s", result.exitCode, result.stdout, result.stderr)
 	}
 }
 func (result worktreeRemoveProcessResult) requireFailure(t *testing.T, substring string) {
@@ -355,7 +407,7 @@ func (fixture *worktreeRemovalFixture) git(t *testing.T, directory string, args 
 	t.Helper()
 	command := exec.Command("git", args...)
 	command.Dir = directory
-	command.Env = append(scrubWorktreeRemovalGitEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
+	command.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)

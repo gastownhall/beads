@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -198,7 +199,9 @@ var configSetCmd = &cobra.Command{
 			if !validRoles[value] {
 				return HandleError("invalid role %q (valid values: maintainer, contributor)", value)
 			}
+			// All role commands ignore inherited Git routing, including GIT_CONFIG_GLOBAL.
 			cmd := exec.Command("git", "config", "beads.role", value) //nolint:gosec // value is validated against allowlist above
+			cmd.Env = gitenv.ScrubRouting(os.Environ())
 			if err := cmd.Run(); err != nil {
 				return HandleError("setting beads.role in git config: %v", err)
 			}
@@ -344,6 +347,7 @@ var configGetCmd = &cobra.Command{
 
 		if key == "beads.role" {
 			cmd := exec.Command("git", "config", "--get", "beads.role")
+			cmd.Env = gitenv.ScrubRouting(os.Environ())
 			output, err := cmd.Output()
 			value := strings.TrimSpace(string(output))
 			if err != nil {
@@ -597,6 +601,7 @@ var configUnsetCmd = &cobra.Command{
 
 		if key == "beads.role" {
 			gitCmd := exec.Command("git", "config", "--unset", "beads.role")
+			gitCmd.Env = gitenv.ScrubRouting(os.Environ())
 			if err := gitCmd.Run(); err != nil {
 				return HandleError("unsetting beads.role in git config: %v", err)
 			}
@@ -889,6 +894,7 @@ Examples:
 
 		for _, p := range gitPairs {
 			cmd := exec.Command("git", "config", "beads.role", p.value) //nolint:gosec // value is validated against allowlist above
+			cmd.Env = gitenv.ScrubRouting(os.Environ())
 			if err := cmd.Run(); err != nil {
 				return HandleError("setting %s in git config: %v", p.key, err)
 			}
