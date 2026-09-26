@@ -113,24 +113,53 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 
 	issueTable, eventTable := TableRouting(issue)
 
-	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
-		return result, err
+	// wasAutoMinted forces CreateOnly - and the EnsureIssueIDAvailableInTx
+	// coordination lock CreateOnly gates - even when the caller didn't ask
+	// for it, and bounds a remint-and-retry loop on a collision. An explicit
+	// caller-supplied ID keeps today's single-attempt, no-retry behavior: a
+	// collision there is a real caller error, not a race to paper over.
+	wasAutoMinted := issue.ID == ""
+	maxAttempts := 1
+	if wasAutoMinted {
+		maxAttempts = 3
 	}
-	if bc.Opts.CreateOnly {
-		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
+
+	var isNew, staleRejected bool
+	for attempt := 1; ; attempt++ {
+		if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
 			return result, err
 		}
-	}
 
-	if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
-		return result, err
-	} else if skip {
-		return result, nil
-	}
+		insertOpts := bc.Opts
+		if wasAutoMinted {
+			insertOpts.CreateOnly = true
+		}
+		if insertOpts.CreateOnly {
+			if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
+				if wasAutoMinted && attempt < maxAttempts && errors.Is(err, storage.ErrAlreadyExists) {
+					issue.ID = ""
+					continue
+				}
+				return result, err
+			}
+		}
 
-	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
-	if err != nil {
-		return result, err
+		if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
+			return result, err
+		} else if skip {
+			return result, nil
+		}
+
+		var insertErr error
+		isNew, staleRejected, insertErr = InsertIssueIfNew(ctx, tx, issueTable, issue, insertOpts)
+		if insertErr == nil {
+			break
+		}
+		if wasAutoMinted && attempt < maxAttempts && errors.Is(insertErr, storage.ErrAlreadyExists) {
+			issue.ID = ""
+			continue
+		}
+		return result, insertErr
 	}
 	if staleRejected {
 		// The stored row is strictly newer than this snapshot: nothing was
