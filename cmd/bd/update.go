@@ -285,7 +285,7 @@ pointless).`,
 			} else {
 				t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 				if err != nil {
-					return HandleErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+					return HandleErrorRespectJSON("invalid --due format %q. %s", dueStr, deferUntilFormatHint)
 				}
 				updates["due_at"] = t
 			}
@@ -302,7 +302,7 @@ pointless).`,
 			} else {
 				t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 				if err != nil {
-					return HandleErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+					return HandleErrorRespectJSON("invalid --defer format %q. %s", deferStr, deferUntilFormatHint)
 				}
 				// Warn if defer date is in the past (user probably meant future)
 				inPast := t.Before(time.Now())
