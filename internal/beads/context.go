@@ -30,6 +30,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 // UserRole represents the user's relationship to a repository.
@@ -234,6 +235,11 @@ func getRepoRootFromPath(path string) (string, error) {
 // We explicitly set GIT_DIR and GIT_WORK_TREE to ensure git operates on
 // the correct repository (the one containing .beads/).
 func (rc *RepoContext) GitCmd(ctx context.Context, args ...string) *exec.Cmd {
+	return rc.gitCmdWithEnv(ctx, os.Environ(), args...)
+}
+
+// gitCmdWithEnv applies the existing repository pins after the caller policy.
+func (rc *RepoContext) gitCmdWithEnv(ctx context.Context, env []string, args ...string) *exec.Cmd {
 	gitArgs := append([]string{"-c", "core.hooksPath="}, args...)
 	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Dir = rc.RepoRoot
@@ -244,7 +250,7 @@ func (rc *RepoContext) GitCmd(ctx context.Context, args ...string) *exec.Cmd {
 
 	// Security: Disable git hooks and templates to prevent code execution
 	// in potentially malicious repositories (SEC-001, SEC-002)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(env,
 		"GIT_TEMPLATE_DIR=",          // Disable templates
 		"GIT_DIR="+gitDir,            // Ensure git uses the correct .git directory
 		"GIT_WORK_TREE="+rc.RepoRoot, // Ensure git uses the correct work tree
@@ -573,11 +579,12 @@ func (rc *RepoContext) Role() (UserRole, bool) {
 		return Contributor, true
 	}
 
-	output, err := rc.GitOutput(context.Background(), "config", "--get", "beads.role")
+	cmd := rc.gitCmdWithEnv(context.Background(), gitenv.ScrubRouting(os.Environ()), "config", "--get", "beads.role")
+	output, err := cmd.Output()
 	if err != nil {
 		return "", false // Not configured
 	}
-	return UserRole(strings.TrimSpace(output)), true
+	return UserRole(strings.TrimSpace(string(output))), true
 }
 
 // IsContributor returns true if user is configured as contributor.

@@ -9,10 +9,12 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 var gitCommandRunner = func(repoPath string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", args...)
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	internalgit "github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -18,15 +19,22 @@ func NewGitRepository(workDir string) domain.GitRepository {
 	return &gitRepositoryImpl{workDir: workDir}
 }
 
+// NewInitGitRepository binds init artifact operations to the selected workDir.
+// The generic constructor retains inherited routing for its existing callers.
+func NewInitGitRepository(workDir string) domain.GitRepository {
+	return &gitRepositoryImpl{workDir: workDir, env: gitenv.ScrubRouting(os.Environ())}
+}
+
 type gitRepositoryImpl struct {
 	workDir string
+	env     []string
 }
 
 var _ domain.GitRepository = (*gitRepositoryImpl)(nil)
 
 func (r *gitRepositoryImpl) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = r.workDir
+	cmd.Dir, cmd.Env = r.workDir, r.env
 	return cmd
 }
 
@@ -98,7 +106,11 @@ func (r *gitRepositoryImpl) GetConfig(ctx context.Context, key string) (string, 
 	if key == "" {
 		return "", false, fmt.Errorf("git: GetConfig: key must not be empty")
 	}
-	out, err := r.gitCmd(ctx, "config", "--get", key).Output()
+	cmd := r.gitCmd(ctx, "config", "--get", key)
+	if key == "beads.role" && r.env == nil {
+		cmd.Env = gitenv.ScrubRouting(os.Environ())
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -117,7 +129,11 @@ func (r *gitRepositoryImpl) SetConfig(ctx context.Context, key, value string) er
 	if key == "" {
 		return fmt.Errorf("git: SetConfig: key must not be empty")
 	}
-	out, err := r.gitCmd(ctx, "config", key, value).CombinedOutput()
+	cmd := r.gitCmd(ctx, "config", key, value)
+	if key == "beads.role" && r.env == nil {
+		cmd.Env = gitenv.ScrubRouting(os.Environ())
+	}
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git: SetConfig %s: %w: %s", key, err, bytes.TrimSpace(out))
 	}
