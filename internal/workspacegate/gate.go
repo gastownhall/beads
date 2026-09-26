@@ -173,9 +173,10 @@ func forDir(dir string) (Gate, error) {
 	// resolving the guarded path itself: full-path resolution would
 	// silently select a different gate once the directory appears as a
 	// symlink, letting two exclusive holders coexist. The flip side is
-	// that a guarded directory that IS a symlink has no stable identity
-	// under this scheme, so it is refused outright rather than gated
-	// ambiguously.
+	// that a literal guarded directory that IS a symlink has no stable
+	// identity under this scheme, so it is refused rather than gated
+	// ambiguously. Callers that deliberately guard physical storage must
+	// resolve the target first; ForPhysicalRoot does that below.
 	if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return Gate{}, fmt.Errorf("workspacegate: %s is a symlink; gate the physical directory it points to", abs)
 	}
@@ -201,6 +202,10 @@ func ForWorkspace(beadsDir string) (Gate, error) { return forDir(beadsDir) }
 // Distinct workspaces that point at the same physical root resolve to the
 // same gate file, which is the point: a workspace-level gate alone cannot
 // stop workspace B from restarting the server workspace A is draining.
+// An existing root symlink is resolved before building the gate so callers
+// that name the same physical storage through different aliases converge on
+// one lock. Workspace symlinks remain forbidden by ForWorkspace because a
+// workspace gate must keep its literal identity across create/replace cycles.
 //
 // Cross-user shared roots are unsupported: the gate file is created 0o600
 // (see Acquire), so a second OS user attempting to gate a shared root such
@@ -216,7 +221,28 @@ func ForWorkspace(beadsDir string) (Gate, error) { return forDir(beadsDir) }
 // file's parent along with everything else in it, which is exactly the
 // split-inode hazard the package comment warns against for the guarded
 // root's own parent.
-func ForPhysicalRoot(root string) (Gate, error) { return forDir(root) }
+func ForPhysicalRoot(root string) (Gate, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return Gate{}, fmt.Errorf("workspacegate: resolving physical root %s: %w", root, err)
+	}
+	abs = filepath.Clean(abs)
+	if fi, lerr := os.Lstat(abs); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		physical, rerr := filepath.EvalSymlinks(abs)
+		if rerr != nil {
+			return Gate{}, fmt.Errorf("workspacegate: resolving physical root symlink %s: %w", abs, rerr)
+		}
+		target, serr := os.Stat(physical)
+		if serr != nil {
+			return Gate{}, fmt.Errorf("workspacegate: inspecting physical root symlink target %s: %w", abs, serr)
+		}
+		if !target.IsDir() {
+			return Gate{}, fmt.Errorf("workspacegate: physical root symlink %s targets %s, which is not a directory", abs, physical)
+		}
+		return forDir(physical)
+	}
+	return forDir(abs)
+}
 
 // Info is the advisory holder-info sidecar written next to the gate file
 // on exclusive acquisition. It is diagnostics only: the flock is the

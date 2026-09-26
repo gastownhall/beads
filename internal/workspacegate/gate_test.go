@@ -421,6 +421,75 @@ func TestCanonicalizationAgreesAcrossSymlinkSpellings(t *testing.T) {
 	}
 }
 
+func TestForPhysicalRootResolvesRootSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	dir := t.TempDir()
+	realRoot := filepath.Join(dir, "real-root")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(dir, "root-alias")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	realGate, err := ForPhysicalRoot(realRoot)
+	if err != nil {
+		t.Fatalf("ForPhysicalRoot(real): %v", err)
+	}
+	linkGate, err := ForPhysicalRoot(linkRoot)
+	if err != nil {
+		t.Fatalf("ForPhysicalRoot(symlink): %v", err)
+	}
+	if linkGate.Path() != realGate.Path() {
+		t.Fatalf("same physical root produced two gates: %s vs %s", linkGate.Path(), realGate.Path())
+	}
+
+	h := mustAcquire(t, realGate, Exclusive, Options{})
+	defer h.Release()
+	if _, err := linkGate.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("symlink spelling did not contend with physical root: err = %v, want ErrBusy", err)
+	}
+}
+
+func TestForPhysicalRootRejectsNonDirectorySymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	dir := t.TempDir()
+	fileTarget := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(fileTarget, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(dir, "root-alias")
+	if err := os.Symlink(fileTarget, linkRoot); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	_, err := ForPhysicalRoot(linkRoot)
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("ForPhysicalRoot(file symlink) error = %v, want not-a-directory diagnostic", err)
+	}
+}
+
+func TestForPhysicalRootRejectsDanglingSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	dir := t.TempDir()
+	linkRoot := filepath.Join(dir, "root-alias")
+	if err := os.Symlink(filepath.Join(dir, "missing-root"), linkRoot); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	_, err := ForPhysicalRoot(linkRoot)
+	if err == nil || !strings.Contains(err.Error(), "resolving physical root symlink") {
+		t.Fatalf("ForPhysicalRoot(dangling symlink) error = %v, want symlink-resolution diagnostic", err)
+	}
+}
+
 // A Wait shorter than the poll interval must come back within (about)
 // Wait, not a full poll interval later.
 func TestWaitBudgetCapsPolling(t *testing.T) {
