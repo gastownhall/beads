@@ -1,0 +1,161 @@
+# Dev channel — trunk that has passed the nightly suite.
+#
+# Part of the release-channel proposal for gastownhall/beads (issue #5867).
+# Phase 0 of three; see engdocs/RELEASE-CHANNELS.md in the same PR.
+#
+# This is the first channel that cuts a real, versioned candidate. It runs only
+# after "Nightly Full Tests" has gone green, so a -dev build always corresponds
+# to a commit that passed the full suite — not merely to a date.
+#
+# WHAT IT DOES NOT DO. It does not modify release.yml, and it does not need to:
+# the tag it pushes carries a prerelease identifier, and release.yml already
+# gates publish-pypi and publish-npm on `!contains(github.ref_name, '-')`, with
+# goreleaser set to `prerelease: auto`. A -dev tag therefore publishes a GitHub
+# prerelease with the full platform matrix and reaches none of Homebrew, PyPI or
+# npm. That path is not new and not theoretical — v1.2.2-rc.1 exercised it on
+# 2026-08-15 and the gate file records the publish jobs correctly skipping.
+#
+# ADOPTION PREREQUISITES, which this workflow cannot grant itself:
+#   1. refs/heads/channel/* writable by GITHUB_TOKEN.
+#   2. The `v*` tag ruleset must admit the Actions bot for prerelease tags, or
+#      this job's final step will be rejected. RELEASING.md restricts v* tag
+#      creation to release maintainers, and that restriction is correct for
+#      STABLE tags — Phase 2 keeps a human in front of those via an environment
+#      approval. If you would rather not widen it at all, set
+#      `dry_run: true` below and cut the -dev tag by hand from the prepared
+#      channel/dev commit; everything up to the tag is still automated.
+
+name: Channel — Dev
+
+on:
+  workflow_run:
+    workflows: [ "Nightly Full Tests" ]
+    types: [ completed ]
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Base version bump"
+        required: false
+        type: choice
+        default: auto
+        options: [ auto, minor, patch ]
+      dry_run:
+        description: "Stage and report, but do not push branch or tag"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: channel-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
+jobs:
+  dev:
+    name: Cut dev candidate
+    # Only promote a nightly that actually passed. A scheduled run that failed
+    # must not produce a candidate — that is the whole point of the channel.
+    if: >-
+      github.repository == 'gastownhall/beads' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # The commit the nightly actually tested, not whatever main is now.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        # Pinned to the version release.yml's MCP package gate uses, so the
+        # lockfile this job writes is the lockfile that gate will validate.
+        run: python -m pip install uv==0.11.16
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # One invocation: it reports, then performs the project's own prep
+      # (update-versions.sh, uv lock, check-versions.sh) and emits the computed
+      # version to $GITHUB_OUTPUT. Mutation here is working-tree only — nothing
+      # leaves the runner until the push step, which dry_run skips.
+      - name: Compute and stage the candidate
+        id: plan
+        run: |
+          bash scripts/channel-promote.sh \
+            --channel dev \
+            --bump "${{ inputs.bump || 'auto' }}" \
+            --apply
+
+      - name: Commit to the channel branch
+        id: commit
+        run: |
+          set -euo pipefail
+          version="${{ steps.plan.outputs.version }}"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit — version files already at $version."
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore(release): dev candidate v${version}
+
+          Automated cut of the dev channel from the commit that passed the
+          nightly suite. Not a release; publishes a GitHub prerelease only."
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Report
+        run: |
+          {
+            echo "## Dev candidate \`v${{ steps.plan.outputs.version }}\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${{ steps.plan.outputs.base_tag }}\`..\`${{ steps.commit.outputs.sha }}\` |"
+            echo "| Base version | ${{ steps.plan.outputs.base_version }} |"
+            echo "| Schema delta | ${{ steps.plan.outputs.migration_count }} migration(s) since ${{ steps.plan.outputs.base_tag }} |"
+            echo
+            if [ "${{ steps.plan.outputs.migration_count }}" != "0" ]; then
+              echo "> This span crosses a schema boundary. A dev build may carry"
+              echo "> several; a **beta may carry at most one**, so the beta"
+              echo "> promotion will need to be cut at the first boundary."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Move the channel pointer and tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.plan.outputs.version }}"
+          git push --force origin HEAD:refs/heads/channel/dev
+          # Tagging the channel commit — which carries the version bump — not
+          # main. Pushing the tag is what triggers release.yml.
+          git tag -a "v${version}" -m "Dev candidate v${version}"
+          git push origin "v${version}"
+
+      - name: Dry run notice
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "::notice::Dry run — v${{ steps.plan.outputs.version }} staged at ${{ steps.commit.outputs.sha }}, nothing pushed."

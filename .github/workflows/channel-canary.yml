@@ -1,0 +1,129 @@
+# Canary channel — "main, built".
+#
+# Part of the release-channel proposal for gastownhall/beads (issue #5867).
+# Phase 0 of three; see engdocs/RELEASE-CHANNELS.md in the same PR.
+#
+# A canary is not a candidate for anything. It carries no version of its own,
+# mutates no version-bearing file, and creates no tag. It exists so that
+# "nothing has been released yet" stops meaning "there is no way to run what
+# has merged".
+#
+# Two reasons it has no version bump:
+#   1. Semantics — it is trunk, built. Naming it a candidate would be a lie.
+#   2. PEP 440 — a canary identifier is not representable, so it could not be
+#      written into integrations/beads-mcp even if we wanted it:
+#        1.3.0-dev.20260825    valid   -> 1.3.0.dev20260825
+#        1.3.0-beta.1          valid   -> 1.3.0b1
+#        1.3.0-canary.abc1234  INVALID
+#        1.3.0-canary.20260825 INVALID  (a numeric suffix does not help; PEP 440
+#                                        admits only a/b/rc/post/dev labels)
+#      Verified with python packaging.version, 2026-08-25.
+#
+# ADOPTION PREREQUISITE: refs/heads/channel/* must be writable by
+# GITHUB_TOKEN. This workflow cannot grant itself that.
+
+name: Channel — Canary
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# A burst of merges collapses to one build. beads lands PRs faster than a
+# platform matrix completes, so without this the queue never drains.
+concurrency:
+  group: channel-canary
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
+jobs:
+  canary:
+    name: Build and publish canary
+    if: ${{ github.repository == 'gastownhall/beads' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Identify build
+        id: id
+        run: |
+          echo "sha7=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # NOTE ON PLATFORM COVERAGE: this is one ubuntu runner, so it produces the
+      # linux/windows artifacts only. release.yml builds darwin in a separate
+      # `goreleaser-macos` job because the cgo build needs a macOS toolchain.
+      # A canary is a convenience build, not a distribution, so single-runner
+      # coverage is the deliberate trade for running on every merge. The full
+      # platform matrix starts at the -dev channel, which goes through the
+      # ordinary tag pipeline.
+      - name: Build snapshot artifacts
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          version: latest
+          # --snapshot builds without a tag and never publishes. Publishing is
+          # the explicit gh step below, into one rolling prerelease.
+          args: release --snapshot --clean --skip=publish,announce
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move the channel pointer
+        run: |
+          git push --force origin HEAD:refs/heads/channel/canary
+
+      # One rolling prerelease, assets replaced in place. This is deliberate:
+      # a tag per commit to main would be thousands of tags a year, and the
+      # point of a canary is a stable download URL for "latest trunk build",
+      # not an archive of every commit.
+      - name: Publish into the rolling canary release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes=$(cat <<EOF
+          Automated build of \`main\` at \`${{ steps.id.outputs.sha7 }}\`, produced ${{ steps.id.outputs.stamp }}.
+
+          **This is not a release.** It is trunk, built, with no gate beyond the
+          checks that ran on the pull request. It carries no version number of its
+          own — \`bd version\` reports a snapshot identifier.
+
+          The stable install channels (Homebrew, \`install.sh\`, npm, PyPI) do not
+          serve this and are not affected by it. Download an asset directly below.
+
+          Linux and Windows only — darwin needs a macOS toolchain and is built on
+          the tag pipeline. The full platform matrix starts at \`-dev\`.
+
+          For a build that has passed the nightly suite, use the latest \`-dev\`
+          prerelease. For one that has passed the full release gate, use \`-beta\`.
+          EOF
+          )
+          if gh release view canary >/dev/null 2>&1; then
+            gh release edit canary --notes "$notes" --prerelease --latest=false
+            # Replace assets rather than accumulate them.
+            for a in $(gh release view canary --json assets --jq '.assets[].name'); do
+              gh release delete-asset canary "$a" --yes
+            done
+          else
+            gh release create canary \
+              --title "Canary (rolling)" \
+              --notes "$notes" \
+              --prerelease \
+              --latest=false \
+              --target main
+          fi
+          gh release upload canary dist/*.tar.gz dist/*.zip dist/checksums.txt --clobber
