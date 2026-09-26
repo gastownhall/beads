@@ -53,6 +53,35 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ImportBatchResult, string, error) {
 		var result publicops.ImportBatchResult
 
+		// Seed issue_prefix before CreateIssuesInTxWithResult needs it (via
+		// NewBatchContext -> ReadConfigPrefix), for the same reason the sync
+		// below exists: an externally-provisioned database's config table can
+		// be missing the row config.yaml already carries. Seeding only when
+		// the table is empty — never overwriting an existing prefix — keeps
+		// this a pure precondition for the sync 40 lines down, not a second,
+		// conflicting writer.
+		//
+		// PrefixSynced is set HERE and not left to the sync: once the seed has
+		// written the value, the sync's `stored != request.SyncIssuePrefix`
+		// test is false and it reports nothing, so a batch that lands no rows
+		// and no memories would build an empty commit message and RunTxResult
+		// would roll the seeded row back (tx.go, importBatchCommitMessage).
+		// The seed IS the prefix write in that case and has to say so.
+		//
+		// Unlike the sync, a failure here does NOT degrade to "not synced":
+		// this write is the precondition for the very next statement, so
+		// swallowing it would surface as the `issue_prefix config is missing`
+		// error this seed exists to prevent, and would hide a serialization
+		// failure from RunTxResult's retry classifier.
+		if request.SyncIssuePrefix != "" {
+			if stored, _ := uw.ConfigUseCase().GetConfig(ctx, "issue_prefix"); stored == "" {
+				if err := uw.ConfigUseCase().SetConfig(ctx, "issue_prefix", request.SyncIssuePrefix); err != nil {
+					return publicops.ImportBatchResult{}, "", fmt.Errorf("seed issue_prefix: %w", err)
+				}
+				result.PrefixSynced = true
+			}
+		}
+
 		if len(request.Issues) > 0 {
 			runner, err := importStatementRunner(uw)
 			if err != nil {

@@ -67,8 +67,9 @@ type ImportBatchResult struct {
 	StaleRejectedIDs []string
 	// SkippedDependencies lists the edges dropped by the batch, deduplicated.
 	SkippedDependencies []SkippedDependency
-	// PrefixSynced reports that the stored issue_prefix was rewritten to
-	// SyncIssuePrefix.
+	// PrefixSynced reports that the batch wrote the stored issue_prefix to
+	// SyncIssuePrefix — either seeding it, when the config table carried no
+	// prefix at all, or rewriting a stored value that disagreed.
 	PrefixSynced bool
 }
 
