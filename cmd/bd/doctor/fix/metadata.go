@@ -280,10 +280,13 @@ func probeForCorrectDoltDatabase(db *sql.DB, skipDB string) string {
 	}
 
 	for _, dbName := range candidates {
+		// Escape backticks in database name to prevent SQL injection (` → ``)
+		safeName := strings.ReplaceAll(dbName, "`", "``")
+
 		var count int
-		//nolint:gosec // G201: dbName from SHOW DATABASES, not user input
+		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
 		err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", dbName)).Scan(&count)
+			fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", safeName)).Scan(&count)
 		if err == nil {
 			return dbName
 		}
