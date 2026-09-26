@@ -1906,6 +1906,25 @@ func selectedDoltBeadsDir() string {
 // an authoritative-but-empty active database from falling through to a
 // stale candidate. A corrupt or unreadable repo_state.json is surfaced as a
 // warning rather than silently rendered as "(none)".
+//
+// Two known limits of that delegation, both narrower than the stale-mode leak
+// it removes:
+//
+//   - show/open parity does NOT hold for a workspace with no metadata.json.
+//     ResolvePhysicalRoots' discovery fallback picks the mode from what is on
+//     disk (embeddeddolt/, else dolt/), while the CLI open path additionally
+//     promotes a nil config to server mode via the
+//     `cfg == nil && configfile.DefaultConfig().IsDoltServerMode()` rescue in
+//     main.go (BEADS_DOLT_SERVER_MODE=1 / config.yaml dolt.mode). So a
+//     workspace with no metadata.json, that env set, and a leftover
+//     embeddeddolt/ tree reports the embedded root's remotes under a
+//     server-mode header. Mirroring the rescue inside the resolver is the real
+//     fix but changes every ResolvePhysicalRoots caller, so it is a follow-up
+//     rather than part of this command's fix.
+//   - a remote-host server workspace has no local root to read, so this
+//     returns nil and `bd dolt show` renders "(none)". Read that as "not
+//     locally knowable" rather than "no remotes configured"; `bd dolt remote
+//     list` against the server is the authoritative answer.
 func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config) []storage.RemoteInfo {
 	ctx := context.Background()
 	if st := getStore(); st != nil {
@@ -1926,6 +1945,10 @@ func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config) []storage.R
 		return nil
 	}
 
+	// Every ResolvePhysicalRoots branch appends exactly one root today; Roots
+	// is a slice because other callers (beads.OpenGated) union several.
+	// Revisit this if the resolver ever does that here, or the extra
+	// candidates would vanish without a trace.
 	root := physical.Roots[0]
 	var candidates []string
 	if dbName != "" {

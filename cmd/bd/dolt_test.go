@@ -1982,8 +1982,17 @@ func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 // cmdCtx over the legacy global, so both must be cleared to reproduce the
 // `bd dolt show` no-store diagnostic path), restoring both on cleanup. See
 // TestDoltPushPullCommitNeedStore for the same pattern.
+//
+// It also neutralizes ambient BEADS_DOLT_SHARED_SERVER: resolveDoltShowRemotes
+// now selects the physical root through doltserver.ResolvePhysicalRoots, whose
+// shared-server arm keys off that variable, so a developer or CI shell
+// exporting it would otherwise redden the mode-independent tests below for
+// reasons unrelated to the code under test. The two shared-server tests set it
+// to "1" themselves after calling this helper, so neutralizing here does not
+// weaken them.
 func withNilStoreForShow(t *testing.T) {
 	t.Helper()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	originalStore := store
 	originalCmdCtx := cmdCtx
 	t.Cleanup(func() {
