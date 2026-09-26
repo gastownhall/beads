@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -451,36 +452,29 @@ func (c *remoteCredentials) applyToCmd(cmd *exec.Cmd) {
 	if c.empty() {
 		return
 	}
-	// Start with current process env, filtering out any existing credential vars
+	cmd.Env = c.childEnv(os.Environ())
+}
+
+func (c *remoteCredentials) childEnv(base []string) []string {
+	// Start with the base environment, filtering out any existing credential vars
 	// to prevent stale values from leaking into the subprocess.
-	env := make([]string, 0, len(os.Environ())+2)
-	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "DOLT_REMOTE_USER=") && !strings.HasPrefix(e, "DOLT_REMOTE_PASSWORD=") {
-			env = append(env, e)
-		}
-	}
+	env := execenv.Without(base, "DOLT_REMOTE_USER", "DOLT_REMOTE_PASSWORD")
 	if c.username != "" {
 		env = append(env, "DOLT_REMOTE_USER="+c.username)
 	}
 	if c.password != "" {
 		env = append(env, "DOLT_REMOTE_PASSWORD="+c.password)
 	}
-	cmd.Env = env
+	return env
 }
 
 func setCmdEnv(cmd *exec.Cmd, key, value string) {
-	prefix := key + "="
 	base := cmd.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	env := make([]string, 0, len(base)+1)
-	for _, e := range base {
-		if !strings.HasPrefix(e, prefix) {
-			env = append(env, e)
-		}
-	}
-	cmd.Env = append(env, prefix+value)
+	env := execenv.Without(base, key)
+	cmd.Env = append(env, key+"="+value)
 }
 
 func applyS3ChecksumEnvToCmd(cmd *exec.Cmd) {
@@ -512,8 +506,7 @@ func applyNoGitHooksToCmd(cmd *exec.Cmd) {
 	// Append rather than replace: a caller that set its own
 	// GIT_CONFIG_PARAMETERS (a test harness pinning user.email, say) would
 	// otherwise have it silently dropped by this call.
-	setCmdEnv(cmd, githooksenv.ParametersEnv,
-		githooksenv.AppendParameter(githooksenv.Extract(base), githooksenv.NoHooksParam))
+	cmd.Env = githooksenv.DisabledEnv(base)
 }
 
 // saveEnv captures the current state of key and returns a function that puts
@@ -827,15 +820,11 @@ func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote stri
 	if len(prefixes) == 0 {
 		return false, nil // unknown scheme — not a cloud remote
 	}
-	for _, e := range os.Environ() {
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(e, prefix) {
-				if err := s.ensureMatchingCLIRemote(remote, remoteURL); err != nil {
-					return false, fmt.Errorf("remote %q has cloud credentials and requires CLI routing: %w", remote, err)
-				}
-				return true, nil
-			}
+	if execenv.ContainsKeyWithPrefix(os.Environ(), prefixes...) {
+		if err := s.ensureMatchingCLIRemote(remote, remoteURL); err != nil {
+			return false, fmt.Errorf("remote %q has cloud credentials and requires CLI routing: %w", remote, err)
 		}
+		return true, nil
 	}
 	return false, nil
 }
