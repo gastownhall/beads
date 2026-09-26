@@ -2,10 +2,12 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
 
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -60,6 +62,33 @@ type DependencyEditorFixture struct {
 	// the cases that need it then skip with that reason rather than pass
 	// quietly. It is non-nil on all three backends today.
 	CountHistory func(context.Context) (int, error)
+	// SetJournalEnabled turns on durable journaling for the workspace under
+	// test (storage.EventsJournalConfigurer) — the same operator switch
+	// JournalFixture.SetJournalEnabled wires, and off by default for the same
+	// reason: a workspace that never opted in records nothing in
+	// bd_events_journal while every other write still succeeds normally.
+	//
+	// The idempotency cases need it on because bd_events_journal has no
+	// deduplication of its own (issueops.RecordDepEventInTx always inserts):
+	// a same-type re-add or an absent removal is a no-op only if nothing
+	// downstream of the role recorded a change, and the journal is the one
+	// place that is not otherwise observable through this fixture. It is
+	// non-nil on all three backends.
+	SetJournalEnabled func(enabled bool)
+	// SetVersionedHistoryEnabled turns on dual-write issue-version history
+	// (storage.VersionedHistoryConfigurer) — off by default for the same
+	// reason SetJournalEnabled is.
+	//
+	// It exists for one case: the metadata-changed re-add, which can only be
+	// driven through AddDependency (the role's own request type carries no
+	// metadata). That hook writes through the backend's raw store path rather
+	// than the role's transaction wrapper, and on at least one backend only
+	// the latter issues the underlying VCS commit CountHistory observes — so
+	// a case reached through AddDependency cannot tell a mint happened by
+	// watching CountHistory the way the role-driven history cases do. It has
+	// to read issue_versions directly instead, which only advances when this
+	// switch is on. It is non-nil on all three backends.
+	SetVersionedHistoryEnabled func(enabled bool)
 }
 
 // RunDependencyEditorRoutesWispSourcedEdgeToTheWispPlane is the regression pin
@@ -252,8 +281,18 @@ func RunDependencyEditorAddedEchoesTheRequestOrder(t *testing.T, ctx context.Con
 // promises a dependency_added entry for a GENUINELY NEW edge, so a backend
 // that re-emitted on the no-op would leave a history of work that did not
 // happen even where the row count could not tell.
+//
+// bd_events_journal is the fourth, and the one none of the others catch:
+// unlike the events table it has no deduplication of its own
+// (issueops.RecordDepEventInTx always inserts), so a same-type re-add that
+// gates on TYPE alone — never the stored metadata VALUE — journals a change
+// that never happened even while the row count, the events table and the
+// history delta all read as a clean no-op. This is #5898's R3 case: a
+// change-free write must create no version and must not journal one either.
 func RunDependencyEditorSameTypeReAddIsIdempotent(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
+	fixture.SetJournalEnabled(true)
+	t.Cleanup(func() { fixture.SetJournalEnabled(false) })
 	source := fixture.IssuePrefix + "-idem-source"
 	target := fixture.IssuePrefix + "-idem-target"
 	seedDependencyEditorIssue(t, ctx, fixture, source)
@@ -267,6 +306,7 @@ func RunDependencyEditorSameTypeReAddIsIdempotent(t *testing.T, ctx context.Cont
 		t.Fatalf("AddDependencies first: %v", err)
 	}
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
 
 	assertHistoryDelta := dependencyEditorHistoryProbe(t, ctx, fixture)
 	result, err := fixture.Editor.AddDependencies(ctx, request)
@@ -279,7 +319,216 @@ func RunDependencyEditorSameTypeReAddIsIdempotent(t *testing.T, ctx context.Cont
 	assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 1)
 	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", source, target, string(publicops.DepBlocks), 1)
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
 	assertHistoryDelta(0, "every edge of the request already existed with the requested type, so nothing was written and nothing is versioned")
+}
+
+// RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion pins the
+// other half of the same-type re-add clause from
+// RunDependencyEditorSameTypeReAddIsIdempotent: same TYPE is not the whole
+// idempotency test, because the row also carries metadata, and a re-add that
+// changes it is a real mutation of the source issue rather than a no-op that
+// happens to share a type. The leaf updates the stored metadata and mints
+// EXACTLY ONE version carrying the new state — the same terms as a genuinely
+// new edge — because from the source issue's point of view a metadata change
+// is as real as the edge appearing in the first place (#5898 leg 2).
+//
+// It drives the re-add through fixture.AddDependency rather than
+// fixture.Editor.AddDependencies because publicops.DependencyEdge carries no
+// metadata for the role API to change — the same reason
+// RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate reaches past
+// the role for a waits-for gate.
+//
+// bd_events_journal is asserted at TWO, not one: unlike the change-free
+// re-add, this path still calls issueops.RecordDepEventInTx — dependencies.go
+// calls it "an observable graph mutation" and journals the complete
+// replacement edge for replay — so the second write adds its own journal
+// entry even though it adds no second row to "dependencies" and no second
+// dependency_added row to "events", because those two describe the STORED
+// ROW and the AUDIT TRAIL, neither of which duplicates on a metadata-only
+// change.
+func RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	if fixture.AddDependency == nil {
+		t.Skip("fixture has no AddDependency hook: metadata is not settable through publicops.DependencyEdge")
+	}
+	fixture.SetJournalEnabled(true)
+	t.Cleanup(func() { fixture.SetJournalEnabled(false) })
+	fixture.SetVersionedHistoryEnabled(true)
+	t.Cleanup(func() { fixture.SetVersionedHistoryEnabled(false) })
+	source := fixture.IssuePrefix + "-idemmeta-source"
+	target := fixture.IssuePrefix + "-idemmeta-target"
+	seedDependencyEditorIssue(t, ctx, fixture, source)
+	seedDependencyEditorIssue(t, ctx, fixture, target)
+
+	first := &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks, Metadata: `{"note":"v1"}`}
+	if err := fixture.AddDependency(ctx, first, "writer"); err != nil {
+		t.Fatalf("AddDependency first: %v", err)
+	}
+	assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 1)
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", source, target, string(types.DepBlocks), 1)
+	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
+
+	versionsBefore := countDependencyEditorIssueVersions(t, ctx, fixture, source)
+	second := &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks, Metadata: `{"note":"v2"}`}
+	if err := fixture.AddDependency(ctx, second, "writer"); err != nil {
+		t.Fatalf("re-adding the same edge with changed metadata refused: %v", err)
+	}
+	assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 1)
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", source, target, string(types.DepBlocks), 1)
+	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+
+	var journalCount int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM bd_events_journal WHERE issue_id = ? AND op = ?",
+		[]any{source, string(storeops.EventDepAdd)}, &journalCount); err != nil {
+		t.Fatalf("count bd_events_journal dep_add rows for %s: %v", source, err)
+	}
+	if journalCount != 2 {
+		t.Errorf("bd_events_journal dep_add rows for %s = %d, want 2: the metadata-changed re-add must journal its own replacement-edge entry", source, journalCount)
+	}
+
+	var storedMetadata string
+	if err := fixture.QueryScalar(ctx,
+		"SELECT metadata FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+		[]any{source, target}, &storedMetadata); err != nil {
+		t.Fatalf("read stored metadata for %s -> %s: %v", source, target, err)
+	}
+	// Compared after re-encoding rather than byte-for-byte: a native JSON
+	// column is free to re-canonicalize what it stores (e.g. inserting the
+	// space after ':' Dolt's does), and that is not the thing this case is
+	// about. canonicalizeForContract has no numeric blind spot here because
+	// this fixture's metadata values never carry a bare JSON number.
+	storedCanon, err := canonicalizeForContract(json.RawMessage(storedMetadata))
+	if err != nil {
+		t.Fatalf("canonicalize stored metadata for %s -> %s: %v", source, target, err)
+	}
+	wantCanon, err := canonicalizeForContract(json.RawMessage(second.Metadata))
+	if err != nil {
+		t.Fatalf("canonicalize want metadata for %s -> %s: %v", source, target, err)
+	}
+	if storedCanon != wantCanon {
+		t.Errorf("stored metadata = %s, want %s: the re-add must persist the NEW metadata, not keep the old", storedCanon, wantCanon)
+	}
+
+	// Not dependencyEditorHistoryProbe/CountHistory: AddDependency seeds this
+	// edge out of band of the role, through the backend's raw store path, and
+	// on at least one backend that path never issues the version-control
+	// commit CountHistory counts — only the role's own transaction wrapper
+	// does. issue_versions is the seam both paths mint through, so it is the
+	// one signal that is meaningful for a write reached this way.
+	if delta := countDependencyEditorIssueVersions(t, ctx, fixture, source) - versionsBefore; delta != 1 {
+		t.Errorf("issue_versions rows for %s went %d -> %d (delta %d), want a delta of 1: the metadata genuinely changed, so the re-add is a real mutation of the source issue and must mint exactly one version (#5898 leg 2)", source, versionsBefore, versionsBefore+delta, delta)
+	}
+}
+
+// countDependencyEditorIssueVersions reports how many issue_versions rows
+// exist for the given issue. Shared by every case here that asserts a
+// version DELTA rather than an absolute count: the fixture's issues accrue
+// versions from more than this one seam, so the relative change across an
+// operation is the only thing a case can rely on.
+func countDependencyEditorIssueVersions(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, id string) int {
+	t.Helper()
+	var count int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?", []any{id}, &count); err != nil {
+		t.Fatalf("count issue_versions rows for %s: %v", id, err)
+	}
+	return count
+}
+
+// RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp pins the leg of
+// the same-type re-add clause that
+// RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion
+// deliberately does not cover: metadata that is byte-different but
+// SEMANTICALLY IDENTICAL to what is already stored. A native JSON column is
+// free to re-canonicalize what it persists — Dolt's inserts a space after
+// ':', sorts object keys, and narrows a bare integral float to an int — so a
+// comparison written against the raw bytes the caller last sent, rather than
+// a canonical form of what is actually stored, reports a change that never
+// happened and mints a version for a write that changed nothing (#6650).
+//
+// Two sub-cases pin the two distinct ways "byte-different" can still mean
+// "the same value", using the same real-world shape
+// (internal/types.WaitsForMeta, which is what a waits-for edge's metadata
+// actually is):
+//   - CompactSpelling re-adds the exact compact spelling
+//     json.Marshal(types.WaitsForMeta{Gate: "any-children"}) already
+//     produced. The caller sends identical bytes both times; only Dolt's own
+//     storage-side renormalization of the FIRST write can make the stored
+//     form disagree with them.
+//   - ReorderedKeys re-adds the same fields with their keys spelled in a
+//     different order — a caller-side difference no byte comparison
+//     survives, but the same JSON value all the same.
+//
+// Both must be a no-op by the same signals
+// RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion checks
+// for a real change: the stored row, the events table, the journal, and the
+// issue_versions delta all have to read as "nothing happened."
+func RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	if fixture.AddDependency == nil {
+		t.Skip("fixture has no AddDependency hook: metadata is not settable through publicops.DependencyEdge")
+	}
+
+	compact, err := json.Marshal(types.WaitsForMeta{Gate: "any-children"})
+	if err != nil {
+		t.Fatalf("marshal compact WaitsForMeta: %v", err)
+	}
+
+	for _, sub := range []struct {
+		name  string
+		tag   string
+		first string
+		readd string
+	}{
+		{
+			name:  "CompactSpelling",
+			tag:   "idemmetasame-compact",
+			first: string(compact),
+			readd: string(compact),
+		},
+		{
+			name:  "ReorderedKeys",
+			tag:   "idemmetasame-reorder",
+			first: `{"gate":"any-children","spawner_id":"src-1"}`,
+			readd: `{"spawner_id":"src-1","gate":"any-children"}`,
+		},
+	} {
+		t.Run(sub.name, func(t *testing.T) {
+			fixture.SetJournalEnabled(true)
+			t.Cleanup(func() { fixture.SetJournalEnabled(false) })
+			fixture.SetVersionedHistoryEnabled(true)
+			t.Cleanup(func() { fixture.SetVersionedHistoryEnabled(false) })
+			source := fixture.IssuePrefix + "-" + sub.tag + "-source"
+			target := fixture.IssuePrefix + "-" + sub.tag + "-target"
+			seedDependencyEditorIssue(t, ctx, fixture, source)
+			seedDependencyEditorIssue(t, ctx, fixture, target)
+
+			first := &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks, Metadata: sub.first}
+			if err := fixture.AddDependency(ctx, first, "writer"); err != nil {
+				t.Fatalf("AddDependency first: %v", err)
+			}
+			assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 1)
+			assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", source, target, string(types.DepBlocks), 1)
+			assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+			assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
+
+			versionsBefore := countDependencyEditorIssueVersions(t, ctx, fixture, source)
+			second := &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks, Metadata: sub.readd}
+			if err := fixture.AddDependency(ctx, second, "writer"); err != nil {
+				t.Fatalf("re-adding the same edge with semantically identical metadata refused: %v", err)
+			}
+			assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 1)
+			assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", source, target, string(types.DepBlocks), 1)
+			assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyAdded, 1)
+			assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepAdd))
+
+			if delta := countDependencyEditorIssueVersions(t, ctx, fixture, source) - versionsBefore; delta != 0 {
+				t.Errorf("issue_versions rows for %s went %d -> %d (delta %d), want a delta of 0: the re-add's metadata is semantically identical to what is already stored (byte differences aside), so nothing changed and nothing should be versioned (#6650)", source, versionsBefore, versionsBefore+delta, delta)
+			}
+		})
+	}
 }
 
 // RunDependencyEditorRepeatsWithinOneRequestCollapse pins the clause that
@@ -454,8 +703,17 @@ func RunDependencyEditorRefusalWritesNothing(t *testing.T, ctx context.Context, 
 // missing edge is Removed false with a NIL error, not ErrNotFound, because an
 // agent replaying its own teardown should not have to classify an error to
 // discover it already ran.
+// bd_events_journal is checked alongside the events table for the same
+// reason RunDependencyEditorSameTypeReAddIsIdempotent checks it: the journal
+// has no deduplication of its own, so a removal that finds nothing must not
+// journal a dep_remove either. This side of #5898's R3 case is expected to
+// already hold — RemoveDependencyInTx only records when it actually deleted a
+// row — but it is pinned here so a future regression on this leg is caught
+// alongside the add-side one rather than only on the leg that is broken today.
 func RunDependencyEditorRemoveIsIdempotent(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
+	fixture.SetJournalEnabled(true)
+	t.Cleanup(func() { fixture.SetJournalEnabled(false) })
 	source := fixture.IssuePrefix + "-rm-source"
 	target := fixture.IssuePrefix + "-rm-target"
 	seedDependencyEditorIssue(t, ctx, fixture, source)
@@ -478,6 +736,7 @@ func RunDependencyEditorRemoveIsIdempotent(t *testing.T, ctx context.Context, fi
 	}
 	assertDependencyEditorOutgoingCount(t, ctx, fixture, "dependencies", source, 0)
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyRemoved, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepRemove))
 
 	removed, err = fixture.Editor.RemoveDependency(ctx, request)
 	if err != nil {
@@ -487,6 +746,7 @@ func RunDependencyEditorRemoveIsIdempotent(t *testing.T, ctx context.Context, fi
 		t.Error("Removed = true, want false for an edge that was already gone")
 	}
 	assertDependencyEditorEventCount(t, ctx, fixture, "events", source, types.EventDependencyRemoved, 1)
+	assertDependencyEditorJournalCountIsOne(t, ctx, fixture, source, string(storeops.EventDepRemove))
 }
 
 // RunDependencyEditorAppliesParentChildBeforeBlockingEdges pins
@@ -2176,6 +2436,26 @@ func assertDependencyEditorEventCount(t *testing.T, ctx context.Context, fixture
 	}
 	if got != want {
 		t.Errorf("%s %s rows for %s = %d, want %d", table, eventType, issueID, got, want)
+	}
+}
+
+// assertDependencyEditorJournalCountIsOne asserts exactly one bd_events_journal
+// row exists for one issue and op — the same shape as
+// assertDependencyEditorEventCount, against the table that has no
+// deduplication of its own and so is the one an unconditional journal write on
+// a no-op would actually show up in. Every call site pins the count at one
+// (the single genuine write); there is no idempotency case that expects zero
+// or more than one, so unlike assertDependencyEditorEventCount this does not
+// take a want.
+func assertDependencyEditorJournalCountIsOne(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, issueID, op string) {
+	t.Helper()
+	var got int
+	query := "SELECT COUNT(*) FROM bd_events_journal WHERE issue_id = ? AND op = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{issueID, op}, &got); err != nil {
+		t.Fatalf("count bd_events_journal %s rows for %s: %v", op, issueID, err)
+	}
+	if got != 1 {
+		t.Errorf("bd_events_journal %s rows for %s = %d, want 1", op, issueID, got)
 	}
 }
 
