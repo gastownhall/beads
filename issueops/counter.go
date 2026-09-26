@@ -92,8 +92,11 @@ type CountRequest struct {
 	TitleContains string
 	DescContains  string
 	NotesContains string
-	// MetadataFields requires equality for every top-level key/value pair.
+	// MetadataFields requires equality for every top-level key/value pair and
+	// HasMetadataKey is a top-level key-presence filter, spelled as
+	// ListRequest and ReadyRequest spell them. Keys are validated inside.
 	MetadataFields map[string]string
+	HasMetadataKey string
 
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
