@@ -345,6 +345,17 @@ func isPathInSafeBoundary(path string) bool {
 		return resolvedPathWithinRoot(absPath, "/var/tmp")
 	}
 
+	// Non-root service accounts commonly use an account-owned home below
+	// /var/lib (for example, /var/lib/my-service). Treat that specific passwd
+	// home like an ordinary user home before the broad /var deny rule below.
+	// Keep the exception narrow: /var/lib itself is never a home boundary, root
+	// never receives the exception, and both the configured home and requested
+	// path must remain below /var/lib after symlink resolution.
+	if u, err := user.Current(); err == nil &&
+		pathWithinNonRootVarLibHome(absPath, u.Uid, u.HomeDir) {
+		return true
+	}
+
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			return false
@@ -386,6 +397,32 @@ func isPathInSafeBoundary(path string) bool {
 		}
 	}
 	return true
+}
+
+func pathWithinNonRootVarLibHome(absPath, uid, homeDir string) bool {
+	if uid == "" || uid == "0" || homeDir == "" {
+		return false
+	}
+
+	inside := func(path, root string) bool {
+		return path == root || strings.HasPrefix(path, root+"/")
+	}
+
+	const varLibRoot = "/var/lib"
+	home, err := filepath.Abs(homeDir)
+	if err != nil || home == varLibRoot || !inside(home, varLibRoot) {
+		return false
+	}
+	physicalVarLibRoot := resolveLongestExistingAncestor(varLibRoot)
+	physicalHome := resolveLongestExistingAncestor(home)
+	if physicalHome == physicalVarLibRoot || !inside(physicalHome, physicalVarLibRoot) {
+		return false
+	}
+
+	if !inside(absPath, home) && !inside(absPath, physicalHome) {
+		return false
+	}
+	return resolvedPathWithinRoot(absPath, home)
 }
 
 // resolveLongestExistingAncestor canonicalizes path by resolving symlinks on its
