@@ -507,6 +507,58 @@ type Config struct {
 	// wy-sbgucn) raise its own default without overriding an operator's
 	// explicit choice. 0 = keep the built-in default.
 	PoolReadTimeoutFallback time.Duration
+	// DialTimeout bounds the fail-fast TCP/unix dial that precedes the MySQL
+	// handshake (0 = defaultDialTimeout, 500ms). That default was hard-coded
+	// and is right for a loopback server; against a WAN hub a single slow
+	// SYN exceeded it, counted as a connection failure, and five in a row
+	// opened the circuit breaker so every read failed fast while nothing was
+	// down (ga-g8lsb4). Ladder: caller > BEADS_DOLT_DIAL_TIMEOUT >
+	// dolt.dial-timeout > default, applied by applyDialTimeout.
+	DialTimeout time.Duration
+}
+
+// defaultDialTimeout is the fail-fast dial budget when no knob sets one.
+const defaultDialTimeout = 500 * time.Millisecond
+
+// dialTimeoutFor returns the fail-fast dial budget cfg carries, or the
+// default when unset.
+func dialTimeoutFor(cfg *Config) time.Duration {
+	if cfg != nil && cfg.DialTimeout > 0 {
+		return cfg.DialTimeout
+	}
+	return defaultDialTimeout
+}
+
+// dialServerFailFast is the fail-fast connectivity probe before MySQL
+// protocol initialization. A dial that TIMES OUT is retried once
+// immediately with the same budget: one slow SYN on a WAN path is not
+// evidence the server is down, and without the retry it counted toward the
+// circuit breaker's five-failure trip (ga-g8lsb4). A refused or otherwise
+// failed dial is not retried — that answer is immediate and honest. The
+// returned error carries the measured wall time so an unreachable report
+// arrives with a number.
+func dialServerFailFast(network, addr string, timeout time.Duration) (net.Conn, error) {
+	started := time.Now()
+	conn, err := net.DialTimeout(network, addr, timeout)
+	if err == nil {
+		return conn, nil
+	}
+	attempts := 1
+	if isDialTimeout(err) {
+		attempts = 2
+		conn, err = net.DialTimeout(network, addr, timeout)
+		if err == nil {
+			return conn, nil
+		}
+	}
+	return nil, fmt.Errorf("%w (dial budget %s, %d attempt(s), %s elapsed)", err, timeout, attempts, time.Since(started).Round(time.Millisecond))
+}
+
+// isDialTimeout reports whether err is a dial that ran out its budget, as
+// opposed to a refusal or another immediate failure.
+func isDialTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // Defaults for the *sql.DB connection pool. Exported for tests/callers that
@@ -1572,6 +1624,10 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.RemotePassword == "" {
 		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
 	}
+	// Dial budget last: every DoltStore open (the CLI's store, bd serve's
+	// store provider, library callers of New/NewFromConfig*) reaches New, so
+	// the knob holds here regardless of how cfg was built.
+	applyDialTimeout(cfg)
 }
 
 // New creates a new Dolt storage backend.
@@ -1774,7 +1830,8 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// isn't currently connectable must not block operations when the server is
 	// reachable over TCP. Normalizing here means the fail-fast dial below and
 	// the DSN built in openServerConnection agree on the transport.
-	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
+	dialTimeout := dialTimeoutFor(cfg)
+	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, dialTimeout)
 
 	// Fail-fast connectivity check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
@@ -1784,10 +1841,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	var dialErr error
 	if cfg.ServerSocket != "" {
 		addr = cfg.ServerSocket
-		conn, dialErr = net.DialTimeout("unix", cfg.ServerSocket, 500*time.Millisecond)
+		conn, dialErr = dialServerFailFast("unix", cfg.ServerSocket, dialTimeout)
 	} else {
 		addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
-		conn, dialErr = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		conn, dialErr = dialServerFailFast("tcp", addr, dialTimeout)
 	}
 	if dialErr != nil {
 		// Auto-start: if enabled and connecting locally via TCP, start a server.
@@ -1893,7 +1950,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				breaker = maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
 			}
 			// Retry connection with longer timeout (server just started)
-			conn, dialErr = net.DialTimeout("tcp", addr, 2*time.Second)
+			conn, dialErr = net.DialTimeout("tcp", addr, max(2*time.Second, dialTimeout))
 			if dialErr != nil {
 				// Release auto-start ref on connection failure
 				if autoStartedDir != "" {
