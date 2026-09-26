@@ -98,11 +98,15 @@ var YamlOnlyKeys = map[string]bool{
 	// because that data is pushed to remotes, triggering secret-scanning
 	// blocks on GitHub. Store them in local config.yaml instead.
 	"github.token":               true,
+	"github.client_id":           true,
+	"github.client_secret":       true,
+	"gitlab.token":               true,
+	"gitlab.client_id":           true,
+	"gitlab.client_secret":       true,
 	"linear.api_key":             true,
 	"linear.oauth_client_id":     true,
 	"linear.oauth_client_secret": true,
 	"jira.api_token":             true,
-	"gitlab.token":               true,
 	"ado.pat":                    true,
 }
 

@@ -1,6 +1,6 @@
 ---
 title: "bd mail"
-description: "Delegates mail operations to an external mail provider."
+description: "Delegate to mail provider (e.g., gt mail)"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

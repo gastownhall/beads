@@ -1,6 +1,6 @@
 ---
 title: "bd children"
-description: "List all beads that are children of the specified parent bead."
+description: "List child beads of a parent"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

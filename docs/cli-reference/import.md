@@ -1,6 +1,6 @@
 ---
 title: "bd import"
-description: "Import issues from a JSONL file (newline-delimited JSON) into the database."
+description: "Import issues from a JSONL file or stdin into the database"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -10,7 +10,9 @@ Generated from `bd help --doc import`.
 Import issues from a JSONL file (newline-delimited JSON) into the database.
 
 If no file is specified, imports from the configured import.path under .beads/
-(default: issues.jsonl). Use "-" to read from stdin. This is the incremental counterpart to
+(default: issues.jsonl). Use "-" to read from stdin; redirecting stdin without
+"-" or a file argument is an error, so a typo'd 'bd import &lt; file' cannot
+silently import the default file instead. This is the incremental counterpart to
 'bd export': new issues are created and existing issues are updated (upsert
 semantics).
 
@@ -58,6 +60,16 @@ with a field-level summary (updated_issues), so local state changed by
 an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
+
+Large imports are written in bounded transactions (a few hundred issues
+each, with a short pause between commits) with progress on stderr, so
+concurrent bd commands keep working while the import runs instead of
+stalling on one batch-wide write lock. Rows land in dependency order
+with their blocking edges in the same transaction, so a half-finished
+`import never shows a blocked issue as ready. If an import fails partway,`
+the already-committed chunks are durable and the command exits nonzero;
+re-running the same import is safe and converges (rows upsert,
+labels/comments/dependencies deduplicate).
 
 EXAMPLES:
   bd import                        # Import from configured import.path

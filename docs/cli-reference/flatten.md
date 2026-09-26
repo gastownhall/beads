@@ -1,6 +1,6 @@
 ---
 title: "bd flatten"
-description: "Nuclear option: squash ALL Dolt commit history into a single commit."
+description: "Squash all Dolt history into a single commit"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -14,7 +14,15 @@ This uses the Tim Sehn recipe:
   2. Soft-reset to the initial commit (preserving all data)
   3. Commit everything as a single snapshot
   4. Swap main branch to the new flattened branch
-  5. Run Dolt GC to reclaim space from old history
+  5. Prune remote-tracking refs (they would keep the old history alive;
+     the next push or fetch re-creates them at the new tip)
+  6. Run a full Dolt GC (all storage generations) to reclaim the old history
+
+The GC pass is a full collection: Dolt storage is generational, and a default
+GC never revisits data an earlier GC moved to the old generation. On any store
+that has been GC'd before (bd gc, or a previous flatten or compact), only a
+full collection reclaims the squashed history. A full GC can take minutes on
+multi-gigabyte stores.
 
 This is irreversible — all commit history is lost. The resulting database
 has exactly one commit containing all current data.

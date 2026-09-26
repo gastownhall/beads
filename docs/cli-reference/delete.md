@@ -1,6 +1,6 @@
 ---
 title: "bd delete"
-description: "Delete one or more issues and clean up all references to them."
+description: "Delete one or more issues and clean up references"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -25,7 +25,7 @@ Delete from file (one ID per line):
 Preview before deleting:
   bd delete --from-file deletions.txt --dry-run
 
-DEPENDENCY HANDLING:
+DEPENDENCY HANDLING (the same on a local database and against a team server):
 Default: Fails if any issue has dependents not in deletion set
   bd delete bd-1 bd-2
 
