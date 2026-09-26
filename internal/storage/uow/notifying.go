@@ -1387,3 +1387,15 @@ func (u *recordingCommentUC) AddCommentToWisp(ctx context.Context, wispID, autho
 	}
 	return comment, err
 }
+
+func (u *recordingCommentUC) DeleteComment(ctx context.Context, issueID, commentID, actor string, useWisp bool) (*types.Comment, error) {
+	comment, err := u.CommentUseCase.DeleteComment(ctx, issueID, commentID, actor, useWisp)
+	if err == nil {
+		if useWisp {
+			u.rec.record(opUpdate, u.snap.wisp(ctx, issueID))
+		} else {
+			u.rec.record(opUpdate, u.snap.issue(ctx, issueID))
+		}
+	}
+	return comment, err
+}

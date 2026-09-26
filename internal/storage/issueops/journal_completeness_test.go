@@ -144,6 +144,7 @@ var mutationEntryPoints = []string{
 // create/update/close/delete/dep/label op vocabulary. The staleness check fails
 // if any stops being flagged, so an exemption cannot rot.
 var beadDMLExemptions = map[string]string{
+	"TouchIssueActivityInTx": "activity timestamp helper is called inside comment mutations, which emit their own structured journal entry",
 	// (1) Child counters are derived CLI acceleration state. In contrast,
 	// is_blocked is part of the exported bead snapshot and its recompute helpers
 	// structurally journal every value that actually changes.
