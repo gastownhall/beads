@@ -760,11 +760,27 @@ func isValidRemoteURL(rawURL string) bool {
 
 // findBeadsRepoRoot walks up from the given path to find the repo root (containing .beads)
 func findBeadsRepoRoot(startPath string) string {
+	// When inside a git repository, never search above its own top-level
+	// directory. A .beads dir found above that boundary belongs to some
+	// unrelated ancestor (e.g. a leaked /tmp/.beads from a stray bd
+	// invocation with HOME=/tmp) rather than to this repo, and must not
+	// shadow the real answer the worktree-fallback branch below would
+	// otherwise find (be-9x3y2).
+	var repoRoot string
+	if isGitRepo() {
+		repoRoot = git.GetRepoRoot()
+	}
+
 	path := startPath
 	for {
 		beadsDir := filepath.Join(path, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return path
+		}
+		if repoRoot != "" {
+			if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved == repoRoot {
+				break
+			}
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
