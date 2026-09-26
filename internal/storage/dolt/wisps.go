@@ -302,6 +302,12 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 // (be-zdqyl: the migration adding those FKs was never promoted out of
 // migrations/ignored/), so the delete paths below must not rely on the
 // database to do it for them.
+// wisp_dependencies belongs to the same declared set
+// (issueops.DeleteCascadeTables) but is deliberately absent here: its rows
+// are journaled as dependency removals, so both delete paths clean it in
+// issueops alongside the dependencies table — via
+// issueops.DeleteWispFromDependenciesInTx / DeleteWispsFromDependenciesInTx,
+// immediately before deleteWispAuxRowsInTx runs.
 var wispAuxCascadeTables = []struct{ table, column string }{
 	{"wisp_labels", "issue_id"},
 	{"wisp_events", "issue_id"},
@@ -420,7 +426,7 @@ func (s *DoltStore) deleteWispBatch(ctx context.Context, ids []string) (int, err
 }
 
 // deleteWispBatchTx deletes one batch of wisps inside its own transaction.
-// Keeping each transaction to ≤200 wisps (6 DELETE statements) ensures it
+// Keeping each transaction to ≤200 wisps (8 DELETE statements) ensures it
 // completes well within Dolt's 10 s write timeout.
 func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -101,6 +101,28 @@ func dropWispAuxFKs(t *testing.T, ctx context.Context, db *sql.DB) {
 	}
 }
 
+// dropWispDependencyFKs removes the wisp_dependencies FK constraints so the
+// test store's schema matches the live hq store, whose wisp_dependencies
+// table carries only the ck_wisp_dep_one_target CHECK constraint and no FKs.
+// A fresh bootstrap gets all three from migration 0021, which creates them
+// inline in CREATE TABLE; 0058 re-adds two of them when healing a legacy
+// split store, and 0047's ADD CONSTRAINT statements are gated on that same
+// legacy path, so neither runs here. Without this drop, the fresh store's
+// ON DELETE CASCADE would clean wisp_dependencies for free and the test
+// could not fail against a delete path that leaks.
+func dropWispDependencyFKs(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	for _, stmt := range []string{
+		"ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue",
+		"ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_wisp_target",
+		"ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("drop wisp_dependencies FK (%s): %v", stmt, err)
+		}
+	}
+}
+
 // wispAuxTables lists the four wisp auxiliary tables a wisp delete must
 // cascade into. This mirrors issueops.DeleteCascadeTables(true), which
 // already documents this exact set as belonging to a wisp delete — separate
@@ -253,4 +275,94 @@ func TestWispDeleteCascade_RepeatedCyclesLeaveNoOrphans(t *testing.T) {
 
 		assertWispAuxTablesTotalZero(t, ctx, store.db, i)
 	}
+}
+
+// TestWispDeleteCascade_CleansUpWispDependencies is the regression test for
+// the hq dangling_parent_ref reaper anomaly: DeleteWispFromDependenciesInTx
+// and DeleteWispsFromDependenciesInTx cleaned only the dependencies table,
+// never wisp_dependencies — even though DeleteCascadeTables(true) declares
+// wisp_dependencies as part of the wisp deletion set. On stores without the
+// migration-0047 FKs (like live hq), every wisp deletion orphaned that
+// wisp's wisp_dependencies rows on both sides (issue_id and
+// depends_on_wisp_id). The package's existing regression tests for this
+// behavior (TestDeleteWispBatch_CleansUpDependencies,
+// TestDeleteWispBatch_BothDirectionsCleared in wisp_gc_test.go) require a
+// Docker-testcontainer Dolt server; this covers the same contract — plus
+// the single-delete path they omit — on the standalone-server harness.
+func TestWispDeleteCascade_CleansUpWispDependencies(t *testing.T) {
+	store := setupWispCascadeStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	dropWispDependencyFKs(t, ctx, store.db)
+
+	t.Run("single delete clears both directions", func(t *testing.T) {
+		// mid appears as both child (issue_id, via mid->parent) and parent
+		// (depends_on_wisp_id, via child->mid) in wisp_dependencies.
+		parent := createTestWisp(t, ctx, store, "wisp-dep parent")
+		mid := createTestWisp(t, ctx, store, "wisp-dep mid")
+		child := createTestWisp(t, ctx, store, "wisp-dep child")
+		mustAddWispDep(t, ctx, store, mid.ID, parent.ID)
+		mustAddWispDep(t, ctx, store, child.ID, mid.ID)
+
+		// An edge between two wisps that are never deleted here. Neither of
+		// its endpoints is mid, so it must still be there afterwards: without
+		// it the subtest only asserts that rows disappeared, which an
+		// over-broad DELETE (missing or wrong WHERE) satisfies just as well.
+		bystanderA := createTestWisp(t, ctx, store, "wisp-dep bystander a")
+		bystanderB := createTestWisp(t, ctx, store, "wisp-dep bystander b")
+		mustAddWispDep(t, ctx, store, bystanderA.ID, bystanderB.ID)
+
+		if err := store.deleteWisp(ctx, mid.ID); err != nil {
+			t.Fatalf("deleteWisp: %v", err)
+		}
+
+		if n := countWispDependencyRows(t, ctx, store.db, mid.ID); n != 0 {
+			t.Errorf("expected 0 wisp_dependencies rows referencing deleted wisp %s, got %d", mid.ID, n)
+		}
+		if n := countWispDependencyRows(t, ctx, store.db, bystanderA.ID, bystanderB.ID); n != 1 {
+			t.Errorf("expected the bystander edge to survive deleteWisp(%s), got %d rows", mid.ID, n)
+		}
+
+		// parent and child are left holding no edges once mid's rows go, so
+		// deleting them must succeed and must still not touch the bystander.
+		if err := store.deleteWisp(ctx, parent.ID); err != nil {
+			t.Fatalf("deleteWisp parent: %v", err)
+		}
+		if err := store.deleteWisp(ctx, child.ID); err != nil {
+			t.Fatalf("deleteWisp child: %v", err)
+		}
+		if n := countWispDependencyRows(t, ctx, store.db, bystanderA.ID, bystanderB.ID); n != 1 {
+			t.Errorf("expected the bystander edge to survive the parent/child deletes, got %d rows", n)
+		}
+	})
+
+	t.Run("batch delete clears both directions", func(t *testing.T) {
+		root := createTestWisp(t, ctx, store, "wisp-dep batch root")
+		stepA := createTestWisp(t, ctx, store, "wisp-dep batch step-a")
+		stepB := createTestWisp(t, ctx, store, "wisp-dep batch step-b")
+		mustAddWispDep(t, ctx, store, stepA.ID, root.ID)
+		mustAddWispDep(t, ctx, store, stepB.ID, stepA.ID)
+
+		// Same over-deletion guard as the single-delete subtest, against the
+		// IN (...) form: both endpoints are outside the deleted batch.
+		outsideA := createTestWisp(t, ctx, store, "wisp-dep outside-batch a")
+		outsideB := createTestWisp(t, ctx, store, "wisp-dep outside-batch b")
+		mustAddWispDep(t, ctx, store, outsideA.ID, outsideB.ID)
+
+		deleted, err := store.deleteWispBatch(ctx, []string{root.ID, stepA.ID, stepB.ID})
+		if err != nil {
+			t.Fatalf("deleteWispBatch: %v", err)
+		}
+		if deleted != 3 {
+			t.Fatalf("expected 3 deleted, got %d", deleted)
+		}
+
+		if n := countWispDependencyRows(t, ctx, store.db, root.ID, stepA.ID, stepB.ID); n != 0 {
+			t.Errorf("expected 0 wisp_dependencies rows after batch delete, got %d", n)
+		}
+		if n := countWispDependencyRows(t, ctx, store.db, outsideA.ID, outsideB.ID); n != 1 {
+			t.Errorf("expected the out-of-batch edge to survive deleteWispBatch, got %d rows", n)
+		}
+	})
 }
