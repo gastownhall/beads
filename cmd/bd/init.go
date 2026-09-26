@@ -372,6 +372,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		reinitLocal, _ := cmd.Flags().GetBool("reinit-local")
 		initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
 		discardRemote, _ := cmd.Flags().GetBool("discard-remote")
+		recreateMissing, _ := cmd.Flags().GetBool("recreate-missing")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		roleFlag, _ := cmd.Flags().GetString("role")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
@@ -798,6 +799,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
 		// engdocs/adr/0002-init-safety-invariants.md).
+		initAllowRecreateMissing = recreateMissing
+		if reinitLocal {
+			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
+			// checkExistingBeadsData entirely, and the typed confirmation below
+			// keys on countExistingIssues, which returns 0/err in exactly the
+			// missing-database case — so `bd init --force` against a lost
+			// server-side database used to create a fresh empty one with no
+			// prompt and no destroy token. Those flags authorize destroying a
+			// database that exists; only --recreate-missing authorizes creating
+			// one where the configured database has gone missing.
+			if err := guardMissingServerDatabase(prefix); err != nil {
+				return fmt.Errorf("%v", err)
+			}
+		}
 		if !reinitLocal {
 			if err := checkExistingBeadsData(prefix); err != nil {
 				// --init-if-missing makes init idempotent, but ONLY for the
@@ -2317,6 +2332,7 @@ func init() {
 	initCmd.Flags().Bool("force", false, "Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').")
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
+	initCmd.Flags().Bool("recreate-missing", false, "Explicitly authorize creating a fresh, empty database when this project's configured server-mode database is missing or unreachable. Opt-in per invocation only; never implied by --force, config, or env (see 'bd help init-safety').")
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement")
 	initCmd.Flags().Bool("init-if-missing", false, "If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
@@ -2555,40 +2571,122 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 			return nil
 		}
 
-		// Check both the local directory AND server mode config.
-		// In server mode the local dolt/ directory may be empty — the database
-		// lives on the Dolt sql-server. Checking only the directory would miss
-		// server-mode installations.
+		// Check both the local database AND server mode config.
+		// In server mode the local dolt/ directory may hold no database for
+		// this project — the data lives on the Dolt sql-server. Checking only
+		// the directory would miss server-mode installations.
 		doltPath := doltserver.ResolveDoltDir(beadsDir)
+		dbName := cfg.GetDoltDatabase()
+
+		// Probe THIS PROJECT's database directory, not the Dolt data directory
+		// that merely holds it: a data dir contains one subdirectory per
+		// database, each with its own .dolt.
+		//
+		// Statting the data dir instead made the FR-010 branch below
+		// unreachable on every initialized workspace, because the data dir
+		// always exists there — shared-server mode MkdirAlls the
+		// machine-global one in SharedDoltDir(), per-project mode MkdirAlls it
+		// in ensureDoltInit. So the branch never ran, and both
+		// --recreate-missing opt-ins inside it were dead code: the escape
+		// hatch named by the flag help, `bd help init-safety`,
+		// docs/recovery/init-safety.md and the guard's own refusal text all
+		// pointed at a command that could not reach its own opt-in, leaving
+		// the operator circling between two refusals. Same probe, and the same
+		// reason, as guardMissingServerDatabaseAt. Pinned by
+		// TestInitGuard_ExistingProjectMissingServerDB_DataDirPresent_Refuses
+		// and TestInitGuard_RecreateMissing_ReachesOptIn_DataDirPresent.
+		//
+		// The data-dir stat does not go away, it stops being the gate: making
+		// the branch reachable also exposes states it used to shadow, and
+		// permitting those would be a new fail-open policy rather than a fix.
+		// The permit condition below keeps it to what the old probe already
+		// allowed, plus the explicit opt-in. Pinned by
+		// TestInitGuard_NoProjectID_DataDirPresent_StillBlocks.
+		localDatabaseExists := false
+		if info, err := os.Stat(filepath.Join(doltPath, dbName, ".dolt")); err == nil && info.IsDir() {
+			localDatabaseExists = true
+		}
+		// The data directory is still read, but only to keep this fix from
+		// widening what fails OPEN. See the permit condition below.
 		doltDirExists := false
 		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
 			doltDirExists = true
 		}
-		if doltDirExists || cfg.IsDoltServerMode() {
+		if localDatabaseExists || cfg.IsDoltServerMode() {
 			// For server mode, distinguish "DB exists" from "DB missing" (FR-010).
-			if cfg.IsDoltServerMode() && !doltDirExists {
+			if cfg.IsDoltServerMode() && !localDatabaseExists {
 				host := cfg.GetDoltServerHost()
 				port := doltserver.DefaultConfig(beadsDir).Port
-				dbName := cfg.GetDoltDatabase()
 				password := cfg.GetDoltServerPassword()
 				user := cfg.GetDoltServerUser()
 
+				// localDatabaseExists==false is ambiguous in server mode: it's the
+				// normal state both for a genuine fresh clone (GH#2433) and for an
+				// existing project whose server-side database was lost or is
+				// unreachable (be-5up5: 2026-08-11 fleet-wide data loss). project_id
+				// is written by a real prior `bd init`, so a non-empty value here is
+				// taken as the latter — recovery, not a fresh clone.
+				//
+				// Known limit: project_id was minted by GH#2372, so a workspace
+				// initialized before that carries none and is indistinguishable
+				// here from a fresh clone. Such workspaces FAIL OPEN — init will
+				// still create the database. Accepted deliberately: failing closed
+				// would block legitimate first inits on every pre-GH#2372 clone,
+				// and this guard's job is to stop a silent recreate where we can
+				// PROVE prior initialization, not to guess where we cannot.
+				//
+				// SETTLED by ADR-0004 (engdocs/adr/0004-missing-database-guard-signal.md).
+				// project_id is a weak proof of prior LOCAL init: .beads/metadata.json
+				// is git-tracked by default (see defaultGitignoreContent in
+				// cmd/bd/doctor/gitignore.go, which says so in as many words), so a
+				// fresh clone inherits one and is refused here with a recovery
+				// message. That is ACCEPTED, not a gap awaiting a fix: absence of
+				// local state cannot distinguish "never initialized here" from
+				// "initialized here, storage since lost", and the second is the
+				// shape of the 2026-08-11 loss. The failure direction is the safe
+				// one — it never recreates a database silently — and
+				// --recreate-missing is the permanent, documented resolution path,
+				// reachable since the probe fix above. Read the ADR before
+				// reopening this; the data-directory and local-marker alternatives
+				// are recorded there as rejected, with reasons.
+				existingProject := cfg.ProjectID != ""
+
 				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS())
 				if result.Reachable && !result.Exists && result.Err == nil {
-					// Server is up but DB doesn't exist. Since we also know
-					// doltDirExists==false, this is a fresh clone — there's no
-					// local database to protect. Allow init to proceed so the
-					// user can bootstrap (e.g. via --from-jsonl). (GH#2433)
-					return nil
+					// Server is up but DB doesn't exist.
+					if existingProject && !initAllowRecreateMissing {
+						return initGuardMissingServerDBMessage(dbName, host, port, prefix)
+					}
+					// Fresh clone (GH#2433) or explicit --recreate-missing opt-in —
+					// there's no local database to protect. Allow init to proceed so
+					// the user can bootstrap (e.g. via --from-jsonl).
+					if initAllowRecreateMissing || !doltDirExists {
+						return nil
+					}
+					// Reached only with no project_id AND a local Dolt data
+					// directory present. The old data-dir probe blocked this
+					// state by never arriving here at all; it keeps being
+					// blocked, by the same message as before. Permitting it
+					// would be a new fail-open policy on workspaces that
+					// predate project_id (GH#2372) — exactly the population
+					// this guard exists for — and choosing the replacement
+					// signal is be-5pjhd's call, not this fix's.
 				}
 				if result.Reachable && result.Exists {
 					// Server up and DB exists — fall through to "already initialized" error.
 				} else {
-					// Server unreachable or error during check: this is a fresh clone
-					// with committed metadata.json but no local dolt/ directory.
-					// Allow init to proceed so the user can bootstrap the database
-					// (e.g. via --from-jsonl). (GH#2433)
-					return nil
+					// Server unreachable or error during check.
+					if existingProject && !initAllowRecreateMissing {
+						return initGuardMissingServerDBMessage(dbName, host, port, prefix)
+					}
+					// Fresh clone with committed metadata.json but no local dolt/
+					// directory, or explicit --recreate-missing opt-in — allow init
+					// to proceed so the user can bootstrap the database (e.g. via
+					// --from-jsonl). Same narrowing as the reachable-server branch
+					// above, for the same reason.
+					if initAllowRecreateMissing || !doltDirExists {
+						return nil
+					}
 				}
 			}
 
@@ -2946,6 +3044,125 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 	// machine, so it counts as explicit too — the seeding block above already
 	// treats it like --server.
 	return config.GetYamlConfig("dolt.mode") != ""
+}
+
+// guardMissingServerDatabaseAt is the be-5up5 refusal, narrowed to the single
+// question --reinit-local/--force must NOT be able to answer for you: is this
+// an already-initialized server-mode project whose configured database is
+// missing or unconfirmable?
+//
+// It exists because those flags bypass checkExistingBeadsData entirely (see the
+// !reinitLocal gate in the init command), and the reinit path's own typed
+// confirmation keys on countExistingIssues — which returns 0 or an error in
+// exactly the case this guard is about, so no prompt fires either. That left
+// `bd init --force` against a lost database creating a fresh empty one with no
+// prompt and no destroy token: the precise reflex of the 2026-08-11 fleet-wide
+// data loss, reached by the flag a panicking operator is most likely to try.
+//
+// --reinit-local/--force authorize destroying a database that EXISTS. They do
+// not authorize inventing an empty one where the configured database has gone
+// missing. Only the explicit, per-invocation --recreate-missing does that,
+// which is what keeps that flag's "never implied by --force" help text true.
+//
+// Deliberately narrow: it answers only the missing-database question and
+// returns nil for every other state, so it never resurrects the
+// "already initialized" refusal that --reinit-local is legitimately meant to
+// bypass.
+func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
+	if initAllowRecreateMissing {
+		return nil
+	}
+	if beadsDir == "" {
+		return nil
+	}
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	cfg, cfgErr := configfile.LoadForDiscovery(beadsDir)
+	if cfgErr != nil || cfg == nil {
+		// Unreadable or absent metadata is the caller's problem, not this
+		// guard's: without it we cannot prove the workspace was ever
+		// initialized, and this guard only ever fires on proof that it was.
+		return nil
+	}
+	if cfg.GetBackend() != configfile.BackendDolt || !cfg.IsDoltServerMode() {
+		return nil
+	}
+	host := cfg.GetDoltServerHost()
+	port := doltserver.DefaultConfig(beadsDir).Port
+	dbName := cfg.GetDoltDatabase()
+	doltPath := doltserver.ResolveDoltDir(beadsDir)
+
+	// TIER 1 (ADR-0004, engdocs/adr/0004-missing-database-guard-signal.md).
+	// Local data means data belonging to THIS project, which is what
+	// --reinit-local exists to override. Test for this project's own database
+	// directory, not the data directory that merely holds it: a Dolt data dir
+	// contains one subdirectory per database, each with its own .dolt.
+	//
+	// Statting the data dir itself made this guard a no-op in shared-server
+	// mode, where ResolveDoltDir returns the machine-global
+	// ~/.beads/shared-server/dolt and SharedDoltDir() MkdirAlls it — so the
+	// stat always succeeded and checkDatabaseOnServer below was never reached.
+	// Shared-server is the topology of the 2026-08-11 data loss, so that was
+	// the primary case going unguarded. Pinned by
+	// TestInitGuard_SharedServerMode_MissingServerDB_Refuses.
+	//
+	// This probe runs BEFORE the project_id check below, and unconditionally.
+	// It used to run after an early `return nil` on empty project_id, which
+	// made this guard — the safety net for --reinit-local/--force — weaker
+	// than the plain-`bd init` guard it backstops: a pre-GH#2372 workspace
+	// (no project_id) whose local database was lost was protected under
+	// `bd init` and waved straight through under --force.
+	if info, err := os.Stat(filepath.Join(doltPath, dbName, ".dolt")); err == nil && info.IsDir() {
+		return nil
+	}
+
+	// TIER 2 (ADR-0004). No local database for this project. project_id is
+	// written by a real prior `bd init`, so a non-empty value is what
+	// separates recovery from a genuine fresh clone. It is imperfect —
+	// .beads/metadata.json is git-tracked by default, so a clone inherits one
+	// it never earned — and that is accepted deliberately: absence of local
+	// state cannot distinguish "never initialized here" from "initialized
+	// here, storage since lost", and the second is the 2026-08-11 shape.
+	// --recreate-missing is the resolution path for both, and it returned nil
+	// at the top of this function.
+	if cfg.ProjectID == "" {
+		// Same coarse-directory permit condition checkExistingBeadsDataAt
+		// applies, so the two guards agree: allow only when NOTHING local
+		// exists. A data dir with no database in it still says this
+		// workspace touched local Dolt storage.
+		//
+		// Accepted asymmetry (ADR-0004): in owned mode doltPath is
+		// per-project and this is a meaningful second signal. In
+		// same-machine shared-server mode it is the machine-global
+		// ~/.beads/shared-server/dolt, true once ANY project has used the
+		// shared server, so this cell is more conservative there. That fails
+		// toward refuse, is resolved the same documented way, and affects a
+		// population that only shrinks — every successful init mints a
+		// project_id. Do not re-litigate it without reading the ADR.
+		if info, err := os.Stat(doltPath); err != nil || !info.IsDir() {
+			return nil
+		}
+	}
+
+	result := checkDatabaseOnServer(host, port, cfg.GetDoltServerUser(), cfg.GetDoltServerPassword(), dbName, cfg.GetDoltServerTLS())
+	if result.Reachable && result.Exists && result.Err == nil {
+		// The database is there. Whatever happens next is the ordinary
+		// reinit path's business, not this guard's.
+		return nil
+	}
+	return initGuardMissingServerDBMessage(dbName, host, port, prefix)
+}
+
+// guardMissingServerDatabase resolves the init target the same way
+// checkExistingBeadsData does, then applies guardMissingServerDatabaseAt.
+func guardMissingServerDatabase(prefix string) error {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return nil
+	}
+	return guardMissingServerDatabaseAt(beadsDir, prefix)
 }
 
 func checkExistingBeadsData(prefix string) error {
