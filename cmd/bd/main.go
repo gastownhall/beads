@@ -1100,7 +1100,13 @@ var rootCmd = &cobra.Command{
 				jsonOutput = true
 			}
 		}
-		// If flag wasn't explicitly set, use viper value
+		// If flag wasn't explicitly set, use viper value.
+		//
+		// SHADOWING HAZARD (GH#6278): this reads the ROOT persistent --format
+		// only, so a subcommand that registers its own local --format shadows
+		// it here and still gets `json: true` promoted over the format it was
+		// asked for. `bd list` compensates in gatherListInput; any new local
+		// --format registration needs the same treatment or this fires again.
 		if !commandJSONFlagChanged(cmd) && !cmd.Root().PersistentFlags().Changed("format") {
 			jsonOutput = config.GetBool("json")
 		} else {

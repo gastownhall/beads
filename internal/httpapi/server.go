@@ -80,9 +80,12 @@ const (
 // pinned connection), and any semaphore-exempt handler that later touches the
 // database all escape it.
 var servePoolLimits = uow.PoolLimits{
-	MaxOpenConns:    maxInflight + 4,
-	MaxIdleConns:    maxInflight,
-	ConnMaxIdleTime: 5 * time.Minute,
+	MaxOpenConns: maxInflight + 4,
+	MaxIdleConns: maxInflight,
+	// Keep this below Dolt's supported 30s wait_timeout configuration. A
+	// longer server-specific override defeats the storage layer's stale-pool
+	// protection and lets the next request receive a server-reaped connection.
+	ConnMaxIdleTime: 20 * time.Second,
 	ConnMaxLifetime: time.Hour,
 }
 

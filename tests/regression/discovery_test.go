@@ -2784,8 +2784,18 @@ func TestDiscovery_BlockedNonexistentParentSilentEmpty(t *testing.T) {
 }
 
 // TestDiscovery_LabelRemoveNonexistentSilentSuccess verifies that
-// bd label remove <id> <nonexistent-label> reports success.
-// BUG-65: Same pattern as BUG-42 (dep rm nonexistent says "Removed").
+// bd label remove <id> <nonexistent-label> does not claim a removal.
+//
+// FIXED (PR #6742, GH#5988): the command used to print "✓ Removed label"
+// for a label the issue never had. It now reports the no-op ("Label 'x' was
+// not on <id>") and still exits 0, since a no-op edit is not an error. This
+// test's assertions describe the fixed behavior and stay as a discovery-suite
+// regression check — this file is `//go:build regression && discovery` and no
+// CI lane passes the discovery tag, so the CI lock for the fix is
+// TestEmbeddedLabel/TestProxiedServerLabel in cmd/bd, not this test. Same
+// class as BUG-42 (dep rm nonexistent says "Removed").
+//
+// Classification: BUG (fixed) — false positive confirmation.
 func TestDiscovery_LabelRemoveNonexistentSilentSuccess(t *testing.T) {
 	w := newCandidateWorkspace(t)
 
@@ -2799,23 +2809,35 @@ func TestDiscovery_LabelRemoveNonexistentSilentSuccess(t *testing.T) {
 		t.Fatalf("expected 1 label, got %d", len(labels))
 	}
 
-	// Bug: removing a nonexistent label should error, not report success
-	_, err := w.tryRun("label", "remove", a, "never-existed-label")
-	if err == nil {
-		// Command succeeded — verify the real label is still there
-		data = parseJSON(t, w.run("show", a, "--json"))
-		labels, _ = data[0]["labels"].([]any)
-		if len(labels) == 1 {
-			t.Errorf("DISCOVERY: bd label remove %s 'never-existed-label' reported success — "+
-				"label didn't exist. Same pattern as BUG-42 (dep rm false positive). "+
-				"File: cmd/bd/label.go (no existence check before remove).", a)
-		}
+	out, err := w.tryRun("label", "remove", a, "never-existed-label")
+	if err != nil {
+		t.Fatalf("bd label remove of an absent label should still exit 0: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Removed") {
+		t.Errorf("DISCOVERY: bd label remove %s 'never-existed-label' claimed a removal — "+
+			"the label was never on the issue. File: cmd/bd/label.go.\n%s", a, out)
+	}
+	if !strings.Contains(out, "was not on") {
+		t.Errorf("bd label remove of an absent label should say so, got:\n%s", out)
+	}
+	data = parseJSON(t, w.run("show", a, "--json"))
+	labels, _ = data[0]["labels"].([]any)
+	if len(labels) != 1 {
+		t.Errorf("the real label should be untouched, got %d labels", len(labels))
 	}
 }
 
 // TestDiscovery_LabelAddDuplicateReportsAdded verifies that adding an
-// already-existing label reports "Added" even though it's a no-op.
-// BUG-66: label.go doesn't check if label already exists before adding.
+// already-existing label does not report "Added".
+//
+// FIXED (PR #6742, GH#5988): the command used to print "✓ Added label" for a
+// label the issue already had. The storage layer was always idempotent (no
+// duplicate row); the message now says "<id> already has label 'x'" and the
+// command still exits 0. Like the test above this stays as a discovery-suite
+// regression check and is not a CI gate; the CI lock is
+// TestEmbeddedLabel/TestProxiedServerLabel in cmd/bd.
+//
+// Classification: BUG (fixed) — misleading success message.
 func TestDiscovery_LabelAddDuplicateReportsAdded(t *testing.T) {
 	w := newCandidateWorkspace(t)
 
@@ -2829,21 +2851,21 @@ func TestDiscovery_LabelAddDuplicateReportsAdded(t *testing.T) {
 		t.Fatalf("expected 1 label, got %d", len(labels))
 	}
 
-	// Bug: adding the same label again should either warn or be rejected
-	_, err := w.tryRun("label", "add", a, "my-label")
-	if err == nil {
-		// Succeeded — check if the label count changed (duplicate created?)
-		data = parseJSON(t, w.run("show", a, "--json"))
-		labels, _ = data[0]["labels"].([]any)
-		if len(labels) == 1 {
-			// Idempotent (correct at storage level) but misleading "Added" message
-			t.Errorf("DISCOVERY: bd label add %s 'my-label' reported 'Added' when label already existed — "+
-				"idempotent no-op but misleading success message. Should warn 'label already exists'. "+
-				"File: cmd/bd/label.go:99-102.", a)
-		} else if len(labels) > 1 {
-			t.Errorf("DISCOVERY: bd label add %s 'my-label' created DUPLICATE label — "+
-				"now has %d copies. File: cmd/bd/label.go.", a, len(labels))
-		}
+	out, err := w.tryRun("label", "add", a, "my-label")
+	if err != nil {
+		t.Fatalf("bd label add of a present label should still exit 0: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Added") {
+		t.Errorf("DISCOVERY: bd label add %s 'my-label' reported 'Added' when the label already existed. "+
+			"File: cmd/bd/label.go.\n%s", a, out)
+	}
+	if !strings.Contains(out, "already has label") {
+		t.Errorf("bd label add of a present label should say so, got:\n%s", out)
+	}
+	data = parseJSON(t, w.run("show", a, "--json"))
+	labels, _ = data[0]["labels"].([]any)
+	if len(labels) != 1 {
+		t.Errorf("bd label add %s 'my-label' created a DUPLICATE label — now has %d copies", a, len(labels))
 	}
 }
 

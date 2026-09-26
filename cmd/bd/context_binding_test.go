@@ -51,9 +51,23 @@ func restoreRootFlagState(t *testing.T, state map[string]flagSnapshot) {
 	}
 }
 
+// clearActorEnv blanks the two environment variables that outrank a
+// config.yaml actor, so a test asserting the config value is rebound does not
+// depend on the developer's shell (GH#6560). BEADS_ACTOR outranks it
+// deliberately: resolveConfiguredActor checks the env first, which is the
+// GH#4645 fix. BD_ACTOR does too, because viper's BD-prefixed AutomaticEnv
+// reads it as the actor key ahead of the file. CI runners set neither, which is
+// why these tests only ever failed locally.
+func clearActorEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("BD_ACTOR", "")
+}
+
 func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	clearActorEnv(t)
 
 	callerDir := t.TempDir()
 	callerBeadsDir := filepath.Join(callerDir, ".beads")
@@ -134,6 +148,7 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 func TestPrepareSelectedCommandContext_DoesNotMergeCallerConfigForUnsetKeys(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	clearActorEnv(t)
 
 	root := t.TempDir()
 	callerDir := filepath.Join(root, "caller")

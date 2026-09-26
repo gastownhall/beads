@@ -27,45 +27,94 @@ func readyHydrationFor(filter types.WorkFilter) sqlbuild.CountsHydration {
 	return sqlbuild.CountsHydration{Lite: filter.Lite}
 }
 
-func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
-	wispDepsExist, err := optionalTableExistsInTx(ctx, tx, "wisp_dependencies")
+// GetReadyWorkWithCountsInTx returns the ready-work page for filter, hydrated
+// with counts. It is GetReadyWorkWithCountsAndTotalInTx without the total.
+func GetReadyWorkWithCountsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	items, _, err := getReadyWorkWithCountsInTx(ctx, tx, filter, false)
+	return items, err
+}
+
+// GetReadyWorkWithCountsAndTotalInTx returns the ready-work page for filter
+// together with the size of the whole ready set the page was cut from —
+// identical to CountReadyWorkInTx(filter), and so to
+// len(GetReadyWorkWithCountsInTx(filter with Limit=0)) — resolved inside the
+// SAME statements that select the page.
+//
+// It exists because `bd ready --limit N` used to answer its "Showing N of M"
+// with a second, separate pass (CountReadyWorkInTx in a new transaction,
+// behind a second defer-wake sweep) that re-ran every probe and predicate the
+// page had just run. Against a remote SQL server each statement is a
+// sequential round trip, so asking for ONE row took longer than asking for
+// all of them. Here the total rides the page's ID query as a window count
+// (COUNT(*) OVER ()), evaluated over the full predicate before LIMIT, so a
+// capped page costs no extra statement for its total. For an unbounded page
+// (Limit <= 0) the total is simply the page's length.
+//
+// The two families are summed and their overlap (an ID ready as both an issue
+// and a wisp, which the merge dedupes wisp-wins) subtracted, exactly as
+// CountReadyWorkInTx does; the overlap statement runs only when the probe saw
+// an ID present in both tables.
+func GetReadyWorkWithCountsAndTotalInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	return getReadyWorkWithCountsInTx(ctx, tx, filter, true)
+}
+
+func getReadyWorkWithCountsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wantTotal bool) ([]*types.IssueWithCounts, int, error) {
+	// A capped page needs the collision fact to size the merged set; an
+	// unbounded one is its own total.
+	sized := wantTotal && filter.Limit > 0
+	probe, err := probeReadyWorkInTx(ctx, tx, filter, sized)
 	if err != nil {
-		return nil, fmt.Errorf("get ready work with counts: wisp dependency probe: %w", err)
+		return nil, 0, fmt.Errorf("get ready work with counts: %w", err)
 	}
 
-	issuePreds, err := buildReadyWorkPredicates(ctx, tx, filter, IssuesFilterTables)
+	issuePreds, err := buildReadyWorkPredicatesFrom(filter, IssuesFilterTables, probe.inputs)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	out, err := runReadyCountsInTx(ctx, tx, IssuesFilterTables, filter.Limit, issuePreds, wispDepsExist, readyHydrationFor(filter))
+	out, issueTotal, err := runReadyCountsInTx(ctx, tx, IssuesFilterTables, filter.Limit, issuePreds, probe.wispDepsExist, readyHydrationFor(filter), sized)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	empty, probeErr := wispsTableEmptyOrMissingInTx(ctx, tx)
-	if probeErr != nil {
-		return nil, fmt.Errorf("get ready work with counts: wisp probe: %w", probeErr)
-	}
-	if empty {
-		return finishReadyWorkWithCounts(out, filter)
-	}
-	if !wispDepsExist {
-		return finishReadyWorkWithCounts(out, filter)
+	finish := func(items []*types.IssueWithCounts, total int) ([]*types.IssueWithCounts, int, error) {
+		if !sized {
+			// Unbounded: every ready row is on the page (the MaxRows cap
+			// refuses rather than truncates), so the page IS the set.
+			total = len(items)
+		}
+		items, err := finishReadyWorkWithCounts(items, filter)
+		if err != nil {
+			return nil, 0, err
+		}
+		return items, total, nil
 	}
 
-	wispPreds, err := buildReadyWorkPredicates(ctx, tx, filter, WispsFilterTables)
-	if err != nil {
-		return nil, err
+	if !probe.readsWisps() {
+		return finish(out, issueTotal)
 	}
-	wisps, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, readyHydrationFor(filter))
+
+	wispPreds, err := buildReadyWorkPredicatesFrom(filter, WispsFilterTables, probe.inputs)
+	if err != nil {
+		return nil, 0, err
+	}
+	wisps, wispTotal, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, readyHydrationFor(filter), sized)
 	if err != nil {
 		if missingOptionalWispTable(err) {
-			return finishReadyWorkWithCounts(out, filter)
+			return finish(out, issueTotal)
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	if len(wisps) == 0 {
-		return finishReadyWorkWithCounts(out, filter)
+		return finish(out, issueTotal)
+	}
+
+	total := issueTotal + wispTotal
+	if sized && probe.idCollision && issueTotal > 0 {
+		overlap, err := countReadyOverlapInTx(ctx, tx, issuePreds, wispPreds)
+		if err != nil {
+			return nil, 0, fmt.Errorf("get ready work with counts: overlap: %w", err)
+		}
+		total -= overlap
 	}
 
 	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
@@ -87,7 +136,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	}
 	kept = append(kept, wisps...)
 	sortIssuesWithCountsByPolicy(kept, filter.SortPolicy)
-	return finishReadyWorkWithCounts(kept, filter)
+	return finish(kept, total)
 }
 
 // finishReadyWorkWithCounts is the terminal hook every
@@ -144,6 +193,14 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 // For limit <= 0 (unbounded) there is no page to push down, so it runs the
 // predicate-form mega-query unchanged.
 //
+// withTotal (bounded pages only) also returns the number of rows the family's
+// ready predicate admits, as a window count over the same ID query:
+// COUNT(*) OVER () is evaluated over every row the WHERE admits, before ORDER
+// BY … LIMIT cut the page, so it is exactly `SELECT COUNT(*) … WHERE` — the
+// count CountReadyWorkInTx takes — at no extra statement. The ID query has no
+// DISTINCT, so the window counts rows and IDs alike. Otherwise the returned
+// total is len(result).
+//
 // Both callers pass readyHydrationFor(filter), which carries Lite and nothing
 // else: ready work always hydrates labels and cardinalities, because
 // types.WorkFilter carries neither opt-out — the projection that builds it
@@ -151,18 +208,28 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 // SkipLabels and SkipCounts are not carried onto the ReadyFlag arm.
 //
 //nolint:gosec // G201: whereSQL/orderBySQL/limitSQL are hardcoded fragments; user input rides ? placeholders.
-func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, limit int, preds *readyWorkPredicates, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
+func runReadyCountsInTx(ctx context.Context, tx DBTX, tables FilterTables, limit int, preds *readyWorkPredicates, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration, withTotal bool) ([]*types.IssueWithCounts, int, error) {
 	if limit <= 0 {
-		return runSearchQueryInTx(ctx, tx, tables, preds.whereSQL, preds.orderBySQL, preds.limitSQL, preds.args, includeWispReverseDeps, hyd)
+		out, err := runSearchQueryInTx(ctx, tx, tables, preds.whereSQL, preds.orderBySQL, preds.limitSQL, preds.args, includeWispReverseDeps, hyd)
+		return out, len(out), err
 	}
 
-	idQuery := fmt.Sprintf("SELECT id FROM %s %s %s %s", tables.Main, preds.whereSQL, preds.orderBySQL, preds.limitSQL)
-	pageIDs, err := queryReadyIssueIDPage(ctx, tx, idQuery, preds.args)
+	var pageIDs []string
+	var total int
+	var err error
+	if withTotal {
+		idQuery := fmt.Sprintf("SELECT id, COUNT(*) OVER () FROM %s %s %s %s", tables.Main, preds.whereSQL, preds.orderBySQL, preds.limitSQL)
+		pageIDs, total, err = queryReadyIDPageWithTotal(ctx, tx, idQuery, preds.args)
+	} else {
+		idQuery := fmt.Sprintf("SELECT id FROM %s %s %s %s", tables.Main, preds.whereSQL, preds.orderBySQL, preds.limitSQL)
+		pageIDs, err = queryReadyIssueIDPage(ctx, tx, idQuery, preds.args)
+		total = len(pageIDs)
+	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(pageIDs) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// Hydrate the counts for the resolved page, chunking the IN-list. The page
@@ -176,7 +243,7 @@ func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, li
 		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, pageIDs[start:end], "", "", "", includeWispReverseDeps, hyd)
 		rows, scanErr := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs, hyd)
 		if scanErr != nil {
-			return nil, scanErr
+			return nil, 0, scanErr
 		}
 		for _, r := range rows {
 			if r != nil && r.Issue != nil {
@@ -193,59 +260,94 @@ func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, li
 			ordered = append(ordered, r)
 		}
 	}
-	return ordered, nil
+	return ordered, total, nil
+}
+
+// queryReadyIDPageWithTotal runs a `SELECT id, COUNT(*) OVER () …` page query
+// and returns the page IDs with the window total. An empty page carries no
+// row to read the total from, and means the predicate admitted nothing.
+func queryReadyIDPageWithTotal(ctx context.Context, tx DBTX, query string, args []interface{}) ([]string, int, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get ready work: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []string
+	var total int64
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, &total); err != nil {
+			return nil, 0, fmt.Errorf("get ready work: scan id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("get ready work: rows: %w", err)
+	}
+	return ids, int(total), nil
 }
 
 // CountReadyWorkInTx returns the number of ready-work items — identical to
 // len(GetReadyWorkWithCountsInTx(filter with Limit=0)) — without materializing
 // the counts mega-query. The ready set is a union of the issues and wisps that
-// match the ready predicate, so it sizes each family with a single indexed
-// COUNT(*) over that predicate and subtracts the overlap (IDs present in both
-// ready sets, which GetReadyWorkWithCountsInTx dedupes wisp-wins). It never
-// re-runs the mega-query, so a single wisp no longer disables the fast path.
-// This backs the "Showing X of N" total `bd ready` prints when the page is
-// capped.
-func CountReadyWorkInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter) (int, error) {
+// match the ready predicate, so it sizes each family with an indexed COUNT(*)
+// over that predicate and subtracts the overlap (IDs present in both ready
+// sets, which GetReadyWorkWithCountsInTx dedupes wisp-wins). It never re-runs
+// the mega-query, so a single wisp no longer disables the fast path.
+//
+// Statement budget: the shared probe (one statement; plus one for the
+// deferred-parent children when a future-deferred parent exists), then both
+// family counts in ONE statement of scalar subqueries, then the overlap only
+// when the probe saw an ID present in both tables. `bd ready` itself sizes a
+// capped --json page in-band (GetReadyWorkWithCountsAndTotalInTx); this backs
+// the ReadyCounter role and the human-readable "Showing X of N".
+func CountReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) (int, error) {
 	countFilter := filter
 	countFilter.Limit = 0
 
-	wispDepsExist, err := optionalTableExistsInTx(ctx, tx, "wisp_dependencies")
+	probe, err := probeReadyWorkInTx(ctx, tx, countFilter, true)
 	if err != nil {
-		return 0, fmt.Errorf("count ready work: wisp dependency probe: %w", err)
+		return 0, fmt.Errorf("count ready work: %w", err)
 	}
 
-	issuePreds, err := buildReadyWorkPredicates(ctx, tx, countFilter, IssuesFilterTables)
+	issuePreds, err := buildReadyWorkPredicatesFrom(countFilter, IssuesFilterTables, probe.inputs)
 	if err != nil {
 		return 0, err
-	}
-	issueCount, err := countReadyPredicateInTx(ctx, tx, "issues", issuePreds.whereSQL, issuePreds.whereArgs)
-	if err != nil {
-		return 0, fmt.Errorf("count ready work: issues: %w", err)
 	}
 
 	// Mirror GetReadyWorkWithCountsInTx's wisp gating: an empty/missing wisps
 	// table or absent wisp_dependencies means the ready set is issues-only.
-	empty, err := wispsTableEmptyOrMissingInTx(ctx, tx)
-	if err != nil {
-		return 0, fmt.Errorf("count ready work: wisp probe: %w", err)
-	}
-	if empty || !wispDepsExist {
+	if !probe.readsWisps() {
+		issueCount, err := countReadyPredicateInTx(ctx, tx, "issues", issuePreds.whereSQL, issuePreds.whereArgs)
+		if err != nil {
+			return 0, fmt.Errorf("count ready work: issues: %w", err)
+		}
 		return issueCount, nil
 	}
 
-	wispPreds, err := buildReadyWorkPredicates(ctx, tx, countFilter, WispsFilterTables)
+	wispPreds, err := buildReadyWorkPredicatesFrom(countFilter, WispsFilterTables, probe.inputs)
 	if err != nil {
 		return 0, err
 	}
-	wispCount, err := countReadyPredicateInTx(ctx, tx, "wisps", wispPreds.whereSQL, wispPreds.whereArgs)
+	issueCount, wispCount, err := countReadyFamiliesInTx(ctx, tx, issuePreds, wispPreds)
 	if err != nil {
-		if missingOptionalWispTable(err) {
-			return issueCount, nil
+		if !missingOptionalWispTable(err) {
+			// Both families ride one statement now, so name it: the
+			// issues-only retry below reports `issues:`, and a reader
+			// otherwise cannot tell the combined statement from it.
+			return 0, fmt.Errorf("count ready work: issues+wisps: %w", err)
 		}
-		return 0, fmt.Errorf("count ready work: wisps: %w", err)
-	}
-	if wispCount == 0 {
+		// A wisp plane the database may legitimately lack: issues-only, and
+		// the issues count has to be taken on its own.
+		issueCount, err = countReadyPredicateInTx(ctx, tx, "issues", issuePreds.whereSQL, issuePreds.whereArgs)
+		if err != nil {
+			return 0, fmt.Errorf("count ready work: issues: %w", err)
+		}
 		return issueCount, nil
+	}
+	if wispCount == 0 || issueCount == 0 || !probe.idCollision {
+		return issueCount + wispCount, nil
 	}
 
 	overlap, err := countReadyOverlapInTx(ctx, tx, issuePreds, wispPreds)
@@ -255,12 +357,29 @@ func CountReadyWorkInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter
 	return issueCount + wispCount - overlap, nil
 }
 
+// countReadyFamiliesInTx counts both families' ready rows in one statement of
+// two scalar subqueries (portable: no FROM-less dialect extension beyond
+// SELECT of subqueries, which every supported backend accepts).
+//
+//nolint:gosec // G201: whereSQL fragments are hardcoded; user input rides ? placeholders.
+func countReadyFamiliesInTx(ctx context.Context, tx DBTX, issuePreds, wispPreds *readyWorkPredicates) (int, int, error) {
+	q := fmt.Sprintf("SELECT (SELECT COUNT(*) FROM issues %s), (SELECT COUNT(*) FROM wisps %s)", issuePreds.whereSQL, wispPreds.whereSQL)
+	args := make([]interface{}, 0, len(issuePreds.whereArgs)+len(wispPreds.whereArgs))
+	args = append(args, issuePreds.whereArgs...)
+	args = append(args, wispPreds.whereArgs...)
+	var issues, wisps int
+	if err := tx.QueryRowContext(ctx, q, args...).Scan(&issues, &wisps); err != nil {
+		return 0, 0, err
+	}
+	return issues, wisps, nil
+}
+
 // countReadyPredicateInTx counts the rows in one table family that match the
 // ready predicate. whereSQL already begins with "WHERE " and whereArgs binds
 // only its placeholders (no ORDER BY params).
 //
 //nolint:gosec // G201: whereSQL is hardcoded fragments; user input rides ? placeholders.
-func countReadyPredicateInTx(ctx context.Context, tx *sql.Tx, table, whereSQL string, whereArgs []interface{}) (int, error) {
+func countReadyPredicateInTx(ctx context.Context, tx DBTX, table, whereSQL string, whereArgs []interface{}) (int, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s %s", table, whereSQL), whereArgs...).Scan(&n); err != nil {
 		return 0, err
@@ -273,7 +392,7 @@ func countReadyPredicateInTx(ctx context.Context, tx *sql.Tx, table, whereSQL st
 // the issue row for such an ID, so |ready| = issueCount + wispCount - overlap.
 //
 //nolint:gosec // G201: whereSQL fragments are hardcoded; user input rides ? placeholders.
-func countReadyOverlapInTx(ctx context.Context, tx *sql.Tx, issuePreds, wispPreds *readyWorkPredicates) (int, error) {
+func countReadyOverlapInTx(ctx context.Context, tx DBTX, issuePreds, wispPreds *readyWorkPredicates) (int, error) {
 	q := fmt.Sprintf("SELECT COUNT(*) FROM issues %s AND id IN (SELECT id FROM wisps %s)", issuePreds.whereSQL, wispPreds.whereSQL)
 	args := make([]interface{}, 0, len(issuePreds.whereArgs)+len(wispPreds.whereArgs))
 	args = append(args, issuePreds.whereArgs...)

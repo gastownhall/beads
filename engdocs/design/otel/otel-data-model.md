@@ -172,7 +172,7 @@ are inventoried here rather than repeated.
 There are two families.
 
 **Direct storage operations** — `storage.<Method>`, one per storage method
-(72 spans):
+(73 spans):
 
 ```
 AddDependency AddIssueComment AddLabel CloseIssue CloseIssueChecked
@@ -183,15 +183,16 @@ GetDependenciesWithMetadata GetDependencyTree GetDependents
 GetDependentsWithMetadata GetEpicsEligibleForClosure GetEvents GetIssue
 GetIssueByExternalRef GetIssueComments GetIssueCommentsPage GetIssuesByIDs
 GetIssuesByLabel GetLabels GetLocalMetadata GetProvenanceByRef
-GetProvenanceEvents GetReadyWork GetReadyWorkWithCounts GetStatistics
-IterAllEventsSince IterBlockedIssues IterDependenciesWithMetadata
-IterDependentsWithMetadata IterEvents IterIssueComments IterIssues
-IterReadyWork IterWisps ListWisps MergeMetadata MergeSlotAcquire
-MergeSlotCheck MergeSlotCreate MergeSlotRelease RecordProvenanceEvent
-RemoveDependency RemoveLabel ReopenIssue RunInIssueLifecycleTransaction
-RunInTransaction SearchIssueIDs SearchIssues SearchIssuesWithCounts SetConfig
-SetLocalMetadata SlotClear SlotGet SlotSet UnclaimIssue UnclaimIssueIfAssignee
-UpdateIssue UpdateIssueChecked UpdateIssueType
+GetProvenanceEvents GetReadyWork GetReadyWorkWithCounts
+GetReadyWorkWithCountsAndTotal GetStatistics IterAllEventsSince
+IterBlockedIssues IterDependenciesWithMetadata IterDependentsWithMetadata
+IterEvents IterIssueComments IterIssues IterReadyWork IterWisps ListWisps
+MergeMetadata MergeSlotAcquire MergeSlotCheck MergeSlotCreate MergeSlotRelease
+RecordProvenanceEvent RemoveDependency RemoveLabel ReopenIssue
+RunInIssueLifecycleTransaction RunInTransaction SearchIssueIDs SearchIssues
+SearchIssuesWithCounts SetConfig SetLocalMetadata SlotClear SlotGet SlotSet
+UnclaimIssue UnclaimIssueIfAssignee UpdateIssue UpdateIssueChecked
+UpdateIssueType
 ```
 
 **Issueops role operations** — `storage.<Role>.<Method>`, emitted when a caller

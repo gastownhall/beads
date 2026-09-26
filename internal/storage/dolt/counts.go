@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -102,8 +103,15 @@ func (s *DoltStore) CountDependencies(ctx context.Context, issueID string) (int6
 func (s *DoltStore) CountIssueComments(ctx context.Context, issueID string) (int64, error) {
 	var n int64
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		// Route by wisp status exactly as GetIssueComments does, so the count
+		// and the rows it summarizes read the same table (GH#5565).
+		table := "comments"
+		if issueops.IsActiveWispInTx(ctx, tx, issueID) {
+			table = "wisp_comments"
+		}
+		//nolint:gosec // G201: table is hardcoded
 		return tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM comments WHERE issue_id = ?`, issueID).Scan(&n)
+			fmt.Sprintf(`SELECT count(*) FROM %s WHERE issue_id = ?`, table), issueID).Scan(&n)
 	})
 	return n, err
 }

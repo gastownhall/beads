@@ -470,6 +470,72 @@ func TestTempDirRootsRejectsOverbroadTMPDIR(t *testing.T) {
 	})
 }
 
+// TestTempDirRootsCoverGOTMPDIR pins the deleted-cwd bound to where Go puts a
+// test's temp dirs. Since Go 1.26, testing.T.TempDir creates them under
+// GOTMPDIR when it is set, whatever TMPDIR says, while os.TempDir() still
+// reads TMPDIR alone. A host that EXPORTS GOTMPDIR as a disk path and leaves
+// TMPDIR unset therefore puts every t.TempDir() outside both os.TempDir() and
+// /tmp, and unless GOTMPDIR is itself a root the arm can never fire there.
+// (`go env -w GOTMPDIR` does not produce that shape: cmd/go keeps the config
+// value out of the test binary's environment, so testing.T.TempDir ignores it
+// too.) GOTMPDIR is as much an environment variable as TMPDIR, so it gets the
+// same bound on the bound.
+//
+// Only "GOTMPDIR outside TMPDIR is covered" discriminates this change: the
+// unset case and the four drop cases pass against the old tempDirRoots() as
+// well, and guard isCredibleTempRoot against a future widening rather than
+// pinning the new root.
+func TestTempDirRootsCoverGOTMPDIR(t *testing.T) {
+	const home = "/home/beads-fixture"
+	const gotmp = "/var/tmp/gotmp"
+	t.Setenv("HOME", home)
+	// Empty TMPDIR sends os.TempDir() to /tmp: the shape that strands a
+	// GOTMPDIR-rooted t.TempDir() outside every TMPDIR-derived root.
+	t.Setenv("TMPDIR", "")
+
+	t.Run("GOTMPDIR outside TMPDIR is covered", func(t *testing.T) {
+		t.Setenv("GOTMPDIR", gotmp)
+		roots := tempDirRoots()
+		if !underAnyRoot(filepath.Join(gotmp, "TestSomething1234", "001", ".beads", "dolt"), roots) {
+			t.Errorf("tempDirRoots() = %v with GOTMPDIR=%s, want GOTMPDIR covered", roots, gotmp)
+		}
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+
+	t.Run("unset GOTMPDIR adds no root", func(t *testing.T) {
+		t.Setenv("GOTMPDIR", "")
+		roots := tempDirRoots()
+		if underAnyRoot(filepath.Join(gotmp, "TestSomething1234", "001", ".beads", "dolt"), roots) {
+			t.Errorf("tempDirRoots() = %v covers %s with GOTMPDIR unset", roots, gotmp)
+		}
+	})
+
+	for _, tc := range []struct{ name, gotmpdir string }{
+		{"GOTMPDIR=/ is dropped", "/"},
+		{"GOTMPDIR=$HOME is dropped", home},
+		{"GOTMPDIR containing HOME is dropped", "/home"},
+		{"relative GOTMPDIR is dropped", "gotmp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GOTMPDIR", tc.gotmpdir)
+			roots := tempDirRoots()
+			if underAnyRoot(filepath.Join(home, "project", ".beads", "dolt"), roots) {
+				t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q covers a workspace under the home directory", roots, tc.gotmpdir)
+			}
+			for _, root := range roots {
+				if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
+					t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q, want no relative or filesystem-root entry", roots, tc.gotmpdir)
+				}
+			}
+			if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+				t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q, want /tmp still covered", roots, tc.gotmpdir)
+			}
+		})
+	}
+}
+
 // TestIsCredibleTempRoot tables the predicate directly, including the shapes
 // no environment on this box can produce.
 func TestIsCredibleTempRoot(t *testing.T) {

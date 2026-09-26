@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -217,14 +216,7 @@ func TestMinPriority(t *testing.T) {
 func TestBondProtoProto(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	store := newTestStore(t, dbPath)
 
 	// Create two protos
 	protoA := &types.Issue{
@@ -293,14 +285,7 @@ func TestBondProtoProto(t *testing.T) {
 func TestBondProtoMol(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	store := newTestStore(t, dbPath)
 
 	// Create a proto with a child issue
 	proto := &types.Issue{
@@ -366,14 +351,7 @@ func TestBondProtoMol(t *testing.T) {
 func TestBondMolMol(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	store := newTestStore(t, dbPath)
 
 	// Create two molecules
 	molA := &types.Issue{
@@ -466,14 +444,7 @@ func TestBondMolMol(t *testing.T) {
 func TestSquashMolecule(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create a molecule (root issue)
 	root := &types.Issue{
@@ -574,14 +545,7 @@ func TestSquashMolecule(t *testing.T) {
 func TestSquashMoleculeWithDelete(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create a molecule with ephemeral children
 	root := &types.Issue{
@@ -683,14 +647,7 @@ func TestGenerateDigest(t *testing.T) {
 func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create a molecule with ephemeral child
 	root := &types.Issue{
@@ -754,14 +711,7 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 func TestSquashWispMoleculeClearsRootEphemeral(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Wisp molecule: root is ephemeral too (created via `bd mol wisp`).
 	root := &types.Issue{
@@ -821,14 +771,7 @@ func TestSquashWispMoleculeClearsRootEphemeral(t *testing.T) {
 func TestSpawnWithBasicAttach(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create primary proto with a child
 	primaryProto := &types.Issue{
@@ -954,14 +897,7 @@ func TestSpawnWithBasicAttach(t *testing.T) {
 func TestSpawnWithMultipleAttachments(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create primary proto
 	primaryProto := &types.Issue{
@@ -1072,14 +1008,7 @@ func TestSpawnWithMultipleAttachments(t *testing.T) {
 func TestSpawnAttachTypes(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create primary proto
 	primaryProto := &types.Issue{
@@ -1192,14 +1121,7 @@ func TestSpawnAttachNonProtoError(t *testing.T) {
 func TestSpawnVariableAggregation(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create primary proto with one variable
 	primaryProto := &types.Issue{
@@ -1360,14 +1282,7 @@ func TestSpawnAttachDryRunOutput(t *testing.T) {
 func TestWispFilteringFromExport(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create a mix of wisp and non-wisp issues
 	normalIssue := &types.Issue{
@@ -1426,14 +1341,7 @@ func TestWispFilteringFromExport(t *testing.T) {
 func TestGetMoleculeProgress(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create a molecule (epic with template label)
 	root := &types.Issue{
@@ -1527,14 +1435,7 @@ func TestGetMoleculeProgress(t *testing.T) {
 func TestFindParentMolecule(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create molecule root (epic with template label)
 	root := &types.Issue{
@@ -1624,14 +1525,7 @@ func TestFindParentMolecule(t *testing.T) {
 func TestFindParentMoleculesBatch(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create molecule root (epic with template label)
 	root := &types.Issue{
@@ -1726,14 +1620,7 @@ func TestFindParentMoleculesBatch(t *testing.T) {
 func TestFindParentMolecule_RootShapes(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	tests := []struct {
 		name       string
@@ -1801,14 +1688,7 @@ func TestFindParentMolecule_RootShapes(t *testing.T) {
 func TestAdvanceToNextStep_PouredMolecule(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Root shaped like `bd mol pour` output: TypeMolecule, no template label.
 	root := &types.Issue{
@@ -1884,14 +1764,7 @@ func TestAdvanceToNextStep_PouredMolecule(t *testing.T) {
 func TestFindHookedMolecules(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create molecule root (epic)
 	molecule := &types.Issue{
@@ -1967,14 +1840,7 @@ func TestFindHookedMolecules(t *testing.T) {
 func TestAdvanceToNextStep(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create molecule with sequential steps
 	root := &types.Issue{
@@ -2069,14 +1935,7 @@ func TestAdvanceToNextStep(t *testing.T) {
 func TestAdvanceToNextStepMoleculeComplete(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create molecule with single step
 	root := &types.Issue{
@@ -2127,14 +1986,7 @@ func TestAdvanceToNextStepMoleculeComplete(t *testing.T) {
 func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create standalone issue (not part of molecule)
 	orphan := &types.Issue{
@@ -2163,14 +2015,7 @@ func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
 func TestAdvanceToNextStepConcurrentClaim(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create molecule: root -> step1 (closed), step2 (open), step3 (open)
 	// step2 and step3 both depend on step1, so both become ready when step1 closes.
@@ -2267,14 +2112,7 @@ func TestAdvanceToNextStepConcurrentClaim(t *testing.T) {
 func TestAdvanceToNextStepAllClaimed(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create molecule: root -> step1 (closed), step2 (open, will be pre-claimed)
 	root := &types.Issue{
@@ -2503,14 +2341,7 @@ func TestGetRelativeID(t *testing.T) {
 func TestBondProtoMolWithRef(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "patrol"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStoreWithPrefix(t, dbPath, "patrol")
 
 	// Create a proto with child steps (mol-polecat-arm template)
 	protoRoot := &types.Issue{
@@ -2593,14 +2424,7 @@ func TestBondProtoMolWithRef(t *testing.T) {
 func TestBondProtoMolMultipleArms(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "patrol"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStoreWithPrefix(t, dbPath, "patrol")
 
 	// Create simple proto
 	proto := &types.Issue{
@@ -3064,14 +2888,7 @@ func TestCalculateBlockingDepths(t *testing.T) {
 func TestSpawnMoleculeEphemeralFlag(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create a template with a child (IDs will be auto-generated)
 	root := &types.Issue{
@@ -3140,14 +2957,7 @@ func TestSpawnMoleculeEphemeralFlag(t *testing.T) {
 func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	// Create a minimal in-memory subgraph (simulating cookFormulaToSubgraph output)
 	root := &types.Issue{
@@ -3228,14 +3038,7 @@ func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
 func TestSpawnMolecule_PreservesStepMetadata(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStore(t, dbPath)
 
 	f := &formula.Formula{
 		Formula: "meta-test",
@@ -3393,14 +3196,7 @@ func TestFormatBondType(t *testing.T) {
 func TestPourRootTitleDescSubstitution(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "mol"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStoreWithPrefix(t, dbPath, "mol")
 
 	// Create a formula that has title and desc variables
 	f := &formula.Formula{
@@ -3483,14 +3279,7 @@ func TestPourRootTitleDescSubstitution(t *testing.T) {
 func TestPourRootTitleOnly(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "mol"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStoreWithPrefix(t, dbPath, "mol")
 
 	// Formula with only title var (no desc)
 	f := &formula.Formula{
@@ -3538,14 +3327,7 @@ func TestPourRootTitleOnly(t *testing.T) {
 func TestPourRootNoVars(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer s.Close()
-	if err := s.SetConfig(ctx, "issue_prefix", "mol"); err != nil {
-		t.Fatalf("Failed to set config: %v", err)
-	}
+	s := newTestStoreWithPrefix(t, dbPath, "mol")
 
 	// Formula with no title/desc vars (uses different var names)
 	f := &formula.Formula{

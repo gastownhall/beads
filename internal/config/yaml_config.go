@@ -733,6 +733,16 @@ func updateYamlKey(content, key, value string) (string, error) {
 		result = append(result, newLine)
 	}
 
+	// TODO: `bd config set` is knowingly left unfixed here. This flat-key path
+	// has the same bufio.Scanner + strings.Join shape that commentOutYamlKey
+	// had, so it is still exactly one newline short for any terminated
+	// document: updateYamlKey("issue_prefix: vp\ndolt.mode: server\n",
+	// "issue_prefix", "zz") returns a string with no terminator, and the
+	// key-not-found branch above is worse, emitting "x\n\nnewkey: \"v\"" for
+	// "x\n". The same one-line tail applied at commentOutYamlKey's return
+	// belongs here too; it is out of scope for a fix aimed at unset. Only this
+	// flat path is affected -- updateNestedYamlKey re-marshals through
+	// yaml.Node and is already newline-faithful.
 	return strings.Join(result, "\n"), nil
 }
 
@@ -1026,7 +1036,26 @@ func commentOutYamlKey(content, key string) (string, error) {
 		result = append(result, line)
 	}
 
-	return strings.Join(result, "\n"), nil
+	// Preserve the document's trailing newlines. The scan above reads with
+	// bufio.Scanner, which yields one empty token per blank line but drops the
+	// final terminator, so the join is always EXACTLY ONE newline short
+	// whenever content ends in "\n" -- "x\n" joins to "x", "x\n\n" to "x\n",
+	// "x\n\n\n" to "x\n\n". An unset therefore also wrote an end-of-file change
+	// on top of the line it meant to comment out, and did so even for a key the
+	// document does not contain, i.e. when nothing was edited at all. A
+	// config.yaml is git-tracked, so that is a spurious line in someone's
+	// review.
+	//
+	// Re-attach content's own run rather than appending a single "\n" under a
+	// HasSuffix guard. The count was never the problem; the GUARD was. For a
+	// file ending "\n\n" the join ends "\n" -- the blank line's own newline --
+	// so !HasSuffix(out, "\n") was already false and the one missing newline
+	// was never restored. Trimming both ends and re-attaching does not depend
+	// on the count at all. The rule is PRESERVE, not always-append: a document
+	// that genuinely has no trailing newline does not acquire one, so this
+	// cannot rewrite the end of a file that was already written that way.
+	out := strings.Join(result, "\n")
+	return strings.TrimRight(out, "\n") + content[len(strings.TrimRight(content, "\n")):], nil
 }
 
 // nestedKeyWalk tracks how much of a dotted key a line-by-line scan has matched

@@ -56,6 +56,57 @@ func TestIsExternalRef(t *testing.T) {
 	}
 }
 
+func TestIsExternalRefSelfHostedURL(t *testing.T) {
+	tr := &Tracker{client: NewClient("tok", "https://nova.teachx.ai", "42")}
+	tests := []struct {
+		ref  string
+		want bool
+	}{
+		{"https://nova.teachx.ai/group/project/-/work_items/24", true},
+		{"https://nova.teachx.ai/group/project/-/issues/24", true},
+		{"https://NOVA.teachx.ai/group/project/-/issues/24", true},
+		// Scheme is not compared, only host: an http:// ref on an https://
+		// instance is claimed.
+		{"http://nova.teachx.ai/group/project/-/issues/24", true},
+		{"https://other.example.com/group/project/-/work_items/24", false},
+		{"https://github.com/org/repo/issues/1", false},
+		{"https://nova.teachx.ai/group/project/-/merge_requests/24", false},
+		{"", false},
+		// Regression pins for the pre-existing arms, not the host check: the
+		// milestone row is claimed by the "milestones" substring and the
+		// shorthand returns at glShorthandPattern, both before the host check
+		// runs. They still pass if onConfiguredHost is deleted.
+		{"https://nova.teachx.ai/group/project/-/milestones/5", true},
+		{"gitlab:24", true},
+	}
+	for _, tt := range tests {
+		if got := tr.IsExternalRef(tt.ref); got != tt.want {
+			t.Errorf("IsExternalRef(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+
+	// A GitLab served from a sub-path only claims URLs under that path.
+	sub := &Tracker{client: NewClient("tok", "https://corp.example.com/git", "42")}
+	if !sub.IsExternalRef("https://corp.example.com/git/g/p/-/issues/3") {
+		t.Error("sub-path host URL should be recognized")
+	}
+	if sub.IsExternalRef("https://corp.example.com/wiki/g/p/-/issues/3") {
+		t.Error("URL outside the configured sub-path should be rejected")
+	}
+
+	// Port is part of the host comparison, so gitlab.url has to name the host
+	// the way GitLab spells it in web_url. A non-default port must be present
+	// in the ref; conversely, a base that spells a port the web URLs omit
+	// matches nothing and the ref falls through to the legacy arms.
+	port := &Tracker{client: NewClient("tok", "https://gl.corp:8443", "42")}
+	if !port.IsExternalRef("https://gl.corp:8443/g/p/-/issues/3") {
+		t.Error("URL on the configured host:port should be recognized")
+	}
+	if port.IsExternalRef("https://gl.corp/g/p/-/issues/3") {
+		t.Error("URL omitting the configured non-default port should be rejected")
+	}
+}
+
 func TestExtractIdentifier(t *testing.T) {
 	tr := &Tracker{}
 	tests := []struct {

@@ -45,13 +45,20 @@ func GetSuppressedChecksWithStore(ss *SharedStore) map[string]bool {
 }
 
 func getSuppressedChecksFromStore(store *dolt.DoltStore) map[string]bool {
-	suppressed := make(map[string]bool)
-
 	ctx := context.Background()
 	allConfig, err := store.GetAllConfig(ctx)
 	if err != nil {
-		return suppressed
+		return make(map[string]bool)
 	}
+
+	return SuppressedChecksFromConfig(allConfig)
+}
+
+// SuppressedChecksFromConfig extracts the suppressed check slugs from an
+// already-loaded config map, for callers outside bd doctor that hold their
+// own store (e.g. bd info, GH#6027).
+func SuppressedChecksFromConfig(allConfig map[string]string) map[string]bool {
+	suppressed := make(map[string]bool)
 
 	for key, value := range allConfig {
 		if strings.HasPrefix(key, SuppressConfigPrefix) && strings.ToLower(value) == "true" {

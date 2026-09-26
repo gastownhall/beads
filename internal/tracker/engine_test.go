@@ -2417,6 +2417,77 @@ func TestEngineCreateDependenciesResolvesSyntheticExternalRef(t *testing.T) {
 	}
 }
 
+type addDependencyCountingStore struct {
+	Store
+	added []types.Dependency
+}
+
+func (s *addDependencyCountingStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	s.added = append(s.added, *dep)
+	return s.Store.AddDependency(ctx, dep, actor)
+}
+
+func TestEngineCreateDependenciesSkipsExistingEdges(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, n := range []string{"1", "2", "3"} {
+		issue := &types.Issue{ID: "bd-edge-" + n, Title: "Issue " + n, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": "https://test.test/EXT-" + n}, "test-actor"); err != nil {
+			t.Fatalf("UpdateIssue external_ref: %v", err)
+		}
+	}
+	existing := &types.Dependency{IssueID: "bd-edge-1", DependsOnID: "bd-edge-2", Type: types.DepBlocks, Metadata: `{"note":"kept"}`}
+	if err := store.AddDependency(ctx, existing, "test-actor"); err != nil {
+		t.Fatalf("AddDependency error: %v", err)
+	}
+
+	counting := &addDependencyCountingStore{Store: NewStore(store)}
+	engine := NewEngine(newMockTracker("test"), counting, "test-actor")
+
+	errCount := engine.createDependencies(ctx, []DependencyInfo{
+		{FromExternalID: "EXT-1", ToExternalID: "EXT-2", Type: string(types.DepBlocks)},
+		{FromExternalID: "EXT-1", ToExternalID: "EXT-3", Type: string(types.DepRelated)},
+	})
+	if errCount != 0 {
+		t.Fatalf("createDependencies returned errCount=%d, warnings=%v", errCount, engine.warnings)
+	}
+
+	depRecords, err := store.GetDependencyRecords(ctx, "bd-edge-1")
+	if err != nil {
+		t.Fatalf("GetDependencyRecords error: %v", err)
+	}
+	// Metadata survival is the defect this guards: a same-type re-add takes the
+	// idempotent branch, which rewrites metadata to the incoming (empty) value.
+	// Assert it before the spy count, and with Errorf, so one run observes both.
+	foundExisting := false
+	for _, dep := range depRecords {
+		if dep.DependsOnID != "bd-edge-2" {
+			continue
+		}
+		foundExisting = true
+		if dep.Metadata != existing.Metadata {
+			t.Errorf("existing edge metadata = %q, want %q", dep.Metadata, existing.Metadata)
+		}
+	}
+	if !foundExisting {
+		t.Errorf("pre-existing edge bd-edge-1 -> bd-edge-2 missing from %+v", depRecords)
+	}
+	// Rows are keyed by a deterministic id, so this count is 2 with or without
+	// the skip; it guards against the skip dropping the pre-existing edge or
+	// double-writing bd-edge-3, not against the re-add itself.
+	if len(depRecords) != 2 {
+		t.Errorf("dependency records = %+v, want the 2 distinct edges", depRecords)
+	}
+	if len(counting.added) != 1 || counting.added[0].DependsOnID != "bd-edge-3" {
+		t.Errorf("AddDependency calls = %+v, want only bd-edge-1 -> bd-edge-3", counting.added)
+	}
+}
+
 func TestEnginePullCreatesDependenciesForUnchangedIssues(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

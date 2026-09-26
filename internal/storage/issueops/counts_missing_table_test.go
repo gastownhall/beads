@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"testing"
@@ -38,6 +39,21 @@ type countsEntryPoint struct {
 	prime         func(mock sqlmock.Sqlmock, wispErr error)
 	run           func(ctx context.Context, tx *sql.Tx) (string, error)
 	wantTolerated string
+}
+
+// readyProbeSQL matches the one-statement ready probe (probeReadyWorkInTx).
+const readyProbeSQL = `^SELECT EXISTS \(SELECT 1 FROM wisps\), EXISTS \(SELECT 1 FROM wisp_dependencies\)`
+
+// readyProbeRows answers the ready probe: wisps present, wisp_dependencies
+// present, then any further flags the caller's probe asks for.
+func readyProbeRows(flags ...bool) *sqlmock.Rows {
+	cols := make([]string, len(flags))
+	vals := make([]driver.Value, len(flags))
+	for i, f := range flags {
+		cols[i] = fmt.Sprintf("f%d", i)
+		vals[i] = f
+	}
+	return sqlmock.NewRows(cols).AddRow(vals...)
 }
 
 func scalarCountRows(n int) *sqlmock.Rows {
@@ -160,11 +176,8 @@ var countsEntryPoints = []countsEntryPoint{
 		name:    "GetReadyWorkWithCountsInTx",
 		missing: countsMegaQueryTables,
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
-			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true))
 			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
-			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -177,12 +190,12 @@ var countsEntryPoints = []countsEntryPoint{
 		name:    "CountReadyWorkInTx",
 		missing: []string{"wisp_labels"},
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
-			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			// Both families are counted in one statement; when its wisp half
+			// names a table the database may lack, the issues count is taken
+			// on its own.
+			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false))
+			mock.ExpectQuery(`SELECT \(SELECT COUNT\(\*\) FROM issues .*\), \(SELECT COUNT\(\*\) FROM wisps`).WillReturnError(wispErr)
 			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM issues`).WillReturnRows(scalarCountRows(1))
-			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM wisps`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
 			n, err := CountReadyWorkInTx(ctx, tx, readyFilter())
@@ -322,4 +335,64 @@ func TestCountsHealthyPlaneStillMerges(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
+}
+
+// TestReadyProbeFallsBackOnPreWispDatabase pins the one-statement ready probe's
+// escape hatch. A pre-migration database has no wisps table, so the combined
+// probe (which names it) fails as a whole; the ready read must then fall back
+// to the per-table probes — whose missing-table tolerance is the documented
+// contract — and answer issues-only, for the page, its in-band total and the
+// separate count alike.
+func TestReadyProbeFallsBackOnPreWispDatabase(t *testing.T) {
+	primeFallback := func(mock sqlmock.Sqlmock) {
+		mock.ExpectQuery(readyProbeSQL).WillReturnError(tableNotFound("wisps"))
+		mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnError(tableNotFound("wisp_dependencies"))
+		mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(tableNotFound("wisps"))
+	}
+
+	t.Run("page_and_total", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		primeFallback(mock)
+		mock.ExpectQuery(`^SELECT id, COUNT\(\*\) OVER \(\) FROM issues`).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "total"}))
+		filter := readyFilter()
+		filter.Limit = 1
+		out, total, err := GetReadyWorkWithCountsAndTotalInTx(context.Background(), tx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCountsAndTotalInTx on a pre-wisp database: %v", err)
+		}
+		if len(out) != 0 || total != 0 {
+			t.Fatalf("got %d rows, total %d; want an empty issues-only answer", len(out), total)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations: %v", err)
+		}
+	})
+
+	t.Run("count", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		primeFallback(mock)
+		mock.ExpectQuery(`^SELECT COUNT\(\*\) FROM issues WHERE`).WillReturnRows(scalarCountRows(4))
+		n, err := CountReadyWorkInTx(context.Background(), tx, readyFilter())
+		if err != nil {
+			t.Fatalf("CountReadyWorkInTx on a pre-wisp database: %v", err)
+		}
+		if n != 4 {
+			t.Fatalf("CountReadyWorkInTx = %d, want the issues-only 4", n)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations: %v", err)
+		}
+	})
+
+	// The fallback is for a MISSING table only; any other probe failure is
+	// the caller's error, never a quietly issues-only answer.
+	t.Run("unrelated_error_propagates", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		boom := errors.New("connection refused")
+		mock.ExpectQuery(readyProbeSQL).WillReturnError(boom)
+		if _, _, err := GetReadyWorkWithCountsAndTotalInTx(context.Background(), tx, readyFilter()); !errors.Is(err, boom) {
+			t.Fatalf("probe failure not propagated: %v", err)
+		}
+	})
 }

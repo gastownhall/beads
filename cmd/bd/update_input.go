@@ -233,21 +233,11 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("metadata") {
 		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			data, err := os.ReadFile(filePath) //#nosec G304 -- user-supplied path via @file syntax
-			if err != nil {
-				return nil, HandleErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
+		metadata, err := readMetadataFlag(metadataValue)
+		if err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
 		}
-		if !json.Valid([]byte(metadataJSON)) {
-			return nil, HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
-		}
-		in.mergeMetadataIn = json.RawMessage(metadataJSON)
+		in.mergeMetadataIn = metadata
 	}
 	setMetadataFlags, _ := cmd.Flags().GetStringArray("set-metadata")
 	unsetMetadataFlags, _ := cmd.Flags().GetStringArray("unset-metadata")
