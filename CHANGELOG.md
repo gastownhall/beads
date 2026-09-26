@@ -339,6 +339,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling), where commenting the key out would leave the body behind as a value
   of its own. Unsetting a key that is not set remains a successful no-op in
   every shape.
+- **`bd rename-prefix --repair` preserves each issue's suffix instead of
+  minting a hash id for every renamed issue** (GH#6591). Consolidating
+  multiple prefixes into one always discarded the mnemonic suffix — and any
+  dotted child's visible parent — even when nothing about that suffix
+  collided under the new prefix; a real multi-family migration of 1,266
+  issues hit exactly one true collision but lost every mnemonic id anyway.
+  `--repair` now rewrites `old-u6ch` to `kb-u6ch` the same way a normal
+  single-prefix rename does, and mints a fresh hash id only for an issue
+  whose suffix-preserving id would actually collide with an existing id or
+  another rename earlier in the same batch — reporting each such collision
+  on stderr instead of silently hashing it.
+
 - **A self-hosted GitLab no longer re-creates its own issues on every push**
   ([#6735](https://github.com/gastownhall/beads/issues/6735)). The tracker
   decided whether a stored `external_ref` was one of its own by looking for
@@ -387,7 +399,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately no optional-interface fallback — a store that cannot size the
   ready set should fail to compile rather than silently fall back to an
   unbounded query.
-
 - **Push `--dry-run` now honors `--create-only`**
   ([#6337](https://github.com/gastownhall/beads/issues/6337)). The sequential
   tracker push previewed "Would update" for every already-linked issue, even
