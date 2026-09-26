@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
@@ -421,4 +422,53 @@ func proxiedServerCommitter() (string, string) {
 		}
 	}
 	return name, email
+}
+
+// ephemeralRootIdleTimeoutDefault is the effective idle window
+// BEADS_EPHEMERAL_ROOT supplies for a managed proxied server when
+// --proxied-server-idle-timeout is not explicitly set on the command line.
+// An ephemeral root is torn down by whatever created it, not by a human who
+// might otherwise hand-tune the flag, so a finite default keeps an abandoned
+// proxy from outliving its root indefinitely (see proxy.IdleTimeoutNever,
+// which is what an explicit --proxied-server-idle-timeout=0 asks for
+// instead — "never idle-exit" is a deliberate choice this default must not
+// make on the caller's behalf).
+const ephemeralRootIdleTimeoutDefault = 45 * time.Second
+
+// validateEphemeralIdleTimeout rejects the combination of an ephemeral root
+// and an explicit --proxied-server-idle-timeout of 0 or negative: with
+// BEADS_EPHEMERAL_ROOT=1 the proxy must be able to idle-exit on its own, but
+// an explicit 0 (or the already-normalized proxy.IdleTimeoutNever sentinel a
+// caller may pass after init.go's own zero-normalization) means "never", and
+// a negative value is rejected for the same reason it always is — both are
+// the flag asking for the opposite of what the env var requires. Neither
+// signal should be silently overridden by the other, so this is a hard
+// error naming both.
+//
+// serverProxyIdleTimeout is accepted either as the flag's raw parsed value
+// or already normalized to proxy.IdleTimeoutNever — call this before or
+// after that normalization in init.go's RunE, whichever is convenient at the
+// call site; the check is the same either way.
+func validateEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet bool, serverProxyIdleTimeout time.Duration) error {
+	if !ephemeralRoot || !idleTimeoutSet || serverProxyIdleTimeout > 0 {
+		return nil
+	}
+	return fmt.Errorf("BEADS_EPHEMERAL_ROOT=1 conflicts with --proxied-server-idle-timeout=%s: "+
+		"an ephemeral root needs the proxy able to idle-exit on its own, but that flag explicitly "+
+		"disables idle shutdown; drop --proxied-server-idle-timeout to use the ephemeral default "+
+		"(%s), or pass a positive duration", serverProxyIdleTimeout, ephemeralRootIdleTimeoutDefault)
+}
+
+// effectiveEphemeralIdleTimeout returns the idle timeout a managed proxied
+// server should use once validateEphemeralIdleTimeout has already cleared
+// serverProxyIdleTimeout: the ephemeral default when BEADS_EPHEMERAL_ROOT=1
+// and --proxied-server-idle-timeout was not explicitly set, and
+// serverProxyIdleTimeout unchanged in every other case — including when
+// BEADS_EPHEMERAL_ROOT is unset, so behavior there stays byte-for-byte the
+// same as before this function existed.
+func effectiveEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet bool, serverProxyIdleTimeout time.Duration) time.Duration {
+	if ephemeralRoot && !idleTimeoutSet {
+		return ephemeralRootIdleTimeoutDefault
+	}
+	return serverProxyIdleTimeout
 }
