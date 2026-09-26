@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -164,23 +165,18 @@ func (r *beadsDirFSRepositoryImpl) WriteProjectGitignore(ctx context.Context) er
 		return nil
 	}
 
-	var buf bytes.Buffer
-	buf.Write(existing)
-	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
-		buf.WriteByte('\n')
-	}
+	var lines []string
 	if header := r.templates.ProjectGitignoreHeader; header != "" && !containsLine(existing, header) {
 		if len(existing) > 0 {
-			buf.WriteByte('\n')
+			lines = append(lines, "")
 		}
-		buf.WriteString(header + "\n")
+		lines = append(lines, header)
 	}
-	for _, pattern := range toAdd {
-		buf.WriteString(pattern + "\n")
-	}
+	lines = append(lines, toAdd...)
+	content := gitignore.AppendLines(existing, lines)
 
 	// #nosec G306 -- .gitignore must be world-readable so users can read/edit it
-	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(path, content, 0644); err != nil {
 		return fmt.Errorf("fs: WriteProjectGitignore: write: %w", err)
 	}
 	return nil
