@@ -418,7 +418,15 @@ func TestRunNotionStatusUsesHTTPClient(t *testing.T) {
 	}
 }
 
-func TestResolveNotionAuthPrefersConfigTokenOverEnv(t *testing.T) {
+// TestResolveNotionAuthPrefersStoredTokenOverEnv pins the PRECEDENCE, which is
+// unchanged: a token in the database still outranks NOTION_TOKEN, so a
+// workspace configured before GH#6676 keeps authenticating after the upgrade.
+//
+// The reported SOURCE did change. Only an older bd can have put this row here,
+// so it resolves as AuthSourceDatabaseLegacy rather than AuthSourceConfigToken
+// — that is the signal `bd notion status` uses to tell this workspace its token
+// was pushed to its remotes and needs rotating.
+func TestResolveNotionAuthPrefersStoredTokenOverEnv(t *testing.T) {
 	recorder := &notionConfigRecorder{reads: []notionConfigOperation{{key: "notion.token", value: "config-token"}}}
 	installNotionRecorderStore(t, recorder, false)
 	t.Setenv("NOTION_TOKEN", "env-token")
@@ -427,7 +435,7 @@ func TestResolveNotionAuthPrefersConfigTokenOverEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveNotionAuth returned error: %v", err)
 	}
-	if auth == nil || auth.Token != "config-token" || auth.Source != notion.AuthSourceConfigToken {
+	if auth == nil || auth.Token != "config-token" || auth.Source != notion.AuthSourceDatabaseLegacy {
 		t.Fatalf("auth = %+v", auth)
 	}
 	assertNotionConfigCalls(t, recorder, []notionConfigCall{{key: "notion.token"}}, nil, nil)
