@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,6 +28,13 @@ type fakeFallbackStore struct {
 	statsNil            bool
 	getStatistics       func(context.Context) (*types.Statistics, error)
 }
+
+// The import pre-validation reads the custom vocabulary before partitioning
+// records (GH#4492). The embedded DoltStorage is nil, so these must be real
+// methods or every auto-import test panics.
+func (f *fakeFallbackStore) GetCustomStatuses(context.Context) ([]string, error) { return nil, nil }
+
+func (f *fakeFallbackStore) GetCustomTypes(context.Context) ([]string, error) { return nil, nil }
 
 func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	if f.getStatistics != nil {
@@ -387,7 +395,8 @@ func TestMaybeAutoImportJSONL_ChangedJSONLBypassesSuccessStamp(t *testing.T) {
 // captureOptsStore is a storage.DoltStorage that records the
 // BatchCreateOptions handed to CreateIssuesWithFullOptions. Every other
 // method panics (embedded nil interface); the import plumbing under test
-// only touches CreateIssuesWithFullOptions, GetConfig and SetConfig.
+// only touches CreateIssuesWithFullOptions, GetConfig, SetConfig and the
+// custom-vocabulary reads the import pre-validation makes (GH#4492).
 type captureOptsStore struct {
 	storage.DoltStorage // nil — panics on any non-overridden method
 	prefix              string
@@ -398,6 +407,10 @@ func (c *captureOptsStore) CreateIssuesWithFullOptions(_ context.Context, _ []*t
 	c.gotOpts = opts
 	return nil
 }
+
+func (c *captureOptsStore) GetCustomStatuses(context.Context) ([]string, error) { return nil, nil }
+
+func (c *captureOptsStore) GetCustomTypes(context.Context) ([]string, error) { return nil, nil }
 
 func (c *captureOptsStore) GetConfig(_ context.Context, _ string) (string, error) {
 	return c.prefix, nil
@@ -474,4 +487,66 @@ func TestAutoImportFallbackSeamUsesConflictSkip(t *testing.T) {
 			t.Fatalf("bd bootstrap / init --from-jsonl must keep UPSERT (ConflictSkip=false); got true")
 		}
 	})
+}
+
+// TestMaybeAutoImportJSONL_QuarantinesWriterRefusedRecords covers the
+// unattended-recovery reject handling this PR added to maybeAutoImportJSONL:
+// a record the writer would refuse (unknown status) is partitioned out and
+// quarantined next to the source before the fallback importer runs, so the
+// one bad row cannot abort the whole upgrade recovery and its data is
+// recoverable even though nobody is watching stderr.
+func TestMaybeAutoImportJSONL_QuarantinesWriterRefusedRecords(t *testing.T) {
+	dir := t.TempDir()
+	valid := `{"_type":"issue","id":"unit-ok","title":"good record","status":"open","priority":2,"issue_type":"task"}`
+	invalid := `{"_type":"issue","id":"unit-bad","title":"bogus status","status":"verify","priority":2,"issue_type":"task"}`
+	jsonlPath := filepath.Join(dir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(valid+"\n"+invalid+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	count := swapFallbackImporter(t, nil)
+	store := &fakeFallbackStore{statsTotalIssues: 0}
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if got := count.Load(); got != 1 {
+		t.Errorf("fallback importer invoked %d time(s), want 1 (valid record should still import)", got)
+	}
+	quarantine := rejectFilePath(jsonlPath)
+	data, err := os.ReadFile(quarantine)
+	if err != nil {
+		t.Fatalf("quarantine file not written: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != invalid {
+		t.Errorf("quarantine content = %q, want the rejected line verbatim %q", got, invalid)
+	}
+}
+
+// TestMaybeAutoImportJSONL_AllRecordsRefusedStampsAndSkipsImport covers the
+// every-record-unusable branch: the DB is left untouched (no importer call)
+// but the stamp is written so the next command does not re-walk the same
+// broken file, and the quarantine still captures the lines.
+func TestMaybeAutoImportJSONL_AllRecordsRefusedStampsAndSkipsImport(t *testing.T) {
+	dir := t.TempDir()
+	invalid := `{"_type":"issue","id":"unit-bad","title":"bogus status","status":"verify","priority":2,"issue_type":"task"}`
+	jsonlPath := filepath.Join(dir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(invalid+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	count := swapFallbackImporter(t, nil)
+	store := &fakeFallbackStore{statsTotalIssues: 0}
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if got := count.Load(); got != 0 {
+		t.Errorf("fallback importer invoked %d time(s), want 0 (nothing importable)", got)
+	}
+	if _, err := os.Stat(rejectFilePath(jsonlPath)); err != nil {
+		t.Errorf("quarantine file missing: %v", err)
+	}
+
+	// The stamp must prevent a re-walk: a second call parses nothing.
+	maybeAutoImportJSONL(context.Background(), store, dir)
+	if got := count.Load(); got != 0 {
+		t.Errorf("fallback importer invoked %d time(s) after stamp, want 0", got)
+	}
 }
