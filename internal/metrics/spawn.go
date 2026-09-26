@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/filelock"
 )
 
 const SendMetricsSubcommand = "send-metrics"
@@ -161,6 +163,32 @@ func touchFlushMarker(dir string) {
 	_ = os.WriteFile(path, nil, 0o600)
 }
 
+// claimFlush is the locked half of the spawn decision (Factor A): concurrent
+// bd invocations all seeing flusherDue's unlocked pre-check pass must still
+// produce exactly one spawn, not one per invocation. TryLock is non-blocking,
+// so a caller that loses the race returns false immediately instead of
+// queueing behind the winner; a caller that does acquire the lock re-checks
+// flusherDue, since another caller may have already touched the marker
+// between the unlocked pre-check and this call. Only the winner touches the
+// marker, and the lock is released before returning — well before the
+// detached child is spawned, so the lock is never held across the child's
+// lifetime.
+func claimFlush(dir string, now time.Time) bool {
+	lock, err := filelock.New(filepath.Join(dir, lockFilename))
+	if err != nil {
+		return false
+	}
+	if err := lock.TryLock(); err != nil {
+		return false
+	}
+	defer func() { _ = lock.Unlock() }()
+	if !flusherDue(dir, now) {
+		return false
+	}
+	touchFlushMarker(dir)
+	return true
+}
+
 func MaybeSpawnFlusher() {
 	if !shouldSpawnFlusher() {
 		return
@@ -172,7 +200,9 @@ func MaybeSpawnFlusher() {
 	if !flusherDue(dir, time.Now()) {
 		return
 	}
-	touchFlushMarker(dir)
+	if !claimFlush(dir, time.Now()) {
+		return
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return
