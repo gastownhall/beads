@@ -3,7 +3,10 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -485,4 +488,185 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	if successCount == 0 {
 		t.Fatal("expected at least 1 worker to succeed")
 	}
+}
+
+// bdRememberBuffers runs "bd remember" and hands back stdout, stderr and the
+// error separately. The budget's lines are STDERR by contract — that is what
+// keeps them out of --json output — so a helper that folds the two streams
+// together cannot test them.
+func bdRememberBuffers(t *testing.T, bd, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"remember"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+// TestEmbeddedMemoryCorpusBudget exercises memories.budget-chars against a REAL
+// store, end to end: the config key routed through `bd config set`, the corpus
+// measured from rows that are actually there, the refusal's nonzero exit, and
+// the fact that a refused write leaves NOTHING behind.
+//
+// The arithmetic below is exact and deliberate — every content length is chosen
+// so the projected corpus lands on a named boundary — because a budget test
+// that only asserts "some line appeared" would pass with an off-by-one budget.
+// The pure branch coverage lives in memory_budget_pure_test.go; this is the
+// wiring.
+func TestEmbeddedMemoryCorpusBudget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// ===== Budget OFF: byte-identical to the pre-budget command =====
+	t.Run("budget_off_is_silent", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mb")
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("x", 5000), "--key", "big")
+		if err != nil {
+			t.Fatalf("remember with no budget failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Remembered [big]") {
+			t.Errorf("expected the shipped success line, got %q", stdout)
+		}
+		if strings.Contains(stderr, "memory corpus") {
+			t.Errorf("budget off must print no budget line, got stderr %q", stderr)
+		}
+	})
+
+	// ===== Budget ON =====
+	dir, _, _ := bdInit(t, bd, "--prefix", "mb")
+
+	// The arithmetic below assumes a fresh, empty corpus. Say so out loud, so
+	// a future `bd init` that seeds a memory fails HERE instead of failing as
+	// an inscrutable off-by-N in the assertions.
+	if out := bdMemories(t, bd, dir); !strings.Contains(out, "No memories stored") {
+		t.Fatalf("budget arithmetic needs an empty corpus after init, got:\n%s", out)
+	}
+
+	cfg := exec.Command(bd, "config", "set", "memories.budget-chars", "100")
+	cfg.Dir = dir
+	cfg.Env = bdEnv(dir)
+	if out, err := cfg.CombinedOutput(); err != nil {
+		t.Fatalf("bd config set memories.budget-chars failed: %v\n%s", err, out)
+	} else if strings.Contains(string(out), "not a recognized") || strings.Contains(string(out), "Unrecognized") {
+		t.Fatalf("memories.budget-chars must be a recognized config key, got:\n%s", out)
+	}
+
+	// 3 ("pad") + 90 = 93 of 100 -> writes, warns at 93%.
+	t.Run("warn_band_writes_and_warns", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("a", 90), "--key", "pad")
+		if err != nil {
+			t.Fatalf("a write inside the budget must succeed: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 93 of 100 chars (93%)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want the warn line %q", stderr, want)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("a", 90)) {
+			t.Errorf("the warned write must still have landed, got %q", out)
+		}
+	})
+
+	// An OVERWRITE of the same size is a no-op on the corpus (delta, not sum).
+	// Were it summed, the projection would be 186 and this would be refused.
+	t.Run("overwrite_counts_delta_not_sum", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("b", 90), "--key", "pad")
+		if err != nil {
+			t.Fatalf("a same-size overwrite must not be refused: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 93 of 100 chars (93%)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q (an overwrite must not add to the sum)", stderr, want)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("b", 90)) {
+			t.Errorf("overwrite did not land: %q", out)
+		}
+	})
+
+	// 93 + 2 ("ab") + 5 = exactly 100. Exactly AT the budget writes.
+	t.Run("exactly_at_budget_writes", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, "ccccc", "--key", "ab")
+		if err != nil {
+			t.Fatalf("a write landing exactly on the budget must succeed: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 100 of 100 chars (100%)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	})
+
+	// Overwriting "pad" with one more byte projects 101 — exactly ONE over.
+	t.Run("one_byte_over_refuses_and_writes_nothing", func(t *testing.T) {
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("d", 91), "--key", "pad")
+		if err == nil {
+			t.Fatalf("a write one byte over the budget must exit nonzero; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		want := "bd remember: memory corpus would be 101 chars, budget is 100 (101%) — refused; use --force to override"
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+		if strings.Contains(stdout, "Remembered") || strings.Contains(stdout, "Updated") {
+			t.Errorf("a refused write must print no success line, got stdout %q", stdout)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("b", 90)) {
+			t.Errorf("a refused write must leave the old content intact, got %q", out)
+		}
+	})
+
+	// The same refusal under --json is said ONCE, and only on stdout: the
+	// machine-readable envelope, nothing else. Printing the prose to stderr as
+	// well would deliver one refusal twice to a caller reading both streams.
+	t.Run("json_refusal_is_said_once", func(t *testing.T) {
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("d", 91), "--key", "pad", "--json")
+		if err == nil {
+			t.Fatalf("a --json write one byte over the budget must exit nonzero; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// Exactly ONE JSON document on stdout — no second envelope, no prose
+		// before or after it.
+		dec := json.NewDecoder(strings.NewReader(stdout))
+		var doc map[string]interface{}
+		if decErr := dec.Decode(&doc); decErr != nil {
+			t.Fatalf("stdout is not a JSON document (%v):\n%s", decErr, stdout)
+		}
+		if decErr := dec.Decode(new(json.RawMessage)); !errors.Is(decErr, io.EOF) {
+			t.Errorf("stdout carries more than one JSON document (second Decode = %v):\n%s", decErr, stdout)
+		}
+
+		// The envelope carries the refusal sentence, under either the enveloped
+		// or the flat error shape.
+		inner := doc
+		if data, ok := doc["data"].(map[string]interface{}); ok {
+			inner = data
+		}
+		msg, _ := inner["error"].(string)
+		want := "bd remember: memory corpus would be 101 chars, budget is 100 (101%) — refused; use --force to override"
+		if msg != want {
+			t.Errorf("JSON error = %q, want %q (full stdout:\n%s)", msg, want, stdout)
+		}
+
+		// ...and stderr says nothing, so the refusal arrived exactly once.
+		if strings.Contains(stderr, "memory corpus") {
+			t.Errorf("--json refusal must not also print the prose line to stderr, got stderr %q", stderr)
+		}
+
+		// A refused --json write still leaves the old content intact.
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("b", 90)) {
+			t.Errorf("a refused --json write must leave the old content intact, got %q", out)
+		}
+	})
+
+	// The same write with --force lands, and still says so.
+	t.Run("force_writes_over_budget", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("d", 91), "--key", "pad", "--force")
+		if err != nil {
+			t.Fatalf("--force must write over the budget: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 101 of 100 chars (101%) — over budget, written anyway (--force)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("d", 91)) {
+			t.Errorf("--force did not land the write, got %q", out)
+		}
+	})
 }

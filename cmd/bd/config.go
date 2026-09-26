@@ -1026,6 +1026,10 @@ var recognizedConfigKeys = map[string]bool{
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
 	"prime.max-memories":  true, "prime.max-memory-chars": true,
+	// Opt-in ceiling on the persistent-memory corpus, enforced by `bd
+	// remember` (0 = off). Yaml-only for the same reason the prime caps are:
+	// it is read through viper, so a DB-backed write would never be seen.
+	"memories.budget-chars": true,
 	// The events-journal family. All four are startup settings that land in
 	// config.yaml (config.YamlOnlyKeys), and every one of them is documented as
 	// a `bd config set` invocation — including the auto-prune opt-out, where an
