@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -140,8 +141,14 @@ func TestRelativeUserRootsNeverReachImplicitOrExplicitFilesystemPaths(t *testing
 	if err := Initialize(); err != nil {
 		t.Fatalf("Initialize should skip unsafe user roots, got: %v", err)
 	}
-	if err := SetUserYamlConfig("metrics.disabled", "true"); err == nil {
+	setErr := SetUserYamlConfig("metrics.disabled", "true")
+	if setErr == nil {
 		t.Fatal("SetUserYamlConfig returned nil error for unsafe roots")
+	}
+	for _, variable := range []string{"HOME", "USERPROFILE"} {
+		if !strings.Contains(setErr.Error(), variable) {
+			t.Errorf("SetUserYamlConfig error %q does not name %s", setErr, variable)
+		}
 	}
 	if err := UnsetUserYamlConfig("metrics.disabled"); err == nil {
 		t.Fatal("UnsetUserYamlConfig returned nil error for unsafe roots")
