@@ -42,6 +42,7 @@ func TestCompareVersions(t *testing.T) {
 		{"an older stable is less than a later patch's rc", "1.3.0", "1.3.1-rc.1", -1},
 		{"fewer prerelease identifiers sorts lower", "1.0.0-alpha", "1.0.0-alpha.1", -1},
 		{"more prerelease identifiers sorts higher", "1.0.0-alpha.1", "1.0.0-alpha", 1},
+		{"hyphenated garbage remains unorderable", "also-not-one", "not-a-version", 0},
 	}
 
 	for _, tt := range tests {

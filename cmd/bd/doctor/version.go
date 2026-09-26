@@ -301,9 +301,28 @@ func CompareVersions(v1, v2 string) int {
 // numeric core and the prerelease suffix (empty when there is none).
 func splitPrereleaseSuffix(v string) (core, prerelease string) {
 	if i := strings.IndexByte(v, '-'); i >= 0 {
-		return v[:i], v[i+1:]
+		candidate := v[:i]
+		if isNumericVersionCore(candidate) {
+			return candidate, v[i+1:]
+		}
 	}
 	return v, ""
+}
+
+// isNumericVersionCore reports whether s is a non-empty dot-separated run of
+// numeric identifiers. A hyphen in an arbitrary non-version string must not be
+// reinterpreted as a semver prerelease separator: callers historically treat
+// such strings as an unorderable 0.0.0 value.
+func isNumericVersionCore(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, part := range strings.Split(s, ".") {
+		if part == "" || strings.Trim(part, "0123456789") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // compareVersionCore compares the dot-separated numeric core of two
