@@ -148,8 +148,8 @@ func (s *testSuite) iucApplyUpdateClaimPlusFields() {
 // entry point must leave a live lease row for the override target, not the
 // claimant. This fails on origin/main (routes through UpdateIssue ->
 // IssueTableOpts{UseWispsTable:false} -> clearLease -> DeleteLeaseInTx) and
-// passes on the be-plv fix branch (internal/storage/domain/issue.go's
-// update() re-arms the lease post-write). Deliberately self-contained (no
+// passes on the be-plv fix branch (internal/storage/domain/db/issue.go's
+// issueSQLRepositoryImpl.Update re-arms the lease post-write). Deliberately self-contained (no
 // helper from parity_claim_lease_test.go, which is itself unmerged PR
 // content and does not exist on origin/main) so this test compiles AND
 // fails behaviorally there, rather than repeating review point 5's

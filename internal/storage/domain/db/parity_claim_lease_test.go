@@ -18,9 +18,9 @@ package db
 // actually running both backends against the same table shapes and
 // comparing. TestClaimOverrideArmsLeaseForFinalHolderOnDomain, the third, is
 // domain-only: it pins the be-plv fix's own behavior (claim + assignee
-// override re-arms the lease for the override target,
-// internal/storage/domain/issue.go's update()) without asserting or
-// characterizing anything about classic/wisps' independent handling of the
+// override re-arms the lease for the override target, in
+// internal/storage/domain/db/issue.go's issueSQLRepositoryImpl.Update)
+// without asserting or characterizing anything about classic/wisps' independent handling of the
 // same case. Classic's own gap there is tracked by unmerged PR #5349 and is
 // out of scope for be-plv to fix or for this bead to characterize; see
 // steveyegge's review of #5349 for that backend's own ruling. Once #5349
@@ -129,8 +129,8 @@ func (s *testSuite) TestParityClaimNoOverridePreservesLeaseOnBothBackends() {
 // actor (alice) and not no lease at all. Before the fix, IssueUseCase.
 // ApplyUpdate's plain field-update path (ManageLeaseOnUpdate's clear-only
 // contract) deleted the lease outright, leaving a live claim with no lease
-// row. internal/storage/domain/issue.go's update() now reads the row back
-// post-write and calls issueops.UpsertLeaseInTx for whoever it names as the
+// row. internal/storage/domain/db/issue.go's issueSQLRepositoryImpl.Update
+// now reads the row back post-write and calls issueops.UpsertLeaseInTx for whoever it names as the
 // final holder when that holder is still in_progress with a live assignee.
 //
 // This is deliberately not a cross-backend comparison: classic/wisps'

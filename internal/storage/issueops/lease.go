@@ -167,6 +167,22 @@ func NodeID(ctx context.Context) string {
 // update that changes status/assignee, an import that accepts a newer
 // non-claimed snapshot — must delete the lease row (DeleteLeaseInTx). Wisps
 // are never leased (see testHeartbeatWisp) and never get a row here.
+//
+// Carve-out, the claim verb (be-plv, PR #6501): a claim-carrying update that
+// also overrides assignee and/or status re-reads the issue after its own
+// write and, if the final row is still a live claim (literally in_progress
+// with a non-empty assignee), re-arms the lease HERE for that final assignee
+// instead of deleting it. That is the same iff read from the other side: the
+// row is still a live claim, so it keeps a lease, now held by whoever the row
+// names. It covers a transfer to another actor, a holder re-doling their own
+// in-progress issue (ClaimIssue reports AlreadyClaimed and the update
+// proceeds), and a pool alias as assignee. Each gets a LeaseTTL(ctx) lease
+// (DefaultLeaseTTL, 5m) that bd reclaim reverts if nothing heartbeats it.
+// A claim-carrying update whose final status is anything other than
+// in_progress still deletes. Site: internal/storage/domain/db/issue.go's
+// issueSQLRepositoryImpl.Update
+// (proxied/domain backend); PR #5349's finalAssigneeIfStillClaimed is the
+// classic/wisps counterpart. See ManageLeaseOnUpdate's doc (update.go).
 func UpsertLeaseInTx(ctx context.Context, tx DBTX, id, holder string, now time.Time, ttl time.Duration) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO leases (issue_id, holder, granted_at, lease_expires_at, heartbeat_at, granted_node)
