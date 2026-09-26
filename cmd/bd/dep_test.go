@@ -517,6 +517,29 @@ func TestDepTreeFormatFlag(t *testing.T) {
 	}
 }
 
+// TestDepTreeFormatMermaidCaseInsensitive pins that --format mermaid folds case
+// the same way the json format check does.
+func TestDepTreeFormatMermaidCaseInsensitive(t *testing.T) {
+	tests := []struct {
+		format string
+		want   bool
+	}{
+		{"mermaid", true},
+		{"Mermaid", true},
+		{"MERMAID", true},
+		{"", false},
+		{"json", false},
+		{"dot", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			if got := isMermaidTreeFormat(tt.format); got != tt.want {
+				t.Errorf("isMermaidTreeFormat(%q) = %v, want %v", tt.format, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetStatusEmoji(t *testing.T) {
 	tests := []struct {
 		status types.Status

@@ -258,6 +258,13 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.prettyFormat = (prettyFormat || treeFormat) && !in.jsonOutput && in.formatStr == ""
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	if in.watchMode {
+		// --watch re-renders the pretty listing on every tick, so a --format
+		// template would be dropped without a word (GH#6277). Refused here,
+		// ahead of the route split, so the direct and proxied routes answer
+		// the same way.
+		if in.formatStr != "" {
+			return in, HandleError("--format cannot be combined with --watch; --watch always renders the pretty listing")
+		}
 		in.prettyFormat = true
 	}
 	in.noPager, _ = cmd.Flags().GetBool("no-pager")

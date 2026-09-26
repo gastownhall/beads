@@ -183,6 +183,12 @@ func tempDirRoots() []string {
 // deleted-cwd arm silently disabled on exactly the boxes whose killed runs it
 // exists to clean up after. A root that merely contains a sandbox home stays
 // credible; a root that IS the home does not, whatever the home looks like.
+//
+// The carve-out is itself bounded by isSharedTempRoot: a sandbox home rescues
+// a root NESTED inside a fixed temp location, never one of those shared
+// locations itself. Otherwise a bare TMPDIR=/var/tmp — where mktemp -d puts
+// the sandbox home directly under the shared root — would hand back all of
+// /var/tmp, and with it every other user's workspace there.
 func isCredibleTempRoot(root, home string) bool {
 	cleaned := filepath.Clean(root)
 	if cleaned == "" || cleaned == "." || cleaned == string(filepath.Separator) {
@@ -199,7 +205,10 @@ func isCredibleTempRoot(root, home string) bool {
 		if h == cleaned {
 			return false
 		}
-		if isUnderDir(h, cleaned) && !isSandboxHome(h) {
+		if !isUnderDir(h, cleaned) {
+			continue
+		}
+		if !isSandboxHome(h) || isSharedTempRoot(cleaned, runtime.GOOS) {
 			return false
 		}
 	}
@@ -237,22 +246,89 @@ func isUnderFixedTempRoots(path, goos string) bool {
 // os.TempDir() itself and left the deleted-cwd arm inert on every Mac
 // (wy-j2zc8q).
 //
+// /var/tmp is the same story on a Linux gate host whose TMPDIR points at a
+// disk-backed path there instead of a tmpfs /tmp: test-env.sh mktemp -ds the
+// sandbox HOME under WHATEVER TMPDIR is, not a hardcoded /tmp. Without this
+// entry, isSandboxHome only recognized /tmp on Linux, so that sandbox HOME
+// read as a real home containing os.TempDir(), isCredibleTempRoot
+// disqualified os.TempDir() itself, and tempDirRoots() collapsed to [/tmp] —
+// stranding every t.TempDir() actually rooted under the /var/tmp-based TMPDIR
+// (TestTempDirRootsBoundTheOrphanArm, be-n9ile / be-35sef).
+//
 // The darwin row spells out the symlink-RESOLVED forms ("/private/tmp",
-// "/private/var/folders") literally instead of leaving them to canonicalRoots.
-// canonicalRoots resolves with filepath.EvalSymlinks, which reads the HOST's
-// filesystem: on a Mac it turns /tmp and /var/folders into their /private/…
-// targets, and on a Linux runner it adds nothing at all. But this table is a
-// claim ABOUT darwin that any platform may be asked to judge — the platform
-// row is pinned from Linux CI by TestSandboxHomeUnderPerUserTempRoot, and a
-// Mac's lsof reports cwds in the /private/… form — so the answer must not
-// depend on where the judging happens. canonicalRoots dedups, so on a real
-// Mac these literals cost nothing: they are exactly what it would have added.
+// "/private/var/folders", "/private/var/tmp") literally instead of leaving
+// them to canonicalRoots. canonicalRoots resolves with filepath.EvalSymlinks,
+// which reads the HOST's filesystem: on a Mac it turns /tmp, /var/folders,
+// and /var/tmp into their /private/… targets, and on a Linux runner it adds
+// nothing at all. But this table is a claim ABOUT darwin that any platform
+// may be asked to judge — the platform row is pinned from Linux CI by
+// TestSandboxHomeUnderPerUserTempRoot, and a Mac's lsof reports cwds in the
+// /private/… form — so the answer must not depend on where the judging
+// happens. canonicalRoots dedups, so on a real Mac these literals cost
+// nothing: they are exactly what it would have added.
+//
+// This table only feeds isSandboxHome's home-containment carve-out inside
+// isCredibleTempRoot; it is never unioned into tempDirRoots()'s own output
+// (canonicalRoots([os.TempDir(), "/tmp"])). That by itself does NOT bound the
+// entry, because os.TempDir() can BE /var/tmp: under a bare TMPDIR=/var/tmp,
+// mktemp -d puts the sandbox HOME directly under the shared root, and the
+// carve-out would then spare /var/tmp itself as a sweep root — putting every
+// other user's deleted-cwd dolt server on the box in range of the kill arm.
+// isSharedTempRoot is what closes that: a sandbox HOME may rescue a root
+// nested INSIDE an entry here (/var/tmp/beads-gate-probe, the shape
+// test-env.sh builds), never the entry itself. So adding /var/tmp widens the
+// orphan arm by nothing — a bare TMPDIR=/var/tmp is judged exactly as it was
+// before this row existed (TestSandboxHomeUnderVarTmpTMPDIR).
 func fixedTempRoots(goos string) []string {
-	roots := []string{"/tmp"}
+	roots := []string{"/tmp", "/var/tmp"}
 	if goos == "darwin" {
-		roots = append(roots, "/private/tmp", "/var/folders", "/private/var/folders")
+		roots = append(roots, "/private/tmp", "/var/folders", "/private/var/folders", "/private/var/tmp")
 	}
 	return roots
+}
+
+// isSharedTempRoot reports whether root IS one of the temp locations every
+// user on the box shares, rather than a path nested inside one. goos is a
+// parameter for the same reason as isUnderFixedTempRoots: the platform table
+// must answer identically wherever it is judged.
+//
+// This is the bound on isCredibleTempRoot's sandbox-home carve-out. That
+// carve-out recognizes a throwaway HOME by the fixed temp location it sits
+// under, so without this check it would spare the whole shared location as a
+// sweep root whenever TMPDIR pointed AT it instead of inside it — and the
+// deleted-cwd arm reaps what it matches (TestSandboxHomeUnderVarTmpTMPDIR).
+func isSharedTempRoot(root, goos string) bool {
+	cleaned := filepath.Clean(root)
+	for _, shared := range canonicalRoots(sharedTempRoots(goos)) {
+		if filepath.Clean(shared) == cleaned {
+			return true
+		}
+	}
+	return false
+}
+
+// sharedTempRoots is fixedTempRoots minus the /tmp family: the entries that
+// may vouch for a sandbox HOME but must never become a sweep root on its
+// account. Derived rather than spelled out so a future row is bounded by
+// default — opting one out has to be a deliberate edit here.
+//
+// /tmp is the deliberate opt-out. tempDirRoots() hardcodes it into the
+// candidate list (canonicalRoots([os.TempDir(), "/tmp"])), so the design
+// already credits it unconditionally and excluding it here widens nothing;
+// including it would instead re-break the case the carve-out exists for,
+// since the CI shape puts HOME directly under /tmp
+// (TestTempDirRootsRejectsOverbroadTMPDIR/"sandbox HOME under /tmp keeps
+// /tmp"). darwin's /private/tmp is that same directory under its resolved
+// name.
+func sharedTempRoots(goos string) []string {
+	var shared []string
+	for _, root := range fixedTempRoots(goos) {
+		if root == "/tmp" || root == "/private/tmp" {
+			continue
+		}
+		shared = append(shared, root)
+	}
+	return shared
 }
 
 // canonicalRoots expands each non-empty root into every form a process's

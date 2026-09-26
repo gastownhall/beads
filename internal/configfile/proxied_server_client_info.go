@@ -8,14 +8,19 @@ import (
 	"time"
 )
 
-const ProxiedServerClientInfoFileName = "proxied_server_client_info.json"
+const (
+	ProxiedServerClientInfoFileName = "proxied_server_client_info.json"
+	// DefaultProxyIdleTimeout is the effective proxy lifetime persisted when
+	// callers leave the internal zero-valued "use the default" sentinel.
+	DefaultProxyIdleTimeout = 30 * time.Second
+)
 
 type ProxiedServerClientInfo struct {
 	RootPath    string              `json:"root_path,omitempty"`
 	ConfigPath  string              `json:"config_path,omitempty"`
 	LogPath     string              `json:"log_path,omitempty"`
 	Port        int                 `json:"port,omitempty"`
-	IdleTimeout time.Duration       `json:"idle_timeout,omitempty"`
+	IdleTimeout time.Duration       `json:"idle_timeout"`
 	External    *ExternalDoltConfig `json:"external,omitempty"`
 }
 
@@ -42,6 +47,13 @@ func LoadProxiedServerClientInfo(beadsDir string) (*ProxiedServerClientInfo, err
 func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo) error {
 	if info == nil {
 		info = &ProxiedServerClientInfo{}
+	}
+	// Zero is the internal "use the default" sentinel. Persist the effective
+	// value so sidecar consumers do not need bd's source code to interpret an
+	// absent key. Update the caller's plan too: migration resume compares the
+	// in-memory plan with the sidecar after this write.
+	if info.IdleTimeout == 0 {
+		info.IdleTimeout = DefaultProxyIdleTimeout
 	}
 	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {

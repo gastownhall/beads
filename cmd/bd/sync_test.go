@@ -18,6 +18,33 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
+func TestSyncFailureTextDistinguishesSSHDialTimeoutFromAuth(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	gitText := timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"
+	timeout := fmt.Errorf("pull: %w", errors.New(gitText))
+	if !strings.Contains(timeout.Error(), "ssh-add") {
+		t.Fatal("fixture did not reproduce Dolt's misleading auth hint")
+	}
+	got := syncFailureText(timeout)
+	if !strings.Contains(got, timeoutLine) || !strings.Contains(got, "could not be reached") {
+		t.Fatalf("dial timeout not explained: %q", got)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(got, misleading) {
+			t.Errorf("dial timeout retained auth hint %q: %q", misleading, got)
+		}
+	}
+
+	auth := fmt.Errorf("pull: %w", errors.New("git@host: Permission denied (publickey).\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"))
+	if got := syncFailureText(auth); got != auth.Error() {
+		t.Errorf("real auth failure changed: got %q, want %q", got, auth.Error())
+	}
+	plainTimeout := errors.New("database query: Operation timed out")
+	if got := syncFailureText(plainTimeout); got != plainTimeout.Error() {
+		t.Errorf("non-SSH timeout changed: got %q, want %q", got, plainTimeout.Error())
+	}
+}
+
 // syncOpsRecorder builds a syncOps whose steps are scripted per attempt and
 // which records how many times each step ran. Scripts are indexed by call
 // number; a call past the end of a script reuses the script's last entry, so a
@@ -302,8 +329,10 @@ func TestRunSyncLoopConflictWinsOverPullError(t *testing.T) {
 // `merged` empty — the conflict branch still fires (from the live check), and
 // the unrelated error must not vanish silently.
 func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	pullErr := errors.New(timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes")
 	r := &syncOpsRecorder{
-		pullErrs:     []error{errors.New("dial tcp: connection refused")},
+		pullErrs:     []error{pullErr},
 		conflictsSeq: [][]string{nil, {"issues"}},
 	}
 	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
@@ -313,8 +342,13 @@ func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
 	if out.Status != syncStatusConflict {
 		t.Fatalf("status = %q, want %q", out.Status, syncStatusConflict)
 	}
-	if out.DiscardedPullError != "dial tcp: connection refused" {
-		t.Errorf("DiscardedPullError = %q, want the unrelated pull error preserved", out.DiscardedPullError)
+	if !strings.Contains(out.DiscardedPullError, "could not be reached") || !strings.Contains(out.DiscardedPullError, timeoutLine) {
+		t.Errorf("DiscardedPullError does not explain the dial timeout: %q", out.DiscardedPullError)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(out.DiscardedPullError, misleading) {
+			t.Errorf("DiscardedPullError retained auth hint %q: %q", misleading, out.DiscardedPullError)
+		}
 	}
 }
 

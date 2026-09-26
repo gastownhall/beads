@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -17,29 +16,24 @@ func TestRepairMultiplePrefixes(t *testing.T) {
 
 	ctx := context.Background()
 
-	testStore, err := dolt.New(ctx, &dolt.Config{Path: testDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, testDBPath)
 
-	// Set globals following TestRenamePrefixCommand pattern
+	// Set the globals this test's code path actually reads. Deliberately NOT
+	// dbPath: on the shared-branch fast path newTestStore writes a
+	// metadata.json naming the shared database with no branch qualifier
+	// (test_helpers_test.go newTestStoreSharedBranch) while the live store sits
+	// on this test's own branch, so a global dbPath would point anything that
+	// reopens by path at shared `main` instead. repairPrefixes takes the store
+	// explicitly and never reopens, so the global is left alone rather than
+	// made to lie.
 	oldStore := store
 	oldActor := actor
-	oldDBPath := dbPath
 	store = testStore
 	actor = "test"
-	dbPath = testDBPath
 	defer func() {
 		store = oldStore
 		actor = oldActor
-		dbPath = oldDBPath
 	}()
-
-	// Set initial prefix
-	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("failed to set prefix: %v", err)
-	}
 
 	// Create issues with multiple prefixes (simulating corruption).
 	// CreateIssue accepts explicit IDs without prefix validation,

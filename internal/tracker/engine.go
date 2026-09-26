@@ -1008,6 +1008,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				}
 				return stats, nil
 			}
+			// No batch dry-runner (e.g. Linear): preview sequentially below,
+			// but only over the issues the batch filter kept. It has already
+			// counted every other issue as Skipped, and iterating all issues
+			// would count those skips a second time (gastownhall/beads#6712).
+			issues = keepBatchPushIssues(issues, pushIssues)
 		} else {
 			batchResult, err := batchTracker.BatchPush(ctx, pushIssues, forceIDs)
 			if err != nil {
@@ -1063,6 +1068,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Created++
+			} else if opts.CreateOnly && !forceIDs[issue.ID] {
+				// A real --create-only run leaves linked issues alone, so the
+				// preview must skip them too (gastownhall/beads#6337).
+				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this
 				// issue, so the preview must say so too (gastownhall/beads#4214).
@@ -1215,6 +1224,26 @@ func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions,
 		pushIssues = append(pushIssues, e.formatPushIssue(issue))
 	}
 	return pushIssues, skipped
+}
+
+// keepBatchPushIssues returns the original (unformatted) issues whose IDs
+// collectBatchPushIssues kept, in their original order. The sequential dry-run
+// needs the originals: pushIssues may carry FormatDescription copies, which
+// would change the content hash the stored-push-hash skip compares against.
+// That is defensive today - the one batch-only tracker, Linear, sets no
+// ContentHash - but keeps the preview honest for one that does.
+func keepBatchPushIssues(issues, pushIssues []*types.Issue) []*types.Issue {
+	kept := make(map[string]bool, len(pushIssues))
+	for _, issue := range pushIssues {
+		kept[issue.ID] = true
+	}
+	out := make([]*types.Issue, 0, len(pushIssues))
+	for _, issue := range issues {
+		if kept[issue.ID] {
+			out = append(out, issue)
+		}
+	}
+	return out
 }
 
 func (e *Engine) formatPushIssue(issue *types.Issue) *types.Issue {

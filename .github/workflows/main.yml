@@ -876,7 +876,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: build-artifacts
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -916,6 +916,13 @@ jobs:
         run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test proxied-server cmd shard
+        # Timeout ordering, same as pr-risk.yml's twin: the test binary's own
+        # -test.timeout=15m (proxied-test-shard.sh) fires first and dumps
+        # goroutines, this 16m step timeout only backstops a wedged binary, and
+        # the 30m job budget absorbs the download/install/pull steps. Without
+        # the step timeout, slow setup alone can exhaust the job budget and kill
+        # a healthy test run with nothing to diagnose.
+        timeout-minutes: 16
         env:
           BEADS_TEST_PROXIED_SERVER: "1"
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure

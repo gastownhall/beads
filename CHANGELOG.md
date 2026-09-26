@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part of the batch closed — the claim commits inside the batch's own
   transaction and a sibling's refusal does not roll it back — so the summary
   names the claimed id rather than leaving it silently assigned.
+
+- **`bd list --watch --format` is refused instead of silently dropping the
+  format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).
+  `--watch` always re-renders the pretty listing, so on the direct route a
+  `--format` template was ignored without a word, while `--proxied-server`
+  already refused the combination. Both routes now fail with the same
+  `--format cannot be combined with --watch` usage error.
+
 - **The smart migrate gate no longer auto-migrates a clone whose data is behind
   the remote, and `bd dolt pull` now works from that state**
   ([#6575](https://github.com/gastownhall/beads/issues/6575)). The gate's
@@ -396,6 +404,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately no optional-interface fallback — a store that cannot size the
   ready set should fail to compile rather than silently fall back to an
   unbounded query.
+
+- **Push `--dry-run` now honors `--create-only`**
+  ([#6337](https://github.com/gastownhall/beads/issues/6337)). The sequential
+  tracker push previewed "Would update" for every already-linked issue, even
+  though a real `--create-only` run skips them, so the preview over-reported
+  updates and under-reported skips. This affected `bd jira sync` and
+  `bd linear sync` with `--push --create-only --dry-run`. The dry-run now
+  applies the same `--create-only` gate as the real run. Linear's dry-run also
+  no longer counts an issue its batch filter skipped (create-only, a `ShouldPush`
+  hook, parent, type, or conflict) as skipped twice. Notion's batch dry-run was already correct.
 
 ## [1.3.0] - 2026-09-15
 

@@ -16,6 +16,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -27,7 +28,7 @@ import (
 
 const (
 	defaultBranch           = "main"
-	defaultProxyIdleTimeout = 30 * time.Second
+	defaultProxyIdleTimeout = configfile.DefaultProxyIdleTimeout
 )
 
 type doltSQLProvider struct {
