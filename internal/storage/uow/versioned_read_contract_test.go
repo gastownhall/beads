@@ -149,8 +149,8 @@ func (h *asOfReadHarness) provider(ctx context.Context, storeID string) (UnitOfW
 	// provider this harness builds stays open for the whole test. These
 	// per-provider Close cleanups are registered AFTER (so, per t.Cleanup's
 	// LIFO order, run BEFORE) TestAsOfReadContract's own shared
-	// proxy.Shutdown cleanup, so every provider is closed while the server
-	// they share is still up.
+	// verifiedShutdownCleanup (proxy.Shutdown) cleanup, so every provider is
+	// closed while the server they share is still up.
 	h.t.Cleanup(func() { _ = provider.Close(context.Background()) })
 
 	if err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
@@ -373,11 +373,7 @@ func TestAsOfReadContract(t *testing.T) {
 	require.NoError(t, err)
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	cfgPath := writeServerConfig(t, port)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
