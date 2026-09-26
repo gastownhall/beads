@@ -562,6 +562,27 @@ func CheckDoltStatus(path string) DoctorCheck {
 	return checkStatusWithDB(conn)
 }
 
+// resolveGlobalDoltDatabase returns the name of the shared-server global routing
+// database, or "" when this workspace has no global database. The
+// global_dolt_database stamp in metadata.json wins when present, but bd init is
+// its only writer and only writes it under shared-server mode
+// (cmd/bd/init.go), so workspaces initialized before the field existed — or
+// initialized per-project and later attached to a shared server — carry no
+// stamp. Those workspaces fall back to the constant the runtime actually routes
+// through, so the deliberately created global database stops being reported as
+// a stray one (GH#6599).
+func resolveGlobalDoltDatabase(cfg *configfile.Config) string {
+	if cfg != nil {
+		if globalDB := cfg.GetGlobalDoltDatabase(); globalDB != "" {
+			return globalDB
+		}
+	}
+	if doltserver.IsSharedServerMode() {
+		return doltserver.GlobalDatabaseName
+	}
+	return ""
+}
+
 // checkPhantomDatabases detects phantom catalog entries from naming convention
 // changes (beads_* prefix or *_beads suffix) that don't match the configured
 // database. These phantom entries can cause INFORMATION_SCHEMA queries to crash
@@ -581,11 +602,10 @@ func checkPhantomDatabases(conn *doltConn) DoctorCheck {
 	defer rows.Close()
 
 	configuredDB := configfile.DefaultDoltDatabase
-	globalDB := ""
 	if conn.cfg != nil {
 		configuredDB = conn.cfg.GetDoltDatabase()
-		globalDB = conn.cfg.GetGlobalDoltDatabase()
 	}
+	globalDB := resolveGlobalDoltDatabase(conn.cfg)
 
 	var phantoms []string
 	for rows.Next() {
@@ -655,6 +675,13 @@ func probeForCorrectDatabase(conn *doltConn) string {
 		"information_schema": true,
 		"mysql":              true,
 		configuredDB:         true, // Already checked this one
+	}
+	// The shared-server global routing database is schema-initialized, so it has
+	// an issues table and would otherwise be offered as "the correct database"
+	// for a project whose own database is missing. It holds global-scope issues,
+	// never a project's (GH#6599).
+	if globalDB := resolveGlobalDoltDatabase(conn.cfg); globalDB != "" {
+		skip[globalDB] = true
 	}
 
 	var candidates []string
