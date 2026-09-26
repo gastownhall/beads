@@ -1,12 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	storagegit "github.com/steveyegge/beads/internal/storage/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -225,4 +236,185 @@ func TestIsTeamServerManaged_RequiresProxiedServerMode(t *testing.T) {
 
 	cfg.DoltMode = configfile.DoltModeProxiedServer
 	assert.True(t, cfg.IsTeamServerManaged())
+}
+
+func TestProxiedInitTailRoleIgnoresInheritedGitRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	globalPath := filepath.Join(home, ".gitconfig")
+	require.NoError(t, os.WriteFile(globalPath, nil, 0600))
+	runGit := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, tc := range []struct {
+		name, initial, flag, want string
+	}{
+		{"explicit", "maintainer", "contributor", "contributor"},
+		{"default", "", "", "maintainer"},
+		{"retained", "contributor", "", "contributor"},
+	} {
+		for _, poison := range []string{"repository", "inline_config"} {
+			t.Run(tc.name+"/"+poison, func(t *testing.T) {
+				target, decoy := t.TempDir(), t.TempDir()
+				for _, dir := range []string{target, decoy} {
+					runGit(t, dir, "init", "--quiet")
+					runGit(t, dir, "config", "--local", "core.hooksPath", ".git/hooks")
+				}
+				if tc.initial != "" {
+					runGit(t, target, "config", "--local", "beads.role", tc.initial)
+				}
+				runGit(t, decoy, "config", "--local", "beads.role", "decoy-role")
+				if poison == "repository" {
+					t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+					t.Setenv("GIT_WORK_TREE", decoy)
+				} else {
+					t.Setenv("GIT_CONFIG_COUNT", "1")
+					t.Setenv("GIT_CONFIG_KEY_0", "beads.role")
+					t.Setenv("GIT_CONFIG_VALUE_0", "injected-role")
+				}
+				env := os.Environ()
+				before, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+				require.NoError(t, err)
+				gitUC := storagegit.NewGitProvider(target).GitUseCase()
+				require.True(t, gitUC.IsGitRepo(t.Context()), "valid inherited repository must reach role branch")
+				cmd := &cobra.Command{}
+				cmd.Flags().Bool("setup-exclude", false, "")
+				// Existing flags exclude all filesystem integrations; nil fsUseCase must stay unused.
+				in := initProxiedServerInput{roleFlag: tc.flag, quiet: true, stealth: true, skipHooks: true, skipAgents: true}
+				require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{gitUC: gitUC}))
+				require.Equal(t, tc.want, runGit(t, target, "config", "--local", "--get", "beads.role"))
+				after, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+				require.NoError(t, err)
+				require.Equal(t, string(before), string(after), "proxied tail changed decoy")
+				globalAfter, err := os.ReadFile(globalPath)
+				require.NoError(t, err)
+				require.Empty(t, globalAfter)
+				require.True(t, slices.Equal(env, os.Environ()), "proxied tail changed inherited environment")
+			})
+		}
+	}
+}
+
+type proxiedRoleProbeUseCase struct {
+	domain.GitUseCase
+	roleReads int
+}
+
+func (u *proxiedRoleProbeUseCase) BeadsRole(ctx context.Context) (string, bool, error) {
+	u.roleReads++
+	return u.GitUseCase.BeadsRole(ctx)
+}
+
+func TestProxiedInitTailRoleProbeUsesSelectedDirectory(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	runGit := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, tc := range []struct {
+		name, kind, initial, flag, want string
+	}{
+		{"explicit", "ordinary", "maintainer", "contributor", "contributor"},
+		{"default", "ordinary", "", "", "maintainer"},
+		{"retained", "ordinary", "contributor", "", "contributor"},
+		{"bare_explicit", "bare", "maintainer", "contributor", "contributor"},
+		{"bare_default", "bare", "", "", "maintainer"},
+		{"bare_retained", "bare", "contributor", "", "contributor"},
+		{"nonrepo_with_decoy_and_global_role", "nonrepo", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, target, decoy := t.TempDir(), t.TempDir(), t.TempDir()
+			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+				t.Setenv(key, home)
+			}
+			globalData := ""
+			if tc.kind == "nonrepo" {
+				globalData = "[beads]\n\trole = global-role\n"
+			}
+			globalPath := filepath.Join(home, ".gitconfig")
+			require.NoError(t, os.WriteFile(globalPath, []byte(globalData), 0600))
+			runGit(t, decoy, "init", "--quiet")
+			runGit(t, decoy, "config", "--local", "core.hooksPath", ".git/hooks")
+			runGit(t, decoy, "config", "--local", "beads.role", "decoy-role")
+			if tc.kind == "bare" {
+				runGit(t, target, "init", "--bare", "--quiet")
+				runGit(t, target, "config", "--local", "core.hooksPath", filepath.Join(target, "hooks"))
+			} else if tc.kind == "ordinary" {
+				runGit(t, target, "init", "--quiet")
+				runGit(t, target, "config", "--local", "core.hooksPath", ".git/hooks")
+			}
+			if tc.initial != "" {
+				runGit(t, target, "config", "--local", "beads.role", tc.initial)
+			}
+			probe := exec.Command("git", "rev-parse", "--git-dir")
+			probe.Dir, probe.Env = target, gitenv.ScrubRouting(os.Environ())
+			require.Equal(t, tc.kind != "nonrepo", probe.Run() == nil, "owned target repository precondition")
+			if tc.kind == "nonrepo" {
+				t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+			} else {
+				invalid := filepath.Join(t.TempDir(), "invalid-git-dir")
+				require.NoError(t, os.WriteFile(invalid, []byte("not a Git directory\n"), 0600))
+				t.Setenv("GIT_DIR", invalid)
+			}
+			t.Setenv("GIT_WORK_TREE", decoy)
+			t.Chdir(decoy)
+			base := storagegit.NewGitProvider(target).GitUseCase()
+			require.Equal(t, tc.kind == "nonrepo", base.IsGitRepo(t.Context()), "inherited probe precondition")
+			if tc.kind == "nonrepo" {
+				role, found, err := base.BeadsRole(t.Context())
+				require.NoError(t, err)
+				require.True(t, found)
+				require.Equal(t, "global-role", role, "global config alone must not manufacture a repository")
+			}
+			gitUC := &proxiedRoleProbeUseCase{GitUseCase: base}
+			before, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+			require.NoError(t, err)
+			env := os.Environ()
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("setup-exclude", false, "")
+			in := initProxiedServerInput{roleFlag: tc.flag, quiet: true, stealth: true, skipHooks: true, skipAgents: true}
+			require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{workDir: target, gitUC: gitUC}))
+			if tc.kind == "nonrepo" {
+				require.Zero(t, gitUC.roleReads, "non-repository entered the role branch")
+				entries, err := os.ReadDir(target)
+				require.NoError(t, err)
+				require.Empty(t, entries)
+			} else {
+				require.Equal(t, 1, gitUC.roleReads, "selected repository did not enter the role branch")
+				require.Equal(t, tc.want, runGit(t, target, "config", "--local", "--get", "beads.role"))
+			}
+			after, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+			require.NoError(t, err)
+			require.Equal(t, string(before), string(after), "tail changed decoy config")
+			globalAfter, err := os.ReadFile(globalPath)
+			require.NoError(t, err)
+			require.Equal(t, globalData, string(globalAfter))
+			require.True(t, slices.Equal(env, os.Environ()), "tail changed inherited environment")
+		})
+	}
 }

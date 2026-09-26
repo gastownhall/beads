@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/fs"
 	"github.com/steveyegge/beads/internal/storage/git"
@@ -283,6 +285,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	return runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
+		workDir:       cwd,
 		beadsDir:      beadsDir,
 		prefix:        adoptedPrefix,
 		dbName:        dbName,
@@ -507,6 +510,7 @@ func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int
 }
 
 type runInitTailContext struct {
+	workDir       string
 	beadsDir      string
 	prefix        string
 	dbName        string
@@ -516,10 +520,22 @@ type runInitTailContext struct {
 	gitUC         domain.GitUseCase
 }
 
+func (t runInitTailContext) isRoleGitRepo(ctx context.Context, fallback bool) bool {
+	// Isolated tail contexts without a selected path retain their supplied use case.
+	if t.workDir == "" {
+		return fallback
+	}
+	// Dropping discovery ceilings can select a containing parent repository,
+	// matching the role adapter's existing scrubbed reads and writes.
+	probe := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	probe.Dir, probe.Env = t.workDir, gitenv.ScrubRouting(os.Environ())
+	return probe.Run() == nil
+}
+
 func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput, t runInitTailContext) error {
 	isRepo := t.gitUC.IsGitRepo(ctx)
 
-	if isRepo {
+	if t.isRoleGitRepo(ctx, isRepo) {
 		role := in.roleFlag
 		if role == "" {
 			role = "maintainer"

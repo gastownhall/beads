@@ -2,10 +2,16 @@ package git
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"testing"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/stretchr/testify/require"
 )
 
 func (s *testSuite) TestIsGitRepo_FalseOutsideRepo() {
@@ -230,4 +236,93 @@ func (s *testSuite) TestExec_HappensInWorkDir() {
 	info, err := os.Stat(filepath.Join(s.tmpDir, ".git"))
 	s.Require().NoError(err)
 	s.True(info.IsDir())
+}
+
+func TestRoleConfigIgnoresInheritedGitRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	runGit := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, tc := range []struct {
+		name, local, global, want string
+	}{
+		{"repository", "maintainer", "", "maintainer"},
+		{"inline_config", "maintainer", "", "maintainer"},
+		{"default_global", "", "contributor", "contributor"},
+		{"absent", "", "", ""},
+		{"literal", "custom role = exact", "", "custom role = exact"},
+		{"empty", " \t ", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, decoy := t.TempDir(), t.TempDir()
+			for _, dir := range []string{target, decoy} {
+				runGit(t, dir, "init", "--quiet")
+				runGit(t, dir, "config", "--local", "core.hooksPath", ".git/hooks")
+			}
+			runGit(t, target, "config", "--local", "test.marker", "target")
+			runGit(t, decoy, "config", "--local", "test.marker", "decoy")
+			runGit(t, decoy, "config", "--local", "beads.role", "decoy-role")
+			if tc.local != "" {
+				runGit(t, target, "config", "--local", "beads.role", tc.local)
+			}
+			global := ""
+			if tc.global != "" {
+				global = "[beads]\n\trole = " + tc.global + "\n"
+			}
+			globalPath := filepath.Join(home, ".gitconfig")
+			require.NoError(t, os.WriteFile(globalPath, []byte(global), 0600))
+			wantGeneric, changedDir := "decoy", decoy
+			if tc.name == "inline_config" {
+				t.Setenv("GIT_CONFIG_COUNT", "2")
+				t.Setenv("GIT_CONFIG_KEY_0", "beads.role")
+				t.Setenv("GIT_CONFIG_VALUE_0", "injected-role")
+				t.Setenv("GIT_CONFIG_KEY_1", "test.marker")
+				t.Setenv("GIT_CONFIG_VALUE_1", "injected-marker")
+				wantGeneric, changedDir = "injected-marker", target
+			} else {
+				t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+				t.Setenv("GIT_WORK_TREE", decoy)
+			}
+			env := os.Environ()
+			before, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+			require.NoError(t, err)
+			repo := NewGitRepository(target)
+			useCase := domain.NewGitUseCase(target, repo)
+			got, found, err := useCase.BeadsRole(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.want != "", found)
+			require.NoError(t, useCase.SetBeadsRole(t.Context(), "new role = exact"))
+			require.Equal(t, "new role = exact", runGit(t, target, "config", "--local", "--get", "beads.role"))
+			after, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+			require.NoError(t, err)
+			require.Equal(t, string(before), string(after), "role write changed decoy")
+			// Ordinary config commands keep their existing inherited context.
+			got, found, err = repo.GetConfig(t.Context(), "test.marker")
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, wantGeneric, got)
+			require.NoError(t, repo.SetConfig(t.Context(), "test.marker", "changed"))
+			require.Equal(t, "changed", runGit(t, changedDir, "config", "--local", "--get", "test.marker"))
+			globalAfter, err := os.ReadFile(globalPath)
+			require.NoError(t, err)
+			require.Equal(t, global, string(globalAfter))
+			require.True(t, slices.Equal(env, os.Environ()), "adapter changed inherited environment")
+		})
+	}
 }
