@@ -32,6 +32,7 @@ var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
@@ -52,6 +53,10 @@ type EmbeddedDoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
+	// versionedHistoryEnabled activates dual-write issue-version history for
+	// THIS store instance only (storage.VersionedHistoryConfigurer); never
+	// process-global.
+	versionedHistoryEnabled atomic.Bool
 	// readOnly marks a store opened via OpenReadOnly or
 	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
 	// migrations) were skipped and write transactions are refused
@@ -392,6 +397,8 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
 	defer clearJournalScope()
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
+	defer clearVersionScope()
 
 	if fnErr := fn(tx); fnErr != nil {
 		err = errors.Join(fnErr, tx.Rollback())
@@ -414,6 +421,12 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 // SetEventsJournalEnabled activates the journal for this store instance only.
 func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+}
+
+// SetVersionedHistoryEnabled activates dual-write issue-version history for
+// this store instance only.
+func (s *EmbeddedDoltStore) SetVersionedHistoryEnabled(enabled bool) {
+	s.versionedHistoryEnabled.Store(enabled)
 }
 
 // commitEmbeddedTx classifies an unconfirmed SQL commit response as
@@ -1058,6 +1071,17 @@ func (s *EmbeddedDoltStore) History(ctx context.Context, issueID string) ([]*sto
 	return result, err
 }
 
+// ListVersions implements storage.VersionLister over issue_versions.
+func (s *EmbeddedDoltStore) ListVersions(ctx context.Context, issueID string) ([]storage.IssueVersion, error) {
+	var result []storage.IssueVersion
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ListVersionsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
 	var result *types.Issue
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
@@ -1422,3 +1446,8 @@ func (s *EmbeddedDoltStore) GetStaleIssues(ctx context.Context, filter types.Sta
 	})
 	return result, err
 }
+
+// Compile-time proof that this leg serves versions -- see the matching
+// assertion in internal/storage/dolt/versioned.go for why it lives in the
+// leg's own package.
+var _ storage.VersionLister = (*EmbeddedDoltStore)(nil)

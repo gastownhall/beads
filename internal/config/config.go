@@ -243,6 +243,18 @@ func Initialize() error {
 	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
 	v.SetDefault("events-journal-auto-prune", true)
 	v.SetDefault("audit.enabled", false)
+	// versioned-history.enabled activates the dual-write issue-version history
+	// (issue_versions, issues.current_revision) that migrations 0067+ provision.
+	// Default OFF: with it off the writer short-circuits and a store is
+	// byte-identical to one built without the feature, which is the contract
+	// gastownhall/beads#6135 ships under. Env: BD_VERSIONED_HISTORY_ENABLED.
+	//
+	// The flag is single-writer-only until the version_id primary key lands
+	// (design section 16.3 steps 1-5): issue_versions.revision and
+	// issues.current_revision are per-store ordinals, so two disconnected
+	// clones can both mint revision 8 for the same issue. Do not enable it on
+	// a store that more than one writer mutates.
+	v.SetDefault("versioned-history.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")

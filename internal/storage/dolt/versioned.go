@@ -33,6 +33,24 @@ func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.His
 	return result, err
 }
 
+// ListVersions implements storage.VersionLister over issue_versions.
+//
+// Plain withReadTx, not the long-timeout variant History needs: this reads an
+// ordinary user table by its composite primary key prefix, not the
+// dolt_history_issues scan whose cost History has to budget for.
+func (s *DoltStore) ListVersions(ctx context.Context, issueID string) ([]storage.IssueVersion, error) {
+	var result []storage.IssueVersion
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ListVersionsInTx(ctx, tx, issueID)
+		if err != nil {
+			return wrapQueryError("list issue versions", err)
+		}
+		return nil
+	})
+	return result, err
+}
+
 // HistoricalIssueIDs reports which of ids appear in HEAD's committed history
 // of the issues table. Implements storage.HistoryPresence.
 //
@@ -283,3 +301,9 @@ func isSafeCommitRef(s string) bool {
 	}
 	return true
 }
+
+// Compile-time proof that this leg serves versions. It lives here rather than
+// in package storage because storage cannot import the legs. Dropping
+// ListVersions is then a build failure rather than a silent demotion to
+// "this backend cannot serve version history" at runtime.
+var _ storage.VersionLister = (*DoltStore)(nil)
