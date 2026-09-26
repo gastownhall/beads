@@ -526,9 +526,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				serverProxyIdleTimeout = proxy.IdleTimeoutNever
 			}
 		}
-		if initProxiedServer {
-			serverProxyIdleTimeout = effectiveEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet, serverProxyIdleTimeout)
-		}
 
 		externalProvided := externalHost != "" || externalPort != 0 || externalSocketPath != "" ||
 			externalUser != "" ||
