@@ -79,6 +79,10 @@ func TestPersistentPreRunRefusesWhenIdentityPreviewFailsForNonBootstrapReason(t 
 	savePersistentPreRunState(t)
 
 	oldStore := store
+	// Zero it too: the assertion at the end of this test is that the gate did
+	// NOT open the real store, which a leftover non-nil global from an earlier
+	// test would satisfy vacuously (or fail spuriously).
+	store = nil
 	t.Cleanup(func() { store = oldStore })
 
 	if rootCmd.PersistentPreRunE == nil {

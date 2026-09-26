@@ -1903,7 +1903,7 @@ var rootCmd = &cobra.Command{
 			case isBootstrapPreviewErr(previewErr):
 				debug.Logf("workspace identity check: skipping, no local database yet (%v)\n", previewErr)
 			default:
-				return HandleError("could not verify workspace identity before opening the database: %v (set BEADS_SKIP_IDENTITY_CHECK=1 to override)", previewErr)
+				return refuseUnverifiablePreviewOpen(previewErr)
 			}
 		}
 
@@ -2395,6 +2395,55 @@ func flushBatchCommitOnShutdown() {
 // wave the real, mutating open through (be-3bt2e).
 func isBootstrapPreviewErr(err error) bool {
 	return errors.Is(err, os.ErrNotExist)
+}
+
+// refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
+// preview open failed for a reason other than first-run bootstrap.
+//
+// The preview IS a real store open, so it can hit the same typed open errors the
+// real one does, and those must be rendered exactly as the real-open arm renders
+// them. Moving the gate earlier is not license to downgrade
+// SchemaSkewError.UserMessage()'s actionable rebuild block into a generic
+// wrapper, nor to drop the JSON body that every `--json` consumer depends on.
+//
+// Only ONE class actually arrives here typed today — schema skew: the preview
+// runs CheckForwardDrift (embeddeddolt openReadOnly, dolt store open), which is
+// how the recurring stale-binary class #4135/#4137 surfaces at the preview
+// first. The other two calls below are defensive-for-symmetry with the real-open
+// arm, and cannot fire from a preview as the code stands:
+//   - handleFreshCloneError matches a post-migration failure string that a
+//     non-mutating preview never produces. Note for whoever makes it reachable:
+//     it ignores jsonOutput (main_errors.go), so it would break the `--json`
+//     guarantee this arm otherwise keeps.
+//   - CheckRemoteMigrateGate* runs only from mutating opens, never from
+//     openReadOnly, so RemoteMigrateGateError cannot originate in the preview.
+//
+// projectIdentityMismatchError is deliberately NOT in that list: it is a plain
+// fmt.Errorf block with no typed wrapper, so it falls to the generic arm below
+// and picks up its prefix. That matches base, where the mismatch block reached
+// the operator inside the real arm's "failed to open database: %v" wrapper.
+//
+// Extracted from the gate's default arm so both halves are directly testable
+// without standing up a forward-drifted workspace; the wire itself is pinned on
+// the embedded tier by
+// TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
+func refuseUnverifiablePreviewOpen(previewErr error) error {
+	if handleFreshCloneError(previewErr) {
+		return SilentExit()
+	}
+	if renderTypedOpenError(previewErr) {
+		return SilentExit()
+	}
+	// What remains is preview-specific: an unreachable endpoint, unloadable
+	// config, a registered backend refusing the read-only open. Respect --json
+	// so a machine caller still receives a structured error. The override hint
+	// lives only on this arm, and states what it actually does: on the typed
+	// arms above it cannot help, because the real open fails on the identical
+	// condition.
+	return HandleErrorRespectJSON(
+		"could not verify workspace identity before opening the database: %v "+
+			"(BEADS_SKIP_IDENTITY_CHECK=1 skips this pre-open check; it does not fix an error the real open would hit too)",
+		previewErr)
 }
 
 // validateWorkspaceIdentity checks that the project identity from metadata.json
