@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // managedHookNames lists the git hooks managed by beads.
@@ -1530,7 +1531,7 @@ func exportJSONLForCommit() {
 	if exportPath == "" {
 		exportPath = "issues.jsonl"
 	}
-	fullPath := preCommitExportPath(beadsDir, exportPath, hookWorkTreeRoot())
+	fullPath := filepath.Join(hookJSONLDir(beadsDir), exportPath)
 
 	// If the export file is staged for deletion (user ran `git rm`), do not
 	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
@@ -1551,11 +1552,31 @@ func exportJSONLForCommit() {
 	debug.Logf("pre-commit: exporting JSONL to %s\n", fullPath)
 	warnJSONLWithoutDoltRemote("pre-commit auto-export")
 
+	// The destination directory is not guaranteed to exist: hookJSONLDir can
+	// retarget into a worktree that has no .beads yet, and a nested
+	// export.path ("exports/issues.jsonl") adds another level. atomicfile
+	// does not create parents, so without this every commit would warn and
+	// write nothing.
+	// 0o750 matches the permissions `bd init` gives a .beads directory.
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o750); err != nil {
+		fmt.Fprintf(os.Stderr, "beads: pre-commit export warning: %v\n", err)
+		return
+	}
+
 	// Shell out to `bd export` which initializes its own store.
 	// Keep BD_GIT_HOOK=1 in the subprocess environment. The explicit export
 	// command must run, but its PersistentPostRun auto-export must stay
-	// suppressed; otherwise it also writes and stages the shared primary
-	// checkout's JSONL when this hook belongs to a linked worktree.
+	// suppressed: maybeAutoExport resolves its own destination straight from
+	// beads.FindBeadsDir(), so letting it fire writes the shared primary
+	// checkout's JSONL behind this hook's back (GH#6680). It cannot *stage*
+	// that file — gitAddFile's cross-worktree guard rejects a target outside
+	// the hook's worktree — but the stray write is exactly the unexplained
+	// `M .beads/issues.jsonl` users see in the primary checkout.
+	//
+	// Keeping the variable set also leaves the subprocess's PersistentPostRun
+	// auto-backup suppressed (backup_auto.go), matching the parent hook
+	// process: the parent bd is already in hook context and skips it, so a
+	// pre-commit no longer takes a second backup of the same state.
 	//
 	// NOTE: we intentionally preserve GIT_DIR et al. in the subprocess env so
 	// it retains the hook's selected Git context. The parent stages fullPath
@@ -1566,7 +1587,7 @@ func exportJSONLForCommit() {
 	// nested .beads/.beads workspace and warn on every commit (GH#3454).
 	cmd := exec.Command("bd", "export", "-o", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
-	cmd.Env = preCommitExportEnv(os.Environ())
+	cmd.Env = hookSubprocessEnv(os.Environ())
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "beads: pre-commit export warning: %v\n", err)
@@ -1576,8 +1597,11 @@ func exportJSONLForCommit() {
 	// Stage the exported file if configured. Skip when no-git-ops is set
 	// (GH#3314). gitAddFile scrubs the inherited git hook env vars so git
 	// rediscovers the repo from cwd, and silently skips when fullPath is
-	// outside the hook's worktree (the .beads/redirect case where fullPath
-	// points into the main repo, not this worktree). See GH#3311.
+	// outside the hook's worktree. That guard still matters here: hookJSONLDir
+	// only retargets the cross-worktree case it can fix, so a .beads/redirect
+	// to a shared out-of-repo store, a BEADS_DIR override, or a beads dir
+	// above the repository root all still resolve outside this worktree and
+	// must not be dropped into the index. See GH#3311.
 	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") {
 		if err := gitAddFile(fullPath); err != nil {
 			debug.Logf("pre-commit: git add failed: %v\n", err)
@@ -1585,19 +1609,174 @@ func exportJSONLForCommit() {
 	}
 }
 
-// preCommitExportPath keeps database discovery separate from export ownership.
-// A linked worktree may use the primary checkout's .beads directory for its
-// shared store, but the JSONL snapshot belongs to the worktree being committed.
-func preCommitExportPath(beadsDir, exportPath, hookRoot string) string {
-	if hookRoot != "" {
-		return filepath.Join(hookRoot, ".beads", exportPath)
-	}
-	return filepath.Join(beadsDir, exportPath)
+// hookJSONLDir returns the directory the running git hook should read and
+// write the git-tracked JSONL snapshot in. It is the single destination
+// resolver shared by the pre-commit export writer and the
+// post-merge/post-checkout sync importer, so those two can never disagree
+// about which copy of the file the hook owns.
+//
+// Database discovery and JSONL ownership are separate concerns (GH#6680): a
+// linked worktree has no store of its own, so beads.FindBeadsDir deliberately
+// falls back to the primary checkout's .beads directory, but the JSONL is a
+// tracked file whose contents belong to the worktree being committed.
+//
+// Known asymmetry, deliberately out of scope for a hook fix: the non-hook
+// auto-export lane (maybeAutoExport and its export-state.json throttle key)
+// still resolves straight from beads.FindBeadsDir. It cannot share this
+// resolver — outside a hook there is no GIT_DIR, hookWorkTreeRoot is empty,
+// and this function is the identity. Giving ordinary `bd` commands in a linked
+// worktree ownership of their own JSONL means resolving the worktree from cwd
+// on every command, which changes JSONL ownership globally; that is a product
+// decision rather than a hook fix, and is tracked separately.
+func hookJSONLDir(beadsDir string) string {
+	hookRoot := hookWorkTreeRoot()
+	primaryRoot := hookLinkedWorktreePrimaryRoot(hookRoot)
+	jsonlDir := worktreeJSONLDir(beadsDir, hookRoot, primaryRoot)
+	// Log both outcomes. When the verdict goes the "keep beadsDir" way for a
+	// topology the user expected this fix to cover, the only other observable
+	// is the absence of a change — which is indistinguishable from the hook
+	// not running at all.
+	debug.Logf("hook: JSONL dir %s (retargeted=%t beadsDir=%s hookRoot=%s primaryRoot=%s)\n",
+		jsonlDir, jsonlDir != beadsDir, beadsDir, hookRoot, primaryRoot)
+	return jsonlDir
 }
 
-func preCommitExportEnv(env []string) []string {
-	// Return an owned slice while preserving BD_GIT_HOOK and Git routing.
-	return append([]string(nil), env...)
+// worktreeJSONLDir is the pure gating decision behind hookJSONLDir.
+//
+// The rewrite is deliberately narrow, because hookWorkTreeRoot is non-empty
+// for *every* hook invocation — it returns filepath.Dir(GIT_DIR) for a plain,
+// non-worktree repository too — so it cannot carry this decision alone.
+// beadsDir is retargeted into the committing worktree only when all of:
+//
+//   - the hook supplied a worktree root (hookRoot != "");
+//   - that worktree is a linked one (primaryRoot != "");
+//   - beadsDir is not already inside the committing worktree;
+//   - beadsDir lives inside the primary checkout — that is, exporting to it
+//     is precisely the cross-worktree write GH#6680 reported.
+//
+// Everything else keeps the discovered directory and so keeps pre-GH#6680
+// behavior: a .beads/redirect to a shared out-of-repo store, a BEADS_DIR
+// override, and a beads dir above the repository root are not another working
+// tree. Retargeting those would both strand the real JSONL and drop a
+// brand-new in-repo copy into the user's commit, and gitAddFile's GH#3311
+// guard already keeps them out of the index.
+//
+// The destination mirrors beadsDir's path *relative to the primary checkout*
+// rather than a hardcoded ".beads" or a bare leaf name, because the relative
+// path is the one the committing worktree actually tracks: a store reached
+// through a .beads/redirect to an in-repo "tools/store" must land at
+// <worktree>/tools/store, not at <worktree>/store, which is a path no commit
+// has ever contained.
+//
+// Which lane reaches that mirroring: the pre-commit export runs only when
+// preCommitHasStagedBeadsFiles sees a staged path under its hardcoded ".beads"
+// pathspec, unchanged from pre-GH#6680. A store that lives outside .beads —
+// "beads-store", "nested/beads-store", an in-repo redirect target — normally
+// stages nothing that gate matches, so on the export lane the mirror is a
+// correctness bound rather than a new capability; the sync lane
+// (importJSONLForSync) has no staged gate and does reach it. The gate blocked
+// exactly the same commits at base, so this is a limit on the fix's reach and
+// not a regression. Read the mirror as "the hook never writes a path the
+// committing worktree does not track", not as "nested stores now auto-export
+// on every commit".
+//
+// One case the gating deliberately does not catch: a <primary>/.beads that is
+// itself a symlink pointing out of the repository. pathInsideDir resolves
+// symlinks on the path's *parent* only (export_auto.go), so such a beadsDir
+// still compares as inside primaryRoot and is retargeted, leaving the real
+// store's JSONL stale — the outcome the .beads/redirect case above exists to
+// prevent. The supported redirect mechanism is unaffected, because
+// FollowRedirect hands back the resolved out-of-repo target whose parent is
+// outside primaryRoot; only a hand-rolled `ln -s` is affected. Closing it
+// means resolving beadsDir itself before both the gating and the lexical Rel
+// below, which also moves the mixed-symlink-form case those two lines
+// currently decline — a behavior change, so the case is named here instead.
+func worktreeJSONLDir(beadsDir, hookRoot, primaryRoot string) string {
+	if hookRoot == "" || primaryRoot == "" {
+		return beadsDir
+	}
+	if pathInsideDir(beadsDir, hookRoot) || !pathInsideDir(beadsDir, primaryRoot) {
+		return beadsDir
+	}
+	// pathInsideDir resolves symlinks (on the parent); filepath.Rel is lexical,
+	// so the two can still disagree and hand back a path that escapes
+	// hookRoot. IsLocal
+	// rejects exactly those ("..", an absolute result), and rel == "." means
+	// the store *is* the checkout root — too degenerate to mirror. Both
+	// decline, which keeps pre-GH#6680 behavior rather than inventing a target.
+	rel, err := filepath.Rel(primaryRoot, beadsDir)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return beadsDir
+	}
+	return filepath.Join(hookRoot, rel)
+}
+
+// hookLinkedWorktreePrimaryRoot returns the primary checkout's worktree root
+// when hookRoot is a *linked* git worktree, and "" otherwise: the main
+// checkout, a repository git cannot describe, or a layout whose common git dir
+// is not a conventional "<root>/.git".
+//
+// That last requirement is narrower than internal/beads' probe
+// (worktreeFallbackBeadsDirForRepo), which classifies linked-ness as
+// --git-dir != --git-common-dir and serves a bare-repo-backed worktree by
+// sharing <repo.git>/.beads. The difference is deliberate: this function must
+// name a primary *checkout* to mirror a tracked path out of, and a bare
+// repository has none — <repo.git>/.beads is not inside any working tree, so
+// there is no relative path to carry into the committing worktree. Worktrees
+// of a `git clone --bare` therefore keep writing the shared copy and GH#6680
+// stays unfixed for that layout; where their JSONL should live is a product
+// decision rather than something this hook fix can infer.
+func hookLinkedWorktreePrimaryRoot(hookRoot string) string {
+	if hookRoot == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", hookRoot, "rev-parse", "--git-common-dir")
+	// Scrub the inherited GIT_* vars so git describes hookRoot itself rather
+	// than whatever repository GIT_DIR happens to name.
+	cmd.Env = scrubGitHookEnv(os.Environ())
+	out, err := cmd.Output()
+	if err != nil {
+		debug.Logf("hook: failed to resolve git common dir for %s: %v\n", hookRoot, err)
+		return ""
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(hookRoot, commonDir)
+	}
+	if filepath.Base(commonDir) != ".git" {
+		return ""
+	}
+	primaryRoot, err := filepath.Abs(filepath.Dir(commonDir))
+	if err != nil {
+		return ""
+	}
+	if utils.PathsEqual(primaryRoot, hookRoot) {
+		// The hook's worktree is the primary one; nothing to retarget.
+		return ""
+	}
+	return primaryRoot
+}
+
+// hookSubprocessEnv builds the environment for the `bd` subprocesses a hook
+// shells out to — `bd export` on the pre-commit lane, `bd import` on the sync
+// lane. It forces BD_GIT_HOOK=1 rather than assuming the caller already
+// exported it: the variable's whole job here is to keep the subprocess's
+// PersistentPostRun auto-export (and auto-backup) suppressed, and a hook
+// entrypoint that had not set it would leave nothing to suppress with. Git
+// routing vars (GIT_DIR et al.) are deliberately preserved — see
+// exportJSONLForCommit.
+//
+// Nothing on either the export or the import path reads BD_GIT_HOOK to decide
+// whether to do its work: its only consumers are maybeAutoExport
+// (export_auto.go), maybeAutoBackup (backup_auto.go), the first-run metrics
+// notice (metrics.go) and terminal color (internal/ui). Setting it therefore
+// suppresses only the post-run writes the hook is doing itself, never the
+// explicit command.
+func hookSubprocessEnv(env []string) []string {
+	return append(filterEnv(env, "BD_GIT_HOOK"), "BD_GIT_HOOK=1")
 }
 
 // isExportFileStagedForDeletion reports whether the beads export file at
@@ -1614,10 +1793,39 @@ func preCommitExportEnv(env []string) []string {
 // here would make git fall back to the on-disk index and miss the
 // deletion. Reimplements gastownhall/beads#3838 (ckumar1).
 func isExportFileStagedForDeletion(fullPath string) bool {
-	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", filepath.Base(fullPath))
-	checkCmd.Dir = filepath.Dir(fullPath)
+	// The export file's directory is not guaranteed to exist — hookJSONLDir
+	// can retarget into a worktree with no .beads yet, and a nested
+	// export.path adds another level. exec fails outright on a missing Dir,
+	// which would silently drop this guard, so run from the nearest existing
+	// ancestor and address the file relative to it. When the directory does
+	// exist this is identical to running in it with the bare file name.
+	dir := nearestExistingDir(filepath.Dir(fullPath))
+	if dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(dir, fullPath)
+	if err != nil {
+		return false
+	}
+	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
+	checkCmd.Dir = dir
 	out, _ := checkCmd.Output()
 	return len(out) > 0
+}
+
+// nearestExistingDir walks up from dir to the first existing directory,
+// returning "" if it reaches the filesystem root without finding one.
+func nearestExistingDir(dir string) string {
+	for {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 func preCommitHasStagedBeadsFiles(beadsDir string) bool {
@@ -1644,14 +1852,19 @@ func exportSubprocessDir(beadsDir string) string {
 // import path. Existing projects may have customized export.path before
 // import.path existed, so keep importing from export.path unless import.path is
 // explicitly configured.
-func syncImportJSONLPath(beadsDir string) string {
+//
+// jsonlDir is the hook-resolved JSONL directory (hookJSONLDir), which is not
+// always the discovered beads dir: in a linked worktree the sync hook must
+// import the copy `git pull` just refreshed in this worktree — the same copy
+// the pre-commit hook exports — not the primary checkout's (GH#6680).
+func syncImportJSONLPath(jsonlDir string) string {
 	if config.GetValueSource("import.path") == config.SourceDefault {
 		exportPath := config.GetString("export.path")
 		if exportPath != "" {
-			return filepath.Join(beadsDir, exportPath)
+			return filepath.Join(jsonlDir, exportPath)
 		}
 	}
-	return configuredImportJSONLPath(beadsDir)
+	return configuredImportJSONLPath(jsonlDir)
 }
 
 // importJSONLForSync imports JSONL into Dolt after a git
@@ -1662,6 +1875,21 @@ func syncImportJSONLPath(beadsDir string) string {
 // Errors are logged as warnings but never block the merge/checkout. The
 // import is upsert; running it on an unchanged JSONL is a no-op (bd
 // import returns "Error 1105: nothing to commit", which we tolerate).
+//
+// JSONL ownership on this lane, the decision GH#6680's fix makes here: the
+// *source file* follows the committing worktree (hookJSONLDir below), while
+// the *store* it feeds stays beads.FindBeadsDir()'s — the primary checkout's,
+// shared by every linked worktree. The asymmetry is deliberate. git has just
+// rewritten this worktree's copy of the tracked JSONL, so that is the only
+// copy describing the pull/merge/checkout being imported; the primary's copy
+// is some other branch's state. The consequence is that a linked worktree on
+// a feature branch can introduce that branch's rows into the shared store.
+// That is forward-only, not a rollback: the import never deletes, and it
+// rewrites an existing row only when updated_at is strictly newer — a guard
+// auto-import paths cannot switch off, since --allow-stale is settable only
+// on an explicit `bd import` (import_shared.go). Narrower still, the
+// resolveSyncRemote check above confines the whole lane to legacy projects
+// with no Dolt remote.
 //
 // See GH#3729.
 func importJSONLForSync(reason string) {
@@ -1678,7 +1906,7 @@ func importJSONLForSync(reason string) {
 		return
 	}
 
-	fullPath := syncImportJSONLPath(beadsDir)
+	fullPath := syncImportJSONLPath(hookJSONLDir(beadsDir))
 
 	if info, err := os.Stat(fullPath); err != nil || info.Size() == 0 {
 		return
@@ -1687,12 +1915,20 @@ func importJSONLForSync(reason string) {
 	debug.Logf("%s: importing JSONL from %s\n", reason, fullPath)
 	warnJSONLWithoutDoltRemote(reason + " JSONL import")
 
-	// Shell out to `bd import` — same pattern as exportJSONLForCommit.
-	// Clear BD_GIT_HOOK so the subprocess's own hook-detection logic
-	// doesn't suppress its work.
+	// Shell out to `bd import` — same pattern as exportJSONLForCommit,
+	// including BD_GIT_HOOK=1. No import path consults that variable, so
+	// clearing it suppressed nothing the import needs; all it did was let the
+	// subprocess's PersistentPostRun auto-export fire, and that export
+	// re-resolves its destination from beads.FindBeadsDir() — the *primary*
+	// checkout's JSONL. Harmless while this hook read the primary's copy too,
+	// but the source above is now the committing worktree's, so an unsuppressed
+	// post-run export would write one worktree's branch state over another
+	// checkout's tracked file: GH#6680's second symptom, from the fix for its
+	// first. Keeping the marker also suppresses the subprocess's auto-backup,
+	// matching the export lane (hookSubprocessEnv).
 	cmd := exec.Command("bd", "import", "--quiet", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
-	cmd.Env = filterEnv(os.Environ(), "BD_GIT_HOOK")
+	cmd.Env = hookSubprocessEnv(os.Environ())
 
 	out, err := cmd.CombinedOutput()
 	if err == nil {
