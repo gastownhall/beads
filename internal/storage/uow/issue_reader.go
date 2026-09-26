@@ -131,6 +131,15 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		// between this implementation and its store-backed sibling, and it is
 		// an argument to the shared function rather than a second copy of it.
 		items, hasMore := workapi.FinishPageAt(page.Items, req.SortBy, req.Reverse, req.Offset, workapi.PageLimit(req), page.HasMore)
+		// The same shared hydration step the store-backed sibling runs, through
+		// the same function and after the same trim. This seam's detail source
+		// is the one that needs the wisp plane told to it, which is why
+		// HydrateListComments derives it from the row rather than assuming a
+		// plane.
+		newComments := func() workapi.CommentStreamer { return workapi.NewUOWDetailSource(uw) }
+		if err := workapi.HydrateListComments(ctx, newComments, items, req.IncludeComments, !req.SkipCounts); err != nil {
+			return publicops.IssuePage{}, err
+		}
 		return publicops.IssuePage{Items: items, HasMore: hasMore}, nil
 	})
 }
