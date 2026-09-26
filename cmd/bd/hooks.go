@@ -131,6 +131,54 @@ func generateHookSection(hookName string) string {
 		hookSectionEndLine() + "\n"
 }
 
+// shellShebangInterpreters lists the shebang interpreters generateHookSection's
+// POSIX sh output is safe to append after. Anything else — python3, node,
+// ruby, perl (as a standalone script, not sh's `sh -c '... perl ...'`), etc. —
+// cannot execute an appended sh block, and appending one after that script's
+// own exit call (Python's `sys.exit()`, for example) does not merely leave
+// the section unreachable: for languages that parse the whole file up front,
+// it is a syntax error that breaks the file entirely.
+var shellShebangInterpreters = []string{"sh", "bash", "dash", "ksh", "zsh"}
+
+// nonShellShebangInterpreter reports the interpreter named by content's first
+// line, when that line is a shebang and the interpreter is not one bd's
+// generated POSIX-sh section can be safely appended after. ok is false when
+// there is no shebang, or the shebang names a shell bd's section can share.
+func nonShellShebangInterpreter(content string) (interp string, ok bool) {
+	nl := strings.IndexByte(content, '\n')
+	firstLine := content
+	if nl != -1 {
+		firstLine = content[:nl]
+	}
+	firstLine = strings.TrimSpace(firstLine)
+	if !strings.HasPrefix(firstLine, "#!") {
+		return "", false
+	}
+	fields := strings.Fields(strings.TrimPrefix(firstLine, "#!"))
+	if len(fields) == 0 {
+		return "", false
+	}
+	// `#!/usr/bin/env python3` and `#!/usr/bin/python3` both name the
+	// interpreter as the last path segment of one of the fields; `env`
+	// itself is never the interpreter, so skip to the next field. A bare
+	// `#!/usr/bin/env` with no argument names no interpreter at all — treat
+	// that as "nothing recognized" rather than misreading "env" as one.
+	interpPath := fields[0]
+	if filepath.Base(interpPath) == "env" {
+		if len(fields) < 2 {
+			return "", false
+		}
+		interpPath = fields[1]
+	}
+	name := filepath.Base(interpPath)
+	for _, shell := range shellShebangInterpreters {
+		if name == shell {
+			return "", false
+		}
+	}
+	return name, true
+}
+
 // injectHookSection merges the beads section into existing hook file content.
 // If section markers are found, only the content between them is replaced.
 // If broken markers exist (orphaned BEGIN, reversed order), the stale markers
@@ -951,8 +999,22 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 					newContent = "#!/usr/bin/env sh\n" + section
 				} else {
 					// Non-bd hook — this is the one write that modifies a file
-					// bd does not own. Preserve the original as a one-time
-					// .backup sidecar before injecting (bd-5vdt8).
+					// bd does not own. generateHookSection always emits POSIX
+					// sh syntax; injecting it into a hook whose own shebang
+					// names a different interpreter corrupts that file rather
+					// than merely leaving the section unreachable.
+					if interp, ok := nonShellShebangInterpreter(existingStr); ok {
+						return fmt.Errorf(
+							"refusing to install the %s hook: existing hook at %s is a %s script, "+
+								"but bd only knows how to inject POSIX sh code into it, which would "+
+								"corrupt the file. Move the existing hook to a chained location "+
+								"(e.g. rename it to %s.old, which bd's own generated hooks source) "+
+								"or set up bd's hook manually. See docs/getting-started/ide-setup.md",
+							hookName, hookPath, interp, hookName)
+					}
+
+					// Preserve the original as a one-time .backup sidecar
+					// before injecting (bd-5vdt8).
 					backupPath := hookPath + ".backup"
 					if _, statErr := os.Lstat(backupPath); os.IsNotExist(statErr) {
 						// #nosec G306 -- keep executable so a rename restores a working hook
