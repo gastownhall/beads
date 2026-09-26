@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1196,4 +1197,146 @@ func TestMaterializeExpansion(t *testing.T) {
 			t.Errorf("Description = %q, want double-brace vars preserved", f.Steps[0].Description)
 		}
 	})
+}
+
+// TestExpandStepPreservesTemplateFields guards against expandStep silently
+// dropping Step fields: every field an expansion template sets must survive
+// into the expanded step (bd #6433).
+func TestExpandStepPreservesTemplateFields(t *testing.T) {
+	target := &Step{ID: "implement", Title: "Implement the feature"}
+	prio := 1
+
+	template := []*Step{{
+		ID:       "{target}.review",
+		Title:    "Review: {target.title}",
+		Notes:    "Notes for {target} in {env}",
+		Metadata: map[string]interface{}{"owner": "team-a", "attempts": 3},
+		Type:     "task",
+		Priority: &prio,
+		WaitsFor: "all-children",
+		Gate: &Gate{
+			Type:    "timer",
+			AwaitID: "review-timer",
+			Timeout: "1h",
+		},
+		Condition:  "{{run_review}}",
+		Loop:       &LoopSpec{Count: 2, Body: []*Step{{ID: "body", Title: "Body"}}},
+		OnComplete: &OnCompleteSpec{ForEach: "output.items", Bond: "mol-item", Vars: map[string]string{"k": "{item}"}},
+		// Expand/ExpandVars are deliberately not carried through; see expandStep.
+		Expand:     "some-expansion",
+		ExpandVars: map[string]string{"x": "y"},
+	}}
+
+	result, err := expandStep(target, template, 0, map[string]string{"env": "prod"})
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(result))
+	}
+	got := result[0]
+
+	if got.Notes != "Notes for implement in prod" {
+		t.Errorf("Notes = %q, want substituted value", got.Notes)
+	}
+	if got.Metadata["owner"] != "team-a" || got.Metadata["attempts"] != 3 {
+		t.Errorf("Metadata = %v, want owner/attempts carried through", got.Metadata)
+	}
+	if got.WaitsFor != "all-children" {
+		t.Errorf("WaitsFor = %q, want %q", got.WaitsFor, "all-children")
+	}
+	if got.Condition != "{{run_review}}" {
+		t.Errorf("Condition = %q, want carried through unsubstituted", got.Condition)
+	}
+	if got.Gate == nil || *got.Gate != *template[0].Gate {
+		t.Errorf("Gate = %+v, want %+v", got.Gate, template[0].Gate)
+	}
+	if got.Loop == nil || got.Loop.Count != 2 || len(got.Loop.Body) != 1 {
+		t.Errorf("Loop = %+v, want carried through", got.Loop)
+	}
+	if got.OnComplete == nil || got.OnComplete.Bond != "mol-item" || got.OnComplete.Vars["k"] != "{item}" {
+		t.Errorf("OnComplete = %+v, want carried through", got.OnComplete)
+	}
+	if got.Expand != "" || got.ExpandVars != nil {
+		t.Errorf("Expand/ExpandVars = %q/%v, want zeroed (no recursive re-expansion)", got.Expand, got.ExpandVars)
+	}
+
+	// The expanded step must not alias mutable template state.
+	got.Metadata["owner"] = "changed"
+	got.Gate.Timeout = "changed"
+	got.Loop.Count = 99
+	got.OnComplete.Vars["k"] = "changed"
+	tmpl := template[0]
+	if tmpl.Metadata["owner"] != "team-a" || tmpl.Gate.Timeout != "1h" || tmpl.Loop.Count != 2 || tmpl.OnComplete.Vars["k"] != "{item}" {
+		t.Error("mutating the expanded step modified the template (shared state)")
+	}
+}
+
+// TestExpandStepCoversAllStepFields is a regression guard: it fills every
+// field of Step via reflection and fails if any is zero in the expanded
+// output, unless deliberately allow-listed. A new Step field is therefore
+// either carried through by expandStep or consciously added to the list.
+func TestExpandStepCoversAllStepFields(t *testing.T) {
+	// Fields expandStep intentionally does not carry through.
+	// Expand/ExpandVars would make an expansion template recursively re-expand.
+	// Children is exercised separately by TestExpandStep.
+	allowZero := map[string]bool{"Expand": true, "ExpandVars": true, "Children": true}
+
+	prio := 2
+	tmpl := &Step{}
+	v := reflect.ValueOf(tmpl).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString("x")
+		case reflect.Ptr:
+			switch f.Type() {
+			case reflect.TypeOf(&prio):
+				f.Set(reflect.ValueOf(&prio))
+			case reflect.TypeOf(&Gate{}):
+				f.Set(reflect.ValueOf(&Gate{Type: "timer"}))
+			case reflect.TypeOf(&LoopSpec{}):
+				f.Set(reflect.ValueOf(&LoopSpec{Count: 1}))
+			case reflect.TypeOf(&OnCompleteSpec{}):
+				f.Set(reflect.ValueOf(&OnCompleteSpec{Bond: "b"}))
+			default:
+				t.Fatalf("Step.%s has unhandled pointer type %s; extend this test", v.Type().Field(i).Name, f.Type())
+			}
+		case reflect.Slice:
+			if f.Type().Elem().Kind() == reflect.String {
+				f.Set(reflect.ValueOf([]string{"x"}))
+			} else if f.Type().Elem() == reflect.TypeOf(&Step{}) {
+				continue // Children; allow-listed
+			} else {
+				t.Fatalf("Step.%s has unhandled slice type %s; extend this test", v.Type().Field(i).Name, f.Type())
+			}
+		case reflect.Map:
+			switch f.Type() {
+			case reflect.TypeOf(map[string]string{}):
+				f.Set(reflect.ValueOf(map[string]string{"k": "v"}))
+			case reflect.TypeOf(map[string]interface{}{}):
+				f.Set(reflect.ValueOf(map[string]interface{}{"k": "v"}))
+			default:
+				t.Fatalf("Step.%s has unhandled map type %s; extend this test", v.Type().Field(i).Name, f.Type())
+			}
+		default:
+			t.Fatalf("Step.%s has unhandled kind %s; extend this test", v.Type().Field(i).Name, f.Kind())
+		}
+	}
+
+	result, err := expandStep(&Step{ID: "t"}, []*Step{tmpl}, 0, nil)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got := reflect.ValueOf(result[0]).Elem()
+	for i := 0; i < got.NumField(); i++ {
+		name := got.Type().Field(i).Name
+		if allowZero[name] {
+			continue
+		}
+		if got.Field(i).IsZero() {
+			t.Errorf("expandStep dropped Step.%s: zero in expanded output although set in template", name)
+		}
+	}
 }
