@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
 )
 
@@ -183,6 +184,7 @@ func IsSecretKey(key string) bool {
 func isGitTracked(path string) bool {
 	cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
 	cmd.Dir = filepath.Dir(path)
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run() == nil
