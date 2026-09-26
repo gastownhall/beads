@@ -616,9 +616,13 @@ func TestProxiedServerList(t *testing.T) {
 		if len(page) != 2 {
 			t.Errorf("--limit 2 should cap at 2 rows, got %d", len(page))
 		}
-		stdout, _ := bdProxiedListCapture(t, bd, p, "--all", "--limit", "2")
+		stdout, stderr := bdProxiedListCapture(t, bd, p, "--all", "--limit", "2")
 		if strings.Contains(stdout, "more results matched") {
 			t.Errorf("truncation hint must not leak into stdout:\n%s", stdout)
+		}
+		// GH#5102: the hint reaches piped stderr on the proxied route too.
+		if !strings.Contains(stderr, "more results matched") {
+			t.Errorf("expected truncation hint on piped stderr (GH#5102), got:\n%s", stderr)
 		}
 	})
 

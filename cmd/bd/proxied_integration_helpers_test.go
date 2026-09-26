@@ -40,6 +40,13 @@ func bdProxiedEnv(dir string) []string {
 		if strings.HasPrefix(e, "BEADS_") {
 			continue
 		}
+		// Same scrub as bdEnv: an ambient envelope opt-in would wrap every
+		// fixture command's JSON in {schema_version, data} and break the
+		// bare-array parsing the proxied helpers do. Tests that want the
+		// envelope opt in per child command.
+		if strings.HasPrefix(e, "BD_JSON_ENVELOPE=") {
+			continue
+		}
 		env = append(env, e)
 	}
 	return append(env,
