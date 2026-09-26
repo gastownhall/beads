@@ -3,7 +3,26 @@ package doltutil
 import (
 	"strings"
 	"testing"
+	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
+
+func TestServerDSN_DefaultConnectTimeout(t *testing.T) {
+	dsn := ServerDSN{
+		Host: "dolt.example.com",
+		Port: 3307,
+		User: "root",
+	}.String()
+
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(%q): %v", dsn, err)
+	}
+	if cfg.Timeout != 5*time.Second {
+		t.Fatalf("default connect timeout = %s, want 5s", cfg.Timeout)
+	}
+}
 
 func TestServerDSN_TLSExplicitlyDisabledByDefault(t *testing.T) {
 	dsn := ServerDSN{
