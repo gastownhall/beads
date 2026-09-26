@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"sort"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/rowid"
@@ -18,8 +18,8 @@ import (
 // frozen lists, the recomputation below stops matching the stored ids and
 // these tests fail.
 var derivedIDDigestColumns = map[string]string{
-	"events":   "issue_id, event_type, actor, old_value, new_value, comment, CAST(created_at AS CHAR)",
-	"comments": "issue_id, author, text, CAST(created_at AS CHAR)",
+	"events":   "issue_id, event_type, actor, old_value, new_value, comment, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')",
+	"comments": "issue_id, author, text, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')",
 }
 
 // assertTableIDsContentDerived scans every row of table, recomputes the
@@ -38,7 +38,15 @@ func assertTableIDsContentDerived(ctx context.Context, t *testing.T, db *sql.DB,
 	}
 	defer rows.Close()
 
-	nFields := strings.Count(columns, ",") + 1
+	// Derive the field count from the driver's own column list rather than
+	// counting commas in the columns string: a column expression can contain
+	// an internal comma (e.g. DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')),
+	// which a naive strings.Count over-counts as an extra top-level field.
+	colNames, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("columns %s: %v", table, err)
+	}
+	nFields := len(colNames) - 1
 	groups := make(map[string][]string)
 	for rows.Next() {
 		var id string
@@ -110,6 +118,64 @@ func TestInsertTimeIDsMatchBackfillDerivation(t *testing.T) {
 
 	assertTableIDsContentDerived(ctx, t, store.db, "events")
 	assertTableIDsContentDerived(ctx, t, store.db, "comments")
+}
+
+// TestAuxTimeDateFormatMatchesGoRendering pins the SQL-side rendering the aux
+// row id derivation depends on: DATE_FORMAT(x, '%Y-%m-%d %H:%i:%s') against a
+// stored DATETIME(0) value must render byte-identically to
+// issueops.FormatAuxTime, the Go-side stamp every insert site binds and every
+// digest is computed from (see derivedIDDigestColumns above and auxRekeyTables
+// in internal/storage/schema, which both render created_at this way to
+// re-derive ids for rows that predate the insert-time derivation).
+//
+// The two sides render identically today because DATE_FORMAT with this exact
+// format string reproduces what CAST(x AS CHAR) happens to render for a
+// DATETIME(0) column — but CAST's rendering is an engine default, not a pinned
+// contract, and nothing stops a future Dolt version from changing it. Pinning
+// the SQL side to DATE_FORMAT with this literal format removes that
+// dependency; this test is what catches it if the two ever drift, before it
+// silently forks the id space the backfill converged.
+func TestAuxTimeDateFormatMatchesGoRendering(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		Title:     "date_format fixture",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	instant := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
+	goRendered := issueops.FormatAuxTime(instant)
+
+	evt := issueops.AuxEvent{
+		IssueID:   issue.ID,
+		EventType: types.EventCommented,
+		Actor:     "tester",
+		Comment:   sql.NullString{String: "date_format probe", Valid: true},
+		CreatedAt: goRendered,
+	}
+	if err := issueops.InsertDerivedEvent(ctx, store.db, "events", evt); err != nil {
+		t.Fatalf("InsertDerivedEvent: %v", err)
+	}
+
+	var sqlRendered string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') FROM events WHERE issue_id = ? AND comment = 'date_format probe'",
+		issue.ID).Scan(&sqlRendered); err != nil {
+		t.Fatalf("DATE_FORMAT read-back: %v", err)
+	}
+
+	if sqlRendered != goRendered {
+		t.Errorf("DATE_FORMAT(created_at, ...) = %q, want issueops.FormatAuxTime rendering %q", sqlRendered, goRendered)
+	}
 }
 
 // TestDerivedEventOrdinalsPreserveLocalDuplicates pins the ordinal
