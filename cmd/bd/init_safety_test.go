@@ -294,6 +294,10 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 		},
 		// INTERACTIVE with a token but no expected token to compare against:
 		// nothing can validate it, so refuse rather than fall to the prompt.
+		// DEFENSIVE: unreachable from current callers — all three call sites
+		// pass ExpectedToken: FormatDestroyToken(prefix), which is never
+		// empty. This pins the fail-closed arm of a pure function; it is not
+		// evidence about any live path (only wrong-token above is).
 		{
 			"remote/discard-remote/interactive/token-without-expected",
 			RemoteSafetyInput{
@@ -335,6 +339,196 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			// Refusal actions must populate UserMessage (per ADR text contract).
 			if (tc.want == ActionRefuseDivergence || tc.want == ActionRequireDestroyToken) && got.UserMessage == "" {
 				t.Errorf("refusal action %v returned empty UserMessage", tc.want)
+			}
+		})
+	}
+}
+
+// TestCheckRemoteSafety_TokenRefusalDistinguishesPresence pins which refusal
+// text each exit-12 path gets. The distinction is load-bearing, not cosmetic:
+// the missing-token message tells the user to "re-run interactively ... and
+// confirm at the prompt", and that remedy only works when NO token was
+// supplied, because the caller's typed-confirmation prompt is gated on
+// destroyToken == "" (init.go:3139). Handing it to a user who supplied a
+// wrong token sends them around the identical refusal forever.
+func TestCheckRemoteSafety_TokenRefusalDistinguishesPresence(t *testing.T) {
+	cases := []struct {
+		name         string
+		in           RemoteSafetyInput
+		wantReason   string
+		wantSupplied bool
+	}{
+		{
+			"non-interactive/no-token",
+			RemoteSafetyInput{RemoteHasDoltData: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
+			"destroy-token-missing", false,
+		},
+		{
+			"non-interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			"destroy-token-mismatch", true,
+		},
+		{
+			"interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			"destroy-token-mismatch", true,
+		},
+		{
+			// Defensive arm (see the guard matrix): a token was still
+			// supplied, so it gets the mismatch text.
+			"interactive/token-without-expected",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG",
+			},
+			"destroy-token-mismatch", true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CheckRemoteSafety(tc.in)
+			if got.Action != ActionRequireDestroyToken {
+				t.Fatalf("Action = %v, want ActionRequireDestroyToken", got.Action)
+			}
+			if got.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+			wantMsg := refusalMessageTokenMissing()
+			if tc.wantSupplied {
+				wantMsg = refusalMessageTokenMismatch()
+			}
+			if got.UserMessage != wantMsg {
+				t.Errorf("UserMessage =\n%s\n\nwant\n%s", got.UserMessage, wantMsg)
+			}
+			// The defect this pins: the "re-run interactively and confirm
+			// at the prompt" remedy must never reach a caller who supplied
+			// a token, since the prompt cannot fire for them.
+			if tc.wantSupplied && got.UserMessage == refusalMessageTokenMissing() {
+				t.Errorf("token-supplied refusal got the missing-token text, whose remedy is unreachable here:\n%s", got.UserMessage)
+			}
+		})
+	}
+
+	if refusalMessageTokenMissing() == refusalMessageTokenMismatch() {
+		t.Error("the two token refusals are identical, so token presence is not actually carried")
+	}
+	// The mismatch remedy must name the reachable escape: drop the flag to
+	// be prompted. Without this the message is merely vaguer, not correct.
+	if !strings.Contains(refusalMessageTokenMismatch(), "drop --destroy-token") {
+		t.Errorf("mismatch refusal does not offer the reachable remedy (drop the flag, get prompted):\n%s", refusalMessageTokenMismatch())
+	}
+}
+
+// TestCheckRemoteSafety_TokenRefusalTextNoEcho extends the ADR error-message
+// contract to both destroy-token refusals. TestCheckRemoteSafety_RefusalTextNoEcho
+// below covers only the divergence message, whose assertions (bd bootstrap,
+// --from-jsonl) are specific to it.
+func TestCheckRemoteSafety_TokenRefusalTextNoEcho(t *testing.T) {
+	msgs := map[string]string{
+		"missing":  refusalMessageTokenMissing(),
+		"mismatch": refusalMessageTokenMismatch(),
+	}
+	bannedEchoes := []string{
+		"bd init --force --discard-remote --destroy-token",
+		"bd init --reinit-local --discard-remote --destroy-token",
+		"DESTROY-",
+	}
+	for name, msg := range msgs {
+		for _, banned := range bannedEchoes {
+			if strings.Contains(msg, banned) {
+				t.Errorf("%s refusal contains destructive echo %q:\n%s", name, banned, msg)
+			}
+		}
+		if !strings.Contains(msg, "bd help init-safety") {
+			t.Errorf("%s refusal does not point to 'bd help init-safety':\n%s", name, msg)
+		}
+	}
+}
+
+// TestHandleRemoteSafetyDecision_RefusalSeam pins the caller half of the
+// #6480 composition. CheckRemoteSafety's guard matrix proves the decision;
+// this proves the decision is honored at the seam — that a refusal aborts
+// with its exit code and never reaches the typed-confirmation prompt, and
+// that it leaves the cross-checkpoint *confirmed latch alone. Before this,
+// handleRemoteSafetyDecision had zero test references repo-wide.
+//
+// Not covered here: the token-ABSENT prompt arm (init.go:3139). It is gated
+// on term.IsTerminal(os.Stdin), which is false under `go test`, so asserting
+// "no prompt" for it would pass no matter what the token gate said — a
+// vacuous pin. Reaching it needs a PTY or a TTY-detection seam; both exceed
+// this change. The arms below discriminate without one.
+func TestHandleRemoteSafetyDecision_RefusalSeam(t *testing.T) {
+	cases := []struct {
+		name          string
+		decision      RemoteSafetyDecision
+		wantBootstrap bool
+		wantExit      int // 0 = expect nil error
+	}{
+		{
+			"require-destroy-token aborts with 12",
+			RemoteSafetyDecision{
+				Action: ActionRequireDestroyToken, Reason: "destroy-token-mismatch",
+				ExitCode: ExitDestroyTokenMissing, UserMessage: "refusal",
+			},
+			false, ExitDestroyTokenMissing,
+		},
+		{
+			"refuse-divergence aborts with 10",
+			RemoteSafetyDecision{
+				Action: ActionRefuseDivergence, Reason: "force-without-discard-remote",
+				ExitCode: ExitRemoteDivergenceRefused, UserMessage: "refusal",
+			},
+			false, ExitRemoteDivergenceRefused,
+		},
+		{
+			"bootstrap adopts the remote",
+			RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"},
+			true, 0,
+		},
+		{
+			// A matching token IS the authorization: proceed, no abort.
+			"authorized divergence proceeds",
+			RemoteSafetyDecision{Action: ActionProceedWithDivergence, Reason: "authorized-divergence"},
+			false, 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			confirmed := false
+			// destroyToken non-empty keeps the prompt arm shut on its own
+			// terms rather than relying on the harness lacking a TTY.
+			bootstrap, err := handleRemoteSafetyDecision(
+				tc.decision, "bd", "git+https://example.invalid/repo.git",
+				"DESTROY-bd", nil, true, &confirmed,
+			)
+			if bootstrap != tc.wantBootstrap {
+				t.Errorf("bootstrap = %v, want %v", bootstrap, tc.wantBootstrap)
+			}
+			if tc.wantExit == 0 {
+				if err != nil {
+					t.Errorf("err = %v, want nil", err)
+				}
+			} else {
+				code, ok := exitCodeFromError(err)
+				if !ok {
+					t.Fatalf("err = %v, want an *exitError with code %d", err, tc.wantExit)
+				}
+				if code != tc.wantExit {
+					t.Errorf("exit code = %d, want %d", code, tc.wantExit)
+				}
+			}
+			// A refusal must not silently satisfy a later checkpoint's
+			// "already confirmed" short-circuit.
+			if confirmed {
+				t.Error("confirmed latch was set without a typed confirmation")
 			}
 		})
 	}
