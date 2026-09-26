@@ -172,7 +172,14 @@ var configSetCmd = &cobra.Command{
 				setErr = config.SetUserYamlConfig(key, value)
 				location = config.UserConfigYamlDisplayPath()
 			} else {
-				setErr = config.SetYamlConfig(key, value)
+				// The CLI owns the routing decision; the library writers keep
+				// writing exactly where they are told (bd-zj95 / #6125).
+				if config.IsMachineLocalKey(key) {
+					location = config.LocalConfigFileName
+					setErr = config.SetMachineLocalYamlConfig(key, value)
+				} else {
+					setErr = config.SetYamlConfig(key, value)
+				}
 			}
 			if setErr != nil {
 				return HandleError("setting config: %v", setErr)
@@ -406,6 +413,9 @@ func runConfigGetBackupEnabled() error {
 		sourceDesc = "env var"
 	case config.SourceConfigFile:
 		sourceDesc = "config.yaml"
+		if _, ok := config.MachineLocalYamlValue(key); ok {
+			sourceDesc = config.LocalConfigFileName
+		}
 	default: // SourceDefault — value came from auto-detection
 		switch {
 		case usesSQLServer():
@@ -575,7 +585,12 @@ var configUnsetCmd = &cobra.Command{
 				unsetErr = config.UnsetUserYamlConfig(key)
 				location = config.UserConfigYamlDisplayPath()
 			} else {
-				unsetErr = config.UnsetYamlConfig(key)
+				if config.IsMachineLocalKey(key) {
+					location = config.LocalConfigFileName
+					unsetErr = config.UnsetMachineLocalYamlConfig(key)
+				} else {
+					unsetErr = config.UnsetYamlConfig(key)
+				}
 			}
 			if unsetErr != nil {
 				return HandleError("unsetting config: %v", unsetErr)

@@ -1336,3 +1336,188 @@ func validateYamlConfigValue(key, value string) error {
 	}
 	return nil
 }
+
+// yamlValueFromBytes reads a dotted key out of YAML bytes, accepting both the
+// flat dotted form and the nested form. Split out of readYamlValueAtPath so
+// the machine-local migration can ask the same question of content it already
+// holds in memory.
+func yamlValueFromBytes(data []byte, key string) (string, bool) {
+	var root map[string]interface{}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return "", false
+	}
+	if raw, ok := root[key]; ok { // flat dotted form
+		return yamlScalarString(raw)
+	}
+	var node interface{} = root // nested form
+	for _, part := range strings.Split(key, ".") {
+		m, ok := node.(map[string]interface{})
+		if !ok {
+			return "", false
+		}
+		node, ok = m[part]
+		if !ok {
+			return "", false
+		}
+	}
+	return yamlScalarString(node)
+}
+
+// commentOutYamlKeyAnyForm comments out a dotted key written in EITHER the
+// flat form (`dolt.mode: server`) or the nested form (`dolt:` with an indented
+// `mode: server`). bd's own writer has produced both — updateYamlKey appends
+// the flat form, updateNestedYamlKey creates the nested one — so a caller that
+// has to remove a key reliably cannot assume either shape.
+//
+// It works on lines rather than through the YAML parser so that comments, key
+// order, and formatting in the surrounding file survive untouched. The
+// alternative, unmarshal-and-remarshal, reflows the entire document; for a
+// git-tracked file that turns a two-line removal into an unreviewable diff.
+//
+// Each segment is matched only as a DIRECT child of the one before it, by
+// indentation. Matching a segment at any depth would let `dolt.mode` comment
+// out the `mode:` inside a `dolt:`/`pool:` block — silently dropping a
+// different key's value.
+//
+// When commenting the child empties its parent block, the parent is commented
+// out too, so no bare `dolt:` (which parses as null) is left behind.
+func commentOutYamlKeyAnyForm(content, key string) (string, error) {
+	// commentOutYamlKey gained an error in #6574 (unsupportedUnsetShape): a
+	// shape it refuses must not be reported as a successful unset, so it
+	// propagates rather than being swallowed into a best-effort string.
+	out, err := commentOutYamlKey(content, key)
+	if err != nil {
+		return "", err
+	}
+	// No trailing-newline repair here any more. Earlier revisions of this PR
+	// carried one, because commentOutYamlKey dropped the document's trailing
+	// newline run and the line-count check below then read a legitimate
+	// blank-line file as a broken invariant and refused the write. #6749 fixed
+	// that in the primitive, which now re-attaches content's own run, so a
+	// repair here would re-trim and re-attach a run that already matches -- a
+	// no-op. The tests below still pin the property end-to-end, so if the
+	// primitive ever regresses this wrapper fails loudly rather than papering
+	// over it.
+
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return out, nil
+	}
+
+	// The path is located in the ORIGINAL content: since #6574,
+	// commentOutYamlKey comments the nested leaf itself, so searching its
+	// output finds nothing and the ancestor cleanup below would never run,
+	// leaving a bare `dolt:` behind. commentOutYamlKey edits lines in place
+	// and adds none, so the indices stay valid for the output; the length
+	// check makes that assumption fail loudly rather than silently mis-index
+	// if it ever stops holding. It returns an error rather than the
+	// uncleaned output: skipping the walk would leave the bare `dolt:` this
+	// function exists to prevent, and reporting that as a successful unset is
+	// the failure mode #6574 added unsupportedUnsetShape to avoid.
+	orig := strings.Split(content, "\n")
+	lines := strings.Split(out, "\n")
+	if len(lines) != len(orig) {
+		return "", fmt.Errorf("cannot unset %q: commenting it out changed the document from %d lines to %d, so the parent-key cleanup cannot be located; edit the file by hand", key, len(orig), len(lines))
+	}
+	path := findNestedKeyPath(orig, parts, 0, 0, len(orig), -1)
+	if path == nil {
+		return out, nil
+	}
+
+	// The leaf is already commented out by commentOutYamlKey.
+	leaf := path[len(path)-1]
+	if !strings.HasPrefix(strings.TrimSpace(lines[leaf]), "#") {
+		lines[leaf] = commentOutLinePreservingIndent(lines[leaf])
+	}
+
+	// Walk back up, commenting out each ancestor whose block no longer holds a
+	// live key, so no bare `dolt:` (which parses as null) is left behind. Stop
+	// at the first ancestor that still has one.
+	for i := len(path) - 2; i >= 0; i-- {
+		j := path[i]
+		end := blockEnd(lines, j+1, indentWidth(lines[j]))
+		if blockHasLiveKey(lines[j+1 : end]) {
+			break
+		}
+		lines[j] = commentOutLinePreservingIndent(lines[j])
+	}
+
+	return strings.Join(lines, "\n"), nil
+}
+
+// findNestedKeyPath returns the line index of every segment of parts[i:],
+// searching lines[from:to] for keys nested strictly deeper than parentIndent.
+// It returns nil when the path is absent.
+//
+// Each segment must be a DIRECT child of the previous one. Matching a segment
+// at any depth would let `dolt.mode` comment out the `mode:` inside a
+// `dolt:`/`pool:` block, silently dropping a different key's value.
+func findNestedKeyPath(lines, parts []string, i, from, to, parentIndent int) []int {
+	pattern := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(parts[i]) + `\s*:`)
+	childIndent := -1
+	for j := from; j < to; j++ {
+		trimmed := strings.TrimSpace(lines[j])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := indentWidth(lines[j])
+		if indent <= parentIndent {
+			return nil // the parent's block ended without a match
+		}
+		// The first key in the block fixes the depth of a direct child;
+		// anything deeper is a grandchild and must not be matched here.
+		if childIndent == -1 {
+			childIndent = indent
+		}
+		if indent != childIndent {
+			continue
+		}
+		if !pattern.MatchString(lines[j]) {
+			continue
+		}
+		if i == len(parts)-1 {
+			return []int{j}
+		}
+		end := blockEnd(lines, j+1, indent)
+		if sub := findNestedKeyPath(lines, parts, i+1, j+1, end, indent); sub != nil {
+			return append([]int{j}, sub...)
+		}
+		return nil
+	}
+	return nil
+}
+
+// blockEnd returns the index one past the last line belonging to the block
+// whose key line sits at parentIndent.
+func blockEnd(lines []string, from, parentIndent int) int {
+	for j := from; j < len(lines); j++ {
+		if strings.TrimSpace(lines[j]) == "" {
+			continue
+		}
+		if indentWidth(lines[j]) <= parentIndent {
+			return j
+		}
+	}
+	return len(lines)
+}
+
+func indentWidth(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+func commentOutLinePreservingIndent(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmed)]
+	return indent + "# " + trimmed
+}
+
+func blockHasLiveKey(lines []string) bool {
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return true
+	}
+	return false
+}
