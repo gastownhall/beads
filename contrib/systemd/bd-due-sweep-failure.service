@@ -1,0 +1,9 @@
+[Unit]
+Description=Announce a failed beads due sweep
+
+[Service]
+Type=oneshot
+# Deliberately loud and deliberately trivial: this unit's only job is to turn a
+# failure into something a human or a monitor notices. Replace the ExecStart
+# with whatever your site already pages on.
+ExecStart=/usr/bin/env sh -c 'echo "bd-due-sweep FAILED on $(hostname) at $(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" | systemd-cat -t bd-due-sweep -p err'

@@ -28,7 +28,7 @@ type readyClaimer struct{ store *DoltStore }
 
 // WakeExpiredDefersAdvisory preserves the backend wake contract for decorators.
 func (s *DoltStore) WakeExpiredDefersAdvisory(ctx context.Context) {
-	s.wakeExpiredDefers(ctx)
+	s.runScheduledSweeps(ctx)
 }
 
 var _ storage.ExpiredDeferWaker = (*DoltStore)(nil)
@@ -54,7 +54,7 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, request issueops.ClaimNext
 	// Wake expired dated defers before selecting, so a bead whose snooze just
 	// ended is claimable the moment its date passes. Advisory, in a write tx
 	// of its own: a failed sweep must not cost the claim.
-	c.store.wakeExpiredDefers(ctx)
+	c.store.runScheduledSweeps(ctx)
 
 	// The write and its verify sit under withCircuitWrite so terminal circuit
 	// success is recorded once at the boundary, only after verifiedReadyClaim
