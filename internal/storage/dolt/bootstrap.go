@@ -55,6 +55,14 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 // remote whose Dolt data lives on the git ref ref (`dolt clone --ref`). An
 // empty ref is Dolt's default, refs/dolt/data.
 func BootstrapFromRemoteWithDBRef(ctx context.Context, doltDir, remoteURL, database, ref string) (bool, error) {
+	// The ref is checked before the already-exists early return so the same
+	// --ref argument is accepted or refused the same way on every host, rather
+	// than surfacing a typo only on a machine that has not bootstrapped yet.
+	// The URL and database checks keep their existing position below it.
+	if err := doltutil.ValidateGitDataRefArg(strings.TrimSpace(ref)); err != nil {
+		return false, fmt.Errorf("invalid git data ref: %w", err)
+	}
+
 	// Skip if Dolt database already exists
 	if doltExists(doltDir) {
 		return false, nil
@@ -62,9 +70,6 @@ func BootstrapFromRemoteWithDBRef(ctx context.Context, doltDir, remoteURL, datab
 
 	if err := remotecache.ValidateRemoteURL(remoteURL); err != nil {
 		return false, fmt.Errorf("invalid remote URL: %w", err)
-	}
-	if err := doltutil.ValidateGitDataRefArg(strings.TrimSpace(ref)); err != nil {
-		return false, fmt.Errorf("invalid git data ref: %w", err)
 	}
 
 	if err := ValidateDatabaseName(database); err != nil {

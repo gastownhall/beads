@@ -3,6 +3,7 @@ package doltutil
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +89,25 @@ func TestPersistedRemotes(t *testing.T) {
 		dir := writeState(t, `{"remotes": not-json`)
 		if _, err := PersistedRemotes(dir); err == nil {
 			t.Fatal("PersistedRemotes on corrupt repo_state.json = nil error, want error")
+		}
+	})
+
+	// A git_ref of the wrong JSON type is "could not tell" too, not "no ref":
+	// silently reading it as the default is what would re-add a remote that is
+	// pinned to a custom ref onto refs/dolt/data.
+	t.Run("a git_ref that is not a string is an error", func(t *testing.T) {
+		dir := writeState(t, `{"remotes":{
+			"unit":{"name":"unit","url":"git+file:///srv/ledgers","fetch_specs":[],"params":{"git_ref":["refs/dolt/units/team-12542"]}}
+		}}`)
+		remotes, err := PersistedRemotes(dir)
+		if err == nil {
+			t.Fatalf("PersistedRemotes with a non-string git_ref = %+v, nil; want an error", remotes)
+		}
+		if !strings.Contains(err.Error(), "unit") {
+			t.Errorf("error %q does not name the remote", err)
+		}
+		if _, err := FindCLIRemoteRef(dir, "unit"); err == nil {
+			t.Error("FindCLIRemoteRef with a non-string git_ref = nil error, want the read error")
 		}
 	})
 }

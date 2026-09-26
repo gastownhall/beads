@@ -123,6 +123,17 @@ func TestCreateRemoteWithRefValidatesArguments(t *testing.T) {
 	if err := uc.CreateRemoteWithRef(context.Background(), "origin", "", "refs/heads/issue-data"); err == nil {
 		t.Error("empty url should be refused")
 	}
+	// A ref the dolt argv boundary will refuse must not be recordable here: it
+	// would create a remote that can never be pushed and only says so at push
+	// time. Refused before the repository is touched, so nothing is recorded.
+	for _, ref := range []string{"-x", "refs/heads/issue data", "refs/heads/issue\tdata"} {
+		if err := uc.CreateRemoteWithRef(context.Background(), "origin", "git+file:///srv/ledgers", ref); err == nil {
+			t.Errorf("CreateRemoteWithRef with ref %q should be refused", ref)
+		}
+	}
+	if len(repo.calls) != 0 {
+		t.Fatalf("a refused CreateRemoteWithRef reached the repository: calls = %v", repo.calls)
+	}
 	if err := uc.CreateRemoteWithRef(context.Background(), "origin", "git+file:///srv/ledgers", "refs/dolt/units/k"); err != nil {
 		t.Fatalf("CreateRemoteWithRef: %v", err)
 	}

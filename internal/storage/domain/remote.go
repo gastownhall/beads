@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -10,7 +11,9 @@ import (
 type DoltRemoteUseCase interface {
 	CreateRemote(ctx context.Context, name, url string) error
 	// CreateRemoteWithRef is CreateRemote for a git-backed remote whose Dolt
-	// data lives on the git ref ref; an empty ref is CreateRemote.
+	// data lives on the git ref ref; an empty ref is CreateRemote. The ref is
+	// checked against what the dolt argv boundary will accept, so a remote
+	// cannot be recorded on a ref it could never be routed to.
 	CreateRemoteWithRef(ctx context.Context, name, url, ref string) error
 	UpdateRemote(ctx context.Context, name, url string) error
 	DeleteRemote(ctx context.Context, name string) error
@@ -61,6 +64,16 @@ func (u *doltRemoteUseCaseImpl) CreateRemoteWithRef(ctx context.Context, name, u
 	}
 	if url == "" {
 		return fmt.Errorf("CreateRemoteWithRef: url must not be empty")
+	}
+	// The SQL write paths below bind the ref as a parameter and would happily
+	// record one the dolt argv boundary later refuses, which would leave a
+	// remote that can be created but never pushed, diagnosed only at push time.
+	// This is the write seam for new remotes, so the recordable ref set is
+	// narrowed to the routable one here, beside the other argument checks.
+	// UpdateRemote deliberately does not re-check: it carries and restores refs
+	// that are already recorded, and must not become unable to put one back.
+	if err := doltutil.ValidateGitDataRefArg(strings.TrimSpace(ref)); err != nil {
+		return fmt.Errorf("CreateRemoteWithRef %s: invalid git data ref: %w", name, err)
 	}
 	if err := u.remoteRepo.AddRemoteWithRef(ctx, name, url, ref); err != nil {
 		return fmt.Errorf("CreateRemoteWithRef %s: %w", name, err)

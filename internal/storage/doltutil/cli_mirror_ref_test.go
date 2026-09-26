@@ -367,6 +367,12 @@ func TestValidateGitDataRefArg(t *testing.T) {
 // A state file that cannot be parsed is an error out of EnsureCLIRemote,
 // before any dolt mutation: treating it as the default ref would remove a
 // ref remote and re-add it on refs/dolt/data. Needs no dolt binary.
+//
+// The empty-ref case is asserted too, because that is the one a later
+// "helpful" relaxation would gate the read error on (only escalate when a ref
+// was asked for). It must stay an error: an unreadable file cannot rule out a
+// ref on the mirror, so the default-ref route has no more proof that the
+// mirror is already correct than the ref route does.
 func TestCLIMirrorUnreadableStateIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".dolt"), 0o755); err != nil {
@@ -378,8 +384,10 @@ func TestCLIMirrorUnreadableStateIsAnError(t *testing.T) {
 	if _, err := FindCLIRemoteRef(dir, "origin"); err == nil {
 		t.Fatal("FindCLIRemoteRef on a corrupt state file = nil error, want error")
 	}
-	err := EnsureCLIRemote(dir, "origin", "git+https://example.com/repo.git", "refs/dolt/units/team-12542")
-	if err == nil || !strings.Contains(err.Error(), "recorded ref") {
-		t.Fatalf("EnsureCLIRemote on a corrupt state file = %v, want the read error", err)
+	for _, ref := range []string{"refs/dolt/units/team-12542", ""} {
+		err := EnsureCLIRemote(dir, "origin", "git+https://example.com/repo.git", ref)
+		if err == nil || !strings.Contains(err.Error(), "recorded ref") {
+			t.Fatalf("EnsureCLIRemote(ref=%q) on a corrupt state file = %v, want the read error", ref, err)
+		}
 	}
 }

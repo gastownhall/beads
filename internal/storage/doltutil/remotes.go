@@ -87,7 +87,9 @@ func IsGitProtocolURL(url string) bool {
 // means "not a dolt repository here" and returns (nil, nil); an unreadable or
 // unparseable file returns an error so callers can tell "definitely none"
 // from "could not tell". Results are sorted by name. Ref is the remote's
-// git_ref parameter when recorded, else empty.
+// git_ref parameter when recorded, else empty; a git_ref that is present but
+// is not a string is unparseable in the same sense (see
+// storage.GitRefFromParams) and is reported as an error naming the remote.
 func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	path := filepath.Join(dbPath, ".dolt", "repo_state.json")
 	data, err := os.ReadFile(path) // #nosec G304 -- repo-local dolt state file
@@ -108,21 +110,18 @@ func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	}
 	remotes := make([]storage.RemoteInfo, 0, len(state.Remotes))
 	for name, r := range state.Remotes {
+		ref, err := storage.GitRefFromParams(r.Params)
+		if err != nil {
+			return nil, fmt.Errorf("remote %s in %s: %w", name, path, err)
+		}
 		remotes = append(remotes, storage.RemoteInfo{
 			Name: name,
 			URL:  r.URL,
-			Ref:  gitRefParamValue(r.Params),
+			Ref:  ref,
 		})
 	}
 	sort.Slice(remotes, func(i, j int) bool { return remotes[i].Name < remotes[j].Name })
 	return remotes, nil
-}
-
-// gitRefParamValue returns the git_ref remote parameter, or "" when absent
-// or not a string.
-func gitRefParamValue(params map[string]any) string {
-	v, _ := params[storage.GitRefParam].(string)
-	return strings.TrimSpace(v)
 }
 
 // ListCLIRemotes parses `dolt remote -v` output from the given database
@@ -203,6 +202,11 @@ func SQLDoubleQuoted(s string) string {
 // AddCLIRemote adds a remote at the filesystem level via dolt CLI.
 // Remote mutation should normally go through SQL; this is reserved for the
 // local CLI mirror required by subprocess push/pull/fetch routing.
+//
+// It has no production caller: EnsureCLIRemote, its only one, now goes through
+// AddCLIRemoteWithRef. It is kept deliberately as the default-ref spelling for
+// tests and callers that have no ref to carry, so a reader changing
+// AddCLIRemoteWithRef does not have to re-derive that.
 func AddCLIRemote(dbPath, name, url string) error {
 	return AddCLIRemoteWithRef(dbPath, name, url, "")
 }
@@ -280,8 +284,8 @@ func ownCLIRefProbe() string {
 // run's leftover is removed at the next re-materialization of that mirror
 // where the platform has a liveness check (unix and windows; elsewhere only
 // the own name is swept). For another run's leftover that removal is
-// best-effort: a failure is
-// ignored here and tried again at the next change, and a pid an unrelated
+// best-effort: a failure is warned about and tried again at the next change
+// rather than failing the caller's own mirror change, and a pid an unrelated
 // process has since taken keeps the leftover until that pid exits. A probe of
 // a live run is left alone, so two bd processes re-materializing the same
 // mirror at the same moment do not remove each other's probe. A leftover
@@ -297,8 +301,16 @@ func sweepLeftoverProbes(dbPath string) error {
 		if !leftoverProbe(r.Name, own) {
 			continue
 		}
-		if err := RemoveCLIRemote(dbPath, r.Name); err != nil && r.Name == own {
-			return fmt.Errorf("remove leftover ref probe remote %s in %s: %w", own, dbPath, err)
+		if err := RemoveCLIRemote(dbPath, r.Name); err != nil {
+			if r.Name == own {
+				return fmt.Errorf("remove leftover ref probe remote %s in %s: %w", own, dbPath, err)
+			}
+			// Best-effort, but never silent: an un-removable leftover stays
+			// visible in `bd remote list` until some run succeeds, and without
+			// this line nothing ever says why.
+			fmt.Fprintf(os.Stderr,
+				"Warning: could not remove the ref probe remote %s left in %s by an exited run (will retry at the next mirror change): %v\n",
+				r.Name, dbPath, err)
 		}
 	}
 	return nil
@@ -367,6 +379,13 @@ func FindCLIRemoteRef(dbPath, name string) (string, error) {
 // idempotent and only mutates the CLI surface when the remote is absent,
 // points somewhere else, or sits on a different ref; before it mutates, it
 // sweeps probe remotes left by interrupted runs.
+//
+// Reading the mirror's recorded ref comes before the no-op short-circuit, so a
+// state file that cannot be read fails the route for a default-ref remote too,
+// not only for a remote with a ref. That is deliberate: an unreadable file
+// cannot rule out a ref on the mirror, so a URL match alone does not prove the
+// mirror is already correct, and continuing would push onto whatever ref the
+// mirror is secretly pinned to. Failing is loud and mutates nothing.
 func EnsureCLIRemote(dbPath, name, url, ref string) error {
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
