@@ -31,9 +31,21 @@ type ClaimResult struct {
 // success (supports agent retry workflows).
 // Routes to the correct table (issues/wisps) automatically.
 // The caller is responsible for Dolt versioning (DOLT_ADD/COMMIT) if needed.
+// A claim that wrote the row mints one version row (assignee, status and
+// started_at are durable state); the idempotent re-claim mints nothing.
+func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
+	return claimIssueInTx(ctx, tx, id, actor, true)
+}
+
+// claimIssueInTx is the body of ClaimIssueInTx. mintVersion controls whether a
+// successful claim mints its own version row: the exported entry point always
+// does, while ExecuteUpdate — which may apply field, label, parent and
+// persistence patches after the claim in the same call — passes false and
+// mints exactly once after the last of them, so the version carries the final
+// state and one guarded update never records two.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
+func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintVersion bool) (*ClaimResult, error) {
 	// The CAS below writes assignee = actor. actor is user-settable (--actor /
 	// BEADS_ACTOR), so bound it against the VARCHAR(255) assignee column up front
 	// and return a typed ErrFieldTooLong rather than a raw backend error.
@@ -218,9 +230,15 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 
 	// A claim changes assignee and status, so it journals as an update. The
 	// idempotent re-claim path returns above without writing and journals
-	// nothing.
+	// nothing — and mints nothing: the version row below is for a claim that
+	// actually rewrote the row.
 	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
 		return nil, err
+	}
+	if mintVersion {
+		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+			return nil, err
+		}
 	}
 
 	return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
