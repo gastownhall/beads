@@ -450,6 +450,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if os.Getenv("BEADS_DOLT_PROXIED_SERVER") == "1" {
 			initProxiedServer = true
 		}
+		ephemeralRoot := os.Getenv("BEADS_EPHEMERAL_ROOT") == "1"
 
 		initEvt := metrics.NewCommandEvent("init-" + resolveInitDoltMode(initProxiedServer, sharedServer, initServerMode))
 		defer func() {
@@ -515,12 +516,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if !initProxiedServer {
 				return fmt.Errorf("--proxied-server-idle-timeout requires --proxied-server")
 			}
+			if err := validateEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet, serverProxyIdleTimeout); err != nil {
+				return err
+			}
 			if serverProxyIdleTimeout < 0 {
 				return fmt.Errorf("--proxied-server-idle-timeout must be 0 (never) or a positive duration, got %s", serverProxyIdleTimeout)
 			}
 			if serverProxyIdleTimeout == 0 {
 				serverProxyIdleTimeout = proxy.IdleTimeoutNever
 			}
+		}
+		if initProxiedServer {
+			serverProxyIdleTimeout = effectiveEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet, serverProxyIdleTimeout)
 		}
 
 		externalProvided := externalHost != "" || externalPort != 0 || externalSocketPath != "" ||
