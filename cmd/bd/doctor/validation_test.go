@@ -417,8 +417,8 @@ func TestCheckChildParentDependenciesDB_NoDeps(t *testing.T) {
 	if check.Status != StatusOK {
 		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
 	}
-	if check.Message != "No child→parent dependencies" {
-		t.Errorf("Message = %q, want %q", check.Message, "No child→parent dependencies")
+	if check.Message != "No hierarchy-blocking anti-patterns" {
+		t.Errorf("Message = %q, want %q", check.Message, "No hierarchy-blocking anti-patterns")
 	}
 }
 
@@ -468,6 +468,97 @@ func TestCheckChildParentDependenciesDB_BlockingDetected(t *testing.T) {
 	}
 	if check.Message == "" {
 		t.Error("Message should not be empty")
+	}
+}
+
+// TestCheckChildParentDependenciesDB_ParentBlocksChildDetected is the GH#4814
+// mirror: parent→child blocks is as deadlocking as child→parent but was
+// invisible. This direction is only flagged when a REAL parent-child edge
+// backs the dotted-ID pattern (bee-ghosttrack review, PR#5131); the dotted
+// IDs alone are not enough (see
+// TestCheckChildParentDependenciesDB_ParentBlocksChildIgnoredWithoutRealEdge).
+func TestCheckChildParentDependenciesDB_ParentBlocksChildDetected(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "Parent epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+
+	db := store.DB()
+	childID := parent.ID + ".1"
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
+		 VALUES (?, 'Hierarchical child', '', '', '', '', 'open', 2, 'task', NOW(), NOW())`,
+		childID)
+	if err != nil {
+		t.Fatalf("Failed to insert child: %v", err)
+	}
+
+	// Real structural parent-child edge: childID is a genuine child of parent.ID.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'test')`,
+		childID, parent.ID)
+	if err != nil {
+		t.Fatalf("Failed to insert parent-child edge: %v", err)
+	}
+
+	// parent blocks child (mirror anti-pattern)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`,
+		parent.ID, childID)
+	if err != nil {
+		t.Fatalf("Failed to insert dependency: %v", err)
+	}
+
+	check := checkChildParentDependenciesDB(db)
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q (parent→child blocks must be detected)", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Detail, parent.ID) || !strings.Contains(check.Detail, childID) {
+		t.Fatalf("Detail = %q, want both parent and child ids", check.Detail)
+	}
+}
+
+// TestCheckChildParentDependenciesDB_ParentBlocksChildIgnoredWithoutRealEdge
+// verifies the new parent→child arm requires a genuine parent-child edge, not
+// just a dotted-ID coincidence. IDs and edges diverge by design after a
+// reparent or import; a parent blocking on an orphaned-dotted issue with no
+// structural link is the ordinary "epic waits for its subtask" shape, not a
+// deadlock (bee-ghosttrack review, PR#5131).
+func TestCheckChildParentDependenciesDB_ParentBlocksChildIgnoredWithoutRealEdge(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "Parent epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+
+	db := store.DB()
+	childID := parent.ID + ".1"
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
+		 VALUES (?, 'Orphaned dotted issue', '', '', '', '', 'open', 2, 'task', NOW(), NOW())`,
+		childID)
+	if err != nil {
+		t.Fatalf("Failed to insert child: %v", err)
+	}
+
+	// No parent-child edge: childID's dotted ID is coincidental, not structural.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`,
+		parent.ID, childID)
+	if err != nil {
+		t.Fatalf("Failed to insert dependency: %v", err)
+	}
+
+	check := checkChildParentDependenciesDB(db)
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q (dotted ID alone, no real parent-child edge, must not be flagged)", check.Status, StatusOK)
 	}
 }
 

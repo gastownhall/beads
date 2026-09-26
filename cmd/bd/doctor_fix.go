@@ -338,7 +338,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Child-Parent Dependencies":
 			// Requires explicit opt-in flag (destructive, may remove intentional deps)
 			if !doctorFixChildParent {
-				fmt.Printf("  ⚠ Child→parent deps require explicit opt-in: bd doctor --fix --fix-child-parent\n")
+				fmt.Printf("  ⚠ Hierarchy-blocking deps (child→parent and parent→child) require explicit opt-in: bd doctor --fix --fix-child-parent\n")
 				continue
 			}
 			err = fix.ChildParentDependencies(path, doctorVerbose)

@@ -48,7 +48,7 @@ var (
 	doctorInteractive               bool   // per-fix confirmation mode
 	doctorDryRun                    bool   // preview fixes without applying
 	doctorOutput                    string // export diagnostics to file
-	doctorFixChildParent            bool   // opt-in fix for child→parent deps
+	doctorFixChildParent            bool   // opt-in fix for hierarchy-blocking deps (child→parent and parent→child)
 	doctorVerbose                   bool   // show detailed output during fixes
 	perfMode                        bool
 	checkHealthMode                 bool
@@ -171,7 +171,7 @@ Examples:
   bd doctor --fix        # Automatically fix issues (with confirmation)
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --fix -i     # Confirm each fix individually
-  bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
+  bd doctor --fix --fix-child-parent  # Also fix hierarchy-blocking deps, both directions (opt-in)
   bd doctor --fix --force # Force repair even when database can't be opened
   bd doctor --fix --source=jsonl # Rebuild database from a JSONL export
   bd doctor --dry-run    # Preview what --fix would do without making changes
@@ -343,7 +343,7 @@ func init() {
 	doctorCmd.Flags().BoolVarP(&doctorYes, "yes", "y", false, "Skip confirmation prompt (for non-interactive use)")
 	doctorCmd.Flags().BoolVarP(&doctorInteractive, "interactive", "i", false, "Confirm each fix individually")
 	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes")
-	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in)")
+	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove hierarchy-blocking dependencies, child→parent and parent→child (opt-in)")
 	doctorCmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show all checks (default shows only warnings/errors)")
 	doctorCmd.Flags().BoolVar(&doctorOrchestrator, "orchestrator", false, "Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
 	doctorCmd.Flags().IntVar(&orchestratorDuplicatesThreshold, "orchestrator-duplicates-threshold", 1000, "Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral)")
