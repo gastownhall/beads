@@ -1039,6 +1039,9 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
+	// The dependent is exactly the row a racing unblocking write can leave
+	// stale, so nothing is excluded from the post-commit recheck.
+	noteBlockedRecheck(tx, fmt.Sprintf("dependency removal %s -> %s", issueID, dependsOnID), nil, affectedIssues, affectedWisps)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
 	// consumer as one from an explicit dep verb.

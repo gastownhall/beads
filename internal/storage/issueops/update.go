@@ -534,6 +534,9 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 			}
 			updateResult.IssueRowsChanged = !isWisp || recompute.IssueRowsChanged
 			updateResult.WispRowsChanged = isWisp || recompute.WispRowsChanged
+			if !newActive {
+				noteBlockedRecheck(tx, statusChangeRecheckLabel(id, newStatus), []string{id}, affectedIssues, affectedWisps)
+			}
 		}
 	}
 

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Unblocking two blockers of one dependent at the same time — closing both,
+  or a close racing a `bd dep remove` or a delete of the other — no longer
+  leaves the dependent stuck as blocked and hidden from `bd ready` until
+  `bd recompute-blocked`: a write that takes a blocker away (a close, an
+  update to an inactive status, a dependency removal, a delete) and runs
+  through a Dolt store write transaction now rechecks the dependents it
+  recomputed once that transaction has committed
+  ([#6716](https://github.com/gastownhall/beads/issues/6716)). Writes that
+  reach the database another way still need the `bd doctor` /
+  `bd recompute-blocked` repair they needed before: `bd batch` (on both its
+  plain and its proxied transaction), `bd cook`, `bd mol squash`,
+  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
+  updates, deletes and demote-to-wisp.
 - **`bd list --watch --format` is refused instead of silently dropping the
   format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).
   `--watch` always re-renders the pretty listing, so on the direct route a
