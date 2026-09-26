@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // buildIssueTree builds parent-child tree structure from issues
@@ -111,18 +112,52 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
+// sortListTreeGroup orders one tree level (roots, or children of one parent).
+// Empty sortBy keeps the tree's default (priority, then natural ID). A requested
+// --sort/--reverse uses the same CompareIssuesBy the JSON path uses, so a forest
+// of roots matches --json order and nested siblings follow the same field.
+func sortListTreeGroup(issues []*types.Issue, sortBy string, reverse bool) {
+	if len(issues) < 2 {
+		return
+	}
+	if sortBy == "" {
+		slices.SortFunc(issues, compareIssuesByPriority)
+		return
+	}
+	workapi.SortIssues(issues, sortBy, reverse)
+}
+
+// applyListTreeOrder is sortListTreeGroup plus a stability restore: when --sort
+// is set, restack this level into the page's already-applied display order
+// before comparing. FinishPage's sort is stable, so equal keys (same-second
+// updated_at) keep SQL/page order in --json; sorting from the tree's default
+// priority order would reshuffle those ties.
+func applyListTreeOrder(level, page []*types.Issue, sortBy string, reverse bool) {
+	if sortBy != "" && len(page) > 0 {
+		pos := make(map[string]int, len(page))
+		for i, issue := range page {
+			if issue != nil {
+				pos[issue.ID] = i
+			}
+		}
+		slices.SortStableFunc(level, func(a, b *types.Issue) int {
+			return cmp.Compare(pos[a.ID], pos[b.ID])
+		})
+	}
+	sortListTreeGroup(level, sortBy, reverse)
+}
+
 // printPrettyTree recursively prints the issue tree.
 // Children are ordered by dependency then priority when dr != nil (--deps), else
 // by priority (P0 first) for intuitive reading. When dr is set, each node's
 // dependency edges are annotated just beneath it.
-func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender) {
+func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, page []*types.Issue, sortBy string, reverse bool) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
 		children = orderSiblingsByDeps(children, dr.allDeps)
 	} else {
-		// Sort children by priority using same comparison as roots for consistency
-		slices.SortFunc(children, compareIssuesByPriority)
+		applyListTreeOrder(children, page, sortBy, reverse)
 	}
 
 	for i, child := range children {
@@ -138,7 +173,7 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr)
+		printPrettyTree(childrenMap, child.ID, prefix+extension, dr, page, sortBy, reverse)
 	}
 }
 
@@ -147,7 +182,7 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 // There is no --ready arm behind this one: it is the plain tree, so the
 // summary keeps its status breakdown.
 func displayPrettyList(issues []*types.Issue, showHeader bool) {
-	displayPrettyListWithDeps(issues, showHeader, nil, false, false, "")
+	displayPrettyListWithDeps(issues, showHeader, nil, false, false, "", "", false)
 }
 
 // displayPrettyListWithDeps displays issues in tree format using dependency data.
@@ -155,8 +190,8 @@ func displayPrettyList(issues []*types.Issue, showHeader bool) {
 // / --status state rather than defaulted here: the watch paths reach the
 // summary through this wrapper, and a hardcoded false silently restores the
 // vacuous "(N open, 0 in progress)" that listFooterLine exists to suppress.
-func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool, statusSelector string) {
-	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered, statusSelector)
+func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool, statusSelector string, sortBy string, reverse bool) {
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered, statusSelector, sortBy, reverse)
 }
 
 // listFooterLine renders the one-line summary under a text listing.
@@ -217,7 +252,7 @@ func readyFooterScope(statusSelector string) string {
 // by --limit; the summary then says "Showing N" instead of "Total: N" (GH#5362).
 // readyFiltered means --ready was in force; statusSelector is the --status value
 // so the summary names the pin that actually applied — see listFooterLine.
-func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector string) {
+func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector string, sortBy string, reverse bool) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -242,12 +277,14 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 		}
 		dr = &depRender{mode: depsMode, allDeps: allDeps, inView: inView}
 		roots = orderSiblingsByDeps(roots, allDeps)
+	} else {
+		applyListTreeOrder(roots, issues, sortBy, reverse)
 	}
 
 	for _, issue := range roots {
 		fmt.Println(formatPrettyIssue(issue))
 		dr.annotationsFor(issue.ID, "")
-		printPrettyTree(childrenMap, issue.ID, "", dr)
+		printPrettyTree(childrenMap, issue.ID, "", dr, issues, sortBy, reverse)
 	}
 
 	// Summary — counts describe the shown page; never label a truncated page "Total".
