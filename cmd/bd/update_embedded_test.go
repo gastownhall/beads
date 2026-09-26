@@ -394,11 +394,29 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("update_notes_overwrite_warns", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
+	// A --notes write that would discard existing notes is refused BEFORE the
+	// write: on 2026-09-15 it destroyed four coordinator notes on one issue,
+	// and the post-write warning could not prevent that. --replace-notes is
+	// the deliberate overwrite, and --append-notes still appends.
+	t.Run("update_notes_overwrite_refused", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes overwrite test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
 
-		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		if !strings.Contains(out, "--append-notes") {
+			t.Errorf("refusal must name --append-notes, got: %s", out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("refused update still changed notes: %q", got.Notes)
+		}
+
+		// --append-notes keeps its newline separator.
+		bdUpdate(t, bd, dir, issue.ID, "--append-notes", "appended notes")
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes\nappended notes" {
+			t.Errorf("--append-notes did not append with a newline separator: %q", got.Notes)
+		}
+
+		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes", "--replace-notes")
 		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
 		if !strings.Contains(stderr, warning) {
 			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)

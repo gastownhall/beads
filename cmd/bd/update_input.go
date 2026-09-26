@@ -18,13 +18,16 @@ import (
 )
 
 type updateInput struct {
-	fields           map[string]any
-	addLabels        []string
-	removeLabels     []string
-	setLabels        *[]string
-	reparent         *string
-	claim            bool
-	appendNotes      string
+	fields       map[string]any
+	addLabels    []string
+	removeLabels []string
+	setLabels    *[]string
+	reparent     *string
+	claim        bool
+	appendNotes  string
+	// replaceNotes carries --replace-notes: the deliberate overwrite of an
+	// existing notes field, which is refused without it.
+	replaceNotes     bool
 	hasAppendNotes   bool
 	setMetadata      []string
 	unsetMetadata    []string
@@ -104,6 +107,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		notes, _ := cmd.Flags().GetString("notes")
 		in.fields["notes"] = notes
 	}
+	in.replaceNotes, _ = cmd.Flags().GetBool("replace-notes")
 	if cmd.Flags().Changed("append-notes") {
 		in.appendNotes, _ = cmd.Flags().GetString("append-notes")
 		in.hasAppendNotes = true
