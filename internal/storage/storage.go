@@ -751,6 +751,19 @@ type BlockedRecomputer interface {
 	RecomputeAllBlocked(ctx context.Context) (int, error)
 }
 
+// StatusBlockedDriftRecomputer reports and repairs issues/wisps left at the
+// manually-set status='blocked' (internal/types/types.go) that the dependency
+// graph no longer holds blocked — every blocker closed, or none was ever
+// recorded. Unlike BlockedRecomputer, which repairs the derived is_blocked
+// column, nothing else in bd ever clears this status on its own (be-ntbxt) —
+// callers should type-assert to this interface for the
+// 'bd recompute-blocked --status' check. Both methods share their definition
+// of "blocked" with the is_blocked recompute, so the two never disagree.
+type StatusBlockedDriftRecomputer interface {
+	CountStatusBlockedDrift(ctx context.Context) (int, error)
+	FixStatusBlockedDrift(ctx context.Context) (int, error)
+}
+
 // StateHasher returns a hash covering committed history plus the working set.
 // Unlike GetCurrentCommit (HEAD only), the hash moves on uncommitted writes.
 // Change detection against a SQL server must use this when available: server
