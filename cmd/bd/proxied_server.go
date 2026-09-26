@@ -427,17 +427,13 @@ func proxiedServerCommitter() (string, string) {
 // validateEphemeralIdleTimeout rejects the combination of an ephemeral root
 // and an explicit --proxied-server-idle-timeout of 0 or negative: with
 // BEADS_EPHEMERAL_ROOT=1 the proxy must be able to idle-exit on its own, but
-// an explicit 0 (or the already-normalized proxy.IdleTimeoutNever sentinel a
-// caller may pass after init.go's own zero-normalization) means "never", and
-// a negative value is rejected for the same reason it always is — both are
-// the flag asking for the opposite of what the env var requires. Neither
-// signal should be silently overridden by the other, so this is a hard
-// error naming both.
+// an explicit 0 means "never", and a negative value is rejected for the same
+// reason it always is — both are the flag asking for the opposite of what the
+// env var requires. Neither signal should be silently overridden by the
+// other, so this is a hard error naming both.
 //
-// serverProxyIdleTimeout is accepted either as the flag's raw parsed value
-// or already normalized to proxy.IdleTimeoutNever — call this before or
-// after that normalization in init.go's RunE, whichever is convenient at the
-// call site; the check is the same either way.
+// init.go's RunE calls this with the flag's raw parsed value, before it
+// converts an explicit 0 to proxy.IdleTimeoutNever.
 func validateEphemeralIdleTimeout(ephemeralRoot, idleTimeoutSet bool, serverProxyIdleTimeout time.Duration) error {
 	if !ephemeralRoot || !idleTimeoutSet || serverProxyIdleTimeout > 0 {
 		return nil

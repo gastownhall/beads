@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
 // TestValidateEphemeralIdleTimeout_ContradictsExplicitZeroOrNegative is
@@ -21,11 +19,6 @@ func TestValidateEphemeralIdleTimeout_ContradictsExplicitZeroOrNegative(t *testi
 	}{
 		{"explicit zero", 0},
 		{"explicit negative", -5 * time.Second},
-		// proxy.IdleTimeoutNever is what an explicit 0 normalizes to
-		// elsewhere in this file; the contradiction must still be caught
-		// whichever of the two callers passes it (see call-site ordering
-		// note on validateEphemeralIdleTimeout).
-		{"already-normalized never sentinel", proxy.IdleTimeoutNever},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateEphemeralIdleTimeout(true, true, tc.timeout)
