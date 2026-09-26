@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2154,6 +2155,120 @@ func TestDetectBootstrapAction_ExistingProjectMissingServerDBRefusesAtPlanTime(t
 	if !strings.Contains(plan.refusalDetail, "will NOT create") {
 		t.Errorf("refusalDetail = %q does not read as a refusal", plan.refusalDetail)
 	}
+
+	// The machine-readable surface is what provisioning scripts consume, and
+	// "blocked" — not the action string — is the discriminator they are
+	// documented to switch on (see the BootstrapPlan.Blocked comment). A
+	// refusal produced no database, so it must carry the flag; otherwise it is
+	// the one no-database outcome a "blocked"-keyed consumer reads as success.
+	if !plan.Blocked {
+		t.Error("Blocked = false on a refuse plan — a run that produced no database must set the flag scripts key on")
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("json.Marshal(plan): %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal plan JSON %s: %v", raw, err)
+	}
+	if decoded["action"] != "refuse" {
+		t.Errorf("json action = %v, want refuse", decoded["action"])
+	}
+	// "blocked" is omitempty, so a false flag does not render as false — the
+	// key vanishes entirely and the consumer cannot tell this run from a
+	// successful one.
+	if decoded["blocked"] != true {
+		t.Errorf("json blocked = %v, want true; full plan JSON: %s", decoded["blocked"], raw)
+	}
+	if strings.Contains(string(raw), "\x1b[") {
+		t.Errorf("plan JSON carries ANSI escapes, which --json consumers must never receive: %s", raw)
+	}
+}
+
+// TestDetectBootstrapAction_RefusePlanDropsUnverifiedSyncRemote pins that a
+// refusal honours SyncRemote's documented "empty on a Blocked plan" contract.
+// A forge sync.remote with no Dolt data yet is recorded on the plan for the
+// workspace bootstrap expected to create (planConfiguredSyncRemote keeps it
+// and returns done=false), and the refusal is downstream of that — so without
+// explicit clearing the credential-bearing URL rides out in --json for a run
+// that wired up nothing, cloned nothing and pushed nothing.
+func TestDetectBootstrapAction_RefusePlanDropsUnverifiedSyncRemote(t *testing.T) {
+	beadsDir := newForgeSyncRemoteWorkspace(t, "https://github.com/org/repo.git")
+	// Forge repo reachable, but no refs/dolt/data yet: sync.remote is recorded
+	// and bootstrap keeps looking rather than cloning.
+	stubProbeGitRemoteDoltData(t, func(string) (bool, error) { return false, nil })
+
+	cfg := configfile.DefaultConfig()
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "mydb"
+	// Never created: a fresh clone has no local shadow directory.
+	cfg.DoltDataDir = filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+	cfg.ProjectID = "proj-already-initialized-456"
+	t.Setenv("BEADS_DOLT_DATA_DIR", cfg.DoltDataDir)
+
+	orig := checkBootstrapServerDB
+	checkBootstrapServerDB = func(bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		return bootstrapServerDBCheck{Reachable: true, Exists: false}
+	}
+	defer func() { checkBootstrapServerDB = orig }()
+	origDelay := bootstrapRetryDelay
+	bootstrapRetryDelay = func(time.Duration) {}
+	defer func() { bootstrapRetryDelay = origDelay }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Action != "refuse" {
+		t.Fatalf("action = %q (reason %q), want refuse", plan.Action, plan.Reason)
+	}
+	if !plan.Blocked {
+		t.Fatal("Blocked = false on a refuse plan")
+	}
+	if plan.SyncRemote != "" {
+		t.Errorf("SyncRemote = %q on a Blocked plan, want empty — the refusal creates no workspace, so nothing may be cloned from or pushed to that remote", plan.SyncRemote)
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("json.Marshal(plan): %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal plan JSON %s: %v", raw, err)
+	}
+	if got, ok := decoded["sync_remote"]; ok {
+		t.Errorf("plan JSON carries sync_remote = %v on a Blocked plan; full JSON: %s", got, raw)
+	}
+}
+
+// TestPrintBootstrapPlan_RefusePrintsSummaryNotDetail covers the refuse arm of
+// printBootstrapPlan, which no test reached. The full explanation is the error
+// executeBootstrapPlan returns, so printing refusalDetail here too would render
+// it twice — a regression a future edit could reintroduce silently.
+func TestPrintBootstrapPlan_RefusePrintsSummaryNotDetail(t *testing.T) {
+	plan := BootstrapPlan{
+		Action:   "refuse",
+		Database: "mydb",
+		Reason:   `Database "mydb" not found on server at 127.0.0.1:3307; workspace already initialized (project_id set) — refusing to create an empty database`,
+		// A marker no production string can produce, so a match is proof the
+		// detail field itself was printed rather than wording that overlaps.
+		refusalDetail: "REFUSAL-DETAIL-MARKER: bd bootstrap will NOT create an empty database here",
+		Blocked:       true,
+	}
+
+	out := captureStdout(t, func() error {
+		printBootstrapPlan(plan)
+		return nil
+	})
+
+	if !strings.Contains(out, "refuse — will NOT create a database") {
+		t.Errorf("output does not announce the refusal:\n%s", out)
+	}
+	if !strings.Contains(out, plan.Reason) {
+		t.Errorf("output omits the one-line reason:\n%s", out)
+	}
+	if strings.Contains(out, "REFUSAL-DETAIL-MARKER") {
+		t.Errorf("printBootstrapPlan printed refusalDetail; executeBootstrapPlan already returns it, so the operator would read the whole explanation twice:\n%s", out)
+	}
 }
 
 // TestExecuteBootstrapPlan_RefuseErrsWithoutPrompting pins that a refuse plan
@@ -2200,5 +2315,72 @@ func TestExecuteBootstrapPlan_RefuseErrsWithoutPrompting(t *testing.T) {
 	}
 	if probes != 0 {
 		t.Errorf("probes = %d, want 0 — the decision was already made at plan time", probes)
+	}
+}
+
+// TestDetectBootstrapAction_FreshCloneServerNameMatchStillSyncs pins the
+// POSITIVE half of the widened probe. Unlocking the server-side existence
+// check for ProjectID-bearing workspaces also unlocked its Exists==true arm,
+// and a reachable server merely holding a database of the configured NAME is
+// not proof that this workspace is bound to it — nothing checks project_id or
+// content. Before the widening such a clone never probed at all and always
+// fell through to sync.remote, so a stale or unrelated same-named database
+// (including one left behind by the very bug this guard fixes) must not
+// silently settle the plan as "nothing to do" and suppress the configured
+// recovery clone. The name match survives only as the fallback verdict, which
+// TestDetectBootstrapAction_NoLocalShadowDirStillLiveChecksExisting pins.
+func TestDetectBootstrapAction_FreshCloneServerNameMatchStillSyncs(t *testing.T) {
+	beadsDir, cfg := freshServerModeCloneFixture(t)
+	orig := checkBootstrapServerDB
+	checkBootstrapServerDB = func(bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		return bootstrapServerDBCheck{Reachable: true, Exists: true}
+	}
+	defer func() { checkBootstrapServerDB = orig }()
+	origDelay := bootstrapRetryDelay
+	bootstrapRetryDelay = func(time.Duration) {}
+	defer func() { bootstrapRetryDelay = origDelay }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+	if plan.Action != "sync" {
+		t.Errorf("action = %q (reason %q), want sync — a server-side name match with no local evidence binding this workspace to that database must not mask configured sync.remote recovery", plan.Action, plan.Reason)
+	}
+}
+
+// TestDetectBootstrapAction_ShadowDirServerNameMatchSettlesNone pins the other
+// half of the same gate: a populated local shadow directory IS evidence this
+// workspace is bound to the database the server confirmed, so the Exists
+// verdict must settle the plan immediately instead of being deferred behind
+// sync.remote. Deferring it would re-clone over a database that already exists
+// — GH#5037's Error 1007, which the comment above the settle gate exists to
+// prevent — and the fixture configures a sync.remote precisely so the
+// assertion discriminates: without the local-evidence half of
+// settledOnNameAlone, sync.remote wins and the action becomes "sync". The
+// Err-arm twin is TestDetectBootstrapAction_ShadowDirUnreachableServerStillReportsNone;
+// this is the Exists-arm one, which nothing covered.
+func TestDetectBootstrapAction_ShadowDirServerNameMatchSettlesNone(t *testing.T) {
+	beadsDir, cfg := freshServerModeCloneFixture(t)
+	if err := os.MkdirAll(filepath.Join(cfg.DoltDataDir, "mydb"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	orig := checkBootstrapServerDB
+	checkBootstrapServerDB = func(bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		return bootstrapServerDBCheck{Reachable: true, Exists: true}
+	}
+	defer func() { checkBootstrapServerDB = orig }()
+	origDelay := bootstrapRetryDelay
+	bootstrapRetryDelay = func(time.Duration) {}
+	defer func() { bootstrapRetryDelay = origDelay }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+	if plan.Action != "none" {
+		t.Errorf("action = %q (reason %q), want none — with local evidence binding this workspace to the database the server reports, re-cloning it is GH#5037's Error 1007", plan.Action, plan.Reason)
+	}
+	if !plan.HasExisting {
+		t.Error("HasExisting = false on a confirmed server-side database with local evidence")
+	}
+	// Discriminates the Exists arm from the Err arm's "Could not verify"
+	// settle, which the same populated shadow directory also unlocks.
+	if !strings.Contains(plan.Reason, "already exists on server") {
+		t.Errorf("reason = %q, want the Exists-arm wording — a 'Could not verify' reason here means the probe result, not the local evidence, is what settled the plan", plan.Reason)
 	}
 }

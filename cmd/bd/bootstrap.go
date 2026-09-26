@@ -120,7 +120,9 @@ Bootstrap auto-detects the right action:
   • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
   • If .beads/backup/*.jsonl exists: restores from backup
   • If .beads/issues.jsonl exists: imports from git-tracked JSONL
-  • If no database exists: creates a fresh one
+  • If no database exists: creates a fresh one — unless the workspace was already
+    initialized (metadata.json has a project_id) and its server-mode database is
+    missing, in which case bootstrap refuses rather than strand the existing data
   • If database already exists: validates and reports status
 
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
@@ -316,9 +318,17 @@ type BootstrapPlan struct {
 	// Blocked marks a plan that took no action and found no database. It is
 	// derived in detectBootstrapAction from Action+HasExisting, never set by a
 	// detection branch, and it is the single discriminator the exit code and
-	// the printed output both switch on. Additive on purpose: JSON consumers
-	// switch on "action", so a new action value would break them, while
-	// "none" + "blocked" + a non-zero exit code is backwards compatible.
+	// the printed output both switch on.
+	//
+	// "blocked" is the stable, script-facing signal and must be set for EVERY
+	// no-database outcome, so a consumer that only understands "none" is never
+	// told a run succeeded when it did not. A new "action" value is acceptable
+	// only for a state that must not be conflated with an existing one — the
+	// refusal is one, because "none" also covers the benign "a database
+	// already exists, nothing to do" — and only when it is accompanied by
+	// "blocked" and, outside --dry-run, a non-zero exit code. That is the
+	// contract to preserve when extending this enum: not "never add an action",
+	// but "never add an action that is the only signal of what happened".
 	Blocked bool `json:"blocked,omitempty"`
 	// BlockedRemote is the credential-free remote URL a Blocked plan could not
 	// verify, carried only so the diagnostic can name it.
@@ -401,8 +411,24 @@ func requireBootstrapDoltBackend(cfg *configfile.Config, beadsDir string) error 
 // branch can leave a stale flag behind for a later branch to inherit.
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {
 	plan := detectBootstrapPlan(beadsDir, cfg)
-	plan.Blocked = plan.Action == "none" && !plan.HasExisting
-	if !plan.Blocked {
+	// "refuse" is a no-database outcome too, so it carries the same flag as
+	// "none": the action string says WHY bootstrap stopped, Blocked says THAT
+	// it stopped, and only the latter is the contract scripts switch on. This
+	// changes no exit code — RunE routes Action=="refuse" through
+	// executeBootstrapPlan, which errors, and --dry-run is contractually
+	// exit 0 either way (see bootstrapPlanOutcome) — it only stops a refusal
+	// from being the one bootstrap outcome that produced nothing yet reported
+	// "blocked" absent.
+	plan.Blocked = (plan.Action == "none" || plan.Action == "refuse") && !plan.HasExisting
+	if plan.Blocked {
+		// Keep SyncRemote's documented "empty on a Blocked plan" invariant
+		// true now that refusals are Blocked: a refusal can be reached with a
+		// forge SyncRemote already recorded (planConfiguredSyncRemote keeps it
+		// for the workspace it expected to create), and no Blocked plan wires
+		// up, clones from, or pushes to a remote. Inert for execution — every
+		// consumer of plan.SyncRemote runs on a sync/provisioning action.
+		plan.SyncRemote = ""
+	} else {
 		plan.BlockedRemote = ""
 	}
 	return plan
@@ -444,8 +470,21 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	// #5743 success tick again.
 	var deferredExistingPlan *BootstrapPlan
 	dbAction, dbProbe, hasExistingDB := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer)
+	// The same masking hazard applies to a server-side hit with no local
+	// evidence. Probing on ProjectID alone (see existingBootstrapDBPlan) means
+	// a shadow-dir-less workspace now reaches the Exists arm, where the only
+	// thing matched is the database NAME — nothing checks that the database on
+	// the server holds this project's data. Such a workspace previously
+	// skipped the probe entirely and always fell through to sync.remote, so
+	// settling here would let a stale or unrelated same-named database (including
+	// one left behind by the very bug this guard fixes) silently suppress the
+	// configured recovery path. Defer it exactly as a missing beadsDir is
+	// deferred: sync.remote / refs/dolt/data / local files get their turn, and
+	// the name match survives as the fallback verdict rather than becoming the
+	// verdict.
+	settledOnNameAlone := dbProbe.Ran && !dbProbe.LocalEvidence
 	if hasExistingDB {
-		if beadsDirExists || dbAction.Action != "none" {
+		if dbAction.Action != "none" || (beadsDirExists && !settledOnNameAlone) {
 			return dbAction
 		}
 		deferredExistingPlan = &dbAction
@@ -648,6 +687,12 @@ type serverDBProbe struct {
 	Ran    bool  // a probe was actually performed
 	Exists bool  // the server confirmed the database exists
 	Err    error // the probe could not reach or question the server
+	// LocalEvidence records whether anything on this machine ties this
+	// workspace to the database the probe asked about — in practice a
+	// populated local shadow directory. Without it the probe can only match
+	// on the database NAME, which is why the caller refuses to let an
+	// Exists verdict settle the plan ahead of the real recovery sources.
+	LocalEvidence bool
 }
 
 // existingBootstrapDBPlan reports whether an existing database already settles
@@ -661,6 +706,17 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 	}
 
 	if isServer {
+		// Scope note: this is per-workspace evidence in locally-managed server
+		// mode only. In shared-server mode bootstrapServerDoltDir resolves to
+		// doltserver.SharedDoltDir() — ~/.beads/shared-server/dolt/, one
+		// directory for EVERY shared-server database on the machine — so a
+		// fresh clone of project B reads a populated directory belonging to
+		// projects A and C. Everything below that calls this "local evidence"
+		// is therefore only sound for the locally-managed case; the
+		// shared-server granularity gap is pre-existing (main probes on the
+		// same signal) and is tracked separately rather than narrowed here,
+		// because keying on the database-named subdirectory would also change
+		// the locally-managed verdict for a data dir holding only .doltcfg.
 		dbPath := bootstrapServerDoltDir(beadsDir, cfg, isSharedServer)
 		hasLocalShadowDir := false
 		if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
@@ -683,7 +739,7 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 		// directory says this database really does live here; see
 		// probeBootstrapServerDB for why a fresh clone must not pay 70s.
 		result := probeBootstrapServerDB(beadsDir, cfg, isSharedServer, hasLocalShadowDir)
-		probe := serverDBProbe{Ran: true, Exists: result.Exists, Err: result.Err}
+		probe := serverDBProbe{Ran: true, Exists: result.Exists, Err: result.Err, LocalEvidence: hasLocalShadowDir}
 
 		if result.Exists {
 			plan.HasExisting = true
@@ -693,8 +749,10 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 		}
 		// An unverifiable probe means UNKNOWN, never "exists". Answering
 		// "nothing to do" for it is only defensible with local evidence that
-		// the database lives here — a populated shadow directory, where a
-		// down server is a live database we simply cannot see right now.
+		// the database lives here — a populated shadow directory (in
+		// locally-managed server mode; see the scope note above, it is not
+		// per-database in shared-server mode), where a down server is a live
+		// database we simply cannot see right now.
 		// Without that evidence the very same error describes a fresh clone
 		// whose server has not been started yet, which is the normal state of
 		// every locally-managed server-mode clone before its first sync. Such
@@ -871,6 +929,14 @@ func printBootstrapPlan(plan BootstrapPlan) {
 		// Deliberately the one-line summary, not refusalDetail: the full
 		// explanation is the error executeBootstrapPlan returns, and printing
 		// both would render it twice.
+		//
+		// Deliberately stdout, unlike the "none"+Blocked arm above: this is the
+		// plan the command was asked to compute, and the one-line Reason rides
+		// with it (pinned by TestPrintBootstrapPlan_RefusePrintsSummaryNotDetail)
+		// so a stdout-only consumer is never left with a bare "refuse". It is
+		// not the #5743 false-success class either — a real refuse run exits
+		// non-zero through executeBootstrapPlan, so nothing reads this as
+		// success.
 		fmt.Printf("Bootstrap plan: refuse — will NOT create a database\n")
 		fmt.Printf("  Database: %s\n", plan.Database)
 		fmt.Printf("  Reason: %s\n", plan.Reason)
@@ -1063,9 +1129,21 @@ func bootstrapMissingServerDBRefusal(dbName, host string, port int, probeErr err
 	b.WriteString("  bd doctor          # check project health\n")
 	b.WriteString("  bd dolt status     # inspect Dolt server state\n")
 
-	b.WriteString("\nTo recover existing data, restore from an export rather than creating fresh:\n")
-	b.WriteString("  bd backup restore                  # if a local backup snapshot exists\n")
-	b.WriteString("  Check .beads/backup/ for a JSONL export you can import manually.\n")
+	// Every route here must be followable FROM this state. `bd backup restore`
+	// alone is not: it restores a Dolt-native snapshot, not a `bd export`
+	// JSONL, and it requires an initialized database — so it silently routes
+	// the operator back through `bd init`, the very unguarded door this
+	// refusal exists to keep shut (PR #5791). Name that precondition instead
+	// of implying it, and lead with the routes that need no init at all.
+	b.WriteString("\nTo recover existing data, repopulate the database rather than creating fresh.\n")
+	b.WriteString("Routes that work from this state:\n")
+	b.WriteString("  bd dolt push                     # from another clone that still has the data\n")
+	b.WriteString("  bd config set sync.remote <url>  # then re-run bd bootstrap to clone from it\n")
+	b.WriteString("  bd init && bd backup restore     # ONLY with a Dolt-native backup snapshot:\n")
+	b.WriteString("                                   # bd backup restore needs an initialized\n")
+	b.WriteString("                                   # database and will not read a bd export JSONL\n")
+	b.WriteString("\nbd bootstrap only auto-restores .beads/backup/issues.jsonl, so a timestamped or\n")
+	b.WriteString("otherwise-named export under .beads/backup/ is still yours to import by hand.\n")
 
 	b.WriteString("\nAborting.")
 	return errors.New(b.String())
