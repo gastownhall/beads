@@ -219,6 +219,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A label filter that was supplied but names no usable label is now an
+  error** ([#6632](https://github.com/gastownhall/beads/pull/6632)).
+  `--label`, `--label-any` and `--exclude-label` on `bd ready`, `bd list`,
+  `bd count`, `bd orphans`, `bd blocked`, `bd stale` and `bd search`
+  previously normalized `--label ""`, `--label "   "` and `--label ",,"` to an
+  empty set and then read that as *no filter*, silently returning every issue
+  — the opposite of what an explicit empty filter asks for, and the worst
+  possible default for a script whose `--label "$LABEL"` expanded to nothing.
+  These now fail with `--label was supplied but contains no usable label`.
+  Unchanged: a list that merely contains a blank element among real ones
+  (`--label "a,,b"`) still filters on the real ones, and omitting the flag
+  still means no filter. **Behavior change to note:** on a workspace with a
+  configured directory label, `bd ready --label "  "` used to fall through to
+  that default and now errors instead. `--label-pattern` and `--label-regex`
+  are a different shape and are not affected.
+
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`
   and `mutates`: `design` for a refusal that is expected to stay (shared

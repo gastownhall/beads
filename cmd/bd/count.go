@@ -81,6 +81,12 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 	issueType, _ := cmd.Flags().GetString("type")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	if err := rejectEmptyLabelFilter(cmd, "label", labels); err != nil {
+		return issueops.CountRequest{}, "", err
+	}
+	if err := rejectEmptyLabelFilter(cmd, "label-any", labelsAny); err != nil {
+		return issueops.CountRequest{}, "", err
+	}
 	titleSearch, _ := cmd.Flags().GetString("title")
 	idFilter, _ := cmd.Flags().GetString("id")
 	titleContains, _ := cmd.Flags().GetString("title-contains")
