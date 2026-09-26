@@ -1031,6 +1031,77 @@ func TestCommentOutYamlKey(t *testing.T) {
 			key:      "backup.enabled",
 			expected: "  # backup.enabled: true\nother: value",
 		},
+		{
+			// A flat key is a top-level key. A single-segment key must not
+			// match the same name nested under some other section: that is a
+			// different key, and the database-backed unset path would
+			// otherwise comment out backup.enabled to unset `enabled`.
+			name:     "single-segment key does not match a nested line",
+			content:  "backup:\n  enabled: true\n",
+			key:      "enabled",
+			expected: "backup:\n  enabled: true\n",
+		},
+		{
+			// Nor refuse on one: the nested `mode:` block is not this key's.
+			// A dedent ends the value: `k:` has nothing beneath it, since the
+			// next content line belongs to the parent's level, so it is
+			// commented like any empty-valued key.
+			name:     "empty nested key followed by a dedent is still commented",
+			content:  "outer:\n  k:\nz: 1\n",
+			key:      "outer.k",
+			expected: "outer:\n  # k:\nz: 1\n",
+		},
+		{
+			name:     "single-segment key ignores a nested block of the same name",
+			content:  "dolt:\n  mode:\n    x: 1\n",
+			key:      "mode",
+			expected: "dolt:\n  mode:\n    x: 1\n",
+		},
+		{
+			name:     "nested key preserves siblings and comments",
+			content:  "# Backup settings\nbackup:\n  enabled: false\n  interval: 15m\n",
+			key:      "backup.enabled",
+			expected: "# Backup settings\nbackup:\n  # enabled: false\n  interval: 15m\n",
+		},
+		{
+			name:     "nested key three levels deep",
+			content:  "a:\n  b:\n    c: 1\n",
+			key:      "a.b.c",
+			expected: "a:\n  b:\n    # c: 1\n",
+		},
+		{
+			name:     "key with an empty value and no block is still commented",
+			content:  "actor:\nother: value",
+			key:      "actor",
+			expected: "# actor:\nother: value",
+		},
+		{
+			name:     "key with an empty value at end of file is still commented",
+			content:  "other: value\nactor:",
+			key:      "actor",
+			expected: "other: value\n# actor:",
+		},
+		{
+			// A match must keep the file's trailing newline, and so must a
+			// miss: UnsetYamlConfig reports a write by comparing content, so a
+			// no-op that dropped the final newline would read as a change.
+			name:     "flat key preserves the trailing newline",
+			content:  "a: 1\n",
+			key:      "a",
+			expected: "# a: 1\n",
+		},
+		{
+			name:     "no match preserves the trailing newline",
+			content:  "other: value\n",
+			key:      "backup.enabled",
+			expected: "other: value\n",
+		},
+		{
+			name:     "flat key without a trailing newline stays without one",
+			content:  "a: 1",
+			key:      "a",
+			expected: "# a: 1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1088,8 +1159,12 @@ other-setting: value
 	defer os.Chdir(oldWd)
 
 	// Test UnsetYamlConfig
-	if err := UnsetYamlConfig("backup.enabled"); err != nil {
+	changed, err := UnsetYamlConfig("backup.enabled")
+	if err != nil {
 		t.Fatalf("UnsetYamlConfig() error = %v", err)
+	}
+	if !changed {
+		t.Error("UnsetYamlConfig() changed = false, want true for a key present in config.yaml")
 	}
 
 	// Read back and verify
@@ -1214,8 +1289,12 @@ func TestSetAndUnsetYamlConfig_WithBEADS_DIR_FromOutsideRepo(t *testing.T) {
 		t.Fatalf("expected runtime config to contain no-git-ops: true, got:\n%s", contentStr)
 	}
 
-	if err := UnsetYamlConfig("no-git-ops"); err != nil {
+	changed, err := UnsetYamlConfig("no-git-ops")
+	if err != nil {
 		t.Fatalf("UnsetYamlConfig() error = %v", err)
+	}
+	if !changed {
+		t.Error("UnsetYamlConfig() changed = false, want true for a key present in config.yaml")
 	}
 	content, err = os.ReadFile(configPath)
 	if err != nil {

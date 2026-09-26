@@ -504,32 +504,39 @@ func MetricsNoticeShownByUserConfig() bool {
 	return shown
 }
 
-func UnsetUserYamlConfig(key string) error {
+// UnsetUserYamlConfig comments out key in the user-global config.yaml. The bool
+// reports whether the file was actually changed, on the same terms as
+// UnsetYamlConfig: an absent file or an absent key is (false, nil), not an
+// error.
+func UnsetUserYamlConfig(key string) (bool, error) {
 	configPath, err := UserConfigYamlPath()
 	if err != nil {
-		return err
+		return false, err
 	}
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is a validated absolute user config path
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("failed to read user config.yaml: %w", err)
+		return false, fmt.Errorf("failed to read user config.yaml: %w", err)
 	}
 
 	newContent, err := commentOutYamlKey(string(content), key)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if newContent == string(content) {
+		return false, nil
 	}
 
 	// Preserve the owner-private 0600 posture every other user-global writer
 	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
 	// rewriting at 0644 would relax this shared user config to world-readable.
 	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
-		return fmt.Errorf("failed to write user config.yaml: %w", err)
+		return false, fmt.Errorf("failed to write user config.yaml: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func SetUserYamlConfig(key, value string) error {
@@ -583,29 +590,44 @@ func GetYamlConfig(key string) string {
 	return v.GetString(key)
 }
 
-// UnsetYamlConfig removes a configuration value from the project's config.yaml file.
-// The key line is commented out (prefixed with "# ") to preserve it as documentation.
-func UnsetYamlConfig(key string) error {
+// UnsetYamlConfig removes a configuration value from the project's config.yaml
+// file. The key line is commented out (prefixed with "# ") to preserve it as
+// documentation.
+//
+// The bool reports whether the file was actually changed, so a caller can name
+// where the unset landed rather than asserting a write it did not make. It is
+// false, with a nil error, when the workspace has no project config.yaml at all
+// (an external BEADS_DIR or a database-only workspace) and when the key is not
+// present in the file. Neither is a failure: "the key is not in config.yaml" is
+// the correct answer to give, and erroring on it left a database-backed unset
+// half-applied - the row deleted, the command exiting non-zero.
+func UnsetYamlConfig(key string) (bool, error) {
 	configPath, err := findProjectConfigYaml()
 	if err != nil {
-		return err
+		return false, nil
 	}
 
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml
 	if err != nil {
-		return fmt.Errorf("failed to read config.yaml: %w", err)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
 	newContent, err := commentOutYamlKey(string(content), key)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if newContent == string(content) {
+		return false, nil
 	}
 
 	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
-		return fmt.Errorf("failed to write config.yaml: %w", err)
+		return false, fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // findProjectConfigYaml finds the active config.yaml path for YAML-only config writes.
@@ -1011,10 +1033,19 @@ func commentOutYamlKey(content, key string) (string, error) {
 	// `remote: keep-this` inside it is prose, and commenting it out edits their
 	// data. Matching by line has to skip those lines to stay honest.
 	blockIndent := -1
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	for scanner.Scan() {
-		line := scanner.Text()
-
+	// Split rather than scan so the file's trailing newline survives: a
+	// scanner drops it, so every unset rewrote the file without its final
+	// newline, and the unset callers could not tell "nothing matched" from a
+	// write by comparing content.
+	lines := strings.Split(content, "\n")
+	// A flat key is a TOP-LEVEL key whose name contains the dots, so it only
+	// matches at the document's top-level indentation. Without this, a
+	// single-segment key such as `enabled` matched a nested `  enabled:` line
+	// under some other section and commented out a key the caller never named.
+	// The top level is usually column 0, but yaml.v3 accepts a document whose
+	// whole mapping is indented, so it is read from the first key line.
+	topIndent := yamlTopLevelIndent(lines)
+	for i, line := range lines {
 		if blockIndent >= 0 {
 			if strings.TrimSpace(line) == "" || lineIndent(line) > blockIndent {
 				result = append(result, line)
@@ -1024,12 +1055,18 @@ func commentOutYamlKey(content, key string) (string, error) {
 		}
 		blockIndent = blockScalarIndent(line)
 
-		if matches := flatPattern.FindStringSubmatch(line); matches != nil {
+		if matches := flatPattern.FindStringSubmatch(line); matches != nil && len(matches[1]) == topIndent {
+			if err := mappingValueUnsetRefusal(lines, i, len(matches[1]), key); err != nil {
+				return "", err
+			}
 			result = append(result, matches[1]+"# "+strings.TrimLeft(line, " \t"))
 			continue
 		}
 
 		if name, indent, ok := yamlKeyOnLine(line); ok && walk.step(name, indent) {
+			if err := mappingValueUnsetRefusal(lines, i, indent, key); err != nil {
+				return "", err
+			}
 			result = append(result, strings.Repeat(" ", indent)+"# "+strings.TrimLeft(line, " \t"))
 			continue
 		}
@@ -1056,6 +1093,72 @@ func commentOutYamlKey(content, key string) (string, error) {
 	// cannot rewrite the end of a file that was already written that way.
 	out := strings.Join(result, "\n")
 	return strings.TrimRight(out, "\n") + content[len(strings.TrimRight(content, "\n")):], nil
+}
+
+// mappingValueUnsetRefusal refuses a matched key line whose value continues on
+// the lines beneath it rather than sitting on the key's own line: a nested
+// mapping, a list, or a plain scalar continued on the next line. Commenting
+// that one line out would orphan those lines, leaving a config.yaml that no
+// longer parses. The value is judged by the first following line that carries
+// content, so a key with an empty value and nothing under it is still
+// commented as before.
+//
+// Nothing on the key's own line but a comment, an anchor or a tag (`b:  #
+// note`, `base: &b`, `m: !!map`) still leaves the value to the lines beneath.
+// A list may sit at the key's OWN indentation (`types.custom:` then `- step`),
+// which YAML allows for a sequence value, so a `-` item at that indentation
+// belongs to the key too.
+func mappingValueUnsetRefusal(lines []string, idx, indent int, key string) error {
+	_, rest, _ := strings.Cut(strings.TrimLeft(lines[idx], " \t"), ":")
+	if !valueContinuesBelow(rest) {
+		return nil
+	}
+	for _, next := range lines[idx+1:] {
+		// TrimSpace, not TrimLeft: a CRLF file's blank line is a lone "\r",
+		// which must not read as content at column 0 and end the value early.
+		trimmed := strings.TrimSpace(next)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		nextIndent := lineIndent(next)
+		if nextIndent < indent {
+			return nil
+		}
+		if nextIndent == indent && trimmed != "-" && !strings.HasPrefix(trimmed, "- ") {
+			return nil
+		}
+		return fmt.Errorf("cannot unset %q: its value continues on the lines beneath it, and commenting the key out would orphan them; remove it by hand, or unset its keys individually if it is a mapping", key)
+	}
+	return nil
+}
+
+// valueContinuesBelow reports whether the text after a key's colon leaves the
+// value to the following lines: it is empty once a trailing comment is dropped,
+// or holds only anchors and tags.
+func valueContinuesBelow(rest string) bool {
+	rest = strings.TrimSpace(rest)
+	if i := strings.Index(rest, " #"); i >= 0 {
+		rest = rest[:i]
+	} else if strings.HasPrefix(rest, "#") {
+		rest = ""
+	}
+	for _, tok := range strings.Fields(rest) {
+		if !strings.HasPrefix(tok, "&") && !strings.HasPrefix(tok, "!") {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlTopLevelIndent is the indentation of the document's first key line, which
+// every top-level key shares, or 0 when the document declares no key.
+func yamlTopLevelIndent(lines []string) int {
+	for _, line := range lines {
+		if _, indent, ok := yamlKeyOnLine(line); ok {
+			return indent
+		}
+	}
+	return 0
 }
 
 // nestedKeyWalk tracks how much of a dotted key a line-by-line scan has matched
@@ -1131,17 +1234,20 @@ func (w *nestedKeyWalk) step(name string, indent int) bool {
 // direction already refuses what it cannot write correctly, so unset says so too.
 //
 // This is a list of known shapes, not a decision procedure for the whole class:
-// a mapping-valued key and a value that spans lines in flow or quoted style land
-// their bodies in the same place and are still silent.
+// a value that spans lines in flow or quoted style lands its body in the same
+// place and is still silent. A mapping-valued key is refused by the line
+// matcher itself (mappingValueUnsetRefusal), which also covers single-segment
+// keys this function never walks.
 //
 // Only a key that is actually present can be refused: unsetting a key that was
 // never there has always been a successful no-op, and staying silent about a
 // shape nobody asked to touch is the point.
 func unsupportedUnsetShape(content, key string) error {
+	// Single-segment keys are checked too. The database-backed unset clears
+	// the config.yaml layer for every key, so `notes: |` with an indented body
+	// reaches this path, and commenting its key line out orphans the body
+	// exactly as it does for a dotted key.
 	segments := strings.Split(key, ".")
-	if len(segments) < 2 {
-		return nil
-	}
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(content), &root); err != nil || len(root.Content) == 0 {
 		// Nothing to walk. A file yaml.v3 cannot parse is not this function's

@@ -398,6 +398,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer counts an issue its batch filter skipped (create-only, a `ShouldPush`
   hook, parent, type, or conflict) as skipped twice. Notion's batch dry-run was already correct.
 
+- **`bd config unset` no longer reports success while the key stays set, and
+  now names where the unset actually landed.** A key present in
+  `config.yaml` but not claimed by `IsYamlOnlyKey` was deleted from the
+  database only, so it stayed effective; it is now cleared from both, and the
+  reported location - `Unset <key> (in database, config.yaml)` - is derived
+  from what the writes actually changed rather than from a pre-check of viper's
+  merged value, which counted defaults and environment variables as present in
+  the file. A yaml-only key that was not in the file prints `<key> was not set
+  in config.yaml` instead of claiming a write. A workspace with no project
+  `config.yaml` at all is an answer rather than a failure, so a database-backed
+  unset there no longer deletes the row and then exits non-zero. Unsetting a
+  key whose value is the indented block beneath it (a mapping or a list), which
+  used to comment out the key line and orphan the block into a `config.yaml`
+  that no longer parsed, is now refused alongside the flow-style and
+  block-scalar shapes above. An unset also keeps the file's trailing newline.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery

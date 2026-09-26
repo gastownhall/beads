@@ -424,8 +424,15 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			wasSet := GetStringFromDir(dir, tc.key) != ""
 
 			t.Setenv("BEADS_DIR", dir)
-			if err := UnsetYamlConfig(tc.key); err != nil {
+			changed, err := UnsetYamlConfig(tc.key)
+			if err != nil {
 				t.Fatalf("UnsetYamlConfig: %v", err)
+			}
+			// The bool is what `bd config unset` reports as the location, so
+			// it must say a write happened exactly when there was a key to
+			// comment out.
+			if changed != wasSet {
+				t.Errorf("UnsetYamlConfig changed = %v, want %v", changed, wasSet)
 			}
 
 			body, err := os.ReadFile(path)
@@ -475,6 +482,31 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// so the whole file stops parsing rather than one section.
 		{name: "block scalar under the flat spelling", seed: "dolt.host: |\n    10.0.0.1\nnode_id: mini\n", key: "dolt.host", want: "block scalar"},
 		{name: "folded block scalar under the flat spelling", seed: "dolt.host: >\n    10.0.0.1\nnode_id: mini\n", key: "dolt.host", want: "block scalar"},
+		// A key whose value is the mapping beneath it: commenting its line out
+		// orphans the children at an indentation no key introduces, and the
+		// file stops parsing. Nested, flat single-segment, and a list value.
+		{name: "mapping-valued nested key", seed: "dolt:\n    limits:\n        host: mini\n", key: "dolt.limits", want: "lines beneath it"},
+		{name: "mapping-valued single-segment key", seed: "backup:\n  enabled: false\n  interval: 15m\n", key: "backup", want: "lines beneath it"},
+		{name: "mapping-valued key behind a comment", seed: "backup:\n  # whether to back up\n  enabled: false\n", key: "backup", want: "lines beneath it"},
+		{name: "list-valued nested key", seed: "sync:\n    remotes:\n        - a\n        - b\n", key: "sync.remotes", want: "lines beneath it"},
+		// YAML lets a sequence value sit at the key's own indentation; the
+		// items still belong to the key, and orphaning them leaves a file that
+		// every later command fails to parse (#5760 review).
+		{name: "list at the key's own indentation", seed: "types.custom:\n- step\n- slot\n", key: "types.custom", want: "lines beneath it"},
+		// Only a comment, an anchor or a tag after the colon still leaves the
+		// value to the lines beneath.
+		{name: "trailing comment on a mapping-valued key", seed: "backup:  # note\n  enabled: false\n", key: "backup", want: "lines beneath it"},
+		{name: "anchored mapping-valued key", seed: "base: &b\n  c: 1\n", key: "base", want: "lines beneath it"},
+		{name: "anchored mapping-valued key with a comment", seed: "base: &b  # shared\n  c: 1\n", key: "base", want: "lines beneath it"},
+		// A tag alone after the colon still leaves the value below.
+		{name: "tagged mapping-valued key", seed: "m: !!map\n  a: 1\n", key: "m", want: "lines beneath it"},
+		// A single-segment key's block scalar is refused like a dotted one's:
+		// the database-backed unset reaches this path for every key.
+		{name: "single-segment block scalar", seed: "notes: |\n  hi\nnode_id: mini\n", key: "notes", want: "block scalar"},
+		// A plain scalar continued on the next line is orphaned the same way.
+		{name: "plain scalar on the next line", seed: "dolt.mode:\n  server\n", key: "dolt.mode", want: "lines beneath it"},
+		// A CRLF blank line is a lone carriage return, not content at column 0.
+		{name: "mapping behind a CRLF blank line", seed: "backup:\r\n\r\n  enabled: false\r\n", key: "backup", want: "lines beneath it"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -485,7 +517,7 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 			}
 
 			t.Setenv("BEADS_DIR", dir)
-			err := UnsetYamlConfig(tc.key)
+			_, err := UnsetYamlConfig(tc.key)
 			if err == nil {
 				body, _ := os.ReadFile(path) //nolint:errcheck // diagnostic
 				t.Fatalf("unsetting %s in a %s reported success\n%s", tc.key, tc.name, body)
@@ -517,8 +549,12 @@ func TestUnsetOfAnAbsentKeyStillSucceeds(t *testing.T) {
 	}
 
 	t.Setenv("BEADS_DIR", dir)
-	if err := UnsetYamlConfig("sync.remote"); err != nil {
+	changed, err := UnsetYamlConfig("sync.remote")
+	if err != nil {
 		t.Fatalf("UnsetYamlConfig on an unset key: %v", err)
+	}
+	if changed {
+		t.Error("UnsetYamlConfig on an unset key reported a write")
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -561,7 +597,7 @@ func TestSettingADottedKeyAgainAfterUnsetStaysNested(t *testing.T) {
 			if err := SetYamlConfigInDir(dir, "sync.remote", "file:///a.git"); err != nil {
 				t.Fatalf("first set: %v", err)
 			}
-			if err := UnsetYamlConfig("sync.remote"); err != nil {
+			if _, err := UnsetYamlConfig("sync.remote"); err != nil {
 				t.Fatalf("unset: %v", err)
 			}
 			if got := GetStringFromDir(dir, "sync.remote"); got != "" {
@@ -696,7 +732,7 @@ func TestUnsetLeavesBlockScalarTextAlone(t *testing.T) {
 	}
 
 	t.Setenv("BEADS_DIR", dir)
-	if err := UnsetYamlConfig("sync.remote"); err != nil {
+	if _, err := UnsetYamlConfig("sync.remote"); err != nil {
 		t.Fatalf("UnsetYamlConfig: %v", err)
 	}
 
