@@ -3,9 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/dolthub/dolt/go/store/blobstore"
+	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/githooksenv"
 )
 
 // TestResetDataRefNamesMatchDolt keeps the locally pinned data-plane ref
@@ -18,6 +21,32 @@ func TestResetDataRefNamesMatchDolt(t *testing.T) {
 	}
 	if want := "refs/heads/" + blobstore.DefaultInfoBranch; gitDoltInfoRef != want {
 		t.Errorf("gitDoltInfoRef = %q, dolt publishes %q", gitDoltInfoRef, want)
+	}
+}
+
+func TestEnvWithNoGitHooksPreservesExistingParameters(t *testing.T) {
+	const existing = "'user.email=ci@example.com'"
+	// os.Environ returns key=value entries; a bare valueless parameters key
+	// cannot reach this boundary. Shared helper tests cover that slice form.
+	t.Setenv(githooksenv.ParametersEnv, existing)
+	t.Setenv("BEADS_TEST_NO_HOOKS_KEEP", "GIT_CONFIG_PARAMETERS=unrelated-value")
+
+	// Build the expected slice independently of Without/DisabledEnv so a
+	// stale entry cannot hide behind Extract's last-wins lookup.
+	var want []string
+	for _, entry := range os.Environ() {
+		if !execenv.KeyEqual(execenv.EntryKey(entry), githooksenv.ParametersEnv) {
+			want = append(want, entry)
+		}
+	}
+	want = append(want, githooksenv.ParametersEnv+"="+existing+" "+githooksenv.NoHooksParam)
+	if got := envWithNoGitHooks(); !slices.Equal(got, want) {
+		for i := 0; i < len(got) && i < len(want); i++ {
+			if got[i] != want[i] {
+				t.Fatalf("envWithNoGitHooks() first difference at entry %d: got key %q, want key %q (values omitted)", i, execenv.EntryKey(got[i]), execenv.EntryKey(want[i]))
+			}
+		}
+		t.Fatalf("envWithNoGitHooks() differs from the expected environment: got %d entries, want %d", len(got), len(want))
 	}
 }
 
