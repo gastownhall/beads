@@ -24,9 +24,24 @@ done
 exit "${HOOK_TEST_BD_EXIT:-0}"
 `
 
+// hookProcessLongRunningBDStub stands in for a bd that never returns, so the
+// expiry subtests can prove the timeout helper reaps it. It sleeps instead of
+// busy-looping and bounds itself: when a test run is killed before the helper
+// fires (the harness reaches the helper by pid before its child), the orphan
+// idles for at most a minute and exits on its own instead of spinning at 100%
+// CPU forever with ppid 1. Exit 97 is outside every code the hook normalizes,
+// so a run that outlives the helper still fails the test. The sleep runs with
+// its stdio detached: when the helper signals only the stub (Perl's alarm hits
+// the exec'd process, not a group), the orphaned sleep must not keep the test's
+// output pipe open past exec.Cmd.WaitDelay.
 const hookProcessLongRunningBDStub = `#!/bin/sh
 printf 'long-running-bd-started\n'
-while :; do :; done
+_bd_test_tick=0
+while [ "$_bd_test_tick" -lt 60 ]; do
+  "${HOOK_TEST_SLEEP:?}" 1 </dev/null >/dev/null 2>&1
+  _bd_test_tick=$((_bd_test_tick + 1))
+done
+exit 97
 `
 
 const hookProcessGNUTimeoutStub = `#!/bin/sh
@@ -113,6 +128,7 @@ type hookProcessCase struct {
 	usePOSIXSh  bool
 	timeout     *string
 	pathTail    string
+	sleepPath   string
 	args        []string
 }
 
@@ -325,9 +341,10 @@ func testHookProcessRealTimeoutExpiry(t *testing.T) {
 	helperName, helperDir := findHookProcessGNUTimeout(t)
 	timeout := "1"
 	result := runGeneratedHookProcess(t, hookProcessCase{
-		bdBody:   hookProcessLongRunningBDStub,
-		timeout:  &timeout,
-		pathTail: helperDir,
+		bdBody:    hookProcessLongRunningBDStub,
+		timeout:   &timeout,
+		pathTail:  helperDir,
+		sleepPath: findHookProcessSleep(t),
 	})
 	if result.exitCode != 0 {
 		t.Fatalf("generated hook exit = %d, want normalized timeout success\n%s", result.exitCode, result.output)
@@ -352,9 +369,10 @@ func testHookProcessRealPerlExpiry(t *testing.T) {
 			{name: "timeout", body: hookProcessIncompatibleTimeoutStub},
 			{name: "gtimeout", body: hookProcessIncompatibleGtimeoutStub},
 		},
-		bdBody:   hookProcessLongRunningBDStub,
-		timeout:  &timeout,
-		pathTail: perlDir,
+		bdBody:    hookProcessLongRunningBDStub,
+		timeout:   &timeout,
+		pathTail:  perlDir,
+		sleepPath: findHookProcessSleep(t),
 	})
 	if result.exitCode != 0 {
 		t.Fatalf("generated hook exit = %d, want normalized Perl alarm success\n%s", result.exitCode, result.output)
@@ -496,6 +514,9 @@ shift
 	if tc.timeout != nil {
 		cmd.Env = append(cmd.Env, "BEADS_HOOK_TIMEOUT="+*tc.timeout)
 	}
+	if tc.sleepPath != "" {
+		cmd.Env = append(cmd.Env, "HOOK_TEST_SLEEP="+tc.sleepPath)
+	}
 	started := time.Now()
 	output, err := cmd.CombinedOutput()
 	elapsed := time.Since(started)
@@ -560,6 +581,30 @@ printf '%s\n' "${_bd_test_path%/*}"
 		t.Fatalf("unexpected Perl probe output: %q", string(output))
 	}
 	return dir
+}
+
+// findHookProcessSleep resolves the sleep the long-running bd stub paces itself
+// with. The generated hook runs under a controlled PATH that carries only the
+// fixtures and the helper under test, so the stub is handed sleep by absolute
+// path (in the shell's own spelling, which on Git Bash is the MSYS form).
+func findHookProcessSleep(t *testing.T) string {
+	t.Helper()
+	probe := `
+_bd_test_path=$(command -v sleep) || exit 1
+"$_bd_test_path" 0 || exit 1
+printf '%s\n' "$_bd_test_path"
+`
+	cmd := exec.Command(hookProcessShell(t), "--noprofile", "--norc", "-c", probe)
+	cmd.Env = hookProcessEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sleep is required to pace the long-running bd stub: %s", strings.TrimSpace(string(output)))
+	}
+	path := strings.TrimSpace(string(output))
+	if path == "" {
+		t.Fatalf("unexpected sleep probe output: %q", string(output))
+	}
+	return path
 }
 
 func writeHookProcessFixture(t *testing.T, dir, name, body string) {
@@ -663,7 +708,7 @@ func hookProcessEnv() []string {
 		}
 		upper := strings.ToUpper(key)
 		if upper == "BASH_ENV" || upper == "BASHOPTS" || upper == "ENV" || upper == "SHELLOPTS" ||
-			upper == "BEADS_HOOK_TIMEOUT" || upper == "HOOK_TEST_BD_EXIT" {
+			upper == "BEADS_HOOK_TIMEOUT" || upper == "HOOK_TEST_BD_EXIT" || upper == "HOOK_TEST_SLEEP" {
 			continue
 		}
 		env = append(env, entry)
