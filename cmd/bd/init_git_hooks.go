@@ -1,15 +1,67 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/ui"
 )
+
+// runEmbeddedInitHooks uses the project for Git and the captured storage for hooks.
+func runEmbeddedInitHooks(ctx context.Context, workDir, beadsDir string, skip, quiet bool) {
+	if skip {
+		return
+	}
+	gitUC := domain.NewGitUseCase(workDir, domaingit.NewInitGitRepository(workDir))
+	isColocated := gitUC.IsColocatedJJGit(ctx)
+	if gitUC.IsJujutsuRepo(ctx) && !isColocated {
+		if !quiet {
+			printJJAliasInstructions()
+		}
+		return
+	}
+	if !isColocated && !gitUC.IsGitRepo(ctx) {
+		return
+	}
+	hooks, err := resolveInitHooksContext(workDir, beadsDir)
+	if err != nil {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "\n%s Failed to resolve git hooks: %v\n", ui.RenderWarn("⚠"), err)
+		}
+		return
+	}
+	hooksExist := hooks.installed()
+	if hooksExist && !hooks.needsUpdate() {
+		return
+	}
+	if hooksExist && !quiet {
+		fmt.Printf("  Updating hooks to version %s...\n", Version)
+	}
+	if isColocated {
+		if err := installHooksWithContext(jjHookNames, false, false, false, false, hooks); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
+			fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
+		} else if !quiet {
+			fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
+		}
+	} else {
+		if err := installHooksWithContext(managedHookNames, false, false, false, true, hooks); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
+			fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd hooks install --beads"))
+		} else if !quiet {
+			fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+		}
+	}
+}
 
 // preCommitFrameworkPattern matches pre-commit or prek framework hooks.
 // Uses same patterns as hookManagerPatterns in doctor/fix/hooks.go for consistency.
@@ -22,6 +74,10 @@ func hooksInstalled() bool {
 	if err != nil {
 		return false
 	}
+	return hooksInstalledAt(hooksDir)
+}
+
+func hooksInstalledAt(hooksDir string) bool {
 	preCommit := filepath.Join(hooksDir, "pre-commit")
 	postMerge := filepath.Join(hooksDir, "post-merge")
 
@@ -80,7 +136,11 @@ func hooksInstalled() bool {
 // Delegates to CheckGitHooks() which handles version comparison, shim detection,
 // and inline hook detection consistently.
 func hooksNeedUpdate() bool {
-	for _, s := range CheckGitHooks() {
+	return hookStatusesNeedUpdate(CheckGitHooks())
+}
+
+func hookStatusesNeedUpdate(statuses []HookStatus) bool {
+	for _, s := range statuses {
 		if s.Outdated {
 			return true
 		}
@@ -261,12 +321,13 @@ func buildPostMergeHook(chainHooks bool, existingHooks []hookInfo) string {
 	return "#!/bin/sh\n" + section
 }
 
+// jjHookNames is the shared inventory for standalone and selected init adapters.
+var jjHookNames = []string{"pre-commit", "post-merge"}
+
 // installJJHooks installs marker-managed hooks for colocated jujutsu+git repos.
 // This path intentionally avoids .old sidecar chaining and uses the same section
 // injection behavior as regular hook installs.
 func installJJHooks() error {
-	// jj only needs pre-commit and post-merge hooks
-	jjHookNames := []string{"pre-commit", "post-merge"}
 	return installHooksWithOptions(jjHookNames, false, false, false, false)
 }
 
@@ -309,4 +370,53 @@ func printJJAliasInstructions() {
 	fmt.Printf("  %s\n", ui.RenderAccent(`push = ["util", "exec", "--", "sh", "-c", "bd dolt commit && bd dolt push && jj git push \"$@\"", ""]`))
 	fmt.Printf("\nThen use %s instead of %s\n\n", ui.RenderAccent("jj push"), ui.RenderAccent("jj git push"))
 	fmt.Printf("For more details, see: https://github.com/gastownhall/beads/blob/main/docs/reference/git-integration.md#branchless-workflows-jujutsu--jj\n\n")
+}
+
+// initHooksContext keeps the selected Git project separate from Beads storage.
+// Its paths and both environments are captured once; tracking fallback supplies
+// refusal evidence only, never a destination for writing hooks or configuration.
+type initHooksContext struct {
+	workDir, beadsDir string
+	paths             git.HooksContext
+	env, inheritedEnv []string
+}
+
+func resolveInitHooksContext(workDir, beadsDir string) (*initHooksContext, error) {
+	workDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return nil, err
+	}
+	inherited := os.Environ()
+	env := gitenv.ScrubRouting(inherited)
+	paths, err := git.ResolveHooksContext(workDir, env)
+	if err != nil {
+		return nil, err
+	}
+	if beadsDir != "" && !filepath.IsAbs(beadsDir) {
+		beadsDir = filepath.Join(workDir, beadsDir)
+	}
+	return &initHooksContext{workDir: workDir, beadsDir: beadsDir, paths: paths, env: env, inheritedEnv: inherited}, nil
+}
+
+func (c *initHooksContext) installed() bool {
+	if c == nil {
+		return hooksInstalled()
+	}
+	return hooksInstalledAt(c.paths.HooksDir)
+}
+
+func (c *initHooksContext) needsUpdate() bool {
+	if c == nil {
+		return hooksNeedUpdate()
+	}
+	return hookStatusesNeedUpdate(checkGitHooksAt(c.paths.HooksDir))
+}
+
+func (c *initHooksContext) configureHooksPath(hooksDir string) error {
+	cmd := exec.Command("git", "--git-dir", c.paths.CommonDir, "config", "--local", "core.hooksPath", hooksDir)
+	cmd.Dir, cmd.Env = c.workDir, c.env
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config failed: %w (output: %s)", err, string(output))
+	}
+	return nil
 }
