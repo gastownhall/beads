@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Generated git hooks accept uutils coreutils `timeout` as a deadline helper**
+  ([#5541](https://github.com/gastownhall/beads/issues/5541)). The managed hook
+  section probes `timeout` and `gtimeout` with `--version` and accepted only the
+  GNU coreutils banner, so a host whose `timeout` is uutils coreutils
+  (Ubuntu 25.10+, NixOS) failed the probe and fell through. Where Perl was
+  installed the shim still got a deadline from the Perl `alarm` arm — which Git
+  for Windows Perl does not guarantee across `exec` — so the missing deadline
+  bit uutils hosts *without* Perl, which ran `bd hooks run` unbounded (with the
+  documented warning). The probe now also accepts the
+  `timeout (uutils coreutils) ` banner; native Windows `timeout.exe` stays
+  rejected ([#5503](https://github.com/gastownhall/beads/issues/5503)).
+
 - **`bd list --watch --format` is refused instead of silently dropping the
   format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).
   `--watch` always re-renders the pretty listing, so on the direct route a

@@ -218,7 +218,10 @@ in
           signal=$(cat "$signal_file" 2>/dev/null || true)
           verdict=ok
           if [ "$rc" -eq 124 ]; then
-            verdict="FAIL: nothing killed the fake bd (harness safety net fired)"
+            # This is the one mode that is intermittent and not reproducible
+            # locally, so it needs the output most: report it like the branch
+            # below rather than as a bare string.
+            verdict="FAIL: nothing killed the fake bd (harness safety net fired), signal='$signal': $case_out"
           elif [ "$rc" -ne 0 ]; then
             verdict="FAIL: hook exit $rc (would block the push): $case_out"
           else
