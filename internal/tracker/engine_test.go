@@ -22,13 +22,14 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 		t.Skip("shared test Dolt database not initialized, skipping test")
 	}
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{
-		Path:         t.TempDir(),
-		ServerHost:   "127.0.0.1",
-		ServerPort:   testServerPort,
-		Database:     testSharedDB,
-		MaxOpenConns: 1,
-	})
+	store, err := openTrackerTestStore(ctx, t.TempDir())
+	if err != nil && testutil.ServerUnreachable(err) {
+		t.Logf("shared Dolt server is gone (%v); replacing it once", err)
+		if rerr := reviveTrackerDolt(); rerr != nil {
+			t.Fatalf("Failed to revive Dolt server after %v: %v", err, rerr)
+		}
+		store, err = openTrackerTestStore(ctx, t.TempDir())
+	}
 	if err != nil {
 		t.Fatalf("Failed to create dolt store: %v", err)
 	}
@@ -41,6 +42,16 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 		store.Close()
 	})
 	return store
+}
+
+func openTrackerTestStore(ctx context.Context, path string) (*dolt.DoltStore, error) {
+	return dolt.New(ctx, &dolt.Config{
+		Path:         path,
+		ServerHost:   "127.0.0.1",
+		ServerPort:   testServerPort,
+		Database:     testSharedDB,
+		MaxOpenConns: 1,
+	})
 }
 
 func TestEnginePullMatchesExistingIssueByLocalID(t *testing.T) {
