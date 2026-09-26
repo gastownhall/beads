@@ -611,12 +611,7 @@ func TestCheckChildParentDependenciesDB_WispChildBlockingParentDetected(t *testi
 // starts a Docker-based Dolt container on Ubuntu but not macOS) so the test
 // exercises the "no database" code path deterministically on all platforms.
 func TestCheckTestPollution_NoTestIssues_NoServer(t *testing.T) {
-	for _, key := range []string{"BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
-		if orig, ok := os.LookupEnv(key); ok {
-			t.Cleanup(func() { os.Setenv(key, orig) })
-			os.Unsetenv(key)
-		}
-	}
+	clearDoltPortEnv(t)
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
