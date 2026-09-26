@@ -836,6 +836,9 @@ func clearCloudAuthEnv(t *testing.T) {
 }
 
 func TestCloudAuthCLIRouting(t *testing.T) {
+	if realDoltTestServerRequired() && testServerPort == 0 {
+		t.Fatal("Dolt server required for cloud-auth routing coverage")
+	}
 	skipIfNoServer(t)
 	clearCloudAuthEnv(t)
 	start := time.Now()
@@ -870,11 +873,12 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
 	}
 	// Shared store: creating one Dolt database per case (16 total) is what
-	// made this test slow (see the regression guard below). Each case gets
+	// made this test slow (see the shared-store guard below). Each case gets
 	// its own remote name (origin_0..origin_15) against a single store,
 	// since shouldUseCLIForCloudAuth's routing decision is keyed purely by
 	// remote name — distinct names are enough to keep cases isolated.
 	store := openCloudAuthTestStore(t, "route")
+	casesRun := 0
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -882,6 +886,7 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 			if err := store.AddRemote(ctx, remote, tt.remoteURL); err != nil {
 				t.Fatalf("AddRemote: %v", err)
 			}
+			casesRun++
 			addCloudAuthCLIRemote(t, store, remote, tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
@@ -893,16 +898,17 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		})
 	}
 
-	// Regression guard: this test previously created one Dolt database per
-	// case (16 total), each slower than the last as server load grew,
-	// pushing wall time into the hundreds of seconds for a test that only
-	// exercises a pure routing predicate. 90s sits below every measured
-	// unfixed run and comfortably above the shared-store fix's expected
-	// time, so it fails on the old per-case-store shape without flaking
-	// under normal CI load.
-	if elapsed := time.Since(start); elapsed > 90*time.Second {
-		t.Fatalf("TestCloudAuthCLIRouting took %s, want < 90s (regression: are per-case Dolt databases being created again instead of a shared store?)", elapsed)
+	// Every registered case must leave its distinct remote in the shared store.
+	// This verifies remote writes use that store; it cannot detect unused stores.
+	// Count only selected children so focused -run invocations still work.
+	remotes, err := store.ListRemotes(context.Background())
+	if err != nil {
+		t.Fatalf("ListRemotes: %v", err)
 	}
+	if len(remotes) != casesRun {
+		t.Errorf("shared store has %d remotes, want %d executed cases", len(remotes), casesRun)
+	}
+	t.Logf("%d cloud auth routing cases took %s", casesRun, time.Since(start))
 }
 
 func TestCloudAuthCLIRoutingStructural(t *testing.T) {
