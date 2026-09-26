@@ -101,12 +101,15 @@ func dropWispAuxFKs(t *testing.T, ctx context.Context, db *sql.DB) {
 	}
 }
 
-// dropWispDependencyFKs removes the wisp_dependencies FK constraints (added
-// by migration 0047 on a fresh bootstrap) so the test store's schema matches
-// the live hq store, whose wisp_dependencies table carries only the
-// ck_wisp_dep_one_target CHECK constraint and no FKs. Without this, the
-// fresh store's ON DELETE CASCADE would clean wisp_dependencies for free and
-// the test could not fail against a delete path that leaks.
+// dropWispDependencyFKs removes the wisp_dependencies FK constraints so the
+// test store's schema matches the live hq store, whose wisp_dependencies
+// table carries only the ck_wisp_dep_one_target CHECK constraint and no FKs.
+// A fresh bootstrap gets all three from migration 0021, which creates them
+// inline in CREATE TABLE; 0058 re-adds two of them when healing a legacy
+// split store, and 0047's ADD CONSTRAINT statements are gated on that same
+// legacy path, so neither runs here. Without this drop, the fresh store's
+// ON DELETE CASCADE would clean wisp_dependencies for free and the test
+// could not fail against a delete path that leaks.
 func dropWispDependencyFKs(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
 	for _, stmt := range []string{
@@ -302,6 +305,14 @@ func TestWispDeleteCascade_CleansUpWispDependencies(t *testing.T) {
 		mustAddWispDep(t, ctx, store, mid.ID, parent.ID)
 		mustAddWispDep(t, ctx, store, child.ID, mid.ID)
 
+		// An edge between two wisps that are never deleted here. Neither of
+		// its endpoints is mid, so it must still be there afterwards: without
+		// it the subtest only asserts that rows disappeared, which an
+		// over-broad DELETE (missing or wrong WHERE) satisfies just as well.
+		bystanderA := createTestWisp(t, ctx, store, "wisp-dep bystander a")
+		bystanderB := createTestWisp(t, ctx, store, "wisp-dep bystander b")
+		mustAddWispDep(t, ctx, store, bystanderA.ID, bystanderB.ID)
+
 		if err := store.deleteWisp(ctx, mid.ID); err != nil {
 			t.Fatalf("deleteWisp: %v", err)
 		}
@@ -309,13 +320,20 @@ func TestWispDeleteCascade_CleansUpWispDependencies(t *testing.T) {
 		if n := countWispDependencyRows(t, ctx, store.db, mid.ID); n != 0 {
 			t.Errorf("expected 0 wisp_dependencies rows referencing deleted wisp %s, got %d", mid.ID, n)
 		}
-		// The surviving wisps' edge set must not have been over-deleted:
-		// parent and child had no edge between them, so nothing remains.
+		if n := countWispDependencyRows(t, ctx, store.db, bystanderA.ID, bystanderB.ID); n != 1 {
+			t.Errorf("expected the bystander edge to survive deleteWisp(%s), got %d rows", mid.ID, n)
+		}
+
+		// parent and child are left holding no edges once mid's rows go, so
+		// deleting them must succeed and must still not touch the bystander.
 		if err := store.deleteWisp(ctx, parent.ID); err != nil {
 			t.Fatalf("deleteWisp parent: %v", err)
 		}
 		if err := store.deleteWisp(ctx, child.ID); err != nil {
 			t.Fatalf("deleteWisp child: %v", err)
+		}
+		if n := countWispDependencyRows(t, ctx, store.db, bystanderA.ID, bystanderB.ID); n != 1 {
+			t.Errorf("expected the bystander edge to survive the parent/child deletes, got %d rows", n)
 		}
 	})
 
@@ -325,6 +343,12 @@ func TestWispDeleteCascade_CleansUpWispDependencies(t *testing.T) {
 		stepB := createTestWisp(t, ctx, store, "wisp-dep batch step-b")
 		mustAddWispDep(t, ctx, store, stepA.ID, root.ID)
 		mustAddWispDep(t, ctx, store, stepB.ID, stepA.ID)
+
+		// Same over-deletion guard as the single-delete subtest, against the
+		// IN (...) form: both endpoints are outside the deleted batch.
+		outsideA := createTestWisp(t, ctx, store, "wisp-dep outside-batch a")
+		outsideB := createTestWisp(t, ctx, store, "wisp-dep outside-batch b")
+		mustAddWispDep(t, ctx, store, outsideA.ID, outsideB.ID)
 
 		deleted, err := store.deleteWispBatch(ctx, []string{root.ID, stepA.ID, stepB.ID})
 		if err != nil {
@@ -336,6 +360,9 @@ func TestWispDeleteCascade_CleansUpWispDependencies(t *testing.T) {
 
 		if n := countWispDependencyRows(t, ctx, store.db, root.ID, stepA.ID, stepB.ID); n != 0 {
 			t.Errorf("expected 0 wisp_dependencies rows after batch delete, got %d", n)
+		}
+		if n := countWispDependencyRows(t, ctx, store.db, outsideA.ID, outsideB.ID); n != 1 {
+			t.Errorf("expected the out-of-batch edge to survive deleteWispBatch, got %d rows", n)
 		}
 	})
 }
