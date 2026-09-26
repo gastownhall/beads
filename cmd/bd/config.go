@@ -973,7 +973,7 @@ var recognizedConfigPrefixes = []string{
 	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
 	"lint.", "hierarchy.", "ai.", "backup.", "federation.", "metrics.",
-	"agent.", "claim.", "storage-class.",
+	"agent.", "claim.", "storage-class.", "versioned-history.",
 }
 
 // validateStorageClassConfig validates a storage-class.<type> per-type

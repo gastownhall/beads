@@ -138,6 +138,25 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// Replays over a database that never synced the wisp tables must use
 		// the frozen source text instead -- see cliSubstituteAssumesWispTables.
 		return cliMigration0067AddVersionedBeadsSchema
+	case "0068_add_attribution_status.up.sql":
+		// Direct DDL for the same reason as 0067: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN and MODIFY COLUMN
+		// alike. issue_versions is always present here -- 0067 runs earlier
+		// in the same fresh-bundle series -- never carries attribution_status
+		// yet, and still has durable_state as the JSON type 0067 gave it, so
+		// both of 0068's steps always fire on a fresh bundle.
+		return cliMigration0068AddAttributionStatus
+	case "0069_add_removed_restriction.up.sql":
+		// Direct DDL for the same reason as 0067/0068: the source migration's
+		// PREPARE guard (an INFORMATION_SCHEMA probe) is what makes the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. issue_versions is
+		// always present here -- 0067 runs earlier in the same fresh-bundle
+		// series -- and never carries removed_restriction yet, so the column
+		// always needs adding on a fresh bundle.
+		return cliMigration0069AddRemovedRestriction
 	default:
 		return sqlText
 	}
@@ -248,6 +267,24 @@ CREATE TABLE IF NOT EXISTS store_epoch (
 );
 ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;`
+
+// cliMigration0068AddAttributionStatus is 0068 with its two guarded PREPARE
+// blocks replaced by the direct ALTERs they would run on a fresh database:
+// step 6's ADD COLUMN attribution_status, and step 7's MODIFY COLUMN
+// durable_state LONGBLOB (the byte-preserving type the review on
+// gastownhall/beads#6358 item 4 asked for -- see the migration's step 7
+// header). issue_versions is created earlier in the same series by 0067,
+// which still creates durable_state as JSON and whose override is left
+// untouched: 0068 is what retypes it. So the column always needs adding and
+// the retype always fires here; no wisps twin exists for this table.
+const cliMigration0068AddAttributionStatus = `ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;
+ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;`
+
+// cliMigration0069AddRemovedRestriction is 0069 with its one guarded PREPARE
+// block replaced by the direct ALTER it would run on a fresh database.
+// issue_versions is created earlier in the same series by 0067 and never
+// carries removed_restriction yet, so the column always needs adding here.
+const cliMigration0069AddRemovedRestriction = `ALTER TABLE issue_versions ADD COLUMN removed_restriction VARCHAR(30);`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

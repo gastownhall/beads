@@ -79,6 +79,9 @@ const (
 	trackSync        = "proxied-parity S5 (bd sync)"
 	trackDegradation = "proxied-parity S6 (doctor, config show, degradations)"
 	trackLongTail    = "proxied-parity S7 (long-tail policy pass)"
+	// Versioned history (gastownhall/beads#6132) is not a proxied-parity slice:
+	// its reads need a storage.VersionLister over the proxied uow provider.
+	trackVersionedHistory = "versioned history: VersionLister over the proxied uow provider (gastownhall/beads#6132)"
 )
 
 // capabilityRow is one command-path policy row. ArgSet is the sorted set of
@@ -445,6 +448,16 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// asserted rather than remembered.
 	permitted("history").withHistory(HistoryProxySupported),
 	permitted("dolt remote remove").withHistory(HistoryProxySupported),
+
+	// --- versioned history ----------------------------------------------------
+	// `bd versions` is a pure read (issueops.ListVersionsInTx in one read
+	// transaction), so nothing about it is unsafe on a shared backend. It is
+	// refused only because no proxied route exists yet: it reaches the backend
+	// through the optional storage.VersionLister, which the dolt and embedded
+	// stores implement and the uow provider does not. Permitting it would open
+	// the proxied provider in the root pre-run and then fail untyped at
+	// errVersionsUnsupported, so it is refused here, before any side effect.
+	refusedPath("versions", "proxy.versions.unsupported", ProxyReasonUnimplemented, trackVersionedHistory),
 
 	// --- untyped refusals inside RunE ---------------------------------------
 	// The gate permits these paths and the command refuses itself with a bare
