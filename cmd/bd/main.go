@@ -1802,8 +1802,10 @@ var rootCmd = &cobra.Command{
 		// root pre-run, before --dry-run/--inspect has had any effect. Proxied
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
-			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
-				rootProviderOptions(previewMode, useReadOnly)...)
+			// Ordinary commands never create the database (#2189); only
+			// bd init opens with create enabled.
+			opts := append(rootProviderOptions(previewMode, useReadOnly), uow.WithCreateIfMissing(false))
+			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride, opts...)
 			if err != nil {
 				// Same typed rendering the store path gets below: a schema
 				// skew or a migration-gate refusal here carries a whole

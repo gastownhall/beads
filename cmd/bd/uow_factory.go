@@ -18,6 +18,13 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
+// openProxiedServerUOWProviderFn is a seam for the create-policy wiring test
+// (proxied_create_policy_test.go), which swaps it to capture which
+// uow.ProviderOption set each proxied call site passes without connecting
+// to a server. Production code always points it at
+// openProxiedServerUOWProvider.
+var openProxiedServerUOWProviderFn = openProxiedServerUOWProvider
+
 // doltVersionWarnOnce ensures the dolt-version advisory (old/unverifiable
 // version) is printed at most once per process, even though
 // resolveAndProbeDolt can run repeatedly against the same resolved binary
@@ -163,12 +170,13 @@ func rootProviderOptions(preview, readOnly bool) []uow.ProviderOption {
 // THIS workspace's project (gastownhall/beads: the proxied-path sibling of the
 // gateway's DoltStore.verifyProjectIdentity guard).
 //
-// opts carry the open's posture that is not workspace topology — today only
+// opts carry the open's posture that is not workspace topology —
 // uow.WithPreview(), which the root pre-run passes for --dry-run/--inspect so
 // a proxied preview does not create or migrate the database before the
-// command's own RunE runs.
+// command's own RunE runs, and the create policy (uow.WithCreateIfMissing;
+// only bd init opens with create enabled).
 func newProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride string, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
-	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, assertWorkspaceIdentity, opts...)
+	return openProxiedServerUOWProviderFn(ctx, beadsDir, databaseOverride, assertWorkspaceIdentity, opts...)
 }
 
 // newProxiedServerUOWProviderAdopting skips that assertion. Three callers
@@ -190,7 +198,7 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride
 // that exists to stop a workspace writing into another project's database. Add
 // a fourth entry here, with its reason, or use newProxiedServerUOWProvider.
 func newProxiedServerUOWProviderAdopting(ctx context.Context, beadsDir, databaseOverride string, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
-	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, adoptWorkspaceIdentity, opts...)
+	return openProxiedServerUOWProviderFn(ctx, beadsDir, databaseOverride, adoptWorkspaceIdentity, opts...)
 }
 
 // identityPosture selects whether a proxied open asserts the workspace's
