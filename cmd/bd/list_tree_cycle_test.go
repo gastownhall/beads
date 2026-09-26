@@ -9,22 +9,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// captureBoundedStdout runs fn with os.Stdout redirected and returns what it
-// wrote and whether it returned before the deadline.
-//
-// It exists for tests whose failure mode is "never returns": the reader stops
-// after captureLimit bytes, so a runaway writer blocks on the full pipe instead
-// of growing a buffer until the host swaps, and os.Stdout is restored before
-// the function returns, so a failing test does not leave the package's stdout
-// redirected for every later test. On deadline the writer goroutine is left
-// parked on the pipe.
-//
-// Two consequences of that design, both confined to the regression case:
-// fn must write less than captureLimit bytes, since larger legitimate output
-// would block on the pipe and read as a hang (the fixtures here print a
-// handful of lines); and if fn is still running at the deadline, restoring
-// os.Stdout races with its next read of that variable, so go test -race
-// reports a data race next to the failure it already produces.
 // parkedCaptures keeps the pipe ends of every timed-out capture reachable for
 // the life of the test binary. The runaway writer is parked on the full pipe;
 // if the read end were garbage-collected its finalizer would close it, the
@@ -41,6 +25,22 @@ const (
 	captureDeadline = 10 * time.Second
 )
 
+// captureBoundedStdout runs fn with os.Stdout redirected and returns what it
+// wrote and whether it returned before the deadline.
+//
+// It exists for tests whose failure mode is "never returns": the reader stops
+// after captureLimit bytes, so a runaway writer blocks on the full pipe instead
+// of growing a buffer until the host swaps, and os.Stdout is restored before
+// the function returns, so a failing test does not leave the package's stdout
+// redirected for every later test. On deadline the writer goroutine is left
+// parked on the pipe.
+//
+// Two consequences of that design, both confined to the regression case:
+// fn must write less than captureLimit bytes, since larger legitimate output
+// would block on the pipe and read as a hang (the fixtures here print a
+// handful of lines); and if fn is still running at the deadline, restoring
+// os.Stdout races with its next read of that variable, so go test -race
+// reports a data race next to the failure it already produces.
 func captureBoundedStdout(t *testing.T, fn func()) (out string, terminated bool) {
 	t.Helper()
 
