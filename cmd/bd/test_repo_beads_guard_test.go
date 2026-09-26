@@ -62,6 +62,9 @@ const suiteRootPrefix = "beads-bd-tests-"
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
 func TestMain(m *testing.M) {
+	if code, ok := runInitGatewayCredentialHelper(); ok {
+		os.Exit(code)
+	}
 	// Delegate to testMainInner so defers run before os.Exit.
 	os.Exit(testMainInner(m))
 }
