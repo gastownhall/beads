@@ -80,6 +80,17 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 	return prefix + "-" + hex.EncodeToString(hash[:])[:8]
 }
 
+// isolateBeadsDirForTest starts a fresh-workspace fixture without an inherited
+// selection and restores BEADS_DIR exactly after command dispatch, even
+// when dispatch changes BEADS_DIR with raw os.Setenv.
+// Call before fixture setup or dispatch; like t.Setenv, it is not parallel-safe.
+// Tests that intentionally select a workspace should set BEADS_DIR explicitly
+// instead; initConfigForTest and ensureCleanGlobalState preserve that selection.
+func isolateBeadsDirForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
+}
+
 // initConfigForTest initializes viper config for a test and ensures cleanup.
 // main.go's init() calls config.Initialize() which picks up the real .beads/config.yaml.
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.

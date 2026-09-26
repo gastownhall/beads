@@ -75,6 +75,7 @@ func TestInitConfigForTestNeutralizesLeakedRepoBeadsDir(t *testing.T) {
 // package-global viper holding the dispatched workspace's issue-prefix for every
 // later test that does not call initConfigForTest.
 func TestDispatchDoesNotPolluteViperIssuePrefix(t *testing.T) {
+	isolateBeadsDirForTest(t)
 	ensureCleanGlobalState(t)
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 
@@ -95,6 +96,70 @@ func TestDispatchDoesNotPolluteViperIssuePrefix(t *testing.T) {
 	if got := config.GetString("issue-prefix"); got != "" {
 		t.Fatalf("config.GetString(issue-prefix) = %q after command dispatch, want empty: "+
 			"dispatch leaked the workspace config into the global viper", got)
+	}
+}
+
+// Command setup uses raw os.Setenv. A fresh fixture must contain that mutation
+// even when its caller's BEADS_DIR was absent, explicitly empty, or inherited.
+func TestIsolateBeadsDirForTestCommandCleanup(t *testing.T) {
+	oldServerMode, oldProxiedServerMode := serverMode, proxiedServerMode
+	t.Cleanup(func() {
+		serverMode, proxiedServerMode = oldServerMode, oldProxiedServerMode
+	})
+
+	ensureCleanGlobalState(t)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+
+	for _, tc := range []struct {
+		name    string
+		value   string
+		present bool
+	}{
+		{name: "absent"},
+		{name: "empty", present: true},
+		{name: "inherited", value: filepath.Join(t.TempDir(), ".beads"), present: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", tc.value)
+			if !tc.present {
+				if err := os.Unsetenv("BEADS_DIR"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			t.Run("command", func(t *testing.T) {
+				isolateBeadsDirForTest(t)
+				if got := os.Getenv("BEADS_DIR"); got != "" {
+					t.Fatalf("fresh fixture inherited BEADS_DIR = %q", got)
+				}
+				beadsDir := newLeakFixtureRepo(t)
+				if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads","backend":"dolt"}`+"\n"), 0o600); err != nil {
+					t.Fatalf("write metadata.json: %v", err)
+				}
+				config.ResetForTesting()
+				t.Cleanup(config.ResetForTesting)
+				t.Cleanup(resetCommandContext)
+
+				// Exercise the actual binding used by command dispatch, without a store.
+				prepareSelectedCommandContext(beadsDir, false)
+				got, err := os.Stat(os.Getenv("BEADS_DIR"))
+				if err != nil {
+					t.Fatalf("stat bound BEADS_DIR: %v", err)
+				}
+				want, err := os.Stat(beadsDir)
+				if err != nil {
+					t.Fatalf("stat fixture: %v", err)
+				}
+				if !os.SameFile(got, want) {
+					t.Fatal("command binding did not select the fixture workspace")
+				}
+			})
+
+			if got, present := os.LookupEnv("BEADS_DIR"); got != tc.value || present != tc.present {
+				t.Fatalf("after fixture cleanup BEADS_DIR = (%q, %v), want (%q, %v)",
+					got, present, tc.value, tc.present)
+			}
+		})
 	}
 }
 
