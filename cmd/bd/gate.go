@@ -525,6 +525,13 @@ func renderGateShow(issue *types.Issue) {
 	}
 }
 
+// gateResolveNotFoundMessage is the not-found error for 'bd gate resolve'.
+// resolve looks gates up by issue ID only; callers often hold the gate's
+// await_id instead, so the message says which ID is expected.
+func gateResolveNotFoundMessage(gateID string) string {
+	return fmt.Sprintf("gate not found: %s — gate resolve takes the gate's issue ID, not its await_id; run 'bd gate list' and use the id column", gateID)
+}
+
 // gateResolveCmd manually closes a gate
 var gateResolveCmd = &cobra.Command{
 	Use:   "resolve <gate-id>",
@@ -558,7 +565,7 @@ Use --reason to provide context for why the gate was resolved.`,
 
 		issue, err = store.GetIssue(ctx, gateID)
 		if err != nil {
-			return HandleError("gate not found: %s", gateID)
+			return HandleError("%s", gateResolveNotFoundMessage(gateID))
 		}
 
 		if issue.IssueType != "gate" {
