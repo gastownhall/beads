@@ -53,8 +53,10 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 	}
 }
 
-// WithEndpoint returns a new client configured to use a custom API endpoint.
+// WithEndpoint returns a new client pointed at a different instance web root.
 // This is useful for testing with mock servers or self-hosted GitLab instances.
+// It sets BaseURL, so endpoint carries the same contract: the web root, without
+// the /api/v4 suffix buildURL appends per request.
 func (c *Client) WithEndpoint(endpoint string) *Client {
 	return &Client{
 		Token:      c.Token,

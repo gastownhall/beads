@@ -275,6 +275,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling), where commenting the key out would leave the body behind as a value
   of its own. Unsetting a key that is not set remains a successful no-op in
   every shape.
+- **A self-hosted GitLab no longer re-creates its own issues on every push**
+  ([#6735](https://github.com/gastownhall/beads/issues/6735)). The tracker
+  decided whether a stored `external_ref` was one of its own by looking for
+  the substring "gitlab" in the URL, so an instance whose hostname does not
+  contain it — `https://nova.teachx.ai`, say — had its own issue and
+  work-item URLs classified as foreign. `bd gitlab push` then took the
+  create-not-update path for issues that were already synced, and pull
+  reconciliation and conflict detection skipped them. Such a URL is now also
+  recognized when its host, and base path for a GitLab served from a
+  sub-path, match the configured `gitlab.url`.
+
+  Recognition only widens: every ref the substring check already claimed is
+  classified exactly as before, so no existing link changes meaning. Two
+  limits are worth knowing. Matching is host-scoped, not project-scoped — with
+  GitLab at the host root, a ref pointing at another project on the same host
+  now counts as this tracker's, as has always been the case for `gitlab.com`.
+  And the host is compared literally, so `gitlab.url` must name it the way
+  GitLab spells it in the `web_url`s it returns; writing an explicit default
+  port (`https://host:443`) matches none of them and leaves the old behavior
+  in place.
 
 ### Changed
 
