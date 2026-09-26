@@ -61,11 +61,15 @@ func allSentinelTables() map[string]bool {
 	return present
 }
 
-// allSentinelTablesExcept is allSentinelTables with one table absent, for
-// cases that need every sentinel healthy except the one under test.
-func allSentinelTablesExcept(table string) map[string]bool {
+// allSentinelTablesExcept is allSentinelTables with the named tables absent,
+// for cases that need every sentinel healthy except the one(s) under test.
+// Variadic so a case can contradict two sentinels of the same kind at once,
+// which is what pins the minimum a single loop accumulates.
+func allSentinelTablesExcept(tables ...string) map[string]bool {
 	present := allSentinelTables()
-	delete(present, table)
+	for _, table := range tables {
+		delete(present, table)
+	}
 	return present
 }
 
@@ -172,6 +176,22 @@ func TestCursorRealityFloor(t *testing.T) {
 			present:     allSentinelTablesExcept("bd_events_seq"),
 			columns:     map[string]bool{"leases.granted_node": true},
 			wantFloor:   21,
+			wantLimited: true,
+		},
+		{
+			// Two floored sentinels contradicted at once: the minimum must win
+			// WITHIN the floored loop, not only across loops. Without this
+			// case every case removes exactly one floored table, so the loop
+			// only ever reaches its !limited arm and `st.replayFloor < floor`
+			// is never evaluated against a floor an earlier absent sentinel
+			// already set — inverting it to `>` leaves the package green. The
+			// floors happen to ascend in slice order (18, 21, 21) today, so
+			// this is what keeps a future reordering or lower-floored addition
+			// from silently regressing to "last absent sentinel wins".
+			name:        "events and bd_events_journal both absent",
+			present:     allSentinelTablesExcept("events", "bd_events_journal"),
+			columns:     map[string]bool{"leases.granted_node": true},
+			wantFloor:   18,
 			wantLimited: true,
 		},
 		{
@@ -526,7 +546,7 @@ func TestSentinelColumnsAreCreatedByTheSeries(t *testing.T) {
 // fk_events_issue, so a temp twin errors "duplicate foreign key constraint
 // name" on Dolt 2.2.2 (see ignored/0019's own comment). Its creator guards a
 // plain CREATE TABLE behind a PREPAREd conditional on an INFORMATION_SCHEMA
-// existence probe instead, so it needs its own detection regex.
+// existence probe instead, so both creation shapes are detected here.
 func TestSentinelFlooredTablesAreCreatedByTheSeries(t *testing.T) {
 	if len(ignoredSource.sentinelFlooredTables) == 0 {
 		t.Fatal("ignoredSource has no sentinel floored tables; the events/bd_events_journal/bd_events_seq guard is inert")
@@ -561,14 +581,21 @@ func TestSentinelFlooredTablesAreCreatedByTheSeries(t *testing.T) {
 		t.Fatal("the unguarded `UPDATE wisps SET is_blocked = 0` the replay floor exists to exclude is gone; re-derive the floor")
 	}
 
-	eventsCreate := regexp.MustCompile(`(?i)IF\(@exists\s*=\s*0,\s*'CREATE TABLE events\s*\(`)
-
 	for _, st := range ignoredSource.sentinelFlooredTables {
-		var creator int
-		if st.table == "events" {
-			creator = findVersion(eventsCreate)
-		} else {
-			creator = findVersion(regexp.MustCompile(regexp.QuoteMeta("__temp__" + st.table)))
+		// Detect both creation shapes and accept whichever the series actually
+		// uses, rather than keying on the table's name: the PREPAREd
+		// conditional CREATE is required of any creator whose table carries a
+		// named, database-unique constraint (ignored/0019's own comment), so a
+		// future floored sentinel can legitimately arrive in either shape and
+		// must not fall through to the misleading "never created" failure.
+		// findVersion already returns the lowest match, so take the earlier of
+		// the two shapes if a table somehow uses both.
+		prepared := findVersion(regexp.MustCompile(
+			`(?i)IF\(@\w+\s*=\s*0,\s*'CREATE TABLE ` + regexp.QuoteMeta(st.table) + `\s*\(`))
+		temp := findVersion(regexp.MustCompile(regexp.QuoteMeta("__temp__" + st.table)))
+		creator := prepared
+		if creator == 0 || (temp != 0 && temp < creator) {
+			creator = temp
 		}
 		if creator == 0 {
 			t.Errorf("sentinel floored table %q is never created by the %s series; re-running it could not repair that table",

@@ -328,6 +328,16 @@ var (
 		// part of committed history, so a clone can arrive with the cursor
 		// at-latest but without them — exactly the leases shape below, except
 		// a whole-table absence rather than a column-on-an-existing-table one.
+		//
+		// The journal tables are ignored unconditionally; events is the one
+		// version-gated pattern ({"events", 62} below), so strictly its
+		// ignore is only asserted once the main cursor reaches 0062. That is
+		// safe here rather than a hole: this replay runs on the ignored plane,
+		// which migrateUpAfterReconcile only reaches after the main pass
+		// succeeded, and a main pass from below 62 applies
+		// 0062_events_dolt_ignore, whose REPLACE INTO dolt_ignore lands
+		// before the ignored plane is touched. So the clamp can never have
+		// 0019 re-create events as tracked-at-HEAD.
 		sentinelFlooredTables: []schemaSentinelTable{
 			{table: "events", replayFloor: 18},
 			{table: "bd_events_journal", replayFloor: 21},
@@ -1459,7 +1469,7 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 	for _, st := range m.sentinelFlooredTables {
 		present, err := sentinelTableExists(ctx, db, st.table)
 		if err != nil {
-			return 0, false, fmt.Errorf("checking %s sentinel table %s: %w", m.cursorTable, st.table, err)
+			return 0, false, fmt.Errorf("checking %s sentinel floored table %s: %w", m.cursorTable, st.table, err)
 		}
 		if present {
 			continue
