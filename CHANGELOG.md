@@ -119,6 +119,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count the same metadata-scoped set `bd list` returns without fetching every
   row.
 
+- **`bd init --proxied-server` refuses an explicit never-idle timeout under
+  `BEADS_EPHEMERAL_ROOT=1`**
+  ([#6755](https://github.com/gastownhall/beads/pull/6755)). A throwaway
+  proxied-server root, such as a test harness or a scratch workspace, can set
+  the variable. A copied `--proxied-server-idle-timeout 0` then fails before
+  init writes anything, instead of leaving behind a proxy and Dolt server that
+  never idle out. Only the value `1` enables it and only
+  `bd init --proxied-server` reads it. It changes nothing else: an omitted or
+  positive `--proxied-server-idle-timeout` behaves exactly as it does without
+  the variable.
+
 ### Fixed
 
 - **`bd dolt start` no longer puts a second sql-server over a proxied
