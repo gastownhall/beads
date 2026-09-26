@@ -26,6 +26,7 @@ func (u *recordingDirectIssueUpdater) Update(_ context.Context, request issueops
 func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 	expectedAssignee := "current-owner"
 	expectedStatus := issueops.StatusOpen
+	expectedVersion := int64(41)
 	tests := []struct {
 		name     string
 		mutation commandUpdateMutation
@@ -41,6 +42,7 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 				force:            true,
 				expectedAssignee: &expectedAssignee,
 				expectedStatus:   &expectedStatus,
+				expectedVersion:  &expectedVersion,
 			},
 			want: issueops.UpdateRequest{
 				Actor:            "writer",
@@ -50,6 +52,7 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 				ForceClosePolicy: true,
 				ExpectedAssignee: &expectedAssignee,
 				ExpectedStatus:   &expectedStatus,
+				ExpectedVersion:  &expectedVersion,
 			},
 		},
 		{
