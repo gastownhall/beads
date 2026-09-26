@@ -1066,6 +1066,50 @@ func TestFindParentConfigDoesNotAdoptOSTempRoot(t *testing.T) {
 	}
 }
 
+// TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd pins the $HOME
+// boundary's empty sentinel. os.UserHomeDir fails when HOME is unset, and
+// canonicalizing the resulting "" resolves it to the current working
+// directory, which silently turns "don't search above $HOME" into "stop at the
+// CWD". The walk here starts exactly at the CWD, so the ancestor workspace
+// config one level up is only reachable when "" still means "no boundary".
+func TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd(t *testing.T) {
+	sandbox := t.TempDir()
+	workspace := filepath.Join(sandbox, "workspace")
+	workspaceBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(workspaceBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceBeadsDir, "metadata.json"), []byte(`{"dolt_database":"parent_workspace"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// findParentConfig starts at the parent of the requested .beads directory's
+	// project, which is <workspace>/rig here.
+	rig := filepath.Join(workspace, "rig")
+	requested := filepath.Join(rig, "project", ".beads")
+	if err := os.MkdirAll(requested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(rig)
+	// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	// os.UserHomeDir reads HOME everywhere except Windows, where it reads
+	// USERPROFILE; clear both so it fails the way an unset HOME does.
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	cfg, err := findParentConfig(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg == nil {
+		t.Fatal("findParentConfig() = nil, want the workspace config above the CWD")
+	}
+	if got := cfg.GetDoltDatabase(); got != "parent_workspace" {
+		t.Errorf("GetDoltDatabase() = %q, want %q", got, "parent_workspace")
+	}
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.

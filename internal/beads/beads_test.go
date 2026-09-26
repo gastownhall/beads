@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -520,6 +521,112 @@ func TestDiscoveryResolversHonorStoreAtOSTempRootStart(t *testing.T) {
 	}
 	if got := FindAllDatabases(); len(got) != 1 {
 		t.Errorf("FindAllDatabases() = %+v, want temp-root start store", got)
+	}
+}
+
+// TestFindAllDatabasesFindsAncestorStoreOutsideGitRepo pins the empty-gitRoot
+// arm. findGitRoot returns "" outside a git repository, and canonicalizing that
+// sentinel resolves it to the current working directory, which makes the
+// git-root break fire on the walk's first iteration and stops discovery at the
+// CWD instead of walking upward.
+func TestFindAllDatabasesFindsAncestorStoreOutsideGitRepo(t *testing.T) {
+	sandbox := t.TempDir()
+	workspace := filepath.Join(sandbox, "workspace")
+	wantBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(filepath.Join(wantBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wantBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(workspace, "project", "nested")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(child)
+	// The git context is cached per process from wherever it was first
+	// resolved, so it has to be re-resolved from the sandbox for this test to
+	// exercise the non-git arm at all.
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	if root := findGitRoot(); root != "" {
+		t.Skipf("sandbox %q resolves inside git repo %q; cannot exercise the non-git arm", child, root)
+	}
+	// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+
+	got := FindAllDatabases()
+	if len(got) != 1 {
+		t.Fatalf("FindAllDatabases() = %+v, want the ancestor store %q", got, wantBeadsDir)
+	}
+	if !utils.PathsEqual(got[0].BeadsDir, wantBeadsDir) {
+		t.Errorf("FindAllDatabases()[0].BeadsDir = %q, want %q", got[0].BeadsDir, wantBeadsDir)
+	}
+}
+
+// TestAncestorDirWalkEndsAtOSTempRoot pins that the ceiling terminates the walk
+// rather than skipping the temp root and resuming above it.
+func TestAncestorDirWalkEndsAtOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	project := filepath.Join(tempRoot, "project")
+	start := filepath.Join(project, "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	var got []string
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		got = append(got, dir)
+	}
+
+	want := []string{
+		canonicalizeAncestorWalkPath(start),
+		canonicalizeAncestorWalkPath(project),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("walk yielded %q, want %q — the temp-root ceiling must end the walk, not skip the temp root and continue above it", got, want)
+	}
+}
+
+// TestAncestorDirWalkYieldsFilesystemRoot pins the documented choice that the
+// walk includes the filesystem root. Most of the hand-rolled loops this type
+// replaced stopped before "/"; the unified walk does not, so the behavior is
+// deliberate and must not flip silently.
+func TestAncestorDirWalkYieldsFilesystemRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	start := filepath.Join(sandbox, "project", "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Point the ceiling somewhere off this walk so it can reach the root.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+
+	fsRoot := canonicalizeAncestorWalkPath(start)
+	for {
+		parent := filepath.Dir(fsRoot)
+		if parent == fsRoot {
+			break
+		}
+		fsRoot = parent
+	}
+
+	last := ""
+	// The walk must terminate at the root; bound the loop so a regression
+	// reports a failure instead of hanging until the package timeout.
+	const maxDepth = 256
+	steps := 0
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		last = dir
+		if steps++; steps > maxDepth {
+			t.Fatalf("walk did not terminate after %d directories, last %q", maxDepth, last)
+		}
+	}
+	if last != fsRoot {
+		t.Errorf("last yielded directory = %q, want the filesystem root %q", last, fsRoot)
 	}
 }
 

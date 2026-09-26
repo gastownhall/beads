@@ -697,13 +697,29 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	return false
 }
 
-// AncestorDirWalk yields canonical directories from startDir upward. The OS
-// temp root is an exclusive ancestor ceiling: a walk that starts below it does
-// not yield it, while a caller whose actual discovery origin is the temp root
-// may inspect that starting directory exactly once. This keeps a deliberately
-// initialized /tmp workspace usable without letting ambient /tmp/.beads state
-// capture projects below it. Both paths are canonicalized once so macOS
+// AncestorDirWalk yields canonical directories from startDir upward, up to and
+// including the filesystem root.
+//
+// The OS temp root is an ancestor ceiling that *ends* the walk rather than
+// skipping one directory: a walk that starts below the temp root stops there
+// without yielding it, so the temp root's own ancestors are unreachable from
+// below. That matters when TMPDIR points inside a project (TMPDIR=$REPO/tmp),
+// where the project's own .beads sits above the ceiling and is not discovered
+// from a path under $REPO/tmp. Terminating is the deliberate choice: resuming
+// above the temp root would let a walk started below it adopt ambient state
+// from the temp root's ancestors, which is the capture this ceiling exists to
+// prevent. A caller whose actual discovery origin is the temp root may inspect
+// that starting directory exactly once, which keeps a deliberately initialized
+// /tmp workspace usable without letting ambient /tmp/.beads state capture
+// projects below it. Both paths are canonicalized once so macOS
 // /var -> /private/var aliases cannot bypass the ceiling.
+//
+// The filesystem root is yielded. The hand-rolled loops this type replaces were
+// inconsistent about it — most stopped before "/" while findDatabaseInTree and
+// FindAllDatabases inspected it — and the resolvers are easier to reason about
+// when they agree on which ancestors exist. The ceiling is not extended to "/"
+// because it guards against ambient state in a world-writable shared root,
+// which the filesystem root is not.
 type AncestorDirWalk struct {
 	next     string
 	origin   string
@@ -1335,8 +1351,16 @@ func FindAllDatabases() []DatabaseInfo {
 		return databases
 	}
 
-	// Find git root to limit the search
-	gitRoot := utils.CanonicalizePath(findGitRoot())
+	// Find git root to limit the search. Canonicalize the boundary so the
+	// `dir == gitRoot` comparison below is robust against symlink or case-form
+	// mismatches, but only when there is a boundary: outside a git repository
+	// findGitRoot returns "" and CanonicalizePath("") resolves to the current
+	// working directory, which would fire the break on the walk's first
+	// iteration and stop discovery at the CWD. Mirrors findDatabaseInTree.
+	gitRoot := findGitRoot()
+	if gitRoot != "" {
+		gitRoot = utils.CanonicalizePath(gitRoot)
+	}
 
 	// Walk up directory tree
 	walk := NewAncestorDirWalk(dir, dir)

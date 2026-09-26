@@ -1310,8 +1310,14 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
 	start := utils.CanonicalizePath(filepath.Dir(filepath.Dir(beadsDir)))
-	homeDir, _ := os.UserHomeDir()
-	homeDir = utils.CanonicalizePath(homeDir)
+	// Canonicalize the $HOME boundary only when there is one. An unset HOME
+	// makes os.UserHomeDir fail, and CanonicalizePath("") resolves to the
+	// current working directory, which would silently turn "don't search above
+	// $HOME" into "stop at the CWD". Keep "" meaning "no boundary".
+	homeDir := ""
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		homeDir = utils.CanonicalizePath(home)
+	}
 	origin := utils.CanonicalizePath(filepath.Dir(beadsDir))
 	walk := beads.NewAncestorDirWalk(start, origin)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
