@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -145,6 +146,7 @@ the flags appear in the command line.`,
 		closedIssues := []*types.Issue{}
 		closedCount := 0
 		alreadyClosed := 0
+		var failures []closeIDFailure
 		firstSettledID := ""
 
 		for i, id := range resolvedIDs {
@@ -153,10 +155,15 @@ the flags appear in the command line.`,
 				// The CLI's own close policy refused this argument, so the
 				// batch never saw it.
 				fmt.Fprintln(os.Stderr, plan.refusals[i])
+				failures = append(failures, closeIDFailure{ID: id, Error: plan.refusals[i]})
 				continue
 			}
 			if res.Err != nil {
 				fmt.Fprintln(os.Stderr, closeDirectRefusal(id, res.Err))
+				// The typed error, not the decorated display line: the --force
+				// hint closeDirectRefusal appends is advice for a human reader,
+				// and the id already has its own field.
+				failures = append(failures, closeIDFailure{ID: id, Error: res.Err.Error()})
 				continue
 			}
 
@@ -318,6 +325,17 @@ the flags appear in the command line.`,
 		// claimed store anyway: the batch committed the claim, but the sweep
 		// below still has to name it if a molecule auto-close made the store
 		// dirty again.
+		//
+		// A batch that also REFUSED an id still reports its claim here, and
+		// that is deliberate (#6648). The claim landed inside the batch's
+		// transaction alongside the survivors and a sibling's refusal does not
+		// roll it back, so suppressing the report would not un-claim anything —
+		// it would only leave an issue assigned to this actor with nothing on
+		// stdout or stderr saying so. The claim is announced here and named
+		// again in reportCloseFailures' summary, so a caller that exits on the
+		// nonzero status can still see what it owns. Retrying the same command
+		// does not stack claims: the survivor is already closed the second time
+		// round, nothing lands, and an empty batch earns no claim.
 		var claimedNextIssue *types.Issue
 		if claimNext && closedForCommand && !continueFlag {
 			if claimedNext != nil {
@@ -370,11 +388,96 @@ the flags appear in the command line.`,
 		}
 
 		totalAttempted := len(resolvedIDs)
+		if len(failures) > 0 {
+			return reportCloseFailures(failures, totalAttempted, closeClaimedID(claimedNextIssue), jsonOutput)
+		}
 		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
 			return SilentExit()
 		}
 		return nil
 	},
+}
+
+// closeIDFailure records one issue id a batch close refused, and why. It
+// mirrors updateIDFailure (update.go) on purpose: `bd close` and `bd update`
+// are the two write verbs that take a list of ids, so a caller that learned to
+// read one partial-failure report should not have to learn a second shape.
+type closeIDFailure struct {
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
+// closeClaimedID names the issue --claim-next claimed on this run, or "" when
+// the run claimed nothing.
+func closeClaimedID(claimed *types.Issue) string {
+	if claimed == nil {
+		return ""
+	}
+	return claimed.ID
+}
+
+// reportCloseFailures emits the partial-failure summary both close routes end
+// on and returns the nonzero exit that #6648 added. Every refusal has already
+// been printed inline, in the order the ids were typed; this is the summary
+// that says how much of the batch was left open.
+//
+// Both routes report through here so the wording and the JSON shape are stated
+// once instead of hand-rolled per route. Each route still passes its own
+// denominator, because only it knows what it attempted — the direct route
+// counts resolved ids, the proxied one counts arguments.
+//
+// The summary is suppressed for a single-id batch deliberately: one inline
+// refusal is already unambiguous about which id failed, and suppressing it
+// keeps single-id stderr byte-identical to what it was before close learned to
+// fail a partial batch.
+//
+// In --json mode the summary is one compact JSON line on stderr — the shape
+// reportUpdateFailures established — so a consumer that sees exit 1 can read
+// WHICH ids failed instead of scraping English prose, while stdout keeps the
+// plain closed-issues array a successful close emits. claimedNextID names the
+// issue --claim-next claimed on this run, if any: that claim is committed
+// inside the batch's own transaction and a sibling's refusal does not roll it
+// back, so the report names it rather than pretending it did not happen.
+func reportCloseFailures(failures []closeIDFailure, total int, claimedNextID string, jsonOut bool) error {
+	if total <= 1 {
+		return SilentExit()
+	}
+	msg := fmt.Sprintf("%d of %d issues failed to close", len(failures), total)
+
+	if !jsonOut {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		if claimedNextID != "" {
+			fmt.Fprintf(os.Stderr, "Note: --claim-next already claimed %s; it stays assigned to you.\n", claimedNextID)
+		}
+		return SilentExit()
+	}
+
+	inner := map[string]interface{}{
+		"error":  msg,
+		"failed": failures,
+	}
+	if claimedNextID != "" {
+		inner["claimed"] = claimedNextID
+	}
+	var payload interface{}
+	if jsonEnvelopeEnabled() {
+		payload = map[string]interface{}{
+			"schema_version": JSONSchemaVersion,
+			"data":           inner,
+		}
+	} else {
+		inner["schema_version"] = JSONSchemaVersion
+		payload = inner
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		// Marshaling flat strings cannot realistically fail; fall back to the
+		// text summary rather than exiting with nothing said at all.
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+	} else {
+		fmt.Fprintln(os.Stderr, string(data))
+	}
+	return SilentExit()
 }
 
 func init() {

@@ -28,7 +28,9 @@
 // flips one, the assertion is updated IN THAT COMMIT with a comment naming the
 // ruling. Any OTHER assertion in this file changing is a regression, not a
 // refactor. All four have now landed; every remaining assertion is unchanged
-// from the pre-rewire CLI and must stay that way.
+// from the pre-rewire CLI and must stay that way. Waiver: the close exit-code
+// contract (#6648: partial batch failure exits nonzero) intentionally flips
+// the TestParityClose* assertions that pinned exit 0.
 //
 // Harness: the commands' RunE functions are invoked in-process against a real
 // storage.DoltStorage, with stdout/stderr captured and the returned error
@@ -1584,11 +1586,10 @@ func TestParityCloseNoIDAndNoLastTouchedExits1(t *testing.T) {
 	}
 }
 
-// TestParityClosePartialFailureExitsZero pins the close exit contract's
-// permissive half (cmd/bd/close.go:377-380): as long as ONE id settled as
-// closed, a batch with refused ids still exits 0. The refusal is reported on
-// stderr only.
-func TestParityClosePartialFailureExitsZero(t *testing.T) {
+// TestParityClosePartialFailureExitsOne pins that a batch with a refused id
+// exits 1 even when other ids closed: the refusal and an `N of M issues failed
+// to close` summary go to stderr, and the closable ids still close.
+func TestParityClosePartialFailureExitsOne(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-cls4", "Closable", nil)
 	env.seed("test-cls5", "Owned by another actor", func(i *types.Issue) {
@@ -1598,11 +1599,11 @@ func TestParityClosePartialFailureExitsZero(t *testing.T) {
 	env.setFlags(closeCmd, nil)
 	res := env.run(closeCmd, "test-cls4", "test-cls5")
 
-	if res.exitCode != 0 {
-		t.Fatalf("exit = %d, want 0 (partial failure is still success today)\nstderr:\n%s", res.exitCode, res.stderr)
+	if res.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1 (a refused id fails the batch)\nstderr:\n%s", res.exitCode, res.stderr)
 	}
 	wantErr := fmt.Sprintf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override\n",
-		"test-cls5", "someone-else", actor)
+		"test-cls5", "someone-else", actor) + "Error: 1 of 2 issues failed to close\n"
 	if res.stderr != wantErr {
 		t.Errorf("stderr = %q, want %q", res.stderr, wantErr)
 	}
@@ -1620,7 +1621,7 @@ func TestParityClosePartialFailureExitsZero(t *testing.T) {
 
 // TestParityCloseNothingSettledExits1 pins the strict half of the same
 // contract: when NO id settled as closed, close returns SilentExit() — exit 1
-// with no extra stdout. Source: cmd/bd/close.go:377-380 and
+// with no extra stdout. Source: cmd/bd/close.go:382-384 and
 // cmd/bd/errors.go:119-121.
 func TestParityCloseNothingSettledExits1(t *testing.T) {
 	env := newParityEnv(t)
@@ -1639,6 +1640,12 @@ func TestParityCloseNothingSettledExits1(t *testing.T) {
 	}
 	if res.stdout != "" {
 		t.Errorf("stdout = %q, want empty (SilentExit prints nothing itself)", res.stdout)
+	}
+	// The batch summary is multi-id ONLY. A single refused id already names
+	// itself on stderr, so adding `N of M issues failed to close` to it would
+	// be noise — and this is the sole assertion pinning that suppression.
+	if strings.Contains(res.stderr, "issues failed to close") {
+		t.Errorf("stderr = %q, want no batch summary for a single id", res.stderr)
 	}
 	if got := env.lastTouched(); got != "" {
 		t.Errorf("last-touched = %q, want it untouched when nothing settled", got)
