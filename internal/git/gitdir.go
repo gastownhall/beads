@@ -28,41 +28,53 @@ var (
 // initGitContext populates the gitContext with a single git call.
 // This is called once per process via sync.Once.
 func initGitContext() {
+	gitCtx = loadGitContext("", nil)
+}
+
+func loadGitContext(workDir string, env []string) gitContext {
+	var ctx gitContext
 	// Get all three values with a single git call
 	cmd := exec.Command("git", "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel")
+	cmd.Dir, cmd.Env = workDir, env
 	output, err := cmd.Output()
 	if err != nil {
-		gitCtx.err = fmt.Errorf("not a git repository: %w", err)
-		return
+		ctx.err = fmt.Errorf("not a git repository: %w", err)
+		if workDir != "" {
+			ctx.err = fmt.Errorf("resolve Git working tree: %w", err)
+			if exit, ok := err.(*exec.ExitError); ok && len(exit.Stderr) > 0 {
+				ctx.err = fmt.Errorf("%w: %s", ctx.err, strings.TrimSpace(string(exit.Stderr)))
+			}
+		}
+		return ctx
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) < 3 {
-		gitCtx.err = fmt.Errorf("unexpected git rev-parse output: got %d lines, expected 3", len(lines))
-		return
+		ctx.err = fmt.Errorf("unexpected git rev-parse output: got %d lines, expected 3", len(lines))
+		return ctx
 	}
 
-	gitCtx.gitDir = strings.TrimSpace(lines[0])
+	ctx.gitDir = strings.TrimSpace(lines[0])
 	commonDirRaw := strings.TrimSpace(lines[1])
 	repoRootRaw := strings.TrimSpace(lines[2])
 
 	// Convert commonDir to absolute for reliable comparison
-	absCommon, err := filepath.Abs(commonDirRaw)
+	absCommon, err := absoluteGitPath(workDir, commonDirRaw)
 	if err != nil {
-		gitCtx.err = fmt.Errorf("failed to resolve common dir path: %w", err)
-		return
+		ctx.err = fmt.Errorf("failed to resolve common dir path: %w", err)
+		return ctx
 	}
-	gitCtx.commonDir = absCommon
+	ctx.commonDir = absCommon
 
 	// Convert gitDir to absolute for worktree comparison
-	absGitDir, err := filepath.Abs(gitCtx.gitDir)
+	absGitDir, err := absoluteGitPath(workDir, ctx.gitDir)
 	if err != nil {
-		gitCtx.err = fmt.Errorf("failed to resolve git dir path: %w", err)
-		return
+		ctx.err = fmt.Errorf("failed to resolve git dir path: %w", err)
+		return ctx
 	}
 
 	// Derive isWorktree from comparing absolute paths
-	gitCtx.isWorktree = absGitDir != absCommon
+	ctx.isWorktree = absGitDir != absCommon
 
 	// Process repoRoot: normalize Windows paths, resolve symlinks,
 	// and canonicalize case on case-insensitive filesystems (GH#880).
@@ -75,7 +87,59 @@ func initGitContext() {
 	if canonicalized := canonicalizeCase(repoRoot); canonicalized != "" {
 		repoRoot = canonicalized
 	}
-	gitCtx.repoRoot = repoRoot
+	ctx.repoRoot = repoRoot
+	return ctx
+}
+
+// absoluteGitPath anchors relative Git output to the command directory.
+func absoluteGitPath(workDir, path string) (string, error) {
+	if workDir != "" && !filepath.IsAbs(path) {
+		path = filepath.Join(workDir, path)
+	}
+	return filepath.Abs(path)
+}
+
+// HooksContext is a detached snapshot of a working repository's hook paths.
+type HooksContext struct {
+	HooksDir, CommonDir, RepoRoot, MainRepoRoot string
+}
+
+// ResolveHooksContext reads fresh paths without changing the legacy cache.
+// workDir must be nonempty and is anchored and symlink/case-normalized once;
+// bare/non-repositories error. Configured absolute hook paths retain their spelling.
+// Nil env inherits; a nonnil env is supplied unchanged, including an empty one.
+// The call neither mutates nor retains env; callers must not change it during the call.
+// Routing variables are honored, not filtered. Tilde expansion uses the Go
+// process's home directory, independently of HOME supplied to child Git.
+// A sandbox HOME therefore does not redirect a configured ~/ hook path: callers
+// that install there would still write under the Go process's home directory.
+func ResolveHooksContext(workDir string, env []string) (HooksContext, error) {
+	if workDir == "" {
+		return HooksContext{}, fmt.Errorf("hooks context requires a working directory")
+	}
+	workDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return HooksContext{}, err
+	}
+	workDir, err = filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return HooksContext{}, fmt.Errorf("resolve hooks working directory: %w", err)
+	}
+	if canonical := canonicalizeCase(workDir); canonical != "" {
+		workDir = canonical
+	}
+	ctx := loadGitContext(workDir, env)
+	if ctx.err != nil {
+		return HooksContext{}, ctx.err
+	}
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir, cmd.Env = workDir, env
+	hooksDir, err := gitHooksDir(cmd, func() (*gitContext, error) { return &ctx, nil })
+	if err != nil {
+		return HooksContext{}, err
+	}
+	return HooksContext{HooksDir: hooksDir, CommonDir: ctx.commonDir,
+		RepoRoot: ctx.repoRoot, MainRepoRoot: ctx.mainRepoRoot()}, nil
 }
 
 // getGitContext returns the cached git context, initializing it if needed.
@@ -123,9 +187,12 @@ func GetGitCommonDir() (string, error) {
 // and live in the common git directory (e.g., /repo/.git/hooks), not in
 // the worktree-specific directory (e.g., /repo/.git/worktrees/feature/hooks).
 func GetGitHooksDir() (string, error) {
+	return gitHooksDir(exec.Command("git", "config", "--get", "core.hooksPath"), getGitContext)
+}
+
+func gitHooksDir(cmd *exec.Cmd, context func() (*gitContext, error)) (string, error) {
 	// Respect core.hooksPath if configured.
 	// This is used by beads' Dolt backend (hooks installed to .beads/hooks/).
-	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
 	if out, err := cmd.Output(); err == nil {
 		hooksPath := strings.TrimSpace(string(out))
 		if hooksPath != "" {
@@ -145,7 +212,7 @@ func GetGitHooksDir() (string, error) {
 			if filepath.IsAbs(hooksPath) {
 				return hooksPath, nil
 			}
-			ctx, err := getGitContext()
+			ctx, err := context()
 			if err != nil {
 				return "", err
 			}
@@ -161,7 +228,7 @@ func GetGitHooksDir() (string, error) {
 	}
 
 	// Default: hooks are stored in the common git directory.
-	ctx, err := getGitContext()
+	ctx, err := context()
 	if err != nil {
 		return "", err
 	}
@@ -214,13 +281,17 @@ func GetMainRepoRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return ctx.mainRepoRoot(), nil
+}
+
+func (ctx *gitContext) mainRepoRoot() string {
 	if ctx.isWorktree {
 		// For worktrees, the main repo root is the parent of the shared .git directory.
-		return filepath.Dir(ctx.commonDir), nil
+		return filepath.Dir(ctx.commonDir)
 	}
 
 	// For regular repos (including submodules), repoRoot is the correct root.
-	return ctx.repoRoot, nil
+	return ctx.repoRoot
 }
 
 // GetRepoRoot returns the root directory of the current git repository.
