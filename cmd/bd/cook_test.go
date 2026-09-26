@@ -1037,3 +1037,126 @@ func TestStepTypeToIssueType(t *testing.T) {
 		}
 	}
 }
+
+// writeConditionDropFormula writes a formula whose `fanout` step is gated by
+// `condition = "{{with_fanout}}"` and returns the directory to search. The
+// extra step body is appended verbatim so each test can reference `fanout`
+// from needs / depends_on / waits_for.
+func writeConditionDropFormula(t *testing.T, name, extraSteps string) string {
+	t.Helper()
+	dir := t.TempDir()
+	toml := `formula = "` + name + `"
+version = 1
+type = "workflow"
+
+[vars.with_fanout]
+description = "Whether to include the fanout step"
+default = "false"
+
+[[steps]]
+id = "fanout"
+title = "Fanout"
+type = "task"
+condition = "{{with_fanout}}"
+
+` + extraSteps
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	return dir
+}
+
+// TestCookFormulaConditionDroppedNeedsTargetErrors covers GH#6437: a step
+// named by another step's needs/depends_on is dropped by its own false
+// condition after Formula.Validate() has already run, so the edge used to be
+// discarded silently. The cook must now fail naming both steps.
+func TestCookFormulaConditionDroppedNeedsTargetErrors(t *testing.T) {
+	for _, field := range []string{"needs", "depends_on"} {
+		t.Run(field, func(t *testing.T) {
+			dir := writeConditionDropFormula(t, "cond-drop-"+field, `[[steps]]
+id = "consumer"
+title = "Consumer"
+type = "task"
+`+field+` = ["fanout"]
+`)
+			_, err := resolveAndCookFormulaWithVars("cond-drop-"+field, []string{dir}, map[string]string{"with_fanout": "false"})
+			if err == nil {
+				t.Fatalf("cook silently dropped the %s edge to the condition-dropped step", field)
+			}
+			for _, want := range []string{`"consumer"`, `"fanout"`, field} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %s", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestCookFormulaConditionDroppedWaitsForSpawnerErrors is the waits_for
+// counterpart of the test above: the gate label is stamped on the step even
+// when its spawner was filtered out, leaving a gate with no edge.
+func TestCookFormulaConditionDroppedWaitsForSpawnerErrors(t *testing.T) {
+	dir := writeConditionDropFormula(t, "cond-drop-waits-for", `[[steps]]
+id = "gate"
+title = "Gate"
+type = "task"
+waits_for = "children-of(fanout)"
+`)
+	_, err := resolveAndCookFormulaWithVars("cond-drop-waits-for", []string{dir}, map[string]string{"with_fanout": "false"})
+	if err == nil {
+		t.Fatal("cook silently dropped the waits_for edge to the condition-dropped spawner")
+	}
+	for _, want := range []string{`"gate"`, `"fanout"`, "waits_for"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+}
+
+// TestCookFormulaConditionKeptNeedsTargetSucceeds guards the happy path: when
+// the condition holds, the step survives filtering and the edge is emitted.
+func TestCookFormulaConditionKeptNeedsTargetSucceeds(t *testing.T) {
+	dir := writeConditionDropFormula(t, "cond-keep", `[[steps]]
+id = "consumer"
+title = "Consumer"
+type = "task"
+needs = ["fanout"]
+`)
+	sg, err := resolveAndCookFormulaWithVars("cond-keep", []string{dir}, map[string]string{"with_fanout": "true"})
+	if err != nil {
+		t.Fatalf("cook failed with the condition satisfied: %v", err)
+	}
+	blocks := 0
+	for _, dep := range sg.Dependencies {
+		if dep.Type == types.DepBlocks {
+			blocks++
+		}
+	}
+	if blocks != 1 {
+		t.Errorf("got %d blocks edges, want 1 (consumer -> fanout)", blocks)
+	}
+}
+
+// TestCollectDependenciesDanglingReferenceErrors exercises collectDependencies
+// directly: a reference absent from idMapping is an error, not a skipped edge.
+func TestCollectDependenciesDanglingReferenceErrors(t *testing.T) {
+	idMapping := map[string]string{"consumer": "proto.consumer"}
+	cases := map[string]*formula.Step{
+		"depends_on": {ID: "consumer", DependsOn: []string{"gone"}},
+		"needs":      {ID: "consumer", Needs: []string{"gone"}},
+		"waits_for":  {ID: "consumer", WaitsFor: "children-of(gone)"},
+		"child":      {ID: "consumer", Children: []*formula.Step{{ID: "consumer", Needs: []string{"gone"}}}},
+	}
+	for name, step := range cases {
+		t.Run(name, func(t *testing.T) {
+			var deps []*types.Dependency
+			err := collectDependencies(step, idMapping, &deps)
+			if err == nil {
+				t.Fatalf("collectDependencies returned nil for a dangling %s reference", name)
+			}
+			if !strings.Contains(err.Error(), `"gone"`) || !strings.Contains(err.Error(), `"consumer"`) {
+				t.Errorf("error %q must name both the referencing and the missing step", err)
+			}
+		})
+	}
+}

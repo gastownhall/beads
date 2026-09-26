@@ -469,7 +469,9 @@ func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgrap
 
 	// Collect dependencies from depends_on using the idMapping built above
 	for _, step := range f.Steps {
-		collectDependencies(step, idMapping, &deps)
+		if err := collectDependencies(step, idMapping, &deps); err != nil {
+			return nil, err
+		}
 	}
 
 	return &TemplateSubgraph{
@@ -894,7 +896,9 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 
 	// Collect dependencies from depends_on
 	for _, step := range f.Steps {
-		collectDependencies(step, idMapping, &deps)
+		if err := collectDependencies(step, idMapping, &deps); err != nil {
+			return nil, err
+		}
 	}
 
 	// Create issues, labels, and dependencies in a single atomic transaction.
@@ -942,7 +946,14 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 
 // collectDependencies collects blocking dependencies from depends_on, needs, and waits_for fields.
 // This is the shared implementation used by both DB-persisted and in-memory subgraph cooking.
-func collectDependencies(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
+//
+// A depends_on/needs/waits_for reference that is absent from idMapping is an
+// error. Formula.Validate() checks references against the formula as written,
+// but ApplyControlFlow/ApplyExpansions/FilterStepsByCondition then reshape the
+// step set, so a referenced step can be gone by the time edges are built
+// (e.g. its own condition evaluated false). Skipping it would leave a bead
+// with no edge (or a gate: label with no spawner edge) and nothing to say why.
+func collectDependencies(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) error {
 	issueID := idMapping[step.ID]
 
 	// Pre-compute the waits_for spawner so we can dedupe against depends_on
@@ -982,7 +993,7 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 		}
 		depIssueID, ok := idMapping[depID]
 		if !ok {
-			continue // Will be caught during validation
+			return danglingStepReference(step.ID, "depends_on", depID)
 		}
 
 		*deps = append(*deps, &types.Dependency{
@@ -1002,7 +1013,7 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 		}
 		needIssueID, ok := idMapping[needID]
 		if !ok {
-			continue // Will be caught during validation
+			return danglingStepReference(step.ID, "needs", needID)
 		}
 
 		*deps = append(*deps, &types.Dependency{
@@ -1014,28 +1025,40 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 
 	// Process waits_for field - fanout gate dependency
 	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
-		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
-			// Spawner identity is the depends_on_id; metadata carries
-			// the gate. A collapsed needs/depends_on edge additionally marks
-			// also_blocks so the gate blocks while the spawner itself is
-			// open, not only while it has an open child (GH#3783).
-			var dep *types.Dependency
-			var err error
-			if waitsForCollapsedBlocks {
-				dep, err = types.NewWaitsForBlockingDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
-			} else {
-				dep, err = types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
-			}
-			if err == nil {
-				*deps = append(*deps, dep)
-			}
+		spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]
+		if !ok {
+			return danglingStepReference(step.ID, "waits_for", waitsForSpawnerStepID)
+		}
+		// Spawner identity is the depends_on_id; metadata carries
+		// the gate. A collapsed needs/depends_on edge additionally marks
+		// also_blocks so the gate blocks while the spawner itself is
+		// open, not only while it has an open child (GH#3783).
+		var dep *types.Dependency
+		var err error
+		if waitsForCollapsedBlocks {
+			dep, err = types.NewWaitsForBlockingDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
+		} else {
+			dep, err = types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
+		}
+		if err == nil {
+			*deps = append(*deps, dep)
 		}
 	}
 
 	// Recursively handle children
 	for _, child := range step.Children {
-		collectDependencies(child, idMapping, deps)
+		if err := collectDependencies(child, idMapping, deps); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// danglingStepReference reports a step whose depends_on/needs/waits_for field
+// names a step that is not in the poured step set.
+func danglingStepReference(stepID, field, targetID string) error {
+	return fmt.Errorf("step %q: %s references step %q, which is not in the poured step set "+
+		"(removed by a false condition or a control-flow/expansion transform)", stepID, field, targetID)
 }
 
 // deleteProtoSubgraph deletes a proto and all its children.
