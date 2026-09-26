@@ -183,8 +183,11 @@ func TestProxiedServerServeSettingsWrites(t *testing.T) {
 	// the write would protect nothing a writer does not already hold; withholding
 	// it from every reader is what redaction actually is.
 	t.Run("a credential key is writable and is never handed back", func(t *testing.T) {
+		// Not a tracker secret such as notion.token: those are yaml-only keys
+		// (GH#6676), which `bd config get` below reads from config.yaml rather
+		// than from the row this PUT writes.
 		const secret = "not-a-real-token-9f13"
-		status, body := sp.putJSON(t, "/v0/beads/config/notion.token", `{"value":"`+secret+`"}`)
+		status, body := sp.putJSON(t, "/v0/beads/config/notes.api_token", `{"value":"`+secret+`"}`)
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want 200 — a credential-bearing key is writable: %v", status, body)
 		}
@@ -197,7 +200,7 @@ func TestProxiedServerServeSettingsWrites(t *testing.T) {
 
 		// The read agrees, and the enumeration agrees: one rule, decided on the
 		// key, for every operation that could carry the value.
-		readStatus, read, _ := sp.get(t, "/v0/beads/config/notion.token")
+		readStatus, read, _ := sp.get(t, "/v0/beads/config/notes.api_token")
 		if readStatus != http.StatusOK {
 			t.Fatalf("read back: status = %d", readStatus)
 		}
@@ -216,7 +219,7 @@ func TestProxiedServerServeSettingsWrites(t *testing.T) {
 
 		// And the CLI, which holds the database, prints it: the withholding is
 		// this SURFACE's and not a claim that the value was not stored.
-		out, err := bdProxiedRun(t, bd, p.dir, "config", "get", "notion.token")
+		out, err := bdProxiedRun(t, bd, p.dir, "config", "get", "notes.api_token")
 		if err != nil {
 			t.Fatalf("bd config get: %v\n%s", err, out)
 		}

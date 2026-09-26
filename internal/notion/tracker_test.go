@@ -599,8 +599,8 @@ func TestTrackerBatchPushDryRunSkipsLabelOrderOnlyDifference(t *testing.T) {
 
 // TestGetConfig_YamlOnlyKeyBypassesStore verifies that yaml-only keys
 // bypass the Dolt store entirely, falling through to config.yaml and env var.
-// Notion doesn't currently have yaml-only secret keys, but this ensures the
-// code path works correctly if one is added in the future.
+// notion.token is resolved by ResolveAuth (see auth_test.go); this covers the
+// generic getConfig branch.
 func TestGetConfig_YamlOnlyKeyBypassesStore(t *testing.T) {
 	ctx := context.Background()
 	tr := &Tracker{store: nil}

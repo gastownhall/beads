@@ -197,15 +197,16 @@ func resolveNotionAuth(ctx context.Context) (*notion.ResolvedAuth, error) {
 			return notion.ResolveAuth(ctx, tempStore)
 		}
 	}
-	if token := strings.TrimSpace(os.Getenv("NOTION_TOKEN")); token != "" {
-		return &notion.ResolvedAuth{Token: token, Source: notion.AuthSourceEnv}, nil
-	}
-	return nil, nil
+	return notion.ResolveAuth(ctx, nil)
 }
 
 func validateNotionConfig(cfg notionConfig, auth *notion.ResolvedAuth) error {
 	if auth == nil || strings.TrimSpace(auth.Token) == "" {
-		return fmt.Errorf("Notion authentication is not configured. Set notion.token with 'bd config set notion.token <token>', or export NOTION_TOKEN")
+		// NOTION_TOKEN leads deliberately: `bd config set notion.token` is
+		// refused when .beads/config.yaml is git-tracked, which is the default
+		// after `bd init` in a repo — so the first suggestion used to be the
+		// one that does not work. Matches the quickstart's ordering.
+		return fmt.Errorf("Notion authentication is not configured. Run 'export NOTION_TOKEN=<token>', or 'bd config set notion.token <token>' if .beads/config.yaml is not tracked by git")
 	}
 	if cfg.DataSourceID == "" {
 		return fmt.Errorf("notion.data_source_id is not configured. Run 'bd notion init --parent <page-id>' or 'bd notion connect --url <notion-url>', or set it directly via bd config set notion.data_source_id <id> or NOTION_DATA_SOURCE_ID")
@@ -215,7 +216,11 @@ func validateNotionConfig(cfg notionConfig, auth *notion.ResolvedAuth) error {
 
 func validateNotionToken(auth *notion.ResolvedAuth) error {
 	if auth == nil || strings.TrimSpace(auth.Token) == "" {
-		return fmt.Errorf("Notion authentication is not configured. Set notion.token with 'bd config set notion.token <token>', or export NOTION_TOKEN")
+		// NOTION_TOKEN leads deliberately: `bd config set notion.token` is
+		// refused when .beads/config.yaml is git-tracked, which is the default
+		// after `bd init` in a repo — so the first suggestion used to be the
+		// one that does not work. Matches the quickstart's ordering.
+		return fmt.Errorf("Notion authentication is not configured. Run 'export NOTION_TOKEN=<token>', or 'bd config set notion.token <token>' if .beads/config.yaml is not tracked by git")
 	}
 	return nil
 }
@@ -388,6 +393,13 @@ func renderNotionStatus(cmd *cobra.Command, auth *notion.ResolvedAuth, cfg notio
 	_, _ = fmt.Fprintf(out, "Auth:        %s\n", maskNotionAuth(auth))
 	if auth != nil && auth.Source != "" {
 		_, _ = fmt.Fprintf(out, "Auth source: %s\n", auth.Source)
+	}
+	// The one place a workspace learns it is the population GH#6676 tells to
+	// rotate. Without it the CHANGELOG's advice has no addressee: the token
+	// keeps working, so nothing else ever mentions where it is stored.
+	if auth != nil && auth.Source == notion.AuthSourceDatabaseLegacy {
+		_, _ = fmt.Fprintln(out, "⚠ This token is stored in the beads database, which 'bd dolt push' replicates to every remote.")
+		_, _ = fmt.Fprintln(out, "  Rotate it, then run 'bd config unset notion.token' to delete the stored row.")
 	}
 	_, _ = fmt.Fprintf(out, "Data source: %s\n", cfg.DataSourceID)
 	if cfg.ViewURL != "" {

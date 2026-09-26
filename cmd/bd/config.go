@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -260,6 +261,182 @@ func openWorkspaceConfig(directRequirement string) (issueops.WorkspaceConfig, er
 		return nil, err
 	}
 	return store.WorkspaceConfig()
+}
+
+// secretRowCleanup is what the best-effort database half of `bd config unset`
+// achieved, kept apart from the config.yaml half because the two removals are
+// independent. The YAML edit is the command's contract; the row is a credential
+// the database replicated to every remote it was pushed to, so "I deleted it",
+// "it is still there and I could not delete it" and "I could not look" are
+// three different things to tell the user, and only the middle one is certain.
+type secretRowCleanup struct {
+	present bool // a row was there when we read it
+	removed bool
+	err     error
+}
+
+// describe writes the database half of the report. It says nothing at all for
+// the overwhelmingly common workspace that never leaked: `config unset` is
+// otherwise a one-line command and this is a footnote about a key's history.
+func (c secretRowCleanup) describe(key, location string) {
+	switch {
+	case c.removed:
+		fmt.Printf("Also removed a stored %s row from the database, left by a bd that predates the key moving to %s.\n", key, location)
+		fmt.Printf("⚠ Rotate this credential: the row was replicated to every Dolt remote this workspace pushed to, and deleting it here does not unpublish it.\n")
+	case c.err != nil && c.present:
+		// The one case that is not a maybe: the read found the row and the
+		// delete failed, so bd knows a live credential is still in the table.
+		fmt.Fprintf(os.Stderr, "⚠ A stored %s row is still in the database: removing it failed (%v).\n", key, c.err)
+		fmt.Fprintf(os.Stderr, "⚠ Rotate this credential: the row was replicated to every Dolt remote this workspace pushed to.\n")
+	case c.err != nil:
+		fmt.Fprintf(os.Stderr, "⚠ Could not check the database for a leaked %s row (%v). An older bd may have stored one there; re-run this command with the database reachable.\n", key, c.err)
+	}
+}
+
+// jsonFields carries the same three-way distinction to machine consumers.
+// database_row_removed is always present for a secret key so a script can tell
+// "nothing leaked" from "the field is missing because bd is older".
+func (c secretRowCleanup) jsonFields(payload map[string]interface{}) {
+	payload["database_row_removed"] = c.removed
+	switch {
+	case c.err != nil && c.present:
+		payload["database_row_present"] = true
+		payload["database_delete_failed"] = c.err.Error()
+	case c.err != nil:
+		payload["database_unreachable"] = c.err.Error()
+	}
+}
+
+// rowNote is the database half folded into the error the YAML half returns, so
+// a failed `config unset` still tells the user where the credential stands. It
+// goes on stderr with that error rather than to stdout, which `--json` owns.
+func (c secretRowCleanup) rowNote(key string) string {
+	switch {
+	case c.removed:
+		return fmt.Sprintf("\nA stored %s row WAS removed from the database; rotate that credential — it was replicated to every Dolt remote this workspace pushed to.", key)
+	case c.err != nil && c.present:
+		return fmt.Sprintf("\nA stored %s row is still in the database: removing it failed (%v).", key, c.err)
+	case c.err != nil:
+		return fmt.Sprintf("\nThe database could not be checked for a leaked %s row (%v).", key, c.err)
+	}
+	return ""
+}
+
+// mayProvisionDatabase reports whether reaching the store from here could have
+// to CREATE a database, which is the only thing unsetLeakedSecretRow's skip
+// exists to avoid. Each arm that returns false is a route on which the database
+// is already there, so consulting it provisions nothing:
+//
+//   - the proxied route opens no local storage at all — proxiedWorkspaceConfig
+//     reaches an already-connected provider;
+//   - a store that is already open and tracked is ensureStoreActive's own
+//     no-op arm: it returns before newDoltStoreFromConfig ever runs. This is
+//     the state PersistentPreRun leaves a connected server-mode workspace in,
+//     and it is the only thing that tells the metadata-less server shape —
+//     `dolt.mode: server` or BEADS_DOLT_SERVER_HOST with no local database
+//     directory, routed deliberately at main.go, GH#3545 — apart from a
+//     workspace that genuinely has no database. beads.FindDatabasePath answers
+//     on metadata.json plus embeddeddolt/ and dolt/, so for that shape it
+//     reports "" while the row itself sits on the shared server, replicated to
+//     every remote the workspace ever pushed to. Skipping there would strand
+//     the leaked credential in the population that holds the most copies of it.
+//
+// Only when neither of those holds does the on-disk answer decide, and there
+// the open really is open-OR-CREATE.
+func mayProvisionDatabase() bool {
+	if usesProxiedServer() {
+		return false
+	}
+	lockStore()
+	active := isStoreActive() && getStore() != nil
+	unlockStore()
+	if active {
+		return false
+	}
+	return beads.FindDatabasePath() == ""
+}
+
+// unsetLeakedSecretRow deletes a yaml-only SECRET key's leftover row from the
+// config table, reporting what it found and what it removed.
+//
+// WHY THE YAML UNSET IS NOT THE WHOLE JOB. A key becomes yaml-only at some
+// point in bd's history, not at the beginning: `notion.token` moved in GH#6676,
+// and every workspace configured before the move still has the value in the
+// config table — a table whose contents `bd dolt push` replicates to every
+// remote. `config unset`'s yaml-only branch returns before the store, so
+// without this the only bd-side remover of that row would be gone for embedded
+// workspaces, which are exactly the population the move protects. The row would
+// keep authenticating (ResolveAuth reads it as the upgrade path) while the user
+// who just ran `bd config unset` believes they are clean.
+//
+// IT IS BEST EFFORT, AND ONLY FOR SECRETS. The caller has already removed the
+// value from config.yaml, which is the command's contract; a workspace with no
+// reachable store must not be told that succeeded work failed. Non-secret
+// yaml-only keys are skipped rather than merely unreported, so the ordinary
+// `bd config unset routing.mode` keeps costing no database open at all — this
+// pays the store-open only where a leaked credential could be sitting.
+//
+// The predicates, not a list of key names: `IsYamlOnlyKey` matches whole
+// prefixes (`ai.`, `sync.`, `federation.`, ...), so the affected set is
+// open-ended and grows whenever a tracker adds a credential. Measured at the
+// time of writing, YamlOnlyKeys alone contributes seven — ado.pat,
+// github.token, gitlab.token, jira.api_token, linear.api_key,
+// linear.oauth_client_secret, notion.token — plus whatever the prefixes cover.
+//
+// IT NEVER PROVISIONS ONE. `config unset <yaml-only key>` is deliberately
+// classified as runnable with no store (configCommandCanRunWithoutStore in
+// main.go, GH#536 / bd-934 / bd-3rw), and the direct open below is
+// open-OR-CREATE (ensureDirectMode → ensureStoreActive →
+// newDoltStoreFromConfig), so without a gate editing a YAML file would
+// materialize a database in a workspace that never had one and flip it out of
+// its db-less mode for every later command. mayProvisionDatabase is that gate,
+// and it asks about the store before the disk: "no local database directory" is
+// not the same question as "no database", and the workspaces where the two
+// answers differ are the ones whose row traveled furthest.
+func unsetLeakedSecretRow(key string) secretRowCleanup {
+	// Gate BEFORE opening the store, not inside removeStoredSecretRow: this is
+	// what keeps `bd config unset routing.mode` from paying a database open it
+	// has no use for.
+	if !config.IsSecretKey(key) {
+		return secretRowCleanup{}
+	}
+	if mayProvisionDatabase() {
+		return secretRowCleanup{}
+	}
+	settings, err := openWorkspaceConfig("config unset requires direct database access")
+	if err != nil {
+		return secretRowCleanup{err: err}
+	}
+	present, removed, err := removeStoredSecretRow(rootCtx, settings, key)
+	if removed {
+		noteDirectConfigWrite()
+	}
+	return secretRowCleanup{present: present, removed: removed, err: err}
+}
+
+// removeStoredSecretRow deletes key's row, reporting whether one was there and
+// whether it is gone. Those are two bits, not one: a failed delete on a row the
+// read found is the single outcome that means "a live credential is still in
+// the table bd pushes", and collapsing it into the error alone renders it as an
+// unreachable database — the one case that needs no hedging.
+//
+// It READS BEFORE DELETING because UnsetSetting deliberately has no "removed"
+// flag and deleting an absent key is a success — so a blind delete could not
+// tell the caller whether anything had leaked, and the overwhelmingly common
+// case (a workspace that never stored the key) has to stay silent rather than
+// announce a removal that did not happen.
+func removeStoredSecretRow(ctx context.Context, settings issueops.WorkspaceConfig, key string) (present bool, removed bool, err error) {
+	stored, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: key})
+	if err != nil {
+		return false, false, err
+	}
+	if strings.TrimSpace(stored.Value) == "" {
+		return false, false, nil
+	}
+	if _, err := settings.UnsetSetting(ctx, issueops.UnsetSettingRequest{Key: key}); err != nil {
+		return true, false, err
+	}
+	return true, true, nil
 }
 
 // noteDirectConfigWrite marks the invocation as having written, which is what
@@ -552,6 +729,53 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 	fmt.Println("\nTip: Run 'bd config show' for all effective config with provenance.")
 }
 
+// runConfigUnsetYamlOnly removes a yaml-only key from config.yaml and, for a
+// secret key, the row a bd that predates the key's move to YAML may have left
+// in the config table.
+//
+// THE TWO REMOVALS ARE INDEPENDENT, AND SO IS THEIR REPORTING. Running the row
+// cleanup only after a successful YAML edit would skip it for exactly the
+// workspaces the cleanup exists for: one whose config.yaml is missing, or whose
+// notion.token sits in a shape the unset refuses, gets an error about
+// config.yaml and keeps the credential in the table `bd dolt push` replicates —
+// while `bd notion status` names this very command as the remover. So the
+// cleanup runs either way, and a failed YAML unset carries the row's fate in
+// its error rather than dropping it.
+func runConfigUnsetYamlOnly(key string) error {
+	location := "config.yaml"
+	var unsetErr error
+	if config.IsUserGlobalKey(key) {
+		unsetErr = config.UnsetUserYamlConfig(key)
+		location = config.UserConfigYamlDisplayPath()
+	} else {
+		unsetErr = config.UnsetYamlConfig(key)
+	}
+
+	cleanup := unsetLeakedSecretRow(key)
+
+	if unsetErr != nil {
+		return HandleError("unsetting config: %v%s", unsetErr, cleanup.rowNote(key))
+	}
+
+	if jsonOutput {
+		payload := map[string]interface{}{
+			"key":      key,
+			"location": location,
+		}
+		if config.IsSecretKey(key) {
+			cleanup.jsonFields(payload)
+		}
+		if err := outputJSON(payload); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("Unset %s (in %s)\n", key, location)
+		cleanup.describe(key, location)
+	}
+	printConfigSideEffects(checkConfigUnsetSideEffects(key))
+	return nil
+}
+
 var configUnsetCmd = &cobra.Command{
 	Use:           "unset <key>",
 	Short:         "Delete a configuration value",
@@ -569,30 +793,7 @@ var configUnsetCmd = &cobra.Command{
 		key := args[0]
 
 		if config.IsYamlOnlyKey(key) {
-			location := "config.yaml"
-			var unsetErr error
-			if config.IsUserGlobalKey(key) {
-				unsetErr = config.UnsetUserYamlConfig(key)
-				location = config.UserConfigYamlDisplayPath()
-			} else {
-				unsetErr = config.UnsetYamlConfig(key)
-			}
-			if unsetErr != nil {
-				return HandleError("unsetting config: %v", unsetErr)
-			}
-
-			if jsonOutput {
-				if err := outputJSON(map[string]interface{}{
-					"key":      key,
-					"location": location,
-				}); err != nil {
-					return err
-				}
-			} else {
-				fmt.Printf("Unset %s (in %s)\n", key, location)
-			}
-			printConfigSideEffects(checkConfigUnsetSideEffects(key))
-			return nil
+			return runConfigUnsetYamlOnly(key)
 		}
 
 		if key == "beads.role" {
