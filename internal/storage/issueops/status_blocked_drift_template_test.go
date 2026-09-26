@@ -60,7 +60,7 @@ func TestStatusBlockedDriftPredicateCoversEveryBlockingReason(t *testing.T) {
 		"blocks / conditional-blocks": "d.type = 'blocks' OR d.type = 'conditional-blocks'",
 		"inherited parent-child":      "d.type = 'parent-child'",
 		"held waits-for gate":         "d.type = 'waits-for'",
-		"wisp-target edge":            "d.depends_on_wisp_id",
+		"wisp-target edge":            "JOIN wisps t ON t.id = d.depends_on_wisp_id",
 	}
 	for _, pair := range driftTablePairs() {
 		tmpl := countStatusBlockedDriftSQL(pair.table, pair.depTable)

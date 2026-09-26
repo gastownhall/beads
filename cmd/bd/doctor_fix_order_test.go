@@ -79,3 +79,26 @@ func TestOrderDoctorFixes_EarlyFixesStillSortFirst(t *testing.T) {
 		t.Errorf("early ordered fixes must sort ahead of Blocked State; order=%v", fixNames(fixes))
 	}
 }
+
+// TestOrderDoctorFixes_StatusBlockedDriftRunsAfterBlockedState pins
+// gastownhall/beads#6565 review R2: the status=blocked drift repair shares
+// Blocked State's membership test, whose parent-child and gate legs read the
+// stored is_blocked column, so it must run after the is_blocked recompute. It
+// is appended both before and after Blocked State so that neither append
+// order decides the result.
+func TestOrderDoctorFixes_StatusBlockedDriftRunsAfterBlockedState(t *testing.T) {
+	for _, fixes := range [][]doctorCheck{
+		{{Name: "Status Blocked Drift"}, {Name: "Blocked State"}, {Name: "Dependency Keys"}},
+		{{Name: "Blocked State"}, {Name: "Dependency Keys"}, {Name: "Status Blocked Drift"}},
+	} {
+		orderDoctorFixes(fixes)
+		pos := make(map[string]int, len(fixes))
+		for i, f := range fixes {
+			pos[f.Name] = i
+		}
+		if pos["Status Blocked Drift"] < pos["Blocked State"] {
+			t.Errorf("Status Blocked Drift (pos %d) must run after Blocked State (pos %d); order=%v",
+				pos["Status Blocked Drift"], pos["Blocked State"], fixNames(fixes))
+		}
+	}
+}

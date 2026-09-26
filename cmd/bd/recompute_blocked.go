@@ -38,6 +38,9 @@ blocker closed, or none was ever recorded (be-ntbxt). Nothing else clears that
 status, so 'bd close --suggest-next' can report an issue as newly unblocked
 while it stays invisible to 'bd ready' forever. A row still held blocked by any
 edge type is left alone. --status is report-only unless paired with --fix.
+--status --fix recomputes is_blocked first (as plain recompute-blocked does)
+and then repairs, so it never acts on a stale is_blocked column. --status
+alone reads the stored column and mutates nothing.
 
 Examples:
   bd recompute-blocked                  # Repair stale is_blocked flags
@@ -67,6 +70,17 @@ Examples:
 				return HandleError("storage backend does not support status=blocked drift check")
 			}
 			if recomputeBlockedFix {
+				// Recompute is_blocked first: the drift test's parent-child
+				// and gate legs read the stored column, so repairing against a
+				// stale one could force-open a row the graph still holds
+				// blocked (gastownhall/beads#6565 review R2).
+				recomputer, ok := storage.UnwrapStore(store).(storage.BlockedRecomputer)
+				if !ok {
+					return HandleError("storage backend does not support is_blocked recompute, which --status --fix runs first")
+				}
+				if _, err := recomputer.RecomputeAllBlocked(ctx); err != nil {
+					return HandleError("recompute is_blocked before status=blocked repair: %v", err)
+				}
 				changed, err := drifter.FixStatusBlockedDrift(ctx)
 				if err != nil {
 					return HandleError("fix status=blocked drift: %v", err)

@@ -5,8 +5,12 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // statusDriftCount pulls the single count out of
@@ -109,5 +113,62 @@ func TestEmbeddedRecomputeBlockedStatusFlag(t *testing.T) {
 	}
 	if text := run("recompute-blocked", "--status"); !strings.Contains(text, "No status=blocked drift") {
 		t.Errorf("converged text: got:\n%s", text)
+	}
+}
+
+// TestEmbeddedRecomputeBlockedStatusFixIgnoresStaleIsBlocked pins
+// gastownhall/beads#6565 review R2: the drift test's parent-child leg reads the
+// parent's stored is_blocked column, so a repair that trusted a stale column
+// would force-open a child the graph still holds blocked. The parent here is
+// genuinely blocked by an open blocker, but its is_blocked column has been
+// zeroed by hand; '--status --fix' must recompute is_blocked before it repairs
+// and leave the child blocked.
+func TestEmbeddedRecomputeBlockedStatusFixIgnoresStaleIsBlocked(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "rbx")
+	run := func(args ...string) string { return runClassic(t, bd, dir, args...) }
+
+	blocker := parseIssueJSON(t, []byte(run("create", "--json", "Open blocker")))
+	parent := parseIssueJSON(t, []byte(run("create", "--json", "Blocked parent",
+		"--deps", "blocked-by:"+blocker.ID)))
+	child := parseIssueJSON(t, []byte(run("create", "--json", "Child of a blocked parent")))
+	run("dep", "add", child.ID, parent.ID, "-t", "parent-child")
+	run("update", child.ID, "--status", "blocked")
+
+	// Make the parent's derived column stale: the graph still holds it blocked.
+	// 'bd sql' is not supported in embedded mode, so write it directly.
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load config from %s: %v", beadsDir, err)
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), cfg.GetDoltDatabase(), "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	res, err := db.ExecContext(t.Context(), "UPDATE issues SET is_blocked = 0 WHERE id = ?", parent.ID)
+	if err != nil {
+		cleanup()
+		t.Fatalf("zero parent is_blocked: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		cleanup()
+		t.Fatalf("fixture: zeroing %s is_blocked affected %d rows, want 1 (was it not blocked?)", parent.ID, n)
+	}
+	if _, err := db.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', 'test: stale parent is_blocked')"); err != nil {
+		cleanup()
+		t.Fatalf("commit stale is_blocked: %v", err)
+	}
+	cleanup()
+
+	if n := statusDriftCount(t, run("recompute-blocked", "--status", "--fix", "--json"), "status_blocked_fixed"); n != 0 {
+		t.Errorf("fix against a stale parent is_blocked: want 0 rows corrected, got %d", n)
+	}
+	if got := getIssueStatus(t, bd, dir, child.ID); got != "blocked" {
+		t.Errorf("after fix: %s (child of a parent the graph holds blocked) status = %q, want still blocked", child.ID, got)
 	}
 }

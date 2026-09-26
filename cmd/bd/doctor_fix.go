@@ -236,6 +236,13 @@ func orderDoctorFixes(fixes []doctorCheck) {
 	// priority so it is provably last regardless of append order (bd-6dnrw.37).
 	const defaultPriority = 1000
 	priority["Blocked State"] = defaultPriority + 1
+	// "Status Blocked Drift" decides drift with the same membership test as
+	// "Blocked State", and two of its legs (inherited parent-child, held
+	// waits-for gate) read the stored is_blocked column. Run before the
+	// recompute, it acts on whatever a stale column says and can force-open a
+	// row the graph still holds blocked (gastownhall/beads#6565 review R2), so
+	// it is pinned after Blocked State.
+	priority["Status Blocked Drift"] = defaultPriority + 2
 	slices.SortStableFunc(fixes, func(a, b doctorCheck) int {
 		pa, oka := priority[a.Name]
 		if !oka {
@@ -338,11 +345,11 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Status Blocked Drift":
 			// be-ntbxt: returns status='blocked' rows the dependency graph no
 			// longer holds blocked to status='open'. Shares its membership
-			// test with "Blocked State" (shouldBeBlockedIDsUnionSQL) but
-			// writes a different column (status, not is_blocked), so the two
-			// fixes don't order against each other — only after the
-			// graph-mutating fixes above, which the default same-tier append
-			// order already guarantees.
+			// test with "Blocked State" (shouldBeBlockedIDsUnionSQL), and that
+			// test's parent-child and gate legs read the stored is_blocked
+			// column, so this fix must run after the is_blocked recompute, not
+			// merely after the graph-mutating fixes. Pinned after Blocked State
+			// in orderDoctorFixes.
 			err = fix.FixStatusBlockedDrift(path)
 		case "Child-Parent Dependencies":
 			// Requires explicit opt-in flag (destructive, may remove intentional deps)
