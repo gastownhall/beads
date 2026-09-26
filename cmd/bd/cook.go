@@ -913,7 +913,13 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 			return fmt.Errorf("failed to create issues: %w", err)
 		}
 
-		// Add labels
+		// Add labels. This does NOT run labels.vocabulary enforcement, in
+		// any mode: it neither calls the interactive checkLabelVocabulary
+		// edge check cmd/bd's other label writers use, nor lands through the
+		// guarded update transaction that re-verifies `enforce` for
+		// create/update/label-add. A cooked formula's labels are written
+		// exactly as given even under `enforce` -- documented scope, not an
+		// oversight (see docs/core-concepts/labels.md, Vocabulary Registry).
 		for _, l := range labels {
 			if err := tx.AddLabel(ctx, l.issueID, l.label, actor); err != nil {
 				return fmt.Errorf("failed to add label %s to %s: %w", l.label, l.issueID, err)

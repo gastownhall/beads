@@ -143,6 +143,10 @@ func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsSta
 		CreateIssue: store.CreateIssue,
 		SetConfig:   store.SetConfig,
 		UpdateRaw:   store.UpdateIssue,
+		Exec: func(ctx context.Context, query string, args ...any) error {
+			_, err := store.db.ExecContext(ctx, query, args...)
+			return err
+		},
 		QueryScalar: func(ctx context.Context, query string, args []any, dest ...any) error {
 			return store.db.QueryRowContext(ctx, query, args...).Scan(dest...)
 		},
@@ -151,4 +155,16 @@ func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsSta
 		cancel()
 		storeCleanup()
 	}
+}
+
+func TestIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t, ctx, fixture)
+}
+
+func TestIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t, ctx, fixture)
 }
