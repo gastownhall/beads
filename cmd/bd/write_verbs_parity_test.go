@@ -1641,6 +1641,12 @@ func TestParityCloseNothingSettledExits1(t *testing.T) {
 	if res.stdout != "" {
 		t.Errorf("stdout = %q, want empty (SilentExit prints nothing itself)", res.stdout)
 	}
+	// The batch summary is multi-id ONLY. A single refused id already names
+	// itself on stderr, so adding `N of M issues failed to close` to it would
+	// be noise — and this is the sole assertion pinning that suppression.
+	if strings.Contains(res.stderr, "issues failed to close") {
+		t.Errorf("stderr = %q, want no batch summary for a single id", res.stderr)
+	}
 	if got := env.lastTouched(); got != "" {
 		t.Errorf("last-touched = %q, want it untouched when nothing settled", got)
 	}
