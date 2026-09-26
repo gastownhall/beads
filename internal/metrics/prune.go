@@ -21,8 +21,12 @@ const (
 	// drain-vs-emission race. When emission outruns drain (a shared $HOME can
 	// emit ~2.3 files/s against a throttled drain of ~0.3-0.4/s) the queue
 	// otherwise grows without bound, and every directory scan pays for it.
-	// Oldest batches are dropped first: recent telemetry is the only kind
-	// worth shipping late.
+	// Recent telemetry is the only kind worth shipping late, so batches are
+	// dropped oldest-first. Both cap values are global — never scaled down to
+	// the prefix a budget-truncated pass managed to examine — but that drop
+	// ORDER is per-examined-prefix, and prefix order is the filesystem's
+	// rather than chronological. See PruneQueue for what that does and does
+	// not guarantee.
 	maxQueueFiles = 10_000
 	maxQueueBytes = 64 << 20 // 64 MiB
 
@@ -42,9 +46,10 @@ const (
 // PruneQueue bounds the queued-event backlog in dir before a flush: event
 // batches (and orphaned emitter temp files) older than pruneTTL are deleted,
 // and the surviving batches are capped at maxQueueFiles / maxQueueBytes by
-// dropping oldest-first. It returns how many files were removed and the bytes
-// freed. It runs only in the detached send-metrics child, so its full
-// directory scan never lands on an interactive bd invocation.
+// dropping oldest-first within whatever prefix of the listing the pass
+// examined. It returns how many files were removed and the bytes freed. It
+// runs only in the detached send-metrics child, so its full directory scan
+// never lands on an interactive bd invocation.
 //
 // The prune deliberately runs OUTSIDE eventkit.lock (Flush's TryLock treats
 // ErrLocked as "another flusher owns the queue" and silently no-ops, so
@@ -62,14 +67,59 @@ const (
 // Every chunk boundary is a safe place to stop, with no exception: the
 // oldest-first caps are applied incrementally as each live entry is seen, via
 // a bounded min-heap capped at maxFiles/maxBytes, rather than deferred to a
-// pass over the whole listing. A later entry can only compete with — never
-// retroactively invalidate — an eviction the heap already made, so a
-// truncated walk's evictions are exactly the ones a full walk would have made
-// over the same prefix. A queue too large to fully examine within one budget
-// converges to the caps across repeated calls instead of within a single one
-// (be-wwy2.3 — this replaced an earlier version where an all-young over-cap
-// pile made no TTL progress and so was allowed to outrun its own budget to
-// the end of the listing just to let the caps fire at all; see GH#5660).
+// pass over the whole listing (be-wwy2.3 — this replaced an earlier version
+// where an all-young over-cap pile made no TTL progress and so was allowed to
+// outrun its own budget to the end of the listing just to let the caps fire at
+// all; see GH#5660).
+//
+// What a truncated pass guarantees is one-directional. Every entry it evicts
+// is one a full oldest-first pass over the same examined set would also have
+// dropped, and the cap values are never scaled down to the examined prefix, so
+// a truncated pass deletes no more than a full pass would — never something a
+// full pass would have kept. That is the property the earlier fail-closed
+// "return (0, 0) on a partial listing" guard existed to protect, and it is why
+// the guard is no longer needed. The converse does NOT hold: under the byte cap
+// the survivor set is readdir-order-dependent and may retain an entry older
+// than one already evicted. With maxBytes=100, arrivals A(t=10, 60B) then
+// B(t=20, 60B) evict A, and a later C(t=5, 30B) then fits and stays, leaving
+// {B, C} where a global pass over the same three keeps {B}. So the design
+// under-applies age fidelity rather than inverting it: evictions always take
+// the oldest entry the heap holds, so the newest entry a pass examined is never
+// dropped in favor of an older entry it is held alongside. It is evicted only
+// once every older entry has already been popped and a cap still binds — its
+// own size alone over maxBytes, or a maxFiles of 0 — and a full pass over the
+// same examined set drops it in that case too, so the one-directional
+// guarantee above is unaffected.
+// If age fidelity ever becomes load-bearing, the cheap recovery is a resumable
+// stopping point — a persisted cursor — not a return to the whole-listing pass.
+//
+// A queue too large to fully examine within one budget converges to the caps
+// across repeated calls instead of within a single one, with two disclosed
+// limits. First, per-pass progress is best-effort rather than exactly
+// pruneChunkSize-maxFiles evictions: the evictions unlink underneath the same
+// in-flight getdents cookie the walk is iterating, and POSIX leaves readdir
+// behavior unspecified for entries removed after the directory was opened (ext4
+// htree can skip or repeat an entry when a block is compacted). That is
+// self-healing — a skipped entry defers to the next spawn, a repeated one hits
+// remove()'s already-gone tolerance — but it makes the per-pass rate a lower
+// bound, not an equality.
+//
+// Second, and more sharply: convergence needs at least one eviction per call,
+// and an eviction needs a single call to push more than maxFiles live entries
+// (or more than maxBytes worth). A budget that examines fewer than that evicts
+// nothing at all, however many entries the directory actually holds, so
+// repeated calls make no cap progress and pruneTTL is the only bound left. On
+// the bd-ulfod-class spool above (~165 stats/s) a 30s budget examines ~5k
+// entries — under both caps — which is exactly the pathological pile the caps
+// exist for. That regime is accepted here rather than fixed, because the only
+// safe fix is to examine more entries: nothing about a prefix of fewer than
+// maxFiles entries can prove any one of them is outside the newest maxFiles of
+// the whole directory. Letting the walk run past its expired budget until
+// maxFiles+pruneChunkSize entries are examined would reinstate the overrun this
+// lane removed (~10k stats, 2x the advertised bound) and still would not make
+// convergence unconditional — wherever the count cap binds first it yields only
+// pruneChunkSize evictions per call, well under the ~690 files one flushInterval
+// of the emission rate above can add.
 func PruneQueue(ctx context.Context, dir string, now time.Time) (dropped int, freed int64) {
 	return pruneQueue(ctx, dir, now, pruneTTL, maxQueueFiles, maxQueueBytes)
 }
@@ -95,11 +145,15 @@ type dirChunkReader interface {
 // at maxFiles/maxBytes during the walk — push, then pop while over either cap
 // — bounds the live-candidate set at O(maxFiles) in memory regardless of how
 // many entries the directory holds. It is also what makes a streaming,
-// incremental cap decision correct: a later entry can only be newer than one
-// already evicted, never able to un-evict it, so the entries the heap holds
-// at any point are exactly the maxFiles-newest (within maxBytes) of
-// everything examined so far — including at a chunk boundary where the walk
-// might stop.
+// incremental cap decision safe: at any point the walk might stop, including
+// every chunk boundary, the heap is within both caps and every entry it has
+// popped is one a full oldest-first pass over everything examined so far would
+// also have dropped, because a later entry can only be newer than one already
+// evicted and so can never un-evict it. Under the count cap alone that makes
+// the held set exactly the maxFiles-newest examined so far. Once the byte cap
+// is doing the evicting it does not: a later small entry can fit after a
+// larger, newer one was evicted, so the held set is a superset of a global
+// pass's survivors, never a subset (PruneQueue carries the worked example).
 type queueMinHeap []queueEntry
 
 func (h queueMinHeap) Len() int           { return len(h) }
