@@ -1,17 +1,36 @@
 package issueops
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/gowebpki/jcs"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// DependencyMetadataEqual reports whether two dependency metadata JSON
+// strings are semantically equal per RFC 8785 (JCS), not merely byte-equal.
+// Dolt's native JSON column re-canonicalizes stored text on write (spacing,
+// key order, number form), so a byte compare between newly-supplied metadata
+// and metadata just read back from the column falsely reports a change on
+// every non-empty value (#6650). Both dependency re-add idempotency checks
+// share this so they can't drift. Falls back to a byte compare if either
+// side fails to parse as JSON.
+func DependencyMetadataEqual(a, b string) bool {
+	aCanon, aErr := jcs.Transform([]byte(a))
+	bCanon, bErr := jcs.Transform([]byte(b))
+	if aErr != nil || bErr != nil {
+		return a == b
+	}
+	return bytes.Equal(aCanon, bCanon)
+}
 
 type DepTargetKind int
 
@@ -275,13 +294,18 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// Check for existing dependency between the same pair. Use the resolved
 	// target expression defensively so stale/reclassified rows in another typed
 	// target column cannot bypass the idempotency/conflict check.
-	var existingType, existingMetadata string
+	var existingType string
+	var existingMetadataNS sql.NullString
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
 	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadata)
+		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS)
 	if err == nil {
+		existingMetadata := existingMetadataNS.String
+		if !existingMetadataNS.Valid {
+			existingMetadata = "{}"
+		}
 		if existingType == string(dep.Type) {
-			if existingMetadata == metadata {
+			if DependencyMetadataEqual(existingMetadata, metadata) {
 				// Same type, same metadata: a change-free write. Nothing is
 				// written and nothing is journaled (#5898 R3).
 				return false, nil

@@ -49,6 +49,12 @@ func TestDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t *test
 	conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t, ctx, fixture)
 }
 
+func TestDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "idemmetasame")
+	defer cleanup()
+	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, ctx, fixture)
+}
+
 func TestDependencyEditorRepeatsWithinOneRequestCollapse(t *testing.T) {
 	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "repeat")
 	defer cleanup()
