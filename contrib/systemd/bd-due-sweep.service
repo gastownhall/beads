@@ -1,0 +1,22 @@
+[Unit]
+Description=Fire beads whose due date has arrived
+Documentation=https://github.com/gastownhall/beads/blob/main/contrib/systemd/README.md
+# A failed sweep is announced rather than buried in the journal. Without this
+# a clock fails silently, which is worse than no clock: everything downstream
+# keeps reading an ever-staler world and nothing says why.
+OnFailure=bd-due-sweep-failure.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/libexec/bd-due-sweep.sh
+
+# The workspace is the one setting with no sensible default. Override it (and
+# anything else) with a drop-in rather than editing this file:
+#   systemctl --user edit bd-due-sweep.service
+Environment=BD_DUE_SWEEP_WORKSPACE=%h
+Environment=BD_DUE_SWEEP_TIMEOUT=120
+
+# The sweep's own timeout bounds the work; this bounds a script wedged outside
+# it. Comfortably larger, so the inner timeout is what normally fires and the
+# failure names the sweep rather than the unit.
+TimeoutStartSec=300

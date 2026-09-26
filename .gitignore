@@ -59,6 +59,11 @@ Thumbs.db
 .beads/db.sqlite
 .beads/bd.db
 
+# Notify outbox: local delivery state (which rows THIS machine has handed to a
+# transport), not shared issue data. Committing it would sync one machine's
+# ack cursor onto every clone.
+.beads/notify/
+
 # Ignore nix result
 result
 
