@@ -237,6 +237,22 @@ type migrationSource struct {
 	// TestSentinelTablesAreCreatedByTheSeries enforces the creating side only;
 	// the dropping side is this comment.
 	sentinelTables []string
+	// sentinelFlooredTables are clone-local tables whose absence contradicts an
+	// otherwise at-latest cursor, but — unlike sentinelTables — only back to
+	// each table's own replayFloor rather than unconditionally to 0. events,
+	// bd_events_journal, and bd_events_seq are dolt_ignored (never part of
+	// committed history, so a fresh clone can arrive at-latest without them)
+	// but floor-0 would replay ignored/0007's unguarded
+	// `UPDATE wisps SET is_blocked = 0` (see schemaSentinelColumn.replayFloor)
+	// for a table absence that says nothing about migrations that predate it.
+	//
+	// INVARIANT: no future migration in this series may DROP or RENAME a
+	// floored sentinel table. Older binaries in the field check their own
+	// sentinel list against the live schema, so removing one would make every
+	// healthy newer database read as "contradicted" to them and replay the
+	// series from their floor. TestSentinelFlooredTablesAreCreatedByTheSeries
+	// enforces the creating side only; the dropping side is this comment.
+	sentinelFlooredTables []schemaSentinelTable
 	// sentinelColumns are clone-local columns whose absence contradicts an
 	// otherwise at-latest cursor. Unlike a missing sentinel table, a missing
 	// column disbelieves the cursor only back to the column's replayFloor: it
@@ -250,6 +266,15 @@ type migrationSource struct {
 	// and replay the series from their floor. TestSentinelColumnsAreCreatedByTheSeries
 	// enforces the creating side only; the dropping side is this comment.
 	sentinelColumns []schemaSentinelColumn
+}
+
+type schemaSentinelTable struct {
+	table string
+	// replayFloor is the highest cursor value this sentinel's absence still
+	// leaves believable — same semantics and the same two constraints as
+	// schemaSentinelColumn.replayFloor, applied to a whole table's presence
+	// instead of one column's.
+	replayFloor int
 }
 
 type schemaSentinelColumn struct {
@@ -296,6 +321,28 @@ var (
 		// missing; wisps is checked too so a partially materialized database
 		// is caught by whichever is absent.
 		sentinelTables: []string{"wisps", "wisp_dependencies"},
+		// events is created by ignored/0019 (floor 18: everything at or below
+		// must stay out of the replay, and 0019 itself must stay in it) and
+		// bd_events_journal/bd_events_seq are both created by ignored/0022
+		// (floor 21, same reasoning). All three are dolt_ignored and never
+		// part of committed history, so a clone can arrive with the cursor
+		// at-latest but without them — exactly the leases shape below, except
+		// a whole-table absence rather than a column-on-an-existing-table one.
+		//
+		// The journal tables are ignored unconditionally; events is the one
+		// version-gated pattern ({"events", 62} below), so strictly its
+		// ignore is only asserted once the main cursor reaches 0062. That is
+		// safe here rather than a hole: this replay runs on the ignored plane,
+		// which migrateUpAfterReconcile only reaches after the main pass
+		// succeeded, and a main pass from below 62 applies
+		// 0062_events_dolt_ignore, whose REPLACE INTO dolt_ignore lands
+		// before the ignored plane is touched. So the clamp can never have
+		// 0019 re-create events as tracked-at-HEAD.
+		sentinelFlooredTables: []schemaSentinelTable{
+			{table: "events", replayFloor: 18},
+			{table: "bd_events_journal", replayFloor: 21},
+			{table: "bd_events_seq", replayFloor: 21},
+		},
 		// A historical ignored-v16 ordinal collision can leave the local
 		// leases table present but without the column frozen 0016 adds; a
 		// database materialized out of band can be missing the leases table
@@ -1392,7 +1439,7 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 // corroborates. limited is false when nothing is missing (believe the cursor as
 // read); otherwise floor is the highest version still believable — 0 for a
 // missing sentinel table, and the sentinel's replayFloor for a missing sentinel
-// column.
+// floored table or sentinel column.
 //
 // Clamping rather than erroring is deliberate: the series is written to be
 // re-runnable against a database that already has some of it.
@@ -1404,8 +1451,10 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 // rather than merely diagnose.
 //
 // Sentinel tables are probed first and short-circuit the whole check: they
-// floor at 0, so no column probe could lower the answer, and skipping it keeps
-// this cheap on the path every store open takes.
+// floor at 0, so no floored-table or column probe could lower the answer, and
+// skipping it keeps this cheap on the path every store open takes. Floored
+// tables are then probed together with columns, each clamping floor to the
+// lowest replayFloor of anything found absent.
 func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int, bool, error) {
 	for _, table := range m.sentinelTables {
 		present, err := sentinelTableExists(ctx, db, table)
@@ -1417,6 +1466,19 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 		}
 	}
 	floor, limited := 0, false
+	for _, st := range m.sentinelFlooredTables {
+		present, err := sentinelTableExists(ctx, db, st.table)
+		if err != nil {
+			return 0, false, fmt.Errorf("checking %s sentinel floored table %s: %w", m.cursorTable, st.table, err)
+		}
+		if present {
+			continue
+		}
+		if !limited || st.replayFloor < floor {
+			floor = st.replayFloor
+		}
+		limited = true
+	}
 	for _, column := range m.sentinelColumns {
 		present, err := sentinelColumnExists(ctx, db, column.table, column.column)
 		if err != nil {
