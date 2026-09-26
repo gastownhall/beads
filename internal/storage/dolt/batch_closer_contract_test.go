@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // The server-backed store's wiring of the BatchCloser contract. Each case gets
@@ -45,6 +46,12 @@ func TestBatchCloserBackendFailureReturnsNoOutcomes(t *testing.T) {
 	fixture, ctx, cleanup := newDoltBatchCloserFixture(t, "bcdeadctx")
 	defer cleanup()
 	conformance.RunBatchCloserBackendFailureReturnsNoOutcomes(t, ctx, fixture)
+}
+
+func TestBatchCloserMidBatchInfrastructureFailureAbortsTheBatch(t *testing.T) {
+	fixture, ctx, cleanup := newDoltBatchCloserFixture(t, "bcmidinfra")
+	defer cleanup()
+	conformance.RunBatchCloserMidBatchInfrastructureFailureAbortsTheBatch(t, ctx, fixture)
 }
 
 func TestBatchCloserIdempotentRecloseIsAPerItemSuccess(t *testing.T) {
@@ -155,6 +162,7 @@ func newDoltBatchCloserFixture(t *testing.T, prefix string) (conformance.BatchCl
 		QueryScalar:          kit.QueryScalar,
 		CountHistory:         kit.CountHistory,
 		CountHistoryMatching: kit.CountHistoryMatching,
+		FailHydrationOf:      storageissueops.FailBatchCloseHydrationOf,
 	}
 	return fixture, ctx, func() {
 		cancel()

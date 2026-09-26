@@ -18,6 +18,8 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+
+	"github.com/steveyegge/beads/issueops"
 )
 
 // dsn is the shape a driver or dial error takes in the wild: it names the
@@ -43,6 +45,25 @@ func TestProblemMapping(t *testing.T) {
 			err:        fmt.Errorf("get issue bd-1: %w", storage.ErrNotFound),
 			wantStatus: http.StatusNotFound,
 			wantCode:   CodeNotFound,
+		},
+		{
+			// Phase outranks sentinel: a post-write-marked ErrNotFound (reload
+			// or journal miss after a close landed) is infrastructure, never a
+			// client-addressable 404.
+			name:       "post-write marked not found",
+			err:        fmt.Errorf("close batch item x: %w", issueops.MarkPostWrite(fmt.Errorf("reload: %w", storage.ErrNotFound))),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   CodeInternal,
+		},
+		{
+			// The post-write override is scoped to miss sentinels only: a
+			// retryable busy error keeps its code and Retry-After semantics
+			// even when phase-marked.
+			name:       "post-write marked busy stays busy",
+			err:        issueops.MarkPostWrite(fmt.Errorf("journal snapshot: %w", ErrBusy)),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeBusy,
+			retryAfter: retryAfterSaturation,
 		},
 		{
 			// The real seam shape: the SQL repository returns a bare
