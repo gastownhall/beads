@@ -28,6 +28,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Bead Me Up, Scotty](https://github.com/brendan-appstart/bead-me-up-scotty)** - Polished multi-project web UI for creating, updating, and prioritizing beads across all your repos from one place. Kanban board with drag-and-drop status changes and reordering, plus list, epics (with progress bars), and dependency-graph views; faceted filtering and full-text search; live updates via SSE that react the moment `.beads/` changes; and human-vs-agent attribution throughout. Uses the `bd` CLI for full Dolt compatibility. Global install (`scotty`) opens the current directory's project in your browser, and a built-in Publish view generates a shareable static showcase site from your beads. Live demo at [beadmeupscotty.com](https://beadmeupscotty.com). Built by [@brendan-appstart](https://github.com/brendan-appstart). (Next.js/TypeScript)
 
+- **[Maggie](https://github.com/mulgadc/maggie)** - Single Go binary with the SPA embedded, serving dashboard, table, board and dependency graph views. Text, id glob, priority, type, assignee, label and status filters compose in one filter bar. Uses the `bd` CLI for every read and write, keeping no store of its own. Runs from a container that bundles `bd` and `dolt`, against either a local `.beads/` directory or a shared Dolt SQL server. Built by [@mulgadc](https://github.com/mulgadc). (Go/React)
+
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and server management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
