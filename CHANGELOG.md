@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Explicit `bd update --claim` and direct `bd close` now enforce unsatisfied
+  external capability dependencies. Mixed close batches still commit eligible
+  items together, and `--claim-next` skips externally blocked work even when
+  `--force` overrides the close guard.
+
 - **The smart migrate gate no longer auto-migrates a clone whose data is behind
   the remote, and `bd dolt pull` now works from that state**
   ([#6575](https://github.com/gastownhall/beads/issues/6575)). The gate's

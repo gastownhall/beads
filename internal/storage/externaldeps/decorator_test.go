@@ -512,6 +512,49 @@ func TestIssueLifecycleRefusesExternalCloseAndDoneUpdate(t *testing.T) {
 	}
 }
 
+func TestIssueLifecycleClaimExternalPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		depType        types.DependencyType
+		providerStatus types.Status
+		labelErr       error
+		wantBlocked    bool
+	}{
+		{"unshipped", types.DepBlocks, types.StatusOpen, nil, true},
+		{"shipped", types.DepBlocks, types.StatusClosed, nil, false},
+		{"unreadable", types.DepBlocks, types.StatusClosed, errors.New("foreign read failed"), true},
+		{"nonblocking", types.DepRelated, types.StatusOpen, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &fakeLifecycle{}
+			raw := &fakeStore{lifecycle: lifecycle, deps: map[string][]*types.Dependency{
+				"be-consumer": {externalDep("be-consumer", "external:remote:payments", tc.depType)},
+			}}
+			foreign := &fakeStore{labelErr: tc.labelErr, labels: map[string][]*types.Issue{
+				"provides:payments": {{ID: "remote-provider", Status: tc.providerStatus}},
+			}}
+			ops, err := testStore(raw, foreign, true).IssueLifecycle()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ops.Update(t.Context(), publicops.UpdateRequest{IssueID: "be-consumer", Actor: "worker", Claim: true})
+			if errors.Is(err, storage.ErrCloseBlocked) != tc.wantBlocked {
+				t.Fatalf("claim error = %v, want blocked=%v", err, tc.wantBlocked)
+			}
+			if !tc.wantBlocked && err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := 1
+			if tc.wantBlocked {
+				wantCalls = 0
+			}
+			if lifecycle.updated != wantCalls {
+				t.Fatalf("inner updates = %d, want %d", lifecycle.updated, wantCalls)
+			}
+		})
+	}
+}
+
 func TestGetBlockedIssuesPaginatesCombinedExternalResults(t *testing.T) {
 	local, external := issue("be-local"), issue("be-external")
 	createdAt := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)

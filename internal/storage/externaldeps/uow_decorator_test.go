@@ -266,6 +266,17 @@ func TestWrapUOWProviderGuardsDoneUpdatesAndWispCloses(t *testing.T) {
 		t.Fatalf("NewUOW: %v", err)
 	}
 	issueUC := uw.IssueUseCase()
+	for _, id := range []string{durable.ID, wisp.ID} {
+		if _, err := issueUC.ApplyUpdate(t.Context(), id, domain.UpdateSpec{Claim: true, Fields: map[string]any{"notes": "must not be written"}}, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
+			t.Fatalf("ApplyUpdate claim %s: %v, want ErrCloseBlocked", id, err)
+		}
+	}
+	if _, err := issueUC.ClaimIssue(t.Context(), durable.ID, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("ClaimIssue error = %v, want ErrCloseBlocked", err)
+	}
+	if _, err := issueUC.ClaimWisp(t.Context(), wisp.ID, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("ClaimWisp error = %v, want ErrCloseBlocked", err)
+	}
 	if _, err := issueUC.ApplyUpdate(t.Context(), durable.ID, domain.UpdateSpec{Fields: map[string]any{"status": string(types.StatusClosed)}}, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("ApplyUpdate error = %v, want ErrCloseBlocked", err)
 	}
@@ -281,6 +292,16 @@ func TestWrapUOWProviderGuardsDoneUpdatesAndWispCloses(t *testing.T) {
 	}
 	if ids := blockedIssueIDs(blocked); !slices.Equal(ids, []string{durable.ID, wisp.ID}) {
 		t.Fatalf("blocked IDs = %v, want [%s %s]", ids, durable.ID, wisp.ID)
+	}
+	durable.Status, wisp.Status = types.StatusClosed, types.StatusClosed
+	if _, err := issueUC.CloseIssueChecked(t.Context(), durable.ID, domain.CloseIssueParams{}, "tester", false); err != nil {
+		t.Fatalf("durable re-close: %v", err)
+	}
+	if _, err := issueUC.CloseWispChecked(t.Context(), wisp.ID, domain.CloseIssueParams{}, "tester", false); err != nil {
+		t.Fatalf("wisp re-close: %v", err)
+	}
+	if !slices.Equal(issues.closed, []string{durable.ID, wisp.ID}) {
+		t.Fatalf("re-closes did not reach the backend: %v", issues.closed)
 	}
 }
 

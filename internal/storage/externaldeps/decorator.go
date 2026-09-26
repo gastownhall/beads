@@ -64,6 +64,11 @@ func (l *lifecycle) Create(ctx context.Context, request publicops.CreateRequest)
 }
 
 func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	if request.Claim {
+		if err := l.policy.guardExternalClose(ctx, request.IssueID, false); err != nil {
+			return publicops.UpdateResult{}, err
+		}
+	}
 	if request.Patch.Status.Set && string(request.Patch.Status.Value) == string(types.StatusClosed) {
 		if err := l.policy.guardExternalClose(ctx, request.IssueID, request.ForceClosePolicy); err != nil {
 			return publicops.UpdateResult{}, err

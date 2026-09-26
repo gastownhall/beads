@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -113,6 +114,8 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	}
 	inner := stubs(nil)
 	middle := stubs(inner)
+	policyReadErr := errors.New("external dependency lookup failed")
+	middle.dependencyReadErr = policyReadErr
 	chained := wireStorageDecorators(middle, hooks.NewRunner(t.TempDir()), false)
 
 	if _, ok := chained.(*storage.HookFiringStore); !ok {
@@ -232,8 +235,17 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	if storage.RoleFiresHooks(roles.readyClaimer) {
 		t.Error("bd serve would run this workspace's hooks on every HTTP ready claim")
 	}
-	if storage.RoleFiresHooks(roles.batchCloser) || roles.batchCloser != issueops.BatchCloser(middle.batchCloser) {
-		t.Errorf("batch closer came from %p, want the layer directly beneath the hooks (%p)", roles.batchCloser, middle.batchCloser)
+	if storage.RoleFiresHooks(roles.batchCloser) {
+		t.Error("bd serve would run this workspace's hooks on every HTTP batch close")
+	}
+	// A failed external-policy lookup must still refuse the served close.
+	// Peeling away that policy would reach the raw stub's ErrUnsupported instead.
+	_, err = roles.batchCloser.CloseBatch(context.Background(), issueops.CloseBatchRequest{
+		Actor: "serve-test",
+		Items: []issueops.BatchCloseItem{{IssueID: "bd-blocked"}},
+	})
+	if !errors.Is(err, policyReadErr) {
+		t.Errorf("served batch closer lost external policy: got %v, want %v", err, policyReadErr)
 	}
 	if storage.RoleFiresHooks(roles.batchCreator) || roles.batchCreator != issueops.BatchCreator(middle.batchCreator) {
 		t.Errorf("batch creator came from %p, want the layer directly beneath the hooks (%p)", roles.batchCreator, middle.batchCreator)
@@ -419,6 +431,11 @@ var _ serveRoleSource = (*serveRolesStore)(nil)
 type serveRolesDoltStore struct {
 	*serveRolesStore
 	serveStubRest
+	dependencyReadErr error
+}
+
+func (s *serveRolesDoltStore) GetAllDependencyRecords(context.Context) (map[string][]*types.Dependency, error) {
+	return nil, s.dependencyReadErr
 }
 
 // serveStubRest carries the remainder of storage.DoltStorage for a stub that

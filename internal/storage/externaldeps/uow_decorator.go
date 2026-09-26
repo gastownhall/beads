@@ -3,6 +3,7 @@ package externaldeps
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -319,26 +320,57 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 }
 
 func (u *issueUseCase) CloseIssueChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
-	if err := u.guardExternalClose(ctx, id, force); err != nil {
+	if err := u.guardExternalCheckedClose(ctx, id, force, u.IssueUseCase.GetIssue); err != nil {
 		return domain.CloseIssueResult{}, err
 	}
 	return u.IssueUseCase.CloseIssueChecked(ctx, id, params, actor, force)
 }
 
 func (u *issueUseCase) CloseWispChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
-	if err := u.guardExternalClose(ctx, id, force); err != nil {
+	if err := u.guardExternalCheckedClose(ctx, id, force, u.IssueUseCase.GetWisp); err != nil {
 		return domain.CloseIssueResult{}, err
 	}
 	return u.IssueUseCase.CloseWispChecked(ctx, id, params, actor, force)
 }
 
+func (u *issueUseCase) guardExternalCheckedClose(ctx context.Context, id string, force bool, get func(context.Context, string) (*types.Issue, error)) error {
+	err := u.guardExternalClose(ctx, id, force)
+	if !errors.Is(err, storage.ErrCloseBlocked) {
+		return err
+	}
+	current, readErr := get(ctx, id)
+	if readErr != nil {
+		return readErr
+	}
+	// The backend owns not-found and idempotent re-close behavior. The
+	// snapshot must not turn an already-settled close into a refusal.
+	if current == nil || current.Status == types.StatusClosed {
+		return nil
+	}
+	return err
+}
+
 func (u *issueUseCase) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
-	if isClosedUpdate(spec.Fields) {
+	if spec.Claim || isClosedUpdate(spec.Fields) {
 		if err := u.guardExternalClose(ctx, id, false); err != nil {
 			return nil, err
 		}
 	}
 	return u.IssueUseCase.ApplyUpdate(ctx, id, spec, actor)
+}
+
+func (u *issueUseCase) ClaimIssue(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
+	if err := u.guardExternalClose(ctx, id, false); err != nil {
+		return domain.ClaimResult{}, err
+	}
+	return u.IssueUseCase.ClaimIssue(ctx, id, actor)
+}
+
+func (u *issueUseCase) ClaimWisp(ctx context.Context, id, actor string) (domain.ClaimResult, error) {
+	if err := u.guardExternalClose(ctx, id, false); err != nil {
+		return domain.ClaimResult{}, err
+	}
+	return u.IssueUseCase.ClaimWisp(ctx, id, actor)
 }
 
 func isClosedUpdate(fields map[string]any) bool {
