@@ -4,6 +4,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,10 +26,12 @@ func sqlCountValue(v any) (float64, bool) {
 	}
 }
 
-// TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce pins both halves
-// of GH#4995 on the proxied route: dolt.auto-commit=batch must leave writes in
-// the working set (no Dolt commit per write), and `bd dolt commit` must mint
-// exactly one commit for the whole batch.
+// TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce pins every half of
+// GH#4995 on the proxied route: dolt.auto-commit=batch must leave policy writes
+// in the working set (no Dolt commit per write), `bd dolt commit` must mint
+// exactly one commit for the whole batch and attribute it to the actor, and the
+// explicit commit points must keep minting their own commit with the caller's
+// message despite the route-wide deferral.
 //
 // Before the proxied flush point existed, step 3 below failed with
 // "no store available": proxied mode returns from the root pre-run before
@@ -50,6 +54,16 @@ func TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce(t *testing.T) {
 			t.Fatalf("dolt_log count is not numeric: %#v", rows[0]["count"])
 		}
 		return n
+	}
+
+	headCommit := func(t *testing.T) map[string]interface{} {
+		t.Helper()
+		rows := bdProxiedSQLJSON(t, bd, p.dir,
+			"SELECT message, committer, email FROM dolt_log ORDER BY date DESC LIMIT 1")
+		if len(rows) != 1 {
+			t.Fatalf("expected one dolt_log row for HEAD, got %d: %v", len(rows), rows)
+		}
+		return rows[0]
 	}
 
 	head0 := doltLogCount(t)
@@ -81,7 +95,8 @@ func TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce(t *testing.T) {
 	}
 
 	// 3. The explicit flush point mints exactly one commit for the batch.
-	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dolt", "commit", "-m", "batch flush")
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+		"--actor", "flush-actor", "dolt", "commit", "-m", "batch flush")
 	if err != nil {
 		t.Fatalf("bd dolt commit failed in proxied mode: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
@@ -90,6 +105,21 @@ func TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce(t *testing.T) {
 	}
 	if got, want := doltLogCount(t), head0+1; got != want {
 		t.Fatalf("bd dolt commit did not advance HEAD exactly once: dolt_log %v -> %v (want %v)", head0, got, want)
+	}
+
+	// 3b. The flush is attributed to the bd actor, not the SQL session user.
+	// Under batch mode this is the only commit a whole batch of writes leaves
+	// behind, so `dolt log` has to be able to say whose batch it was — the
+	// '--author' DoltStorage.CommitAll passes on the direct route.
+	head := headCommit(t)
+	if got := head["message"]; got != "batch flush" {
+		t.Fatalf("flush commit message = %v, want %q (row: %v)", got, "batch flush", head)
+	}
+	if got := head["committer"]; got != "flush-actor" {
+		t.Fatalf("flush commit is not attributed to the actor: committer = %v, want %q (row: %v)", got, "flush-actor", head)
+	}
+	if got := head["email"]; got != "test@test.com" {
+		t.Fatalf("flush commit email = %v, want the git identity %q (row: %v)", got, "test@test.com", head)
 	}
 
 	// 4. A second flush with nothing pending is a no-op, not a second commit.
@@ -114,5 +144,48 @@ func TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce(t *testing.T) {
 	}
 	if got, want := doltLogCount(t), before+1; got != want {
 		t.Fatalf("auto-commit=on did not commit per write: dolt_log %v -> %v (want %v)", before, got, want)
+	}
+
+	// 6. The deferral is per commit CLASS, not per route: `bd batch -m` is an
+	// explicit commit point (its direct-route twin calls transact, which mints
+	// regardless of policy), so under batch it must still commit, carrying the
+	// caller's message. A plain create in the same policy is the control.
+	before = doltLogCount(t)
+	stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir,
+		"--dolt-auto-commit", "batch", "create", "deferred control write", "-p", "1")
+	if err != nil {
+		t.Fatalf("control create under batch failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got := doltLogCount(t); got != before {
+		t.Fatalf("control create minted a commit under batch: dolt_log %v -> %v (want unchanged)", before, got)
+	}
+
+	script := filepath.Join(p.dir, "explicit-batch.txt")
+	if err := os.WriteFile(script, []byte("create task 1 explicit batch write\n"), 0o600); err != nil {
+		t.Fatalf("write batch script: %v", err)
+	}
+	stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir,
+		"--dolt-auto-commit", "batch", "batch", "-f", script, "-m", "explicit batch commit")
+	if err != nil {
+		t.Fatalf("bd batch under batch policy failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got, want := doltLogCount(t), before+1; got != want {
+		t.Fatalf("explicit batch commit did not mint exactly one commit under batch: dolt_log %v -> %v (want %v)", before, got, want)
+	}
+	// The message is the half a route-wide deferral silently drops: blanking it
+	// selects the plain-COMMIT form, which persists the rows and records nothing.
+	if got := headCommit(t)["message"]; got != "explicit batch commit" {
+		t.Fatalf("explicit batch commit lost the caller's message: %v (want %q)", got, "explicit batch commit")
+	}
+
+	// 7. That commit swept the deferred control write with it (DOLT_COMMIT
+	// '-Am'), so the working set is clean and a flush now has nothing to do —
+	// the exemption does not strand the writes the policy deferred.
+	stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "dolt", "commit", "-m", "post-batch flush")
+	if err != nil {
+		t.Fatalf("flush after explicit batch commit failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Nothing to commit.") {
+		t.Fatalf("flush after explicit batch commit found pending work:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 }

@@ -30,6 +30,15 @@ func exitCodeFromError(err error) (int, bool) {
 	return 0, false
 }
 
+// isReportedExit reports whether err is an already-rendered failure — the
+// *exitError every Handle*Error returns after writing the message (or the JSON
+// error envelope) itself. A caller that re-wraps one prints a second Error line
+// and, in --json mode, a plain line after the envelope.
+func isReportedExit(err error) bool {
+	_, reported := exitCodeFromError(err)
+	return reported
+}
+
 func activeWorkspaceNotFoundError() string {
 	return "no active beads workspace found"
 }

@@ -245,6 +245,30 @@ func TestDoltServerTxCommitDefersDoltCommitUnderDeferredContext(t *testing.T) {
 	}
 }
 
+// TestDoltServerTxCommitHonorsImmediateVersionCommit pins the other half of the
+// GH#4995 policy: the proxied route applies the deferral ONCE, to the root
+// context, so the explicit commit points — the duals whose direct-route twin
+// calls transact and mints a Dolt commit whatever dolt.auto-commit says — opt
+// back out with issueops.WithImmediateVersionCommit. The caller's message must
+// then survive all the way to DOLT_COMMIT; blanking it would persist the rows
+// and record nothing, which is what `bd batch -m` must never do.
+func TestDoltServerTxCommitHonorsImmediateVersionCommit(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectPendingChanges(mock, 1)
+	mock.ExpectExec("DOLT_COMMIT").WithArgs("bd: batch 3 ops by tester").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	tx, err := p.BeginTx(context.Background())
+	require.NoError(t, err)
+
+	// Composed in the order the proxied CLI composes them: the route-wide
+	// deferral from the pre-run, then the exemption from the dual.
+	ctx := issueops.WithImmediateVersionCommit(issueops.WithDeferredVersionCommit(context.Background()))
+	require.NoError(t, tx.Commit(ctx, "bd: batch 3 ops by tester"))
+	require.NoError(t, mock.ExpectationsWereMet())
+	assert.Equal(t, 1, p.db.Stats().OpenConnections, "session must cleanly return to pool")
+}
+
 // TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit verifies that a complete
 // unit of work executed via RunTx under deferred version commit commits via plain
 // COMMIT and succeeds without advancing Dolt history (GH#4995).

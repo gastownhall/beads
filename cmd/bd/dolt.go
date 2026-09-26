@@ -760,9 +760,15 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 			committed, err = st.CommitAll(ctx, msg)
 		}
 		if err != nil {
-			if isDoltNothingToCommit(err) {
+			switch {
+			case isDoltNothingToCommit(err):
 				committed = false
-			} else {
+			case isReportedExit(err):
+				// The proxied route reports provider failures itself, through
+				// HandleErrorRespectJSON, so the JSON envelope is already on
+				// stdout; re-wrapping would print a second, plain Error line.
+				return err
+			default:
 				return HandleError("%v", err)
 			}
 		}

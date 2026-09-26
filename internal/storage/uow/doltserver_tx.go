@@ -46,11 +46,16 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	}
 	// An empty message selects the EPHEMERAL commit form (bd-aq0ql): a plain
 	// SQL COMMIT persists the transaction's writes into the working set
-	// without minting a Dolt commit or history. This exists for work that
-	// touches ONLY dolt_ignored state — today the leases table (bd-lrgn1),
-	// whose heartbeats must never create commits — and is only reachable via
-	// uow.RunTxEphemeral: RunTx/RunTxResult treat an empty commitMsg as
-	// "nothing to commit" and never call Commit at all.
+	// without minting a Dolt commit or history. It has two entry points:
+	//
+	//   - uow.RunTxEphemeral, for work that touches ONLY dolt_ignored state —
+	//     today the leases table (bd-lrgn1), whose heartbeats must never create
+	//     commits. RunTx/RunTxResult treat an empty commitMsg as "nothing to
+	//     commit" and never call Commit at all, so they cannot reach it that way.
+	//   - RunTx/RunTxResult under a deferred-version-commit context, via the
+	//     blanking just above (GH#4995). There the writes are ordinary versioned
+	//     rows and the ONLY-dolt_ignored-state rationale does not apply: the
+	//     working set is meant to hold them until the explicit flush point.
 	stmt, args := "CALL DOLT_COMMIT('-Am', ?);", []interface{}{message}
 	if message == "" {
 		stmt, args = "COMMIT;", nil
