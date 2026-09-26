@@ -26,16 +26,17 @@ type Config struct {
 	// Dolt connection mode configuration (bd-dolt.2.2)
 	// "embedded" (default for standalone) runs Dolt in-process.
 	// "server" connects to an external dolt sql-server (required for orchestrator / multi-writer).
-	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
-	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
-	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
-	DoltServerSocket   string `json:"dolt_server_socket,omitempty"`   // Unix domain socket path (overrides host/port)
-	DoltServerUser     string `json:"dolt_server_user,omitempty"`     // MySQL user (default: root)
-	DoltDatabase       string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
-	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
-	DoltDataDir        string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
-	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
-	DoltTeamServer     bool   `json:"dolt_team_server,omitempty"`     // Schema is managed by beads-team-server (bts); bd never runs migrations (proxied-server mode only)
+	DoltMode                         string `json:"dolt_mode,omitempty"`                            // "embedded" (default) or "server"
+	DoltServerHost                   string `json:"dolt_server_host,omitempty"`                     // Server host (default: 127.0.0.1)
+	DoltServerPort                   int    `json:"dolt_server_port,omitempty"`                     // Server port (default: 3307)
+	DoltServerSocket                 string `json:"dolt_server_socket,omitempty"`                   // Unix domain socket path (overrides host/port)
+	DoltServerUser                   string `json:"dolt_server_user,omitempty"`                     // MySQL user (default: root)
+	DoltDatabase                     string `json:"dolt_database,omitempty"`                        // SQL database name (default: beads)
+	DoltServerTLS                    bool   `json:"dolt_server_tls,omitempty"`                      // Enable TLS for server connections (required for Hosted Dolt)
+	DoltServerAllowCleartextPassword bool   `json:"dolt_server_allow_cleartext_password,omitempty"` // Allow mysql_clear_password auth for server connections (needs dolt_server_tls)
+	DoltDataDir                      string `json:"dolt_data_dir,omitempty"`                        // Custom dolt data directory (absolute path; default: .beads/dolt)
+	DoltRemotesAPIPort               int    `json:"dolt_remotesapi_port,omitempty"`                 // Dolt remotesapi port for federation (default: 8080)
+	DoltTeamServer                   bool   `json:"dolt_team_server,omitempty"`                     // Schema is managed by beads-team-server (bts); bd never runs migrations (proxied-server mode only)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
 	// Deprecated backend fields are retained only to round-trip metadata written by
@@ -617,6 +618,53 @@ func (c *Config) GetDoltServerTLS() bool {
 		return t == "1" || strings.ToLower(t) == "true"
 	}
 	return c.DoltServerTLS
+}
+
+// GetDoltServerAllowCleartextPassword mirrors GetDoltServerTLS (env
+// BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD, then config). Reports the
+// configured value raw, with no TLS gate — most callers want
+// GetDoltServerAllowCleartextPasswordChecked or ValidateServerAuthConfig
+// instead, so a missed gate degrades to the driver's own refusal rather
+// than a password in the clear.
+func (c *Config) GetDoltServerAllowCleartextPassword() bool {
+	if t := os.Getenv("BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD"); t != "" {
+		return t == "1" || strings.ToLower(t) == "true"
+	}
+	return c.DoltServerAllowCleartextPassword
+}
+
+// ValidateServerAuthConfig refuses a config that would send a MySQL server
+// password in the clear. It is the single place that owns the refusal text,
+// so every server-DSN builder — internal/storage/dolt.New and every direct
+// doltutil.ServerDSN / dbproxy/util.DoltServerDSN construction alongside it —
+// reports the same error naming both settings and both env vars involved.
+// Callers pass the two resolved values (env > config) rather than a *Config,
+// so this also gates builders that read TLS/cleartext from a plain bool
+// field (e.g. internal/storage/dolt.Config) rather than from configfile
+// directly.
+func ValidateServerAuthConfig(allowCleartext, tls bool) error {
+	if allowCleartext && !tls {
+		return fmt.Errorf(
+			"dolt_server_allow_cleartext_password is set without dolt_server_tls: " +
+				"refusing to send the MySQL password in the clear. " +
+				"Enable TLS (dolt_server_tls / BEADS_DOLT_SERVER_TLS=1) or unset " +
+				"dolt_server_allow_cleartext_password (BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD)")
+	}
+	return nil
+}
+
+// GetDoltServerAllowCleartextPasswordChecked resolves the cleartext-auth flag
+// together with TLS and refuses the combination that would send a password
+// in the clear (ValidateServerAuthConfig owns the refusal text). Every
+// server-DSN builder that already has a *Config in hand should call this
+// instead of GetDoltServerAllowCleartextPassword, so a missed TLS pairing
+// fails the open instead of silently building an unsafe DSN.
+func (c *Config) GetDoltServerAllowCleartextPasswordChecked() (bool, error) {
+	allow := c.GetDoltServerAllowCleartextPassword()
+	if err := ValidateServerAuthConfig(allow, c.GetDoltServerTLS()); err != nil {
+		return false, err
+	}
+	return allow, nil
 }
 
 // GetDoltDataDir returns the custom dolt data directory path.

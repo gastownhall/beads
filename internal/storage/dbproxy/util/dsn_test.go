@@ -34,3 +34,38 @@ func TestDoltServerDSN_TLS(t *testing.T) {
 		}
 	})
 }
+
+func TestDoltServerDSN_AllowCleartextPasswords(t *testing.T) {
+	t.Run("enabled alongside TLSRequired", func(t *testing.T) {
+		dsn := DoltServerDSN{Host: "127.0.0.1", Port: 3306, User: "root", TLSRequired: true, AllowCleartextPasswords: true}.String()
+		if !strings.Contains(dsn, "allowCleartextPasswords=true") {
+			t.Fatalf("dsn %q missing allowCleartextPasswords=true", dsn)
+		}
+	})
+
+	t.Run("enabled alongside a registered TLSConfigName", func(t *testing.T) {
+		dsn := DoltServerDSN{Host: "127.0.0.1", Port: 3306, User: "root", TLSConfigName: "beads-external-abc", AllowCleartextPasswords: true}.String()
+		if !strings.Contains(dsn, "allowCleartextPasswords=true") {
+			t.Fatalf("dsn %q missing allowCleartextPasswords=true", dsn)
+		}
+	})
+
+	t.Run("fails safe without TLS", func(t *testing.T) {
+		// String() doesn't refuse the combination — that refusal is
+		// configfile.ValidateServerAuthConfig / ExternalDoltConfig.Validate,
+		// called by every builder — but it must never emit the flag without
+		// TLS, so a missed gate degrades to the driver's own refusal instead
+		// of a password sent in the clear.
+		dsn := DoltServerDSN{Host: "127.0.0.1", Port: 3306, User: "root", AllowCleartextPasswords: true}.String()
+		if strings.Contains(dsn, "allowCleartextPasswords") {
+			t.Fatalf("dsn %q should omit allowCleartextPasswords without TLS", dsn)
+		}
+	})
+
+	t.Run("omitted by default", func(t *testing.T) {
+		dsn := DoltServerDSN{Host: "127.0.0.1", Port: 3306, User: "root", TLSRequired: true}.String()
+		if strings.Contains(dsn, "allowCleartextPasswords") {
+			t.Fatalf("dsn %q should omit allowCleartextPasswords by default", dsn)
+		}
+	})
+}

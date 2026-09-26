@@ -72,8 +72,11 @@ Configuration keys for 'bd dolt set':
 Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
 (keeps secrets out of metadata.json). Configure them with:
 
-  BEADS_DOLT_PASSWORD       Server password (highest priority)
-  BEADS_DOLT_SERVER_TLS     Enable TLS (set to "1" or "true")
+  BEADS_DOLT_PASSWORD                      Server password (highest priority)
+  BEADS_DOLT_SERVER_TLS                    Enable TLS (set to "1" or "true")
+  BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD
+                                            Allow mysql_clear_password auth
+                                            ("1"/"true"); requires BEADS_DOLT_SERVER_TLS=1
   BEADS_DOLT_SERVER_USER    MySQL user override (else use 'bd dolt set user')
   BEADS_CREDENTIALS_FILE    Optional path to credentials file
 
@@ -94,7 +97,9 @@ Examples:
   bd dolt set host 192.168.1.100 --update-config
   bd dolt set data-dir /home/user/.beads-dolt/myproject
   export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
-  bd dolt test`,
+  export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1 BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD=1
+  bd list           # bd dolt test only probes an unauthenticated TCP greeting;
+                     # it confirms neither setting. bd list (or bd doctor) does.`,
 }
 
 var doltShowCmd = &cobra.Command{
@@ -124,9 +129,20 @@ Keys:
 There is no 'password' or 'tls' key here on purpose — secrets and TLS must
 not land in metadata.json. Use environment variables or the credentials file:
 
-  BEADS_DOLT_PASSWORD     Server password (highest priority)
-  BEADS_DOLT_SERVER_TLS   Enable TLS ("1" or "true")
+  BEADS_DOLT_PASSWORD                         Server password (highest priority)
+  BEADS_DOLT_SERVER_TLS                       Enable TLS ("1" or "true")
+  BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD  Allow mysql_clear_password auth
+                                               ("1" or "true"); requires TLS
   BEADS_CREDENTIALS_FILE  Optional override path for credentials
+
+dolt_server_allow_cleartext_password IS intended as a metadata.json key too
+(mirroring dolt_server_tls): unlike password, it is not a secret, so it round-
+trips through 'bd dolt show' / 'bd config show'. It is read in this order —
+BEADS_DOLT_SERVER_ALLOW_CLEARTEXT_PASSWORD, then metadata.json, then the
+central ~/.config/beads/server.json — never config.yaml, which this key has
+no field for. 'bd dolt set' just doesn't write metadata.json for this key,
+same reasoning as tls: edit metadata.json or server.json by hand, or use the
+env var.
 
   Default credentials file: ~/.config/beads/credentials
   Format:
@@ -1280,15 +1296,6 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	tls := cfg.GetDoltServerTLS()
 	password := cfg.GetDoltServerPasswordForPort(port)
 
-	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      tls,
-		Timeout:  5 * time.Second,
-	}.String()
-
 	result := map[string]interface{}{
 		"mode":     "external",
 		"host":     host,
@@ -1298,24 +1305,47 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 		"tls":      tls,
 	}
 
-	db, openErr := sql.Open("mysql", dsn)
 	var running bool
 	var version string
 	var connErr error
 
-	if openErr == nil {
-		defer db.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if pingErr := db.PingContext(ctx); pingErr != nil {
-			connErr = pingErr
-		} else {
-			running = true
-			// Best-effort version lookup; don't treat errors as fatal.
-			_ = db.QueryRowContext(ctx, "SELECT @@version").Scan(&version)
-		}
+	// A refused auth config (cleartext without TLS) is reported the same way
+	// as any other connection failure below, rather than skipping straight
+	// to "not reachable" with no explanation. Report the CONFIGURED value
+	// even when it is refused — GetDoltServerAllowCleartextPasswordChecked
+	// returns false on refusal, which would otherwise misstate a flag that
+	// is actually set to true.
+	configuredCleartext := cfg.GetDoltServerAllowCleartextPassword()
+	allowCleartext, authErr := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	result["allow_cleartext_password"] = configuredCleartext
+	if authErr != nil {
+		connErr = authErr
 	} else {
-		connErr = openErr
+		dsn := doltutil.ServerDSN{
+			Host:                    host,
+			Port:                    port,
+			User:                    user,
+			Password:                password,
+			TLS:                     tls,
+			AllowCleartextPasswords: allowCleartext,
+			Timeout:                 5 * time.Second,
+		}.String()
+
+		db, openErr := sql.Open("mysql", dsn)
+		if openErr == nil {
+			defer db.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if pingErr := db.PingContext(ctx); pingErr != nil {
+				connErr = pingErr
+			} else {
+				running = true
+				// Best-effort version lookup; don't treat errors as fatal.
+				_ = db.QueryRowContext(ctx, "SELECT @@version").Scan(&version)
+			}
+		} else {
+			connErr = openErr
+		}
 	}
 
 	result["running"] = running
@@ -1343,6 +1373,7 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	fmt.Printf("  Database: %s\n", database)
 	fmt.Printf("  User:     %s\n", user)
 	fmt.Printf("  TLS:      %t\n", tls)
+	fmt.Printf("  Cleartext password auth: %t\n", configuredCleartext)
 	if version != "" {
 		fmt.Printf("  Version:  %s\n", version)
 	}
@@ -1952,6 +1983,24 @@ func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDat
 	return nil
 }
 
+// resolveDoltShowAllowCleartextPassword returns the cleartext-password
+// setting that actually applies to bd's own connection, plus whether that
+// came from the proxied-server sidecar. In proxied mode the connection bd
+// makes is governed by ProxiedServerClientInfo.External.AllowCleartextPassword
+// (see ExternalDoltConfig), not by cfg.GetDoltServerAllowCleartextPassword()
+// (the metadata.json/env value) — those two can differ, and only the
+// External one is enforced by ExternalDoltConfig.Validate on this
+// connection. Falls back to the metadata/env value if the sidecar can't be
+// read, so 'bd dolt show' still prints something rather than erroring.
+func resolveDoltShowAllowCleartextPassword(beadsDir string, cfg *configfile.Config) (value bool, external bool) {
+	if usesProxiedServer() {
+		if info, err := configfile.LoadProxiedServerClientInfo(beadsDir); err == nil && info != nil && info.External != nil {
+			return info.External.AllowCleartextPassword, true
+		}
+	}
+	return cfg.GetDoltServerAllowCleartextPassword(), false
+}
+
 func showDoltConfig(testConnection bool) error {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
@@ -1992,6 +2041,12 @@ func showDoltConfig(testConnection bool) error {
 				result["port"] = showPort
 				result["user"] = cfg.GetDoltServerUser()
 				result["tls"] = cfg.GetDoltServerTLS()
+				allowCleartext, externalCleartext := resolveDoltShowAllowCleartextPassword(beadsDir, cfg)
+				result["allow_cleartext_password"] = allowCleartext
+				result["allow_cleartext_password_source"] = "metadata"
+				if externalCleartext {
+					result["allow_cleartext_password_source"] = "external"
+				}
 				result["shared_server"] = doltserver.IsSharedServerMode()
 				if testConnection {
 					result["connection_ok"] = testServerConnection(showHost, showPort)
@@ -2020,6 +2075,12 @@ func showDoltConfig(testConnection bool) error {
 		fmt.Printf("  Port:     %d\n", showPort)
 		fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
 		fmt.Printf("  TLS:      %t\n", cfg.GetDoltServerTLS())
+		allowCleartext, externalCleartext := resolveDoltShowAllowCleartextPassword(beadsDir, cfg)
+		if externalCleartext {
+			fmt.Printf("  Cleartext password auth (external, applies to this connection): %t\n", allowCleartext)
+		} else {
+			fmt.Printf("  Cleartext password auth: %t\n", allowCleartext)
+		}
 		if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode:     shared server")
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {
@@ -2395,12 +2456,17 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	user := cfg.GetDoltServerUser()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return nil, nil, HandleError("%v", err)
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:                    host,
+		Port:                    port,
+		User:                    user,
+		Password:                password,
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", connStr)

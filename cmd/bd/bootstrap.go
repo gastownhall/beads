@@ -35,12 +35,13 @@ import (
 var resolveBootstrapAuthoritativeMetadata = fix.ResolveAuthoritativeServerMetadata
 
 type bootstrapServerProbeConfig struct {
-	host     string
-	port     int
-	user     string
-	pass     string
-	database string
-	tls      bool
+	host           string
+	port           int
+	user           string
+	pass           string
+	database       string
+	tls            bool
+	allowCleartext bool
 }
 
 type bootstrapServerDBCheck struct {
@@ -63,12 +64,16 @@ var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrap
 	host := probeCfg.host
 	port := probeCfg.port
 	dbName := probeCfg.database
+	if err := configfile.ValidateServerAuthConfig(probeCfg.allowCleartext, probeCfg.tls); err != nil {
+		return bootstrapServerDBCheck{Reachable: false, Err: err}
+	}
 	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     probeCfg.user,
-		Password: probeCfg.pass,
-		TLS:      probeCfg.tls,
+		Host:                    host,
+		Port:                    port,
+		User:                    probeCfg.user,
+		Password:                probeCfg.pass,
+		TLS:                     probeCfg.tls,
+		AllowCleartextPasswords: probeCfg.allowCleartext,
 	}.String()
 
 	db, err := sql.Open("mysql", dsn)
@@ -622,12 +627,13 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 
 	if isServer {
 		probeCfg := bootstrapServerProbeConfig{
-			host:     cfg.GetDoltServerHost(),
-			port:     bootstrapServerPort(beadsDir, cfg, isSharedServer),
-			user:     cfg.GetDoltServerUser(),
-			pass:     cfg.GetDoltServerPassword(),
-			database: cfg.GetDoltDatabase(),
-			tls:      cfg.GetDoltServerTLS(),
+			host:           cfg.GetDoltServerHost(),
+			port:           bootstrapServerPort(beadsDir, cfg, isSharedServer),
+			user:           cfg.GetDoltServerUser(),
+			pass:           cfg.GetDoltServerPassword(),
+			database:       cfg.GetDoltDatabase(),
+			tls:            cfg.GetDoltServerTLS(),
+			allowCleartext: cfg.GetDoltServerAllowCleartextPassword(),
 		}
 		// When the server is reachable but the DB appears absent, retry with
 		// exponential backoff before concluding the DB is genuinely missing.
@@ -1206,13 +1212,18 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 // servers where bd does not know the filesystem layout.
 func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config) error {
 	port := serverClonePort(beadsDir, cfg)
+	allowCleartext, err := cfg.GetDoltServerAllowCleartextPasswordChecked()
+	if err != nil {
+		return fmt.Errorf("clone via server: %w", err)
+	}
 	dsn := doltutil.ServerDSN{
-		Socket:   cfg.GetDoltServerSocket(),
-		Host:     cfg.GetDoltServerHost(),
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		TLS:      cfg.GetDoltServerTLS(),
+		Socket:                  cfg.GetDoltServerSocket(),
+		Host:                    cfg.GetDoltServerHost(),
+		Port:                    port,
+		User:                    cfg.GetDoltServerUser(),
+		Password:                cfg.GetDoltServerPasswordForPort(port),
+		TLS:                     cfg.GetDoltServerTLS(),
+		AllowCleartextPasswords: allowCleartext,
 		// No Database — DOLT_CLONE creates the database.
 	}.String()
 
