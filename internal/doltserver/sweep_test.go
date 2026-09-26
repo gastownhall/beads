@@ -698,6 +698,37 @@ func TestSandboxHomeUnderVarTmpTMPDIR(t *testing.T) {
 		}
 	})
 
+	// The bound on the carve-out, tabled from any platform: an entry may
+	// vouch for a sandbox HOME without ever becoming a sweep root itself.
+	// /tmp is the one deliberate opt-out — tempDirRoots() hardcodes it, so
+	// excluding it here widens nothing (see sharedTempRoots).
+	t.Run("shared temp roots by platform", func(t *testing.T) {
+		cases := []struct {
+			root string
+			goos string
+			want bool
+		}{
+			{"/var/tmp", "linux", true},
+			{"/var/tmp", "darwin", true},
+			{"/private/var/tmp", "darwin", true},
+			{"/var/folders", "darwin", true},
+			{"/private/var/folders", "darwin", true},
+			// Nested inside a shared root: still rescuable, which is the
+			// whole point — this is the shape test-env.sh builds.
+			{"/var/tmp/beads-gate-probe", "linux", false},
+			{"/var/folders/zz/qqqqqqqq/T", "darwin", false},
+			// The /tmp family is excluded on purpose.
+			{"/tmp", "linux", false},
+			{"/tmp", "darwin", false},
+			{"/private/tmp", "darwin", false},
+		}
+		for _, tc := range cases {
+			if got := isSharedTempRoot(tc.root, tc.goos); got != tc.want {
+				t.Errorf("isSharedTempRoot(%q, %q) = %v, want %v", tc.root, tc.goos, got, tc.want)
+			}
+		}
+	})
+
 	// End to end: TMPDIR pointed at a disk-backed /var/tmp path, with the
 	// sandbox HOME nested under it exactly the way test-env.sh builds one.
 	// os.TempDir() must survive as a root, or the deleted-cwd arm goes inert
@@ -714,22 +745,42 @@ func TestSandboxHomeUnderVarTmpTMPDIR(t *testing.T) {
 		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
 			t.Errorf("tempDirRoots() = %v with TMPDIR=%s, want it still covered", roots, tmpdir)
 		}
-	})
-
-	// Safety bound: crediting the process's OWN TMPDIR-rooted sandbox must
-	// not widen the arm into crediting every /var/tmp path on the box. A
-	// SIBLING /var/tmp tree the process knows nothing about — another
-	// user's production server, say — must stay out of tempDirRoots(),
-	// exactly as an unrelated /Users workspace already does for /tmp.
-	t.Run("does not credit a sibling /var/tmp path outside TMPDIR", func(t *testing.T) {
-		const tmpdir = "/var/tmp/beads-gate-probe"
-		t.Setenv("TMPDIR", tmpdir)
-		t.Setenv("HOME", tmpdir+"/beads-test-env-abc123/home")
-
-		roots := tempDirRoots()
+		// The rescue is scoped to this TMPDIR, not to /var/tmp at large.
+		// Note this assertion does not by itself pin the widening: under a
+		// SUBdirectory TMPDIR the sibling is out of range at base too. The
+		// bare-TMPDIR subtest below is the pin.
 		const sibling = "/var/tmp/some-other-users-production-server/.beads/dolt"
 		if underAnyRoot(sibling, roots) {
 			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
+		}
+	})
+
+	// Safety bound: crediting the process's OWN TMPDIR-rooted sandbox must
+	// not widen the arm into crediting every /var/tmp path on the box. The
+	// degenerate case is a BARE TMPDIR=/var/tmp, where mktemp -d lands the
+	// sandbox HOME directly under the shared root — so the carve-out is
+	// asked to spare /var/tmp itself, and another user's production server
+	// with a deleted cwd would come into range of the kill arm. Adding
+	// /var/tmp to fixedTempRoots without isSharedTempRoot does exactly
+	// that; this is the subtest that catches it.
+	t.Run("a sandbox HOME never rescues bare /var/tmp as a root", func(t *testing.T) {
+		t.Setenv("TMPDIR", "/var/tmp")
+		t.Setenv("HOME", "/var/tmp/tmp.abc123/home")
+
+		roots := tempDirRoots()
+		for _, root := range roots {
+			if filepath.Clean(root) == "/var/tmp" {
+				t.Errorf("tempDirRoots() = %v kept the shared root /var/tmp", roots)
+			}
+		}
+		const sibling = "/var/tmp/some-other-users-production-server/.beads/dolt"
+		if underAnyRoot(sibling, roots) {
+			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
+		}
+		// Bounded, not disabled: the hardcoded /tmp fallback still has to
+		// come through, or the arm would be inert rather than scoped.
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
 		}
 	})
 }
