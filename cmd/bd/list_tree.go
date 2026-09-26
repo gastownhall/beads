@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -111,11 +112,30 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
+// treeCycleMarker is appended to a tree line whose issue is already an
+// ancestor on the current path. It mirrors the "(shown above)" arm of
+// bd dep tree and names the command that reports the cycle itself.
+const treeCycleMarker = "(cycle: shown above; run bd dep cycles)"
+
 // printPrettyTree recursively prints the issue tree.
 // Children are ordered by dependency then priority when dr != nil (--deps), else
 // by priority (P0 first) for intuitive reading. When dr is set, each node's
 // dependency edges are annotated just beneath it.
 func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender) {
+	printPrettyTreePath(childrenMap, parentID, prefix, dr, map[string]bool{parentID: true})
+}
+
+// printPrettyTreePath is printPrettyTree carrying the set of ancestors on the
+// current root-to-node path. childrenMap comes from stored edges, and a cycle
+// in it (parent-child rows imported without validation, or a build that nested
+// every dependency on an epic, as v1.2.2 did) must not recurse forever: the
+// walk allocates until the host swaps (GH#5887). A child already on the path
+// is printed once with a marker and not descended. The set is scoped to the
+// path, not the whole walk, so a node reachable through two parents still
+// renders under both; only a true ancestor counts as a cycle. Like the
+// "(shown above)" arm of bd dep tree, the marked line carries no --deps
+// annotations: they were printed with the node's first appearance.
+func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, onPath map[string]bool) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
@@ -131,6 +151,10 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 		if isLast {
 			connector = "└── "
 		}
+		if onPath[child.ID] {
+			fmt.Printf("%s%s%s %s\n", prefix, connector, formatPrettyIssue(child), ui.RenderMuted(treeCycleMarker))
+			continue
+		}
 		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssue(child))
 
 		extension := "│   "
@@ -138,7 +162,9 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr)
+		onPath[child.ID] = true
+		printPrettyTreePath(childrenMap, child.ID, prefix+extension, dr, onPath)
+		delete(onPath, child.ID)
 	}
 }
 
