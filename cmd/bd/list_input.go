@@ -71,7 +71,9 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		// into jsonOutput unless the ROOT --format changed, but this command's
 		// own --format shadows the root one, so that check never sees it and
 		// the JSON branch would replace the requested graph or template. An
-		// explicit --json still wins, as the --format help says.
+		// explicit --json still wins (the !commandJSONFlagChanged conjunct
+		// above is what preserves it); note no flag's help text states that
+		// precedence, so this comment is its only record.
 		jsonOutput = false
 	}
 	in.jsonOutput = jsonOutput

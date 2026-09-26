@@ -88,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template printed the JSON listing instead, because `bd list`'s own `--format`
   flag shadows the root one the config-precedence check looks at. A typed
   `--format` now wins over the config default; an explicit `--json` still wins
-  over `--format`, as the flag's help says.
+  over `--format`.
 
 ### Added
 
