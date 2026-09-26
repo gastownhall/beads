@@ -59,6 +59,10 @@ type StatsReporterFixture struct {
 	// A nil hook means "this backend cannot observe history", and the case
 	// that needs it SKIPS with that reason rather than passing quietly.
 	CountHistory func(context.Context) (int, error)
+	// SetConfig writes one workspace config key. The infra-type cases use it to
+	// change types.infra between seeding and counting, which is the only way a
+	// durable row of an infra type comes to exist. A nil hook SKIPS those cases.
+	SetConfig func(context.Context, string, string) error
 }
 
 // RunStatsReporterCountsEveryDurableRowByStatus pins statsreporter.go:92-98:
@@ -101,6 +105,107 @@ func RunStatsReporterExcludesTheWispTier(t *testing.T, ctx context.Context, fixt
 
 	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
 	assertStatsReporterDelta(t, before, after, statsReporterCounts{total: 1, open: 1})
+}
+
+// RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses pins the
+// GateIssues and TemplateIssues tally: the durable rows a default `bd list`
+// will not show, broken out of Total rather than removed from it, so `bd
+// status` and `bd list` can be reconciled instead of silently disagreeing.
+//
+// The two predicates have to be the exact complements of the listing's:
+// `issue_type = 'gate'` against list.go's `ExcludeTypes = append(..., "gate")`,
+// and `is_template = 1` against sqlbuild's default
+// `(is_template = 0 OR is_template IS NULL)`. A backend that spelled either
+// one loosely - `is_template <> 0`, or a LIKE on the type - moves the same
+// numbers on these seeds, so the case also seeds the NEGATIVE rows: a plain
+// task, and a gate-typed row that is not a template, each of which must move
+// exactly one of the two counts and not the other.
+//
+// Both counts overlap the status buckets rather than forming their own, in the
+// same way PinnedIssues does; the deltas below assert that by counting the
+// gate and proto rows in Total and Open as well.
+func RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	// Neither suppression: the control. A backend that counted every row
+	// would move both counts by three rather than by one.
+	seedStatsReporterIssue(t, ctx, fixture, statsReporterSeed(fixture, "suppressed-plain", types.StatusOpen))
+
+	gate := statsReporterSeed(fixture, "suppressed-gate", types.StatusOpen)
+	gate.IssueType = types.TypeGate
+	seedStatsReporterIssue(t, ctx, fixture, gate)
+
+	proto := statsReporterSeed(fixture, "suppressed-proto", types.StatusOpen)
+	proto.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, proto)
+
+	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, after, statsReporterCounts{
+		total: 3, open: 3, gates: 1, templates: 1,
+	})
+}
+
+// RunStatsReporterBreaksOutAGateThatIsAlsoATemplate pins that the two
+// suppressions are independent: a proto's gate step is both a gate and a
+// template, and `bd list` hides it for either reason on its own, so it belongs
+// in both counts. A backend that treated the two as exclusive arms of one CASE
+// reports one of them as zero here while passing the case above.
+func RunStatsReporterBreaksOutAGateThatIsAlsoATemplate(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	both := statsReporterSeed(fixture, "suppressed-gateproto", types.StatusOpen)
+	both.IssueType = types.TypeGate
+	both.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, both)
+
+	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, after, statsReporterCounts{
+		total: 1, open: 1, gates: 1, templates: 1,
+	})
+}
+
+// RunStatsReporterBreaksOutDurableRowsOfAConfiguredInfraType pins InfraIssues,
+// the third suppression a default `bd list` applies (GH#6439): durable rows
+// whose type is in the workspace's CONFIGURED types.infra set.
+//
+// Such a row is reachable only through configuration, and the case walks that
+// path rather than inserting one by hand. A configured set replaces the
+// built-in one, so with types.infra = message an agent-typed create is
+// durable, which is the path the issue-operations contract already pins for
+// creates. Changing the set afterwards moves no rows, so once agent is named
+// again that same durable row is one `bd list` hides and `bd status` counts.
+//
+// The first delta is the control. With agent not infra, the row must NOT move
+// InfraIssues, which a backend counting the built-in names would get wrong.
+// The second delta moves ONLY InfraIssues, with no new rows, which shows the
+// count follows configuration at query time.
+//
+// The message WISP pins the durable-only filter (StatsInfraCountFilter). Its
+// type is infra in both sets, so a count that merged the ephemeral tier would
+// move InfraIssues in the first delta, where it must stay zero. A task-typed
+// wisp, as RunStatsReporterExcludesTheWispTier seeds, cannot catch that.
+func RunStatsReporterBreaksOutDurableRowsOfAConfiguredInfraType(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	setStatsReporterInfraTypes(t, ctx, fixture, "message")
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	seedStatsReporterIssue(t, ctx, fixture, statsReporterSeed(fixture, "infra-plain", types.StatusOpen))
+	agent := statsReporterSeed(fixture, "infra-agent", types.StatusOpen)
+	agent.IssueType = types.IssueType("agent")
+	seedStatsReporterIssue(t, ctx, fixture, agent)
+	wisp := statsReporterSeed(fixture, "infra-wisp", types.StatusOpen)
+	wisp.IssueType = types.IssueType("message")
+	wisp.Ephemeral = true
+	seedStatsReporterWisp(t, ctx, fixture, wisp)
+
+	evicted := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, evicted, statsReporterCounts{total: 2, open: 2})
+
+	setStatsReporterInfraTypes(t, ctx, fixture, "agent,message")
+	named := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, evicted, named, statsReporterCounts{infra: 1})
 }
 
 // RunStatsReporterAStatusOutsideTheTalliesIsCountedOnlyInTotal pins the second
@@ -452,6 +557,104 @@ func RunStatsReporterAssigneeStatsMergesTheWispTier(t *testing.T, ctx context.Co
 	}
 }
 
+// RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows is the scoped half of
+// the pair. `bd status --assigned` reaches a different implementation - the
+// fold over one actor's rows in internal/workapi/stats.go, not
+// ScanIssueCountsInTx - and its filter sets only Assignee, so the actor's gates
+// and protos ARE in these rows while `bd list --assignee` suppresses both. The
+// two counts must therefore be populated here too; a zero would be the same
+// silent disagreement, one scope down.
+func RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	assignee := statsReporterAssignee(fixture, "asuppressed")
+
+	plain := statsReporterSeed(fixture, "asuppressed-plain", types.StatusOpen)
+	plain.Assignee = assignee
+	seedStatsReporterIssue(t, ctx, fixture, plain)
+
+	gate := statsReporterSeed(fixture, "asuppressed-gate", types.StatusOpen)
+	gate.Assignee = assignee
+	gate.IssueType = types.TypeGate
+	seedStatsReporterIssue(t, ctx, fixture, gate)
+
+	proto := statsReporterSeed(fixture, "asuppressed-proto", types.StatusOpen)
+	proto.Assignee = assignee
+	proto.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, proto)
+
+	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
+	if summary.TotalIssues != 3 {
+		t.Fatalf("TotalIssues = %d, want 3 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
+	}
+	if summary.GateIssues != 1 {
+		t.Errorf("GateIssues = %d, want 1 — the actor's gate is in this answer but not in `bd list --assignee`", summary.GateIssues)
+	}
+	if summary.TemplateIssues != 1 {
+		t.Errorf("TemplateIssues = %d, want 1 — the actor's proto is in this answer but not in `bd list --assignee`", summary.TemplateIssues)
+	}
+}
+
+// RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows is the scoped half
+// of the infra case. The fold tests each of the actor's rows against the
+// configured set, so the same reclassification has to move this answer too, as
+// it moves `bd list --assignee`.
+func RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	assignee := statsReporterAssignee(fixture, "ainfra")
+	setStatsReporterInfraTypes(t, ctx, fixture, "message")
+
+	plain := statsReporterSeed(fixture, "ainfra-plain", types.StatusOpen)
+	plain.Assignee = assignee
+	seedStatsReporterIssue(t, ctx, fixture, plain)
+	agent := statsReporterSeed(fixture, "ainfra-agent", types.StatusOpen)
+	agent.Assignee = assignee
+	agent.IssueType = types.IssueType("agent")
+	seedStatsReporterIssue(t, ctx, fixture, agent)
+
+	if got := statsReporterAssigneeSummary(t, ctx, fixture, assignee).InfraIssues; got != 0 {
+		t.Errorf("InfraIssues = %d with agent evicted from types.infra, want 0 - the count must follow the configured set, not the built-in names", got)
+	}
+
+	setStatsReporterInfraTypes(t, ctx, fixture, "agent,message")
+	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
+	if summary.TotalIssues != 2 {
+		t.Fatalf("TotalIssues = %d, want 2 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
+	}
+	if summary.InfraIssues != 1 {
+		t.Errorf("InfraIssues = %d, want 1 - the actor's agent row is in this answer but not in `bd list --assignee`", summary.InfraIssues)
+	}
+}
+
+// RunStatsReporterAssigneeStatsCountsTheActorsInfraTypedWisps pins the scope
+// InfraIssues has on this route, which is NOT the workspace-wide one. The fold
+// covers the actor's rows on both planes, as its TotalIssues does, so an
+// infra-typed wisp assigned to the actor counts here - and `bd list --assignee
+// X --include-infra` shows that row - while the workspace-wide answer, durable
+// rows only, does not move for it. The built-in infra set names message, so no
+// configuration is needed.
+func RunStatsReporterAssigneeStatsCountsTheActorsInfraTypedWisps(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
+	t.Helper()
+	assignee := statsReporterAssignee(fixture, "ainfrawisp")
+	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+
+	wisp := statsReporterSeed(fixture, "ainfrawisp-message", types.StatusOpen)
+	wisp.Assignee = assignee
+	wisp.IssueType = types.IssueType("message")
+	wisp.Ephemeral = true
+	seedStatsReporterWisp(t, ctx, fixture, wisp)
+
+	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
+	assertStatsReporterDelta(t, before, after, statsReporterCounts{})
+
+	summary := statsReporterAssigneeSummary(t, ctx, fixture, assignee)
+	if summary.TotalIssues != 1 {
+		t.Fatalf("TotalIssues = %d, want 1 (the fixture namespaces this actor, so this is an absolute)", summary.TotalIssues)
+	}
+	if summary.InfraIssues != 1 {
+		t.Errorf("InfraIssues = %d, want 1 - the actor's message wisp is in this answer's total and hidden by `bd list --assignee`, so it is broken out on both planes", summary.InfraIssues)
+	}
+}
+
 // RunStatsReporterAssigneeStatsPopulatesBothPointers pins the clause
 // FoldStatsAssigneeSummary exists to guarantee: on this path BlockedIssues and
 // ReadyIssues are ALWAYS non-nil, including for an actor with no rows at all.
@@ -499,6 +702,9 @@ type statsReporterCounts struct {
 	deferred   int
 	pinned     int
 	blocked    int
+	gates      int
+	templates  int
+	infra      int
 }
 
 // assertStatsReporterDelta compares two summaries field by field against the
@@ -519,6 +725,9 @@ func assertStatsReporterDelta(t *testing.T, before, after types.Statistics, want
 		{"ClosedIssues", before.ClosedIssues, after.ClosedIssues, want.closed},
 		{"DeferredIssues", before.DeferredIssues, after.DeferredIssues, want.deferred},
 		{"PinnedIssues", before.PinnedIssues, after.PinnedIssues, want.pinned},
+		{"GateIssues", before.GateIssues, after.GateIssues, want.gates},
+		{"TemplateIssues", before.TemplateIssues, after.TemplateIssues, want.templates},
+		{"InfraIssues", before.InfraIssues, after.InfraIssues, want.infra},
 	} {
 		if got := field.after - field.before; got != field.want {
 			t.Errorf("%s moved by %d (%d -> %d), want %d", field.name, got, field.before, field.after, field.want)
@@ -547,6 +756,41 @@ func statsReporterSeed(fixture StatsReporterFixture, suffix string, status types
 // statsReporterAssignee namespaces an actor to this fixture.
 func statsReporterAssignee(fixture StatsReporterFixture, suffix string) string {
 	return fixture.IssuePrefix + "-actor-" + suffix
+}
+
+// setStatsReporterInfraTypes writes types.infra for the rest of the case. An
+// agent row has to stay creatable once agent is evicted from the infra set, so
+// it also names agent in types.custom, as the issue-operations create contract
+// does for the same path.
+func setStatsReporterInfraTypes(t *testing.T, ctx context.Context, fixture StatsReporterFixture, value string) {
+	t.Helper()
+	setStatsReporterConfig(t, ctx, fixture, "types.custom", "agent")
+	setStatsReporterConfig(t, ctx, fixture, "types.infra", value)
+}
+
+// setStatsReporterConfig writes one config key for the rest of the case and
+// restores the unconfigured value when it ends.
+//
+// It restores "" rather than the prior value because the fixture has no read
+// hook, and "" IS the prior value here in effect: this helper is the only
+// writer of these keys on a StatsReporter fixture, the backends start with
+// neither configured, and every backend reads an empty types.infra or
+// types.custom as unconfigured (built-in infra set, no custom types). So the
+// cases sharing this database see the configuration they would have without
+// this one.
+func setStatsReporterConfig(t *testing.T, ctx context.Context, fixture StatsReporterFixture, key, value string) {
+	t.Helper()
+	if fixture.SetConfig == nil {
+		t.Skipf("this fixture has no SetConfig hook, so it cannot configure %s", key)
+	}
+	if err := fixture.SetConfig(ctx, key, value); err != nil {
+		t.Fatalf("SetConfig(%s, %q): %v", key, value, err)
+	}
+	t.Cleanup(func() {
+		if err := fixture.SetConfig(context.WithoutCancel(ctx), key, ""); err != nil {
+			t.Errorf("restore %s: %v", key, err)
+		}
+	})
 }
 
 func seedStatsReporterIssue(t *testing.T, ctx context.Context, fixture StatsReporterFixture, issue *types.Issue) {

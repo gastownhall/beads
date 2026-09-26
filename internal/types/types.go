@@ -1882,6 +1882,18 @@ type Statistics struct {
 	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
+
+	// GateIssues, TemplateIssues and InfraIssues count rows the default
+	// `bd list` suppresses on account of what they are. They are already part
+	// of TotalIssues, which counts the database rather than the listing; they
+	// are broken out so the two commands can be reconciled instead of silently
+	// disagreeing. InfraIssues counts rows whose type is in the workspace's
+	// configured types.infra set: durable rows only on the workspace-wide
+	// summary, and the actor's rows on both planes on the --assigned one,
+	// matching what each summary's TotalIssues counts.
+	GateIssues     int `json:"gate_issues"`
+	TemplateIssues int `json:"template_issues"`
+	InfraIssues    int `json:"infra_issues"`
 }
 
 // IssueFilter is used to filter issue queries

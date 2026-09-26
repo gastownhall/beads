@@ -32,6 +32,15 @@ func TestStatsReporterContract(t *testing.T) {
 	t.Run("ExcludesTheWispTier", func(t *testing.T) {
 		conformance.RunStatsReporterExcludesTheWispTier(t, ctx, fixture)
 	})
+	t.Run("BreaksOutTheRowsTheDefaultListingSuppresses", func(t *testing.T) {
+		conformance.RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses(t, ctx, fixture)
+	})
+	t.Run("BreaksOutAGateThatIsAlsoATemplate", func(t *testing.T) {
+		conformance.RunStatsReporterBreaksOutAGateThatIsAlsoATemplate(t, ctx, fixture)
+	})
+	t.Run("BreaksOutDurableRowsOfAConfiguredInfraType", func(t *testing.T) {
+		conformance.RunStatsReporterBreaksOutDurableRowsOfAConfiguredInfraType(t, ctx, fixture)
+	})
 	t.Run("AStatusOutsideTheTalliesIsCountedOnlyInTotal", func(t *testing.T) {
 		conformance.RunStatsReporterAStatusOutsideTheTalliesIsCountedOnlyInTotal(t, ctx, fixture)
 	})
@@ -65,6 +74,15 @@ func TestStatsReporterContract(t *testing.T) {
 	t.Run("AssigneeStatsMergesTheWispTier", func(t *testing.T) {
 		conformance.RunStatsReporterAssigneeStatsMergesTheWispTier(t, ctx, fixture)
 	})
+	t.Run("AssigneeStatsBreaksOutTheSuppressedRows", func(t *testing.T) {
+		conformance.RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows(t, ctx, fixture)
+	})
+	t.Run("AssigneeStatsBreaksOutConfiguredInfraRows", func(t *testing.T) {
+		conformance.RunStatsReporterAssigneeStatsBreaksOutConfiguredInfraRows(t, ctx, fixture)
+	})
+	t.Run("AssigneeStatsCountsTheActorsInfraTypedWisps", func(t *testing.T) {
+		conformance.RunStatsReporterAssigneeStatsCountsTheActorsInfraTypedWisps(t, ctx, fixture)
+	})
 	t.Run("AssigneeStatsPopulatesBothPointers", func(t *testing.T) {
 		conformance.RunStatsReporterAssigneeStatsPopulatesBothPointers(t, ctx, fixture)
 	})
@@ -87,5 +105,6 @@ func newEmbeddedStatsReporterFixture(t *testing.T, te *testEnv, prefix string) c
 		CreateWisp:    kit.CreateWisp,
 		AddDependency: kit.AddDependency,
 		CountHistory:  kit.CountHistory,
+		SetConfig:     kit.SetConfig,
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -120,6 +121,42 @@ func openStatsReporter() (issueops.StatsReporter, error) {
 	return store.StatsReporter()
 }
 
+// suppressedTypeSummary describes the counted rows that a default bd list will
+// not show, so the totals above can be reconciled against a listing instead of
+// looking like a phantom.
+//
+// It names the three type-based suppressions a default listing applies: gates,
+// templates, and the infra types applyTypeSuppressions (internal/workapi/
+// list.go) excludes from the durable plane. The infra count is of the
+// WORKSPACE-CONFIGURED types.infra set, which is what the listing reads: that
+// set replaces the built-in names, and changing it never moves rows already
+// written, so durable rows of a type that has since become infra are counted
+// here and hidden there. Under --assigned the count covers the actor's rows of
+// those types on both planes, matching what that route's total counts.
+func suppressedTypeSummary(stats *types.Statistics) string {
+	var parts []string
+	if stats.GateIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-gates)", pluralCount(stats.GateIssues, "gate", "gates")))
+	}
+	if stats.TemplateIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-templates)", pluralCount(stats.TemplateIssues, "template", "templates")))
+	}
+	if stats.InfraIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-infra)", pluralCount(stats.InfraIssues, "infra-typed issue", "infra-typed issues")))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// pluralCount renders a count with the right one of two spellings. Both forms
+// are passed in rather than derived by appending "s", so a caller with an
+// irregular plural is not silently mis-served.
+func pluralCount(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
 func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary) error {
 	output := &StatusOutput{
 		Summary:             stats,
@@ -153,6 +190,10 @@ func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary
 		fmt.Printf("  Ready to Work:          %s\n", ui.MutedStyle.Render("(skipped)"))
 	} else {
 		fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", *stats.ReadyIssues)))
+	}
+
+	if suppressed := suppressedTypeSummary(stats); suppressed != "" {
+		fmt.Printf("  Not shown by bd list:   %s\n", suppressed)
 	}
 
 	// Extended statistics (only show if non-zero)
