@@ -303,6 +303,108 @@ func TestMaybeAutoImportJSONL_FallbackImporter_RunsWhenEmpty(t *testing.T) {
 	}
 }
 
+// fakeVocabStore extends the fallback fake with a recording vocabulary
+// surface, so the defs-first auto-import order (bda-os0d/bda-we22) is
+// observable without a real store.
+type fakeVocabStore struct {
+	fakeFallbackStore
+	defined   []string
+	defineErr error
+}
+
+func (f *fakeVocabStore) ListLabelDefinitions(context.Context) ([]types.LabelDefinition, error) {
+	return nil, nil
+}
+
+func (f *fakeVocabStore) DefineLabel(_ context.Context, label, _, _ string) error {
+	if f.defineErr != nil {
+		return f.defineErr
+	}
+	f.defined = append(f.defined, label)
+	return nil
+}
+
+// TestMaybeAutoImportJSONL_DefinitionOnlyExportApplies pins bda-we22: a JSONL
+// carrying only label-definition records is a real import - previously the
+// len(issues)==0 early return dropped the definitions on the floor.
+func TestMaybeAutoImportJSONL_DefinitionOnlyExportApplies(t *testing.T) {
+	dir := t.TempDir()
+	line := `{"_type":"label-definition","label":"tier:fable","description":"model tier"}`
+	if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	count := swapFallbackImporter(t, errors.New("test importer must not run for a definition-only file"))
+
+	store := &fakeVocabStore{fakeFallbackStore: fakeFallbackStore{statsTotalIssues: 0}}
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if len(store.defined) != 1 || store.defined[0] != "tier:fable" {
+		t.Fatalf("definition-only export not applied, defined=%v", store.defined)
+	}
+	if got := count.Load(); got != 0 {
+		t.Fatalf("issue importer invoked %d time(s) for a definition-only file; expected 0", got)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Fatalf("definition-only import must stamp (else it re-runs every invocation): %v", err)
+	}
+}
+
+// TestMaybeAutoImportJSONL_DefsPlusConfigDoesNotStamp pins the codex
+// re-verify regression: config/memory records without issues cannot be
+// applied by auto-import (only the issue importers carry configEntries), so
+// stamping a defs+config file would permanently suppress their retry. The
+// definitions apply; the stamp must NOT be written.
+func TestMaybeAutoImportJSONL_DefsPlusConfigDoesNotStamp(t *testing.T) {
+	dir := t.TempDir()
+	lines := `{"_type":"label-definition","label":"tier:fable","description":"model tier"}` + "\n" +
+		`{"_type":"memory","key":"note","value":"remember me"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	count := swapFallbackImporter(t, errors.New("test importer must not run without issues"))
+
+	store := &fakeVocabStore{fakeFallbackStore: fakeFallbackStore{statsTotalIssues: 0}}
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if len(store.defined) != 1 {
+		t.Fatalf("definitions must still apply, defined=%v", store.defined)
+	}
+	if got := count.Load(); got != 0 {
+		t.Fatalf("issue importer invoked %d time(s) without issues; expected 0", got)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err == nil {
+		t.Fatal("defs+config input was stamped - the unapplied config/memory records can never be retried")
+	}
+}
+
+// TestMaybeAutoImportJSONL_DefinitionErrorLeavesNoStamp pins bda-os0d: a
+// store-level definitions failure must leave NO stamp and must not proceed to
+// the issue import, so the next pass - database still empty - retries both.
+// The previous order (issues -> stamp -> definitions) made the failure
+// permanent.
+func TestMaybeAutoImportJSONL_DefinitionErrorLeavesNoStamp(t *testing.T) {
+	dir := t.TempDir()
+	lines := `{"_type":"label-definition","label":"tier:fable","description":"model tier"}` + "\n" +
+		`{"_type":"issue","id":"unit-d1","title":"x","status":"open","priority":2,"issue_type":"task"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	count := swapFallbackImporter(t, errors.New("test importer must not run after a definitions failure"))
+
+	store := &fakeVocabStore{
+		fakeFallbackStore: fakeFallbackStore{statsTotalIssues: 0},
+		defineErr:         errors.New("store connection lost"),
+	}
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if got := count.Load(); got != 0 {
+		t.Fatalf("issue importer invoked %d time(s) after a definitions failure; expected 0", got)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err == nil {
+		t.Fatal("definitions failure wrote the stamp - the retry the code comments promise is impossible")
+	}
+}
+
 func TestMaybeAutoImportJSONL_UsesConfiguredImportPath(t *testing.T) {
 	initConfigForTest(t)
 	config.Set("import.path", "beads.jsonl")

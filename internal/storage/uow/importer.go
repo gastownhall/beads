@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -97,6 +98,34 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 			result.MemoriesImported++
 		}
 
+		// Label vocabulary records, define-if-absent in the same transaction.
+		// The decision logic (exact re-import skipped, case-collision kept as
+		// existing with a warning) is storageissueops.ImportLabelDefinitions,
+		// shared with the classic import path.
+		if len(request.LabelDefinitions) > 0 {
+			existing, err := uw.LabelVocabularyUseCase().List(ctx)
+			if err != nil {
+				return publicops.ImportBatchResult{}, "", fmt.Errorf("import label definitions: read registry: %w", err)
+			}
+			incoming := make([]types.LabelDefinition, 0, len(request.LabelDefinitions))
+			for i := range request.LabelDefinitions {
+				description := request.LabelDefinitions[i].Description
+				actor := request.LabelDefinitions[i].Actor
+				incoming = append(incoming, types.LabelDefinition{
+					Label:       request.LabelDefinitions[i].Label,
+					Description: &description,
+					CreatedBy:   &actor,
+				})
+			}
+			defined, warnings, err := storageissueops.ImportLabelDefinitions(ctx, existing, incoming, request.Actor,
+				uw.LabelVocabularyUseCase().Define)
+			if err != nil {
+				return publicops.ImportBatchResult{}, "", err
+			}
+			result.LabelDefinitionsImported = defined
+			result.LabelDefinitionWarnings = warnings
+		}
+
 		// config.yaml is authoritative for issue_prefix on the import flow
 		// (be-llaf); a read or write failure here degrades to "not synced"
 		// rather than failing the batch, matching the classic path.
@@ -119,10 +148,13 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 // classic path used for its separate config commit; a batch that landed
 // nothing at all returns "" and commits nothing.
 func importBatchCommitMessage(request publicops.ImportBatchRequest, result publicops.ImportBatchResult) string {
-	if result.Created > 0 || result.MemoriesImported > 0 {
+	if result.Created > 0 || result.MemoriesImported > 0 || result.LabelDefinitionsImported > 0 {
 		msg := fmt.Sprintf("bd import: %d issues", result.Created)
 		if result.MemoriesImported > 0 {
 			msg += fmt.Sprintf(", %d memories", result.MemoriesImported)
+		}
+		if result.LabelDefinitionsImported > 0 {
+			msg += fmt.Sprintf(", %d label definitions", result.LabelDefinitionsImported)
 		}
 		return msg + fmt.Sprintf(" from %s", request.Source)
 	}
