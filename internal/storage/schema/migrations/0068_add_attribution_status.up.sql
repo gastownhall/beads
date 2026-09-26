@@ -56,6 +56,23 @@
 -- No wisps twin needed: issue_versions has no wisps-side counterpart table
 -- at all (design section 16.3), so cliSubstituteAssumesWispTables does not
 -- apply to this migration either.
+--
+-- DOLT PLANE, stated here because 0067 created these tables without saying
+-- so and a reader has to know before writing to them: issue_versions and
+-- store_epoch REPLICATE. They are ordinary synced tables, deliberately NOT
+-- registered dolt_ignore'd the way 0064 registers the events journal's
+-- clone-local pair. A bead's version history is part of the bead and has to
+-- travel with it -- and the single-writer constraint above is a statement
+-- about what happens when two clones MERGE these tables, which only means
+-- anything for a table that replicates at all.
+--
+-- The obligation that buys: every operation that mints must STAGE what it
+-- minted (issue_versions, store_epoch, and issues for the current_revision
+-- advance), or the rows sit dirty in the working set -- outside the
+-- DOLT_COMMIT of the very mutation they describe, unreplicated, and able to
+-- trip DirtyTablesError on the next migration. The staging paths do this
+-- from one list, issueops.VersionedHistoryStagedTables, keyed off whether
+-- versioned history is active so no call site has to remember it.
 SET @issue_versions_as_needs_add = (
     SELECT IF(COUNT(*) = 0, 1, 0)
     FROM INFORMATION_SCHEMA.COLUMNS

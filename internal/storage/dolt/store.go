@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1269,6 +1270,28 @@ func (s *DoltStore) SetVersionedHistoryEnabled(enabled bool) {
 
 func (s *DoltStore) scopeVersionedHistoryTransaction(tx *sql.Tx) func() {
 	return issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
+}
+
+// withVersionedHistoryTables appends the tables the versioned-history seam
+// writes to a fixed staging list when history is active on this store, so a
+// mutation's version rows land in that mutation's own Dolt commit rather than
+// sitting dirty in the working set. Every fixed-list DOLT_ADD path in this
+// package routes through here; the tracker-based path uses
+// DirtyTableTracker.MarkVersionedHistoryDirty instead.
+//
+// Staging a table that turns out to be clean is free: DOLT_ADD stages nothing
+// and both helpers already skip the commit on an empty staged set.
+func (s *DoltStore) withVersionedHistoryTables(tables []string) []string {
+	if !s.versionedHistoryEnabled.Load() {
+		return tables
+	}
+	staged := slices.Clone(tables)
+	for _, table := range issueops.VersionedHistoryStagedTables() {
+		if !slices.Contains(staged, table) {
+			staged = append(staged, table)
+		}
+	}
+	return staged
 }
 
 func (s *DoltStore) commitSQLTx(ctx context.Context, op string, tx *sql.Tx) error {
@@ -3671,6 +3694,7 @@ func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commi
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
+	tables = s.withVersionedHistoryTables(tables)
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		conn, err := s.db.Conn(ctx)
 		if err != nil {

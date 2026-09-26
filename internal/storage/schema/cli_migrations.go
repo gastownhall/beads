@@ -259,9 +259,10 @@ CREATE TABLE IF NOT EXISTS store_epoch (
 ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;`
 
-// cliMigration0068AddAttributionStatus is 0068 with its three guarded
+// cliMigration0068AddAttributionStatus is 0068 with its four guarded
 // PREPARE blocks replaced by the direct ALTERs they would run on a fresh
-// database: step 6's ADD COLUMN attribution_status, step 7's MODIFY COLUMN
+// database -- four blocks across three steps, because step 8 carries one per
+// column: step 6's ADD COLUMN attribution_status, step 7's MODIFY COLUMN
 // durable_state LONGBLOB (the byte-preserving type the review on
 // gastownhall/beads#6358 item 4 asked for -- see the migration's step 7
 // header), and step 8's MODIFY COLUMN change_at/removed_at DATETIME(6) (the
