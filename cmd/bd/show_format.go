@@ -46,6 +46,17 @@ func formatShortIssue(issue *types.Issue) string {
 // Format: ID · Title   [Priority · STATUS]
 // All elements in bd show get semantic colors since focus is on one issue
 func formatIssueHeader(issue *types.Issue) string {
+	return formatIssueHeaderWithGates(issue, nil)
+}
+
+// formatIssueHeaderWithGates is formatIssueHeader plus the derived GATED
+// marker: [P2 · OPEN · GATED] when an open gate blocks the issue. The stored
+// status is untouched — GATED is a third segment, not a replacement — because
+// the row really is open and `bd ready` really does skip it, and a reader who
+// sees only OPEN has no way to tell those two facts apart. Callers pass the
+// gates types.ActiveGates selected; an empty set renders exactly what
+// formatIssueHeader always did.
+func formatIssueHeaderWithGates(issue *types.Issue, gates []*types.Issue) string {
 	// Get status icon and style
 	statusIcon := ui.RenderStatusIcon(string(issue.Status))
 	statusStyle := ui.GetStatusStyle(string(issue.Status))
@@ -72,10 +83,17 @@ func formatIssueHeader(issue *types.Issue) string {
 		tierEmoji = " 📦"
 	}
 
+	// Derived gate marker (wy-j2upyy): an open gate holds this issue out of
+	// bd ready, so the header says so.
+	gatedStr := ""
+	if len(gates) > 0 {
+		gatedStr = " · " + ui.StatusBlockedStyle.Render("GATED")
+	}
+
 	// Build header: STATUS_ICON ID · Title   [Priority · STATUS]
 	idStyled := ui.RenderAccent(issue.ID)
-	return fmt.Sprintf("%s %s%s · %s%s   [%s · %s]",
-		statusIcon, idStyled, typeBadge, issue.Title, tierEmoji, priorityTag, statusStr)
+	return fmt.Sprintf("%s %s%s · %s%s   [%s · %s%s]",
+		statusIcon, idStyled, typeBadge, issue.Title, tierEmoji, priorityTag, statusStr, gatedStr)
 }
 
 // formatIssueMetadata returns the metadata line(s) with grouped info
@@ -83,6 +101,15 @@ func formatIssueHeader(issue *types.Issue) string {
 //
 //	Created: 2026-01-06 · Updated: 2026-01-08
 func formatIssueMetadata(issue *types.Issue) string {
+	return formatIssueMetadataWithGates(issue, nil)
+}
+
+// formatIssueMetadataWithGates is formatIssueMetadata plus one "Gated by:"
+// line per active gate, beside the Deferred: line the time row carries: a
+// deferred AND gated issue shows both, because they are two different reasons
+// the work is not startable. A gate that has been resolved (closed) is not in
+// the set and renders nothing.
+func formatIssueMetadataWithGates(issue *types.Issue, gates []*types.Issue) string {
 	var lines []string
 
 	// Line 1: Created by/Assignee · Type
@@ -124,6 +151,11 @@ func formatIssueMetadata(issue *types.Issue) string {
 	}
 	if len(timeParts) > 0 {
 		lines = append(lines, strings.Join(timeParts, " · "))
+	}
+
+	// Line 3+: one line per gate actively blocking this issue.
+	for _, gate := range gates {
+		lines = append(lines, formatGatedByLine(gate))
 	}
 
 	// Lease line: only when an active lease is held (in_progress + non-null
@@ -507,4 +539,23 @@ func formatMetadataValue(v any) string {
 		}
 		return string(b)
 	}
+}
+
+// formatGatedByLine renders one gate on bd show's meta block:
+//
+//	Gated by: bd-abc (human: Need design review)
+//	Gated by: bd-def (gh:pr, awaiting 42)
+//
+// The parenthetical is the gate's own record — its await type, the reason its
+// creator gave, and what it is waiting on — so the reader can act on the gate
+// without a second lookup.
+func formatGatedByLine(gate *types.Issue) string {
+	detail := types.GateKind(gate)
+	if reason := types.GateReason(gate.Description); reason != "" {
+		detail += ": " + reason
+	}
+	if gate.AwaitID != "" {
+		detail += ", awaiting " + gate.AwaitID
+	}
+	return fmt.Sprintf("Gated by: %s (%s)", gate.ID, detail)
 }

@@ -248,7 +248,10 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status)
+		// The gate decoration rides the edge map this route just read, so the
+		// proxied pretty listing says what the direct one says (wy-j2upyy).
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status,
+			proxiedGatedIssueIDs(ctx, uw, issues, depsByIssueID))
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
@@ -277,11 +280,19 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 	}
 	blocking := newListBlocking(result)
 
+	// The proxied --json routes get gated_by from workapi.BuildIssueDetails;
+	// without this the proxied TEXT routes would render a plain OPEN row for
+	// the same bead (wy-j2upyy). --long renders no gate, so it pays nothing.
+	var gated map[string][]string
+	if ui.IsAgentMode() || !in.longFormat {
+		gated = proxiedGatedIssueIDsOwnUOW(ctx, issues)
+	}
+
 	var buf strings.Builder
 	switch {
 	case ui.IsAgentMode():
 		for _, issue := range issues {
-			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID], gated[issue.ID])
 		}
 		fmt.Print(buf.String())
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -293,7 +304,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 		}
 	default:
 		for _, issue := range issues {
-			formatIssueCompact(&buf, issue, labelsMap[issue.ID], blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatIssueCompact(&buf, issue, labelsMap[issue.ID], blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID], gated[issue.ID])
 		}
 	}
 

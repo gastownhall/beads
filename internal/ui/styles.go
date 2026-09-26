@@ -281,6 +281,13 @@ const (
 	StatusIconDeferred   = "❄" // scheduled for later (snowflake)
 	StatusIconPinned     = "📌" // elevated priority
 	StatusIconCustom     = "◇" // custom/uncategorized status (diamond)
+	// StatusIconGated marks an issue an OPEN gate blocks (bd gate create
+	// --blocks). It is a DERIVED decoration, not a stored status: the row's
+	// status is untouched and only the glyph column changes. Circle family,
+	// like ○ ◐ ●, so it reads as a sibling of the status icons rather than as
+	// a badge — barred rather than hollow, because the work exists and cannot
+	// start.
+	StatusIconGated = "⊘" // blocked by an open gate (barred circle)
 )
 
 // RenderStatusIcon returns the appropriate icon for a status with semantic coloring.

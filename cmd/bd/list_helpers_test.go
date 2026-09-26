@@ -317,7 +317,7 @@ func TestListDisplayPrettyList_TruncatedSummary(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(issues, false, nil, "", true, false, "")
+		displayPrettyListWithDepsMode(issues, false, nil, "", true, false, "", nil)
 		return nil
 	})
 	if !strings.Contains(out, "Showing 2 issues") {

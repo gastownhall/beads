@@ -43,8 +43,30 @@ func renderStatusIcon(status types.Status) string {
 // formatPrettyIssue formats a single issue for pretty output
 // Uses semantic colors: status icon colored, priority P0/P1 colored, rest neutral
 func formatPrettyIssue(issue *types.Issue) string {
+	return formatPrettyIssueGated(issue, nil)
+}
+
+// formatPrettyIssueGated is formatPrettyIssue with the derived gate marker
+// (wy-j2upyy): when an open gate blocks the issue, the glyph column carries
+// ⊘ instead of the stored status's icon. The rest of the row is untouched,
+// and the stored status is untouched — this is a decoration over the same
+// predicate `bd ready` filters on, so the listing stops disagreeing with it.
+//
+// The marker OUTRANKS the status icon, including ❄: one column can hold one
+// glyph, and of the two reasons the work cannot start, the gate is the one a
+// reader cannot discover from the row's own fields. It never outranks 📌,
+// because types.SubjectCanBeGated refuses a pinned subject outright — a pinned
+// bead is out of `bd ready` on its own account, not the gate's.
+//
+// gatedBy is the gate ids the ONE predicate selected (gatesByIssueID); the
+// SubjectCanBeGated re-check is the same clause, not a second rule, and is
+// here so a caller that hands over a stale map cannot invent a decoration.
+func formatPrettyIssueGated(issue *types.Issue, gatedBy []string) string {
 	// Use shared helpers from ui package
 	statusIcon := ui.RenderStatusIcon(string(issue.Status))
+	if len(gatedBy) > 0 && types.SubjectCanBeGated(issue) {
+		statusIcon = ui.StatusBlockedStyle.Render(ui.StatusIconGated)
+	}
 	priorityTag := renderPriorityTag(issue.Priority)
 
 	// Type badge - only show for notable types
@@ -132,9 +154,15 @@ func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string, 
 }
 
 // formatAgentIssue formats a single issue in ultra-compact agent mode format
-// Output: "ID: Title" with optional dependency info "(parent: X, blocked by: Y, blocks: Z)"
-func formatAgentIssue(buf *strings.Builder, issue *types.Issue, blockedBy, blocks []string, parent string) {
-	depInfo := formatDependencyInfo(blockedBy, blocks, parent)
+// Output: "ID: Title" with optional dependency info
+// "(parent: X, blocked by: Y, blocks: Z, gated by: G)"
+//
+// Agent mode has no glyph column, so the gate rides in the parenthetical the
+// line already carries (wy-j2upyy). It is the seat that most needs it:
+// ui.IsAgentMode() is true whenever CLAUDE_CODE is set, and an agent reading a
+// plain row cannot tell startable work from work a human has to release.
+func formatAgentIssue(buf *strings.Builder, issue *types.Issue, blockedBy, blocks []string, parent string, gatedBy []string) {
+	depInfo := formatDependencyInfo(blockedBy, blocks, parent, gatedBy)
 	if depInfo != "" {
 		buf.WriteString(fmt.Sprintf("%s: %s %s\n", issue.ID, issue.Title, depInfo))
 	} else {
@@ -144,9 +172,15 @@ func formatAgentIssue(buf *strings.Builder, issue *types.Issue, blockedBy, block
 
 // formatDependencyInfo formats dependency info for list output.
 // Parent-child deps are shown as "parent: X" (structural), separate from "blocked by" (blocking). (bd-hcxu)
-// Returns "(parent: X, blocked by: Y, blocks: Z)" or "" if no dependencies.
-func formatDependencyInfo(blockedBy, blocks []string, parent string) string {
-	if len(blockedBy) == 0 && len(blocks) == 0 && parent == "" {
+// Returns "(parent: X, blocked by: Y, blocks: Z, gated by: G)" or "" if no dependencies.
+//
+// A gate is also a blocker, so its id appears under BOTH "blocked by" and
+// "gated by". The repetition is the point: "blocked by" says what to wait on,
+// "gated by" says which of those is a gate — work nobody can start by doing
+// more work. The clause is present exactly when the ONE predicate selected a
+// gate (types.GateIsHolding + types.SubjectCanBeGated).
+func formatDependencyInfo(blockedBy, blocks []string, parent string, gatedBy []string) string {
+	if len(blockedBy) == 0 && len(blocks) == 0 && parent == "" && len(gatedBy) == 0 {
 		return ""
 	}
 
@@ -159,6 +193,9 @@ func formatDependencyInfo(blockedBy, blocks []string, parent string) string {
 	}
 	if len(blocks) > 0 {
 		parts = append(parts, fmt.Sprintf("blocks: %s", strings.Join(blocks, ", ")))
+	}
+	if len(gatedBy) > 0 {
+		parts = append(parts, fmt.Sprintf("gated by: %s", strings.Join(gatedBy, ", ")))
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
 }
@@ -235,7 +272,7 @@ func getClosedBlockerIDs(ctx context.Context, s storage.DoltStorage, allDeps map
 // formatIssueCompact formats a single issue in compact format to a buffer
 // Uses status icons for better scanability - consistent with bd graph
 // Format: [icon] [pin] ID [Priority] [Type] @assignee [labels] - Title (parent: X, blocked by: Y, blocks: Z)
-func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []string, blockedBy, blocks []string, parent string) {
+func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []string, blockedBy, blocks []string, parent string, gatedBy []string) {
 	labelsStr := ""
 	if len(labels) > 0 {
 		labelsStr = fmt.Sprintf(" %v", labels)
@@ -246,7 +283,7 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 	}
 
 	// Format dependency info
-	depInfo := formatDependencyInfo(blockedBy, blocks, parent)
+	depInfo := formatDependencyInfo(blockedBy, blocks, parent, gatedBy)
 	if depInfo != "" {
 		depInfo = " " + depInfo
 	}
@@ -255,6 +292,11 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 	statusIcon := renderStatusIcon(issue.Status)
 	if len(blockedBy) > 0 && issue.Status == types.StatusOpen {
 		statusIcon = renderStatusIcon(types.StatusBlocked)
+	}
+	// A gate is a blocker a reader cannot see in the row, so it takes the
+	// column back off ● (wy-j2upyy). Same predicate as the tree view's glyph.
+	if len(gatedBy) > 0 && types.SubjectCanBeGated(issue) {
+		statusIcon = ui.StatusBlockedStyle.Render(ui.StatusIconGated)
 	}
 
 	if issue.Status == types.StatusClosed {
