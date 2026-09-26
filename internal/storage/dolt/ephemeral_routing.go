@@ -357,6 +357,19 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 // uow/domain claim surfaces. Every one of these should migrate to the
 // post-tx ordering; until then any of them racing a concurrent writer can
 // still silently revert that writer's committed rows.
+//
+// The STAGED SET is the hazard's other axis, and it widened. When versioned
+// history is active, withVersionedHistoryTables adds issue_versions and
+// store_epoch to whatever fixed list a caller passed (every caller here
+// already stages issues), so those two tables are now exposed to the lost
+// update above on every in-tx plane named in the paragraph above. The
+// exposure is not equivalent to the one issues already had: a reverted issues
+// row is rewritten by the next mutation of that bead, while issue_versions
+// and store_epoch are append-only, so a row reverted to its BEGIN-time value
+// is never rewritten -- it is gone, leaving a hole in the history no later
+// write fills. Migrating these planes to the post-tx ordering closes this
+// along with the rest of the hazard; it is written down here so the
+// activation phase inherits a known hazard rather than discovering it.
 func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables []string, commitMsg string) error {
 	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
 	// for a later explicit commit point (bd dolt commit / CommitPending)
@@ -364,7 +377,7 @@ func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
-	for _, table := range tables {
+	for _, table := range s.withVersionedHistoryTables(tables) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}

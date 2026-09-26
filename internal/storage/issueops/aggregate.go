@@ -286,7 +286,17 @@ func metadataChanged(current, next json.RawMessage) (bool, error) {
 }
 
 // ApplyLabelPatch applies ordered label edits and reports whether rows changed.
+// A patch that changed the label set mints ONE version row for the issue,
+// after every label row it wrote; a patch that leaves the set as it was mints
+// nothing.
 func ApplyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch publicops.LabelPatch, actor string) (bool, error) {
+	return applyLabelPatch(ctx, tx, current, patch, actor, true)
+}
+
+// applyLabelPatch is the body of ApplyLabelPatch. mintVersion controls whether
+// the patch mints its own version row; ExecuteUpdate passes false and mints
+// once for the whole guarded update after its last patch.
+func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch publicops.LabelPatch, actor string, mintVersion bool) (bool, error) {
 	if !patch.Replace.Set && len(patch.Add) == 0 && len(patch.Remove) == 0 {
 		return false, nil
 	}
@@ -333,13 +343,21 @@ func ApplyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 	if !ok {
 		return false, fmt.Errorf("apply labels: transaction must be *sql.Tx")
 	}
+	// The per-label helpers run without minting: the patch is one mutation
+	// and is versioned once below, after the last row, so the version carries
+	// the complete post-patch set rather than one row per label.
 	for _, label := range stringSetDifference(existing, target) {
-		if err := RemoveLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor); err != nil {
+		if err := removeLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor, false); err != nil {
 			return false, err
 		}
 	}
 	for _, label := range stringSetDifference(target, existing) {
-		if err := AddLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor); err != nil {
+		if err := addLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor, false); err != nil {
+			return false, err
+		}
+	}
+	if mintVersion {
+		if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
 			return false, err
 		}
 	}
@@ -353,8 +371,17 @@ type ParentPatchResult struct {
 	WispRowsChanged  bool
 }
 
-// ApplyParentPatch replaces the parent-child targets and reports concrete changes.
+// ApplyParentPatch replaces the parent-child targets and reports concrete
+// changes. A patch that rewired the parent edges mints ONE version row for the
+// child (the referencing issue), after the last edge write; an unchanged
+// parent set mints nothing.
 func ApplyParentPatch(ctx context.Context, tx DBTX, current *types.Issue, parent publicops.Field[string], actor string) (ParentPatchResult, error) {
+	return applyParentPatch(ctx, tx, current, parent, actor, true)
+}
+
+// applyParentPatch is the body of ApplyParentPatch; mintVersion is
+// applyLabelPatch's, for the same reason.
+func applyParentPatch(ctx context.Context, tx DBTX, current *types.Issue, parent publicops.Field[string], actor string, mintVersion bool) (ParentPatchResult, error) {
 	if !parent.Set {
 		return ParentPatchResult{}, nil
 	}
@@ -379,14 +406,21 @@ func ApplyParentPatch(ctx context.Context, tx DBTX, current *types.Issue, parent
 	if !ok {
 		return ParentPatchResult{}, fmt.Errorf("apply parent: transaction must be *sql.Tx")
 	}
+	// The edge helpers run without minting: the patch is one mutation of the
+	// child's edge set and is versioned once below, after the last edge.
 	var recomputed RecomputeIsBlockedResult
 	for _, parentID := range stringSetDifference(existing, target) {
-		if _, err := removeDependencyInTx(ctx, sqlTx, current.ID, parentID, actor, false, &recomputed); err != nil {
+		if _, err := removeDependencyInTx(ctx, sqlTx, current.ID, parentID, actor, false, &recomputed, false); err != nil {
 			return ParentPatchResult{}, err
 		}
 	}
 	for _, parentID := range stringSetDifference(target, existing) {
-		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed); err != nil {
+		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed, false); err != nil {
+			return ParentPatchResult{}, err
+		}
+	}
+	if mintVersion {
+		if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
 			return ParentPatchResult{}, err
 		}
 	}

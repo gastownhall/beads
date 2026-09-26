@@ -32,6 +32,46 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 	return t.tables
 }
 
+// MarkVersionedHistoryDirty adds the tables the versioned-history seam writes
+// (issueops.VersionedHistoryStagedTables) when history is enabled on the store
+// that owns this transaction. Stores call it once, after the body has run and
+// before handing DirtyTables to StageAndCommit, so no individual mutator has
+// to remember that minting a version dirties three more tables.
+//
+// enabled is the store's own activation flag — the same input its
+// ScopeVersionedHistoryTransaction call takes. That is the same atomic read
+// twice, not one value threaded through: the scope call reads it when the
+// transaction opens, this one reads it again after the body has run. So the
+// staging set and the minting behavior cannot disagree only as long as
+// activation does not change mid-operation — a SetVersionedHistoryEnabled
+// flip landing in that window mints rows under the scope and then declines to
+// stage them. Activation is wiring-time configuration with no non-test caller
+// today, so this is an invariant to preserve rather than a live defect; latch
+// the flag once per operation and pass the bool if that ever stops holding.
+//
+// A tracker with nothing dirty is left alone. Minting only happens alongside a
+// mutation, so an empty set means no mutation ran; adding tables there would
+// turn an operation that deliberately stages nothing into one that stages, and
+// StageAndCommit's own len(dirtyTables)==0 early return is load-bearing for
+// those callers.
+//
+// Keyed on SCOPE, not on whether a row was actually minted -- deliberately.
+// Staging a clean table costs one DOLT_ADD that stages nothing, and both
+// commit helpers already skip an empty staged set, so the false-positive side
+// is free; tracking real mints would mean threading state back out of the seam
+// for no behavioral gain. The one thing it does widen is `issues` on the
+// dependency paths, which stage only {dependencies, events} today -- and that
+// widening is exactly what the current_revision advance requires, gated on
+// history being on, so no flag-off commit changes shape.
+func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
+	if !enabled || len(t.tables) == 0 {
+		return
+	}
+	for _, table := range issueops.VersionedHistoryStagedTables() {
+		t.MarkDirty(table)
+	}
+}
+
 // StageAndCommit stages only the specified dirty tables and creates a Dolt
 // version commit. conn must be a non-transactional database connection (the
 // SQL transaction should already be committed before calling this).
