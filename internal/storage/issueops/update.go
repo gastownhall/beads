@@ -352,6 +352,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// it does not recognize, so a surviving override would reach the field
 	// allowlist and be refused by name.
 	forceClosePolicy := PopForceClosePolicy(updates)
+	dueClearReason := PopDueClearReason(updates)
 
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
@@ -394,6 +395,10 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 	if len(updates) == 0 {
 		return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: false}, nil
+	}
+
+	if err := ValidateDueClear(oldIssue, updates, dueClearReason); err != nil {
+		return nil, err
 	}
 
 	// A status update that crosses into the done category is a close by another
@@ -501,7 +506,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		newData, _ := json.Marshal(updates)
 		eventType := DetermineEventType(oldIssue, updates)
 
-		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
+		if err := RecordFullEventWithCommentInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData), dueClearReason); err != nil {
 			return nil, fmt.Errorf("failed to record event: %w", err)
 		}
 	}
@@ -1026,11 +1031,22 @@ func readIssueAndResolveMergeOps(ctx context.Context, tx DBTX, id string, update
 
 // RecordFullEventInTable records an event with both old and new values.
 func RecordFullEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
-	return InsertDerivedEvent(ctx, tx, table, AuxEvent{
+	return RecordFullEventWithCommentInTable(ctx, tx, table, issueID, eventType, actor, oldValue, newValue, "")
+}
+
+// RecordFullEventWithCommentInTable records an event with both values and a
+// comment; an empty comment is stored as NULL, exactly as RecordFullEventInTable
+// leaves it.
+func RecordFullEventWithCommentInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, oldValue, newValue, comment string) error {
+	event := AuxEvent{
 		IssueID:   issueID,
 		EventType: eventType,
 		Actor:     actor,
 		OldValue:  str(oldValue),
 		NewValue:  str(newValue),
-	})
+	}
+	if comment != "" {
+		event.Comment = str(comment)
+	}
+	return InsertDerivedEvent(ctx, tx, table, event)
 }

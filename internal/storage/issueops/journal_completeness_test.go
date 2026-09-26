@@ -150,11 +150,12 @@ var beadDMLExemptions = map[string]string{
 	"ReconcileChildCounters": "recomputes denormalized child-counter state, not a bead mutation",
 
 	// (2) aux tables matched via templated %s, not work-bead state.
-	"RecordEventInTable":            "writes the events audit table (templated %s), not work-bead state",
-	"RecordFullEventInTable":        "writes the events audit table (templated %s), not work-bead state",
-	"InsertDerivedEvent":            "writes the events audit table (templated %s), not work-bead state",
-	"InsertDerivedEventReturningID": "writes the events audit table (templated %s), not work-bead state",
-	"GetNextChildIDTx":              "writes the child_counters allocation table (templated %s), not work-bead state",
+	"RecordEventInTable":                "writes the events audit table (templated %s), not work-bead state",
+	"RecordFullEventInTable":            "writes the events audit table (templated %s), not work-bead state",
+	"RecordFullEventWithCommentInTable": "writes the events audit table (templated %s), not work-bead state",
+	"InsertDerivedEvent":                "writes the events audit table (templated %s), not work-bead state",
+	"InsertDerivedEventReturningID":     "writes the events audit table (templated %s), not work-bead state",
+	"GetNextChildIDTx":                  "writes the child_counters allocation table (templated %s), not work-bead state",
 
 	// (3) constituent sub-helpers; the calling entry point journals the whole
 	// mutation once (a create/rename/promote/delete emits a single row).
