@@ -382,10 +382,11 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(fromID)
-				tgtPrefix := types.ExtractPrefix(dependsOnArg)
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = dependsOnArg
+				if typedErr := refuseTypedDependencyTarget(dependsOnArg); typedErr != nil {
+					return HandleErrorRespectJSON("%v", typedErr)
+				}
+				if foreign, ok := crossPrefixDependencyTarget(fromID, dependsOnArg); ok {
+					toID = foreign
 				} else {
 					return HandleErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
 				}
@@ -708,10 +709,13 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 		} else {
 			toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, edge.DependsOnID)
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(current.IssueID)
-				tgtPrefix := types.ExtractPrefix(edge.DependsOnID)
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = edge.DependsOnID
+				if typedErr := refuseTypedDependencyTarget(edge.DependsOnID); typedErr != nil {
+					errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, typedErr))
+					resolved = append(resolved, current)
+					continue
+				}
+				if foreign, ok := crossPrefixDependencyTarget(current.IssueID, edge.DependsOnID); ok {
+					toID = foreign
 				} else {
 					errs = append(errs, fmt.Sprintf("line %d: resolving dependency ID %s: %v", edge.Line, edge.DependsOnID, err))
 					resolved = append(resolved, current)
@@ -1138,10 +1142,8 @@ var depRemoveCmd = &cobra.Command{
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, args[1])
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(fromID)
-				tgtPrefix := types.ExtractPrefix(args[1])
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = args[1]
+				if foreign, ok := crossPrefixDependencyTarget(fromID, args[1]); ok {
+					toID = foreign
 				} else {
 					return HandleErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
 				}
@@ -1576,4 +1578,63 @@ func init() {
 	depCmd.AddCommand(depTreeCmd)
 	depCmd.AddCommand(depCyclesCmd)
 	rootCmd.AddCommand(depCmd)
+}
+
+// refuseTypedDependencyTarget rejects a dependency target written in the
+// `type:id` form that `bd create --deps` accepts but `bd dep add` does not
+// read. Before this check the target fell through to the cross-prefix
+// fallback below: types.ExtractPrefix cuts at the first '-', so
+// "blocks:ga-x" yields the prefix "blocks:ga-", which differs from the
+// source's, and the whole string was written verbatim as a foreign-project
+// dependency id with the default type — an unresolvable edge, reported as
+// success (ga-1qu26u). Only a head that names a dependency type bd knows
+// (or one of the --type aliases) is refused; "external:" is handled before
+// this runs, and any other colon-bearing string is left to the fallback's
+// own shape check.
+func refuseTypedDependencyTarget(target string) error {
+	head, rest, ok := strings.Cut(target, ":")
+	if !ok || strings.HasPrefix(target, "external:") {
+		return nil
+	}
+	head = strings.TrimSpace(head)
+	if !isKnownDependencyTypeHead(head) {
+		return nil
+	}
+	return fmt.Errorf("dependency target %q is in the 'type:id' form, which bd dep add does not read; run: bd dep add <from> %s --type %s", target, strings.TrimSpace(rest), canonicalDependencyType(types.DependencyType(head)))
+}
+
+// isKnownDependencyTypeHead reports whether head is one of bd's dependency
+// types or a --type alias for one.
+func isKnownDependencyTypeHead(head string) bool {
+	switch head {
+	case "depends-on", "blocked-by":
+		return true
+	}
+	for _, dt := range types.AllDependencyTypes {
+		if string(dt) == head {
+			return true
+		}
+	}
+	return false
+}
+
+// crossPrefixDependencyTarget is the cross-project fallback for a target that
+// did not resolve locally: it is accepted verbatim only when it LOOKS like an
+// issue id of another project — a non-empty prefix ending in '-', a non-empty
+// remainder, no ':' anywhere — and its prefix differs from the source's. A
+// typo-shaped string never qualifies; before this guard any colon-bearing
+// value with a '-' after the colon did (ga-1qu26u).
+func crossPrefixDependencyTarget(fromID, target string) (string, bool) {
+	if strings.Contains(target, ":") {
+		return "", false
+	}
+	srcPrefix := types.ExtractPrefix(fromID)
+	tgtPrefix := types.ExtractPrefix(target)
+	if srcPrefix == "" || tgtPrefix == "" || srcPrefix == tgtPrefix {
+		return "", false
+	}
+	if strings.TrimSpace(strings.TrimPrefix(target, tgtPrefix)) == "" {
+		return "", false
+	}
+	return target, true
 }
