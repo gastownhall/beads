@@ -2258,8 +2258,11 @@ func projectIdentityMismatchError(localID, dbID, database string, openedByInit b
 	if openedByInit {
 		return fmt.Errorf(
 			"PROJECT IDENTITY MISMATCH — refusing to initialize against an existing database\n\n"+
+				// The database name is variable-length, so it gets its own line:
+				// interpolating it into a label would unalign the two ID columns.
+				"  Database: %q\n"+
 				"  Local project ID (metadata.json):  %s\n"+
-				"  Database %q project ID:            %s\n\n"+
+				"  Database project ID:               %s\n\n"+
 				"The Dolt server already has a database with this name, and it belongs to\n"+
 				"a DIFFERENT project. bd init will not adopt or write to it.\n"+
 				"This can happen when:\n"+
@@ -2270,10 +2273,11 @@ func projectIdentityMismatchError(localID, dbID, database string, openedByInit b
 				"To fix, point bd init at this project's data instead:\n"+
 				"  - this project's server:  bd init --server-host <host> --server-port <port>\n"+
 				"  - an unused database:     bd init --database <other-name>\n"+
-				"    (if bd init then reports the workspace is already initialized, follow its steps)\n"+
+				"    (if bd init then reports the workspace is already initialized,\n"+
+				"     follow those steps)\n"+
 				"If this database really is this project's and metadata.json is stale,\n"+
 				"run 'bd doctor --fix' or 'bd bootstrap' to reconcile metadata.json with it.",
-			localID, database, dbID)
+			database, localID, dbID)
 	}
 	return fmt.Errorf(
 		"PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+

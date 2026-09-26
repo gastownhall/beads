@@ -6,14 +6,14 @@ import (
 )
 
 // TestProjectIdentityMismatchError_InitAdvice pins GH#5558: when the identity
-// check fires inside bd init (a CreateIfMissing open against an existing
-// database), the refusal must not tell the user not to run the command they are
-// running, and must name remedies that work from there. The ordinary open keeps
-// its original advice.
+// check fires inside bd init (Config.OpenedByInit), the refusal must not tell
+// the user not to run the command they are running, and must name remedies that
+// work from there. Every other open keeps its original advice — including a
+// CreateIfMissing open, which is not by itself bd init.
 func TestProjectIdentityMismatchError_InitAdvice(t *testing.T) {
 	const localID, dbID, database = "project-AAAA", "project-BBBB", "shared_db"
 
-	t.Run("create-if-missing", func(t *testing.T) {
+	t.Run("opened-by-init", func(t *testing.T) {
 		msg := projectIdentityMismatchError(localID, dbID, database, true).Error()
 		if strings.Contains(msg, "Do NOT run 'bd init'") {
 			t.Errorf("init-time refusal tells the user not to run bd init:\n%s", msg)

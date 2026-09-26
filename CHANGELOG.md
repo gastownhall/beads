@@ -159,10 +159,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`bd init` no longer tells you not to run `bd init` when it refuses a
   foreign database** ([#5558](https://github.com/gastownhall/beads/issues/5558)).
-  Re-running `bd init` in a workspace whose `metadata.json` already records a
-  project ID, against a server whose database of that name belongs to another
-  project, correctly refuses with `PROJECT IDENTITY MISMATCH` — but the refusal
-  was the one written for ordinary opens, ending in "Do NOT run 'bd init'". The
+  When `bd init` opens a server database that already exists and belongs to a
+  different project — for example when `--server-host`/`--server-port`/
+  `--database` point it somewhere other than this workspace's own server — it
+  correctly refuses with `PROJECT IDENTITY MISMATCH`, but the refusal was the
+  one written for ordinary opens, ending in "Do NOT run 'bd init'". The
   init-time refusal now names the database and points at remedies that work
   from there: point `bd init` at this project's server
   (`--server-host`/`--server-port`) or an unused database name
