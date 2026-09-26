@@ -43,6 +43,18 @@ const (
 	// prove the caller was non-interactive. Supplying the token is the
 	// correct remedy for all three sources.
 	ExitDestroyTokenMissing = 12
+
+	// ExitHomeDirRefused signals `bd init` was run directly in the user's
+	// home directory, which is not already a git repo, without the caller
+	// naming a BEADS_DIR. Refused because init would `git init` $HOME and
+	// scaffold agent files over whatever is already there (GH#4635).
+	//
+	// Not part of protocol v0 §E3, which freezes 10/11/12/130 and says a
+	// new stable code needs a spec revision. This constant gives the
+	// refusal the same in-repo scriptability the other three have — a
+	// stable number instead of grepping stderr — without claiming wire
+	// status the spec has not granted.
+	ExitHomeDirRefused = 13
 )
 
 // RemoteSafetyAction names what the init command should do once it has
