@@ -237,7 +237,7 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 		readOnly: true,
 	}
 
-	db, cleanup, err := OpenSQL(ctx, dataDir, database, branch)
+	db, cleanup, err := openReadOnlySQL(ctx, dataDir, database, branch)
 	if err != nil {
 		return nil, fmt.Errorf("embeddeddolt: open db: %w", err)
 	}
@@ -273,7 +273,7 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = s.openSQL(ctx, s.database, s.branch)
 	if err != nil {
 		return
 	}
@@ -338,7 +338,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	if s.readOnly {
 		return 0, ErrReadOnly
 	}
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err := s.openSQL(ctx, s.database, s.branch)
 	if err != nil {
 		return 0, fmt.Errorf("embeddeddolt: open db: %w", err)
 	}
@@ -354,7 +354,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 }
 
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, "", "")
+	db, cleanup, err := s.openSQL(ctx, "", "")
 	if err != nil {
 		return fmt.Errorf("embeddeddolt: open db: %w", err)
 	}
@@ -579,6 +579,16 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// openSQL applies the exact-filesystem-exhaustion preflight only to stores
+// opened for logically read-only commands. Writable opens retain the existing
+// connector path unchanged.
+func (s *EmbeddedDoltStore) openSQL(ctx context.Context, database, branch string) (*sql.DB, func() error, error) {
+	if s.readOnly || s.intent == openReadOnlyCommand {
+		return openReadOnlySQL(ctx, s.dataDir, database, branch)
+	}
+	return OpenSQL(ctx, s.dataDir, database, branch)
 }
 
 // GetIssue is implemented in get_issue.go.
