@@ -292,10 +292,7 @@ func (env *contributorRoutingEnv) cleanup() {
 func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltStore {
 	env.t.Helper()
 	projectDBPath := filepath.Join(env.projectDir, ".beads", "beads.db")
-	store, err := dolt.New(env.ctx, &dolt.Config{Path: projectDBPath})
-	if err != nil {
-		env.t.Skipf("skipping: Dolt server not available: %v", err)
-	}
+	store := newTestStoreIsolatedDB(env.t, projectDBPath, "proj-")
 
 	// Set routing config
 	if err := store.SetConfig(env.ctx, "routing.mode", "auto"); err != nil {
@@ -303,9 +300,6 @@ func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltSt
 	}
 	if err := store.SetConfig(env.ctx, "routing.contributor", env.planningDir); err != nil {
 		env.t.Fatalf("failed to set routing.contributor: %v", err)
-	}
-	if err := store.SetConfig(env.ctx, "issue_prefix", "proj-"); err != nil {
-		env.t.Fatalf("failed to set issue_prefix: %v", err)
 	}
 
 	// Set sync mode-specific config
@@ -333,14 +327,7 @@ func (env *contributorRoutingEnv) initProjectStore(syncMode string) *dolt.DoltSt
 func (env *contributorRoutingEnv) initPlanningStore() *dolt.DoltStore {
 	env.t.Helper()
 	planningDBPath := filepath.Join(env.planningDir, ".beads", "beads.db")
-	store, err := dolt.New(env.ctx, &dolt.Config{Path: planningDBPath})
-	if err != nil {
-		env.t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-
-	if err := store.SetConfig(env.ctx, "issue_prefix", "plan-"); err != nil {
-		env.t.Fatalf("failed to set issue_prefix in planning store: %v", err)
-	}
+	store := newTestStoreIsolatedDB(env.t, planningDBPath, "plan-")
 
 	return store
 }
@@ -646,15 +633,7 @@ func TestExplicitRepoOverride(t *testing.T) {
 	}
 
 	overrideDBPath := filepath.Join(overrideBeadsDir, "beads.db")
-	overrideStore, err := dolt.New(env.ctx, &dolt.Config{Path: overrideDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer overrideStore.Close()
-
-	if err := overrideStore.SetConfig(env.ctx, "issue_prefix", "over-"); err != nil {
-		t.Fatalf("failed to set issue_prefix in override store: %v", err)
-	}
+	overrideStore := newTestStoreIsolatedDB(t, overrideDBPath, "over-")
 
 	// Build routing config WITH explicit override
 	mode, _ := projectStore.GetConfig(env.ctx, "routing.mode")
@@ -721,15 +700,7 @@ func TestBEADS_DIRPrecedence(t *testing.T) {
 	}
 
 	externalDBPath := filepath.Join(externalBeadsDir, "beads.db")
-	externalStore, err := dolt.New(env.ctx, &dolt.Config{Path: externalDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer externalStore.Close()
-
-	if err := externalStore.SetConfig(env.ctx, "issue_prefix", "ext-"); err != nil {
-		t.Fatalf("failed to set issue_prefix in external store: %v", err)
-	}
+	externalStore := newTestStoreIsolatedDB(t, externalDBPath, "ext-")
 
 	// Set BEADS_DIR to external directory
 	t.Setenv("BEADS_DIR", externalBeadsDir)
