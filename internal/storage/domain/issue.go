@@ -1014,14 +1014,18 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
+	// Labels supplied as part of creation belong to the accepted snapshot.
+	// Their repository writes must not replace an imported/explicit UpdatedAt;
+	// only a later standalone label mutation advances that timestamp.
+	createLabelOpts := LabelOpts{UseWispsTable: useWisp, SkipUpdatedAtTouch: true}
 	for _, label := range params.Labels {
-		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, createLabelOpts); err != nil {
 			return result, fmt.Errorf("create: add label %s: %w", label, err)
 		}
 		result.PostCreateWrites = true
 	}
 	for _, label := range result.InheritedLabels {
-		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, createLabelOpts); err != nil {
 			return result, fmt.Errorf("create: add inherited label %s: %w", label, err)
 		}
 		result.PostCreateWrites = true
