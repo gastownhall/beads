@@ -358,6 +358,13 @@ func GetRedirectInfo() RedirectInfo {
 // resolved it (under `bd -C dir` it names the redirect target itself, which
 // would mask the clone's redirect). Used by `bd -C dir prime` so the redirect
 // notice describes the primed workspace (gastownhall/beads#5509).
+//
+// NOTE: the non-git fallback here is the walk-up probe alone, so relative to
+// GetRedirectInfo this drops three cwd-specific tiers: BEADS_DIR (deliberate,
+// see above), the worktree-local redirect / separate-DB probe, and
+// GetWorktreeFallbackBeadsDir. Inside a git worktree those tiers can answer
+// differently, so a caller that has not already resolved dir the way
+// `bd -C dir` does wants GetRedirectInfo, not this.
 func GetRedirectInfoFrom(dir string) RedirectInfo {
 	return redirectInfoFor(findLocalBdsDirInRepoFrom(dir), func() string { return findBeadsDirUpward(dir) })
 }
@@ -425,12 +432,21 @@ func findLocalBdsDirInRepoFrom(dir string) string {
 
 // repoLocalBeadsDir returns <repoRoot>/.beads when repoRoot is known and the
 // directory exists, else "".
+//
+// repoRoot is canonicalized here so both locators share one form: the cwd
+// variant receives it pre-canonicalized from git.GetRepoRoot(), while the From
+// variant hands over raw `git rev-parse --show-toplevel` output, which on
+// Windows is `C:/...` or msys `/c/...`. Left un-normalized, the os.Stat below
+// misses and the repo-local tier falls through to the walk-up locator — the
+// fallback bd-wayc3 exists to beat. Canonicalizing after the "" guard is
+// deliberate: utils.CanonicalizePath("") resolves to the process cwd, which
+// would leak the cwd's .beads into an answer about another directory.
 func repoLocalBeadsDir(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
 
-	beadsDir := filepath.Join(repoRoot, ".beads")
+	beadsDir := filepath.Join(utils.CanonicalizePath(git.NormalizePath(repoRoot)), ".beads")
 	if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 		return beadsDir
 	}

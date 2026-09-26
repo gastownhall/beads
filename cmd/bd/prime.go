@@ -283,6 +283,9 @@ func primeWorkspaceDir() string {
 // it runs in the -C target, so the upstream/remote checks describe the primed
 // workspace rather than the process cwd (#5509); otherwise it runs in the
 // cwd repository via GitCmdCWD, exactly as before.
+//
+// NOTE: the probes built here are not prime-only — see primeHasGitRemote for
+// the auto-backup consumer that inherits this directory choice.
 func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	if ws := primeWorkspaceDir(); ws != "" {
 		cmd := exec.CommandContext(ctx, "git", args...)
@@ -382,6 +385,14 @@ var primeAgentProfile = func() config.AgentProfile {
 }
 
 // primeHasGitRemote detects if any git remote is configured (stubbable for tests)
+//
+// NOTE: despite the prime prefix, this has a consumer outside prime —
+// isBackupAutoEnabled (backup_auto.go) gates auto-backup and the
+// `bd backup status` note on it. Since it probes through primeGitCmd,
+// `bd -C dir <any command>` now keys that decision off the -C target's git
+// remote rather than the cwd's (#5509). That is the consistent answer, because
+// the store being backed up is the -C-resolved one, but it is a behavior
+// change beyond prime: check backup_auto before changing what this probes.
 var primeHasGitRemote = func() bool {
 	cmd, err := primeGitCmd(context.Background(), "remote")
 	if err != nil {

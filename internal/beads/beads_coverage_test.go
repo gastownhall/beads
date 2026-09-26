@@ -485,6 +485,50 @@ func TestGetRedirectInfoFrom(t *testing.T) {
 	}
 }
 
+// TestRepoLocalBeadsDirCanonicalizesRepoRoot pins both halves of the shared
+// repo-local tier's contract (gastownhall/beads#5509): the repo root is
+// canonicalized before it is joined, so the From locator's raw
+// `git rev-parse --show-toplevel` output lands on the same .beads as the cwd
+// locator's already-canonical git.GetRepoRoot(); and "" stays "", because
+// canonicalizing it would resolve to the process cwd and answer about the
+// wrong workspace.
+func TestRepoLocalBeadsDirCanonicalizesRepoRoot(t *testing.T) {
+	t.Cleanup(git.ResetCaches)
+	tmpDir := t.TempDir()
+	tmpDir, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	realRoot := filepath.Join(tmpDir, "real")
+	if err := os.MkdirAll(filepath.Join(realRoot, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(tmpDir, "link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	want := filepath.Join(realRoot, ".beads")
+	if got := repoLocalBeadsDir(realRoot); got != want {
+		t.Errorf("control: repoLocalBeadsDir(%q) = %q, want %q", realRoot, got, want)
+	}
+	// A non-canonical root must resolve to the canonical .beads. Without the
+	// canonicalization this returns <link>/.beads, which string-compares
+	// unequal against every other locator's answer for the same directory.
+	if got := repoLocalBeadsDir(linkRoot); got != want {
+		t.Errorf("repoLocalBeadsDir(symlinked root) = %q, want %q", got, want)
+	}
+
+	// "" means "not in a git repository". Canonicalizing before this guard
+	// would turn it into the cwd and report the cwd's .beads as the named
+	// workspace's — the cwd leak the -C fix exists to remove.
+	t.Chdir(realRoot)
+	if got := repoLocalBeadsDir(""); got != "" {
+		t.Errorf("repoLocalBeadsDir(\"\") = %q, want \"\" (cwd must not leak in)", got)
+	}
+}
+
 // TestFollowRedirect_ChainPrevention tests that redirect chains are not followed
 func TestFollowRedirect_ChainPrevention(t *testing.T) {
 	tmpDir := t.TempDir()
