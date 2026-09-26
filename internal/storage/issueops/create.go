@@ -107,6 +107,15 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	// The mandatory-due invariant runs here, on the classic/store leg, because
+	// this is the one body every non-public create reaches (CLI create, quick
+	// capture, batch create) with the wisp/plane routing already settled. The
+	// public leg has its own call in ValidatePublicCreateRequest.
+	if !bc.Opts.SkipDueRequired {
+		if err := ValidateDueRequired(issue); err != nil {
+			return result, err
+		}
+	}
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
 		return result, err
 	}

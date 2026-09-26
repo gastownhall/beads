@@ -290,6 +290,11 @@ func Initialize() error {
 	// Create command defaults
 	v.SetDefault("create.require-description", false)
 
+	// Mandatory due dates. OFF by default: beads does not decide that your
+	// workspace needs deadlines. A team that turns it on gets the invariant on
+	// every create surface (issueops.ValidateDueRequired).
+	v.SetDefault("due.required", false)
+
 	// Validation configuration defaults (bd-t7jq)
 	// Values: "warn" | "error" | "none"
 	// - "none": no validation (default, backwards compatible)
