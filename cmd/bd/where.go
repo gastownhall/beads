@@ -170,8 +170,9 @@ func findOriginalBeadsDir() string {
 		}
 	}
 
-	// Walk up directory tree looking for .beads with redirect
-	for dir := cwd; dir != "/" && dir != "."; {
+	// Walk up directory tree looking for .beads with redirect.
+	walk := beads.NewAncestorDirWalk(cwd, cwd)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			redirectFile := filepath.Join(beadsDir, beads.RedirectFileName)
@@ -182,15 +183,6 @@ func findOriginalBeadsDir() string {
 			return ""
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root (works on both Unix and Windows)
-			// On Unix: filepath.Dir("/") returns "/"
-			// On Windows: filepath.Dir("C:\\") returns "C:\\"
-			break
-		}
-		dir = parent
 	}
 
 	return ""
