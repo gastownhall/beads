@@ -950,7 +950,7 @@ func init() {
 	//   --defer=tomorrow    Hidden until tomorrow
 	createCmd.Flags().String("due", "", "Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
 	createCmd.Flags().String("defer", "", "Defer until date (issue hidden from bd ready until then). Same formats as --due")
-	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
+	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON object, or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
 }

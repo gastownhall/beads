@@ -1009,7 +1009,7 @@ func init() {
 	updateCmd.Flags().Bool("no-history", false, "Mark issue as no-history (skip Dolt commits, not GC-eligible)")
 	updateCmd.Flags().Bool("history", false, "Clear no-history flag (re-enable Dolt commit history)")
 	// Metadata flag (GH#1413)
-	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
+	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON object, or @file.json to read from file)")
 	// Incremental metadata edits (GH#1406)
 	updateCmd.Flags().StringArray("set-metadata", nil, "Set metadata key=value (repeatable, e.g., --set-metadata team=platform)")
 	updateCmd.Flags().StringArray("unset-metadata", nil, "Remove metadata key (repeatable, e.g., --unset-metadata team)")

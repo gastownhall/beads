@@ -156,8 +156,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage merge, with an internal unmarshal error. A shared check now refuses
   a string, number, boolean, array or `null` up front on every create and
   update path with `invalid --metadata: must be a JSON object`; `{}` is still
-  accepted. Values inside the object stay opaque, so a string value that
-  looks like JSON is kept as written.
+  accepted. `null` is the one value update handled differently before: the
+  storage merge accepted it as a no-op and exited 0, so `bd update --metadata
+  null` now exits 1 where it used to silently change nothing. Values inside
+  the object stay opaque, so a string value that looks like JSON is kept as
+  written.
 
 - **`bd mol ready --gated` no longer refuses under `--proxied-server` when
   `BEADS_MAX_ROWS` is set**
