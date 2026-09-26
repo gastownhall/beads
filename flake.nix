@@ -38,6 +38,8 @@
 
       packages = forAllSystems (import ./packages.nix);
 
+      checks = forAllSystems (import ./checks.nix);
+
       apps = nixpkgs.lib.genAttrs systems (
         system:
         rec {

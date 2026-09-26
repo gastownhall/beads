@@ -134,6 +134,16 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 }
 
 func testHookProcessBackendSelection(t *testing.T) {
+	// Derive the uutils helper from the GNU stub so the two differ only in the
+	// banner, but fail loudly if that banner ever moves: strings.Replace returns
+	// its input unchanged when the pattern is absent, which would silently turn
+	// the uutils case into a second copy of the GNU one.
+	const hookProcessGNUTimeoutBanner = "(GNU coreutils) 9.99"
+	uutilsTimeoutStub := strings.Replace(hookProcessGNUTimeoutStub, hookProcessGNUTimeoutBanner, "(uutils coreutils) 0.10.0", 1)
+	if uutilsTimeoutStub == hookProcessGNUTimeoutStub {
+		t.Fatalf("uutils fixture is a copy of the GNU stub: %q not found in hookProcessGNUTimeoutStub", hookProcessGNUTimeoutBanner)
+	}
+
 	tests := []struct {
 		name        string
 		fixtures    []hookProcessFixture
@@ -147,6 +157,14 @@ func testHookProcessBackendSelection(t *testing.T) {
 				{name: "gtimeout", body: hookProcessGNUGtimeoutStub},
 			},
 			wantHelper: "helper=gtimeout",
+		},
+		{
+			name: "uutils coreutils timeout is selected like GNU",
+			fixtures: []hookProcessFixture{
+				{name: "timeout", body: uutilsTimeoutStub},
+				{name: "gtimeout", body: hookProcessGNUGtimeoutStub},
+			},
+			wantHelper: "helper=timeout",
 		},
 		{
 			name: "nonzero GNU-looking probe yields to gtimeout",

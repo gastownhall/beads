@@ -22,6 +22,7 @@ a unit test: use the real boundary when the defect could live there.
 | Affected-package confidence | `./scripts/test.sh ./path/to/package/...` | After the focused test passes; include directly affected neighbors when their contract changed. |
 | Final Go baseline | `make test` | Once after focused work on Go code is green. It applies the normal local build flags, coverage, and local skip handling. |
 | Named CI wrapper | `make ci-pr-core`, `make ci-pr-policy`, or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
+| Hook shims against real timeout implementations | `nix flake check -L` (or `nix build .#checks.<system>.hook-timeout-backends -L`) | After changing the hook generator in `cmd/bd/hooks.go` (then `make githooks-regen`) or anything under `.githooks/`. Runs the tracked managed sections against GNU coreutils, uutils, busybox and toybox `timeout` — the multicalls also installed as `gtimeout` alone — with and without Perl, under dash, bash and busybox ash. About one deadline of wall time; needs no Go build. |
 
 Do not replace the focused loop with repeated full-suite runs. Run the final
 `make test` once the affected Go tests are green. For docs-only changes, use
