@@ -70,3 +70,16 @@ func TestValidateEphemeralIdleTimeout_NoContradictionCases(t *testing.T) {
 		})
 	}
 }
+
+// TestInitIdleTimeoutHelpNamesEphemeralRoot keeps BEADS_EPHEMERAL_ROOT
+// discoverable: the flag it constrains is where its one effect is
+// documented, and the generated CLI reference is built from this string.
+func TestInitIdleTimeoutHelpNamesEphemeralRoot(t *testing.T) {
+	flag := initCmd.Flags().Lookup("proxied-server-idle-timeout")
+	if flag == nil {
+		t.Fatal("init does not register --proxied-server-idle-timeout")
+	}
+	if !strings.Contains(flag.Usage, "BEADS_EPHEMERAL_ROOT=1") {
+		t.Errorf("--proxied-server-idle-timeout help does not mention BEADS_EPHEMERAL_ROOT=1: %q", flag.Usage)
+	}
+}
