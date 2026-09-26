@@ -1646,7 +1646,7 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	require.False(t, store.isGitProtocolRemote(ctx, store.remote), "file:// is not git-protocol")
 	if !store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()) {
 		remotes, listErr := store.ListRemotes(ctx)
-		ensureErr := doltutil.EnsureCLIRemote(clientTestdbDir, store.remote, remoteURL)
+		ensureErr := doltutil.EnsureCLIRemote(clientTestdbDir, store.remote, remoteURL, "")
 		t.Fatalf("should route through CLI for credentials; serverMode=%v remotes=%v listErr=%v cliRemote=%q ensureErr=%v",
 			store.serverMode, remotes, listErr, doltutil.FindCLIRemote(clientTestdbDir, store.remote), ensureErr)
 	}

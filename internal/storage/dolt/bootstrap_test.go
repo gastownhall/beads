@@ -19,7 +19,7 @@ func TestBootstrapCloneCmdEnvIsGuarded(t *testing.T) {
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("GIT_CURL_VERBOSE", "1")
 
-	cmd := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"))
+	cmd := bootstrapCloneCmd(context.Background(), "git+https://example.com/repo.git", filepath.Join(t.TempDir(), "beads"), "")
 	if cmd.Env == nil {
 		t.Fatal("bootstrapCloneCmd() left cmd.Env nil; the clone would inherit stderr-directed git tracing")
 	}
@@ -153,17 +153,65 @@ func TestBootstrapFromRemoteWithDB_PreservesPreExistingCloneTarget(t *testing.T)
 	}
 }
 
+// An invalid --ref is refused on a host whose database already exists, not
+// only on a fresh one: the ref check runs before the already-exists early
+// return, so the same argument is accepted or refused the same way everywhere.
+// The valid-ref control proves the early return still fires, so the refusal
+// comes from the ref and not from the call failing for some other reason.
+// Needs no dolt binary — both outcomes are decided before the CLI lookup.
+func TestBootstrapFromRemoteWithDBRef_RefusesInvalidRefOnBootstrappedHost(t *testing.T) {
+	doltDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(doltDir, "beads", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !doltExists(doltDir) {
+		t.Fatal("test setup: doltExists should see the pre-existing database")
+	}
+
+	for _, ref := range []string{"-x", "refs/heads/issue data"} {
+		cloned, err := BootstrapFromRemoteWithDBRef(context.Background(), doltDir, "git+https://example.com/repo.git", "beads", ref)
+		if err == nil || !strings.Contains(err.Error(), "invalid git data ref") {
+			t.Errorf("BootstrapFromRemoteWithDBRef(ref=%q) = %v, %v; want the invalid-ref error", ref, cloned, err)
+		}
+	}
+
+	cloned, err := BootstrapFromRemoteWithDBRef(context.Background(), doltDir, "git+https://example.com/repo.git", "beads", "refs/dolt/units/team-12542")
+	if cloned || err != nil {
+		t.Fatalf("BootstrapFromRemoteWithDBRef with a valid ref on an existing database = %v, %v; want false, nil", cloned, err)
+	}
+}
+
 func TestDoltCloneArgs(t *testing.T) {
 	t.Setenv("DOLT_REMOTE_USER", "")
-	got := doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	got := doltCloneArgs("https://example.com/repo", "/tmp/clone", "")
 	want := []string{"clone", "https://example.com/repo", "/tmp/clone"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
 	}
 
 	t.Setenv("DOLT_REMOTE_USER", "alice")
-	got = doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	got = doltCloneArgs("https://example.com/repo", "/tmp/clone", "")
 	want = []string{"clone", "--user", "alice", "https://example.com/repo", "/tmp/clone"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
+	}
+}
+
+// A git data ref reaches `dolt clone` as --ref, verbatim, whether it is a
+// branch under refs/heads/ or a ref elsewhere in the namespace.
+func TestDoltCloneArgsWithRef(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "")
+	for _, ref := range []string{"refs/heads/issue-data", "refs/dolt/units/team-12542"} {
+		got := doltCloneArgs("git+https://example.com/repo.git", "/tmp/clone", ref)
+		want := []string{"clone", "--ref", ref, "git+https://example.com/repo.git", "/tmp/clone"}
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("doltCloneArgs(ref=%q) = %q, want %q", ref, got, want)
+		}
+	}
+
+	t.Setenv("DOLT_REMOTE_USER", "alice")
+	got := doltCloneArgs("git+https://example.com/repo.git", "/tmp/clone", " refs/heads/issue-data ")
+	want := []string{"clone", "--user", "alice", "--ref", "refs/heads/issue-data", "git+https://example.com/repo.git", "/tmp/clone"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
 	}
