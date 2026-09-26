@@ -17,22 +17,24 @@ import (
 	"github.com/olebedev/when/rules/en"
 )
 
-// compactDurationRe matches compact duration patterns: [+-]?(\d+)([hdwmy])
-// Examples: +6h, -1d, +2w, 3m, 1y
-var compactDurationRe = regexp.MustCompile(`^([+-]?)(\d+)([hdwmy])$`)
+// compactDurationRe matches compact duration patterns: [+-]?(\d+)(min|[hdwmy])
+// Examples: +6h, -1d, +2w, 3m, 1y, +30min
+var compactDurationRe = regexp.MustCompile(`^([+-]?)(\d+)(min|[hdwmy])$`)
 
 // ParseCompactDuration parses compact duration syntax and returns the resulting time.
 //
-// Format: [+-]?(\d+)([hdwmy])
+// Format: [+-]?(\d+)(min|[hdwmy])
 //
 // Units:
+//   - min = minutes
 //   - h = hours
 //   - d = days
 //   - w = weeks
-//   - m = months
+//   - m = months (NOT minutes; use "min" for minutes)
 //   - y = years
 //
 // Examples:
+//   - "+30min" -> now + 30 minutes
 //   - "+6h" -> now + 6 hours
 //   - "-1d" -> now - 1 day
 //   - "+2w" -> now + 2 weeks
@@ -67,6 +69,8 @@ func ParseCompactDuration(s string, now time.Time) (time.Time, error) {
 // applyDuration applies the given amount and unit to the base time.
 func applyDuration(base time.Time, amount int, unit string) time.Time {
 	switch unit {
+	case "min":
+		return base.Add(time.Duration(amount) * time.Minute)
 	case "h":
 		return base.Add(time.Duration(amount) * time.Hour)
 	case "d":

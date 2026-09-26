@@ -42,6 +42,28 @@ func TestParseCompactDuration(t *testing.T) {
 			want:  time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC),
 		},
 
+		// "min" is the unambiguous minute unit; bare "m" stays months (GH #6609)
+		{
+			name:  "+30min adds 30 minutes",
+			input: "+30min",
+			want:  time.Date(2025, 6, 15, 12, 30, 0, 0, time.UTC),
+		},
+		{
+			name:  "-15min subtracts 15 minutes",
+			input: "-15min",
+			want:  time.Date(2025, 6, 15, 11, 45, 0, 0, time.UTC),
+		},
+		{
+			name:  "90min without sign adds 90 minutes",
+			input: "90min",
+			want:  time.Date(2025, 6, 15, 13, 30, 0, 0, time.UTC),
+		},
+		{
+			name:  "+30m still adds 30 months",
+			input: "+30m",
+			want:  time.Date(2027, 12, 15, 12, 0, 0, 0, time.UTC),
+		},
+
 		// Valid negative durations (past)
 		{
 			name:  "-1d subtracts 1 day",
@@ -97,6 +119,16 @@ func TestParseCompactDuration(t *testing.T) {
 		{
 			name:    "++1d (double sign) is invalid",
 			input:   "++1d",
+			wantErr: true,
+		},
+		{
+			name:    "30mins (plural) is invalid",
+			input:   "+30mins",
+			wantErr: true,
+		},
+		{
+			name:    "30minutes is invalid",
+			input:   "+30minutes",
 			wantErr: true,
 		},
 		{
@@ -161,6 +193,8 @@ func TestIsCompactDuration(t *testing.T) {
 		{"3m", true},
 		{"1y", true},
 		{"+24h", true},
+		{"+30min", true},
+		{"+30mins", false},
 		{"", false},
 		{"tomorrow", false},
 		{"2025-01-15", false},
