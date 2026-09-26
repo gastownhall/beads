@@ -2789,8 +2789,11 @@ func TestDiscovery_BlockedNonexistentParentSilentEmpty(t *testing.T) {
 // FIXED (PR #6742, GH#5988): the command used to print "✓ Removed label"
 // for a label the issue never had. It now reports the no-op ("Label 'x' was
 // not on <id>") and still exits 0, since a no-op edit is not an error. This
-// test's assertions describe the fixed behavior and stay as a regression
-// lock. Same class as BUG-42 (dep rm nonexistent says "Removed").
+// test's assertions describe the fixed behavior and stay as a discovery-suite
+// regression check — this file is `//go:build regression && discovery` and no
+// CI lane passes the discovery tag, so the CI lock for the fix is
+// TestEmbeddedLabel/TestProxiedServerLabel in cmd/bd, not this test. Same
+// class as BUG-42 (dep rm nonexistent says "Removed").
 //
 // Classification: BUG (fixed) — false positive confirmation.
 func TestDiscovery_LabelRemoveNonexistentSilentSuccess(t *testing.T) {
@@ -2830,7 +2833,9 @@ func TestDiscovery_LabelRemoveNonexistentSilentSuccess(t *testing.T) {
 // FIXED (PR #6742, GH#5988): the command used to print "✓ Added label" for a
 // label the issue already had. The storage layer was always idempotent (no
 // duplicate row); the message now says "<id> already has label 'x'" and the
-// command still exits 0.
+// command still exits 0. Like the test above this stays as a discovery-suite
+// regression check and is not a CI gate; the CI lock is
+// TestEmbeddedLabel/TestProxiedServerLabel in cmd/bd.
 //
 // Classification: BUG (fixed) — misleading success message.
 func TestDiscovery_LabelAddDuplicateReportsAdded(t *testing.T) {

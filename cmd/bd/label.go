@@ -132,6 +132,18 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 	// for a single label; a multi-label edit that changed something also
 	// needs the pre-edit set to tell its moved labels from its no-ops, so
 	// only that case pays for a read.
+	//
+	// THAT PRE-EDIT SET IS READ OUTSIDE THE WRITE TRANSACTION, so per-label
+	// attribution on the multi-label path is best-effort: a concurrent edit
+	// landing between the read and the Update can misattribute one label's
+	// line. What it cannot do is write the wrong thing — the target set is
+	// recomputed from current.Labels inside the write transaction
+	// (issueops.ApplyLabelPatch), so the stored labels, the JSON shape and
+	// the exit code stay correct and the state converges. A single-label
+	// edit is immune by construction, deriving its outcome from the write's
+	// own transaction. The batch shape named above closes the window
+	// structurally by collapsing the read and the write into one
+	// transaction; it is not worth a second read protocol before then.
 	var reader issueops.Reader
 	if len(labels) > 1 {
 		if reader, err = openIssueReader(); err != nil {

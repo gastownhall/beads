@@ -328,6 +328,46 @@ func TestEmbeddedLabel(t *testing.T) {
 		}
 	})
 
+	// One label, two issues, only one of which has it: the divergence is
+	// BETWEEN the issues, so this pins the per-issue derivation the way
+	// label_edit_mixed_reports_each_label pins the per-label one. The outcome
+	// is built inside the id loop from that id's own UpdateResult, and a
+	// refactor that hoisted it out — or reused the last result for every id —
+	// would print one identical line per issue again, which is what the
+	// pre-GH#5988 code did. Every other subtest here edits a single issue and
+	// so would pass such a refactor.
+	t.Run("label_edit_divergent_multi_issue", func(t *testing.T) {
+		fresh := bdCreate(t, bd, dir, "Divergent JSON fresh", "--type", "task")
+		holder := bdCreate(t, bd, dir, "Divergent JSON holder", "--type", "task", "--label", "shared")
+		rows := bdLabelEditJSON(t, bd, dir, "add", fresh.ID, holder.ID, "shared")
+		got := map[interface{}]interface{}{}
+		for _, r := range rows {
+			if r["label"] != "shared" {
+				t.Errorf("unexpected label in row %v", r)
+			}
+			got[r["issue_id"]] = r["status"]
+		}
+		if len(rows) != 2 || got[fresh.ID] != "added" || got[holder.ID] != "unchanged" {
+			t.Errorf("divergent multi-issue add JSON = %v, want %s=added %s=unchanged",
+				rows, fresh.ID, holder.ID)
+		}
+
+		// Same shape in the text report: one line per issue, each naming its
+		// own id, and the no-op issue must not be claimed as an edit.
+		freshText := bdCreate(t, bd, dir, "Divergent text fresh", "--type", "task")
+		holderText := bdCreate(t, bd, dir, "Divergent text holder", "--type", "task", "--label", "shared")
+		out := bdLabel(t, bd, dir, "add", freshText.ID, holderText.ID, "shared")
+		if want := "Added label 'shared' to " + freshText.ID; !strings.Contains(out, want) {
+			t.Errorf("expected %q in output: %s", want, out)
+		}
+		if want := holderText.ID + " already has label 'shared'"; !strings.Contains(out, want) {
+			t.Errorf("expected %q in output: %s", want, out)
+		}
+		if claim := "Added label 'shared' to " + holderText.ID; strings.Contains(out, claim) {
+			t.Errorf("add claimed an edit on the issue that already had the label: %s", out)
+		}
+	})
+
 	// ===== Label List =====
 
 	t.Run("label_list", func(t *testing.T) {
