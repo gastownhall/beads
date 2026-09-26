@@ -290,3 +290,35 @@ func TestIsSchemaSkewError_OtherError(t *testing.T) {
 		t.Error("IsSchemaSkewError(non-SchemaSkewError) = true, want false")
 	}
 }
+
+// -- CheckBehindDrift unit tests (mock DB) --
+
+func TestCheckBehindDrift_FreshDB_ReturnsSchemaBehindError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// On a fresh database where schema_migrations does not exist, the cursor probe
+	// returns 0 and no bare SELECT against schema_migrations is issued.
+	expectCursorProbe(mock, "schema_migrations", false)
+
+	got := CheckBehindDrift(context.Background(), db)
+	if got == nil {
+		t.Fatal("CheckBehindDrift = nil, want *SchemaBehindError for fresh DB (version=0)")
+	}
+	var behindErr *SchemaBehindError
+	if !errors.As(got, &behindErr) {
+		t.Fatalf("error type = %T (%v), want *SchemaBehindError", got, got)
+	}
+	if behindErr.DBVersion != 0 {
+		t.Errorf("DBVersion = %d, want 0", behindErr.DBVersion)
+	}
+	if behindErr.BinaryVersion != LatestVersion() {
+		t.Errorf("BinaryVersion = %d, want %d", behindErr.BinaryVersion, LatestVersion())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
