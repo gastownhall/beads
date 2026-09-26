@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -105,9 +106,13 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 	}
 
 	var existing string
+	var content []byte
 	// #nosec G304 - git config path
-	if content, rerr := os.ReadFile(excludePath); rerr == nil {
+	if readContent, rerr := os.ReadFile(excludePath); rerr == nil {
+		content = readContent
 		existing = string(content)
+	} else if !os.IsNotExist(rerr) {
+		return nil, excludePath, fmt.Errorf("failed to read git exclude file: %w", rerr)
 	}
 
 	for _, p := range patterns {
@@ -120,17 +125,14 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 		return nil, excludePath, nil
 	}
 
-	newContent := existing
-	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
-		newContent += "\n"
+	lines := []string{header}
+	if len(content) > 0 {
+		lines = []string{"", header}
 	}
-	newContent += "\n" + header + "\n"
-	for _, p := range added {
-		newContent += p + "\n"
-	}
+	newContent := gitignore.AppendLines(content, append(lines, added...))
 
 	// #nosec G306 - config file needs 0644
-	if err = os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
+	if err = os.WriteFile(excludePath, newContent, 0644); err != nil {
 		return nil, excludePath, fmt.Errorf("failed to write git exclude file: %w", err)
 	}
 	return added, excludePath, nil
