@@ -16,13 +16,28 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// DefaultLeaseTTL is how long a fresh claim stays valid without a heartbeat.
-// A worker is expected to call HeartbeatIssueInTx well within this window
-// (heartbeat cadence ≫ claim cadence; see the commit-bloat note on bd heartbeat)
-// so a live claim's lease_expires_at always sits in the future. A worker that
-// dies stops heartbeating, its lease_expires_at goes stale, and bd reclaim
-// reverts the issue to ready. Tunable per-claim via WithLeaseTTL on the
-// context, falling back to this default.
+// DefaultLeaseTTL is how long a fresh claim stays valid without a heartbeat,
+// for deployments that have not set the "lease.ttl" config key / BD_LEASE_TTL
+// env var (see EffectiveDefaultLeaseTTL). A worker is expected to call
+// HeartbeatIssueInTx well within this window (heartbeat cadence ≫ claim
+// cadence; see the commit-bloat note on bd heartbeat) so a live claim's
+// lease_expires_at always sits in the future. A worker that dies stops
+// heartbeating, its lease_expires_at goes stale, and bd reclaim reverts the
+// issue to ready. Tunable per-claim via WithLeaseTTL on the context (highest
+// precedence), then EffectiveDefaultLeaseTTL's config/env override, falling
+// back to this constant.
+//
+// Deliberately left unwidened (2026-08-09 attempt reverted, see
+// gastownhall/gascity ga-7uoua / PR #5470 review): the original motivation
+// (gastownhall/gascity ga-z93p0 — with no caller invoking HeartbeatIssueInTx
+// on a cadence, a claim's lease went stale almost immediately regardless of
+// worker liveness, decorrelating the TTL from actual liveness for any task
+// longer than 5min) is real, but bumping this compiled constant changes the
+// default for every deployment at once — including ones that DO heartbeat on
+// a cadence tuned to 5min (e.g. a supervisor whose `bd reclaim` sweep is the
+// primary dead-worker recovery path), for whom a 240min default is a ~48x
+// regression in recovery latency shipped silently in a binary roll. Widen it
+// per-deployment via EffectiveDefaultLeaseTTL instead.
 const DefaultLeaseTTL = 5 * time.Minute
 
 // leaseTTLContextKey overrides DefaultLeaseTTL for a single claim. Used by tests
@@ -34,12 +49,50 @@ func WithLeaseTTL(ctx context.Context, ttl time.Duration) context.Context {
 	return context.WithValue(ctx, leaseTTLContextKey{}, ttl)
 }
 
+// EffectiveDefaultLeaseTTL returns this deployment's configured lease TTL —
+// "lease.ttl" in config.yaml, or the BD_LEASE_TTL env var (bound
+// automatically by the existing "BD_" viper prefix, same mechanism as
+// BD_DOLT_AUTO_PUSH / dolt.auto-push) — falling back to DefaultLeaseTTL when
+// neither is set. This is how a deployment opts into a longer default (e.g.
+// Gas City's measured 240min claim-to-merge window, ga-z93p0) without
+// changing the compiled default for every other deployment of this binary.
+// A per-claim WithLeaseTTL still wins over this when both are set.
+//
+// A value that IS set but unusable (fails to parse as a duration, or isn't
+// positive) warns to stderr and falls back to DefaultLeaseTTL rather than
+// doing so silently: reading via config.GetDuration would collapse "unset"
+// and "malformed" into the same zero value, so a typo'd BD_LEASE_TTL (e.g.
+// "4hrs" instead of "4h") would otherwise silently keep the deployment on
+// the narrow 5-minute default with no indication anything was wrong
+// (PR #5470 review R1, gastownhall/gascity ga-7uoua).
+func EffectiveDefaultLeaseTTL() time.Duration {
+	raw := config.GetString("lease.ttl")
+	if raw == "" {
+		return DefaultLeaseTTL
+	}
+	// Trim before parsing: shell quoting or a .env line can leave surrounding
+	// whitespace (e.g. BD_LEASE_TTL=" 4h "), which time.ParseDuration rejects
+	// outright — degrading otherwise-plausible operator input to the 5min
+	// default, exactly what this warning path exists to catch (PR #5470
+	// review R2, gastownhall/gascity ga-7uoua).
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: lease.ttl/BD_LEASE_TTL=%q is not a valid duration, using compiled default %v: %v\n", raw, DefaultLeaseTTL, err)
+		return DefaultLeaseTTL
+	}
+	if d <= 0 {
+		fmt.Fprintf(os.Stderr, "warning: lease.ttl/BD_LEASE_TTL=%q must be positive, using compiled default %v\n", raw, DefaultLeaseTTL)
+		return DefaultLeaseTTL
+	}
+	return d
+}
+
 // leaseTTL resolves the lease TTL for the current claim/heartbeat.
 func leaseTTL(ctx context.Context) time.Duration {
 	if ttl, ok := ctx.Value(leaseTTLContextKey{}).(time.Duration); ok && ttl > 0 {
 		return ttl
 	}
-	return DefaultLeaseTTL
+	return EffectiveDefaultLeaseTTL()
 }
 
 // freshRowLock returns a random non-zero int64 for the row_lock cell.
@@ -120,7 +173,7 @@ func FreshRowLock() int64 {
 
 // LeaseTTL is the exported form of leaseTTL: it resolves the lease TTL for the
 // current claim from the context (WithLeaseTTL) or falls back to
-// DefaultLeaseTTL.
+// EffectiveDefaultLeaseTTL.
 func LeaseTTL(ctx context.Context) time.Duration {
 	return leaseTTL(ctx)
 }

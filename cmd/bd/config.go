@@ -1026,6 +1026,7 @@ var recognizedConfigKeys = map[string]bool{
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
 	"prime.max-memories":  true, "prime.max-memory-chars": true,
+	"lease.ttl": true, // lease guard TTL override (read from yaml/env, never the DB — PR #5470 review R2, ga-7uoua)
 	// The events-journal family. All four are startup settings that land in
 	// config.yaml (config.YamlOnlyKeys), and every one of them is documented as
 	// a `bd config set` invocation — including the auto-prune opt-out, where an

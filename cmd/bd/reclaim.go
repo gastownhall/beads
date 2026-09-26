@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -29,7 +30,10 @@ claim them. The previous owner's stale lease is recorded as a recovery event.
 --older-than is a grace window past lease expiry: only leases that expired at
 least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
 is not robbed of live work. Run it from a supervisor on a timer with a window
-of roughly 2× the claim TTL.
+of roughly 2× the claim TTL. When --older-than is omitted, that 2× multiplier
+is applied to the deployment's EFFECTIVE claim TTL — 'lease.ttl' in
+config.yaml, or the BD_LEASE_TTL env var, falling back to a 5m compiled
+default (see 'bd config set lease.ttl' for widening it deployment-wide).
 
 By default reclaim covers every stale lease THIS replica granted. The scope
 filters below narrow it further, using the same label surface claiming is
@@ -87,9 +91,9 @@ Examples:
 			}
 		}()
 
-		olderThan, _ := cmd.Flags().GetDuration("older-than")
-		if olderThan < 0 {
-			return HandleErrorRespectJSON("--older-than must not be negative")
+		olderThan, err := resolveReclaimOlderThan(cmd)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		filter, err := reclaimFilterFromFlags(cmd)
@@ -167,6 +171,31 @@ func registerReclaimScopeFlags(fs *pflag.FlagSet) {
 		"Also reclaim leases granted by ANOTHER replica (unsafe unless that replica is gone; see 'Replicas and leases')")
 }
 
+// resolveReclaimOlderThan returns the reclaim grace window: the explicit
+// --older-than value if the operator passed one, otherwise 2x the
+// deployment's EFFECTIVE lease TTL, resolved at run time.
+//
+// The flag's registered default (2*issueops.DefaultLeaseTTL) is frozen at
+// command-registration time from the compiled constant, so it cannot see a
+// deployment's "lease.ttl" config key / BD_LEASE_TTL env var override
+// (issueops.EffectiveDefaultLeaseTTL). Without this, a deployment that widens
+// its claim TTL via that override would silently keep a default grace window
+// sized for the old, narrower TTL — the "2x the lease TTL" this command's own
+// help text promises would quietly stop being true.
+func resolveReclaimOlderThan(cmd *cobra.Command) (time.Duration, error) {
+	olderThan, err := cmd.Flags().GetDuration("older-than")
+	if err != nil {
+		return 0, fmt.Errorf("--older-than: %w", err)
+	}
+	if !cmd.Flags().Changed("older-than") {
+		olderThan = 2 * issueops.EffectiveDefaultLeaseTTL()
+	}
+	if olderThan < 0 {
+		return 0, fmt.Errorf("--older-than must not be negative")
+	}
+	return olderThan, nil
+}
+
 // reclaimFilterFromFlags maps the scope flags onto a types.ReclaimFilter,
 // rejecting a flag that was SUPPLIED but carries no usable value.
 //
@@ -225,7 +254,10 @@ func reclaimFilterFromFlags(cmd *cobra.Command) (types.ReclaimFilter, error) {
 
 func init() {
 	reclaimCmd.Flags().Duration("older-than", 2*issueops.DefaultLeaseTTL,
-		"Only reclaim leases that expired at least this long ago (grace window)")
+		"Only reclaim leases that expired at least this long ago (grace window). "+
+			"Default shown is 2x the compiled lease TTL baseline; when omitted, the "+
+			"actual default is 2x this deployment's EFFECTIVE lease.ttl (config.yaml "+
+			"or BD_LEASE_TTL), which may be wider")
 	registerReclaimScopeFlags(reclaimCmd.Flags())
 	rootCmd.AddCommand(reclaimCmd)
 }

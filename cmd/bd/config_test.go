@@ -202,6 +202,78 @@ func TestYamlOnlyConfigWithoutDatabase(t *testing.T) {
 	}
 }
 
+// TestConfigSetLeaseTTLRoutesToYaml is the discriminator from PR #5470
+// review R2 (gastownhall/gascity ga-7uoua): before this fix, "lease.ttl" was
+// absent from both config.IsYamlOnlyKey and recognizedConfigKeys, so
+// `bd config set lease.ttl <value>` silently fell through the yaml branch in
+// configSetCmd.RunE — landing wherever the non-yaml path goes instead of
+// config.yaml, where EffectiveDefaultLeaseTTL's viper-backed read can never
+// see it. This test asserts the two outcomes that prove the key is now
+// routed and validated correctly: a valid duration is visible on the actual
+// read path (not just present in some file), and an invalid one is rejected
+// at set-time rather than silently degrading to the compiled default later.
+//
+// No database is created anywhere in this test (same no-DB setup as
+// TestYamlOnlyConfigWithoutDatabase above) — if the fix regressed and the
+// key fell through to the database-backed write path again, that path would
+// fail outright here (no store to write to) rather than silently diverging,
+// which is a stronger guarantee than inspecting store internals would be.
+func TestConfigSetLeaseTTLRoutesToYaml(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bd-test-lease-ttl-config-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("prefix: test\n"), 0644); err != nil {
+		t.Fatalf("Failed to create config.yaml: %v", err)
+	}
+
+	t.Setenv("BEADS_DIR", beadsDir)
+	forceGitTracked = false
+	jsonOutput = false
+
+	t.Run("valid duration lands on the read path EffectiveDefaultLeaseTTL uses", func(t *testing.T) {
+		if err := configSetCmd.RunE(configSetCmd, []string{"lease.ttl", "4h"}); err != nil {
+			t.Fatalf("config set lease.ttl 4h: %v", err)
+		}
+
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		// EffectiveDefaultLeaseTTL itself reads exactly this key this way
+		// (internal/storage/issueops/lease.go); asserting through
+		// config.GetString proves the CLI's write is visible on that same
+		// path without adding an issueops import to this file.
+		if got := config.GetString("lease.ttl"); got != "4h" {
+			t.Errorf("config.GetString(lease.ttl) = %q, want %q (write did not reach the yaml-backed read path)", got, "4h")
+		}
+	})
+
+	t.Run("invalid duration is rejected at set-time", func(t *testing.T) {
+		// RunE's returned error is an opaque *exitError (its Error() is just
+		// "exit code 1") — HandleError puts the actual message on stderr, so
+		// that is what a discriminating assertion has to inspect.
+		var err error
+		stderr := captureStderr(t, func() {
+			err = configSetCmd.RunE(configSetCmd, []string{"lease.ttl", "4hrs"})
+		})
+		if err == nil {
+			t.Fatal("expected a non-nil error for an invalid duration (\"4hrs\"), got nil")
+		}
+		if !strings.Contains(stderr, "lease.ttl must be a valid duration") {
+			t.Errorf("expected a lease.ttl duration-validation message on stderr, got: %q", stderr)
+		}
+	})
+}
+
 // setupTestDB creates a temporary test database
 func setupTestDB(t *testing.T) (*dolt.DoltStore, func()) {
 	tmpDir, err := os.MkdirTemp("", "bd-test-config-*")
