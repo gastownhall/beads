@@ -17,6 +17,50 @@ type CommentStreamer interface {
 	IterComments(ctx context.Context, id string, isWisp bool) (storage.Iter[types.Comment], error)
 }
 
+// CommentPlanes answers, for one page of ids, which of them keep their comments
+// on the WISP plane: an id the map reports true for is read from wisp_comments,
+// and an id it reports false for or omits from comments.
+//
+// IT IS A QUERY, NOT A PREDICATE ON THE ROW, because residence is the answer
+// and only a query has it. An earlier version of this body derived the plane
+// from the row's own Ephemeral/NoHistory flags — issueops.IsWisp's rule, which
+// is the right rule for routing a record being WRITTEN — and that inference is
+// wrong on a read for a row class the tree deliberately maintains. `bd import`
+// pins a `no_history` record to the durable table while PRESERVING the flag on
+// the row (cmd/bd/import_shared.go, applyImportWispPlane: clearing it would
+// change the content hash and break export→import→export byte-identity, so
+// "only the routing is pinned"), and every clone materializes its database by
+// importing JSONL. A promoted no-history bead that has been through
+// export→import is therefore a durable row whose flags say wisp, and reading
+// its comments by those flags queries wisp_comments, finds nothing, and answers
+// with a nonzero comment_count, an empty comments array, no marker and no error
+// — be-73x's own failure mode, under the flag whose contract is "gets them or
+// gets an error".
+//
+// Every other comment-touching role already resolves residence instead of
+// inferring it: GetIssueOrWisp behind both Reader.Get implementations and behind
+// uow.commenter.AddComment, DoltStore.GetIssueComments through isActiveWisp,
+// issueops.GetCommentCountsInTx through PartitionWispIDsInTx. So `bd comment`
+// writes such a row's comments where `bd show` reads them, and a listing that
+// went by the flags was the one role that disagreed with the other three about
+// the same row. A page is that same question asked about many ids, so it is
+// answered the same way, once per page rather than once per row.
+type CommentPlanes func(ctx context.Context, ids []string) (map[string]bool, error)
+
+// SourceRoutesCommentPlanes is the CommentPlanes to pass when the comment
+// source needs no plane told to it because it resolves each id itself: the
+// store-backed source is the one that does (DoltStore.GetIssueComments picks
+// the table from isActiveWisp), and it ignores the argument entirely.
+//
+// It is a NAMED no-op rather than a nil default so that the seam with a routing
+// question and the seam without one are told apart at the call site, and so a
+// third seam added later has to answer the question rather than inherit
+// "durable" by omission — which is exactly how the wrong-table read described
+// on CommentPlanes got in.
+func SourceRoutesCommentPlanes(context.Context, []string) (map[string]bool, error) {
+	return nil, nil
+}
+
 // HydrateListComments fills in the comment half of one list page.
 //
 // It is the shared epilogue step FinishPageAt is, and for the identical
@@ -69,7 +113,13 @@ type CommentStreamer interface {
 // "the JSON route never sets SkipCounts" — true of today's CLI callers, and
 // not a property of the contract they were reading. The HTTP surface and any
 // future caller may set both.
-func HydrateListComments(ctx context.Context, newSrc func() CommentStreamer, items []*types.IssueWithCounts, include, countsKnown bool) error {
+//
+// THE PLANE COMES FROM THE PAGE'S SEAM, NOT FROM THE ROW. Which comment table
+// an id's comments live in is a fact about where the row was found, so the
+// caller resolves it (CommentPlanes) rather than this body inferring it from
+// the row's flags — see CommentPlanes for the row class where the flags and the
+// table disagree, and why that made a listing answer with content-free rows.
+func HydrateListComments(ctx context.Context, newSrc func() CommentStreamer, planes CommentPlanes, items []*types.IssueWithCounts, include, countsKnown bool) error {
 	if len(items) == 0 {
 		return nil
 	}
@@ -82,28 +132,60 @@ func HydrateListComments(ctx context.Context, newSrc func() CommentStreamer, ite
 	if newSrc == nil {
 		return fmt.Errorf("hydrate list comments: comment source must not be nil")
 	}
+	if planes == nil {
+		return fmt.Errorf("hydrate list comments: comment plane resolution must not be nil (pass SourceRoutesCommentPlanes when the source routes ids itself)")
+	}
+	rows := rowsNeedingComments(items, countsKnown)
+	if len(rows) == 0 {
+		return nil
+	}
 	src := newSrc()
 	if src == nil {
 		return fmt.Errorf("hydrate list comments: comment source must not be nil")
 	}
-	for _, item := range items {
-		if item == nil || item.Issue == nil {
-			continue
-		}
-		// A row the page can PROVE has no comments needs no query. Only a
-		// hydrated count proves it: under SkipCounts a zero means unknown, and
-		// treating it as none is how this body once dropped every comment a
-		// caller had asked for.
-		if countsKnown && item.CommentCount == 0 {
-			continue
-		}
-		comments, err := collectComments(ctx, src, item.ID, isWispPlane(item.Issue))
+	// One plane query for the whole page, and only for the rows that are about
+	// to be read: the ids are the same set the loop below walks, so a page that
+	// needs no comment read pays for no plane lookup either.
+	wisp, err := planes(ctx, rowIDs(rows))
+	if err != nil {
+		return fmt.Errorf("hydrate list comments: resolve comment planes: %w", err)
+	}
+	for _, item := range rows {
+		comments, err := collectComments(ctx, src, item.ID, wisp[item.ID])
 		if err != nil {
 			return fmt.Errorf("hydrate list comments: %w", err)
 		}
 		item.Issue.Comments = comments
 	}
 	return nil
+}
+
+// rowsNeedingComments is the page narrowed to the rows a comment read has to be
+// issued for, and it is what bounds both that read and the plane lookup.
+//
+// A row the page can PROVE has no comments needs no query. Only a hydrated
+// count proves it: under SkipCounts a zero means unknown, and treating it as
+// none is how this body once dropped every comment a caller had asked for.
+func rowsNeedingComments(items []*types.IssueWithCounts, countsKnown bool) []*types.IssueWithCounts {
+	out := make([]*types.IssueWithCounts, 0, len(items))
+	for _, item := range items {
+		if item == nil || item.Issue == nil {
+			continue
+		}
+		if countsKnown && item.CommentCount == 0 {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func rowIDs(items []*types.IssueWithCounts) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.ID)
+	}
+	return out
 }
 
 // markCommentsOmitted flags the rows whose comment text was never fetched.
@@ -125,20 +207,4 @@ func markCommentsOmitted(items []*types.IssueWithCounts) {
 			item.CommentsOmitted = &omitted
 		}
 	}
-}
-
-// isWispPlane reports which storage plane a row's comments live in.
-//
-// It is internal/storage/issueops.IsWisp's rule, restated rather than called
-// because this package does not import that one. Both halves matter: the
-// override pins the plane for an in-memory record and the two flags are the
-// inference everywhere else. The store-backed detail source ignores the answer
-// — it routes ids to the right table itself — and the unit-of-work one needs
-// it, so getting it wrong is a wrong-table read on exactly one of the two
-// seams, which is the kind of divergence this package exists to prevent.
-func isWispPlane(issue *types.Issue) bool {
-	if issue.WispPlaneOverride != nil {
-		return *issue.WispPlaneOverride
-	}
-	return issue.Ephemeral || issue.NoHistory
 }
