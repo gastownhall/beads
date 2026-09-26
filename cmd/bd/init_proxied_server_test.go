@@ -2,11 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	storagegit "github.com/steveyegge/beads/internal/storage/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -225,4 +234,91 @@ func TestIsTeamServerManaged_RequiresProxiedServerMode(t *testing.T) {
 
 	cfg.DoltMode = configfile.DoltModeProxiedServer
 	assert.True(t, cfg.IsTeamServerManaged())
+}
+
+func TestProxiedInitTailRoleIgnoresInheritedGitRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	globalPath := filepath.Join(home, ".gitconfig")
+	require.NoError(t, os.WriteFile(globalPath, nil, 0600))
+	runGit := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, tc := range []struct {
+		name, initial, flag, want string
+	}{
+		{"explicit", "maintainer", "contributor", "contributor"},
+		{"default", "", "", "maintainer"},
+		{"retained", "contributor", "", "contributor"},
+	} {
+		poisons := []string{"repository", "inline_config"}
+		if tc.name == "retained" {
+			// An absent decoy role must not make init replace the target contributor role.
+			poisons = append(poisons, "roleless_repository")
+		}
+		for _, poison := range poisons {
+			t.Run(tc.name+"/"+poison, func(t *testing.T) {
+				target, decoy := t.TempDir(), t.TempDir()
+				for _, dir := range []string{target, decoy} {
+					runGit(t, dir, "init", "--quiet")
+					runGit(t, dir, "config", "--local", "core.hooksPath", ".git/hooks")
+				}
+				if tc.initial != "" {
+					runGit(t, target, "config", "--local", "beads.role", tc.initial)
+				}
+				if poison != "roleless_repository" {
+					runGit(t, decoy, "config", "--local", "beads.role", "decoy-role")
+				}
+				if poison != "inline_config" {
+					t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+					t.Setenv("GIT_WORK_TREE", decoy)
+				} else {
+					t.Setenv("GIT_CONFIG_COUNT", "1")
+					t.Setenv("GIT_CONFIG_KEY_0", "beads.role")
+					t.Setenv("GIT_CONFIG_VALUE_0", "injected-role")
+				}
+				if poison == "roleless_repository" {
+					inherited := exec.Command("git", "config", "--get", "beads.role")
+					inherited.Dir = target
+					out, err := inherited.CombinedOutput()
+					var exitErr *exec.ExitError
+					require.ErrorAs(t, err, &exitErr, "roleless decoy precondition: %s", out)
+					require.Equal(t, 1, exitErr.ExitCode())
+					require.Empty(t, out)
+				}
+				env := os.Environ()
+				before, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+				require.NoError(t, err)
+				gitUC := storagegit.NewGitProvider(target).GitUseCase()
+				require.True(t, gitUC.IsGitRepo(t.Context()), "valid inherited repository must reach role branch")
+				cmd := &cobra.Command{}
+				cmd.Flags().Bool("setup-exclude", false, "")
+				// Existing flags exclude all filesystem integrations; nil fsUseCase must stay unused.
+				in := initProxiedServerInput{roleFlag: tc.flag, quiet: true, stealth: true, skipHooks: true, skipAgents: true}
+				require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{gitUC: gitUC}))
+				require.Equal(t, tc.want, runGit(t, target, "config", "--local", "--get", "beads.role"))
+				after, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+				require.NoError(t, err)
+				require.Equal(t, string(before), string(after), "proxied tail changed decoy")
+				globalAfter, err := os.ReadFile(globalPath)
+				require.NoError(t, err)
+				require.Empty(t, globalAfter)
+				require.True(t, slices.Equal(env, os.Environ()), "proxied tail changed inherited environment")
+			})
+		}
+	}
 }
