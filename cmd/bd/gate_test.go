@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -257,17 +258,45 @@ func TestCheckBeadGate_LocalBead(t *testing.T) {
 	}
 }
 
+// A gate awaiting a bead that no longer exists can never resolve on its own:
+// the bead will never close. Treat the absence as resolution rather than
+// leaving the gate pending forever.
 func TestCheckBeadGate_LocalBeadNotFound(t *testing.T) {
 	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{}}
 	satisfied, reason := checkBeadGate(context.Background(), st, "bd-missing")
-	if satisfied {
-		t.Error("expected not satisfied for missing local bead")
+	if !satisfied {
+		t.Errorf("expected satisfied for missing local bead, got reason %q", reason)
 	}
-	if !gateTestContainsIgnoreCase(reason, "not found") {
-		t.Errorf("reason %q does not mention not found", reason)
+	if !gateTestContainsIgnoreCase(reason, "no longer exists") {
+		t.Errorf("reason %q does not mention that the bead no longer exists", reason)
 	}
 }
 
+// Real storage reports a purged bead as an error, not as (nil, nil).
+func TestCheckBeadGate_LocalBeadErrNotFoundResolves(t *testing.T) {
+	st := &fakeBeadGateGetter{err: storage.ErrNotFound}
+	satisfied, reason := checkBeadGate(context.Background(), st, "bd-missing")
+	if !satisfied {
+		t.Errorf("expected satisfied for storage.ErrNotFound, got reason %q", reason)
+	}
+	if !gateTestContainsIgnoreCase(reason, "no longer exists") {
+		t.Errorf("reason %q does not mention that the bead no longer exists", reason)
+	}
+}
+
+func TestCheckBeadGate_LocalBeadErrNoRowsResolves(t *testing.T) {
+	st := &fakeBeadGateGetter{err: fmt.Errorf("query bead: %w", sql.ErrNoRows)}
+	satisfied, reason := checkBeadGate(context.Background(), st, "bd-missing")
+	if !satisfied {
+		t.Errorf("expected satisfied for sql.ErrNoRows, got reason %q", reason)
+	}
+	if !gateTestContainsIgnoreCase(reason, "no longer exists") {
+		t.Errorf("reason %q does not mention that the bead no longer exists", reason)
+	}
+}
+
+// Negative control: a genuine backend failure is not a missing bead, so the
+// gate must stay pending rather than silently resolving.
 func TestCheckBeadGate_LocalBeadLookupError(t *testing.T) {
 	st := &fakeBeadGateGetter{err: errors.New("dolt exploded")}
 	satisfied, reason := checkBeadGate(context.Background(), st, "bd-abc")
