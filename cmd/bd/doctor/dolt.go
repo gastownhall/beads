@@ -789,10 +789,9 @@ func CheckCorruptManifest(path string) DoctorCheck {
 }
 
 // issuesProbeQuery builds the issues-table probe for a database name taken from
-// SHOW DATABASES. The name is identifier-escaped (backticks doubled) because it reflects
-// whatever created the database, not a bd-controlled value.
+// SHOW DATABASES. The name is identifier-quoted because it reflects whatever
+// created the database, not a bd-controlled value.
 func issuesProbeQuery(dbName string) string {
-	safeName := strings.ReplaceAll(dbName, "`", "``")
-	//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
-	return fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", safeName)
+	//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+	return fmt.Sprintf("SELECT COUNT(*) FROM %s.issues LIMIT 1", doltutil.QuoteIdentifierUnvalidated(dbName))
 }

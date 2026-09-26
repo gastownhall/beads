@@ -2099,17 +2099,15 @@ func IsPreV56DoltDir(doltDir string) bool {
 }
 
 // doltStatusQuery builds the dolt_status probe for a SHOW DATABASES name,
-// doubling backticks so the name cannot break out of the identifier.
+// identifier-quoting it so the name cannot break out of the identifier.
 func doltStatusQuery(dbName string) string {
-	safeName := strings.ReplaceAll(dbName, "`", "``")
-	//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
-	return fmt.Sprintf("SELECT COUNT(*) > 0 FROM `%s`.dolt_status", safeName)
+	//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+	return fmt.Sprintf("SELECT COUNT(*) > 0 FROM %s.dolt_status", doltutil.QuoteIdentifierUnvalidated(dbName))
 }
 
 // useDatabaseStatement builds a USE statement for a SHOW DATABASES name,
-// doubling backticks so the name cannot break out of the identifier.
+// identifier-quoting it so the name cannot break out of the identifier.
 func useDatabaseStatement(dbName string) string {
-	safeName := strings.ReplaceAll(dbName, "`", "``")
-	//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
-	return fmt.Sprintf("USE `%s`", safeName)
+	//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+	return fmt.Sprintf("USE %s", doltutil.QuoteIdentifierUnvalidated(dbName))
 }
