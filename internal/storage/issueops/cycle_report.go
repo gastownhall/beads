@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"context"
+	"fmt"
 	"slices"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -11,8 +12,9 @@ import (
 // The cycle REPORT: the shared body behind issueops.CycleDetector on all three
 // backends, split into a pure half and a transactional half so the part that
 // decides what the answer MEANS is testable without a database.
-// CanonicalCyclePaths holds the determinism ruling and BuildCycles the
-// honest-partial one; both are pinned in cycle_report_test.go.
+// CanonicalCyclePaths holds the determinism ruling, CanonicalMixedCyclePaths
+// the IncludeTracks widening, and BuildCycles the honest-partial one; all
+// three are pinned in cycle_report_test.go.
 
 // CanonicalCyclePaths returns the cycles of a blocking graph as id paths, in a
 // canonical form: each path rotated so its lowest id comes first, and the paths
@@ -80,6 +82,241 @@ func CanonicalCyclePaths(graph map[string][]string) [][]string {
 	return cycles
 }
 
+// CanonicalMixedCyclePaths reports the qualifying cycles of a graph that also
+// carries `tracks` edges (MixedCycleEdge.Scheduling false). A cycle qualifies
+// only when at least one of its edges is a scheduling edge.
+//
+// THE REPORT IS THE UNION, deduplicated by canonical rotation, of two sets:
+//
+//  1. CanonicalCyclePaths over the scheduling edges alone, which is exactly
+//     the report the default request produces on the same data.
+//  2. For every scheduling edge from -> to whose endpoints share a strongly
+//     connected component of the mixed graph, the cycle that edge closes with
+//     the shortest return path from `to` back to `from` over edges of either
+//     kind (closeMixedCycle).
+//
+// Set 1 makes the widened report a SUPERSET of the default report. Set 2 alone
+// would not: the default walk records the depth-first tree path behind each
+// back edge, which need not be the shortest return path of any edge on it. And
+// sampling one cycle per component instead would drop real deadlocks, because
+// tracks edges can fuse separate blocks-only deadlocks into one component.
+//
+// Set 2 finds the cycles that need a tracks edge, the shape this exists for: a
+// molecule root that blocks-depends (transitively) on its own entry step,
+// which tracks-depends back to the root. Every internal edge of a strongly
+// connected component lies on a cycle, so each such scheduling edge closes one,
+// and a scheduling edge outside every component lies on no cycle at all.
+//
+// BOUND: at most one cycle per scheduling edge inside a component plus one per
+// default-walk cycle, so never more than twice the distinct scheduling edges. A
+// cycle made only of tracks edges is never reported, which keeps out the
+// "thousands of cycles" regression AppendMixedCycleGraphInTx documents.
+//
+// COST: one breadth-first search per distinct scheduling-edge target inside a
+// component, confined to that component, and shared by every edge into that
+// target. On a component of V nodes and E edges that is O(V(V+E)). A search per
+// edge was O(E(V+E)), and on a dense tangle E grows with the square of V.
+//
+// Nodes, adjacency lists, components, and return paths are all ordered, so the
+// answer depends only on the graph, not on Go map or SQL row order. The error
+// is a broken internal invariant (see closeMixedCycle), never a property of
+// the data.
+func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) ([][]string, error) {
+	adjacency := make(map[string][]MixedCycleEdge, len(graph))
+	nodeSet := make(map[string]struct{}, len(graph))
+	for node, edges := range graph {
+		nodeSet[node] = struct{}{}
+		scheduling := make(map[string]bool, len(edges))
+		for _, edge := range edges {
+			nodeSet[edge.To] = struct{}{}
+			scheduling[edge.To] = scheduling[edge.To] || edge.Scheduling
+		}
+		targets := make([]string, 0, len(scheduling))
+		for to := range scheduling {
+			targets = append(targets, to)
+		}
+		slices.Sort(targets)
+		deduped := make([]MixedCycleEdge, 0, len(targets))
+		for _, to := range targets {
+			deduped = append(deduped, MixedCycleEdge{To: to, Scheduling: scheduling[to]})
+		}
+		adjacency[node] = deduped
+	}
+	nodes := make([]string, 0, len(nodeSet))
+	plain := make(map[string][]string, len(nodeSet))
+	schedulingOnly := make(map[string][]string, len(nodeSet))
+	for node := range nodeSet {
+		nodes = append(nodes, node)
+		for _, edge := range adjacency[node] {
+			plain[node] = append(plain[node], edge.To)
+			if edge.Scheduling {
+				schedulingOnly[node] = append(schedulingOnly[node], edge.To)
+			}
+		}
+	}
+	slices.Sort(nodes)
+
+	cycles := CanonicalCyclePaths(schedulingOnly)
+	for _, component := range mixedStronglyConnectedComponents(adjacency, nodes) {
+		closed, err := closeComponentSchedulingEdges(adjacency, plain, component)
+		if err != nil {
+			return nil, err
+		}
+		cycles = append(cycles, closed...)
+	}
+	slices.SortFunc(cycles, slices.Compare)
+	return slices.CompactFunc(cycles, slices.Equal), nil
+}
+
+// closeComponentSchedulingEdges closes every scheduling edge inside one strongly
+// connected component, which is set 2 of CanonicalMixedCyclePaths.
+//
+// The edges are grouped by target, so one shortestPathTree rooted at a target
+// closes every edge into it. Only one tree is held at a time.
+func closeComponentSchedulingEdges(adjacency map[string][]MixedCycleEdge, plain map[string][]string, component []string) ([][]string, error) {
+	members := make(map[string]bool, len(component))
+	for _, node := range component {
+		members[node] = true
+	}
+	sources := make(map[string][]string, len(component))
+	for _, from := range component {
+		for _, edge := range adjacency[from] {
+			if edge.Scheduling && members[edge.To] {
+				sources[edge.To] = append(sources[edge.To], from)
+			}
+		}
+	}
+
+	var cycles [][]string
+	for _, to := range component {
+		if len(sources[to]) == 0 {
+			continue
+		}
+		tree := shortestPathTree(plain, members, to)
+		for _, from := range sources[to] {
+			cycle, err := closeMixedCycle(tree, from, to)
+			if err != nil {
+				return nil, err
+			}
+			cycles = append(cycles, cycle)
+		}
+	}
+	return cycles, nil
+}
+
+// shortestPathTree is the breadth-first tree over graph from start, confined to
+// members: tree[n] is the node before n on a shortest path from start, and
+// tree[start] is start. Neighbors are taken in their stored order, so the path
+// to any node is the one reachPath returns for the same start and goal. The
+// search runs past the first goal so that every goal can share it.
+//
+// Confining the search to a strongly connected component loses no path between
+// two of its members. A node that start reaches, and that reaches back into the
+// component, is itself in the component, so a search that leaves the component
+// never comes back to it.
+func shortestPathTree(graph map[string][]string, members map[string]bool, start string) map[string]string {
+	tree := map[string]string{start: start}
+	queue := []string{start}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		for _, next := range graph[node] {
+			if _, seen := tree[next]; seen || !members[next] {
+				continue
+			}
+			tree[next] = node
+			queue = append(queue, next)
+		}
+	}
+	return tree
+}
+
+// closeMixedCycle returns the canonical cycle the edge from -> to closes: from,
+// followed by the shortest path from `to` back to `from`, read out of tree, the
+// shortestPathTree rooted at `to`.
+//
+// The caller passes only edges inside one strongly connected component, with
+// the tree rooted at the edge's target, so the tree always reaches `from`. When
+// it does not, or the climb ends at a different root, the invariant is broken,
+// and that is returned as an error rather than a panic: the caller is a read
+// that `bd dep cycles --include-tracks` runs, and a crash there would hide every
+// other cycle behind a stack trace.
+func closeMixedCycle(tree map[string]string, from, to string) ([]string, error) {
+	// Climbing from `from` to the root gives the return path backwards.
+	backwards := []string{from}
+	for at := from; at != to; {
+		parent, reached := tree[at]
+		if !reached || parent == at {
+			return nil, fmt.Errorf("mixed cycle graph: edge %s -> %s lies in a strongly connected component but has no return path", from, to)
+		}
+		at = parent
+		backwards = append(backwards, at)
+	}
+	cycle := make([]string, 0, len(backwards))
+	cycle = append(cycle, from)
+	for i := len(backwards) - 1; i > 0; i-- {
+		cycle = append(cycle, backwards[i])
+	}
+	return rotateToLowest(cycle), nil
+}
+
+// mixedStronglyConnectedComponents returns Tarjan components with both their
+// members and the component list sorted. Targets without outgoing edges are in
+// nodes too, so singleton sinks remain part of the traversal even though they
+// can never qualify on their own.
+func mixedStronglyConnectedComponents(adjacency map[string][]MixedCycleEdge, nodes []string) [][]string {
+	nextIndex := 0
+	index := make(map[string]int, len(nodes))
+	lowlink := make(map[string]int, len(nodes))
+	onStack := make(map[string]bool, len(nodes))
+	stack := make([]string, 0, len(nodes))
+	components := make([][]string, 0)
+
+	var visit func(string)
+	visit = func(node string) {
+		nextIndex++
+		index[node] = nextIndex
+		lowlink[node] = nextIndex
+		stack = append(stack, node)
+		onStack[node] = true
+
+		for _, edge := range adjacency[node] {
+			neighbor := edge.To
+			if index[neighbor] == 0 {
+				visit(neighbor)
+				lowlink[node] = min(lowlink[node], lowlink[neighbor])
+			} else if onStack[neighbor] {
+				lowlink[node] = min(lowlink[node], index[neighbor])
+			}
+		}
+
+		if lowlink[node] != index[node] {
+			return
+		}
+		component := make([]string, 0)
+		for {
+			last := len(stack) - 1
+			member := stack[last]
+			stack = stack[:last]
+			onStack[member] = false
+			component = append(component, member)
+			if member == node {
+				break
+			}
+		}
+		slices.Sort(component)
+		components = append(components, component)
+	}
+
+	for _, node := range nodes {
+		if index[node] == 0 {
+			visit(node)
+		}
+	}
+	slices.SortFunc(components, slices.Compare)
+	return components
+}
+
 // rotateToLowest returns a copy of a cycle path rotated so its lowest id comes
 // first, preserving edge order. The members of a cycle are distinct — the path
 // it is taken from is a simple path — so the lowest id is unique and names
@@ -133,18 +370,32 @@ func BuildCycles(paths [][]string, hydrate func(id string) *types.Issue) []publi
 
 // DetectCycleReportInTx is the whole read: build the blocking graph across both
 // planes, canonicalize it, and hydrate what it can. It reads the same two tables
-// and the same two edge types DetectCyclesInTx reads, because it is the same
-// question.
-func DetectCycleReportInTx(ctx context.Context, tx DBTX) (publicops.CycleReport, error) {
-	graph := make(map[string][]string)
-	if err := AppendBlockingGraphInTx(ctx, tx, cycleDetectionTables(), graph); err != nil {
-		return publicops.CycleReport{}, err
-	}
+// and, by default, the same two edge types DetectCyclesInTx reads, because it
+// is the same question. req.IncludeTracks answers a wider question instead —
+// see DetectCyclesRequest and CanonicalMixedCyclePaths.
+func DetectCycleReportInTx(ctx context.Context, tx DBTX, req publicops.DetectCyclesRequest) (publicops.CycleReport, error) {
 	hydrate := func(id string) *types.Issue {
 		// The error is deliberately not distinguished from a miss: both mean the
 		// same thing to the answer, that this database did not describe the node.
 		issue, _ := GetIssueInTx(ctx, tx, id)
 		return issue
+	}
+
+	if req.IncludeTracks {
+		graph := make(map[string][]MixedCycleEdge)
+		if err := AppendMixedCycleGraphInTx(ctx, tx, cycleDetectionTables(), graph); err != nil {
+			return publicops.CycleReport{}, err
+		}
+		paths, err := CanonicalMixedCyclePaths(graph)
+		if err != nil {
+			return publicops.CycleReport{}, err
+		}
+		return publicops.CycleReport{Cycles: BuildCycles(paths, hydrate)}, nil
+	}
+
+	graph := make(map[string][]string)
+	if err := AppendBlockingGraphInTx(ctx, tx, cycleDetectionTables(), graph); err != nil {
+		return publicops.CycleReport{}, err
 	}
 	return publicops.CycleReport{
 		Cycles: BuildCycles(CanonicalCyclePaths(graph), hydrate),

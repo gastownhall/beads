@@ -36,13 +36,15 @@ func proxiedCycleDetector() (issueops.CycleDetector, error) {
 	return src.CycleDetector()
 }
 
-// runDepCycles is the whole of `bd dep cycles` on both routes.
-func runDepCycles() error {
+// runDepCycles is the whole of `bd dep cycles` on both routes. includeTracks
+// widens the walk per issueops.DetectCyclesRequest.IncludeTracks; the default
+// invocation leaves it false and the walk unchanged.
+func runDepCycles(includeTracks bool) error {
 	detector, err := openCycleDetector()
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	report, err := detector.DetectCycles(rootCtx, issueops.DetectCyclesRequest{})
+	report, err := detector.DetectCycles(rootCtx, issueops.DetectCyclesRequest{IncludeTracks: includeTracks})
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
