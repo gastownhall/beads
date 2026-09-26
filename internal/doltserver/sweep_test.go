@@ -473,11 +473,18 @@ func TestTempDirRootsRejectsOverbroadTMPDIR(t *testing.T) {
 // TestTempDirRootsCoverGOTMPDIR pins the deleted-cwd bound to where Go puts a
 // test's temp dirs. Since Go 1.26, testing.T.TempDir creates them under
 // GOTMPDIR when it is set, whatever TMPDIR says, while os.TempDir() still
-// reads TMPDIR alone. A host whose go tooling pins GOTMPDIR to a disk path and
-// leaves TMPDIR unset therefore puts every t.TempDir() outside both
-// os.TempDir() and /tmp, and unless GOTMPDIR is itself a root the arm can
-// never fire there. GOTMPDIR is as much an environment variable as TMPDIR, so
-// it gets the same bound on the bound.
+// reads TMPDIR alone. A host that EXPORTS GOTMPDIR as a disk path and leaves
+// TMPDIR unset therefore puts every t.TempDir() outside both os.TempDir() and
+// /tmp, and unless GOTMPDIR is itself a root the arm can never fire there.
+// (`go env -w GOTMPDIR` does not produce that shape: cmd/go keeps the config
+// value out of the test binary's environment, so testing.T.TempDir ignores it
+// too.) GOTMPDIR is as much an environment variable as TMPDIR, so it gets the
+// same bound on the bound.
+//
+// Only "GOTMPDIR outside TMPDIR is covered" discriminates this change: the
+// unset case and the four drop cases pass against the old tempDirRoots() as
+// well, and guard isCredibleTempRoot against a future widening rather than
+// pinning the new root.
 func TestTempDirRootsCoverGOTMPDIR(t *testing.T) {
 	const home = "/home/beads-fixture"
 	const gotmp = "/var/tmp/gotmp"

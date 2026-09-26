@@ -134,9 +134,16 @@ func selectServers(candidates []serverCandidate, want func(serverCandidate) bool
 //
 // GOTMPDIR is where testing.T.TempDir roots every test's directories when it
 // is set (Go 1.26+), independently of TMPDIR, while os.TempDir() reads TMPDIR
-// alone. A host whose go tooling pins GOTMPDIR to a disk path and leaves
-// TMPDIR unset puts every t.TempDir() — and every test server's data dir under
-// it — outside both os.TempDir() and /tmp (TestTempDirRootsCoverGOTMPDIR).
+// alone. A host that EXPORTS GOTMPDIR as a disk path and leaves TMPDIR unset
+// puts every t.TempDir() — and every test server's data dir under it —
+// outside both os.TempDir() and /tmp (TestTempDirRootsCoverGOTMPDIR).
+//
+// Exported is the operative word: `go env -w GOTMPDIR` writes the go env
+// config file, which cmd/go consumes for its own build work dir and does not
+// put into the test binary's environment. It therefore reaches neither
+// testing.T.TempDir nor this function, both of which read the PROCESS
+// environment — which is also why os.Getenv below is the right lookup: it is
+// byte-for-byte the one testing.T.TempDir performs.
 //
 // Roots too broad to be evidence of anything are dropped — see
 // isCredibleTempRoot. TMPDIR and GOTMPDIR are environment variables, so "/"
