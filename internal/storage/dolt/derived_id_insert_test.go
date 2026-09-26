@@ -135,6 +135,11 @@ func TestInsertTimeIDsMatchBackfillDerivation(t *testing.T) {
 // the SQL side to DATE_FORMAT with this literal format removes that
 // dependency; this test is what catches it if the two ever drift, before it
 // silently forks the id space the backfill converged.
+//
+// CAST is co-asserted below rather than argued about: it is no longer part of
+// any derivation, but pinning it here proves the switch left the rendering of an
+// already-converged row untouched, and it is the cheapest way to settle that no
+// storable value renders differently under the two expressions.
 func TestAuxTimeDateFormatMatchesGoRendering(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -166,15 +171,18 @@ func TestAuxTimeDateFormatMatchesGoRendering(t *testing.T) {
 		t.Fatalf("InsertDerivedEvent: %v", err)
 	}
 
-	var sqlRendered string
+	var sqlRendered, castRendered string
 	if err := store.db.QueryRowContext(ctx,
-		"SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') FROM events WHERE issue_id = ? AND comment = 'date_format probe'",
-		issue.ID).Scan(&sqlRendered); err != nil {
+		"SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), CAST(created_at AS CHAR) FROM events WHERE issue_id = ? AND comment = 'date_format probe'",
+		issue.ID).Scan(&sqlRendered, &castRendered); err != nil {
 		t.Fatalf("DATE_FORMAT read-back: %v", err)
 	}
 
 	if sqlRendered != goRendered {
 		t.Errorf("DATE_FORMAT(created_at, ...) = %q, want issueops.FormatAuxTime rendering %q", sqlRendered, goRendered)
+	}
+	if castRendered != goRendered {
+		t.Errorf("CAST(created_at AS CHAR) = %q, want issueops.FormatAuxTime rendering %q (the rendering this derivation abandoned CAST for must still agree for already-converged rows)", castRendered, goRendered)
 	}
 }
 
