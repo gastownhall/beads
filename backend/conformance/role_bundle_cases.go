@@ -650,6 +650,8 @@ var roleContractCases = []roleContract{
 		RunSweeperTreatsALegacyTypedWispAsEphemeralTier,
 		RunSweeperLeavesNoHistoryBeadsToTheDurableTier,
 		RunSweeperProtectsPinnedRows,
+		RunSweeperProtectsLabeledRows,
+		RunSweeperWithoutProtectedLabelsSweepsLabeledRows,
 		RunSweeperHonorsTheCutoffAndThePattern,
 		RunSweeperDryRunChangesNothing,
 		RunSweeperProtectsRowsCitedFromAWispComment,

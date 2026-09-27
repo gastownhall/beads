@@ -3,6 +3,7 @@ package workapi
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -129,7 +130,7 @@ func TestFilterSweepCandidatesRechecksClosedAtCutoff(t *testing.T) {
 		nil,
 	}
 
-	filtered, skips := FilterSweepCandidates(candidates, "", &cutoff)
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{ClosedBefore: &cutoff})
 
 	if len(filtered) != 1 || filtered[0].ID != "old-closed" {
 		t.Fatalf("filtered IDs = %v, want only old-closed", sweepCandidateIDs(filtered))
@@ -157,7 +158,7 @@ func TestFilterSweepCandidatesWithoutCutoffStillRequiresClosedAt(t *testing.T) {
 		{ID: "closed-missing-time", Status: types.StatusClosed},
 	}
 
-	filtered, skips := FilterSweepCandidates(candidates, "", nil)
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{})
 
 	if len(filtered) != 1 || filtered[0].ID != "closed" {
 		t.Fatalf("filtered IDs = %v, want only closed", sweepCandidateIDs(filtered))
@@ -181,7 +182,7 @@ func TestFilterSweepCandidatesNarrowsByPatternBeforeProtecting(t *testing.T) {
 		{ID: "other-pinned", Status: types.StatusClosed, ClosedAt: &closedAt, Pinned: true},
 	}
 
-	filtered, skips := FilterSweepCandidates(candidates, "keep-*", nil)
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{IDPattern: "keep-*"})
 
 	if len(filtered) != 1 || filtered[0].ID != "keep-1" {
 		t.Fatalf("filtered IDs = %v, want only keep-1", sweepCandidateIDs(filtered))
@@ -352,4 +353,165 @@ func sweepCandidateIDs(issues []*types.Issue) []string {
 		ids[i] = issue.ID
 	}
 	return ids
+}
+
+// TestFilterSweepCandidatesProtectsLabeledCandidates is the whole of be-edf at
+// the seam every sweep route runs through: a closed ephemeral bead carrying a
+// protected label is HELD BACK and counted, not deleted.
+//
+// The negative control is the load-bearing half. `unlabeled` and `other-label`
+// are identical to `protected` in every field the filter reads except the one
+// under test, so a guard that protected everything — or that resolved its set
+// to "match anything" — fails here rather than passing as a stricter version of
+// the same behavior.
+func TestFilterSweepCandidatesProtectsLabeledCandidates(t *testing.T) {
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	candidates := []*types.Issue{
+		{ID: "unlabeled", Status: types.StatusClosed, ClosedAt: &closedAt},
+		{ID: "other-label", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"gt:message"}},
+		{ID: "protected", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"bd:protected"}},
+		{ID: "protected-among-many", Status: types.StatusClosed, ClosedAt: &closedAt,
+			Labels: []string{"a", "bd:protected", "z"}},
+	}
+
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{
+		ProtectedLabels: []string{"bd:protected"},
+	})
+
+	got := sweepCandidateIDs(filtered)
+	want := []string{"unlabeled", "other-label"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("filtered IDs = %v, want %v", got, want)
+	}
+	if skips.Labeled != 2 {
+		t.Errorf("skips.Labeled = %d, want 2", skips.Labeled)
+	}
+	if skips.Pinned != 0 {
+		t.Errorf("skips.Pinned = %d, want 0 — a labeled row is counted as labeled, in exactly one bucket", skips.Pinned)
+	}
+}
+
+// TestFilterSweepCandidatesWithoutProtectedLabelsProtectsNothing is the
+// no-opt-in control: the rows above, unchanged, all sweep when no labels are
+// requested. Without it the test above could pass against a filter that held
+// back every labeled row regardless of the request.
+func TestFilterSweepCandidatesWithoutProtectedLabelsProtectsNothing(t *testing.T) {
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	candidates := []*types.Issue{
+		{ID: "protected", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"bd:protected"}},
+		{ID: "unlabeled", Status: types.StatusClosed, ClosedAt: &closedAt},
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  issueops.SweepRequest
+	}{
+		{"absent", issueops.SweepRequest{}},
+		{"empty slice", issueops.SweepRequest{ProtectedLabels: []string{}}},
+		{"only empty strings", issueops.SweepRequest{ProtectedLabels: []string{"", ""}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filtered, skips := FilterSweepCandidates(candidates, tc.req)
+			if len(filtered) != 2 {
+				t.Fatalf("filtered IDs = %v, want both", sweepCandidateIDs(filtered))
+			}
+			if skips.Labeled != 0 {
+				t.Errorf("skips.Labeled = %d, want 0", skips.Labeled)
+			}
+		})
+	}
+}
+
+// TestFilterSweepCandidatesMatchesLabelsWholeAndExactly pins that the guard is
+// not a prefix or substring test. A near-miss label must NOT protect: a guard
+// that over-matches silently stops a sweep from ever clearing anything, which
+// presents as `bd purge` quietly doing nothing rather than as an error.
+func TestFilterSweepCandidatesMatchesLabelsWholeAndExactly(t *testing.T) {
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	candidates := []*types.Issue{
+		{ID: "prefix", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"bd:protected-ish"}},
+		{ID: "suffix", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"x-bd:protected"}},
+		{ID: "case", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"BD:PROTECTED"}},
+	}
+
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{
+		ProtectedLabels: []string{"bd:protected"},
+	})
+
+	if len(filtered) != 3 {
+		t.Fatalf("filtered IDs = %v, want all three — matching is whole-label and exact", sweepCandidateIDs(filtered))
+	}
+	if skips.Labeled != 0 {
+		t.Errorf("skips.Labeled = %d, want 0", skips.Labeled)
+	}
+}
+
+// TestFilterSweepCandidatesNarrowsByPatternBeforeProtectingLabels is the label
+// twin of the pinned ordering pin: a labeled row the pattern EXCLUDED was never
+// a candidate, so it is not counted as a protection.
+func TestFilterSweepCandidatesNarrowsByPatternBeforeProtectingLabels(t *testing.T) {
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	candidates := []*types.Issue{
+		{ID: "keep-1", Status: types.StatusClosed, ClosedAt: &closedAt},
+		{ID: "keep-labeled", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"bd:protected"}},
+		{ID: "other-labeled", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"bd:protected"}},
+	}
+
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{
+		IDPattern:       "keep-*",
+		ProtectedLabels: []string{"bd:protected"},
+	})
+
+	if len(filtered) != 1 || filtered[0].ID != "keep-1" {
+		t.Fatalf("filtered IDs = %v, want only keep-1", sweepCandidateIDs(filtered))
+	}
+	if skips.Labeled != 1 {
+		t.Fatalf("skips.Labeled = %d, want 1 — only the labeled row the pattern ADMITTED is a protection", skips.Labeled)
+	}
+}
+
+// TestFilterSweepCandidatesProtectsLabeledAheadOfTheClosedAtDefenses pins the
+// bucket a row lands in when two reasons apply. The protections run first, so a
+// labeled row that is ALSO not-closed reports as Labeled — the fact its owner
+// needs — and the defense counters stay reserved for rows nothing protected.
+// This is the shape Pinned already had.
+func TestFilterSweepCandidatesProtectsLabeledAheadOfTheClosedAtDefenses(t *testing.T) {
+	candidates := []*types.Issue{
+		{ID: "labeled-open", Status: types.StatusOpen, Labels: []string{"bd:protected"}},
+		{ID: "labeled-no-closed-at", Status: types.StatusClosed, Labels: []string{"bd:protected"}},
+	}
+
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{
+		ProtectedLabels: []string{"bd:protected"},
+	})
+
+	if len(filtered) != 0 {
+		t.Fatalf("filtered IDs = %v, want none", sweepCandidateIDs(filtered))
+	}
+	if skips.Labeled != 2 {
+		t.Errorf("skips.Labeled = %d, want 2", skips.Labeled)
+	}
+	if skips.NotClosed != 0 || skips.UnknownClosedAt != 0 {
+		t.Errorf("defense buckets = NotClosed %d, UnknownClosedAt %d, want 0 — a candidate lands in exactly one bucket",
+			skips.NotClosed, skips.UnknownClosedAt)
+	}
+}
+
+// TestFilterSweepCandidatesPinnedWinsOverLabeled pins the one remaining bucket
+// ambiguity: a row that is both pinned and labeled counts ONCE, as Pinned,
+// because pinned is checked first. Stated so the counters sum to the candidate
+// set rather than double-counting.
+func TestFilterSweepCandidatesPinnedWinsOverLabeled(t *testing.T) {
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	candidates := []*types.Issue{
+		{ID: "both", Status: types.StatusClosed, ClosedAt: &closedAt, Pinned: true, Labels: []string{"bd:protected"}},
+	}
+
+	_, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{
+		ProtectedLabels: []string{"bd:protected"},
+	})
+
+	if skips.Pinned != 1 || skips.Labeled != 0 {
+		t.Fatalf("Pinned = %d, Labeled = %d, want 1 and 0", skips.Pinned, skips.Labeled)
+	}
 }
