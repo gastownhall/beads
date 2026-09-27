@@ -105,7 +105,7 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 	return dst
 }
 
-func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
+func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (_ CreateIssueResult, retErr error) {
 	var result CreateIssueResult
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
 		return result, err
@@ -113,53 +113,49 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 
 	issueTable, eventTable := TableRouting(issue)
 
-	// wasAutoMinted forces CreateOnly - and the EnsureIssueIDAvailableInTx
-	// coordination lock CreateOnly gates - even when the caller didn't ask
-	// for it, and bounds a remint-and-retry loop on a collision. An explicit
-	// caller-supplied ID keeps today's single-attempt, no-retry behavior: a
-	// collision there is a real caller error, not a race to paper over.
+	// An auto-minted ID always inserts CreateOnly, which also takes the
+	// EnsureIssueIDAvailableInTx coordination lock, whatever the caller asked
+	// for: the upsert path would overwrite whatever row already holds the ID.
+	// There is no re-mint loop. GenerateIssueIDInTable must return an ID free
+	// in this transaction's snapshot, so a collision here is a minter bug for
+	// the backstop to refuse. A concurrent writer that takes the same ID
+	// conflicts at commit instead, and the store's transaction retry replays
+	// the whole create on a fresh snapshot. An explicit caller-supplied ID
+	// keeps the caller's options.
 	wasAutoMinted := issue.ID == ""
-	maxAttempts := 1
 	if wasAutoMinted {
-		maxAttempts = 3
+		defer func() {
+			// A failed create's transaction is rolled back, so the minted ID
+			// names nothing. Drop it: a caller retrying this struct must mint
+			// again, not take the explicit-ID upsert path with a stale
+			// candidate that another writer may since have taken.
+			if retErr != nil {
+				issue.ID = ""
+			}
+		}()
+	}
+	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
+		return result, err
+	}
+	insertOpts := bc.Opts
+	if wasAutoMinted {
+		insertOpts.CreateOnly = true
+	}
+	if insertOpts.CreateOnly {
+		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
+			return result, err
+		}
 	}
 
-	var isNew, staleRejected bool
-	for attempt := 1; ; attempt++ {
-		if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
-			return result, err
-		}
+	if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
+		return result, err
+	} else if skip {
+		return result, nil
+	}
 
-		insertOpts := bc.Opts
-		if wasAutoMinted {
-			insertOpts.CreateOnly = true
-		}
-		if insertOpts.CreateOnly {
-			if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
-				if wasAutoMinted && attempt < maxAttempts && errors.Is(err, storage.ErrAlreadyExists) {
-					issue.ID = ""
-					continue
-				}
-				return result, err
-			}
-		}
-
-		if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
-			return result, err
-		} else if skip {
-			return result, nil
-		}
-
-		var insertErr error
-		isNew, staleRejected, insertErr = InsertIssueIfNew(ctx, tx, issueTable, issue, insertOpts)
-		if insertErr == nil {
-			break
-		}
-		if wasAutoMinted && attempt < maxAttempts && errors.Is(insertErr, storage.ErrAlreadyExists) {
-			issue.ID = ""
-			continue
-		}
-		return result, insertErr
+	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, insertOpts)
+	if err != nil {
+		return result, err
 	}
 	if staleRejected {
 		// The stored row is strictly newer than this snapshot: nothing was

@@ -10,24 +10,20 @@ import (
 )
 
 // TestCreateOnlyDuplicateKeyErrorDoesNotPoisonTx answers, against a real Dolt
-// backend, the empirical question be-p1gl1's round-1 review left open (exit
-// contract item 5): does a duplicate-key error from insertIssueCreateOnly
-// (reached through InsertIssueIfNew's CreateOnly branch) poison the enclosing
-// transaction, so that CreateIssueInTxWithResult's retry-and-remint branches —
-// round 1's existing branch after InsertIssueIfNew, and round 2's new branch
-// after EnsureIssueIDAvailableInTx — would be retrying against a transaction
-// that can no longer actually commit?
+// backend, whether a duplicate-key error from insertIssueCreateOnly (reached
+// through InsertIssueIfNew's CreateOnly branch) poisons the enclosing
+// transaction. A caller that gets storage.ErrAlreadyExists back from a
+// CreateOnly insert inside its own transaction needs to know whether it can
+// handle the error and keep writing on that transaction.
 //
 // This forces the SQL-level collision directly and deterministically: same
 // explicit ID, same transaction, no goroutines, no hash-space odds. It is
 // deliberately narrower than a race reproduction —
 // TestCrossProject_ConcurrentWrites already exercises real concurrent writers
-// against a real backend, and create_auto_mint_race_test.go's sqlmock test
-// covers the retry LOGIC deterministically. Neither of those can answer
-// whether the real driver/engine leaves a transaction usable after an error
-// mid-transaction (a mock always behaves as instructed; the concurrent test's
-// writers each use their own transaction, so it never asks this). This test
-// isolates exactly that one question.
+// against a real backend, but its writers each use their own transaction, so
+// it never asks whether the real driver/engine leaves a transaction usable
+// after an error mid-transaction. This test isolates exactly that one
+// question.
 //
 // Answer, verified empirically below rather than assumed: no. MySQL-protocol
 // semantics — unlike PostgreSQL's "current transaction is aborted" behavior —
@@ -40,11 +36,10 @@ import (
 // all — REPLACE INTO local_metadata cannot itself error on a duplicate key
 // (REPLACE is delete-then-insert by definition), and the collision is
 // reported by a plain SELECT COUNT(*) read that the Go code then rejects.
-// There is no SQL-level error for that branch's retry to be un-poisoned
-// from. This test's collision is therefore forced at the stricter,
-// higher-risk site the review actually named — a genuine INSERT constraint
-// violation from insertIssueCreateOnly — which also covers the weaker
-// EnsureIssueIDAvailableInTx case by implication.
+// There is no SQL-level error there to poison anything. This test's
+// collision is therefore forced at the stricter, higher-risk site — a genuine
+// INSERT constraint violation from insertIssueCreateOnly — which also covers
+// the weaker EnsureIssueIDAvailableInTx case by implication.
 func TestCreateOnlyDuplicateKeyErrorDoesNotPoisonTx(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -103,9 +98,7 @@ func TestCreateOnlyDuplicateKeyErrorDoesNotPoisonTx(t *testing.T) {
 	}
 
 	// The actual question: is the transaction still usable after that error?
-	// This is exactly what CreateIssueInTxWithResult's retry-and-remint
-	// branches depend on (be-tl5v2 round 1, be-p1gl1 round 2) — reset the ID
-	// and try again on the SAME tx, never a fresh one.
+	// Keep writing on the SAME tx, never a fresh one.
 	third := newIssue("duptx-after-collision", "post-collision write")
 	isNew, _, err = issueops.InsertIssueIfNew(ctx, tx, "issues", third, storage.BatchCreateOptions{CreateOnly: true})
 	if err != nil {
