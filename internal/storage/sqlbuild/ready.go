@@ -13,11 +13,15 @@ import (
 // default, plus any caller extras (deduped, empty entries dropped). Infra types
 // stay hidden from ready work, and rig identity beads are also hidden even
 // though they are durable issues rather than infra wisps.
+//
+// Epics are also excluded because all of the claimable work lives in their
+// children, and that work can be split across multiple agents.
 func ReadyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
 	out := []types.IssueType{
 		types.IssueType("merge-request"),
 		types.TypeGate,
 		types.TypeMolecule,
+		types.TypeEpic,
 		types.IssueType("rig"),
 	}
 	for _, t := range domain.DefaultInfraTypes() {
