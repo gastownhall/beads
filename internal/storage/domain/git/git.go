@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	internalgit "github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -27,6 +28,7 @@ var _ domain.GitRepository = (*gitRepositoryImpl)(nil)
 func (r *gitRepositoryImpl) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = r.workDir
+	cmd.Env = gittraceenv.ScrubEnv(cmd.Environ())
 	return cmd
 }
 

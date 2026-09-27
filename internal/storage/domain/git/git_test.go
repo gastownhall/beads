@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -59,6 +61,75 @@ func (s *testSuite) TestConfig_RoundTrip() {
 	s.Require().NoError(err)
 	s.True(found)
 	s.Equal("maintainer", value)
+}
+
+func (s *testSuite) TestConfig_TraceEnvironmentPreservesResults() {
+	for _, key := range gittraceenv.Vars() {
+		s.T().Setenv(key, "")
+		s.Require().NoError(os.Unsetenv(key))
+	}
+	s.gitInit()
+	s.run("git", "config", "core.hooksPath", ".git/hooks")
+	s.Require().NoError(s.repo.SetConfig(s.Ctx(), "test.present", "local"))
+	s.T().Setenv("GIT_CONFIG_COUNT", "1")
+	s.T().Setenv("GIT_CONFIG_KEY_0", "test.inherited")
+	s.T().Setenv("GIT_CONFIG_VALUE_0", "environment")
+
+	baseline := exec.CommandContext(s.Ctx(), "git", "config", "--get", "invalid")
+	baseline.Dir = s.tmpDir
+	_, baselineErr := baseline.Output()
+	var baselineExit *exec.ExitError
+	s.Require().ErrorAs(baselineErr, &baselineExit)
+	s.Require().Equal(1, baselineExit.ExitCode())
+	s.Require().NotEmpty(strings.TrimSpace(string(baselineExit.Stderr)))
+
+	traceFile := filepath.Join(s.T().TempDir(), "git.trace")
+	for _, tc := range []struct {
+		name, key, value string
+		fileTarget       bool
+	}{
+		{"trace_stderr", "GIT_TRACE", "1", false},
+		{"setup_stderr", "GIT_TRACE_SETUP", "1", false},
+		{"relative_trace", "GIT_TRACE", "relative.trace", false},
+		{"absolute_trace", "GIT_TRACE", traceFile, true},
+	} {
+		s.Run(tc.name, func() {
+			s.T().Setenv(tc.key, tc.value)
+			before := os.Environ()
+
+			value, found, err := s.repo.GetConfig(s.Ctx(), "test.absent")
+			s.Require().NoError(err)
+			s.False(found)
+			s.Empty(value)
+
+			value, found, err = s.repo.GetConfig(s.Ctx(), "test.present")
+			s.Require().NoError(err)
+			s.True(found)
+			s.Equal("local", value)
+
+			value, found, err = s.repo.GetConfig(s.Ctx(), "test.inherited")
+			s.Require().NoError(err)
+			s.True(found)
+			s.Equal("environment", value)
+
+			value, found, err = s.repo.GetConfig(s.Ctx(), "invalid")
+			s.Require().Error(err)
+			s.False(found)
+			s.Empty(value)
+			var exitErr *exec.ExitError
+			s.Require().ErrorAs(err, &exitErr)
+			s.Equal(1, exitErr.ExitCode())
+			s.Equal(string(baselineExit.Stderr), string(exitErr.Stderr))
+			s.Contains(err.Error(), strings.TrimSpace(string(exitErr.Stderr)))
+
+			if tc.fileTarget {
+				trace, err := os.ReadFile(traceFile)
+				s.Require().NoError(err)
+				s.NotEmpty(trace)
+			}
+			s.True(slices.Equal(before, os.Environ()), "Git command changed parent environment")
+		})
+	}
 }
 
 func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
