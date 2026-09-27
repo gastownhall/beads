@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -383,6 +385,248 @@ func TestFindBeadsDirSkipsDaemonRegistry(t *testing.T) {
 		if resultResolved == beadsDirResolved {
 			t.Errorf("FindBeadsDir() should skip daemon-only directory, got %q", result)
 		}
+	}
+}
+
+func TestFindBeadsDirFromSkipsOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "private", "tmp")
+	if err := os.MkdirAll(filepath.Join(tempRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempRoot, ".beads", "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(tempRoot, "isolated", "project")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	if got := FindBeadsDirFrom(child); got != "" {
+		t.Fatalf("FindBeadsDirFrom() = %q, want no discovery from OS temp root", got)
+	}
+}
+
+func TestFindBeadsDirFromSkipsAliasedOSTempRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinked temp-root alias is a Unix path regression")
+	}
+
+	sandbox := t.TempDir()
+	realTempRoot := filepath.Join(sandbox, "private", "var", "tmp")
+	aliasParent := filepath.Join(sandbox, "var")
+	if err := os.MkdirAll(realTempRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(sandbox, "private", "var"), aliasParent); err != nil {
+		t.Fatal(err)
+	}
+	aliasTempRoot := filepath.Join(aliasParent, "tmp")
+	if err := os.MkdirAll(filepath.Join(realTempRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realTempRoot, ".beads", "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(realTempRoot, "isolated", "project")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", aliasTempRoot)
+
+	if got := FindBeadsDirFrom(child); got != "" {
+		t.Fatalf("FindBeadsDirFrom() = %q, want aliased OS temp root ignored", got)
+	}
+}
+
+func TestFindBeadsDirFromPreservesNestedProjectUnderOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	project := filepath.Join(tempRoot, "project")
+	want := filepath.Join(project, ".beads")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(want, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(project, "nested", "directory")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	if got := FindBeadsDirFrom(child); !utils.PathsEqual(got, want) {
+		t.Fatalf("FindBeadsDirFrom() = %q, want nested project %q", got, want)
+	}
+}
+
+func TestDiscoveryResolversDoNotAdoptOSTempRootAncestor(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(rootBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(tempRoot, "fixture", "nested")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(child)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	if got := FindDatabasePath(); got != "" {
+		t.Errorf("FindDatabasePath() = %q, want no temp-root ancestor", got)
+	}
+	if got := FindBeadsDir(); got != "" {
+		t.Errorf("FindBeadsDir() = %q, want no temp-root ancestor", got)
+	}
+	if got := findLocalBeadsDir(); got != "" {
+		t.Errorf("findLocalBeadsDir() = %q, want no temp-root ancestor", got)
+	}
+	if got := FindAllDatabases(); len(got) != 0 {
+		t.Errorf("FindAllDatabases() = %+v, want no temp-root ancestor", got)
+	}
+}
+
+func TestDiscoveryResolversHonorStoreAtOSTempRootStart(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(rootBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tempRoot)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	if got := FindDatabasePath(); got == "" {
+		t.Error("FindDatabasePath() = empty, want temp-root start store")
+	}
+	if got := FindBeadsDir(); !utils.PathsEqual(got, rootBeadsDir) {
+		t.Errorf("FindBeadsDir() = %q, want %q", got, rootBeadsDir)
+	}
+	if got := findLocalBeadsDir(); !utils.PathsEqual(got, rootBeadsDir) {
+		t.Errorf("findLocalBeadsDir() = %q, want %q", got, rootBeadsDir)
+	}
+	if got := FindAllDatabases(); len(got) != 1 {
+		t.Errorf("FindAllDatabases() = %+v, want temp-root start store", got)
+	}
+}
+
+// TestFindAllDatabasesFindsAncestorStoreOutsideGitRepo pins the empty-gitRoot
+// arm. findGitRoot returns "" outside a git repository, and canonicalizing that
+// sentinel resolves it to the current working directory, which makes the
+// git-root break fire on the walk's first iteration and stops discovery at the
+// CWD instead of walking upward.
+func TestFindAllDatabasesFindsAncestorStoreOutsideGitRepo(t *testing.T) {
+	sandbox := t.TempDir()
+	workspace := filepath.Join(sandbox, "workspace")
+	wantBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(filepath.Join(wantBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wantBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(workspace, "project", "nested")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(child)
+	// The git context is cached per process from wherever it was first
+	// resolved, so it has to be re-resolved from the sandbox for this test to
+	// exercise the non-git arm at all.
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	if root := findGitRoot(); root != "" {
+		t.Skipf("sandbox %q resolves inside git repo %q; cannot exercise the non-git arm", child, root)
+	}
+	// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+
+	got := FindAllDatabases()
+	if len(got) != 1 {
+		t.Fatalf("FindAllDatabases() = %+v, want the ancestor store %q", got, wantBeadsDir)
+	}
+	if !utils.PathsEqual(got[0].BeadsDir, wantBeadsDir) {
+		t.Errorf("FindAllDatabases()[0].BeadsDir = %q, want %q", got[0].BeadsDir, wantBeadsDir)
+	}
+}
+
+// TestAncestorDirWalkEndsAtOSTempRoot pins that the ceiling terminates the walk
+// rather than skipping the temp root and resuming above it.
+func TestAncestorDirWalkEndsAtOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	project := filepath.Join(tempRoot, "project")
+	start := filepath.Join(project, "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	var got []string
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		got = append(got, dir)
+	}
+
+	want := []string{
+		canonicalizeAncestorWalkPath(start),
+		canonicalizeAncestorWalkPath(project),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("walk yielded %q, want %q — the temp-root ceiling must end the walk, not skip the temp root and continue above it", got, want)
+	}
+}
+
+// TestAncestorDirWalkYieldsFilesystemRoot pins the documented choice that the
+// walk includes the filesystem root. Most of the hand-rolled loops this type
+// replaced stopped before "/"; the unified walk does not, so the behavior is
+// deliberate and must not flip silently.
+func TestAncestorDirWalkYieldsFilesystemRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	start := filepath.Join(sandbox, "project", "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Point the ceiling somewhere off this walk so it can reach the root.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+
+	fsRoot := canonicalizeAncestorWalkPath(start)
+	for {
+		parent := filepath.Dir(fsRoot)
+		if parent == fsRoot {
+			break
+		}
+		fsRoot = parent
+	}
+
+	last := ""
+	// The walk must terminate at the root; bound the loop so a regression
+	// reports a failure instead of hanging until the package timeout.
+	const maxDepth = 256
+	steps := 0
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		last = dir
+		if steps++; steps > maxDepth {
+			t.Fatalf("walk did not terminate after %d directories, last %q", maxDepth, last)
+		}
+	}
+	if last != fsRoot {
+		t.Errorf("last yielded directory = %q, want the filesystem root %q", last, fsRoot)
 	}
 }
 

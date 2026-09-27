@@ -186,11 +186,15 @@ for entry in "${DOCS[@]}"; do
         echo "PASS: listed in engdocs/DOC_INVENTORY.md"
     fi
 
-    reviewed_line="$(grep -E -m1 '^Last reviewed: [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$doc_path" || true)"
-    if [[ -z "$reviewed_line" ]]; then
+    reviewed_count="$(grep -Ec '^Last reviewed: [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$doc_path" || true)"
+    if [[ "$reviewed_count" -eq 0 ]]; then
         echo "FAIL: missing Last reviewed marker in YYYY-MM-DD format"
         ERRORS=$((ERRORS + 1))
+    elif [[ "$reviewed_count" -gt 1 ]]; then
+        echo "FAIL: found $reviewed_count Last reviewed markers; expected exactly one"
+        ERRORS=$((ERRORS + 1))
     else
+        reviewed_line="$(grep -E -m1 '^Last reviewed: [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$doc_path")"
         reviewed="${reviewed_line#Last reviewed: }"
         if ! age_days="$(date_age_days "$reviewed" 2>/dev/null)"; then
             echo "FAIL: invalid Last reviewed date: $reviewed"
