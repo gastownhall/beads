@@ -685,6 +685,41 @@ func (r *issueSQLRepositoryImpl) NextCounterID(ctx context.Context, prefix strin
 	if err := r.runner.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&nextID); err != nil {
 		return 0, fmt.Errorf("db: NextCounterID: read last_id %q: %w", prefix, err)
 	}
+
+	// An explicit ID created after the counter's last bump can already hold
+	// the incremented value, in either plane. Jump the counter past the
+	// highest numeric suffix either plane holds — one aggregate pass however
+	// far the counter lags, rather than a retry budget a long enough lag
+	// would still exhaust — mirroring issueops.NextCounterIDTx (e748b72ad0).
+	id := fmt.Sprintf("%s-%d", prefix, nextID)
+	taken, err := r.Exists(ctx, id, domain.IssueTableOpts{UseWispsTable: false})
+	if err != nil {
+		return 0, fmt.Errorf("db: NextCounterID: check collision %q: %w", prefix, err)
+	}
+	if !taken {
+		taken, err = r.Exists(ctx, id, domain.IssueTableOpts{UseWispsTable: true})
+		if err != nil {
+			return 0, fmt.Errorf("db: NextCounterID: check collision %q: %w", prefix, err)
+		}
+	}
+	if !taken {
+		return nextID, nil
+	}
+
+	maxNum := 0
+	for _, table := range []string{"issues", "wisps"} {
+		n, err := r.maxNumericIDSuffix(ctx, table, prefix)
+		if err != nil {
+			return 0, fmt.Errorf("db: NextCounterID: scan %s for %q: %w", table, prefix, err)
+		}
+		if n > maxNum {
+			maxNum = n
+		}
+	}
+	nextID = maxNum + 1
+	if _, err := r.runner.ExecContext(ctx, "UPDATE issue_counter SET last_id = ? WHERE prefix = ?", nextID, prefix); err != nil {
+		return 0, fmt.Errorf("db: NextCounterID: advance past collision %q: %w", prefix, err)
+	}
 	return nextID, nil
 }
 
@@ -698,9 +733,27 @@ func (r *issueSQLRepositoryImpl) seedCounterFromExisting(ctx context.Context, pr
 		return fmt.Errorf("read existing counter %q: %w", prefix, err)
 	}
 
-	rows, err := r.runner.QueryContext(ctx, "SELECT id FROM issues WHERE id LIKE CONCAT(?, '-%')", prefix)
+	maxNum, err := r.maxNumericIDSuffix(ctx, "issues", prefix)
 	if err != nil {
-		return fmt.Errorf("scan issues for %q: %w", prefix, err)
+		return err
+	}
+
+	if maxNum > 0 {
+		if _, err := r.runner.ExecContext(ctx, "INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", prefix, maxNum); err != nil {
+			return fmt.Errorf("seed counter %q at %d: %w", prefix, maxNum, err)
+		}
+	}
+	return nil
+}
+
+// maxNumericIDSuffix returns the highest N among table's IDs of the form
+// prefix-N, or 0 if there are none. Hierarchical child IDs (prefix-N.M) are
+// skipped.
+func (r *issueSQLRepositoryImpl) maxNumericIDSuffix(ctx context.Context, table, prefix string) (int, error) {
+	//nolint:gosec // G201: table is one of two hardcoded constants
+	rows, err := r.runner.QueryContext(ctx, fmt.Sprintf("SELECT id FROM %s WHERE id LIKE CONCAT(?, '-%%')", table), prefix)
+	if err != nil {
+		return 0, fmt.Errorf("scan %s for %q: %w", table, prefix, err)
 	}
 	defer rows.Close()
 
@@ -720,15 +773,9 @@ func (r *issueSQLRepositoryImpl) seedCounterFromExisting(ctx context.Context, pr
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate issues for %q: %w", prefix, err)
+		return 0, fmt.Errorf("iterate %s for %q: %w", table, prefix, err)
 	}
-
-	if maxNum > 0 {
-		if _, err := r.runner.ExecContext(ctx, "INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", prefix, maxNum); err != nil {
-			return fmt.Errorf("seed counter %q at %d: %w", prefix, maxNum, err)
-		}
-	}
-	return nil
+	return maxNum, nil
 }
 
 func normalizeIssueTimestamps(issue *types.Issue) {
