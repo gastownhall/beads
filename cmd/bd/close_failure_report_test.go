@@ -68,12 +68,12 @@ func TestCloseProxiedFailuresRecordTheTypedErrorNotTheDisplayLine(t *testing.T) 
 		errors:        make([]string, len(args)),
 		failureErrors: make([]string, len(args)),
 	}
-	outcomes, _ := closeProxiedOutcomes(&pre, issueops.CloseBatchResult{
+	outcomes, _, _ := closeProxiedOutcomes(&pre, issueops.CloseBatchResult{
 		Outcomes: []issueops.CloseOutcome{
 			{IssueID: "pb-3", Issue: &types.Issue{ID: "pb-3"}, Changed: true},
 			{IssueID: "pb-2", Err: blockedErr},
 		},
-	})
+	}, false)
 	if len(outcomes) != 1 || outcomes[0].id != "pb-3" {
 		t.Fatalf("outcomes = %+v, want only the survivor pb-3", outcomes)
 	}
@@ -144,7 +144,7 @@ func TestCloseProxiedFailuresTypedErrorPerRefusalClass(t *testing.T) {
 			}
 			closeProxiedOutcomes(&pre, issueops.CloseBatchResult{
 				Outcomes: []issueops.CloseOutcome{{IssueID: "rc-1", Err: tc.err}},
-			})
+			}, false)
 
 			failures := closeProxiedFailures(&pre, args)
 			if len(failures) != 1 {
@@ -254,7 +254,7 @@ func TestCloseProxiedFailuresKeepPolicyRefusalsAndTypedOrder(t *testing.T) {
 			{IssueID: "mx-2", Issue: &types.Issue{ID: "mx-2"}, Changed: true},
 			{IssueID: "mx-3", Err: engineErr},
 		},
-	})
+	}, false)
 
 	failures := closeProxiedFailures(&pre, args)
 	want := []closeIDFailure{
