@@ -1058,6 +1058,8 @@ func TestFindParentConfigDoesNotAdoptOSTempRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 
 	requested := filepath.Join(tempRoot, "isolated", "project", ".beads")
 	cfg, err := findParentConfig(requested)
@@ -1096,6 +1098,8 @@ func TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd(t *testing.T) {
 	t.Chdir(rig)
 	// Keep the temp-root ceiling clear of this walk; it is not what this pins.
 	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	t.Setenv("TMP", filepath.Join(sandbox, "tmp"))
+	t.Setenv("TEMP", filepath.Join(sandbox, "tmp"))
 	// os.UserHomeDir reads HOME everywhere except Windows, where it reads
 	// USERPROFILE; clear both so it fails the way an unset HOME does.
 	t.Setenv("HOME", "")

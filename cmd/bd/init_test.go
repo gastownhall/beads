@@ -198,6 +198,8 @@ func TestInitTargetsRequestedProjectBelowOSTempRoot(t *testing.T) {
 	}
 	t.Chdir(project)
 	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 	t.Setenv("BEADS_DIR", "")
 	t.Setenv("BEADS_DB", "")
 	t.Setenv("BD_DB", "")

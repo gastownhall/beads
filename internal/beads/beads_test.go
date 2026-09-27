@@ -402,6 +402,8 @@ func TestFindBeadsDirFromSkipsOSTempRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 
 	if got := FindBeadsDirFrom(child); got != "" {
 		t.Fatalf("FindBeadsDirFrom() = %q, want no discovery from OS temp root", got)
@@ -456,6 +458,8 @@ func TestFindBeadsDirFromPreservesNestedProjectUnderOSTempRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 
 	if got := FindBeadsDirFrom(child); !utils.PathsEqual(got, want) {
 		t.Fatalf("FindBeadsDirFrom() = %q, want nested project %q", got, want)
@@ -477,6 +481,8 @@ func TestDiscoveryResolversDoNotAdoptOSTempRootAncestor(t *testing.T) {
 	}
 	t.Chdir(child)
 	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 	t.Setenv("BEADS_DIR", "")
 	t.Setenv("BEADS_DB", "")
 	t.Setenv("BD_DB", "")
@@ -506,6 +512,8 @@ func TestDiscoveryResolversHonorStoreAtOSTempRootStart(t *testing.T) {
 	}
 	t.Chdir(tempRoot)
 	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 	t.Setenv("BEADS_DIR", "")
 	t.Setenv("BEADS_DB", "")
 	t.Setenv("BD_DB", "")
@@ -554,6 +562,8 @@ func TestFindAllDatabasesFindsAncestorStoreOutsideGitRepo(t *testing.T) {
 	}
 	// Keep the temp-root ceiling clear of this walk; it is not what this pins.
 	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	t.Setenv("TMP", filepath.Join(sandbox, "tmp"))
+	t.Setenv("TEMP", filepath.Join(sandbox, "tmp"))
 
 	got := FindAllDatabases()
 	if len(got) != 1 {
@@ -575,6 +585,8 @@ func TestAncestorDirWalkEndsAtOSTempRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
 
 	var got []string
 	walk := NewAncestorDirWalk(start, start)
@@ -603,6 +615,8 @@ func TestAncestorDirWalkYieldsFilesystemRoot(t *testing.T) {
 	}
 	// Point the ceiling somewhere off this walk so it can reach the root.
 	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	t.Setenv("TMP", filepath.Join(sandbox, "tmp"))
+	t.Setenv("TEMP", filepath.Join(sandbox, "tmp"))
 
 	fsRoot := canonicalizeAncestorWalkPath(start)
 	for {

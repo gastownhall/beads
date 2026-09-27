@@ -500,6 +500,8 @@ func TestFindOriginalBeadsDirRespectsOSTempRootCeiling(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("TMPDIR", tempRoot)
+		t.Setenv("TMP", tempRoot)
+		t.Setenv("TEMP", tempRoot)
 		t.Setenv("BEADS_DIR", "")
 		t.Chdir(child)
 
@@ -518,6 +520,8 @@ func TestFindOriginalBeadsDirRespectsOSTempRootCeiling(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("TMPDIR", tempRoot)
+		t.Setenv("TMP", tempRoot)
+		t.Setenv("TEMP", tempRoot)
 		t.Setenv("BEADS_DIR", "")
 		t.Chdir(tempRoot)
 
