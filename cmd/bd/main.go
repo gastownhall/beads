@@ -1850,6 +1850,63 @@ var rootCmd = &cobra.Command{
 
 		doltCfg.Path = doltPath
 
+		// Validate workspace identity for write commands (GH#2438, GH#2372)
+		// BEFORE the real store opens below. Skip for read-only commands
+		// since they can't corrupt data. Skip for --global: the global
+		// database uses a sentinel project ID that won't match any
+		// project's metadata.json.
+		//
+		// This has to run before the store opens, not after: opening it is
+		// what lets a pending schema migration auto-apply (the smart gate,
+		// #4516), and checking identity only after that open means a
+		// mismatch is caught after the migration already landed as a real,
+		// permanent commit — the refusal arrives too late to prevent it
+		// (be-0gfcs). newPreviewStoreFromConfig gives a non-mutating,
+		// behind-schema-tolerant peek at the same database: enough to read
+		// _project_id without running (or needing) the migration this check
+		// must complete ahead of.
+		//
+		// Dispatches on previewErr, not on idStore's own nilness: even the
+		// success case can't trust idStore to signal failure on its own.
+		// openNonMutatingStoreFromConfig's dolt-server-mode branch returns
+		// dolt.NewFromConfigWithOptions's result straight through, and on a
+		// failed connection that is a nil *dolt.DoltStore boxed into a
+		// non-nil storage.DoltStorage interface — the classic Go typed-nil
+		// trap, where `idStore != nil` reads true even though the store
+		// behind it is not there. Calling Close() (or anything else) on
+		// that reference panics (confirmed live:
+		// TestPersistentPreRunHonorsSkipStoreAnnotation's control case, a
+		// command with no skip-store annotation run against an absent
+		// server-mode database). Checking previewErr first sidesteps the
+		// trap entirely, matching the ordinary (value, err) contract every
+		// other caller of this pair already trusts.
+		//
+		// A failed peek still has to be told apart from a legitimate first
+		// run: isBootstrapPreviewErr recognizes "no local database yet" (a
+		// wrapped os.ErrNotExist from the embedded store's own data-dir
+		// check), and only that case is skipped silently — the bootstrap
+		// tolerance this check has always had. Any other previewErr
+		// (unreachable server-mode endpoint, unloadable config, a
+		// registered backend refusing the read-only open, ...) used to be
+		// swallowed the same way, which let a preview failure wave the
+		// real, mutating open through unexamined — the one thing this check
+		// exists to prevent (be-3bt2e). Those cases now refuse instead.
+		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
+			idStore, previewErr := newPreviewStoreFromConfig(rootCtx, beadsDir)
+			switch {
+			case previewErr == nil:
+				checkErr := validateWorkspaceIdentity(rootCtx, idStore, beadsDir)
+				_ = idStore.Close()
+				if checkErr != nil {
+					return checkErr
+				}
+			case isBootstrapPreviewErr(previewErr):
+				debug.Logf("workspace identity check: skipping, no local database yet (%v)\n", previewErr)
+			default:
+				return refuseUnverifiablePreviewOpen(previewErr)
+			}
+		}
+
 		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
 		// directory — including noms/LOCK files. These are Dolt-internal files.
 		// Removing them WILL cause unrecoverable data corruption and data loss.
@@ -1897,15 +1954,10 @@ var rootCmd = &cobra.Command{
 			maybeAutoImportJSONL(rootCtx, store, beadsDir)
 		}
 
-		// Validate workspace identity for write commands (GH#2438, GH#2372)
-		// Skip for read-only commands since they can't corrupt data.
-		// Skip for --global: the global database uses a sentinel project ID
-		// that won't match any project's metadata.json.
-		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			if err := validateWorkspaceIdentity(rootCtx, beadsDir); err != nil {
-				return err
-			}
-		}
+		// Workspace identity is validated earlier now, before the store below
+		// was allowed to open and auto-apply a pending schema migration as a
+		// side effect (be-0gfcs) — see the check right before
+		// newRegisteredBackendStore/newDoltStore.
 
 		// Initialize hook runner using the .beads directory resolved above via
 		// resolveCommandBeadsDir. Do not use filepath.Dir(dbPath): for a
@@ -2336,16 +2388,80 @@ func flushBatchCommitOnShutdown() {
 	fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
 }
 
+// isBootstrapPreviewErr reports whether err is the identity check's preview
+// open failing because no local database exists yet — a legitimate first
+// run, not a workspace problem. It must stay narrow: any other previewErr
+// (unreachable server, bad config, ...) has to refuse rather than silently
+// wave the real, mutating open through (be-3bt2e).
+func isBootstrapPreviewErr(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
+// preview open failed for a reason other than first-run bootstrap.
+//
+// The preview IS a real store open, so it can hit the same typed open errors the
+// real one does, and those must be rendered exactly as the real-open arm renders
+// them. Moving the gate earlier is not license to downgrade
+// SchemaSkewError.UserMessage()'s actionable rebuild block into a generic
+// wrapper, nor to drop the JSON body that every `--json` consumer depends on.
+//
+// Only ONE class actually arrives here typed today — schema skew: the preview
+// runs CheckForwardDrift (embeddeddolt openReadOnly, dolt store open), which is
+// how the recurring stale-binary class #4135/#4137 surfaces at the preview
+// first. The other two calls below are defensive-for-symmetry with the real-open
+// arm, and cannot fire from a preview as the code stands:
+//   - handleFreshCloneError matches a post-migration failure string that a
+//     non-mutating preview never produces. Note for whoever makes it reachable:
+//     it ignores jsonOutput (main_errors.go), so it would break the `--json`
+//     guarantee this arm otherwise keeps.
+//   - CheckRemoteMigrateGate* runs only from mutating opens, never from
+//     openReadOnly, so RemoteMigrateGateError cannot originate in the preview.
+//
+// projectIdentityMismatchError is deliberately NOT in that list: it is a plain
+// fmt.Errorf block with no typed wrapper, so it falls to the generic arm below
+// and picks up its prefix. That matches base, where the mismatch block reached
+// the operator inside the real arm's "failed to open database: %v" wrapper.
+//
+// Extracted from the gate's default arm so both halves are directly testable
+// without standing up a forward-drifted workspace; the wire itself is pinned on
+// the embedded tier by
+// TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
+func refuseUnverifiablePreviewOpen(previewErr error) error {
+	if handleFreshCloneError(previewErr) {
+		return SilentExit()
+	}
+	if renderTypedOpenError(previewErr) {
+		return SilentExit()
+	}
+	// What remains is preview-specific: an unreachable endpoint, unloadable
+	// config, a registered backend refusing the read-only open. Respect --json
+	// so a machine caller still receives a structured error. The override hint
+	// lives only on this arm, and states what it actually does: on the typed
+	// arms above it cannot help, because the real open fails on the identical
+	// condition.
+	return HandleErrorRespectJSON(
+		"could not verify workspace identity before opening the database: %v "+
+			"(BEADS_SKIP_IDENTITY_CHECK=1 skips this pre-open check; it does not fix an error the real open would hit too)",
+		previewErr)
+}
+
 // validateWorkspaceIdentity checks that the project identity from metadata.json
-// matches the database's stored project_id. A mismatch indicates configuration
-// drift — the CLI may be pointing at the wrong database (GH#2438, GH#2372).
+// matches s's stored project_id. A mismatch indicates configuration drift —
+// the CLI may be pointing at the wrong database (GH#2438, GH#2372).
 //
 // This check only runs for write commands because:
 // 1. Read commands are safe even against wrong databases (no data mutation)
-// 2. The check requires an open store connection
+// 2. The check requires a store connection
 // 3. New databases won't have _project_id yet (bootstrap case)
-func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
-	if store == nil {
+//
+// s is passed explicitly rather than read off the package-level store: the
+// caller runs this against a throwaway, non-mutating store opened BEFORE the
+// real command store, specifically so a mismatch is caught before that real
+// open lets a pending schema migration auto-apply (be-0gfcs) — see the call
+// site in the root command's PersistentPreRunE.
+func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beadsDir string) error {
+	if s == nil {
 		return nil // No store connection, nothing to validate
 	}
 
@@ -2360,7 +2476,7 @@ func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
 	}
 
 	// Get project_id from database
-	dbProjectID, err := store.GetMetadata(ctx, "_project_id")
+	dbProjectID, err := s.GetMetadata(ctx, "_project_id")
 	if err != nil || dbProjectID == "" {
 		return nil // No project_id in DB (new or pre-identity database)
 	}
