@@ -450,4 +450,50 @@ func TestGraphExportDispatchPropagatesWriterErrors(t *testing.T) {
 			t.Fatalf("renderGraphAllSubgraphs error = %v, want %v", err, io.ErrClosedPipe)
 		}
 	})
+
+	t.Run("all empty message", func(t *testing.T) {
+		graphDOT, graphHTML, graphOpen = false, false, false
+		var out bytes.Buffer
+
+		if err := renderGraphAllSubgraphs(&out, nil); err != nil {
+			t.Fatalf("renderGraphAllSubgraphs: %v", err)
+		}
+		if got, want := out.String(), "No open issues found\n"; got != want {
+			t.Fatalf("empty all output = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("all empty message error", func(t *testing.T) {
+		graphDOT, graphHTML, graphOpen = false, false, false
+		writer := &graphFailWriter{err: io.ErrClosedPipe, failAt: 1}
+
+		err := renderGraphAllSubgraphs(writer, nil)
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("renderGraphAllSubgraphs error = %v, want %v", err, io.ErrClosedPipe)
+		}
+	})
+
+	t.Run("single empty open message", func(t *testing.T) {
+		graphDOT, graphHTML, graphOpen = false, false, true
+		subgraph := &TemplateSubgraph{Issues: []*types.Issue{{ID: "closed", Status: types.StatusClosed}}}
+		var out bytes.Buffer
+
+		if err := renderGraphSingleSubgraph(&out, subgraph); err != nil {
+			t.Fatalf("renderGraphSingleSubgraph: %v", err)
+		}
+		if got, want := out.String(), "No open issues in subgraph\n"; got != want {
+			t.Fatalf("empty single output = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("single empty open message error", func(t *testing.T) {
+		graphDOT, graphHTML, graphOpen = false, false, true
+		subgraph := &TemplateSubgraph{Issues: []*types.Issue{{ID: "closed", Status: types.StatusClosed}}}
+		writer := &graphFailWriter{err: io.ErrClosedPipe, failAt: 1}
+
+		err := renderGraphSingleSubgraph(writer, subgraph)
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("renderGraphSingleSubgraph error = %v, want %v", err, io.ErrClosedPipe)
+		}
+	})
 }

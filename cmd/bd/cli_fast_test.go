@@ -167,6 +167,10 @@ func runBDInProcess(t *testing.T, dir string, args ...string) string {
 	rErr, wErr, _ := os.Pipe()
 	os.Stdout = wOut
 	os.Stderr = wErr
+	defer func() {
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+	}()
 
 	// Set args for rootCmd
 	rootCmd.SetArgs(args)
@@ -195,8 +199,6 @@ func runBDInProcess(t *testing.T, dir string, args ...string) string {
 	// Close writers and restore
 	wOut.Close()
 	wErr.Close()
-	os.Stdout = oldStdout
-	os.Stderr = oldStderr
 	os.Chdir(oldDir)
 	os.Args = oldArgs
 	rootCmd.SetArgs(nil)
@@ -1217,6 +1219,10 @@ func runBDInProcessAllowError(t *testing.T, dir string, args ...string) (string,
 	rErr, wErr, _ := os.Pipe()
 	os.Stdout = wOut
 	os.Stderr = wErr
+	defer func() {
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+	}()
 
 	rootCmd.SetArgs(args)
 	os.Args = append([]string{"bd"}, args...)
@@ -1239,8 +1245,6 @@ func runBDInProcessAllowError(t *testing.T, dir string, args ...string) (string,
 
 	wOut.Close()
 	wErr.Close()
-	os.Stdout = oldStdout
-	os.Stderr = oldStderr
 	os.Chdir(oldDir)
 	os.Args = oldArgs
 	rootCmd.SetArgs(nil)

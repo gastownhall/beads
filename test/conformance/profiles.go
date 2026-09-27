@@ -8,6 +8,12 @@
 // isolated workspace for each backend. Adding a backend is one Profiles entry; the
 // runner and scripts/conformance.sh pick it up automatically. The suite is behind
 // the `e2e` build tag because it shells out to a freshly built bd.
+//
+// # Stability
+//
+// EXPERIMENTAL, same terms as the backend package: this harness tracks the
+// evolving storage contract and its registry may change in a minor release.
+// Pin an exact beads version.
 package conformance
 
 // Workspace is one isolated place a backend can be `bd init`-ed. Dir is the working

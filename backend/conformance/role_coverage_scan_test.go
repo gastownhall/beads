@@ -17,6 +17,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/journalops"
 	"github.com/steveyegge/beads/memoryops"
 )
 
@@ -39,8 +40,17 @@ const modulePath = "github.com/steveyegge/beads"
 // gate names its interfaces by. The paths come from real types rather than
 // string literals, so moving a package breaks the build here instead of
 // quietly emptying the census.
+//
+// journalops is the third, and it is the entry that proves this census had to
+// be a SOURCE parse. Its one role is handed out by no accessor at all — a
+// backend publishes the journal by implementing an interface a caller
+// type-asserts for — so reflectRoleAccessors below can never see it, exactly as
+// it can never see issueops.Importer. A package listed here is censused from
+// its declarations, which is what puts a role with no accessor under the
+// exhaustiveness gate rather than outside it.
 var facadePackages = map[string]string{
 	reflect.TypeOf((*issueops.Reader)(nil)).Elem().PkgPath():    "issueops",
+	reflect.TypeOf((*journalops.Journal)(nil)).Elem().PkgPath(): "journalops",
 	reflect.TypeOf((*memoryops.Memories)(nil)).Elem().PkgPath(): "memoryops",
 }
 

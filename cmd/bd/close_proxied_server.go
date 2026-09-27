@@ -122,9 +122,13 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	outcomes, closeReasons := closeProxiedOutcomes(&pre, result)
 	post := closeProxiedRunPostClose(ctx, args, in, outcomes)
 
-	for _, e := range pre.errors {
+	// pre.errors is indexed by argument position, so args[i] is the id this
+	// refusal belongs to.
+	var failures []closeIDFailure
+	for i, e := range pre.errors {
 		if e != "" {
 			fmt.Fprintln(os.Stderr, e)
+			failures = append(failures, closeIDFailure{ID: args[i], Error: e})
 		}
 	}
 	for _, w := range post.warnings {
@@ -182,6 +186,9 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		}
 	}
 
+	if len(failures) > 0 {
+		return reportCloseFailures(failures, len(args), closeClaimedID(claimedNextIssue), in.jsonOut)
+	}
 	if len(args) > 0 && len(outcomes) == 0 {
 		return SilentExit()
 	}
@@ -425,7 +432,12 @@ func autoCloseProxiedCompletedMolecule(ctx context.Context, uw uow.UnitOfWork, c
 	if err != nil || root == nil || root.Status == types.StatusClosed {
 		return nil
 	}
-	if labels, err := uw.LabelUseCase().GetLabels(ctx, moleculeID); err == nil {
+	// A READ, and one that has to see this transaction. The auto-close decision
+	// is made from labels written earlier in the same unit of work, and
+	// issueops.Reader opens a transaction of its own, so it would answer from
+	// the last committed state instead. The follow-up is a reader role bound to
+	// a caller's transaction; until one exists this stays (ga-2ltro.12).
+	if labels, err := uw.LabelUseCase().GetLabels(ctx, moleculeID); err == nil { //nolint:forbidigo // in-transaction read; issueops.Reader would open its own
 		root.Labels = labels
 	}
 	if !shouldAutoCloseCompletedRoot(root) {

@@ -470,6 +470,16 @@ func TestProxiedServerList(t *testing.T) {
 		}
 	})
 
+	t.Run("format_digraph_output_error", func(t *testing.T) {
+		stderr, err := runWithReadOnlyStdout(t, bd, p.dir, bdProxiedEnv(p.dir), "list", "--format", "digraph", "--all", "--no-pager")
+		if err == nil {
+			t.Fatalf("proxied list --format digraph succeeded with read-only stdout; stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "writing formatted list output") {
+			t.Fatalf("proxied list --format digraph stderr = %q, want writer diagnostic", stderr)
+		}
+	})
+
 	t.Run("compact_default", func(t *testing.T) {
 		out := bdProxiedList(t, bd, p, "--flat", "--no-pager")
 		if !strings.Contains(out, seed.openBug) {
@@ -709,7 +719,7 @@ func TestProxiedServerList(t *testing.T) {
 
 	t.Run("reject_format_with_watch", func(t *testing.T) {
 		out := bdProxiedListFail(t, bd, p, "--watch", "--format", "dot")
-		if !strings.Contains(out, "--format under --proxied-server --watch is not supported") {
+		if !strings.Contains(out, "--format cannot be combined with --watch") {
 			t.Errorf("expected --format+--watch rejection message, got: %s", out)
 		}
 	})

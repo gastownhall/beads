@@ -262,6 +262,17 @@ func RecomputeAllIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
 // recomputeIsBlockedCounting is RecomputeIsBlockedInTx with a corrected-row
 // count: it sums the rows flipped across every fixpoint pass. A parent flip in
 // one pass can cascade to its children in the next, and each correction counts.
+//
+// Unlike the scoped passes, the full repair runs UNBATCHED semi-join statements
+// (markAllBlockedSQL/unmarkAllBlockedSQL): the id lists here cover every row by
+// construction, so an IN-batch adds nothing but statement count. This was the
+// first home of the decorrelated union — the batched templates' original
+// OR-of-correlated-EXISTS shape ran per outer row and made the full repair
+// cost ~80+ statement-seconds on fast hardware and >600s on small cloud CPUs
+// (bd-t9ypt); the batched templates now use the same union scoped to their
+// batch (gastownhall/beads#6288). The id lists are still captured for the
+// journal snapshot, and len(wispIDs) doubles as the "wisps table exists and
+// has rows" signal.
 func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) (int64, error) {
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return 0, nil
@@ -273,16 +284,20 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 	var total int64
 	for {
 		var changed int64
-		n, err := recomputeIsBlockedPassForIssuesInTx(ctx, tx, issueIDs)
-		if err != nil {
-			return total, err
+		if len(issueIDs) > 0 {
+			n, err := recomputeAllIsBlockedPassInTx(ctx, tx, "issues", "i", "dependencies")
+			if err != nil {
+				return total, err
+			}
+			changed += n
 		}
-		changed += n
-		n, err = recomputeIsBlockedPassForWispsInTx(ctx, tx, wispIDs)
-		if err != nil {
-			return total, err
+		if len(wispIDs) > 0 {
+			n, err := recomputeAllIsBlockedPassInTx(ctx, tx, "wisps", "w", "wisp_dependencies")
+			if err != nil {
+				return total, err
+			}
+			changed += n
 		}
-		changed += n
 		total += changed
 		if changed == 0 {
 			if err := recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs); err != nil {
@@ -293,12 +308,144 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 	}
 }
 
+// recomputeAllIsBlockedPassInTx runs one full-table mark+unmark pass for one
+// table using the unbatched semi-join statements, returning rows corrected.
+// Error wrapping mirrors runMarkUnmarkBatchedInTx verbatim — downstream
+// consumers (wh-bridge-sync among them) match on these strings.
+func recomputeAllIsBlockedPassInTx(ctx context.Context, tx DBTX, table, alias, depTable string) (int64, error) {
+	var changed int64
+	res, err := tx.ExecContext(ctx, markAllBlockedSQL(table, alias, depTable))
+	if err != nil {
+		return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return changed, fmt.Errorf("recompute is_blocked (mark rows affected): %w", err)
+	}
+	changed += n
+
+	res, err = tx.ExecContext(ctx, unmarkAllBlockedSQL(table, alias, depTable))
+	if err != nil {
+		return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
+	}
+	n, err = res.RowsAffected()
+	if err != nil {
+		return changed, fmt.Errorf("recompute is_blocked (unmark rows affected): %w", err)
+	}
+	changed += n
+	return changed, nil
+}
+
+// markAllBlockedSQL is the full-table analog of the batched mark template:
+// same predicate, restructured so the engine can execute it as a semi-join.
+//
+//nolint:gosec // G201: table, alias, and depTable are constants from the only two callers.
+func markAllBlockedSQL(table, alias, depTable string) string {
+	return fmt.Sprintf(`
+		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 1, %[2]s.updated_at = %[2]s.updated_at
+		WHERE %[2]s.is_blocked = 0
+		  AND %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
+		  AND %[2]s.id IN (%[3]s)
+	`, table, alias, shouldBeBlockedIDsUnionSQL(depTable))
+}
+
+// unmarkAllBlockedSQL is the full-table analog of the batched unmark
+// template. NOT IN is null-hostile — one NULL in the subquery result makes the
+// predicate UNKNOWN for every row and the unmark silently stops firing — which
+// is why every leg of shouldBeBlockedIDsUnionSQL carries an explicit
+// d.issue_id IS NOT NULL guard.
+//
+//nolint:gosec // G201: table, alias, and depTable are constants from the only two callers.
+func unmarkAllBlockedSQL(table, alias, depTable string) string {
+	return fmt.Sprintf(`
+		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 0, %[2]s.updated_at = %[2]s.updated_at
+		WHERE %[2]s.is_blocked = 1
+		  AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
+		        OR %[2]s.id NOT IN (%[3]s) )
+	`, table, alias, shouldBeBlockedIDsUnionSQL(depTable))
+}
+
+// shouldBeBlockedIDsUnionSQL selects, UNCORRELATED with any outer row, every
+// depTable issue_id that currently has a reason to be blocked: one UNION leg
+// per reason — an open blocks/conditional-blocks target (issue or wisp), a
+// blocked parent-child parent (issue or wisp), a blocking waits-for gate.
+// Semantically, `<alias>.id IN (this select)` ≡ the disjunction of those
+// reasons correlated on d.issue_id = <alias>.id, which is what the batched
+// mark/unmark templates in blocked_state.go once spelled out as five
+// correlated EXISTS — but the engine evaluates this form once as hash
+// lookups instead of per outer row (bd-t9ypt). Full repair, doctor count and
+// the batched templates (scoped, see below) now share this one definition.
+//
+//nolint:gosec // G201: depTable is constant; waitsForGateBlockedSQL is a constant template.
+func shouldBeBlockedIDsUnionSQL(depTable string) string {
+	return shouldBeBlockedIDsUnionScopedSQL(depTable, "")
+}
+
+// shouldBeBlockedIDsUnionScopedSQL is shouldBeBlockedIDsUnionSQL with an
+// extra predicate on the dependency row appended to every leg's WHERE — "" for
+// the whole table (full repair, doctor count), batchScopeSQL for the batched
+// mark/unmark templates in blocked_state.go, which confine each leg to
+// d.issue_id IN (batch) so the union stays index-sized per statement. scope is
+// spliced verbatim: a %s inside it survives this Sprintf for the batch runner.
+//
+// The waits-for leg wraps its dependency rows in a DISTINCT derived table
+// BEFORE the gate predicate (waitsForGateBlockedSQL, six correlated EXISTS
+// over the parent-child children and the spawner) is applied, so the engine
+// narrows to the leg's few waits-for rows first and evaluates the gate only
+// per surviving row. Written flat, dolt 2.1.8's planner pushed the gate's
+// correlated subqueries ahead of the type filter and re-ran them against the
+// whole overlay for every candidate row — over a 19k-row uncommitted working
+// set the flat leg took 436 s while returning zero rows; behind the derived
+// table, 0.01 s (gastownhall/beads#6288, wy-pyrus4). The DISTINCT is
+// semantically free (the leg feeds a UNION, and the gate depends only on the
+// projected columns) and is what makes the barrier structural: a plain
+// single-table derived table is the mergeable shape MySQL-dialect planners
+// fold back into the outer query; a DISTINCT one is materialized.
+//
+//nolint:gosec // G201: depTable and scope are constants; waitsForGateBlockedSQL is a constant template.
+func shouldBeBlockedIDsUnionScopedSQL(depTable, scope string) string {
+	return fmt.Sprintf(`
+		SELECT d.issue_id FROM %[1]s d
+		JOIN issues t ON t.id = d.depends_on_issue_id
+		WHERE d.issue_id IS NOT NULL %[3]s
+		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
+		  AND t.status <> 'closed' AND t.status <> 'pinned'
+		UNION
+		SELECT d.issue_id FROM %[1]s d
+		JOIN wisps t ON t.id = d.depends_on_wisp_id
+		WHERE d.issue_id IS NOT NULL %[3]s
+		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
+		  AND t.status <> 'closed' AND t.status <> 'pinned'
+		UNION
+		SELECT d.issue_id FROM %[1]s d
+		JOIN issues p ON p.id = d.depends_on_issue_id
+		WHERE d.issue_id IS NOT NULL %[3]s
+		  AND d.type = 'parent-child'
+		  AND p.is_blocked = 1
+		UNION
+		SELECT d.issue_id FROM %[1]s d
+		JOIN wisps p ON p.id = d.depends_on_wisp_id
+		WHERE d.issue_id IS NOT NULL %[3]s
+		  AND d.type = 'parent-child'
+		  AND p.is_blocked = 1
+		UNION
+		SELECT d.issue_id FROM (
+		  SELECT DISTINCT d.issue_id, d.depends_on_issue_id, d.depends_on_wisp_id, d.metadata
+		  FROM %[1]s d
+		  WHERE d.issue_id IS NOT NULL %[3]s
+		    AND d.type = 'waits-for'
+		) d
+		WHERE (%[2]s)
+	`, depTable, waitsForGateBlockedSQL, scope)
+}
+
 // CountIsBlockedInconsistenciesInTx reports how many issue and wisp rows carry a
 // stale is_blocked flag — rows a full recompute would flip. It is the read-only
 // detection behind the bd doctor "Blocked State" check (bd-6dnrw.37); the
 // repair is RecomputeAllIsBlockedInTx.
 //
-// The two share no SQL but are pinned together by the blocked-consistency
+// Both derive their membership test from the one shouldBeBlockedIDsUnionSQL
+// builder above, and they are pinned together by the blocked-consistency
 // lockstep test: a converged database counts 0, and any row this counts is one
 // a recompute pass changes. The count is a single-pass lower bound — a
 // corrupted parent's children are only counted on the pass after the parent is
@@ -327,77 +474,33 @@ func CountIsBlockedInconsistenciesInTx(ctx context.Context, tx DBTX) (int64, err
 
 // countStaleIsBlockedSQL builds a COUNT(*) of rows whose stored is_blocked
 // disagrees with the dependency graph for one table (issues or wisps). The two
-// OR branches mirror the mark and unmark UPDATE templates in blocked_state.go
-// exactly:
+// OR branches mirror the mark and unmark UPDATE shapes exactly:
 //
 //   - mark-eligible:   is_blocked = 0 on an open row that should be blocked.
 //   - unmark-eligible: is_blocked = 1 on a row that should not be blocked
-//     (closed/pinned, or no remaining reason — De Morgan of NOT EXISTS ... is
-//     NOT (the shouldBeBlocked disjunction)).
+//     (closed/pinned, or its id absent from the should-be-blocked union — the
+//     set-membership form of De Morgan over the shouldBeBlocked disjunction).
 //
 // is_blocked is 0 or 1, so the branches are mutually exclusive and the count is
-// their sum. table/alias/depTable are hardcoded constants supplied by the only
-// two callers.
+// their sum. Built on the uncorrelated shouldBeBlockedIDsUnionSQL for the same
+// reason as the full repair (bd-t9ypt): the correlated disjunction form ran per
+// outer row and cost whole-table scans per branch. table/alias/depTable are
+// hardcoded constants supplied by the only two callers.
 //
 //nolint:gosec // G201: table, alias, and depTable are constant; only the constant gate SQL is interpolated.
 func countStaleIsBlockedSQL(table, alias, depTable string) string {
-	disjunction := shouldBeBlockedDisjunction(alias, depTable)
+	union := shouldBeBlockedIDsUnionSQL(depTable)
 	return fmt.Sprintf(`
 		SELECT COUNT(*) FROM %[1]s %[2]s
 		WHERE
 		  ( %[2]s.is_blocked = 0
 		    AND %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
-		    AND ( %[3]s ) )
+		    AND %[2]s.id IN (%[3]s) )
 		  OR
 		  ( %[2]s.is_blocked = 1
 		    AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
-		          OR NOT ( %[3]s ) ) )
-	`, table, alias, disjunction)
-}
-
-// shouldBeBlockedDisjunction is the OR of every reason a row should have
-// is_blocked = 1: an open hard blocker (issue or wisp), a blocked parent (issue
-// or wisp), or an ungated waits-for spawner. It mirrors the disjunction inside
-// the mark/unmark templates in blocked_state.go; the lockstep test keeps the
-// two from drifting. alias is the row's table alias, depTable its dependency
-// table; the joined target tables (issues/wisps) are the same for both.
-func shouldBeBlockedDisjunction(alias, depTable string) string {
-	//nolint:gosec // G201: alias and depTable are constant; waitsForGateBlockedSQL is a constant template.
-	return fmt.Sprintf(`
-		    EXISTS (
-		      SELECT 1 FROM %[2]s d
-		      JOIN issues t ON t.id = d.depends_on_issue_id
-		      WHERE d.issue_id = %[1]s.id
-		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		        AND t.status <> 'closed' AND t.status <> 'pinned'
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM %[2]s d
-		      JOIN wisps t ON t.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = %[1]s.id
-		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		        AND t.status <> 'closed' AND t.status <> 'pinned'
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM %[2]s d
-		      JOIN issues p ON p.id = d.depends_on_issue_id
-		      WHERE d.issue_id = %[1]s.id
-		        AND d.type = 'parent-child'
-		        AND p.is_blocked = 1
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM %[2]s d
-		      JOIN wisps p ON p.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = %[1]s.id
-		        AND d.type = 'parent-child'
-		        AND p.is_blocked = 1
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM %[2]s d
-		      WHERE d.issue_id = %[1]s.id AND d.type = 'waits-for'
-		        AND (%[3]s)
-		    )
-	`, alias, depTable, waitsForGateBlockedSQL)
+		          OR %[2]s.id NOT IN (%[3]s) ) )
+	`, table, alias, union)
 }
 
 // countRows runs a single COUNT(*) query and returns the scalar.

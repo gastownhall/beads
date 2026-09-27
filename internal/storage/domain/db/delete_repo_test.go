@@ -77,7 +77,7 @@ func (s *testSuite) TestEventsSQLRepositoryDelete() {
 func (s *testSuite) issueDeleteRemovesRow() {
 	s.seedIssueRow("bd-del-r1")
 	r := s.issueRepo()
-	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-r1", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-r1", domain.IssueTableOpts{}, "tester"))
 
 	var c int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
@@ -87,7 +87,7 @@ func (s *testSuite) issueDeleteRemovesRow() {
 
 func (s *testSuite) issueDeleteMissing() {
 	r := s.issueRepo()
-	err := r.Delete(s.Ctx(), "bd-del-nope", domain.IssueTableOpts{})
+	err := r.Delete(s.Ctx(), "bd-del-nope", domain.IssueTableOpts{}, "tester")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "not found")
 }
@@ -97,7 +97,7 @@ func (s *testSuite) issueDeleteWispRouting() {
 	s.seedIssueRow("bd-del-w1")
 
 	r := s.issueRepo()
-	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-w1", domain.IssueTableOpts{UseWispsTable: true}))
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-w1", domain.IssueTableOpts{UseWispsTable: true}, "tester"))
 
 	var wispCount, issueCount int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
@@ -109,7 +109,7 @@ func (s *testSuite) issueDeleteWispRouting() {
 }
 
 func (s *testSuite) issueDeleteByIDsEmpty() {
-	n, err := s.issueRepo().DeleteByIDs(s.Ctx(), nil, domain.IssueTableOpts{})
+	n, err := s.issueRepo().DeleteByIDs(s.Ctx(), nil, domain.IssueTableOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(0, n)
 }
@@ -120,7 +120,7 @@ func (s *testSuite) issueDeleteByIDsBulk() {
 	s.seedIssueRow("bd-del-bulk-c")
 
 	n, err := s.issueRepo().DeleteByIDs(s.Ctx(),
-		[]string{"bd-del-bulk-a", "bd-del-bulk-b", "bd-del-bulk-c"}, domain.IssueTableOpts{})
+		[]string{"bd-del-bulk-a", "bd-del-bulk-b", "bd-del-bulk-c"}, domain.IssueTableOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(3, n)
 
@@ -136,7 +136,7 @@ func (s *testSuite) issueDeleteByIDsWispRouting() {
 	s.seedIssueRow("bd-del-bulk-w1")
 
 	n, err := s.issueRepo().DeleteByIDs(s.Ctx(),
-		[]string{"bd-del-bulk-w1", "bd-del-bulk-w2"}, domain.IssueTableOpts{UseWispsTable: true})
+		[]string{"bd-del-bulk-w1", "bd-del-bulk-w2"}, domain.IssueTableOpts{UseWispsTable: true}, "tester")
 	s.Require().NoError(err)
 	s.Equal(2, n)
 
@@ -152,7 +152,7 @@ func (s *testSuite) issueDeleteByIDsWispRouting() {
 func (s *testSuite) issueDeleteByIDsMissing() {
 	s.seedIssueRow("bd-del-mix-a")
 	n, err := s.issueRepo().DeleteByIDs(s.Ctx(),
-		[]string{"bd-del-mix-a", "bd-del-mix-missing"}, domain.IssueTableOpts{})
+		[]string{"bd-del-mix-a", "bd-del-mix-missing"}, domain.IssueTableOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(1, n, "only one row matched")
 }
@@ -265,7 +265,7 @@ func (s *testSuite) issueRecomputeIsBlockedFlips() {
 }
 
 func (s *testSuite) depDeleteAllEmpty() {
-	n, err := s.depRepo().DeleteAllForIDs(s.Ctx(), nil, domain.DepInsertOpts{})
+	n, err := s.depRepo().DeleteAllForIDs(s.Ctx(), nil, domain.DepInsertOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(0, n)
 }
@@ -282,7 +282,7 @@ func (s *testSuite) depDeleteAllRemoves() {
 	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-del-da-b", "bd-del-da-c", types.DepBlocks),
 		"tester", domain.DepInsertOpts{}))
 
-	n, err := r.DeleteAllForIDs(s.Ctx(), []string{"bd-del-da-a"}, domain.DepInsertOpts{})
+	n, err := r.DeleteAllForIDs(s.Ctx(), []string{"bd-del-da-a"}, domain.DepInsertOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(2, n)
 
@@ -301,7 +301,7 @@ func (s *testSuite) depDeleteAllWispRouting() {
 		domain.DepInsertOpts{UseWispsTable: true}))
 
 	n, err := r.DeleteAllForIDs(s.Ctx(), []string{"bd-del-dw-src"},
-		domain.DepInsertOpts{UseWispsTable: true})
+		domain.DepInsertOpts{UseWispsTable: true}, "tester")
 	s.Require().NoError(err)
 	s.Equal(1, n)
 

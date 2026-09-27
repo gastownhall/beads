@@ -69,9 +69,15 @@ func ValidateSweepRequest(in issueops.SweepRequest) error {
 func BuildSweepCandidateFilter(in issueops.SweepRequest) types.IssueFilter {
 	closed := types.StatusClosed
 	ephemeral := in.Tier == issueops.SweepEphemeral
+	// EphemeralTier, not Ephemeral: the tier owns typed wisps whether or not
+	// their minting set the ephemeral flag (older creators set wisp_type but
+	// not ephemeral, and those rows must fall to `bd purge` — they were the
+	// rows it exists for). It also keeps the candidate search on the
+	// both-planes merge path, because legacy typed wisps live in the issues
+	// table, not the wisps plane an Ephemeral=true search is routed to.
 	filter := types.IssueFilter{
-		Status:    &closed,
-		Ephemeral: &ephemeral,
+		Status:        &closed,
+		EphemeralTier: &ephemeral,
 	}
 	if in.ClosedBefore != nil {
 		cutoff := *in.ClosedBefore

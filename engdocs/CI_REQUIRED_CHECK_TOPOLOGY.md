@@ -277,6 +277,30 @@ The current embedded Dolt topology already fits the required-check model:
 - Docs-only PRs can skip the embedded matrix without leaving the required gate
   pending, because the aggregate job still runs.
 
+### Server Dolt Storage Matrix
+
+`test-server-storage-full` mirrors `test-embedded-storage`'s sharding, one
+tier down in the same workflow:
+
+- Job-level `if` uses the same `detect-ci-tier` gate as the embedded matrix.
+- `.github/scripts/server-storage-test-shard.sh` discovers top-level
+  `Test*` functions from `internal/storage/dolt/*_test.go` (excluding
+  `TestConformance`, which keeps its own `test-server-storage` job), assigns
+  known-heavy tests via the committed
+  `.github/scripts/server-storage-test-shards.txt` manifest, and
+  hash-distributes everything else — the same manifest-plus-fallback
+  mechanism `embedded-storage-test-shard.sh` uses.
+- 16 shards (vs. embedded's 5): server-mode tests are real socket
+  round-trips against a containerized Dolt server with a per-test
+  CREATE/DROP DATABASE, and the package has 3.5x as many top-level tests
+  (1126 vs. 324) as the embedded suite. An earlier unsharded single job
+  (15m Go timeout, `timeout-minutes: 20`) never finished — it died at
+  256/1126 tests with zero failures, just out of time. One test,
+  `TestCloudAuthCLIRouting`, alone costs ~9.5 minutes and is pinned alone
+  on shard 1 in the manifest so it cannot delay any other shard.
+- `fail-fast: false`, matching every other matrix job in this workflow: one
+  slow or flaky shard should not cancel its siblings.
+
 ### Regression Tests
 
 `Regression Tests` can stay visible as a non-required workflow. If regression

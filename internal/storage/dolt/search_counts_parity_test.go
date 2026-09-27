@@ -65,14 +65,17 @@ func TestSearchCountsFilterBeforeJoinParity(t *testing.T) {
 
 			// Predicate form (nil ids): the form this PR reshapes. The by-IDs
 			// form keeps the plain driver and is unaffected.
-			newSQL, genArgs := sqlbuild.SearchCountsSQL(sqlbuild.IssuesFilterTables, nil, whereSQL, orderBy, limitSQL, true, sqlbuild.CountsHydration{SkipLabels: tc.filter.SkipLabels})
+			hyd := sqlbuild.CountsHydration{SkipLabels: tc.filter.SkipLabels}
+			newSQL, genArgs := sqlbuild.SearchCountsSQL(sqlbuild.IssuesFilterTables, nil, whereSQL, orderBy, limitSQL, true, hyd)
 			if genArgs != nil {
 				t.Fatalf("predicate form must not generate args, got %d", len(genArgs))
 			}
 			oldSQL := oldSearchCountsSQL(sqlbuild.IssuesFilterTables, whereSQL, orderBy, limitSQL, true, tc.filter.SkipLabels)
 
-			gotNew := runCountsSQL(ctx, t, store.db, newSQL, args)
-			gotOld := runCountsSQL(ctx, t, store.db, oldSQL, args)
+			// Both sides scan under the hydration that built them; the old
+			// builder has no lite form, so this pair is always full-shape.
+			gotNew := runCountsSQL(ctx, t, store.db, newSQL, args, hyd)
+			gotOld := runCountsSQL(ctx, t, store.db, oldSQL, args, hyd)
 
 			if len(gotNew) != len(gotOld) {
 				t.Fatalf("row count: new=%d old=%d", len(gotNew), len(gotOld))
@@ -97,7 +100,7 @@ type countsRow struct {
 	deps         string
 }
 
-func runCountsSQL(ctx context.Context, t *testing.T, db *sql.DB, query string, args []any) []countsRow {
+func runCountsSQL(ctx context.Context, t *testing.T, db *sql.DB, query string, args []any, hyd sqlbuild.CountsHydration) []countsRow {
 	t.Helper()
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -108,7 +111,7 @@ func runCountsSQL(ctx context.Context, t *testing.T, db *sql.DB, query string, a
 	var out []countsRow
 	seen := make(map[string]bool)
 	for rows.Next() {
-		iwc, err := issueops.ScanReadyWorkRowWithCounts(rows)
+		iwc, err := issueops.ScanReadyWorkRowWithCounts(rows, hyd)
 		if err != nil {
 			t.Fatalf("scan: %v", err)
 		}

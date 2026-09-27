@@ -140,14 +140,25 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		issueType, _ := cmd.Flags().GetString("type")
 		in.fields["issue_type"] = utils.NormalizeIssueType(issueType)
 	}
+	// Normalize on the way in, as the read paths do. --remove-label matters as
+	// much as the additive flags: an untrimmed " theme:a" would fail to match
+	// the stored label and silently remove nothing.
 	if cmd.Flags().Changed("add-label") {
-		in.addLabels, _ = cmd.Flags().GetStringSlice("add-label")
+		addLabels, _ := cmd.Flags().GetStringSlice("add-label")
+		in.addLabels = utils.NormalizeLabels(addLabels)
+		warnLabelsContainingWhitespace(in.addLabels)
 	}
 	if cmd.Flags().Changed("remove-label") {
-		in.removeLabels, _ = cmd.Flags().GetStringSlice("remove-label")
+		removeLabels, _ := cmd.Flags().GetStringSlice("remove-label")
+		in.removeLabels = utils.NormalizeLabels(removeLabels)
 	}
 	if cmd.Flags().Changed("set-labels") {
 		labels, _ := cmd.Flags().GetStringSlice("set-labels")
+		// Preserve the explicit "clear all labels" signal: --set-labels ''
+		// normalizes to empty, and a nil slice here would still be a non-nil
+		// pointer to an empty slice, which is the clear instruction.
+		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 		in.setLabels = &labels
 	}
 	if cmd.Flags().Changed("parent") {
@@ -222,21 +233,11 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("metadata") {
 		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			data, err := os.ReadFile(filePath) //#nosec G304 -- user-supplied path via @file syntax
-			if err != nil {
-				return nil, HandleErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
+		metadata, err := readMetadataFlag(metadataValue)
+		if err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
 		}
-		if !json.Valid([]byte(metadataJSON)) {
-			return nil, HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
-		}
-		in.mergeMetadataIn = json.RawMessage(metadataJSON)
+		in.mergeMetadataIn = metadata
 	}
 	setMetadataFlags, _ := cmd.Flags().GetStringArray("set-metadata")
 	unsetMetadataFlags, _ := cmd.Flags().GetStringArray("unset-metadata")

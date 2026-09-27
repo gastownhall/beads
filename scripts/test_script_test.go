@@ -95,7 +95,7 @@ func TestTestScriptPrebuiltBinaryContract(t *testing.T) {
 // package-wide TestMain authority needed by other script-selection contracts.
 func TestTestScriptPrebuiltBinaryLaunchProbe(t *testing.T) {
 	if os.Getenv(testScriptLaunchProbeEnv) != "1" {
-		return
+		t.Skip("re-exec probe runs only under the test.sh fake-go driver")
 	}
 
 	prebuilt := os.Getenv("BEADS_TEST_BD_BINARY")

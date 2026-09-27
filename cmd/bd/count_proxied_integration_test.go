@@ -30,6 +30,7 @@ func TestProxiedServerCount(t *testing.T) {
 	bdProxiedCreate(t, bd, p.dir, "Count labeled", "--type", "task", "--label", "frontend", "--label", "urgent")
 	bdProxiedCreate(t, bd, p.dir, "Count labeled two", "--type", "task", "--label", "backend")
 	bdProxiedCreate(t, bd, p.dir, "Count notes issue", "--type", "task", "--description", "notes keyword here")
+	bdProxiedCreate(t, bd, p.dir, "Count metadata issue", "--type", "task", "--metadata", `{"count_scope":"matching"}`)
 
 	// countInt runs "count <args>" and parses the plain integer stdout.
 	countInt := func(t *testing.T, args ...string) int {
@@ -118,6 +119,13 @@ func TestProxiedServerCount(t *testing.T) {
 		}
 		if got < 1 {
 			t.Errorf("expected at least 1 closed issue, got %d", got)
+		}
+	})
+
+	t.Run("filter_by_metadata_field", func(t *testing.T) {
+		got := countJSONInt(t, "--metadata-field", "count_scope=matching")
+		if want := listCount("--metadata-field", "count_scope=matching"); got != want || got != 1 {
+			t.Errorf("count --metadata-field = %d, want list cardinality %d and fixture count 1", got, want)
 		}
 	})
 

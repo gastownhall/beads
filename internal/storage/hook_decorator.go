@@ -78,10 +78,22 @@ func (h *HookFiringStore) Unwrap() DoltStorage { return h.inner }
 // to fire them, and a server that admitted it would be one config change away
 // from breaking its own.
 //
-// NOT ENFORCED, because the assertion is on the type: a role this decorator
-// produced and something else then wrapped is invisible here, and so is a
-// future decorator elsewhere that fires hooks of its own. Every case that
-// exists today is in the switch, and a new one belongs there too.
+// THE SET IS ENFORCED, and it is enforced because saying "every case that
+// exists today is in the switch" did not make it so. That sentence stood here
+// while FOUR decorators were missing — the commenter, the ready claimer, the
+// batch closer and the batch creator — each of them found by hand by whoever
+// happened to publish an operation over that role, which is a discovery process
+// and not a guarantee. TestRoleFiresHooksKnowsEveryHookFiringRole now scans this
+// package's source for every decorator that holds an issueOperationHooks and
+// requires a case here that RETURNS TRUE for it, so the fifth cannot repeat the
+// first four. It counts the return rather than the case label because an empty
+// case answers false, which is how *hookMetadataCAS spent time silently
+// disarmed.
+//
+// WHAT IS STILL NOT ENFORCED, narrowly and deliberately: the assertion is on the
+// TYPE, so a role this decorator produced and something ELSE then wrapped is
+// invisible here, and so is a future decorator in another package that fires
+// hooks of its own. Both are outside what a scan of this package can see.
 func RoleFiresHooks(role any) bool {
 	switch role.(type) {
 	case *hookIssueClaimer:
@@ -115,6 +127,31 @@ func RoleFiresHooks(role any) bool {
 	// distinct edge source (hook_batch_applier.go). A hundred-item plan served
 	// unpeeled is a hundred user subprocesses inside one request.
 	case *hookBatchApplier:
+		return true
+	// The commenter fires the update hook for every comment it lands
+	// (hook_commenter.go), because the legacy comment path fired it and a
+	// comment is a change to the issue as far as a hook script is concerned.
+	case *hookCommenter:
+		return true
+	// The ready claimer fires the update hook for every row it WINS
+	// (hook_ready_claimer.go) — a claim sets the assignee and moves the status,
+	// so it is an update as far as a hook script is concerned. It is the one
+	// whose caller is a polling loop by design: an agent draining a queue
+	// through POST /v0/beads/issues:claimNext would run the workspace's script
+	// once per bead it picked up.
+	case *hookReadyClaimer:
+		return true
+	// The batch closer fires the close hook once per LANDED ITEM and the update
+	// hook for the claim it may chain (hook_batch_closer.go), so one request
+	// through POST /v0/beads/issues:batchClose is N+1 subprocesses.
+	case *hookBatchCloser:
+		return true
+	// The batch creator fires the create hook once PER ITEM
+	// (hook_batch_creator.go), so a hundred-item
+	// POST /v0/beads/issues:batchCreate served unpeeled is a hundred of the
+	// workspace's subprocesses inside one HTTP call — the batch applier's
+	// hazard, on the operation that reaches it with nothing else in the way.
+	case *hookBatchCreator:
 		return true
 	}
 	return false

@@ -102,6 +102,17 @@ func (e *MergeConflictsError) Error() string {
 
 func (e *MergeConflictsError) Unwrap() error { return e.MergeErr }
 
+// ErrPullBehindFastForwardable marks the one "pull reported success but merged
+// nothing" state that a plain re-pull fixes on its own: the branch this database
+// reads is a strict ANCESTOR of the refreshed remote-tracking ref, so a peer
+// pushed after this pull's fetch and the next pull fast-forwards it. bd sync's
+// loop treats it as a transient — like a push race — instead of hard-failing the
+// tick. A genuine divergence (a common ancestor that is neither tip) is NOT
+// wrapped in this and stays a hard error, because retrying cannot converge it.
+// The concrete error this wraps still carries the full both-hashes diagnosis;
+// the sentinel only classifies it.
+var ErrPullBehindFastForwardable = errors.New("pull merged nothing but the local branch is behind a fast-forwardable remote tip")
+
 // SettleMerge finishes a merge that ran on db with the session flags
 // MergeAndSettle sets: it auto-resolves the safe conflict classes, repairs FK
 // cascade violations (bd-6dnrw.4), and leaves the settled working set in

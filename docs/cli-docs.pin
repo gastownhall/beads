@@ -9,4 +9,4 @@
 #
 # Set to HEAD to track the current checkout's source instead (the pre-pin
 # behavior).
-v1.1.0
+v1.2.2

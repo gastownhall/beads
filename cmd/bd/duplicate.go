@@ -28,8 +28,8 @@ Examples:
 var supersedeCmd = &cobra.Command{
 	Use:     "supersede <id> --with <new>",
 	GroupID: "deps",
-	Short:   "Mark an issue as superseded by a newer one",
-	Long: `Mark an issue as superseded by a newer version.
+	Short:   "Mark an issue as superseded by a replacement issue",
+	Long: `Mark an issue as superseded by a different (replacement) issue.
 
 The superseded issue is automatically closed with a reference to the replacement.
 Useful for design docs, specs, and evolving artifacts.

@@ -36,18 +36,18 @@ const importerOneAccessorWaiverReason = "Importer has one accessor (uow.Importer
 // brings its waivers the same way; see unwiredContractEntrypoints.
 func init() {
 	registerContractLegWaivers("dolt", map[string]string{
-		"RunImporterRejectsAStaleRowAndNamesIt":          importerOneAccessorWaiverReason,
-		"RunImporterReportsTheAbsentTargetItDroppedOnce": importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCrossPlaneEdgeItDropped":   importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCycleEdgeItDropped":        importerOneAccessorWaiverReason,
-		"RunBootstrapperRecordsExactlyOneHistoryEntry":   bootstrapSplitWaiverReason,
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
 	})
 	registerContractLegWaivers("embeddeddolt", map[string]string{
-		"RunImporterRejectsAStaleRowAndNamesIt":          importerOneAccessorWaiverReason,
-		"RunImporterReportsTheAbsentTargetItDroppedOnce": importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCrossPlaneEdgeItDropped":   importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCycleEdgeItDropped":        importerOneAccessorWaiverReason,
-		"RunBootstrapperRecordsExactlyOneHistoryEntry":   bootstrapSplitWaiverReason,
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
 	})
 	registerContractLegWaivers("uow", map[string]string{
 		"RunBootstrapperRecordsNoHistoryEntryOfItsOwn":                   bootstrapSplitWaiverReason,

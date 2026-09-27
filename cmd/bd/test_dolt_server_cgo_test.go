@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -76,13 +77,38 @@ func startTestDoltServer() func() {
 // initCmdBDSharedSchema initializes the schema and config on the shared database
 // and commits to main so branches get a clean snapshot.
 func initCmdBDSharedSchema(port int) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
 	cfg := &dolt.Config{
 		Path:       "/tmp/cmdbd-shared-init",
 		ServerHost: "127.0.0.1",
 		ServerPort: port,
 		Database:   testSharedDB,
+		// CreateIfMissing must be true even though SetupSharedTestDB already
+		// ran `CREATE DATABASE IF NOT EXISTS` moments ago: on a container
+		// that only just reported ready, a fresh connection's SHOW DATABASES
+		// catalog probe can still lag that DDL (GH-1851-class propagation
+		// race), producing a false "database not found" here. Without this,
+		// dolt.New takes the immediate-fail branch with no retry at all;
+		// with it, dolt.New treats the resulting "database exists" (1007) on
+		// its own CREATE DATABASE as proof of existence and falls through to
+		// its already-bounded post-create catalog-registration backoff.
+		CreateIfMissing: true,
 	}
+
+	// This database lives only inside a container startTestDoltServer just
+	// created for this test binary's run and is torn down with it at process
+	// exit, so the #4259 remote-migrate gate's "don't independently fork a
+	// shared remote's schema" concern does not apply — there is no persistent
+	// remote here to fork away from. Without this override, the gate blocks
+	// whenever the container image's baked-in schema version lags the current
+	// migration set, forcing every store-opening test in the binary onto the
+	// slow per-test-DB fallback path (openExistingTestDB and friends in
+	// test_helpers_test.go), which in turn becomes unstable — confirmed via
+	// be-fgd round-2 triage — once two or more full-migration replays land
+	// back-to-back against the same long-lived container.
+	schema.SetForceAllowRemoteMigrate(true)
+	defer schema.SetForceAllowRemoteMigrate(false)
 	store, err := dolt.New(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("New: %w", err)

@@ -163,6 +163,12 @@ in total before any individual status trips it.`,
 	},
 }
 
+func writeGraphLine(out io.Writer, value string) error {
+	w := &graphExportWriter{out: out}
+	w.println(value)
+	return w.wrapError("graph")
+}
+
 func renderGraphAllSubgraphs(out io.Writer, subgraphs []*TemplateSubgraph) error {
 	if graphOpen {
 		var filtered []*TemplateSubgraph
@@ -176,8 +182,7 @@ func renderGraphAllSubgraphs(out io.Writer, subgraphs []*TemplateSubgraph) error
 	}
 
 	if len(subgraphs) == 0 {
-		fmt.Println("No open issues found")
-		return nil
+		return writeGraphLine(out, "No open issues found")
 	}
 
 	if jsonOutput {
@@ -195,7 +200,9 @@ func renderGraphAllSubgraphs(out io.Writer, subgraphs []*TemplateSubgraph) error
 			layout := computeLayout(subgraph)
 			renderGraphCompact(layout, subgraph)
 			if i < len(subgraphs)-1 {
-				fmt.Println(strings.Repeat("─", 60))
+				if err := writeGraphLine(out, strings.Repeat("─", 60)); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -215,7 +222,9 @@ func renderGraphAllSubgraphs(out io.Writer, subgraphs []*TemplateSubgraph) error
 			renderGraphVisual(layout, subgraph)
 		}
 		if !graphDOT && i < len(subgraphs)-1 {
-			fmt.Println(strings.Repeat("─", 60))
+			if err := writeGraphLine(out, strings.Repeat("─", 60)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -225,8 +234,7 @@ func renderGraphSingleSubgraph(out io.Writer, subgraph *TemplateSubgraph) error 
 	if graphOpen {
 		subgraph = filterSubgraphOpen(subgraph)
 		if subgraph == nil || len(subgraph.Issues) == 0 {
-			fmt.Println("No open issues in subgraph")
-			return nil
+			return writeGraphLine(out, "No open issues in subgraph")
 		}
 	}
 

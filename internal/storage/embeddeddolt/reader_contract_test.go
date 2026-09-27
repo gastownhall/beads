@@ -217,6 +217,12 @@ func TestEmbeddedReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsN
 	conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -233,6 +239,18 @@ func TestEmbeddedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
 // newEmbeddedReaderFixture composes the shared role kit with the reader

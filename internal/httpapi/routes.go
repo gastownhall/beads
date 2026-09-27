@@ -315,6 +315,33 @@ var routeTable = []route{
 		handler:     (*Server).handleListRelatedIssues,
 	},
 	{
+		op:     OpAddComment,
+		method: http.MethodPost,
+		// The second SUB-RESOURCE row and the first that writes, spelled the way
+		// the neighbor read above is: a LITERAL segment after a single-segment
+		// wildcard, so pattern and specPath agree, the router registers the
+		// documented path itself, and the claim row's exception does not apply.
+		//
+		// A PLAIN collection POST rather than a custom method, for the single
+		// create's reason: this creates one member of the collection the path
+		// names. It is the one place a sub-resource earns the method outright.
+		//
+		// It collides with nothing, and the POST wildcard is the collision worth
+		// checking rather than assuming: `/v0/beads/issues/{idop}` matches ONE
+		// segment after `/issues/`, and this path has two, so the dispatcher
+		// never sees a request for it. TestCustomMethodsNarrowThePOSTSurface and
+		// TestAddCommentPathReachesItsHandler pin the two halves.
+		//
+		// The collection has no GET row and must not grow one by reflex: no role
+		// answers a comment page, and the thread is read through
+		// `GET /v0/beads/issues/{id}?include_comments=true`. A GET here lands on
+		// the catch-all, which answers 404 — this surface has no 405.
+		pattern:     "/v0/beads/issues/{id}/comments",
+		capability:  "issues.addComment",
+		implemented: true,
+		handler:     (*Server).handleAddComment,
+	},
+	{
 		op:          OpListSettings,
 		method:      http.MethodGet,
 		pattern:     "/v0/beads/config",
@@ -329,6 +356,33 @@ var routeTable = []route{
 		capability:  "config.get",
 		implemented: true,
 		handler:     (*Server).handleGetSetting,
+	},
+	{
+		op:     OpSetSetting,
+		method: http.MethodPut,
+		// THE SURFACE'S FIRST PUT, and the method is what the operation means
+		// rather than a preference: the caller names the resource by path and
+		// sends the value that becomes its whole state, which is what PUT
+		// already means, and the write is idempotent in the strict sense.
+		//
+		// It shares its pattern with the read above and the delete below and
+		// differs only in method, which ServeMux registers together — the same
+		// arrangement the memory key already has, so the three rows cannot
+		// collide.
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.set",
+		implemented: true,
+		handler:     (*Server).handleSetSetting,
+	},
+	{
+		op:     OpUnsetSetting,
+		method: http.MethodDelete,
+		// The surface's second DELETE, and forgetMemory's argument unchanged:
+		// one named resource, no body, no flags.
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.unset",
+		implemented: true,
+		handler:     (*Server).handleUnsetSetting,
 	},
 	{
 		op:          OpListDependencies,

@@ -105,6 +105,12 @@ type ReadyRequest struct {
 	// to page ready work. A caller that must page across backends pages a
 	// ListRequest instead — see ListRequest.Offset.
 	Offset int
+
+	// Brief drops the free-form text from every row: Description, Design,
+	// AcceptanceCriteria, Notes, Payload and Waiters come back zero-valued and
+	// the row carries types.Issue.IsLitePartial. See ListRequest.Brief, which
+	// is the same knob on the other operation and carries the full contract.
+	Brief bool
 }
 
 // ListRequest describes one issue-list query.
@@ -180,6 +186,33 @@ type ListRequest struct {
 	// Like SkipLabels it is NOT carried onto the ReadyFlag arm; the counts are
 	// hydrated there either way, which costs time and not correctness.
 	SkipCounts bool
+
+	// Brief suppresses the FREE-FORM TEXT the way SkipLabels suppresses labels
+	// and SkipCounts the cardinalities: Description, Design,
+	// AcceptanceCriteria, Notes, Payload and Waiters are not selected and come
+	// back zero-valued. Nothing else about the page moves — the rows, their
+	// order, Parent and the has-more verdict are what they would have been —
+	// because this chooses what is HYDRATED, never which rows match. A
+	// predicate over a heavy column (DescContains, NotesContains, EmptyDesc)
+	// keeps selecting exactly the rows it selects today: WHERE is independent
+	// of the SELECT shape.
+	//
+	// A BLANK FIELD IS AMBIGUOUS ON THE WIRE and the row says so in process:
+	// all six are omitempty, so a projected row marshals identically to a
+	// genuinely textless one, and the row carries types.Issue.IsLitePartial to
+	// tell them apart for an in-process caller. That flag is json:"-", so a
+	// wire consumer distinguishes them by having asked — the same shape the
+	// repo has already argued about twice (ga-clgh/CommentsOmitted, #5550).
+	//
+	// UNLIKE SkipLabels and SkipCounts it IS carried onto the ReadyFlag arm,
+	// and onto ReadyRequest.Brief beside it. Those two drop a NUMBER the ready
+	// renderings print; this drops a body no listing prints, so carrying it is
+	// what makes `--ready` and `bd ready` answer the same request the same way.
+	//
+	// It is the storage layer's types.IssueFilter.Lite / types.WorkFilter.Lite
+	// under the name the CLI and the MCP integration already use for a
+	// projection (bd show --brief-deps, the MCP's brief).
+	Brief bool
 
 	// Priority is exact; PriorityMin and PriorityMax bound a range. All three
 	// are pointers for the same reason ReadyRequest.Priority is.
@@ -307,7 +340,9 @@ type ListRequest struct {
 	// narrower filter vocabulary than this request can describe, and only part
 	// of the request reaches it.
 	//
-	// WHAT IT CARRIES: IssueType, all five label forms, Assignee, NoAssignee,
+	// WHAT IT CARRIES: Status/Statuses (an explicit --status is the
+	// intersection; AllFlag and `--status all` still take the open default),
+	// IssueType, all five label forms, Assignee, NoAssignee,
 	// the exact Priority, ParentID, MolType, WispType, MetadataFields,
 	// HasMetadataKey, the type exclusions (ExcludeTypes, and with them
 	// IncludeGates and IncludeInfra), IncludeEphemeral — the ready query has an
@@ -315,8 +350,7 @@ type ListRequest struct {
 	// IncludeInfra's plane half crosses with it — Limit, Offset and the MaxRows
 	// cap with its attribution. SortBy and Reverse
 	// still apply, because the display order is applied to the page after the
-	// query rather than inside it. Status and AllFlag are resolved to "open"
-	// and have no further effect: ready work is open work.
+	// query rather than inside it.
 	//
 	// WHAT IT REFUSES: every other filter here is one the ready query cannot
 	// carry, so combining it with ReadyFlag returns ErrValidation naming the
@@ -365,8 +399,24 @@ type ListRequest struct {
 	// AfterCreatedAt and AfterID carry a decoded keyset position in the
 	// (created_at DESC, id ASC) order. The opaque token that encodes them is a
 	// transport concern and never reaches this contract.
+	//
+	// AfterPriority EXTENDS that position to the (priority ASC, created_at
+	// DESC, id ASC) order — the order SortBy="priority" and the empty default
+	// render — and is honored by every implementation, on BOTH tier legs, the
+	// same way the pair above is. It is the same position and not a second
+	// one: AfterCreatedAt alone decides whether one was supplied, so a
+	// priority with no instant is ignored exactly as an AfterID with no instant
+	// is.
+	//
+	// SET IT ONLY UNDER THE ORDER IT NAMES. A priority position under
+	// SortBy="created" positions in an order the ORDER BY does not render, and
+	// the page that comes back is a walk through rows neither side agrees on.
+	// The order the request asks for and the order the position was minted in
+	// are one decision; the transport above this contract is what keeps them
+	// from drifting.
 	AfterCreatedAt *time.Time
 	AfterID        string
+	AfterPriority  *int
 
 	// MaxRows is a DEFENSIVE CAP rather than a page. It bounds how many rows
 	// the query may match before the whole answer is refused; 0 disables it.

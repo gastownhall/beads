@@ -113,11 +113,12 @@ func testAuditLabelEventNonIdempotent(t *testing.T, f Factory) {
 	}
 }
 
-// testAuditCountCommentsWispAsymmetry pins the intentional route asymmetry:
-// GetIssueComments wisp-routes, but CountIssueComments always queries `comments`.
-// A wisp with structured comments returns them from GetIssueComments but reports 0
-// from CountIssueComments.
-func testAuditCountCommentsWispAsymmetry(t *testing.T, f Factory) {
+// testAuditCountCommentsWispParity pins that CountIssueComments wisp-routes the
+// same way GetIssueComments does: a wisp's structured comments live in
+// `wisp_comments`, and the count must agree with the rows (GH#5565 — the count
+// used to query only `comments` and report 0, so `bd show` showed comment_count 0
+// on a wisp that had comments).
+func testAuditCountCommentsWispParity(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-w", Title: "wisp", Ephemeral: true}), "a"))
@@ -133,8 +134,8 @@ func testAuditCountCommentsWispAsymmetry(t *testing.T, f Factory) {
 	}
 	n, err := s.CountIssueComments(c, "test-w")
 	must(t, err)
-	if n != 0 {
-		t.Errorf("CountIssueComments(wisp) = %d, want 0 (queries only `comments`, never wisp-routed)", n)
+	if n != int64(len(got)) {
+		t.Errorf("CountIssueComments(wisp) = %d, want %d (must wisp-route like GetIssueComments)", n, len(got))
 	}
 }
 
@@ -297,7 +298,7 @@ func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Helper()
 	t.Run("EventValueNullability", func(t *testing.T) { testAuditEventValueNullability(t, f) })
 	t.Run("LabelEventNonIdempotent", func(t *testing.T) { testAuditLabelEventNonIdempotent(t, f) })
-	t.Run("CountCommentsWispAsymmetry", func(t *testing.T) { testAuditCountCommentsWispAsymmetry(t, f) })
+	t.Run("CountCommentsWispParity", func(t *testing.T) { testAuditCountCommentsWispParity(t, f) })
 	t.Run("LabelCollationOrder", func(t *testing.T) { testAuditLabelCollationOrder(t, f) })
 	t.Run("EventsSinceStrictBoundary", func(t *testing.T) { testAuditEventsSinceStrictBoundary(t, f) })
 	t.Run("EventsLimitAndAll", func(t *testing.T) { testAuditEventsLimitAndAll(t, f) })

@@ -66,8 +66,8 @@ func renderGraphDOT(out io.Writer, layout *GraphLayout, subgraph *TemplateSubgra
 }
 
 // graphExportWriter records the first output failure and suppresses later
-// writes. Export commands can therefore return one stable root cause without
-// buffering the whole graph or changing successful output bytes.
+// writes. Writer-aware graph and list paths can therefore return one stable
+// root cause without buffering their whole output or changing successful bytes.
 type graphExportWriter struct {
 	out io.Writer
 	err error

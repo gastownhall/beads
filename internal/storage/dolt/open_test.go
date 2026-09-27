@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 )
@@ -243,6 +244,81 @@ func TestCLIDirUsesDbPathOutsideSharedServerMode(t *testing.T) {
 }
 
 func TestApplyResolvedConfig(t *testing.T) {
+	// The config.yaml rung of the pool-knob ladders, for library consumers.
+	// The config.GetString rungs read a package-global viper populated only
+	// by cmd/bd's config.Initialize(), so for a process that links beads as
+	// a library they always return "" and the project's configured values
+	// were silently ignored. applyResolvedConfig falls back to a direct read
+	// of <beadsDir>/config.yaml, the same pattern dolt.auto-start carries.
+	writeConfigYAML := func(t *testing.T, beadsDir, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatalf("writing config.yaml: %v", err)
+		}
+	}
+	ladderFileCfg := func() *configfile.Config {
+		return &configfile.Config{Backend: configfile.BackendDolt, DoltDatabase: "ladder"}
+	}
+
+	t.Run("config.yaml populates pool knobs with no env and no global viper", func(t *testing.T) {
+		// The premise is load-bearing: if this package ever initializes the
+		// global viper, the dir-fallback rung under test is no longer the one
+		// answering and the subtest would pass vacuously.
+		if config.GetString("dolt.pool-read-timeout") != "" || config.GetString("dolt.max-conns") != "" {
+			t.Fatal("global viper unexpectedly configured; this subtest's premise is broken")
+		}
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "")
+		beadsDir := t.TempDir()
+		writeConfigYAML(t, beadsDir, "dolt:\n  pool-read-timeout: 120s\n  pool-write-timeout: 45\n  max-conns: 25\n")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, ladderFileCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 120*time.Second {
+			t.Fatalf("PoolReadTimeout = %v, want 120s from config.yaml", cfg.PoolReadTimeout)
+		}
+		if cfg.PoolWriteTimeout != 45*time.Second {
+			t.Fatalf("PoolWriteTimeout = %v, want 45s from config.yaml (bare number = seconds)", cfg.PoolWriteTimeout)
+		}
+		if cfg.MaxOpenConns != 25 {
+			t.Fatalf("MaxOpenConns = %d, want 25 from config.yaml", cfg.MaxOpenConns)
+		}
+	})
+
+	t.Run("env var wins over config.yaml for pool deadlines", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+		beadsDir := t.TempDir()
+		writeConfigYAML(t, beadsDir, "dolt:\n  pool-read-timeout: 120s\n")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, ladderFileCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 90*time.Second {
+			t.Fatalf("PoolReadTimeout = %v, want the env's 90s over the file's 120s", cfg.PoolReadTimeout)
+		}
+	})
+
+	t.Run("no config.yaml leaves the pool deadlines unset", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), ladderFileCfg(), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 0 || cfg.PoolWriteTimeout != 0 {
+			t.Fatalf("pool deadlines = %v/%v, want 0/0 so buildServerDSN applies its default", cfg.PoolReadTimeout, cfg.PoolWriteTimeout)
+		}
+	})
+
 	t.Run("fills server config for legacy metadata without dolt_mode", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		fileCfg := &configfile.Config{
@@ -399,6 +475,105 @@ func TestApplyResolvedConfig(t *testing.T) {
 
 		if cfg.PoolReadTimeout != 2*time.Minute {
 			t.Fatalf("PoolReadTimeout = %v, want caller's 2m", cfg.PoolReadTimeout)
+		}
+	})
+
+	t.Run("propagates ServerPortSource and ServerPortSharedServer alongside ServerPort (be-9tju)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
+			t.Fatalf("EnsurePortFile: %v", err)
+		}
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.ServerPort != 14567 {
+			t.Fatalf("ServerPort = %d, want 14567", cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourcePortFile {
+			t.Fatalf("ServerPortSource = %q, want %q (applyResolvedConfig must propagate doltserver.DefaultConfig's PortSource, not just Port)", cfg.ServerPortSource, doltserver.PortSourcePortFile)
+		}
+		if cfg.ServerPortSharedServer != false {
+			t.Fatalf("ServerPortSharedServer = %v, want false", cfg.ServerPortSharedServer)
+		}
+	})
+
+	t.Run("chained through applyConfigDefaults: port-file resolution is never mislabeled caller-explicit (be-9tju)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
+			t.Fatalf("EnsurePortFile: %v", err)
+		}
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPortSource != doltserver.PortSourcePortFile {
+			t.Fatalf("ServerPortSource = %q, want %q (a port-file-resolved port must not be mislabeled caller_explicit — GH#4052 auto-start fail-closed logic depends on this)", cfg.ServerPortSource, doltserver.PortSourcePortFile)
+		}
+		if cfg.ServerPort != 14567 {
+			t.Fatalf("ServerPort = %d, want 14567 (unchanged)", cfg.ServerPort)
+		}
+	})
+
+	t.Run("legacy BEADS_DOLT_PORT redirects away from a non-authoritative port-file port (be-9tju)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "43211")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
+			t.Fatalf("EnsurePortFile: %v", err)
+		}
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != 43211 {
+			t.Fatalf("ServerPort = %d, want 43211 (legacy BEADS_DOLT_PORT must override a non-authoritative port-file-resolved port — regression of hq-27t bug class)", cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourceEnv {
+			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceEnv)
+		}
+	})
+
+	t.Run("genuinely caller-explicit ServerPort still outranks ambient BEADS_DOLT_SERVER_PORT env (be-wf9a.1 regression safety)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "43211")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{ServerPort: 15000}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != 15000 {
+			t.Fatalf("ServerPort = %d, want 15000 (caller-explicit preset must outrank ambient env)", cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceCallerExplicit)
 		}
 	})
 }

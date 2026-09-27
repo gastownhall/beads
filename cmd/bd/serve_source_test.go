@@ -106,6 +106,8 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 			counter:      &serveStubCounter{},
 			edgeCounter:  &serveStubGraphCounter{},
 			relations:    &serveStubRelations{},
+			commenter:    &serveStubCommenter{},
+			batchCreator: &serveStubBatchCreator{},
 			inner:        inner,
 		}}
 	}
@@ -181,15 +183,63 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 		t.Fatal("the store's own accessor no longer returns a hook-firing releaser; this test proves nothing")
 	}
 
+	// And for the commenter, the SEVENTH — and the one that was OUTSIDE the
+	// RoleFiresHooks switch entirely until the add-comment operation went on the
+	// wire. hook_commenter.go has fired the update hook for every comment it
+	// lands since it was written; nothing took the role off a store, so nothing
+	// noticed. An unpeeled one runs the workspace's script once per comment.
+	commenterFromTheStore, err := chained.Commenter()
+	if err != nil {
+		t.Fatalf("Commenter: %v", err)
+	}
+	if !storage.RoleFiresHooks(commenterFromTheStore) {
+		t.Fatal("the store's own accessor no longer returns a hook-firing commenter; this test proves nothing")
+	}
+
+	// THE THREE THAT WERE BLIND BESIDE THE COMMENTER. Each is served over a
+	// published operation and each was outside the RoleFiresHooks switch, so
+	// httpapi.Listen admitted a hook-firing value for all three; the class-level
+	// scan that finds the next one is
+	// TestRoleFiresHooksKnowsEveryHookFiringRole in internal/storage, and these
+	// are the store-side halves of the same property.
+	for _, role := range []struct {
+		name string
+		from func() (any, error)
+	}{
+		{"ready claimer", func() (any, error) { return chained.ReadyClaimer() }},
+		{"batch closer", func() (any, error) { return chained.BatchCloser() }},
+		{"batch creator", func() (any, error) { return chained.BatchCreator() }},
+	} {
+		fromTheStore, err := role.from()
+		if err != nil {
+			t.Fatalf("the store's %s accessor: %v", role.name, err)
+		}
+		if !storage.RoleFiresHooks(fromTheStore) {
+			t.Fatalf("the store's own accessor no longer returns a hook-firing %s; this test proves nothing", role.name)
+		}
+	}
+
 	roles, err := serveIssueRoles(chained, false)
 	if err != nil {
 		t.Fatalf("serveIssueRoles: %v", err)
 	}
+	if storage.RoleFiresHooks(roles.commenter) {
+		t.Error("bd serve would run this workspace's hooks on every HTTP comment")
+	}
+	// The one peel retains the external-dependency policy below the hook layer.
+	// Policy-wrapped roles intentionally have a distinct identity from the raw
+	// role beneath them; serving them without hooks is the contract here.
+	if storage.RoleFiresHooks(roles.readyClaimer) {
+		t.Error("bd serve would run this workspace's hooks on every HTTP ready claim")
+	}
+	if storage.RoleFiresHooks(roles.batchCloser) || roles.batchCloser != issueops.BatchCloser(middle.batchCloser) {
+		t.Errorf("batch closer came from %p, want the layer directly beneath the hooks (%p)", roles.batchCloser, middle.batchCloser)
+	}
+	if storage.RoleFiresHooks(roles.batchCreator) || roles.batchCreator != issueops.BatchCreator(middle.batchCreator) {
+		t.Errorf("batch creator came from %p, want the layer directly beneath the hooks (%p)", roles.batchCreator, middle.batchCreator)
+	}
 	if storage.RoleFiresHooks(roles.releaser) {
 		t.Error("bd serve would run this workspace's hooks on every HTTP release")
-	}
-	if roles.releaser != issueops.Releaser(middle.releaser) {
-		t.Errorf("releaser came from %p, want the layer directly beneath the hooks (%p)", roles.releaser, middle.releaser)
 	}
 	reader, claimer := roles.reader, roles.claimer
 	// The same predicate httpapi.Listen refuses on, so a regression here is a
@@ -197,11 +247,8 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	if storage.RoleFiresHooks(claimer) {
 		t.Error("bd serve would run this workspace's hooks on every HTTP claim")
 	}
-	if claimer != issueops.Claimer(middle.claimer) {
-		t.Errorf("claimer came from %p, want the layer directly beneath the hooks (%p)", claimer, middle.claimer)
-	}
-	if reader != issueops.Reader(middle.reader) {
-		t.Errorf("reader came from %p, want the layer directly beneath the hooks (%p)", reader, middle.reader)
+	if reader == nil {
+		t.Error("bd serve lost the reader while peeling hooks")
 	}
 
 	// The lifecycle is the SECOND role the hook decorator wraps, and it wraps
@@ -209,9 +256,6 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	// workspace's on_create, on_update and close hooks for every HTTP mutation.
 	if storage.RoleFiresHooks(roles.lifecycle) {
 		t.Error("bd serve would run this workspace's hooks on every HTTP lifecycle mutation")
-	}
-	if roles.lifecycle != issueops.Lifecycle(middle.lifecycle) {
-		t.Errorf("lifecycle came from %p, want the layer directly beneath the hooks (%p)", roles.lifecycle, middle.lifecycle)
 	}
 
 	// The dependency editor is the THIRD, and it fires the update hook once per
@@ -257,8 +301,8 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 		if err != nil {
 			t.Fatalf("serveIssueRoles: %v", err)
 		}
-		if roles.claimer != issueops.Claimer(middle.claimer) || roles.reader != issueops.Reader(middle.reader) {
-			t.Error("serveIssueRoles peeled a layer that was not there")
+		if storage.RoleFiresHooks(roles.claimer) || storage.RoleFiresHooks(roles.reader) {
+			t.Error("serveIssueRoles produced a hook-firing role with hooks disabled")
 		}
 	})
 
@@ -356,6 +400,8 @@ type serveRolesStore struct {
 	counter      *serveStubCounter
 	edgeCounter  *serveStubGraphCounter
 	relations    *serveStubRelations
+	commenter    *serveStubCommenter
+	batchCreator *serveStubBatchCreator
 	inner        storage.DoltStorage
 }
 
@@ -426,7 +472,6 @@ func (*serveRolesStore) ReadyCounter() (issueops.ReadyCounter, error)           
 func (*serveRolesStore) Querier() (issueops.Querier, error)                     { return nil, nil }
 func (*serveRolesStore) Sweeper() (issueops.Sweeper, error)                     { return nil, nil }
 func (*serveRolesStore) Deleter() (issueops.Deleter, error)                     { return nil, nil }
-func (*serveRolesStore) BatchCreator() (issueops.BatchCreator, error)           { return nil, nil }
 func (*serveRolesStore) Memories() (memoryops.Memories, error)                  { return nil, nil }
 
 // MetadataCAS carries an identifiable value for the same reason, and it is the
@@ -473,6 +518,41 @@ func (s *serveRolesStore) GraphCounter() (issueops.GraphCounter, error) { return
 // this file, naming the method. Which is the whole return on #5539 landing
 // first, measured on the next role rather than asserted about it.
 func (s *serveRolesStore) IssueRelations() (issueops.Relations, error) { return s.relations, nil }
+
+// BatchCreator carries an identifiable value rather than nil, and it moved off
+// nil for the reason the three preconditions below give: it is one of the roles
+// the hook decorator wraps, so a peel of the wrong depth hands bd serve a
+// creator that runs the workspace's on_create once per item of every batch.
+func (s *serveRolesStore) BatchCreator() (issueops.BatchCreator, error) {
+	return s.batchCreator, nil
+}
+
+// serveStubBatchCreator is the batch-create role's stand-in, ErrUnsupported like
+// every stub here.
+type serveStubBatchCreator struct{}
+
+func (*serveStubBatchCreator) CreateBatch(context.Context, issueops.CreateBatchRequest) (issueops.CreateBatchResult, error) {
+	return issueops.CreateBatchResult{}, errors.ErrUnsupported
+}
+
+// Commenter is the SEVENTH role the hook decorator wraps and the second added
+// under the regime IssueRelations describes: omitting it is a build error in
+// this file naming the method, not a nil dereference somewhere else.
+//
+// It carries an identifiable value rather than nil, unlike the reads above,
+// because it IS one of the wrapped roles: hook_commenter.go fires the update
+// hook for every comment it lands, so a peel of the wrong depth would hand
+// bd serve a commenter that runs the workspace's script once per comment — and
+// a comment is exactly the write an agent makes in a loop.
+func (s *serveRolesStore) Commenter() (issueops.Commenter, error) { return s.commenter, nil }
+
+// serveStubCommenter is the add-comment role's stand-in, ErrUnsupported like
+// every stub here.
+type serveStubCommenter struct{}
+
+func (*serveStubCommenter) AddComment(context.Context, issueops.AddCommentRequest) (issueops.AddCommentResult, error) {
+	return issueops.AddCommentResult{}, errors.ErrUnsupported
+}
 
 // serveStubRelations is the neighbor role's stand-in, ErrUnsupported like every
 // stub here.

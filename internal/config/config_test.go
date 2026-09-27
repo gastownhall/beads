@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 // envSnapshot saves and clears BD_/BEADS_ environment variables.
@@ -1685,6 +1687,34 @@ func TestGetStringFromDir(t *testing.T) {
 		writeConfig(t, dir, "a:\n  b:\n    c: value\n")
 		if got := GetStringFromDir(dir, "a.b.c"); got != "value" {
 			t.Errorf("got %q, want %q", got, "value")
+		}
+	})
+
+	t.Run("literal flat dotted key", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt.host: 127.0.0.1\n")
+		if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+			t.Errorf("got %q, want %q", got, "127.0.0.1")
+		}
+	})
+
+	t.Run("literal flat dotted key wins over nested spelling", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt.host: 127.0.0.1\ndolt:\n  host: 10.0.0.1\n")
+		got := GetStringFromDir(dir, "dolt.host")
+		if got != "127.0.0.1" {
+			t.Errorf("got %q, want the literal-key value %q", got, "127.0.0.1")
+		}
+
+		savedV := v
+		v = viper.New()
+		t.Cleanup(func() { v = savedV })
+		v.SetConfigFile(filepath.Join(dir, "config.yaml"))
+		if err := v.ReadInConfig(); err != nil {
+			t.Fatalf("ReadInConfig: %v", err)
+		}
+		if viperGot := GetString("dolt.host"); viperGot != got {
+			t.Errorf("readers disagree: GetString = %q, GetStringFromDir = %q", viperGot, got)
 		}
 	})
 

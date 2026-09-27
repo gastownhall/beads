@@ -21,7 +21,7 @@ if [[ -n "${BD_LINT_NEW_FROM_MERGE_BASE:-}" ]]; then
     lint_scope=(--new-from-merge-base="$BD_LINT_NEW_FROM_MERGE_BASE")
 fi
 
-ci_time "gofmt check" -- make fmt-check
+ci_time "gofmt check" -- ./scripts/ci/fmt-check.sh
 ci_time "golangci-lint" -- \
     golangci-lint run --config=.golangci.yml --modules-download-mode=readonly \
         --timeout=5m --build-tags=gms_pure_go \

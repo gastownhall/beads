@@ -1522,6 +1522,39 @@ func TestRequiredPatterns_ContainsSyncStatePatterns(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsDoltServerConfig verifies that the generated Dolt
+// server config is ignored like the other dolt-server.* runtime state files
+// it sits beside. doltserver.Start() writes .beads/dolt-server-config.yaml
+// when the resolved dolt binary supports auto_gc_behavior.archive_level, and
+// it holds an absolute cfg_dir plus a per-machine port, so committing it
+// would break every other clone.
+//
+// The hyphenated name falls outside the "dolt-server." prefix shared by the
+// other five entries, so it was missed by both lists. It must be in
+// requiredPatterns too, otherwise bd doctor --fix cannot heal an existing
+// .beads/.gitignore.
+func TestGitignore_ContainsDoltServerConfig(t *testing.T) {
+	// Keep this in sync with doltserver.doltServerConfigFileName. It is not
+	// imported here because cmd/bd/doctor must not depend on the server
+	// package for a string constant.
+	const pattern = "dolt-server-config.yaml"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+
+	found := false
+	for _, p := range requiredPatterns {
+		if p == pattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
 // TestCheckLastTouchedNotTracked_NoFile verifies that check passes when no last-touched file exists
 func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
 	tmpDir := t.TempDir()

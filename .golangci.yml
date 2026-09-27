@@ -160,11 +160,18 @@ linters:
         # guard, finds one, and stops looking.
         #
         # What closes that route is the forbidigo `LabelUseCase` rule below,
-        # scoped to this same file. The two are a PAIR and neither is
-        # decorative: forbidigo names the call and depguard names the package,
-        # so a caller that reached the domain through some third spelling —
-        # a helper returning a use case directly, say — still trips the import.
-        # Both were verified by mutation, one bypass each.
+        # and since ga-2ltro.12 that rule is PACKAGE-WIDE across cmd/bd while
+        # this one still names one file. The asymmetry is the design, not a
+        # gap: forbidigo denies the CALL, which is what a front door has to
+        # stop doing, and every file may be held to that today. depguard denies
+        # the PACKAGE, which a file cannot stop importing until its whole
+        # command has moved — fifty-eight non-test files in cmd/bd open a unit
+        # of work for verbs no role serves yet. So the pair covers a caller who
+        # reached the domain through some third spelling (a helper returning a
+        # use case directly, say) in the one file that has fully migrated, and
+        # forbidigo alone covers the call everywhere else. Both were verified
+        # by mutation, one bypass each; ga-2ltro.12 re-verified the forbidigo
+        # half from a file the depguard half does not name.
         #
         # cmd/bd/label.go holds every label decision now — the arg split, the
         # reserved-prefix refusal, the patch, the report — and reaches storage
@@ -176,17 +183,22 @@ linters:
         #
         # The list grows by one file per command whose front doors reach the
         # roles, the way cmd-bd-role-constructors grows by one package per
-        # shared body.
+        # shared body. cmd/bd/state.go is the second entry: ga-2ltro.12 moved
+        # `bd state`, `bd state list` and `bd set-state` onto Reader.Get and
+        # Lifecycle, deleted their proxied twin outright, and left the file
+        # importing neither package — so the rule pins a migration that has
+        # happened rather than asking for one that has not.
         cmd-bd-domain-boundary:
           list-mode: lax
           files:
             - "**/cmd/bd/label.go"
+            - "**/cmd/bd/state.go"
             - "!$test"
           deny:
             - pkg: github.com/steveyegge/beads/internal/storage/domain
-              desc: "bd label reaches storage through an issueops role accessor, never through the domain use cases - see openIssueLifecycle in cmd/bd/label.go"
+              desc: "bd label and bd state reach storage through an issueops role accessor, never through the domain use cases - see openIssueLifecycle in cmd/bd/label.go"
             - pkg: github.com/steveyegge/beads/internal/storage/uow
-              desc: "bd label does not open a unit of work: the route fork is the accessor (openIssueLifecycle/openIssueReader), and a unit of work here is how a use-case call gets back in - see cmd/bd/label.go"
+              desc: "these commands do not open a unit of work: the route fork is the accessor (openIssueLifecycle/openIssueReader), and a unit of work here is how a use-case call gets back in - see cmd/bd/label.go"
         # store.IssueReader() is the door to the reader role, and a store wears
         # decorators (telemetry spans, hook firing) that each add their layer in
         # their OWN accessor. A command holding the storage.DoltStorage
@@ -322,29 +334,29 @@ linters:
       #
       # The previous version of this comment said there was exactly one rule and
       # that a second "would need this widened or replaced". That came true, and
-      # what it cost is the two entries below plus a `text:` on ONE of the
-      # per-path holes. Every hole from here down is written for the FILTER rule
-      # and predates the label one, so a hole that names only a path silently
-      # opens both. That is fine wherever the file never reaches a label use
-      # case, and it is not fine for cmd/bd/label.go, which is the one file the
-      # label rule exists for - see the `text:`-scoped entry at the label family
-      # below.
+      # what it cost is the entry below plus a `text:` on THREE of the per-path
+      # holes. Every hole from here down is written for the FILTER rule and
+      # predates the label one, so a hole that names only a path silently opens
+      # both. That is fine wherever the file never reaches a label use case, and
+      # it is not fine for the files that do - see the three `text:`-scoped
+      # entries below.
       - path-except: '^(internal/httpapi/|cmd/bd/)'
         linters:
           - forbidigo
-      # The label-plane rule is deny-by-default across cmd/bd like its sibling,
-      # and this narrows it to the ONE file whose front door has been migrated.
-      # Every other caller of a label use case in cmd/bd is a command this slice
-      # did not move - `bd create --labels`' dry-run preview, the mutate and
-      # show proxied routes, and label.go's own list-all and propagate twins in
-      # label_proxied_server.go - and holding them to a rule written for a
-      # migration they have not had would be a lint that has to be waived on
-      # sight. Each one drops off this exemption as its command reaches the
-      # role, which is the same shrink-by-migration the filter holes above do.
-      - path-except: '^cmd/bd/label\.go$'
-        text: 'reach the label plane through issueops'
-        linters:
-          - forbidigo
+      #
+      # THE LABEL-PLANE RULE IS NOW PACKAGE-WIDE ACROSS cmd/bd (ga-2ltro.12).
+      # It used to be narrowed by a `path-except` to cmd/bd/label.go, the one
+      # file ga-26w10 had migrated, on the argument that holding an unmigrated
+      # command to a rule written for a migration it had not had would be a lint
+      # waived on sight. What that reasoning missed is that the waiver was
+      # INVISIBLE: a file outside the exemption got no marker, no reason and no
+      # diff, so the three commands still hand-rolling the four-way
+      # (add|remove) x (wisp|durable) switch the rule exists to delete looked
+      # exactly like the ones that had nothing to declare. There is no
+      # `path-except` here any more. Every remaining caller carries its own
+      # //nolint:forbidigo with the reason that site is not a role's question,
+      # and a reviewer can count them.
+      #
       # Inside cmd/bd the rule is deny-by-default, so each entry below is a
       # HOLE in it and carries the reason that hole exists. 59 of the 389
       # non-test files under cmd/bd are on this list; widening it is an edit
@@ -364,6 +376,7 @@ linters:
       # file on it. The entry therefore stays and the count is unchanged — a
       # role commit that could not remove one says so rather than implying it.
       - path: '^cmd/bd/list_show_filter_modes\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # `bd ready` hands its filter to the plain listing and to --claim, and
@@ -384,6 +397,7 @@ linters:
       # ReadyCounter, both over the request rather than the filter, on both
       # routes - which is why this hole keeps shrinking rather than growing.
       - path: '^cmd/bd/ready(_input|_proxied_server)?\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # Everything below this point is a command that is NOT one of the three
@@ -408,25 +422,40 @@ linters:
       # provider's capability accessor. `gc` stays — it is a different command
       # that still selects its own closed beads, and it now shares only the pure
       # recheck (workapi.FilterSweepCandidates) with the role.
-      # `text:` HERE AND NOWHERE ELSE, and the asymmetry is deliberate rather
-      # than an oversight to tidy up later. This is the only hole in the list
-      # whose files include one the LABEL rule must bite in - cmd/bd/label.go,
-      # which still names types.IssueFilter for list-all and propagate and
-      # therefore still needs its filter exemption. Without the text scope this
-      # entry would exempt that file from every forbidigo rule there will ever
-      # be, including the one written to guard it. The other holes name no such
-      # file, so widening them now would be churn asserting nothing; the next
-      # rule that overlaps one of them adds its own text scope the same way.
+      # `text:` ON EVERY HOLE IN THIS FAMILY, this one included, and the
+      # completeness is the point rather than the tidiness. A hole naming only a
+      # path opens EVERY forbidigo rule for its files, so an unscoped one is a
+      # standing invitation: move the call into a file the hole already covers
+      # and the label guard never sees it. That is not hypothetical - it is how
+      # the guard spent its first slice unable to see mol_port.go's copy of the
+      # switch it was written for.
+      #
+      # The first version of this pass scoped only the three holes that covered
+      # a file with a LabelUseCase call TODAY, and reasoned that the others
+      # "name no file that reaches a label use case, so widening them now would
+      # be churn asserting nothing". That reasoning is wrong in the one way that
+      # matters for a guard: a rule is not sized by where the violations are, it
+      # is sized by where the next one may be WRITTEN. A review probe put a
+      # neutrally-named helper into the ado/gitlab/jira/linear hole and it
+      # passed. Every hole below is scoped now, and adding a file family to this
+      # list no longer silently costs the label boundary.
+      #
+      # The `_test\.go` exemption further down stays unscoped on purpose: `run:
+      # tests: false` means forbidigo never analyzes a test file at all, so that
+      # entry asserts nothing either way and scoping it would be the churn this
+      # comment just refused to write.
       - path: '^cmd/bd/(close|duplicates|find_duplicates|gate|gc|graph|info|label|orphans|purge|search|todo|wisp|human)(_proxied_server)?\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo
       # Molecule reporting: each selects the members of one molecule.
       - path: '^cmd/bd/mol_(current|port|progress|ready_gated|stale)\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # External-tracker sync: each selects the beads to push to its tracker.
       - path: '^cmd/bd/(ado|gitlab|jira|linear)\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # Bulk movement of issues in, out and across prefixes. export_source is
@@ -434,10 +463,12 @@ linters:
       # not build a filter, it carries the one export.go builds through to
       # whichever stack is live.
       - path: '^cmd/bd/(export|export_auto|export_source|import|migrate|migrate_issues|migrate_personal|rename|rename_prefix)\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # doctor's diagnostics and the fixes that follow them.
       - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|fix/maintenance|fix/migrate)\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # One command each, no family to join.
@@ -449,6 +480,7 @@ linters:
       # front door reached the role.
       
       - path: '^cmd/bd/(cleanup|completions|gate_discover|lint|ping|repo|swarm|template)\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # Tests are exempt for the same reason the depguard twin exempts them:

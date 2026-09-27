@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,9 +20,18 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-func runListProxiedServer(cmd *cobra.Command, ctx context.Context, in listInput) error {
+func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer, in listInput) error {
 	if in.repoOverrideSet {
-		return errors.New("--repo is not supported with --proxied-server")
+		// Unreachable from the CLI: listCmd registers no --repo flag, so
+		// gatherListInput's Changed("repo") is always false. Kept as a
+		// defensive guard for the day one is added, and deliberately NOT keyed
+		// on proxyCommandCapabilities["list"] -- that row reads
+		// notApplicable() precisely because the flag is absent, so a
+		// command-keyed assert would resolve it to "allowed" and let a repo
+		// override through. The mode-wide rule is the one that still means
+		// something here, and it renders the same typed code/mutates on stdout
+		// under --json.
+		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
 	switch {
 	case in.watchMode:
@@ -32,7 +42,7 @@ func runListProxiedServer(cmd *cobra.Command, ctx context.Context, in listInput)
 		// The --ready arm is not a case of its own any more: it is
 		// ListRequest.ReadyFlag, and choosing the ready query from it is the
 		// ROLE's job on both routes.
-		return runListProxiedPage(ctx, in)
+		return runListProxiedPage(ctx, out, in)
 	}
 }
 
@@ -72,7 +82,7 @@ func runListProxiedTree(ctx context.Context, in listInput) error {
 // one more than this route used to for a listing that also loads dependency
 // records. Nothing here was atomic across those reads before either: the
 // renderings ran after the query returned.
-func runListProxiedPage(ctx context.Context, in listInput) error {
+func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error {
 	rd, err := proxiedIssueReader()
 	if err != nil {
 		return err
@@ -96,14 +106,11 @@ func runListProxiedPage(ctx context.Context, in listInput) error {
 		return err
 	}
 	issues, hasMore := listPageIssues(page)
-	return renderProxiedListText(ctx, issues, in, hasMore)
+	return renderProxiedListText(ctx, out, issues, in, hasMore)
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {
-	if in.formatStr != "" {
-		return errors.New("--format under --proxied-server --watch is not supported")
-	}
-
+	// --format with --watch is refused in gatherListInput, on both routes.
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
 		return err
@@ -155,7 +162,7 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 	if err != nil {
 		return fmt.Errorf("initial query: %w", err)
 	}
-	displayPrettyListWithDeps(issues, true, deps, hasMore)
+	displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 	printTruncationHint(hasMore, in.effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -182,7 +189,7 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayPrettyListWithDeps(issues, true, deps, hasMore)
+				displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 				printTruncationHint(hasMore, in.effectiveLimit)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
@@ -216,7 +223,7 @@ func loadDepsForIssues(ctx context.Context, uw uow.UnitOfWork, issues []*types.I
 	return uw.DependencyUseCase().GetForIssueIDs(ctx, ids)
 }
 
-func renderProxiedListText(ctx context.Context, issues []*types.Issue, in listInput, truncated bool) error {
+func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.Issue, in listInput, truncated bool) error {
 	// --format and the pretty tree want the WHOLE dependency record set for the
 	// page — every edge type, no status rule — which is neither role's
 	// question. They open their own unit of work for it, which is what lets
@@ -232,13 +239,13 @@ func renderProxiedListText(ctx context.Context, issues []*types.Issue, in listIn
 			return err
 		}
 		if in.formatStr != "" {
-			if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
+			if err := outputFormattedList(out, issues, depsByIssueID, in.formatStr); err != nil {
 				return err
 			}
 			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated)
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil

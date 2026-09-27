@@ -15,17 +15,23 @@ import (
 // elsewhere calls these yet — they are wired into the smart migrate gate in
 // a later change.
 
-// LocalIsStrictAncestorOf reports whether local HEAD is a STRICT ancestor of
-// ref in the Dolt commit graph: local has zero commits that ref lacks
-// (ahead == 0) and at least one commit that local lacks (behind >= 1). A
-// local HEAD equal to ref (ahead == 0, behind == 0) is NOT a strict
-// ancestor, and returns false.
+// LocalAheadBehind reports how far local HEAD has diverged from ref in the
+// Dolt commit graph: ahead is the number of commits local has that ref lacks,
+// behind the number ref has that local lacks. (0, 0) means the two are level.
+//
+// It is the raw fact behind LocalIsStrictAncestorOf, exposed separately
+// because the two callers need different slices of it: a fast-forward adopt
+// needs "ahead == 0 && behind >= 1", while the data-behind migrate stop
+// (gastownhall/beads#6575) needs "behind >= 1" whatever ahead is — a clone
+// with local commits of its own AND unpulled remote commits reaches the same
+// wedge, and telling the operator which shape they are in changes whether
+// their `bd dolt pull` fast-forwards or merges.
 //
 // ref must already be present locally (e.g. a cached remote-tracking ref
 // such as "origin/main" after a fetch); this performs no fetch of its own.
-func LocalIsStrictAncestorOf(ctx context.Context, db DBConn, ref string) (bool, error) {
+func LocalAheadBehind(ctx context.Context, db DBConn, ref string) (ahead, behind int, err error) {
 	if err := issueops.ValidateRef(ref); err != nil {
-		return false, fmt.Errorf("invalid ref: %w", err)
+		return 0, 0, fmt.Errorf("invalid ref: %w", err)
 	}
 
 	// Dolt's AS OF requires a literal ref, not a bind parameter; ref was
@@ -41,11 +47,25 @@ func LocalIsStrictAncestorOf(ctx context.Context, db DBConn, ref string) (bool, 
 				(SELECT commit_hash FROM dolt_log)) AS behind
 	`, ref, ref)
 
-	var ahead, behind int
 	if err := db.QueryRowContext(ctx, query).Scan(&ahead, &behind); err != nil {
-		return false, fmt.Errorf("compare local HEAD to %s: %w", ref, err)
+		return 0, 0, fmt.Errorf("compare local HEAD to %s: %w", ref, err)
 	}
+	return ahead, behind, nil
+}
 
+// LocalIsStrictAncestorOf reports whether local HEAD is a STRICT ancestor of
+// ref in the Dolt commit graph: local has zero commits that ref lacks
+// (ahead == 0) and at least one commit that local lacks (behind >= 1). A
+// local HEAD equal to ref (ahead == 0, behind == 0) is NOT a strict
+// ancestor, and returns false.
+//
+// ref must already be present locally (e.g. a cached remote-tracking ref
+// such as "origin/main" after a fetch); this performs no fetch of its own.
+func LocalIsStrictAncestorOf(ctx context.Context, db DBConn, ref string) (bool, error) {
+	ahead, behind, err := LocalAheadBehind(ctx, db, ref)
+	if err != nil {
+		return false, err
+	}
 	return ahead == 0 && behind >= 1, nil
 }
 

@@ -87,7 +87,10 @@ Examples:
 			if compactDolt {
 				return runCompactDoltProxiedServer(rootCtx)
 			}
-			return HandleErrorRespectJSON("only 'compact --dolt' is supported in proxied-server mode")
+			// Same string the "admin compact" refusal row carries; the
+			// pre-provider gate short-circuits this path, so the two are kept
+			// identical rather than left to drift.
+			return HandleErrorRespectJSON("only 'bd admin compact --dolt' is supported in proxied-server mode")
 		}
 		// Block mutating operations in embedded mode; allow --stats, --analyze, --dry-run read-only paths.
 		if !compactStats && !compactAnalyze && !compactDryRun {

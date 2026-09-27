@@ -121,7 +121,7 @@ func TestProxiedServerGraph(t *testing.T) {
 	})
 
 	t.Run("html_output_error", func(t *testing.T) {
-		stderr, err := runGraphWithReadOnlyStdout(t, bd, p.dir, bdProxiedEnv(p.dir), "--html", epic.ID)
+		stderr, err := runWithReadOnlyStdout(t, bd, p.dir, bdProxiedEnv(p.dir), "graph", "--html", epic.ID)
 		if err == nil {
 			t.Fatalf("proxied graph --html succeeded with read-only stdout; stderr:\n%s", stderr)
 		}

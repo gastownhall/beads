@@ -1,6 +1,7 @@
 package issueops
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -70,6 +71,87 @@ func TestReclaimReplicaSQL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFormatForeignSkipSummary pins the BOUND on the foreign-skip audit
+// (wy-sp2l4 F5). Foreign stale leases are never reclaimed, so this line repeats
+// on every reclaim run forever — a supervisor on a 1-minute timer used to print
+// one line per stranded lease, per minute, indefinitely. The property that
+// matters is that the line's size is set by foreignSkipNamedNodes and not by
+// the deployment, while the TOTAL it reports stays exact.
+func TestFormatForeignSkipSummary(t *testing.T) {
+	t.Run("one replica, one lease reads singular", func(t *testing.T) {
+		got := formatForeignSkipSummary([]foreignSkipGroup{{"mini", 1}}, 1, "laptop")
+		for _, want := range []string{"skipped 1 stale lease ", "another replica", `"mini" (1)`, `"laptop"`, "--any-replica"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("summary = %q, want it to contain %q", got, want)
+			}
+		}
+		if strings.Contains(got, "stale leases") {
+			t.Errorf("summary = %q, want the singular spelling", got)
+		}
+		if lines := strings.Count(got, "\n"); lines != 1 {
+			t.Errorf("summary spans %d lines, want exactly 1", lines)
+		}
+	})
+
+	t.Run("names every replica up to the cap", func(t *testing.T) {
+		groups := []foreignSkipGroup{{"a", 3}, {"b", 2}, {"c", 1}}
+		got := formatForeignSkipSummary(groups, 6, "here")
+		if !strings.Contains(got, "other replicas") {
+			t.Errorf("summary = %q, want the plural replica spelling", got)
+		}
+		for _, want := range []string{`"a" (3)`, `"b" (2)`, `"c" (1)`} {
+			if !strings.Contains(got, want) {
+				t.Errorf("summary = %q, want it to contain %q", got, want)
+			}
+		}
+		if strings.Contains(got, "more replica") {
+			t.Errorf("summary = %q, want no collapsed tail at exactly the cap", got)
+		}
+	})
+
+	t.Run("collapses the tail past the cap and keeps the total exact", func(t *testing.T) {
+		groups := []foreignSkipGroup{{"a", 40}, {"b", 4}, {"c", 2}, {"d", 1}, {"e", 1}}
+		got := formatForeignSkipSummary(groups, 48, "here")
+		if !strings.Contains(got, "skipped 48 stale leases") {
+			t.Errorf("summary = %q, want the exact total 48", got)
+		}
+		if !strings.Contains(got, "and 2 more replicas (2)") {
+			t.Errorf("summary = %q, want the tail collapsed into a count", got)
+		}
+		for _, unwanted := range []string{`"d"`, `"e"`} {
+			if strings.Contains(got, unwanted) {
+				t.Errorf("summary = %q, want %s collapsed rather than named", got, unwanted)
+			}
+		}
+		if lines := strings.Count(got, "\n"); lines != 1 {
+			t.Errorf("summary spans %d lines, want exactly 1", lines)
+		}
+	})
+
+	t.Run("output size is bounded by the cap, not the deployment", func(t *testing.T) {
+		var few, many []foreignSkipGroup
+		total := 0
+		for i := 0; i < 500; i++ {
+			g := foreignSkipGroup{node: fmt.Sprintf("replica-%03d", i), count: 1}
+			many = append(many, g)
+			if i < foreignSkipNamedNodes {
+				few = append(few, g)
+			}
+			total++
+		}
+		short := formatForeignSkipSummary(few, foreignSkipNamedNodes, "here")
+		long := formatForeignSkipSummary(many, total, "here")
+		// The only growth allowed is the collapsed tail and the wider counts.
+		if len(long) > len(short)+40 {
+			t.Errorf("500 replicas produced %d bytes vs %d for %d — the line grows with the deployment",
+				len(long), len(short), foreignSkipNamedNodes)
+		}
+		if !strings.Contains(long, "and 497 more replicas (497)") {
+			t.Errorf("summary = %q, want the 497 unnamed replicas collapsed exactly", long)
+		}
+	})
 }
 
 // TestReclaimFilterIsEmptyIgnoresAnyReplica pins that --any-replica is an

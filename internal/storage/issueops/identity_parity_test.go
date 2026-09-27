@@ -36,6 +36,9 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "mixed separators each collapse to one canonical separator", in: "gastown.dog-3"},
 		{name: "leading separator is preserved as a separator, not dropped", in: ".mayor"},
 		{name: "trailing separator is preserved as a separator, not dropped", in: "mayor."},
+		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor"},
+		{name: "raw slash passes through unchanged", in: "gastown/mayor"},
+		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor"},
 	}
 	for _, tc := range canonicalCases {
 		t.Run("CanonicalActor/"+tc.name, func(t *testing.T) {
@@ -57,6 +60,9 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "genuinely different identities do not match", assignee: "gastown.mayor", actor: "gastown.dog-3"},
 		{name: "both empty match", assignee: "", actor: ""},
 		{name: "empty assignee never matches a non-empty actor", assignee: "", actor: "mayor"},
+		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor"},
+		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor"},
+		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor"},
 	}
 	for _, tc := range matchCases {
 		t.Run("ActorMatches/"+tc.name, func(t *testing.T) {

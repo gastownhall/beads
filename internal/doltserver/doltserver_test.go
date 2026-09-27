@@ -2426,7 +2426,9 @@ func TestWaitForReady(t *testing.T) {
 
 	// Spawn a goroutine that delays binding the port. This simulates a
 	// "slow server" -- the TCP listener is not yet bound when waitForReady
-	// is first called.
+	// is first called. Once bound, each accepted connection is sent a fake
+	// MySQL handshake greeting so waitForReady's post-F7 "must be greeted,
+	// not just accepted" check is satisfiable.
 	bindAfter := 200 * time.Millisecond
 	listenerReady := make(chan net.Listener, 1)
 	go func() {
@@ -2436,6 +2438,18 @@ func TestWaitForReady(t *testing.T) {
 			close(listenerReady)
 			return
 		}
+		go func() {
+			for {
+				conn, acceptErr := ln.Accept()
+				if acceptErr != nil {
+					return
+				}
+				go func(c net.Conn) {
+					_, _ = c.Write([]byte{0x08, 0x00, 0x00, 0x00, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a})
+					_ = c.Close()
+				}(conn)
+			}
+		}()
 		listenerReady <- ln
 	}()
 	t.Cleanup(func() {
@@ -2651,4 +2665,40 @@ func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
 			t.Errorf("with backend=sqlite, externalNonLocalhostHost should be false (backend gate precedes host inference); got ok=true host=%q", host)
 		}
 	})
+}
+
+func TestDoltStatusQuery(t *testing.T) {
+	tests := []struct {
+		name   string
+		dbName string
+		want   string
+	}{
+		{"plain", "beads_x", "SELECT COUNT(*) > 0 FROM `beads_x`.dolt_status"},
+		{"backtick", "evil`; DROP TABLE x", "SELECT COUNT(*) > 0 FROM `evil``; DROP TABLE x`.dolt_status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doltStatusQuery(tt.dbName); got != tt.want {
+				t.Errorf("doltStatusQuery(%q) = %q, want %q", tt.dbName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUseDatabaseStatement(t *testing.T) {
+	tests := []struct {
+		name   string
+		dbName string
+		want   string
+	}{
+		{"plain", "beads_x", "USE `beads_x`"},
+		{"backtick", "evil`; DROP TABLE x", "USE `evil``; DROP TABLE x`"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := useDatabaseStatement(tt.dbName); got != tt.want {
+				t.Errorf("useDatabaseStatement(%q) = %q, want %q", tt.dbName, got, tt.want)
+			}
+		})
+	}
 }

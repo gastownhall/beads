@@ -60,8 +60,12 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.gated, _ = cmd.Flags().GetBool("gated")
 	in.molID, _ = cmd.Flags().GetString("mol")
 	in.explain, _ = cmd.Flags().GetBool("explain")
+	in.Brief, _ = cmd.Flags().GetBool("brief")
 	in.prettyFormat, _ = cmd.Flags().GetBool("pretty")
 	in.plainFormat, _ = cmd.Flags().GetBool("plain")
+	if flat, _ := cmd.Flags().GetBool("flat"); flat {
+		in.plainFormat = true
+	}
 	in.jsonOut = jsonOutput
 
 	limit, _ := cmd.Flags().GetInt("limit")
@@ -106,6 +110,9 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	}
 	if in.claim && in.explain {
 		return in, HandleErrorRespectJSON("--claim cannot be combined with --explain")
+	}
+	if err := briefModeConflict(in.Brief, in.claim, in.gated, in.explain, in.molID, in.jsonOut); err != nil {
+		return in, err
 	}
 	if in.Offset > 0 && in.claim {
 		return in, HandleErrorRespectJSON("--offset cannot be combined with --claim")
@@ -254,4 +261,58 @@ func readyRoleRequest(in readyInput) issueops.ReadyRequest {
 // the shared ready question above, plus the claimant.
 func claimNextRequest(in readyInput) issueops.ClaimNextRequest {
 	return issueops.ClaimNextRequest{Actor: actor, Filter: readyRoleRequest(in)}
+}
+
+// briefModeConflict reports the usage error for a --brief combination that no
+// route can honor, and nil when there is none.
+//
+// THE PROJECTION IS REFUSED WHEREVER IT CANNOT BE HONORED, rather than accepted
+// and dropped. types.WorkFilter.Lite reaches the driver through one query, the
+// counts mega-query behind GetReadyWorkWithCounts, and `bd ready` only runs
+// that query for --json. Everything else reaches a different one: the text
+// routes call the bare GetReadyWork, and --gated, --mol and --explain answer
+// with shapes of their own. A flag those routes take and ignore is exactly the
+// silent no-op this feature exists to close, so each combination says so.
+//
+// --claim is refused for a stronger reason than the rest: it cannot be served
+// on ANY route. ClaimNext refetches its winning row whole and returns
+// ErrValidation for a projected request (issueops.ValidateClaimNextRequest).
+// Refusing here keeps the message about the two flags the user typed, and
+// leaves readyRoleRequest free to carry Brief for the COUNT, which needs it.
+//
+// IT IS ONE BODY WITH TWO CALLERS, and that is the point. readyCmd's RunE
+// dispatches --gated, --mol and --explain before gathering, so a copy of these
+// checks written into each of those branches would guard the direct route only,
+// with nothing driving it: the gatherer's tests reach the proxied route alone,
+// and deleting one of the copies would re-open the silent no-op while every
+// test stayed green. RunE calls this once, above the dispatch, and the gatherer
+// calls it for every other arrival.
+func briefModeConflict(brief, claim, gated, explain bool, molID string, jsonOut bool) error {
+	if !brief {
+		return nil
+	}
+	switch {
+	case claim:
+		return HandleErrorRespectJSON("--claim cannot be combined with --brief")
+	case gated:
+		return HandleErrorRespectJSON("--gated cannot be combined with --brief")
+	case molID != "":
+		return HandleErrorRespectJSON("--mol cannot be combined with --brief")
+	case explain:
+		return HandleErrorRespectJSON("--explain cannot be combined with --brief")
+	case !jsonOut:
+		return HandleErrorRespectJSON("--brief requires --json; the text renderings print none of the fields it omits")
+	}
+	return nil
+}
+
+// briefModeConflictFromFlags is readyCmd's entry to the check above, reading the
+// mode flags off the command because it runs before gatherReadyInput has.
+func briefModeConflictFromFlags(cmd *cobra.Command) error {
+	brief, _ := cmd.Flags().GetBool("brief")
+	claim, _ := cmd.Flags().GetBool("claim")
+	gated, _ := cmd.Flags().GetBool("gated")
+	explain, _ := cmd.Flags().GetBool("explain")
+	molID, _ := cmd.Flags().GetString("mol")
+	return briefModeConflict(brief, claim, gated, explain, molID, jsonOutput)
 }

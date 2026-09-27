@@ -163,6 +163,35 @@ func (r *roleRelations) relatedRequests() []issueops.RelatedRequest {
 	return append([]issueops.RelatedRequest(nil), r.reqs...)
 }
 
+// roleCommenter is the append-one-comment role of the store-shaped source. It
+// records the whole request, because on this operation the request IS most of
+// what the wire edge has to get right: the anchor comes from the path and the
+// two members come from the body, so a handler that crossed any of the three
+// would still answer 200.
+type roleCommenter struct {
+	comment *issueops.Comment
+	err     error
+
+	mu   sync.Mutex
+	reqs []issueops.AddCommentRequest
+}
+
+func (c *roleCommenter) AddComment(_ context.Context, req issueops.AddCommentRequest) (issueops.AddCommentResult, error) {
+	c.mu.Lock()
+	c.reqs = append(c.reqs, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.AddCommentResult{}, c.err
+	}
+	return issueops.AddCommentResult{Comment: c.comment}, nil
+}
+
+func (c *roleCommenter) commentRequests() []issueops.AddCommentRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.AddCommentRequest(nil), c.reqs...)
+}
+
 // roleBlockingAnnotator is the derived-decoration role of the store-shaped
 // source. It is its own fake beside roleEdgeReader because the two are separate
 // interfaces for separate questions, and a double answering both would be the
@@ -745,9 +774,19 @@ type roleSettings struct {
 	value    string
 	settings map[string]string
 	err      error
+	// writeErr is what the two writes refuse with, so a case can drive a role
+	// refusal without making the reads fail too.
+	writeErr error
+	// stored is what SetSetting reports back. Empty means "the value that was
+	// sent", which is the role's own promise for every key this plane accepts;
+	// a case that wants to prove the response carries the STORED value rather
+	// than the request sets it.
+	stored string
 
-	mu   sync.Mutex
-	gets []issueops.GetSettingRequest
+	mu     sync.Mutex
+	gets   []issueops.GetSettingRequest
+	sets   []issueops.SetSettingRequest
+	unsets []issueops.UnsetSettingRequest
 }
 
 func (c *roleSettings) GetSetting(_ context.Context, req issueops.GetSettingRequest) (issueops.SettingResult, error) {
@@ -767,18 +806,46 @@ func (c *roleSettings) ListSettings(context.Context, issueops.ListSettingsReques
 	return issueops.ListSettingsResult{Settings: c.settings}, nil
 }
 
-func (c *roleSettings) SetSetting(context.Context, issueops.SetSettingRequest) (issueops.SetSettingResult, error) {
-	return issueops.SetSettingResult{}, errors.New("this surface publishes no settings write")
+func (c *roleSettings) SetSetting(_ context.Context, req issueops.SetSettingRequest) (issueops.SetSettingResult, error) {
+	c.mu.Lock()
+	c.sets = append(c.sets, req)
+	c.mu.Unlock()
+	if c.writeErr != nil {
+		return issueops.SetSettingResult{}, c.writeErr
+	}
+	value := req.Value
+	if c.stored != "" {
+		value = c.stored
+	}
+	return issueops.SetSettingResult{Key: req.Key, Value: value}, nil
 }
 
-func (c *roleSettings) UnsetSetting(context.Context, issueops.UnsetSettingRequest) (issueops.UnsetSettingResult, error) {
-	return issueops.UnsetSettingResult{}, errors.New("this surface publishes no settings write")
+func (c *roleSettings) UnsetSetting(_ context.Context, req issueops.UnsetSettingRequest) (issueops.UnsetSettingResult, error) {
+	c.mu.Lock()
+	c.unsets = append(c.unsets, req)
+	c.mu.Unlock()
+	if c.writeErr != nil {
+		return issueops.UnsetSettingResult{}, c.writeErr
+	}
+	return issueops.UnsetSettingResult{Key: req.Key}, nil
 }
 
 func (c *roleSettings) getRequests() []issueops.GetSettingRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]issueops.GetSettingRequest(nil), c.gets...)
+}
+
+func (c *roleSettings) setRequests() []issueops.SetSettingRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.SetSettingRequest(nil), c.sets...)
+}
+
+func (c *roleSettings) unsetRequests() []issueops.UnsetSettingRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.UnsetSettingRequest(nil), c.unsets...)
 }
 
 type roleStats struct {
@@ -864,6 +931,9 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.Relations == nil {
 		cfg.Relations = &roleRelations{}
+	}
+	if cfg.Commenter == nil {
+		cfg.Commenter = &roleCommenter{}
 	}
 	if cfg.BlockingAnnotator == nil {
 		cfg.BlockingAnnotator = &roleBlockingAnnotator{}
@@ -1113,6 +1183,14 @@ func TestListenRequiresExactlyOneDatabaseSource(t *testing.T) {
 		{
 			name:    "no edge reader",
 			cfg:     rolesConfigWithout(func(c *Config) { c.EdgeReader = nil }),
+			wantErr: "no database source",
+		},
+		{
+			// The write on the sub-resource: missing it, the server binds,
+			// advertises issues.addComment, and nil-dereferences on the first
+			// request that appends a comment.
+			name:    "no commenter",
+			cfg:     rolesConfigWithout(func(c *Config) { c.Commenter = nil }),
 			wantErr: "no database source",
 		},
 		{
@@ -1820,14 +1898,26 @@ func assertNoPanic(t *testing.T, ts *testServer) {
 }
 
 // hookableStore is the smallest thing storage.NewHookFiringStore will decorate:
-// the DoltStorage surface is embedded nil because IssueClaimer is the only
-// method this test ever reaches through it.
+// the DoltStorage surface is embedded nil, and the accessors declared below are
+// exactly the hook-firing roles this test drives through Listen.
 type hookableStore struct {
 	storage.DoltStorage
-	claimer issueops.Claimer
+	claimer      issueops.Claimer
+	commenter    issueops.Commenter
+	readyClaimer issueops.ReadyClaimer
+	batchCloser  issueops.BatchCloser
+	batchCreator issueops.BatchCreator
 }
 
 func (s hookableStore) IssueClaimer() (issueops.Claimer, error) { return s.claimer, nil }
+
+func (s hookableStore) Commenter() (issueops.Commenter, error) { return s.commenter, nil }
+
+func (s hookableStore) ReadyClaimer() (issueops.ReadyClaimer, error) { return s.readyClaimer, nil }
+
+func (s hookableStore) BatchCloser() (issueops.BatchCloser, error) { return s.batchCloser, nil }
+
+func (s hookableStore) BatchCreator() (issueops.BatchCreator, error) { return s.batchCreator, nil }
 
 // TestListenRefusesARoleThatFiresTheWorkspaceHooks.
 //
@@ -1846,7 +1936,13 @@ func TestListenRefusesARoleThatFiresTheWorkspaceHooks(t *testing.T) {
 	// The refusal must not depend on that: the type's job is to fire hooks, and
 	// a server that admitted this one would be a config change away from
 	// breaking its own contract.
-	hooked := storage.NewHookFiringStore(hookableStore{claimer: &roleClaimer{}}, nil)
+	hooked := storage.NewHookFiringStore(hookableStore{
+		claimer:      &roleClaimer{},
+		commenter:    &roleCommenter{},
+		readyClaimer: &roleReadyClaimer{},
+		batchCloser:  &roleBatchCloser{},
+		batchCreator: &roleBatchCreator{},
+	}, nil)
 
 	fromTheStore, err := hooked.IssueClaimer()
 	if err != nil {
@@ -1882,6 +1978,69 @@ func TestListenRefusesARoleThatFiresTheWorkspaceHooks(t *testing.T) {
 		t.Fatalf("Listen: %v, want a bound server for the claimer beneath the hook layer", err)
 	}
 	t.Cleanup(func() { _ = srv.http.Close() })
+
+	// THE FOUR ROLES RoleFiresHooks DID NOT KNOW ABOUT, each driven through the
+	// same refusal. They were blind for as long as nobody happened to take one
+	// off a store by hand, and every one of them is served over a PUBLISHED
+	// operation, so Listen was admitting a hook-firing value for any of the four
+	// — which is the exact failure this whole guard exists to prevent.
+	//
+	// Their per-request cost is what makes them worth naming individually: the
+	// commenter fires once per comment, which is what an agent posting progress
+	// into a thread does in a loop; the ready claimer once per bead a polling
+	// drainer picks up; the batch closer once per landed item plus one for the
+	// claim it chains; the batch creator once per item, so a hundred-item batch
+	// is a hundred subprocesses inside one HTTP call.
+	//
+	// The class-level guard is TestRoleFiresHooksKnowsEveryHookFiringRole in
+	// internal/storage, which scans for the NEXT one. These are the both-ends
+	// pins beneath it: the store really hands back a hook-firing value, and
+	// Listen really refuses it.
+	for _, role := range []struct {
+		name string
+		from func() (any, error)
+		bind func(any) Config
+	}{
+		{
+			name: "commenter",
+			from: func() (any, error) { return hooked.Commenter() },
+			bind: func(v any) Config { return rolesConfig(Config{Commenter: v.(issueops.Commenter)}) },
+		},
+		{
+			name: "ready claimer",
+			from: func() (any, error) { return hooked.ReadyClaimer() },
+			bind: func(v any) Config { return rolesConfig(Config{ReadyClaimer: v.(issueops.ReadyClaimer)}) },
+		},
+		{
+			name: "batch closer",
+			from: func() (any, error) { return hooked.BatchCloser() },
+			bind: func(v any) Config { return rolesConfig(Config{BatchCloser: v.(issueops.BatchCloser)}) },
+		},
+		{
+			name: "batch creator",
+			from: func() (any, error) { return hooked.BatchCreator() },
+			bind: func(v any) Config { return rolesConfig(Config{BatchCreator: v.(issueops.BatchCreator)}) },
+		},
+	} {
+		t.Run(role.name, func(t *testing.T) {
+			fromStore, err := role.from()
+			if err != nil {
+				t.Fatalf("the store's %s accessor: %v", role.name, err)
+			}
+			if !storage.RoleFiresHooks(fromStore) {
+				t.Fatalf("RoleFiresHooks does not recognize the hook-firing %s, so Listen would serve one", role.name)
+			}
+			cfg := role.bind(fromStore)
+			cfg.Addr = "127.0.0.1:0"
+			cfg.Stdout = io.Discard
+			cfg.Stderr = io.Discard
+			if _, err := Listen(cfg); err == nil {
+				t.Errorf("Listen bound a server whose %s runs the workspace's hook scripts", role.name)
+			} else if !strings.Contains(err.Error(), "hooks") {
+				t.Errorf("refusal %q does not say what is wrong with the role", err)
+			}
+		})
+	}
 }
 
 // serveHookRunner stands in for the workspace's script runner. The refusal is

@@ -284,6 +284,9 @@ func TestCollectViperEntriesWithEnvOverride(t *testing.T) {
 	defer os.Chdir(origDir) //nolint:errcheck
 
 	t.Setenv("BD_ACTOR", "env-bot")
+	// BEADS_ACTOR outranks BD_ACTOR on purpose (GH#4645), so one exported in
+	// the developer's shell would be reported as the source instead (GH#6560).
+	t.Setenv("BEADS_ACTOR", "")
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
@@ -409,7 +412,10 @@ func TestCollectViperEntriesMetricsUserGlobalProvenance(t *testing.T) {
 	}
 	// Source is the explicit user-global path, matching `bd config get`, not the
 	// generic project "config.yaml" label.
-	wantSource := config.UserConfigYamlPath()
+	wantSource, err := config.UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("resolve user config path: %v", err)
+	}
 	if entry.Source != wantSource {
 		t.Errorf("metrics.disabled source = %q, want %q (user-global path)", entry.Source, wantSource)
 	}

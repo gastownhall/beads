@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -203,97 +204,96 @@ func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) 
 // clones that recomputed the same flip at different times, bd-578h9.19) and
 // makes stale-guard/conflict-guard consumers treat the row as user-edited.
 // An explicit assignment suppresses the ON UPDATE clause.
+//
+// Both templates decide membership through shouldBeBlockedIDsUnionScopedSQL,
+// the same uncorrelated union the full repair and the doctor count use
+// (blocked_consistency.go), scoped to the batch: one derived blocked set per
+// batch, computed once and probed by hash. The previous shape — five
+// correlated EXISTS per outer row — was re-executed per row by the engine:
+// ~4 s per 200-id batch on committed, indexed data, and unbounded (>69 min
+// observed on dolt 2.1.8) over a large uncommitted working set, where every
+// probe re-read the uncommitted overlay (gastownhall/beads#6288).
+//
+// The batch IN-list therefore appears more than once per statement — the
+// outer row filter plus one per union leg; expandBatchTemplate repeats the
+// placeholders and the bound ids to match.
+
+// batchScopeSQL is the per-leg predicate that confines the should-be-blocked
+// union to the batch (see shouldBeBlockedIDsUnionScopedSQL); its %s is filled
+// with the batch placeholders by expandBatchTemplate, never by fmt here.
+const batchScopeSQL = "AND d.issue_id IN (%s)"
+
 func markBlockedTemplateForIssues() string {
-	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 1, i.updated_at = i.updated_at
-		WHERE i.id IN (%%s)
-		  AND i.is_blocked = 0
-		  AND i.status <> 'closed' AND i.status <> 'pinned'
-		  AND (
-		    EXISTS (
-		      SELECT 1 FROM dependencies d
-		      JOIN issues t ON t.id = d.depends_on_issue_id
-		      WHERE d.issue_id = i.id
-		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		        AND t.status <> 'closed' AND t.status <> 'pinned'
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM dependencies d
-		      JOIN wisps t ON t.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = i.id
-		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		        AND t.status <> 'closed' AND t.status <> 'pinned'
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM dependencies d
-		      JOIN issues p ON p.id = d.depends_on_issue_id
-		      WHERE d.issue_id = i.id
-		        AND d.type = 'parent-child'
-		        AND p.is_blocked = 1
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM dependencies d
-		      JOIN wisps p ON p.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = i.id
-		        AND d.type = 'parent-child'
-		        AND p.is_blocked = 1
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM dependencies d
-		      WHERE d.issue_id = i.id AND d.type = 'waits-for'
-		        AND (%s)
-		    )
-		  )
-	`, waitsForGateBlockedSQL)
+	return markBlockedTemplate("issues", "i", "dependencies")
 }
 
 func unmarkBlockedTemplateForIssues() string {
-	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 0, i.updated_at = i.updated_at
-		WHERE i.id IN (%%s)
-		  AND i.is_blocked = 1
-		  AND (
-		    i.status = 'closed' OR i.status = 'pinned'
-		    OR (
-		      NOT EXISTS (
-		        SELECT 1 FROM dependencies d
-		        JOIN issues t ON t.id = d.depends_on_issue_id
-		        WHERE d.issue_id = i.id
-		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		          AND t.status <> 'closed' AND t.status <> 'pinned'
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM dependencies d
-		        JOIN wisps t ON t.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = i.id
-		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		          AND t.status <> 'closed' AND t.status <> 'pinned'
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM dependencies d
-		        JOIN issues p ON p.id = d.depends_on_issue_id
-		        WHERE d.issue_id = i.id
-		          AND d.type = 'parent-child'
-		          AND p.is_blocked = 1
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM dependencies d
-		        JOIN wisps p ON p.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = i.id
-		          AND d.type = 'parent-child'
-		          AND p.is_blocked = 1
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM dependencies d
-		        WHERE d.issue_id = i.id AND d.type = 'waits-for'
-		          AND (%s)
-		      )
-		    )
-		  )
-	`, waitsForGateBlockedSQL)
+	return unmarkBlockedTemplate("issues", "i", "dependencies")
 }
 
-//nolint:gosec // G201: SQL templates are constant; only IN-clause placeholders are formatted in.
+func markBlockedTemplateForWisps() string {
+	return markBlockedTemplate("wisps", "w", "wisp_dependencies")
+}
+
+func unmarkBlockedTemplateForWisps() string {
+	return unmarkBlockedTemplate("wisps", "w", "wisp_dependencies")
+}
+
+// markBlockedTemplate is the batched mark statement for one table: the
+// batch-scoped analog of markAllBlockedSQL. The union is confined to the
+// batch's own dependency rows, so `<alias>.id IN (union)` is exactly the
+// old correlated disjunction for every id in the batch.
+//
+//nolint:gosec // G201: table, alias, and depTable are constants from the four callers above.
+func markBlockedTemplate(table, alias, depTable string) string {
+	return fmt.Sprintf(`
+		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 1, %[2]s.updated_at = %[2]s.updated_at
+		WHERE %[2]s.id IN (%%s)
+		  AND %[2]s.is_blocked = 0
+		  AND %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
+		  AND %[2]s.id IN (%[3]s)
+	`, table, alias, shouldBeBlockedIDsUnionScopedSQL(depTable, batchScopeSQL))
+}
+
+// unmarkBlockedTemplate is the batched unmark statement for one table: the
+// batch-scoped analog of unmarkAllBlockedSQL. NOT IN is null-hostile; the
+// union's d.issue_id IS NOT NULL guards keep it total.
+//
+//nolint:gosec // G201: table, alias, and depTable are constants from the four callers above.
+func unmarkBlockedTemplate(table, alias, depTable string) string {
+	return fmt.Sprintf(`
+		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 0, %[2]s.updated_at = %[2]s.updated_at
+		WHERE %[2]s.id IN (%%s)
+		  AND %[2]s.is_blocked = 1
+		  AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
+		        OR %[2]s.id NOT IN (%[3]s) )
+	`, table, alias, shouldBeBlockedIDsUnionScopedSQL(depTable, batchScopeSQL))
+}
+
+// expandBatchTemplate fills every %s in a batched template with the same
+// IN-list placeholders and repeats the bound ids once per occurrence, in
+// order. Templates carry the batch list in the outer row filter and in each
+// leg of the scoped union (six occurrences today); a template with a single
+// %s degrades to the plain Sprintf it always was. The count is textual, so a
+// template must contain no other percent sign (no LIKE 'x%' pattern, no %%)
+// and at least one %s — a template with none is a programmer error that
+// surfaces as an %!(EXTRA …) syntax error at exec.
+//
+//nolint:gosec // G201: tmpl is a constant template; only IN-clause placeholders are formatted in.
+func expandBatchTemplate(tmpl, placeholders string, args []interface{}) (string, []interface{}) {
+	n := strings.Count(tmpl, "%s")
+	if n <= 1 {
+		return fmt.Sprintf(tmpl, placeholders), args
+	}
+	fills := make([]interface{}, n)
+	expanded := make([]interface{}, 0, n*len(args))
+	for k := range fills {
+		fills[k] = placeholders
+		expanded = append(expanded, args...)
+	}
+	return fmt.Sprintf(tmpl, fills...), expanded
+}
+
 func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -309,97 +309,6 @@ func markIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (
 	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), ids)
 }
 
-func markBlockedTemplateForWisps() string {
-	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 1, w.updated_at = w.updated_at
-		WHERE w.id IN (%%s)
-		  AND w.is_blocked = 0
-		  AND w.status <> 'closed' AND w.status <> 'pinned'
-		  AND (
-		    EXISTS (
-		      SELECT 1 FROM wisp_dependencies d
-		      JOIN issues t ON t.id = d.depends_on_issue_id
-		      WHERE d.issue_id = w.id
-		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		        AND t.status <> 'closed' AND t.status <> 'pinned'
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM wisp_dependencies d
-		      JOIN wisps t ON t.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = w.id
-		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		        AND t.status <> 'closed' AND t.status <> 'pinned'
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM wisp_dependencies d
-		      JOIN issues p ON p.id = d.depends_on_issue_id
-		      WHERE d.issue_id = w.id
-		        AND d.type = 'parent-child'
-		        AND p.is_blocked = 1
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM wisp_dependencies d
-		      JOIN wisps p ON p.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = w.id
-		        AND d.type = 'parent-child'
-		        AND p.is_blocked = 1
-		    )
-		    OR EXISTS (
-		      SELECT 1 FROM wisp_dependencies d
-		      WHERE d.issue_id = w.id AND d.type = 'waits-for'
-		        AND (%s)
-		    )
-		  )
-	`, waitsForGateBlockedSQL)
-}
-
-func unmarkBlockedTemplateForWisps() string {
-	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 0, w.updated_at = w.updated_at
-		WHERE w.id IN (%%s)
-		  AND w.is_blocked = 1
-		  AND (
-		    w.status = 'closed' OR w.status = 'pinned'
-		    OR (
-		      NOT EXISTS (
-		        SELECT 1 FROM wisp_dependencies d
-		        JOIN issues t ON t.id = d.depends_on_issue_id
-		        WHERE d.issue_id = w.id
-		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		          AND t.status <> 'closed' AND t.status <> 'pinned'
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM wisp_dependencies d
-		        JOIN wisps t ON t.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = w.id
-		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		          AND t.status <> 'closed' AND t.status <> 'pinned'
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM wisp_dependencies d
-		        JOIN issues p ON p.id = d.depends_on_issue_id
-		        WHERE d.issue_id = w.id
-		          AND d.type = 'parent-child'
-		          AND p.is_blocked = 1
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM wisp_dependencies d
-		        JOIN wisps p ON p.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = w.id
-		          AND d.type = 'parent-child'
-		          AND p.is_blocked = 1
-		      )
-		      AND NOT EXISTS (
-		        SELECT 1 FROM wisp_dependencies d
-		        WHERE d.issue_id = w.id AND d.type = 'waits-for'
-		          AND (%s)
-		      )
-		    )
-		  )
-	`, waitsForGateBlockedSQL)
-}
-
-//nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
 func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl string, ids []string) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
@@ -409,7 +318,8 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
 
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), args...)
+		stmt, stmtArgs := expandBatchTemplate(markTmpl, placeholders, args)
+		res, err := tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
 		}
@@ -419,7 +329,8 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 		}
 		changed += n
 
-		res, err = tx.ExecContext(ctx, fmt.Sprintf(unmarkTmpl, placeholders), args...)
+		stmt, stmtArgs = expandBatchTemplate(unmarkTmpl, placeholders, args)
+		res, err = tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
 		}
@@ -432,7 +343,6 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 	return changed, nil
 }
 
-//nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
 func runMarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl string, ids []string) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
@@ -442,7 +352,8 @@ func runMarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl string, ids []str
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
 
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), args...)
+		stmt, stmtArgs := expandBatchTemplate(markTmpl, placeholders, args)
+		res, err := tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("mark is_blocked: %w", err)
 		}

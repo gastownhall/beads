@@ -501,9 +501,13 @@ func testAuditCreateAllWispsInlineDependencies(t *testing.T, f Factory) {
 	}
 }
 
-// A mixed regular+wisp batch with a cross-bucket edge is rejected before insert;
-// with SkipDependencyValidationErrors the edge is dropped and both issues persist
-// (create.go:288-361).
+// A mixed regular+wisp batch with a cross-bucket edge is rejected before insert
+// (the strict plane rule, issueops.ValidateCreateIssuesMixedBucketDependencies);
+// with SkipDependencyValidationErrors — the import mode — both issues persist
+// AND the edge is wired: every row of both planes is written on the one
+// transaction before the dependency pass, which resolves the target on its own
+// plane. Until wy-a648lq the tolerant arm dropped the edge instead, and a
+// re-import could never backfill it.
 func testAuditCreateCrossBucketDependency(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
@@ -520,7 +524,7 @@ func testAuditCreateCrossBucketDependency(t *testing.T, f Factory) {
 		t.Errorf("(a) test-a persisted despite rejected batch: %v", err)
 	}
 
-	// (b) With skip: both persist, edge dropped.
+	// (b) With skip: both persist, and the cross-bucket edge is wired.
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "test-c", Title: "C"}),
 		withDefaults(&types.Issue{ID: "test-d", Title: "D", Ephemeral: true, Dependencies: []*types.Dependency{{IssueID: "test-d", DependsOnID: "test-c", Type: types.DepBlocks}}}),
@@ -532,8 +536,8 @@ func testAuditCreateCrossBucketDependency(t *testing.T, f Factory) {
 		t.Errorf("(b) test-d missing: %v", err)
 	}
 	recs, _ := s.GetAllDependencyRecords(c)
-	if len(recs["test-d"]) != 0 {
-		t.Errorf("(b) cross-bucket edge not dropped: %v", auditDepTargets(recs["test-d"]))
+	if got := auditDepTargets(recs["test-d"]); !slices.Equal(got, []string{"test-c"}) {
+		t.Errorf("(b) test-d deps = %v, want [test-c] (in-batch cross-bucket edge wired, not dropped)", got)
 	}
 }
 

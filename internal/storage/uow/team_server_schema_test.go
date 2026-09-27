@@ -14,7 +14,22 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
+// expectCursorProbe mocks the information_schema existence probe that
+// migrationSource.currentVersion issues before it ever reads the cursor
+// table. The probe was added by be-bv7x so a not-yet-created cursor table
+// never poisons the pooled Dolt session with a failing statement.
+func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
+	present := 0
+	if exists {
+		present = 1
+	}
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.tables`).
+		WithArgs(table).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(present))
+}
+
 func expectVersionQuery(mock sqlmock.Sqlmock, version int) {
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
 }
@@ -67,8 +82,9 @@ func TestCheckTeamServerSchema_FreshDB_RefusesWithBtsInit(t *testing.T) {
 func TestCheckTeamServerSchema_MissingTable_RefusesWithBtsInit(t *testing.T) {
 	mock, db, closeDB := newVersionMockDB(t)
 	defer closeDB()
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-		WillReturnError(errors.New("Error 1146 (42S02): Table 'beads_team.schema_migrations' doesn't exist"))
+	// With the be-bv7x probe in front, an absent cursor table is reported by
+	// the probe returning 0 rather than by the cursor read erroring out.
+	expectCursorProbe(mock, "schema_migrations", false)
 
 	err := checkTeamServerSchema(context.Background(), db, "beads_team")
 	if err == nil {

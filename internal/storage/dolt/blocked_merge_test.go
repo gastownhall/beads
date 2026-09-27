@@ -241,6 +241,18 @@ func TestMergeRecomputesIsBlocked(t *testing.T) {
 		t.Fatalf("get current branch: %v", err)
 	}
 
+	// The peer branch name is derived from this test's own isolation branch
+	// (already unique per run) instead of a fixed literal: the shared Dolt
+	// server can outlive a single test run in this environment (containers
+	// that leak past TestMain persist their branches), so a fixed name risks
+	// colliding with a stale branch of the same name left by an earlier run.
+	// The "test-" prefix also means the next run's CleanTestBranches sweeps
+	// it even if this t.Cleanup doesn't get to.
+	peerBranch := currentBranch + "-peer"
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_BRANCH('-D', ?)", peerBranch)
+	})
+
 	seedBlockedPair(ctx, t, store, true)
 	if !isBlocked(ctx, t, db, "bm-w") {
 		t.Fatal("precondition: bm-w should be blocked by open bm-x")
@@ -248,21 +260,23 @@ func TestMergeRecomputesIsBlocked(t *testing.T) {
 
 	// Peer branch closes the blocker with raw SQL (a merged-in write: no
 	// local write path, no recompute hook).
-	for _, q := range []string{
-		"CALL DOLT_BRANCH('bmpeer', 'HEAD')",
-		"CALL DOLT_CHECKOUT('bmpeer')",
-		"UPDATE issues SET status = 'closed' WHERE id = 'bm-x'",
-		"CALL DOLT_COMMIT('-am', 'peer closes blocker')",
-	} {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			t.Fatalf("%q: %v", q, err)
-		}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peerBranch); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peerBranch); err != nil {
+		t.Fatalf("checkout peer branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE issues SET status = 'closed' WHERE id = 'bm-x'"); err != nil {
+		t.Fatalf("close blocker on peer branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-am', 'peer closes blocker')"); err != nil {
+		t.Fatalf("commit peer branch: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
 		t.Fatalf("checkout test branch: %v", err)
 	}
 
-	conflicts, err := store.Merge(ctx, "bmpeer")
+	conflicts, err := store.Merge(ctx, peerBranch)
 	if err != nil {
 		t.Fatalf("merge peer branch: %v", err)
 	}

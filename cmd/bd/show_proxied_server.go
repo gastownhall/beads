@@ -95,7 +95,10 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	in := gatherShowProxiedInput(cmd, args)
 
 	if in.watchMode {
-		return HandleErrorRespectJSON("watch mode not supported in proxied-server mode")
+		// Defense in depth, like create's --repo fallback: the pre-provider
+		// gate refuses `show --watch` first. Typed so all three refusals render
+		// identically if one ever becomes reachable.
+		return HandleProxyCapabilityError(AssertProxyCommandCapability("show", ProxyModeProxied, ProxyCapWatch))
 	}
 
 	uw, err := proxiedOpenReadUOW(ctx)
@@ -159,6 +162,7 @@ func proxiedGetComments(ctx context.Context, uw uow.UnitOfWork, id string, isWis
 func reportIssueLookupFailure(verb, id string, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Error %s %s: %v\n", verb, id, err)
@@ -468,7 +472,8 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 		if len(allDetails) > 0 {
 			_ = outputJSON(allDetails)
 		} else {
-			return HandleErrorRespectJSON("no issues found matching the provided IDs")
+			return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+				"some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check")
 		}
 	} else if foundCount == 0 {
 		return SilentExit()
@@ -485,16 +490,6 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	}
 	fmt.Println(formatIssueMetadata(issue))
 
-	if issue.CompactionLevel > 0 && issue.OriginalSize > 0 {
-		currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-		saved := issue.OriginalSize - currentSize
-		if saved > 0 {
-			reduction := float64(saved) / float64(issue.OriginalSize) * 100
-			fmt.Println()
-			fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n", issue.OriginalSize, currentSize, reduction)
-		}
-	}
-
 	if issue.Description != "" {
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
 	} else {
@@ -510,11 +505,19 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
 	}
 
+	// A READ on an ALTERNATE view. `bd show`'s detail view is on
+	// issueops.Reader on both routes and gets its labels hydrated there; this
+	// renderer serves --refs, --children, --thread and --as-of, which answer
+	// with shapes the Reader contract does not describe, from a unit of work
+	// the caller already holds and has already read the issue from. Asking the
+	// role here would open a second transaction to re-fetch a row this function
+	// was handed. Alternate views reaching roles of their own is the follow-up
+	// (ga-2ltro.12).
 	var labels []string
 	if isWisp {
-		labels, _ = uw.LabelUseCase().GetWispLabels(ctx, issue.ID)
+		labels, _ = uw.LabelUseCase().GetWispLabels(ctx, issue.ID) //nolint:forbidigo // alternate view, caller-owned UOW; the detail view is on the role
 	} else {
-		labels, _ = uw.LabelUseCase().GetLabels(ctx, issue.ID)
+		labels, _ = uw.LabelUseCase().GetLabels(ctx, issue.ID) //nolint:forbidigo // alternate view, caller-owned UOW; the detail view is on the role
 	}
 	if len(labels) > 0 {
 		fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))

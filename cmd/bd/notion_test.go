@@ -160,7 +160,7 @@ func TestGetNotionConfigPrefersStoreOverEnv(t *testing.T) {
 
 func TestRunNotionStatusJSONWithMissingConfig(t *testing.T) {
 	saveAndRestoreGlobals(t)
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	store = nil
 	dbPath = ""
 	t.Setenv("NOTION_TOKEN", "")
@@ -383,7 +383,7 @@ func TestRunNotionStatusUsesHTTPClient(t *testing.T) {
 	newNotionStatusClient = func(token string) *notion.Client {
 		return notion.NewClient(token).WithBaseURL(server.URL)
 	}
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	store = nil
 	dbPath = ""
 	t.Setenv("NOTION_TOKEN", "env-token")

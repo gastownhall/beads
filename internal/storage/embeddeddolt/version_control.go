@@ -119,6 +119,18 @@ func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, toler
 	return committed, err
 }
 
+// CommitAll commits the entire working set (config included) with the given
+// message and reports whether a commit actually landed — the
+// storage.VersionControl entry point for the explicit operator commands
+// (bd vc commit, bd dolt commit). Embedded commits already stage everything
+// via DOLT_COMMIT('-Am'); what the explicit commands need from this store is
+// the committed bool, which replaces their HEAD-before/HEAD-after comparison
+// (racy against concurrent writers, and two extra engine opens per call —
+// the same reasoning as CommitPending's doc comment).
+func (s *EmbeddedDoltStore) CommitAll(ctx context.Context, message string) (bool, error) {
+	return s.commitAll(ctx, message, true)
+}
+
 func commitAllInTx(ctx context.Context, tx *sql.Tx, message string, tolerateEmpty bool) (bool, error) {
 	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
 		if issueops.IsNothingToCommitError(err) {
@@ -261,6 +273,26 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 	})
 	return exists, err
 }
+
+// HistoricalIssueIDs reports which of ids appear in HEAD's committed history
+// of the issues table. Implements storage.HistoryPresence.
+//
+// This is the capability that lets embedded mode — the default open path, and
+// the one with no DiffStore — prove a deletion for auto-export's orphan guard
+// instead of wedging on it forever (GH#5896). Same body as the server-backed
+// store; only the connection differs.
+func (s *EmbeddedDoltStore) HistoricalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var present map[string]struct{}
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		present, err = issueops.HistoricalIssueIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return present, err
+}
+
+// The auto-export guard reaches this through storage.UnwrapStore.
+var _ storage.HistoryPresence = (*EmbeddedDoltStore)(nil)
 
 func (s *EmbeddedDoltStore) Status(ctx context.Context) (*storage.Status, error) {
 	var status *storage.Status

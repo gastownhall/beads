@@ -747,6 +747,16 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	t.Run("format_dot_output_error", func(t *testing.T) {
+		stderr, err := runWithReadOnlyStdout(t, bd, dir, bdEnv(dir), "list", "--format", "dot", "--flat", "--all")
+		if err == nil {
+			t.Fatalf("list --format dot succeeded with read-only stdout; stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "writing DOT output") {
+			t.Fatalf("list --format dot stderr = %q, want writer diagnostic", stderr)
+		}
+	})
+
 	t.Run("compact_default", func(t *testing.T) {
 		out := bdList(t, bd, dir, "--flat")
 		if !strings.Contains(out, seed.openBug) {

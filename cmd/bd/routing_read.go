@@ -171,5 +171,5 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 	if err != nil {
 		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
 	}
-	return targetStore, true, rule, nil
+	return wireExternalDependencyPolicy(targetStore), true, rule, nil
 }

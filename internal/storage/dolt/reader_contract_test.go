@@ -224,6 +224,15 @@ func TestReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t
 	conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, fixture)
 }
 
+// The same probe-row rule under the second served order, where the next
+// position is a triple and the row it is read from is still the last DELIVERED
+// one.
+func TestReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t, ctx, fixture)
+}
+
 func TestReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
@@ -244,6 +253,18 @@ func TestReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testi
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
 	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, fixture)
+}
+
+func TestReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
+}
+
+func TestReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
 }
 
 // newDoltReaderFixture composes the shared role kit with the reader accessor.

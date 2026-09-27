@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -47,6 +48,14 @@ func loadReadyFilterGolden(t *testing.T) []readyFilterGoldenCase {
 // running both of them before either was deleted, so a green run here is the
 // proof that collapsing them into this package changed nothing.
 //
+// EVERY RECORDED FILTER CARRIES "Lite": false, which the old builders could
+// not have produced because types.WorkFilter had no such field. The record is
+// of what each REQUEST resolves to, and false is what a request that did not
+// ask for the projection resolves that field to, so writing it in keeps the
+// replay exact rather than weakening it — the same absorption
+// types.IssueFilter's MaxRows and SkipCounts had on the listing golden. A case
+// that MEANT to set it would fail here, which is the property being kept.
+//
 // It replays the gatherReadyInput column: that is the builder both CLI paths
 // now share, and it is the one whose output a filter can be built from for
 // every case (the direct column stops at --max-rows, which stays in cmd/bd).
@@ -78,12 +87,9 @@ func TestBuildReadyFilterGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal filter: %v", err)
 			}
-			var want bytes.Buffer
-			if err := json.Compact(&want, c.Gather.Filter); err != nil {
-				t.Fatalf("compact golden filter: %v", err)
-			}
-			if !bytes.Equal(got, want.Bytes()) {
-				t.Errorf("filter differs from the recorded pre-collapse filter\n got: %s\nwant: %s", got, want.Bytes())
+			want := normalizedGoldenFilter(t, c.Gather.Filter)
+			if !bytes.Equal(got, want) {
+				t.Errorf("filter differs from the recorded pre-collapse filter\n got: %s\nwant: %s", got, want)
 			}
 		})
 	}
@@ -91,6 +97,22 @@ func TestBuildReadyFilterGolden(t *testing.T) {
 	if replayed < 30 {
 		t.Fatalf("only %d cases produced a filter to replay, expected the bulk of the table", replayed)
 	}
+}
+
+// normalizedGoldenFilter absorbs zero-value fields added after the original
+// cmd/bd recording. In particular, ExcludeIDs is nil unless a storage policy
+// decorates a ready query, so historical CLI inputs must retain its null value.
+func normalizedGoldenFilter(t *testing.T, raw json.RawMessage) []byte {
+	t.Helper()
+	var filter types.WorkFilter
+	if err := json.Unmarshal(raw, &filter); err != nil {
+		t.Fatalf("decode golden filter: %v", err)
+	}
+	result, err := json.Marshal(filter)
+	if err != nil {
+		t.Fatalf("marshal golden filter: %v", err)
+	}
+	return result
 }
 
 // TestReadyFilterGoldenDivergences pins the ways cmd/bd's two pre-collapse

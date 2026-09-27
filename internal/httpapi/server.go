@@ -80,9 +80,12 @@ const (
 // pinned connection), and any semaphore-exempt handler that later touches the
 // database all escape it.
 var servePoolLimits = uow.PoolLimits{
-	MaxOpenConns:    maxInflight + 4,
-	MaxIdleConns:    maxInflight,
-	ConnMaxIdleTime: 5 * time.Minute,
+	MaxOpenConns: maxInflight + 4,
+	MaxIdleConns: maxInflight,
+	// Keep this below Dolt's supported 30s wait_timeout configuration. A
+	// longer server-specific override defeats the storage layer's stale-pool
+	// protection and lets the next request receive a server-reaped connection.
+	ConnMaxIdleTime: 20 * time.Second,
 	ConnMaxLifetime: time.Hour,
 }
 
@@ -228,7 +231,15 @@ type Config struct {
 	// this one answers with the hydrated ISSUES on the far end for ONE anchor and
 	// answers ErrNotFound. Different answer shape, different miss policy,
 	// different arity. Required on the same terms as every field here.
-	Relations         issueops.Relations
+	Relations issueops.Relations
+	// Commenter is the append-one-comment role behind
+	// POST /v0/beads/issues/{id}/comments. It is its own field rather than a
+	// verb on Lifecycle for the role's own reason: a comment is not a patch to
+	// an issue — it appends a row to a thread the issue owns and leaves every
+	// field of the issue untouched, so an IssuePatch has nothing to carry and an
+	// UpdateResult has nowhere to put the comment. Required on the same terms as
+	// every field here.
+	Commenter         issueops.Commenter
 	BlockingAnnotator issueops.BlockingAnnotator
 	TreeWalker        issueops.TreeWalker
 	ReadyCounter      issueops.ReadyCounter
@@ -278,8 +289,11 @@ type Config struct {
 	// EventsJournal is the durable mutation journal's READ side, and the ONE
 	// role here that is required CONDITIONALLY — which is why it is absent from
 	// sourceRoles and checked on its own. Like Memories it is not an issueops
-	// role: the journal is engine state on a dolt_ignored table, not a bead
-	// query, so its seam lives in internal/storage beside the rows it yields.
+	// role: the journal is a replay feed over engine state on a dolt_ignored
+	// table, not a bead query, so it has its own leaf package (journalops,
+	// whose doc states why). storage.EventsJournalCursor is an ALIAS of
+	// journalops.Journal, so this field names the role whichever spelling
+	// reaches it.
 	//
 	// Required exactly when EventsJournalEnabled. A workspace that records
 	// nothing needs no reader, and a storage backend that cannot read the
@@ -288,7 +302,7 @@ type Config struct {
 	// activation to a store. Demanding it unconditionally would make a
 	// capability nothing uses a precondition for running the server.
 	//
-	// It is a storage.EventsJournalCursor and deliberately NOT the wider
+	// It is the READ role and deliberately NOT the wider
 	// storage.EventsJournalAccessor the CLI takes. That interface also prunes,
 	// and a server that is documented to publish the journal and never retain
 	// it should not be holding a delete it merely promises not to call.
@@ -346,6 +360,7 @@ type Server struct {
 	issueEdges        issueops.EdgeReader
 	issueEdgeCounter  issueops.GraphCounter
 	issueRelations    issueops.Relations
+	issueCommenter    issueops.Commenter
 	issueBlocking     issueops.BlockingAnnotator
 	issueTree         issueops.TreeWalker
 	issueReadyCounter issueops.ReadyCounter
@@ -497,6 +512,7 @@ func Listen(cfg Config) (*Server, error) {
 		issueEdges:        cfg.EdgeReader,
 		issueEdgeCounter:  cfg.GraphCounter,
 		issueRelations:    cfg.Relations,
+		issueCommenter:    cfg.Commenter,
 		issueBlocking:     cfg.BlockingAnnotator,
 		issueTree:         cfg.TreeWalker,
 		issueReadyCounter: cfg.ReadyCounter,
@@ -614,12 +630,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.Relations, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, Relations, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -950,6 +966,26 @@ func (s *Server) relations(r *http.Request) (issueops.Relations, error) {
 	}
 	var src uow.RelationsSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.IssueRelations()
+}
+
+// commenter returns the append-one-comment surface for one request, built the
+// same two ways as every role above and held by INTERFACE so
+// uow.CommenterSource is load-bearing rather than decorative.
+//
+// It goes out WRAPPED, unlike the reads beside it and for checkedClaimer's
+// reason: handleAddComment dereferences the pointer the role answers with, so a
+// caller-supplied role that reported success without a row would panic on a live
+// server rather than reaching the generic 500 with the fault in the log.
+func (s *Server) commenter(r *http.Request) (issueops.Commenter, error) {
+	if s.provider == nil {
+		return checkedCommenter{inner: s.issueCommenter}, nil
+	}
+	var src uow.CommenterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	c, err := src.Commenter()
+	if err != nil {
+		return nil, err
+	}
+	return checkedCommenter{inner: c}, nil
 }
 
 // blockingAnnotator returns the derived blocking-decoration surface for one

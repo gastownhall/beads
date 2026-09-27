@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/storage"
@@ -93,7 +94,7 @@ var eventsTailCmd = &cobra.Command{
 
 Each line is a JSON record:
   {"seq":N,"ts":"...","op":"create|update|close|delete|dep_add|dep_remove|comment",
-   "issue_id":"...","issue":{...|null},"dep":{"kind":..,"target":..,"metadata":..},"comment":{...}}
+   "issue_id":"...","actor":"...","issue":{...|null},"dep":{"kind":..,"target":..,"metadata":..},"comment":{...}}
 
 Record contract (stable for external consumers):
   seq       int64   counter-assigned inside the mutation's transaction; gapless,
@@ -101,6 +102,14 @@ Record contract (stable for external consumers):
   ts        string  UTC insert time, stamped inside the committing transaction
   op        string  one of the seven ops above
   issue_id  string  the mutated issue's id
+  actor     string  the acting identity that performed the mutation, as resolved
+                    for the audit-events table (on a comment row: the comment's
+                    author). A delete — and the dep_remove rows a cascading
+                    delete produces — carries the identity that REQUESTED it.
+                    Empty (omitted) only when the path genuinely has no actor:
+                    derived maintenance, system cleanup with no request behind
+                    it, and rows older than the column. Never user attribution
+                    when empty.
   issue     object  full issue state AFTER the mutation; null on delete
   dep       object  {"kind","target","metadata"} for dep_add / dep_remove; omitted otherwise
   comment   object  {"id","author","text","created_at","source"} for comment; omitted otherwise
@@ -240,7 +249,32 @@ func reportEventsTruncated(err error, streaming bool) error {
 		fmt.Sprintf("resume with --since %d to continue from the oldest retained record (accepting the gap), or re-import from scratch", trunc.Floor-1))
 }
 
+// noticeEventsJournalDisabled warns, on stderr, that this workspace is not
+// recording — so an empty or stale read is not mistaken for "caught up".
+//
+// It exists because zero rows is INDISTINGUISHABLE from a journal that has
+// nothing new: a consumer polling a workspace that never enabled the journal
+// sees a successful, empty read forever and concludes it is up to date. The
+// HTTP API refuses that read outright (EventsJournalDisabled, 409); the CLI
+// cannot, because exporting the ledger a now-disabled workspace recorded while
+// it WAS enabled is legitimate. So it serves the rows and says what it is
+// serving.
+//
+// stderr, not stdout, and not the JSON envelope: stdout is a JSONL stream a
+// line reader consumes, and a notice about the reader's own configuration is
+// not a record. Exit status is unchanged.
+func noticeEventsJournalDisabled(beadsDir string) {
+	if eventsjournal.EnabledFor(beadsDir) {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"note: the events journal is disabled for this workspace (enable with 'bd config set %s true'); "+
+			"any records shown were written while it was enabled, and new mutations are not being recorded\n",
+		eventsjournal.ConfigKey)
+}
+
 func runEventsTail(ctx context.Context, since int64, limit int, follow bool) error {
+	noticeEventsJournalDisabled(beads.FindBeadsDir())
 	enc := json.NewEncoder(os.Stdout)
 	emit := func(from int64) (int64, error) {
 		rows, err := readJournal(ctx, from, limit)

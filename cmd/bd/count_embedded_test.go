@@ -89,12 +89,13 @@ func TestEmbeddedCount(t *testing.T) {
 	bdCreate(t, bd, dir, "Count labeled", "--type", "task", "--label", "frontend", "--label", "urgent")
 	bdCreate(t, bd, dir, "Count labeled two", "--type", "task", "--label", "backend")
 	bdCreate(t, bd, dir, "Count notes issue", "--type", "task", "--description", "notes keyword here")
+	bdCreate(t, bd, dir, "Count metadata issue", "--type", "task", "--metadata", `{"count_scope":"matching"}`)
 
 	// ===== Basic count =====
 
 	t.Run("basic_count_no_filters", func(t *testing.T) {
 		out := strings.TrimSpace(bdCount(t, bd, dir))
-		// Should return a number >= 8 (we created 8 issues)
+		// Should return a number >= 9 (we created 9 issues)
 		if out == "0" {
 			t.Error("expected non-zero count")
 		}
@@ -165,6 +166,16 @@ func TestEmbeddedCount(t *testing.T) {
 		count := int(m["count"].(float64))
 		if count < 2 {
 			t.Errorf("expected at least 2 issues with either label, got %d", count)
+		}
+	})
+
+	// ===== Metadata filter =====
+
+	t.Run("filter_by_metadata_field", func(t *testing.T) {
+		got := int(bdCountJSON(t, bd, dir, "--metadata-field", "count_scope=matching")["count"].(float64))
+		want := len(bdListJSON(t, bd, dir, "--all", "--limit", "0", "--metadata-field", "count_scope=matching"))
+		if got != want || got != 1 {
+			t.Errorf("count --metadata-field = %d, want list cardinality %d and fixture count 1", got, want)
 		}
 	})
 

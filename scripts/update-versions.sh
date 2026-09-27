@@ -137,9 +137,22 @@ update_file "README.md" "Alpha (v$CURRENT_VERSION)" "Alpha (v$NEW_VERSION)"
 echo "  • default.nix"
 update_file "default.nix" "version = \"$CURRENT_VERSION\";" "version = \"$NEW_VERSION\";"
 
-# 7. Hook templates — now generated dynamically by cmd/bd/hooks.go using the
-# Version constant from version.go. No template files to update.
-# (Previously updated cmd/bd/templates/hooks/* which no longer exist.)
+# 7. Tracked managed git-hook sections. The hooks a fresh `bd init` installs
+# are generated dynamically by cmd/bd/hooks.go, but this repo also TRACKS
+# rendered copies in .githooks/, whose BEGIN/END markers embed the binary
+# Version (hookSectionBeginLine), and TestTrackedManagedHookSectionsMatchGenerator
+# holds them byte-equal to the generator's output. Rewrite the marker version
+# wholesale rather than from CURRENT_VERSION — the v1.2.0 bump proved the
+# markers can already be drifted when the bump runs (they still said v1.1.0).
+echo "  • .githooks/* managed section markers"
+for hook in .githooks/*; do
+    [ -f "$hook" ] || continue
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -E "s#(--- (BEGIN|END) BEADS INTEGRATION) v[^ ]+ ---#\1 v$NEW_VERSION ---#g" "$hook"
+    else
+        sed -i -E "s#(--- (BEGIN|END) BEADS INTEGRATION) v[^ ]+ ---#\1 v$NEW_VERSION ---#g" "$hook"
+    fi
+done
 
 # 8. Windows PE resource metadata
 echo "  • cmd/bd/winres/winres.json"

@@ -7,6 +7,11 @@ import "fmt"
 // leases. qualifier (the mega-query FROM includes LeaseJoin("i")).
 var ReadyWorkIssueColumns = QualifyColumns(IssueBaseColumns, "i.") + ", " + LeaseSelectColumns
 
+// ReadyWorkIssueColumnsLite is the lite counterpart of ReadyWorkIssueColumns,
+// selected by CountsHydration.Lite. The scan side is
+// issueops.ScanIssueLiteFrom, reached through ScanReadyWorkRowWithCounts.
+var ReadyWorkIssueColumnsLite = QualifyColumns(IssueBaseColumnsLite, "i.") + ", " + LeaseSelectColumns
+
 // DepJSONObject renders one dependency row as JSON for JSON_ARRAYAGG
 // aggregation in the counts mega-query. Field names must match the JSON tags
 // of types.Dependency.
@@ -20,30 +25,51 @@ const DepJSONObject = `JSON_OBJECT(
 	'thread_id', thread_id
 )`
 
-// CountsHydration selects which per-row aggregates the counts mega-query
-// computes. Both members are opt-OUTs: the zero value hydrates everything.
+// CountsHydration selects what the counts mega-query materializes per row.
+// Every member is an opt-OUT: the zero value hydrates everything.
 //
-// Neither one changes WHICH ROWS come back or in what order — the aggregates
+// None of them changes WHICH ROWS come back or in what order. The aggregates
 // hang off LEFT JOINs that preserve every driver row, so dropping one drops a
-// column's value and nothing else. Each also keeps the projection's SHAPE:
-// the scan side (issueops.ScanReadyWorkRowWithCounts) reads the six extra
-// columns positionally, so a suppressed aggregate is projected as a constant
-// in place rather than removed.
+// column's value and nothing else; Lite changes only the driver's own SELECT
+// list, and no filter predicate is expressed in the SELECT.
 //
 // SkipLabels leaves labels_json NULL, which the scan turns into no labels.
 // SkipCounts leaves the three cardinalities 0, which a caller must read as
 // unknown rather than as none — the promise issueops.ListRequest.SkipCounts
-// makes above storage.
+// makes above storage. Both keep the projection's SHAPE: the scan side reads
+// the six extra columns positionally, so a suppressed aggregate is projected
+// as a constant in place rather than removed.
+//
+// LITE IS THE ONE THAT CHANGES THE SHAPE, which is why it is not merely a
+// third constant substitution. It swaps ReadyWorkIssueColumns for
+// ReadyWorkIssueColumnsLite, so the driver projects six fewer columns and the
+// scan must read the matching dest list — ScanReadyWorkRowWithCounts takes the
+// whole struct for that reason and dispatches on this field. Substituting
+// empty strings in place would have kept one scan path, and was rejected: the
+// row would come back with blank free-form text and IsLitePartial=false, which
+// is indistinguishable from a genuinely textless row (the ambiguity ga-clgh
+// and CommentsOmitted already record). ScanIssueLiteFrom sets the flag.
 type CountsHydration struct {
 	SkipLabels bool
 	SkipCounts bool
+	Lite       bool
 }
 
-// SearchCountsSQL renders the counts mega-query: full issue rows aliased "i"
-// plus labels JSON, dep/rdep/comment counts, parent ID, and dependency JSON,
-// for one table family. The scan side is issueops.ScanReadyWorkRowWithCounts,
-// which scans IssueSelectColumns positionally followed by the six extra
-// columns in the order projected here.
+// IssueColumns returns the driver's SELECT list for this hydration.
+func (h CountsHydration) IssueColumns() string {
+	if h.Lite {
+		return ReadyWorkIssueColumnsLite
+	}
+	return ReadyWorkIssueColumns
+}
+
+// SearchCountsSQL renders the counts mega-query: issue rows aliased "i" plus
+// labels JSON, dep/rdep/comment counts, parent ID, and dependency JSON, for one
+// table family. The scan side is issueops.ScanReadyWorkRowWithCounts, which
+// scans hyd.IssueColumns() positionally followed by the six extra columns in
+// the order projected here — so the SAME hydration value has to reach both, and
+// is the reason the scan takes the struct rather than being told the shape
+// separately.
 //
 // There are two forms of the same projection, selected by ids:
 //
@@ -223,7 +249,7 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		) d ON d.issue_id = i.id
 		%s
 	`,
-		ReadyWorkIssueColumns,
+		hyd.IssueColumns(),
 		labelsSelect,
 		countsSelect,
 		driverSQL,

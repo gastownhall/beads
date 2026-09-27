@@ -239,6 +239,28 @@ func (c checkedClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (i
 	return result, err
 }
 
+// checkedCommenter is the commenter the add-comment handler is handed.
+//
+// It exists for checkedClaimer's reason exactly: handleAddComment writes
+// *result.Comment onto the wire, so a role that reported success without the row
+// would panic on a live server.
+type checkedCommenter struct{ inner issueops.Commenter }
+
+// AddComment refuses a result that reports success without the row the response
+// body is built from.
+//
+// The generic 500, for checkedClaimer's reason. There is no wire code that fits
+// and there must not be: a 404 would say the issue does not exist when the role
+// just said it appended a comment to it, and this operation has no conflict code
+// at all. It is a broken implementation.
+func (c checkedCommenter) AddComment(ctx context.Context, req issueops.AddCommentRequest) (issueops.AddCommentResult, error) {
+	result, err := c.inner.AddComment(ctx, req)
+	if err == nil && result.Comment == nil {
+		return issueops.AddCommentResult{}, fmt.Errorf("add comment %q: the commenter reported success without a comment", req.IssueID)
+	}
+	return result, err
+}
+
 // checkedReleaser is the releaser the release handler is handed.
 //
 // It exists for checkedClaimer's reason exactly: handleRelease writes

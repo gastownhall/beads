@@ -1,0 +1,41 @@
+# Server storage test shard manifest.
+#
+# Format: <total_shards> <shard_number> <top_level_test_name>
+#
+# Unlike the embedded manifest, per-test timing is known for the tests
+# pinned below (see be-extn's investigation of CI job 95616282508):
+# TestCloudAuthCLIRouting alone costs ~9.5 minutes -- its 16 subtests each
+# call openCloudAuthTestStore, which does CREATE DATABASE + the full
+# migration chain + dolt init + dolt remote add + DROP DATABASE, and the
+# test uses t.Setenv so it can never run t.Parallel. It is pinned alone on
+# shard 1 so no other test shares its runtime. The remaining pins below
+# (TestCloudAuthCLIRoutingStructural, TestCreateGuard_* (9 tests),
+# TestFederationPeerCredentialLifecycleLazyKeyInit,
+# TestConcurrentWorkQueueDrain, TestHighContentionStress,
+# TestSerializationConflictRetry,
+# TestConcurrentCommentAndCloseWithoutCallerRetry, TestReadWriteMix, and
+# TestConcurrentIssueCreationWithoutCallerRetry) are each roughly 10-20s and
+# are spread across the remaining shards so they don't cluster on one.
+# Every other discovered test (the bulk of the 1126) is not listed here and
+# falls through to server-storage-test-shard.sh's hash(name) % total
+# fallback, the same mechanism the embedded manifest uses for its unlisted
+# tests. TestConformance is deliberately excluded -- it runs in the separate
+# test-server-storage job (sharded by sub-test path, not by this manifest).
+16 1 TestCloudAuthCLIRouting
+16 2 TestCloudAuthCLIRoutingStructural
+16 2 TestReadWriteMix
+16 3 TestCreateGuard_ErrorMessage
+16 3 TestConcurrentIssueCreationWithoutCallerRetry
+16 4 TestCreateGuard_ExistingDB_DoesNotCreateMissingBeadsDir
+16 5 TestCreateGuard_ExistingDB_NoFlag
+16 6 TestCreateGuard_ExistingDB_WithData
+16 7 TestCreateGuard_MissingDB_CreateIfMissing
+16 8 TestCreateGuard_MissingDB_DefaultConfig
+16 9 TestCreateGuard_ReadOnly_MissingDB
+16 10 TestCreateGuard_UnderscoreBothExist
+16 11 TestCreateGuard_UnderscoreInName
+16 12 TestFederationPeerCredentialLifecycleLazyKeyInit
+16 13 TestConcurrentWorkQueueDrain
+16 14 TestHighContentionStress
+16 15 TestSerializationConflictRetry
+16 16 TestConcurrentCommentAndCloseWithoutCallerRetry

@@ -179,7 +179,7 @@ func collectViperEntries() []configEntry {
 			if value == "" {
 				continue // unset in user-global; runtime uses the built-in default
 			}
-			sourceLabel = config.UserConfigYamlPath()
+			sourceLabel = config.UserConfigYamlDisplayPath()
 		}
 
 		// Skip empty defaults — they add noise without information

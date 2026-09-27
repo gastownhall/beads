@@ -560,6 +560,97 @@ now carry a per-row `inner` comparand naming the surface each one must not be
 fixture a new namespace cannot satisfy is a signal: the row you add beside it
 may be a row that cannot fail.**
 
+## The third namespace
+
+`journalops.Journal` is the durable mutation journal's read side: the
+seq-ordered replay feed behind `bd events tail`, `bd events export` and
+`GET /v0/beads/events`. It is a third leaf rather than a role in either
+existing one because its rows are neither beads nor settings — they are
+clone-local engine state on a `dolt_ignore`d table, written in the same
+transaction as the mutation they describe, versioned by nothing and replicated
+nowhere. A plane whose rows deliberately survive no merge has nothing in common
+with the plane that holds the merged data, however similar an id column makes
+them look.
+
+Most of what the second namespace decided transferred without argument. Four
+things did not, and the first two are the ones a fourth namespace inherits.
+
+**A role can have NO ACCESSOR AT ALL, and that is what makes the census a
+source parse rather than a convenience.** Every other role in this tree is
+handed out by a method on a store or a provider; this one is reached by TYPE
+ASSERTION, because the journal is not on `storage.DoltStorage`'s published
+surface and a backend is free not to implement it (`cmd/bd/serve.go`,
+`serveJournalCursor`). `issueops.Importer` is the precedent and the warning: it
+had no contract case from the day it was written and nothing noticed, precisely
+because a reflection-only census can only ask about types something already
+names. So the demand side is where an accessorless role is added —
+`facadePackages` in `backend/conformance/role_coverage_scan_test.go`, one line
+— and from there `TestEveryRoleMethodHasAContractCase` treats it exactly like a
+role with three accessors. The supply side needs nothing: `#5499`'s per-leg
+lock is ENTRYPOINT-scoped, so the six new `Run…` functions were demanded of all
+three legs the moment the contract file existed. Check which of the two gates
+your role is invisible to before assuming both.
+
+Nothing else in the accessor apparatus applies, and the absences should read as
+decisions: no row in either `role_accessor_decorator_test.go`, because there is
+no accessor to decorate; no `RoleFiresHooks` entry, because a read fires none;
+no `.golangci.yml` deny entry, for `memoryops`' reason — the body is an `…InTx`
+function (`issueops.ReadEventsPageInTx`) that no front door can hold, so there
+is no constructor to deny.
+
+**Conditional requiredness is a RESOLVED BOOLEAN the caller hands in, never
+something the server works out.** `httpapi.Config.EventsJournal` is the one
+role field required conditionally — on `Config.EventsJournalEnabled` — and the
+flag is separate from the role because it CANNOT BE INFERRED FROM THE DATA: a
+disabled journal presents as zero rows and a head of zero, byte-identical to an
+enabled journal nothing has written to yet, so a server without the flag would
+answer "you are caught up" to a consumer polling a workspace that will never
+emit a record. Activation lives in the target workspace's own config and
+environment, which `internal/httpapi` resolves none of. If your role is
+optional, ask what tells the difference between "off" and "empty"; if the
+answer is nothing, the flag is a field and not an inference.
+
+**Alias FORWARD from the old home when a role is carved out of shipped code.**
+The second namespace's section above argued that moving a vocabulary later
+costs nothing because a Go alias preserves identity in both directions, and
+called the opposite claim a false dichotomy. This is that claim measured. Four
+names and a constant moved from `internal/storage` into the leaf and the old
+spellings became aliases —
+`type EventsJournalCursor = journalops.Journal` and its three siblings — and
+the whole tree compiled with **no non-test change anywhere else**: not in
+`internal/httpapi`, not in `cmd/bd`, not in any of the four implementations,
+not in the enterprise sync. `errors.As` against `*journalops.TruncatedError`
+matches an error every leg constructs as `*storage.EventsJournalTruncatedError`,
+because they are one type. The direction is what has to be right — the leaf
+imports `context` and `fmt` and cannot name `internal/storage`, so the canon
+goes down and the alias goes up — and the contract asserts the identity at
+runtime on three legs rather than leaving it to be argued from the spec.
+
+**A role may arrive AFTER its front doors, and the leaf is where that gets
+written down.** The checklist's usual worry is a role whose command or
+operation lands later (`GraphCounter`, `BatchApplier`, `VersionReconciler`).
+This is the inverse: the CLI, the HTTP operation and four implementations all
+shipped first, against a seam in `internal/storage`, and the role was carved
+out of them afterwards. What that buys is exactly what a facade-only slice
+buys, one step later: ONE place where the promises are stated and three legs
+held to them. What it costs is that the promises have to be reconstructed from
+working code rather than written before it — so read the bodies for what they
+actually do at every boundary (a checkpoint at or above the head; a limit of 0;
+a head after a full prune) and put each answer in the leaf doc, because those
+are the cases the shipped tests were least likely to have covered.
+
+**And keep the operator's half OFF the role, deliberately and in writing.**
+`storage.EventsJournalAccessor` (read plus prune) and
+`storage.EventsJournalConfigurer` (per-instance activation) stayed in
+`internal/storage` when the read moved out. The entitlement test from `bd init`
+applies and comes back loudly yes: `bd serve` documents itself as publishing
+the journal and never retaining it, so handing it a delete would make that
+documentation the only thing between a consumer's checkpoint and a prune. The
+conformance fixture still needs both — the cases have to create records and
+manufacture a truncation — so they arrive as fixture hooks with a comment
+saying they are the operator surface being borrowed, not part of what is under
+test (`backend/conformance/journal_contract.go`, `JournalFixture.Prune`).
+
 ## When all three legs share one body
 
 `issueops.TreeWalker` was the first, and `issueops.MetadataCAS` is the second:

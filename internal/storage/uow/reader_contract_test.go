@@ -144,6 +144,14 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing", func(t *testing.T) {
 		conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, fixture)
 	})
+	// The second served order's walk. This seam ORDERs a SQL union, so the
+	// priority-equal arm of the predicate and the union's ORDER BY have to agree
+	// about what "after" means across both legs — a place the created-order walk
+	// never exercises, because there the tie-break is reached by a shared second
+	// alone.
+	t.Run("ListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing", func(t *testing.T) {
+		conformance.RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t, ctx, fixture)
+	})
 	t.Run("ListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates", func(t *testing.T) {
 		conformance.RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t, ctx, fixture)
 	})
@@ -155,6 +163,12 @@ func TestReaderContract(t *testing.T) {
 	})
 	t.Run("ListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt", func(t *testing.T) {
 		conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, fixture)
+	})
+	t.Run("ListBriefDropsTheFreeFormTextAndNothingElse", func(t *testing.T) {
+		conformance.RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
+	})
+	t.Run("ReadyBriefDropsTheFreeFormTextAndNothingElse", func(t *testing.T) {
+		conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
 	})
 	// Last on purpose: the backend-failure half runs a request on a dead
 	// context, and this backend's provider is shared by every case above it.

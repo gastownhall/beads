@@ -89,9 +89,11 @@ type RoleContractBundle struct {
 	CycleDetector        func(t *testing.T) *CycleDetectorFixture
 	Deleter              func(t *testing.T) *DeleterFixture
 	DependencyEditor     func(t *testing.T) *DependencyEditorFixture
+	DualWrite            func(t *testing.T) *DualWriteFixture
 	EdgeReader           func(t *testing.T) *EdgeReaderFixture
 	GraphCounter         func(t *testing.T) *GraphCounterFixture
 	Importer             func(t *testing.T) *ImporterFixture
+	Journal              func(t *testing.T) *JournalFixture
 	LifecycleCloseReopen func(t *testing.T) *LifecycleCloseReopenFixture
 	LifecycleCreate      func(t *testing.T) *LifecycleCreateFixture
 	LifecycleUpdate      func(t *testing.T) *LifecycleUpdateFixture

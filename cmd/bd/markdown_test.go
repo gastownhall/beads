@@ -154,6 +154,38 @@ Just a title and description.
 				},
 			},
 		},
+		{
+			name: "GH-4643 H2-per-section briefing file parses as three issues",
+			content: `## Problem
+Something is broken.
+
+## Context
+Extra background.
+
+## Acceptance Criteria
+It should work.
+`,
+			expected: []*IssueTemplate{
+				{
+					Title:       "Problem",
+					Description: "Something is broken.",
+					Priority:    2,
+					IssueType:   "task",
+				},
+				{
+					Title:       "Context",
+					Description: "Extra background.",
+					Priority:    2,
+					IssueType:   "task",
+				},
+				{
+					Title:       "Acceptance Criteria",
+					Description: "It should work.",
+					Priority:    2,
+					IssueType:   "task",
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

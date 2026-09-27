@@ -287,3 +287,39 @@ func TestCommitPending(t *testing.T) {
 		}
 	})
 }
+
+// TestIsSafeCommitRef is a be-shbed / PR #5806 review regression test.
+// dolt_diff() accepts the literal "WORKING" as an endpoint alongside real
+// commit hashes, and the fix threads that literal through ChangedIssueIDs as
+// the incremental path's "to" endpoint (in place of a root/working-set hash
+// dolt_diff always rejected) — isSafeCommitRef's character/length check must
+// keep admitting it, since no prior test in this file covered that value.
+func TestIsSafeCommitRef(t *testing.T) {
+	valid := []string{
+		"WORKING",
+		"a",
+		"0123456789abcdefABCDEF",
+		strings.Repeat("a", 64),
+	}
+	for _, s := range valid {
+		if !isSafeCommitRef(s) {
+			t.Errorf("isSafeCommitRef(%q) = false, want true", s)
+		}
+	}
+
+	invalid := []string{
+		"",
+		strings.Repeat("a", 65),
+		"has space",
+		"has-dash",
+		"has_underscore",
+		"has.dot",
+		"'; DROP TABLE issues; --",
+		"abc\ndef",
+	}
+	for _, s := range invalid {
+		if isSafeCommitRef(s) {
+			t.Errorf("isSafeCommitRef(%q) = true, want false", s)
+		}
+	}
+}

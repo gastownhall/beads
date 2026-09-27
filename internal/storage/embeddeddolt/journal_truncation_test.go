@@ -19,6 +19,18 @@ import (
 // It runs against the real embedded store — the same read path `bd events
 // tail --since` takes — so the counter self-heal, the prune floors, and the
 // truncation check are all exercised together rather than mocked.
+//
+// IT SURVIVED THE JOURNAL CONTRACT, and which half survived is the point.
+// backend/conformance/journal_contract.go now pins the same restart, retention
+// and truncation promises on all three legs — but it pins them on
+// journalops.Journal, whose body is issueops.ReadEventsPageInTx. Every read
+// below is ReadEventsJournal, which is storage.EventsJournalAccessor's
+// list-only read and a SECOND composition of the same parts: it pays for the
+// head only where the verdict is ambiguous, because `bd events tail --follow`
+// runs it every second. A mutation of one is invisible to the other, so the
+// role contract cannot stand in for this file. Its page-path twin,
+// TestEventsJournalPageReportsTheHead, could and was deleted with the contract
+// that replaced it.
 func TestEventsJournalRestartAndRetentionBoundary(t *testing.T) {
 	env := newTestEnv(t, "trn")
 	ctx := context.Background()
@@ -129,75 +141,14 @@ func TestEventsJournalRestartAndRetentionBoundary(t *testing.T) {
 	}
 }
 
-// TestEventsJournalPageReportsTheHead is the guard for the read that
-// GET /v0/beads/events answers from. The head is the whole reason that read
-// exists beside ReadEventsJournal — it is how a polling consumer tells "this
-// page is the end" from "there is more, keep asking" — so it is checked against
-// the substrate rather than assumed.
-//
-// Three properties, and the last one is the one that would break silently:
-// the head reflects every mutation ever journaled; it survives a prune, because
-// prune deletes rows and never touches the counter; and a truncated read still
-// fails through this path rather than answering with rows and a plausible head.
-func TestEventsJournalPageReportsTheHead(t *testing.T) {
-	env := newTestEnv(t, "pge")
-	ctx := context.Background()
-	store := env.store
-	store.SetEventsJournalEnabled(true)
-
-	must := func(err error, what string) {
-		t.Helper()
-		if err != nil {
-			t.Fatalf("%s: %v", what, err)
-		}
-	}
-	for _, id := range []string{"pge-1", "pge-2", "pge-3", "pge-4", "pge-5"} {
-		must(store.CreateIssue(ctx, &types.Issue{
-			ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen,
-		}, "actor"), "create "+id)
-	}
-
-	// A BOUNDED page: the head must describe the journal, not the page. A head
-	// derived from the last row returned would read as "caught up" here and
-	// stall a consumer three records short.
-	page, err := store.ReadEventsJournalPage(ctx, 0, 2)
-	must(err, "read page")
-	if len(page.Rows) != 2 {
-		t.Fatalf("rows = %d, want 2", len(page.Rows))
-	}
-	if page.Head != 5 {
-		t.Fatalf("head = %d, want 5 — the head must be the journal's, not the page's", page.Head)
-	}
-
-	// Caught up: no rows, and the same head.
-	caughtUp, err := store.ReadEventsJournalPage(ctx, 5, 0)
-	must(err, "read caught up")
-	if len(caughtUp.Rows) != 0 || caughtUp.Head != 5 {
-		t.Fatalf("caught-up page = %+v, want no rows and head 5", caughtUp)
-	}
-
-	// Prune the whole journal. The counter is untouched, so the head stands
-	// while the rows are gone — which is what lets a fully pruned journal say
-	// "you are at the end of my history" instead of "I have nothing".
-	if _, err := store.PruneEventsJournal(ctx, 6, 0, 0); err != nil {
-		t.Fatalf("prune: %v", err)
-	}
-	afterPrune, err := store.ReadEventsJournalPage(ctx, 5, 0)
-	must(err, "read after prune")
-	if len(afterPrune.Rows) != 0 || afterPrune.Head != 5 {
-		t.Fatalf("post-prune page = %+v, want no rows and head 5", afterPrune)
-	}
-
-	// And a checkpoint below the pruned window still FAILS on this path, with
-	// the same window the CLI's read reports. A page read that answered an
-	// empty success here would be the silent-loss case the truncation contract
-	// exists to prevent, reintroduced by the second read plumbing.
-	_, err = store.ReadEventsJournalPage(ctx, 2, 0)
-	trunc := requireTruncated(t, err)
-	if trunc.Since != 2 || trunc.Floor != 6 || trunc.Head != 5 {
-		t.Fatalf("truncation = %+v, want since 2, floor 6, head 5", trunc)
-	}
-}
+// TestEventsJournalPageReportsTheHead was here, and the Journal contract
+// replaced it: RunJournalLimitCapsRowsNotHead pins that a bounded page reports
+// the JOURNAL's head, RunJournalHeadArrivesWithItsRowsAndDetectsCaughtUp pins
+// the caught-up answer, RunJournalHeadSurvivesAFullPrune pins the head standing
+// over an emptied table, and RunJournalTruncationIsTypedAndNamesTheWindow pins
+// the typed failure on the same read. Every one of them now runs on three legs
+// where this ran on one, against the same body
+// (issueops.ReadEventsPageInTx). See journal_contract_test.go.
 
 func requireTruncated(t *testing.T, err error) *storage.EventsJournalTruncatedError {
 	t.Helper()

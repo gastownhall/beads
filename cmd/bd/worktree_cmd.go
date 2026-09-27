@@ -36,9 +36,10 @@ type WorktreeInfo struct {
 }
 
 var worktreeCmd = &cobra.Command{
-	Use:     "worktree",
-	Short:   "Manage git worktrees for parallel development",
-	GroupID: "maint",
+	Use:         "worktree",
+	Short:       "Manage git worktrees for parallel development",
+	GroupID:     "maint",
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
 	Long: `Manage git worktrees with proper beads configuration.
 
 Worktrees allow multiple working directories sharing the same git repository,
@@ -2067,6 +2068,7 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 	// e.g. if ".worktrees" is in .gitignore, ".worktrees/my-branch" is already covered.
 	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
 		trimmed := strings.TrimSuffix(filepath.ToSlash(line), "/")
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue

@@ -99,7 +99,7 @@ pointless).`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("update")
+		CheckReadonly("update") // also covers the migration freeze check (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("update")
 		defer func() {
@@ -253,15 +253,19 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("add-label") {
 			addLabels, _ := cmd.Flags().GetStringSlice("add-label")
-			updates["add_labels"] = addLabels
+			added := utils.NormalizeLabels(addLabels)
+			warnLabelsContainingWhitespace(added)
+			updates["add_labels"] = added
 		}
 		if cmd.Flags().Changed("remove-label") {
 			removeLabels, _ := cmd.Flags().GetStringSlice("remove-label")
-			updates["remove_labels"] = removeLabels
+			updates["remove_labels"] = utils.NormalizeLabels(removeLabels)
 		}
 		if cmd.Flags().Changed("set-labels") {
 			setLabels, _ := cmd.Flags().GetStringSlice("set-labels")
-			updates["set_labels"] = setLabels
+			set := utils.NormalizeLabels(setLabels)
+			warnLabelsContainingWhitespace(set)
+			updates["set_labels"] = set
 		}
 		if cmd.Flags().Changed("parent") {
 			parent, _ := cmd.Flags().GetString("parent")
@@ -347,27 +351,14 @@ pointless).`,
 		// Metadata flag (GH#1413)
 		if cmd.Flags().Changed("metadata") {
 			metadataValue, _ := cmd.Flags().GetString("metadata")
-			var metadataJSON string
-			if strings.HasPrefix(metadataValue, "@") {
-				// Read JSON from file
-				filePath := metadataValue[1:]
-				// #nosec G304 -- user explicitly provides file path via @file.json syntax
-				data, err := os.ReadFile(filePath)
-				if err != nil {
-					return HandleErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
-				}
-				metadataJSON = string(data)
-			} else {
-				metadataJSON = metadataValue
-			}
-			// Validate JSON
-			if !json.Valid([]byte(metadataJSON)) {
-				return HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
+			metadata, err := readMetadataFlag(metadataValue)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
 			}
 			// Passed as a merge OPERATION, not a pre-merged value: the storage
 			// layer re-reads and merges inside the mutation transaction so a
 			// concurrent writer's keys survive (lost-update fix).
-			updates[storageissueops.OpMergeMetadata] = json.RawMessage(metadataJSON)
+			updates[storageissueops.OpMergeMetadata] = metadata
 		}
 
 		// Incremental metadata edits (GH#1406)
@@ -786,7 +777,8 @@ func optionalTimeField(value any) (issueops.Field[*time.Time], bool) {
 
 // parseSetMetadataFlags splits --set-metadata key=value pairs, matching
 // storage.ApplyMetadataEdits' parsing so the CLI contract is unchanged. Values
-// are always stored as JSON strings (GH#4146).
+// are typed by storage.MetadataEditValue, which infers null/bool/number from
+// the spelling and falls back to a string.
 func parseSetMetadataFlags(flags []string) (map[string]json.RawMessage, error) {
 	set := make(map[string]json.RawMessage, len(flags))
 	for _, flag := range flags {
@@ -913,9 +905,10 @@ func applyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string)
 	return storage.ApplyMetadataEdits(existing, setFlags, unsetFlags)
 }
 
-// toJSONValue stores a CLI metadata value as a JSON string.
-// Previous behavior inferred types (numbers, booleans) from content,
-// which silently broke map[string]string round-trips (GH#4146).
+// toJSONValue converts a CLI metadata value to its most appropriate JSON
+// representation: numbers, booleans and null keep their type, everything else
+// becomes a JSON string.
+// Thin alias over the shared storage helper (also used in-transaction by issueops).
 func toJSONValue(s string) json.RawMessage {
 	return storage.MetadataEditValue(s)
 }
@@ -1016,7 +1009,7 @@ func init() {
 	updateCmd.Flags().Bool("no-history", false, "Mark issue as no-history (skip Dolt commits, not GC-eligible)")
 	updateCmd.Flags().Bool("history", false, "Clear no-history flag (re-enable Dolt commit history)")
 	// Metadata flag (GH#1413)
-	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
+	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON object, or @file.json to read from file)")
 	// Incremental metadata edits (GH#1406)
 	updateCmd.Flags().StringArray("set-metadata", nil, "Set metadata key=value (repeatable, e.g., --set-metadata team=platform)")
 	updateCmd.Flags().StringArray("unset-metadata", nil, "Remove metadata key (repeatable, e.g., --unset-metadata team)")

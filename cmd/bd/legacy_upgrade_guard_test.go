@@ -8,7 +8,22 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
+// pinLegacyUpgradeGuardEnv pins the process-global inputs the guard now reads
+// through configfile.IsDoltServerMode, so these tables assert the workspace
+// shape each case lays down rather than whatever mode the developer's shell
+// happens to select. CI already unsets these three
+// (scripts/ci/lib/test-env.sh), so the pins make a local `go test ./cmd/bd/`
+// match CI instead of changing what CI checks.
+func pinLegacyUpgradeGuardEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "0")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+}
+
 func TestLegacyUpgradeGuardRefusesHistoricalLayoutsWithoutMutatingMetadata(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name     string
 		metadata string
@@ -77,6 +92,7 @@ func TestLegacyUpgradeGuardRefusesHistoricalLayoutsWithoutMutatingMetadata(t *te
 }
 
 func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	t.Run("metadata-less v091 vc database", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(beadsDir, "vc.db"), []byte("SQLite format 3\x00"), 0o600); err != nil {
@@ -203,7 +219,8 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 		}
 	})
 
-	t.Run("explicit server metadata with malformed version witness and local Dolt root is refused", func(t *testing.T) {
+	t.Run("explicit server metadata with malformed version witness and local Dolt root is admitted with a warning", func(t *testing.T) {
+		warnings := captureLegacyUpgradeWarnings(t)
 		beadsDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
 			t.Fatal(err)
@@ -214,8 +231,11 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
-			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+		if warnings.Len() == 0 {
+			t.Fatal("guard admitted an unreadable witness without warning")
 		}
 	})
 
@@ -243,6 +263,7 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 }
 
 func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name        string
 		version     string
@@ -250,12 +271,15 @@ func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testin
 	}{
 		{name: "historical witness", version: "0.62.0", wantRefusal: true},
 		{name: "missing witness", wantRefusal: true},
-		{name: "malformed witness", version: "not-a-version", wantRefusal: true},
+		{name: "malformed witness opens as unknown era", version: "not-a-version"},
 		{name: "current witness", version: "1.1.2"},
+		{name: "pseudo-version witness", version: "v1.1.1-0.20260805093327-bf97b73749ac"},
+		{name: "release candidate witness", version: "1.1.0-rc.1"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			captureLegacyUpgradeWarnings(t)
 			beadsDir := t.TempDir()
 			metadata := []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"selected_server_db"}`)
 			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o600); err != nil {
@@ -289,6 +313,7 @@ func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testin
 }
 
 func TestLegacyUpgradeGuardRefusesOldDoltRootWithoutTrustingVersionWitness(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name     string
 		metadata string
@@ -324,6 +349,9 @@ func TestLegacyUpgradeGuardRefusesOldDoltRootWithoutTrustingVersionWitness(t *te
 }
 
 func TestLegacyUpgradeGuardSharedServerAdmission(t *testing.T) {
+	// The per-case BEADS_DOLT_SHARED_SERVER below is set after this and wins;
+	// the pin is what keeps the other two mode inputs out of the decision.
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name        string
 		metadata    string
@@ -373,6 +401,7 @@ func TestLegacyUpgradeGuardSharedServerAdmission(t *testing.T) {
 }
 
 func TestLegacyUpgradeGuardLeavesCurrentDoltWorkspaceAlone(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	beadsDir := t.TempDir()
 	metadata := `{"backend":"dolt","dolt_mode":"embedded"}`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {

@@ -216,7 +216,7 @@ func enrichLargeDatabase(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("The database has accumulated many closed issues: %s. This may cause performance degradation in list/search operations. Pruning is optional and destructive.", dc.Message),
 		observed:    dc.Message,
 		expected:    "Closed issue count below configured threshold",
-		commands:    []string{"bd cleanup --older-than 90"},
+		commands:    []string{"bd prune --older-than 90d"},
 		sourceFiles: []string{"cmd/bd/doctor/database.go:CheckDatabaseSize"},
 	}
 }
@@ -521,7 +521,7 @@ func enrichStaleClosedIssues(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("Stale closed issues: %s. Old closed issues can be pruned to reduce database size and improve query performance.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Closed issues are within acceptable age/count thresholds",
-		commands:    []string{"bd cleanup --older-than 90"},
+		commands:    []string{"bd prune --older-than 90d"},
 		sourceFiles: []string{"cmd/bd/doctor/maintenance.go:CheckStaleClosedIssues"},
 	}
 }

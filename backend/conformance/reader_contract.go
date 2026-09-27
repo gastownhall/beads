@@ -2397,6 +2397,141 @@ func RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t 
 	assertReaderPageIDs(t, `List from (the group's second, "")`, fromGroupStart, append(slices.Clone(group), older))
 }
 
+// RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing
+// is the walk over the SECOND served order, (priority ASC, created_at DESC,
+// id ASC), and the proof that its three-part key is total.
+//
+// WHY A SECOND WALK CASE AND NOT A PARAMETER ON THE FIRST: the created order's
+// key is (created_at, id) and this one's is (priority, created_at, id), so the
+// property at risk is different. There the tie-break is reached whenever two
+// rows share a second; here it is reached only when two rows share BOTH a
+// priority and a second, and the leg above it — created_at DESC WITHIN one
+// priority — does not exist there at all. A body can pass the created walk and
+// still get this one wrong in two ways that both look like a correct page:
+// carrying only the (created_at, id) half of the position, which drops every
+// row of a higher-numbered priority created after the cursor; or flattening the
+// predicate's priority-equal arm, which re-delivers rows at the cursor's own
+// priority created after it.
+//
+// THE FIXTURE IS BUILT SO THE PAGE BREAK LANDS INSIDE THE EQUAL-KEY RUN, which
+// is the input that makes totality observable rather than merely asserted.
+// Five rows share one (priority, created_at) and the page is two, so two of the
+// three boundaries fall mid-run and the walk can only continue on `id`. A
+// fixture whose runs happened to align with its pages would pass against a
+// two-part key and prove nothing.
+//
+// THE NEIGHBORS ARE THE OTHER HALF OF THE FIXTURE. `sooner` shares the run's
+// priority and is NEWER, so it must be delivered before the run and never
+// again after it — it is the row a flattened predicate re-delivers. `worse` is
+// a higher-numbered priority and is OLDER than nothing in particular; it must
+// come last however its timestamp compares, which is what fails when only the
+// created half of the position survives.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the id set it scopes on, and nothing
+// about the workspace. Every timestamp is a whole second, deliberately: the
+// column has no fractional part, so a fixture written in milliseconds would
+// have the engine, not the case, decide which rows tie.
+func RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	id := func(name string) string { return readerID(fixture, "pkswalk", name) }
+	better, sooner, worse := id("better"), id("sooner"), id("worse")
+	run := []string{id("a1"), id("a2"), id("a3"), id("a4"), id("a5")}
+
+	runSecond := time.Now().UTC().Truncate(time.Second).Add(-1 * time.Hour)
+	seed := func(memberID string, priority int, at time.Time) {
+		issue := readerIssue(memberID, types.TypeTask, "")
+		issue.Priority = priority
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	// A lower-numbered priority sorts FIRST, whatever its instant: this row is
+	// the OLDEST in the fixture and must still lead the answer.
+	seed(better, 1, runSecond.Add(-time.Hour))
+	// Same priority as the run, one second newer — the row a priority-equal arm
+	// that forgot its created_at bound would hand out twice.
+	seed(sooner, 2, runSecond.Add(time.Second))
+	for _, member := range run {
+		seed(member, 2, runSecond)
+	}
+	// A higher-numbered priority sorts LAST, and it is the NEWEST row in the
+	// fixture so that a body carrying only the created half of the position
+	// cannot reach it at all.
+	seed(worse, 3, runSecond.Add(time.Hour))
+
+	want := append([]string{better, sooner}, run...)
+	want = append(want, worse)
+	idScope := readerIDFilter(want...)
+
+	// THE ONE-SHOT ORDER IS READ FIRST, so a backend that agrees with itself
+	// but orders differently from the reference fails on the sequence rather
+	// than on the walk — two different defects that would otherwise report the
+	// same way.
+	oneShot, err := fixture.Reader.List(ctx, publicops.ListRequest{IDFilter: idScope, SortBy: "priority"})
+	if err != nil {
+		t.Fatalf("List unpaged: %v", err)
+	}
+	assertReaderPageIDs(t, "List unpaged", oneShot, want)
+
+	const pageSize = 2
+	var walked []string
+	seen := make(map[string]bool, len(want))
+	var afterPriority *int
+	var afterCreatedAt *time.Time
+	afterID := ""
+	for page := 0; page <= len(want); page++ {
+		got, pageErr := fixture.Reader.List(ctx, publicops.ListRequest{
+			IDFilter: idScope, SortBy: "priority", Limit: readerLimit(pageSize),
+			AfterPriority: afterPriority, AfterCreatedAt: afterCreatedAt, AfterID: afterID,
+		})
+		if pageErr != nil {
+			t.Fatalf("List page %d: %v", page, pageErr)
+		}
+		if len(got.Items) == 0 {
+			if got.HasMore {
+				t.Errorf("List page %d came back empty with HasMore set", page)
+			}
+			break
+		}
+		if len(got.Items) > pageSize {
+			t.Fatalf("List page %d answered %d rows over a Limit of %d", page, len(got.Items), pageSize)
+		}
+		for _, item := range got.Items {
+			if item == nil || item.Issue == nil {
+				t.Fatalf("List page %d returned a nil row", page)
+			}
+			if seen[item.ID] {
+				t.Fatalf("List page %d repeated %s: the equal-key run is larger than the page, and the position re-delivered a row it had already handed out",
+					page, item.ID)
+			}
+			seen[item.ID] = true
+			walked = append(walked, item.ID)
+		}
+		last := got.Items[len(got.Items)-1]
+		at := last.CreatedAt.UTC()
+		priority := last.Priority
+		afterPriority, afterCreatedAt, afterID = &priority, &at, last.ID
+	}
+	if !slices.Equal(walked, want) {
+		t.Errorf("the priority keyset walk delivered %v, want the one-shot sequence %v with nothing dropped and nothing repeated", walked, want)
+	}
+
+	// The position is a CONJUNCT here too: resuming from the run's first member
+	// keeps the rest of the run and the higher-numbered priority behind it, and
+	// drops the two rows that sort ahead of it — including `sooner`, which
+	// shares the cursor's priority and is only excluded by the created_at leg.
+	cursorAt := runSecond
+	cursorPriority := 2
+	resumed, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "priority",
+		AfterPriority: &cursorPriority, AfterCreatedAt: &cursorAt, AfterID: run[0],
+	})
+	if err != nil {
+		t.Fatalf("List resumed from inside the run: %v", err)
+	}
+	assertReaderPageIDs(t, "List resumed from inside the run", resumed, append(slices.Clone(run[1:]), worse))
+}
+
 // RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates pins the
 // keyset position as a CONJUNCT. It narrows what the rest of the request
 // matched; it does not become the request.
@@ -2670,6 +2805,263 @@ func RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testin
 			t.Fatalf("List (%s): %v", test.name, err)
 		}
 		assertReaderPageIDSet(t, "List ("+test.name+")", page, test.want)
+	}
+}
+
+// RunReaderListBriefDropsTheFreeFormTextAndNothingElse pins
+// ListRequest.Brief. It is the SkipCounts case's shape, on the other kind of
+// payload, and both halves are load-bearing for the same reason:
+//
+//   - all six free-form fields come back zero-valued on a row that genuinely
+//     carries each of them, so the knob demonstrably reached the SELECT rather
+//     than being accepted and dropped; and
+//   - NOTHING ELSE MOVES. Same rows, same order, same identity fields, same
+//     counts, same labels, same Parent, same has-more verdict as the identical
+//     request without the knob.
+//
+// EVERY ASSERTED FIELD IS SEEDED HEAVY, which is the discipline the sibling
+// projection on the detail view had to be sent back for: a case that asserts
+// Design and AcceptanceCriteria empty without seeding them passes on a body
+// that strips two of the six and leaks four.
+//
+// IDENTITY IS ASSERTED, not assumed. Brief keeps Title, and the lite SELECT
+// deliberately retains the small routing columns beside it; a body that
+// stripped the row down to its id would satisfy every emptiness clause above.
+//
+// IsLitePartial IS THE HALF NO WIRE CONSUMER CAN SEE. All six fields are
+// omitempty, so a projected row marshals identically to a genuinely textless
+// one — the ambiguity ga-clgh and CommentsOmitted already record. The flag is
+// how an in-process caller tells them apart, so a body that blanked the fields
+// without setting it would answer correctly and lie about why.
+func RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	subject := readerID(fixture, "lsbrief", "subject")
+	blocker := readerID(fixture, "lsbrief", "blocker")
+	dependent := readerID(fixture, "lsbrief", "dependent")
+	parent := readerID(fixture, "lsbrief", "parent")
+	label := readerLabel(fixture, "lsbrief")
+
+	for _, id := range []string{subject, blocker, dependent, parent} {
+		seedReaderIssue(t, ctx, fixture, readerHeavyIssue(id, label))
+	}
+	// The same three edges and one comment the SkipCounts case seeds, so the
+	// counts and Parent this one holds STILL are nonzero and can be tripwires
+	// for a projection that suppressed more than the text.
+	for _, edge := range []*types.Dependency{
+		{IssueID: subject, DependsOnID: blocker, Type: types.DepBlocks},
+		{IssueID: dependent, DependsOnID: subject, Type: types.DepBlocks},
+		{IssueID: subject, DependsOnID: parent, Type: types.DepParentChild},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+	if err := fixture.AddComment(ctx, subject, "seed", "so the comment count is nonzero"); err != nil {
+		t.Fatalf("seed the comment: %v", err)
+	}
+
+	req := publicops.ListRequest{IDFilter: readerIDFilter(subject, blocker, dependent, parent), SortBy: "created"}
+	hydrated, err := fixture.Reader.List(ctx, req)
+	if err != nil {
+		t.Fatalf("List with the text hydrated: %v", err)
+	}
+	hydratedRow := readerRowByID(t, "List with the text hydrated", hydrated, subject)
+	if hydratedRow == nil {
+		return
+	}
+	assertReaderHeavyPremise(t, "List", hydratedRow.Issue)
+	if hydratedRow.DependencyCount == 0 || hydratedRow.DependentCount == 0 || hydratedRow.CommentCount == 0 || hydratedRow.Parent == nil {
+		t.Fatalf("the seeded subject came back with counts (%d, %d, %d) and Parent %v; this case needs all of them populated before it can assert Brief leaves them alone",
+			hydratedRow.DependencyCount, hydratedRow.DependentCount, hydratedRow.CommentCount, readerParentText(hydratedRow.Parent))
+	}
+
+	req.Brief = true
+	brief, err := fixture.Reader.List(ctx, req)
+	if err != nil {
+		t.Fatalf("List with Brief: %v", err)
+	}
+	briefRow := readerRowByID(t, "List with Brief", brief, subject)
+	if briefRow == nil {
+		return
+	}
+	assertReaderBriefRow(t, "List with Brief", briefRow.Issue, hydratedRow.Issue)
+
+	if !slices.Equal(readerPageIDs(brief), readerPageIDs(hydrated)) {
+		t.Errorf("List with Brief returned %v, want the same page as without it, %v: this knob chooses what is hydrated, never which rows match",
+			readerPageIDs(brief), readerPageIDs(hydrated))
+	}
+	if brief.HasMore != hydrated.HasMore {
+		t.Errorf("List with Brief reported HasMore = %v, want %v", brief.HasMore, hydrated.HasMore)
+	}
+	for _, got := range []struct {
+		what      string
+		got, want int
+	}{
+		{"DependencyCount", briefRow.DependencyCount, hydratedRow.DependencyCount},
+		{"DependentCount", briefRow.DependentCount, hydratedRow.DependentCount},
+		{"CommentCount", briefRow.CommentCount, hydratedRow.CommentCount},
+	} {
+		if got.got != got.want {
+			t.Errorf("List with Brief returned %s = %d, want %d: Brief bounds a row's TEXT and no aggregate beside it", got.what, got.got, got.want)
+		}
+	}
+	if !readerSameParent(briefRow.Parent, hydratedRow.Parent) {
+		t.Errorf("List with Brief returned Parent = %v, want %v: Parent is not free-form text and rides the same query",
+			readerParentText(briefRow.Parent), readerParentText(hydratedRow.Parent))
+	}
+	if !slices.Equal(briefRow.Labels, hydratedRow.Labels) {
+		t.Errorf("List with Brief returned Labels = %v, want %v: labels are their own opt-out (SkipLabels) and this is not it", briefRow.Labels, hydratedRow.Labels)
+	}
+}
+
+// RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse is ListRequest.Brief's
+// twin on the ready plane. It gets a case of its own rather than an arm because
+// the two operations reach the projection through DIFFERENT filters: the
+// listing carries types.IssueFilter.Lite and ready carries
+// types.WorkFilter.Lite, built by a different builder and read by a different
+// hydration helper on each backend. A break in either is invisible from the
+// other, and the ready side is the one no route reaches through this role from
+// the CLI, so this case is the only thing holding it.
+func RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	label := readerLabel(fixture, "rdybrief")
+	subject := readerID(fixture, "rdybrief", "subject")
+	dependent := readerID(fixture, "rdybrief", "dependent")
+
+	for _, id := range []string{subject, dependent} {
+		seedReaderIssue(t, ctx, fixture, readerHeavyIssue(id, label))
+	}
+	// An INCOMING blocks edge only. It leaves the subject itself unblocked, so
+	// it still qualifies for ready work, while giving its row a nonzero
+	// DependentCount for the same tripwire the listing case uses.
+	if err := fixture.AddDependency(ctx, &types.Dependency{IssueID: dependent, DependsOnID: subject, Type: types.DepBlocks}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", dependent, subject, err)
+	}
+	if err := fixture.AddComment(ctx, subject, "seed", "so the comment count is nonzero"); err != nil {
+		t.Fatalf("seed the comment: %v", err)
+	}
+
+	req := publicops.ReadyRequest{Labels: []string{label}, Sort: "oldest"}
+	hydrated, err := fixture.Reader.Ready(ctx, req)
+	if err != nil {
+		t.Fatalf("Ready with the text hydrated: %v", err)
+	}
+	hydratedRow := readerRowByID(t, "Ready with the text hydrated", hydrated, subject)
+	if hydratedRow == nil {
+		return
+	}
+	assertReaderHeavyPremise(t, "Ready", hydratedRow.Issue)
+	if hydratedRow.DependentCount == 0 || hydratedRow.CommentCount == 0 {
+		t.Fatalf("the seeded subject came back with DependentCount %d and CommentCount %d; this case needs both nonzero before it can assert Brief leaves them alone",
+			hydratedRow.DependentCount, hydratedRow.CommentCount)
+	}
+
+	req.Brief = true
+	brief, err := fixture.Reader.Ready(ctx, req)
+	if err != nil {
+		t.Fatalf("Ready with Brief: %v", err)
+	}
+	briefRow := readerRowByID(t, "Ready with Brief", brief, subject)
+	if briefRow == nil {
+		return
+	}
+	assertReaderBriefRow(t, "Ready with Brief", briefRow.Issue, hydratedRow.Issue)
+
+	if !slices.Equal(readerPageIDs(brief), readerPageIDs(hydrated)) {
+		t.Errorf("Ready with Brief returned %v, want the same page as without it, %v", readerPageIDs(brief), readerPageIDs(hydrated))
+	}
+	if brief.HasMore != hydrated.HasMore {
+		t.Errorf("Ready with Brief reported HasMore = %v, want %v", brief.HasMore, hydrated.HasMore)
+	}
+	// Ready carries no SkipLabels and no SkipCounts (issueops.readyHydrationFor),
+	// so an implementation that reached for the listing's hydration helper here
+	// would drop these along with the text.
+	if briefRow.DependentCount != hydratedRow.DependentCount || briefRow.CommentCount != hydratedRow.CommentCount {
+		t.Errorf("Ready with Brief returned DependentCount %d / CommentCount %d, want %d / %d: a ready filter carries no counts opt-out",
+			briefRow.DependentCount, briefRow.CommentCount, hydratedRow.DependentCount, hydratedRow.CommentCount)
+	}
+	if !slices.Equal(briefRow.Labels, hydratedRow.Labels) {
+		t.Errorf("Ready with Brief returned Labels = %v, want %v: a ready filter carries no label opt-out either", briefRow.Labels, hydratedRow.Labels)
+	}
+}
+
+// readerHeavyFields is what the two Brief cases seed and assert on: every
+// free-form column the lite SELECT drops (issueops.HeavyDropList). It is one
+// list so the seed and the assertions cannot fall out of step, which is the
+// exact way the sibling projection's first draft went vacuous.
+func readerHeavyFields(issue *types.Issue) []struct {
+	what string
+	text string
+} {
+	return []struct {
+		what string
+		text string
+	}{
+		{"Description", issue.Description},
+		{"Design", issue.Design},
+		{"AcceptanceCriteria", issue.AcceptanceCriteria},
+		{"Notes", issue.Notes},
+		{"Payload", issue.Payload},
+		{"Waiters", strings.Join(issue.Waiters, ",")},
+	}
+}
+
+// readerHeavyIssue is readerIssue with every droppable field carrying text.
+func readerHeavyIssue(id, label string) *types.Issue {
+	issue := readerIssue(id, types.TypeTask, label)
+	issue.Description = id + " description body"
+	issue.Design = id + " design body"
+	issue.AcceptanceCriteria = id + " acceptance criteria body"
+	issue.Notes = id + " notes body"
+	issue.Payload = id + " payload body"
+	issue.Waiters = []string{id + "-waiter"}
+	return issue
+}
+
+// assertReaderHeavyPremise fails the case when a field it is about to assert
+// EMPTY did not arrive populated. Without it, a backend that never round-trips
+// one of the six turns this case's clause for that field into a clause that
+// cannot fail.
+func assertReaderHeavyPremise(t *testing.T, what string, issue *types.Issue) {
+	t.Helper()
+	for _, field := range readerHeavyFields(issue) {
+		if field.text == "" {
+			t.Fatalf("%s returned the seeded subject with an empty %s; this case needs every field it asserts stripped to arrive populated, or that assertion cannot fail",
+				what, field.what)
+		}
+	}
+	if issue.IsLitePartial {
+		t.Fatalf("%s returned the seeded subject with IsLitePartial already set on a full read", what)
+	}
+}
+
+// assertReaderBriefRow holds a projected row to both halves of the promise: the
+// text is gone, the identity is not, and the row says which it is.
+func assertReaderBriefRow(t *testing.T, what string, brief, full *types.Issue) {
+	t.Helper()
+	for _, field := range readerHeavyFields(brief) {
+		if field.text != "" {
+			t.Errorf("%s returned %s = %q, want empty: Brief was accepted and the column selected anyway", what, field.what, field.text)
+		}
+	}
+	if !brief.IsLitePartial {
+		t.Errorf("%s returned IsLitePartial = false on a projected row: a blank body and a genuinely textless one are indistinguishable without it", what)
+	}
+	for _, id := range []struct {
+		what      string
+		got, want string
+	}{
+		{"ID", brief.ID, full.ID},
+		{"Title", brief.Title, full.Title},
+		{"Status", string(brief.Status), string(full.Status)},
+		{"IssueType", string(brief.IssueType), string(full.IssueType)},
+	} {
+		if id.got != id.want {
+			t.Errorf("%s returned %s = %q, want %q: Brief drops the free-form text and keeps everything a caller picks a row by", what, id.what, id.got, id.want)
+		}
+	}
+	if brief.Priority != full.Priority {
+		t.Errorf("%s returned Priority = %d, want %d", what, brief.Priority, full.Priority)
 	}
 }
 

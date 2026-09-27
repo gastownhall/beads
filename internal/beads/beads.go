@@ -348,16 +348,41 @@ type RedirectInfo struct {
 // BEADS_DIR is set. This handles the case where BEADS_DIR is pre-set to the redirect target
 // (e.g., by shell environment or tooling), but we still need to detect that a redirect exists.
 func GetRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findLocalBeadsDir)
+}
+
+// GetRedirectInfoFrom is GetRedirectInfo for the workspace at dir rather than
+// the process cwd: the .beads directory at dir's git repository root is
+// checked for a redirect first, then the nearest .beads walking up from dir.
+// BEADS_DIR is not consulted, since a caller asking about dir has already
+// resolved it (under `bd -C dir` it names the redirect target itself, which
+// would mask the clone's redirect). Used by `bd -C dir prime` so the redirect
+// notice describes the primed workspace (gastownhall/beads#5509).
+//
+// NOTE: the non-git fallback here is the walk-up probe alone, so relative to
+// GetRedirectInfo this drops three cwd-specific tiers: BEADS_DIR (deliberate,
+// see above), the worktree-local redirect / separate-DB probe, and
+// GetWorktreeFallbackBeadsDir. Inside a git worktree those tiers can answer
+// differently, so a caller that has not already resolved dir the way
+// `bd -C dir` does wants GetRedirectInfo, not this.
+func GetRedirectInfoFrom(dir string) RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepoFrom(dir), func() string { return findBeadsDirUpward(dir) })
+}
+
+// redirectInfoFor reports the redirect state given the repo-local .beads
+// directory ("" outside a git repository) and a fallback locator for the
+// non-git case.
+func redirectInfoFor(repoLocalBeadsDir string, fallback func() string) RedirectInfo {
 	// First, always check the git repo's local .beads directory for redirects
 	// This handles the case where BEADS_DIR is pre-set to the redirect target
-	if localBeadsDir := findLocalBdsDirInRepo(); localBeadsDir != "" {
-		if info := checkRedirectInDir(localBeadsDir); info.IsRedirected {
+	if repoLocalBeadsDir != "" {
+		if info := checkRedirectInDir(repoLocalBeadsDir); info.IsRedirected {
 			return info
 		}
 	}
 
 	// Fall back to original logic for non-git-repo cases
-	if localBeadsDir := findLocalBeadsDir(); localBeadsDir != "" {
+	if localBeadsDir := fallback(); localBeadsDir != "" {
 		return checkRedirectInDir(localBeadsDir)
 	}
 
@@ -392,13 +417,36 @@ func checkRedirectInDir(beadsDir string) RedirectInfo {
 // This ignores BEADS_DIR to find the "true local" .beads for redirect detection.
 // bd-wayc3: Added to detect redirects even when BEADS_DIR is pre-set.
 func findLocalBdsDirInRepo() string {
-	// Get git repo root
-	repoRoot := git.GetRepoRoot()
+	return repoLocalBeadsDir(git.GetRepoRoot())
+}
+
+// findLocalBdsDirInRepoFrom is findLocalBdsDirInRepo for the git repository
+// containing dir rather than the process cwd.
+func findLocalBdsDirInRepoFrom(dir string) string {
+	repoRoot, err := gitOutput(dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return ""
+	}
+	return repoLocalBeadsDir(repoRoot)
+}
+
+// repoLocalBeadsDir returns <repoRoot>/.beads when repoRoot is known and the
+// directory exists, else "".
+//
+// repoRoot is canonicalized here so both locators share one form: the cwd
+// variant receives it pre-canonicalized from git.GetRepoRoot(), while the From
+// variant hands over raw `git rev-parse --show-toplevel` output, which on
+// Windows is `C:/...` or msys `/c/...`. Left un-normalized, the os.Stat below
+// misses and the repo-local tier falls through to the walk-up locator — the
+// fallback bd-wayc3 exists to beat. Canonicalizing after the "" guard is
+// deliberate: utils.CanonicalizePath("") resolves to the process cwd, which
+// would leak the cwd's .beads into an answer about another directory.
+func repoLocalBeadsDir(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
 
-	beadsDir := filepath.Join(repoRoot, ".beads")
+	beadsDir := filepath.Join(utils.CanonicalizePath(git.NormalizePath(repoRoot)), ".beads")
 	if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 		return beadsDir
 	}
@@ -444,22 +492,19 @@ func findLocalBeadsDir() string {
 	if err != nil {
 		return ""
 	}
+	return findBeadsDirUpward(cwd)
+}
 
-	for dir := cwd; dir != "/" && dir != "."; {
+// findBeadsDirUpward returns the nearest .beads directory at or above start,
+// without following redirects, or "" when there is none.
+func findBeadsDirUpward(start string) string {
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root (works on both Unix and Windows)
-			// On Unix: filepath.Dir("/") returns "/"
-			// On Windows: filepath.Dir("C:\\") returns "C:\\"
-			break
-		}
-		dir = parent
 	}
 
 	return ""
@@ -630,7 +675,8 @@ func FindBeadsDirFrom(startDir string) string {
 		}
 	}
 
-	for dir := startDir; dir != "/" && dir != "."; {
+	walk := NewAncestorDirWalk(startDir, startDir)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
@@ -649,11 +695,6 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 
 	if fallbackBeadsDir != "" {
@@ -707,6 +748,95 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	}
 
 	return false
+}
+
+// AncestorDirWalk yields canonical directories from startDir upward, up to and
+// including the filesystem root.
+//
+// The OS temp root is an ancestor ceiling that *ends* the walk rather than
+// skipping one directory: a walk that starts below the temp root stops there
+// without yielding it, so the temp root's own ancestors are unreachable from
+// below. That matters when TMPDIR points inside a project (TMPDIR=$REPO/tmp),
+// where the project's own .beads sits above the ceiling and is not discovered
+// from a path under $REPO/tmp. Terminating is the deliberate choice: resuming
+// above the temp root would let a walk started below it adopt ambient state
+// from the temp root's ancestors, which is the capture this ceiling exists to
+// prevent. A caller whose actual discovery origin is the temp root may inspect
+// that starting directory exactly once, which keeps a deliberately initialized
+// /tmp workspace usable without letting ambient /tmp/.beads state capture
+// projects below it. Both paths are canonicalized once so macOS
+// /var -> /private/var aliases cannot bypass the ceiling.
+//
+// The filesystem root is yielded. The hand-rolled loops this type replaces were
+// inconsistent about it — most stopped before "/" while findDatabaseInTree and
+// FindAllDatabases inspected it — and the resolvers are easier to reason about
+// when they agree on which ancestors exist. The ceiling is not extended to "/"
+// because it guards against ambient state in a world-writable shared root,
+// which the filesystem root is not.
+type AncestorDirWalk struct {
+	next     string
+	origin   string
+	tempRoot string
+	done     bool
+}
+
+// NewAncestorDirWalk constructs an upward directory walk. originDir is the
+// caller's actual discovery start even when startDir begins a later segment of
+// a bounded walk.
+func NewAncestorDirWalk(startDir, originDir string) *AncestorDirWalk {
+	return &AncestorDirWalk{
+		next:     canonicalizeAncestorWalkPath(startDir),
+		origin:   canonicalizeAncestorWalkPath(originDir),
+		tempRoot: canonicalizeAncestorWalkPath(os.TempDir()),
+	}
+}
+
+// canonicalizeAncestorWalkPath resolves the longest existing ancestor and
+// reattaches any missing tail. Discovery often starts from a not-yet-created
+// project path; a bare EvalSymlinks would leave /var unresolved while the
+// existing temp root resolves to /private/var, defeating the ceiling.
+func canonicalizeAncestorWalkPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	cur := filepath.Clean(abs)
+	remainder := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			resolved = utils.CanonicalizePath(resolved)
+			if remainder == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, remainder)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(abs)
+		}
+		remainder = filepath.Join(filepath.Base(cur), remainder)
+		cur = parent
+	}
+}
+
+// Next returns the next directory permitted by the temp-root ceiling.
+func (w *AncestorDirWalk) Next() (string, bool) {
+	if w == nil || w.done || w.next == "" || w.next == "." {
+		return "", false
+	}
+	dir := w.next
+	if w.tempRoot != "" && dir == w.tempRoot && dir != w.origin {
+		w.done = true
+		return "", false
+	}
+
+	parent := filepath.Dir(dir)
+	if parent == dir || (w.tempRoot != "" && dir == w.tempRoot) {
+		w.done = true
+	} else {
+		w.next = parent
+	}
+	return dir, true
 }
 
 // hasBeadsDatabase is the strict counterpart to hasBeadsProjectFiles: it
@@ -819,7 +949,8 @@ func FindBeadsDir() string {
 	if walkBoundary != "" {
 		walkBoundaryCanonical = utils.CanonicalizePath(walkBoundary)
 	}
-	for dir := cwdCanonical; dir != "/" && dir != "."; {
+	walk := NewAncestorDirWalk(cwdCanonical, cwdCanonical)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		// Stop at the walk boundary (exclusive — don't check this directory).
 		// For worktrees: stops before worktree root so step 3 handles it.
 		// For non-worktrees: stops before git root (which is checked below in the
@@ -827,7 +958,6 @@ func FindBeadsDir() string {
 		if walkBoundaryCanonical != "" && dir == walkBoundaryCanonical {
 			break
 		}
-
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			beadsDir = FollowRedirect(beadsDir)
@@ -836,11 +966,6 @@ func FindBeadsDir() string {
 			}
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 
 	// 3. Worktree-specific fallback: redirect, own .beads, shared .beads.
@@ -968,7 +1093,8 @@ func FindBeadsDir() string {
 			extendedRootCanonical = utils.CanonicalizePath(extendedRoot)
 		}
 
-		for dir := walkBoundaryCanonical; dir != "/" && dir != "."; {
+		extendedWalk := NewAncestorDirWalk(walkBoundaryCanonical, cwdCanonical)
+		for dir, ok := extendedWalk.Next(); ok; dir, ok = extendedWalk.Next() {
 			beadsDir := filepath.Join(dir, ".beads")
 			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 				beadsDir = FollowRedirect(beadsDir)
@@ -982,11 +1108,6 @@ func FindBeadsDir() string {
 				break
 			}
 
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
 		}
 	}
 
@@ -1245,7 +1366,8 @@ func findDatabaseInTree() string {
 	}
 
 	// Walk up directory tree (regular repository or worktree fallback)
-	for {
+	walk := NewAncestorDirWalk(dir, dir)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			// Follow redirect if present
@@ -1257,19 +1379,10 @@ func findDatabaseInTree() string {
 			}
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-
 		// Stop at git root to avoid finding unrelated databases
 		if gitRootCanonical != "" && dir == gitRootCanonical {
 			break
 		}
-
-		dir = parent
 	}
 
 	return ""
@@ -1291,11 +1404,20 @@ func FindAllDatabases() []DatabaseInfo {
 		return databases
 	}
 
-	// Find git root to limit the search
+	// Find git root to limit the search. Canonicalize the boundary so the
+	// `dir == gitRoot` comparison below is robust against symlink or case-form
+	// mismatches, but only when there is a boundary: outside a git repository
+	// findGitRoot returns "" and CanonicalizePath("") resolves to the current
+	// working directory, which would fire the break on the walk's first
+	// iteration and stop discovery at the CWD. Mirrors findDatabaseInTree.
 	gitRoot := findGitRoot()
+	if gitRoot != "" {
+		gitRoot = utils.CanonicalizePath(gitRoot)
+	}
 
 	// Walk up directory tree
-	for {
+	walk := NewAncestorDirWalk(dir, dir)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			// Follow redirect if present
@@ -1323,12 +1445,6 @@ func FindAllDatabases() []DatabaseInfo {
 
 				// Skip if we've already seen this database (via symlink or other path)
 				if seen[canonicalPath] {
-					// Move up one directory
-					parent := filepath.Dir(dir)
-					if parent == dir {
-						break
-					}
-					dir = parent
 					continue
 				}
 				seen[canonicalPath] = true
@@ -1344,19 +1460,10 @@ func FindAllDatabases() []DatabaseInfo {
 			}
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-
 		// Stop at git root to avoid finding unrelated databases
 		if gitRoot != "" && dir == gitRoot {
 			break
 		}
-
-		dir = parent
 	}
 
 	return databases

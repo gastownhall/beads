@@ -27,10 +27,10 @@ func bdGraph(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
-// runGraphWithReadOnlyStdout gives the child a real stdout handle that cannot
+// runWithReadOnlyStdout gives the child a real stdout handle that cannot
 // be written. Unlike a closed pipe, this produces a normal write error on both
 // Unix and Windows instead of depending on SIGPIPE behavior.
-func runGraphWithReadOnlyStdout(t *testing.T, bd, dir string, env []string, args ...string) (string, error) {
+func runWithReadOnlyStdout(t *testing.T, bd, dir string, env []string, args ...string) (string, error) {
 	t.Helper()
 	stdoutPath := filepath.Join(t.TempDir(), "stdout.txt")
 	if err := os.WriteFile(stdoutPath, nil, 0o600); err != nil {
@@ -42,7 +42,7 @@ func runGraphWithReadOnlyStdout(t *testing.T, bd, dir string, env []string, args
 	}
 	defer func() { _ = stdout.Close() }()
 
-	cmd := exec.Command(bd, append([]string{"graph"}, args...)...)
+	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdout = stdout
@@ -127,7 +127,7 @@ func TestEmbeddedGraph(t *testing.T) {
 	})
 
 	t.Run("dot_output_error", func(t *testing.T) {
-		stderr, err := runGraphWithReadOnlyStdout(t, bd, dir, bdEnv(dir), "--dot", epic.ID)
+		stderr, err := runWithReadOnlyStdout(t, bd, dir, bdEnv(dir), "graph", "--dot", epic.ID)
 		if err == nil {
 			t.Fatalf("graph --dot succeeded with read-only stdout; stderr:\n%s", stderr)
 		}
@@ -135,6 +135,24 @@ func TestEmbeddedGraph(t *testing.T) {
 			t.Fatalf("graph --dot stderr = %q, want writer diagnostic", stderr)
 		}
 	})
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "all_separator_output_error", args: []string{"graph", "--all", "--compact"}},
+		{name: "all_open_separator_output_error", args: []string{"graph", "--all", "--open"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr, err := runWithReadOnlyStdout(t, bd, dir, bdEnv(dir), tc.args...)
+			if err == nil {
+				t.Fatalf("%s succeeded with read-only stdout; stderr:\n%s", strings.Join(tc.args, " "), stderr)
+			}
+			if !strings.Contains(stderr, "writing graph output") {
+				t.Fatalf("%s stderr = %q, want writer diagnostic", strings.Join(tc.args, " "), stderr)
+			}
+		})
+	}
 
 	// ===== --json =====
 

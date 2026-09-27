@@ -10,11 +10,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/journalops"
 	"github.com/steveyegge/beads/memoryops"
 )
 
@@ -411,6 +411,12 @@ type Storage interface {
 	// Work queries
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error)
+	// GetReadyWorkWithCountsAndTotal is GetReadyWorkWithCounts plus the size
+	// of the whole ready set the page was cut from — the same number
+	// ReadyWorkCounter.CountReadyWork(filter) answers — resolved in the same
+	// read transaction and statements as the page. It is what lets
+	// `bd ready --limit N` print "Showing N of M" without a second pass.
+	GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error)
 	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 
@@ -691,6 +697,19 @@ type GarbageCollector interface {
 	DoltGC(ctx context.Context) error
 }
 
+// FullGarbageCollector provides a full Dolt garbage collection, which collects
+// the old generation as well as the new one.
+//
+// Dolt GC is generational: each pass promotes the chunks reachable at that
+// moment into the old generation, and DoltGC only visits the new generation.
+// After a history rewrite (Flatten, Compact) the orphaned commit chain usually
+// lives in the old generation, so DoltGC reclaims nothing and callers must use
+// DoltGCFull. Prefer DoltGC for periodic hygiene, where a full pass costs
+// minutes on large stores for no extra reclaim.
+type FullGarbageCollector interface {
+	DoltGCFull(ctx context.Context) error
+}
+
 // Flattener squashes all Dolt commit history into a single commit.
 // Callers should type-assert to this interface for history compaction.
 type Flattener interface {
@@ -763,117 +782,62 @@ type StateHasher interface {
 	GetStateHash(ctx context.Context) (string, error)
 }
 
-// EventsJournalRow is one raw bd_events_journal row surfaced to the
-// `bd events` CLI. IssueJSON is empty when the op is a delete (no surviving
-// row); DepJSON is empty for non-dependency ops; CommentJSON is empty for
-// non-comment ops. TS is the insert-time timestamp (stamped inside the
-// committing transaction) normalized to a string.
-type EventsJournalRow struct {
-	Seq         int64
-	TS          string
-	Op          string
-	IssueID     string
-	IssueJSON   string
-	DepJSON     string
-	CommentJSON string
-}
-
-// EventsJournalTruncatedCode is the stable machine-readable code a consumer
-// matches on when its checkpoint has fallen below the retained journal window.
-const EventsJournalTruncatedCode = "events_journal_truncated"
-
-// EventsJournalTruncatedError reports that a sequential read cannot resume from
-// the caller's checkpoint because the rows it needs next were pruned.
+// The durable mutation journal's vocabulary lives in the journalops leaf, and
+// these four names are ALIASES of it — not copies, and not a compatibility
+// shim to be deleted later. The canon is journalops: what a record carries,
+// what a page promises and what a truncation means are stated there, once, and
+// every citation in this tree points at those symbols rather than repeating
+// them here.
 //
-// Without it, `WHERE seq > since` cannot distinguish "nothing new" from "your
-// prefix is gone": a consumer resuming past a prune would either see an empty
-// success and stall forever, or silently skip to the current floor and lose
-// every record in between. Both are silent data loss, so the read fails loudly
-// instead and hands back the window it can actually serve.
+// THE ALIAS DIRECTION IS THE LOAD-BEARING PART. journalops imports context and
+// fmt and nothing else, so it cannot name anything in this package; this
+// package can name it. Declaring the canon down there and aliasing up here is
+// what makes the leaf a leaf. And because a Go alias is the SAME TYPE, every
+// existing implementation, every errors.As site and every caller compiles
+// unchanged across the move — which is why the journal became a role without a
+// line of behavior changing.
 //
-// Floor is the lowest seq still retained, or Head+1 when the journal holds no
-// rows at all. Head is the highest seq the counter has ever assigned; it never
-// decreases under a prune, so Floor > Head means "fully pruned, caught up to
-// Head". A consumer that receives this must decide explicitly — resume from
-// Floor-1 and accept the gap, or rebuild from scratch — and the engine does not
-// decide for it.
-type EventsJournalTruncatedError struct {
-	// Since is the checkpoint the reported window begins after, which is the
-	// caller's own checkpoint in every case except one.
-	//
-	// When the rows the read can serve start above the caller's checkpoint —
-	// the ordinary "your prefix was pruned" case — Since IS that checkpoint and
-	// Floor is the first row still retained.
-	//
-	// When the prefix is intact but the retained window has an interior hole
-	// (a restored or hand-edited table; bd's own prune cannot produce one),
-	// Since is instead the last seq the engine could serve contiguously from
-	// the caller's checkpoint, and Floor is where the next intact island
-	// starts. A batch with BOTH shapes reports the prefix one; the interior
-	// hole is reported on the next read, once the caller has resumed past the
-	// first. Every gap is surfaced, one resume at a time.
-	//
-	// Since therefore never reports a value BELOW what the caller presented, so
-	// echoing it back can never make a consumer re-read records it already has.
-	Since int64
-	// Floor is the lowest retained seq (Head+1 when nothing is retained).
-	Floor int64
-	// Head is the highest seq ever assigned.
-	Head int64
-}
+// The two interfaces BELOW these aliases stay declared here on purpose. They
+// are the operator's half of the plane — retention and per-instance activation
+// — and journalops states why they are deliberately not on the role.
+type (
+	// EventsJournalRow is journalops.Row: one raw bd_events_journal record.
+	EventsJournalRow = journalops.Row
+	// EventsJournalPage is journalops.Page: rows plus the journal head.
+	EventsJournalPage = journalops.Page
+	// EventsJournalTruncatedError is journalops.TruncatedError: a checkpoint
+	// below the retained window, carrying the window that can still be served.
+	EventsJournalTruncatedError = journalops.TruncatedError
+	// EventsJournalCursor is journalops.Journal: the role a consumer holds to
+	// page through the journal from a checkpoint.
+	EventsJournalCursor = journalops.Journal
+)
 
-func (e *EventsJournalTruncatedError) Error() string {
-	return fmt.Sprintf(
-		"events journal truncated: checkpoint %d is below the retained window [%d..%d]; records %d..%d were pruned",
-		e.Since, e.Floor, e.Head, e.Since+1, e.Floor-1)
-}
-
-// EventsJournalPage is one journal read that also reports how far behind the
-// caller is: the rows it asked for, and the head of the journal's history at
-// the moment they were read.
-//
-// The two travel together because they are only meaningful together. Rows alone
-// cannot answer "poll again now, or wait?" — a full page might be the end of
-// the journal or the first thousand of a hundred thousand — and a head read
-// separately could be taken from a different instant and land BELOW the last
-// row served, which a consumer reads as "past the end" and stalls on.
-//
-// Head is the highest seq the counter has ever assigned. It never decreases
-// under a prune (see EventsJournalTruncatedError), so it is the journal's
-// history rather than its contents: a fully pruned journal reports its rows
-// gone and its head unchanged.
-type EventsJournalPage struct {
-	Rows []EventsJournalRow
-	Head int64
-}
-
-// EventsJournalCursor is the READ-ONLY half of the journal seam, for a consumer
-// that pages through the journal with a checkpoint.
-//
-// It is separate from EventsJournalAccessor rather than a method on it because
-// of who holds it. Retention is an operator decision made by the workspace
-// (`bd events prune` and the automatic bounding); a surface that only PUBLISHES
-// the journal — bd serve's GET /v0/beads/events — must not be handed a delete.
-// Narrowing the interface is what makes "this surface cannot prune" a fact
-// about the type rather than a promise about the handler.
-type EventsJournalCursor interface {
-	// ReadEventsJournalPage returns rows with seq greater than since, ordered
-	// by seq ascending and capped by limit (0 = no cap), together with the
-	// journal head read in the same transaction. It returns
-	// *EventsJournalTruncatedError on the same terms ReadEventsJournal does.
-	ReadEventsJournalPage(ctx context.Context, since int64, limit int) (EventsJournalPage, error)
-}
+// EventsJournalTruncatedCode is journalops.TruncatedCode: the stable wire
+// spelling of a truncation.
+const EventsJournalTruncatedCode = journalops.TruncatedCode
 
 // EventsJournalAccessor reads and prunes the durable events journal
 // (bd_events_journal) through the store's own transaction machinery. Unlike
 // RawDBAccessor — which only the server-mode store provides — this works on the
 // embedded store too, which owns its connections and exposes no stable *sql.DB.
-// Callers that need the journal should type-assert to this interface; a caller
-// that only reads should ask for EventsJournalCursor instead.
+//
+// IT IS THE OPERATOR SURFACE, and it is deliberately not the role. Retention is
+// a decision the workspace makes, so a caller that only READS the journal asks
+// for EventsJournalCursor — journalops.Journal — instead, and a surface
+// documented never to retain then cannot prune rather than merely promising not
+// to. journalops' package doc states the split; this is the half it excludes.
+//
+// ReadEventsJournal is also a SECOND read body, not a narrowing of the role's:
+// it pays for the head read only in the cases where the truncation verdict is
+// ambiguous, because `bd events tail --follow` runs it every second. The two
+// share the row query and the verdict (issueops.ComputeEventsTruncation) and
+// differ in exactly that, so they are pinned separately.
 type EventsJournalAccessor interface {
 	// ReadEventsJournal returns rows with seq greater than since, ordered by
 	// seq ascending, optionally capped by limit (0 = no cap). It returns
-	// *EventsJournalTruncatedError when since sits below the retained window.
+	// *EventsJournalTruncatedError when since sits below the retained window,
+	// on the terms journalops.Journal.ReadEventsJournalPage states.
 	ReadEventsJournal(ctx context.Context, since int64, limit int) ([]EventsJournalRow, error)
 	// PruneEventsJournal deletes rows with seq below before, honoring the
 	// retain-days / retain-rows floors (0 = floor disabled), and returns the
@@ -887,8 +851,36 @@ type EventsJournalAccessor interface {
 // parallel fixtures), and opening one with the journal enabled must not turn it
 // on for any other. Callers type-assert; a store that does not implement it
 // simply cannot journal.
+//
+// Activation is operator surface for the reason retention is: it is the
+// workspace's answer to "do we record at all", read from the workspace's own
+// config, and a consumer holding the read role has no business changing it.
 type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
+}
+
+// VersionedHistoryConfigurer controls dual-write issue-version history
+// activation on ONE storage instance. Implementations must never use
+// process-global state, for the same reason as EventsJournalConfigurer:
+// a process can hold several stores at once, and enabling history on one must
+// not turn it on for any other. Callers type-assert; a store that does not
+// implement it simply cannot record version history.
+//
+// SINGLE WRITER ONLY until the version_id primary-key swap lands.
+// issue_versions is keyed PRIMARY KEY (issue_id, revision), and revision is
+// a local ordinal (MAX(revision)+1 inside the writing transaction), so two
+// disconnected writers that each mint the same ordinal for the same issue
+// collide on merge — and TryAutoResolveMergeConflicts
+// (versioncontrolops/mergesettle.go) fails the pull for a table it does not
+// know. Enabling versioned history is therefore safe only with a SINGLE
+// writer per store until migration 0068 steps 1-3 (UUID version_id primary
+// key, ordinal demoted to an index) land; those steps follow as their own
+// PR. "Single writer" means one writer at a time per store, not merely one
+// clone: MAX(revision)+1 is not a safe allocator for two concurrent
+// transactions in one store either (gastownhall/beads#6379, item 4). See
+// issueops/version_history.go for why the ordinal is never an address.
+type VersionedHistoryConfigurer interface {
+	SetVersionedHistoryEnabled(enabled bool)
 }
 
 // LifecycleManager provides lifecycle inspection beyond Close().
@@ -940,6 +932,13 @@ type BackupStore interface {
 // answer fails to compile rather than falling back to an unbounded query.
 type ReadyWorkCounter interface {
 	CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error)
+}
+
+// ExternalDependencyQueryStore returns the narrow set of explicit external
+// blocking edges. Policy decorators use this instead of scanning every graph
+// edge on each ready-work query.
+type ExternalDependencyQueryStore interface {
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 }
 
 // Transaction provides atomic multi-operation support within a single database transaction.

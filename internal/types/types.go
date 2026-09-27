@@ -9,6 +9,7 @@ import (
 	"hash"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -80,8 +81,10 @@ type Issue struct {
 	// row_lock is random per write, so generic Issue serialization would break
 	// stable list/export round-trips. The detail-view DTO projects it explicitly
 	// as `revision` for guarded clients (IssueDetails.Revision, set by
-	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}); Go
-	// consumers read RowVersion directly.
+	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}) — as a
+	// decimal STRING, via RevisionToken, because the full int64 range does not
+	// survive a JSON number in a JavaScript consumer. Go consumers read
+	// RowVersion directly and never see the string.
 	//
 	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
 	// generic update path, but NOT on direct-UPDATE paths that rewrite text
@@ -298,6 +301,36 @@ var ErrFieldTooLong = errors.New("field exceeds maximum length")
 func CheckFieldLen(name, val string) error {
 	if n := utf8.RuneCountInString(val); n > MaxFieldLen {
 		return fmt.Errorf("%w: %s is %d characters (max %d)", ErrFieldTooLong, name, n, MaxFieldLen)
+	}
+	return nil
+}
+
+// MaxTextBytes is the maximum size, in BYTES, of a `TEXT` column — the storage
+// ceiling for the values this schema keeps in one rather than in a LONGTEXT.
+//
+// BYTES, NOT CHARACTERS, which is the one place this differs from MaxFieldLen
+// beside it and the reason CheckTextLen does not simply call CheckFieldLen with
+// a bigger number: MySQL and Dolt bound a TEXT column by its encoded length, so
+// a value of 40000 multi-byte characters overflows it while a value of 65000
+// ASCII characters does not.
+//
+// The large-content columns are deliberately NOT bounded by this — issue
+// descriptions and comment bodies are LONGTEXT precisely so an embedded image or
+// a captured transcript fits (migrations 0049 and 0065). This is for the columns
+// that hold a VALUE rather than a document, `config.value` being the one a front
+// door can reach with an arbitrary payload.
+const MaxTextBytes = 65535
+
+// CheckTextLen returns ErrFieldTooLong (wrapped with context) when val exceeds
+// MaxTextBytes bytes. name is the field label used in the message.
+//
+// It exists so a front door can refuse an oversized value with a 400 that names
+// the member, instead of letting the column refuse it — which arrives as a
+// driver error, is classified as a generic 500, and tells the caller nothing it
+// could act on.
+func CheckTextLen(name, val string) error {
+	if n := len(val); n > MaxTextBytes {
+		return fmt.Errorf("%w: %s is %d bytes (max %d)", ErrFieldTooLong, name, n, MaxTextBytes)
 	}
 	return nil
 }
@@ -1156,12 +1189,44 @@ type IssueDetails struct {
 	// from a legacy migration-0054 row, so the projection lives beside the
 	// field and not at each caller.
 	//
-	// NO omitempty. A guarded write that expects 0 matches an un-mutated
+	// IT IS A STRING ON THE WIRE, holding the token's decimal spelling
+	// (RevisionToken). The token is drawn from the FULL int64 range, and a JSON
+	// number past 2^53 does not survive a JavaScript consumer: it reads back a
+	// rounded value, echoes that as its guard, and earns a 409 for a row nobody
+	// touched. A string round-trips exactly in every JSON consumer, which is
+	// what an equality-only opaque token needs, and it leaves a future backend
+	// free to mint a token that is not an int64 at all.
+	//
+	// NO omitempty. A guarded write that expects "0" matches an un-mutated
 	// legacy row and misses any current one, which is correct CAS; omitting
 	// the member would leave that client unable to read the value it must
 	// send, and would make an absent field mean either "legacy-zero" or "this
-	// producer has no token".
-	Revision int64 `json:"revision"`
+	// producer has no token". The legacy migration-0054 value is the string
+	// "0", not the empty string.
+	Revision string `json:"revision"`
+}
+
+// RevisionToken renders an optimistic-concurrency token for the wire.
+//
+// This and ParseRevisionToken are the ONE spelling of the encoding. The token
+// is int64 everywhere inside bd — the row_lock column, Issue.RowVersion, the
+// ExpectedVersion guard on the issueops requests — and a decimal string
+// everywhere on the wire, because it is opaque and equality-only and a JSON
+// number loses the top bits in a JavaScript consumer. Keeping the conversion in
+// one pair of functions is what keeps "0" meaning the legacy row rather than
+// an absent value.
+func RevisionToken(v int64) string {
+	return strconv.FormatInt(v, 10)
+}
+
+// ParseRevisionToken reads a wire revision token back to the internal int64.
+//
+// It accepts exactly what RevisionToken emits. A caller must echo the token a
+// response carried rather than compose one, so anything else is a client that
+// invented a value, and reporting that as a parse failure is more useful than
+// guessing at it.
+func ParseRevisionToken(s string) (int64, error) {
+	return strconv.ParseInt(s, 10, 64)
 }
 
 // NewIssueDetails starts a detail view of issue with the wire-visible revision
@@ -1172,7 +1237,7 @@ type IssueDetails struct {
 // literal would publish a silently wrong token that nothing can distinguish
 // from a right one. The caller fills in labels, edges and counts afterwards.
 func NewIssueDetails(issue Issue) *IssueDetails {
-	return &IssueDetails{Issue: issue, Revision: issue.RowVersion}
+	return &IssueDetails{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
 }
 
 // DependencyType categorizes the relationship
@@ -1194,7 +1259,7 @@ const (
 	DepRepliesTo  DependencyType = "replies-to" // Conversation threading
 	DepRelatesTo  DependencyType = "relates-to" // Loose knowledge graph edges
 	DepDuplicates DependencyType = "duplicates" // Deduplication link
-	DepSupersedes DependencyType = "supersedes" // Version chain link
+	DepSupersedes DependencyType = "supersedes" // Replacement link: old issue superseded by a different issue (bd supersede); not a version relation
 
 	// Entity types (HOP foundation - Decision 004)
 	DepAuthoredBy DependencyType = "authored-by" // Creator relationship
@@ -1871,6 +1936,33 @@ type IssueFilter struct {
 	AfterCreatedAt *time.Time
 	AfterID        string
 
+	// AfterPriority EXTENDS the position above to the (priority ASC,
+	// created_at DESC, id ASC) order — the order SortBy="priority" (and the
+	// empty default) renders. When it is set the restriction becomes
+	// (priority > AfterPriority)
+	//   OR (priority = AfterPriority AND created_at < AfterCreatedAt)
+	//   OR (priority = AfterPriority AND created_at = AfterCreatedAt AND id > AfterID),
+	// which is total for the same reason the pair above is: priority and
+	// created_at are NOT NULL and id is the primary key, so a page boundary
+	// inside a run of equal (priority, created_at) resolves on id with no
+	// dropped and no duplicated row.
+	//
+	// IT IS THE SAME POSITION, NOT A SECOND ONE. AfterCreatedAt still decides
+	// whether a position was supplied at all; a priority with no instant is
+	// half a position and is ignored, exactly as AfterID alone is. Set it only
+	// under the priority order — pairing it with SortBy="created" positions in
+	// an order the ORDER BY does not render, which pages a walk through rows
+	// in an order neither side agrees on.
+	//
+	// THE KEY IS MUTABLE, which created_at is not, and that changes what a
+	// walk can promise. `bd update --priority` moves a row between pages
+	// mid-walk, so a row can be seen twice or missed — the already-documented
+	// consequence of pinning a position rather than a snapshot, reached here
+	// by updates as well as by creations. What totality buys is that
+	// UNCHANGED data never skips or duplicates, which is what welding the
+	// listing to the created order originally bought.
+	AfterPriority *int
+
 	// Empty/null checks
 	EmptyDescription bool
 	NoAssignee       bool
@@ -1885,6 +1977,17 @@ type IssueFilter struct {
 
 	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
+
+	// EphemeralTier selects a SWEEP TIER rather than the raw ephemeral flag:
+	// a row is ephemeral-tier when ephemeral=1 OR it carries a wisp_type.
+	// The distinction exists because the flag alone misses typed wisps minted
+	// without it (older creators set wisp_type but not ephemeral), and those
+	// rows must fall to `bd purge`, not accumulate forever — while NoHistory
+	// beads (wisps plane, ephemeral=0, no wisp_type) stay durable-tier.
+	// Unlike Ephemeral=true this field does NOT route the search to the wisps
+	// plane alone; a tier query must merge both planes, because legacy typed
+	// wisps can live in the issues table. nil = no tier constraint.
+	EphemeralTier *bool
 
 	// Pinned filtering
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
@@ -1975,11 +2078,19 @@ type IssueFilter struct {
 	// reference columns in WHERE regardless of SELECT shape. Default false preserves
 	// today's behavior at every call site.
 	//
-	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
-	// Dolt). The proxied-server (domain/db) path does not check this field yet
-	// and always returns fully-hydrated issues with IsLitePartial=false —
-	// correct results, no lite optimization. Wiring Lite through domain/db is
-	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	// Backend coverage: honored on BOTH stacks for the COUNTED page, which is
+	// every read that returns IssueWithCounts — issueops.Reader.List on either
+	// implementation, and so `bd list --json` on both routes and
+	// GET /v0/beads/issues. It rides the counts mega-query as
+	// sqlbuild.CountsHydration.Lite, which both seams derive from this field
+	// through their hydrationFor helper.
+	//
+	// The UNCOUNTED search is store-backed only: SearchIssuesInTx selects
+	// issueLiteProjection from this field, and the domain/db SearchIssues has
+	// no equivalent, so a caller on that path gets correct rows fully hydrated
+	// rather than an error. That path serves the text renderings, which print
+	// no body, so the gap costs bytes off the wire and no correctness.
+	// See engdocs/EXTENDING.md.
 	Lite bool
 }
 
@@ -2102,6 +2213,11 @@ type WorkFilter struct {
 	// When Type is set, ExcludeTypes is ignored (explicit type inclusion wins).
 	ExcludeTypes []IssueType
 
+	// ID exclusion: omit these issues before ordering, pagination, or atomic
+	// ready-claim selection. Storage policy decorators use this to inject
+	// query-time blockers that cannot be represented by local is_blocked state.
+	ExcludeIDs []string
+
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
@@ -2116,6 +2232,19 @@ type WorkFilter struct {
 	// MaxRowsSource attributes which knob set MaxRows. Expected values:
 	// "--max-rows", "BEADS_MAX_ROWS", or "" (library users with no source).
 	MaxRowsSource string
+
+	// Lite mirrors IssueFilter.Lite for ready work: the heavy TEXT columns
+	// (description, design, acceptance_criteria, notes, payload, waiters) are
+	// not selected, and the returned issues carry IsLitePartial=true with those
+	// fields zero-valued. It bounds the SIZE of a row, never which rows match:
+	// a predicate that reads a heavy column keeps working, because WHERE is
+	// independent of the SELECT shape.
+	//
+	// Unlike IssueFilter.Lite it is honored on BOTH backends, through the
+	// counts mega-query's CountsHydration. The two knobs beside it there
+	// (SkipLabels, SkipCounts) have no WorkFilter counterpart on purpose; see
+	// issueops.readyHydrationFor.
+	Lite bool
 }
 
 // StaleFilter is used to filter stale issue queries
@@ -2123,6 +2252,10 @@ type StaleFilter struct {
 	Days   int    // Issues not updated in this many days
 	Status string // Filter by status (open|in_progress|blocked), empty = all non-closed
 	Limit  int    // Maximum issues to return
+
+	Labels        []string // AND semantics: issue must have ALL these labels
+	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
+	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
 }
 
 // WispFilter is used to filter ListWisps queries.

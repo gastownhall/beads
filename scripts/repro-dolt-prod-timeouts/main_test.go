@@ -108,9 +108,68 @@ func TestParseFlagsPreservesExplicitExistingWorkspaceSeedMode(t *testing.T) {
 	}
 }
 
+func TestCleanEnvUsesHostKeySemantics(t *testing.T) {
+	env := []string{
+		"FIRST=keep-first",
+		"beads_dir=drop-on-windows",
+		"BEADS_DIR=drop-canonical-first",
+		"ALLOWED=keep-duplicate-first",
+		"MALFORMED",
+		"BeAdS_DoLt_PoRt=drop-on-windows",
+		"BEADS_DOLT_PORT=drop-canonical",
+		"BEADS_DIR=drop-canonical-second",
+		"BEADſ_DIR=keep-unicode-near-collision",
+		"ALLOWED=keep-duplicate-second",
+		"=C:=keep-windows-drive-entry",
+		"LAST=keep-last",
+	}
+
+	got := cleanEnv(slices.Clone(env), "BEADS_DIR", "BEADS_DOLT_PORT")
+	want := []string{
+		"FIRST=keep-first",
+		"beads_dir=drop-on-windows",
+		"ALLOWED=keep-duplicate-first",
+		"MALFORMED",
+		"BeAdS_DoLt_PoRt=drop-on-windows",
+		"BEADſ_DIR=keep-unicode-near-collision",
+		"ALLOWED=keep-duplicate-second",
+		"=C:=keep-windows-drive-entry",
+		"LAST=keep-last",
+	}
+	if runtime.GOOS == "windows" {
+		want = []string{
+			"FIRST=keep-first",
+			"ALLOWED=keep-duplicate-first",
+			"MALFORMED",
+			"BEADſ_DIR=keep-unicode-near-collision",
+			"ALLOWED=keep-duplicate-second",
+			"=C:=keep-windows-drive-entry",
+			"LAST=keep-last",
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanEnv() = %q, want %q on %s", got, want, runtime.GOOS)
+	}
+}
+
 func TestBenchmarkCommandBuildersStripDoltEnvOverrides(t *testing.T) {
+	windowsSpellings := map[string]string{
+		"BEADS_DIR":                "beads_dir",
+		"BEADS_DOLT_SERVER_PORT":   "BeAdS_DoLt_SeRvEr_PoRt",
+		"BEADS_DOLT_PORT":          "beads_dolt_port",
+		"BEADS_DOLT_SERVER_HOST":   "BeAdS_DoLt_SeRvEr_HoSt",
+		"BEADS_DOLT_SERVER_SOCKET": "beads_dolt_server_socket",
+	}
 	for _, key := range subprocessEnvDenylist {
-		t.Setenv(key, "ambient-"+strings.ToLower(key))
+		ambientKey := key
+		if runtime.GOOS == "windows" {
+			var ok bool
+			ambientKey, ok = windowsSpellings[key]
+			if !ok {
+				t.Fatalf("missing mixed-case Windows spelling for denied key %q", key)
+			}
+		}
+		t.Setenv(ambientKey, "ambient-"+strings.ToLower(key))
 	}
 	const allowedAmbient = "BEADS_REPRO_TIMEOUTS_ALLOWED_AMBIENT=present"
 	allowedKey, allowedValue, _ := strings.Cut(allowedAmbient, "=")
@@ -179,7 +238,7 @@ func TestBenchmarkCommandBuildersStripDoltEnvOverrides(t *testing.T) {
 			for _, key := range subprocessEnvDenylist {
 				for _, entry := range cmd.Env {
 					gotKey, _, _ := strings.Cut(entry, "=")
-					if gotKey == key {
+					if environmentKeyIdentity(gotKey) == environmentKeyIdentity(key) {
 						t.Fatalf("Env retained ambient denied override %q", entry)
 					}
 				}
@@ -436,6 +495,19 @@ func TestSeedProductionShapeFullSmallIssueCountRealSchema(t *testing.T) {
 	if err := serverCmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Deliberately exempt from the suite-sweep contract every other package
+	// that spawns a `dolt sql-server` is wired into (internal/doltserver's
+	// SweepDeadSuiteRoots + SweepSuiteTestServers + ApplyLeakPolicy).
+	// This is a manual repro harness, and its cleanup is an unconditional
+	// Kill + Wait rather than a stop that can fail silently: the server is
+	// dead before t.TempDir() removes baseDir, so this package cannot produce
+	// the live-server-with-deleted-cwd state that another suite's post-run
+	// sweep reaps and fails on. A run killed outright (`go test -timeout`,
+	// Ctrl-C) does leak one, but with an intact cwd and no claimed suite
+	// root, so no sweep arm can reach it and no suite is misblamed for it.
+	// Wiring a TestMain here would buy only the killed-run reap; if that
+	// becomes worth it, the template is internal/storage/uow/testmain_test.go
+	// (wy-j2zc8q).
 	t.Cleanup(func() {
 		_ = serverCmd.Process.Kill()
 		_ = serverCmd.Wait()
