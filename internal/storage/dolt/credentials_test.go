@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,57 @@ func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 	}
 	if gotUser != "user" || gotPassword != "pass" {
 		t.Fatalf("credential env = user:%q password:%q", gotUser, gotPassword)
+	}
+}
+
+func TestPrepareDoltCLITransferCommandAddsRemoteUserFlag(t *testing.T) {
+	tests := []struct {
+		name  string
+		creds *remoteCredentials
+		args  []string
+		want  []string
+	}{
+		{
+			name:  "fetch",
+			creds: &remoteCredentials{username: "alice", password: "secret"},
+			args:  []string{"fetch", "peer"},
+			want:  []string{"dolt", "fetch", "--user", "alice", "peer"},
+		},
+		{
+			name:  "pull",
+			creds: &remoteCredentials{username: "alice", password: "secret"},
+			args:  []string{"pull", "peer", "main"},
+			want:  []string{"dolt", "pull", "--user", "alice", "peer", "main"},
+		},
+		{
+			name:  "push preserves flags",
+			creds: &remoteCredentials{username: "alice", password: "secret"},
+			args:  []string{"push", "--force", "peer", "main"},
+			want:  []string{"dolt", "push", "--user", "alice", "--force", "peer", "main"},
+		},
+		{
+			name:  "no credentials",
+			creds: nil,
+			args:  []string{"fetch", "peer"},
+			want:  []string{"dolt", "fetch", "peer"},
+		},
+		{
+			name:  "password only",
+			creds: &remoteCredentials{password: "secret"},
+			args:  []string{"fetch", "peer"},
+			want:  []string{"dolt", "fetch", "peer"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, _, cancel := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), tt.creds, false, tt.args...)
+			defer cancel()
+
+			if got := cmd.Args; !slices.Equal(got, tt.want) {
+				t.Fatalf("command args = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

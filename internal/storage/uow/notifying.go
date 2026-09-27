@@ -352,6 +352,16 @@ func (p *notifyingProvider) SetEventsJournalEnabled(enabled bool) {
 	}
 }
 
+// SetVersionedHistoryEnabled forwards dual-write issue-version history
+// activation to the provider that actually binds it to a transaction
+// (doltSQLProvider.BeginTx), for the same reason and in the same shape as
+// SetEventsJournalEnabled above.
+func (p *notifyingProvider) SetVersionedHistoryEnabled(enabled bool) {
+	if configurer, ok := p.inner.(storage.VersionedHistoryConfigurer); ok {
+		configurer.SetVersionedHistoryEnabled(enabled)
+	}
+}
+
 // eventsMaintenanceRunner is issueops.EventsMaintenanceRunner under this file's
 // import alias, named once so the forwarder below reads as an ordinary
 // capability check.

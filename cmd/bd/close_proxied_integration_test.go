@@ -42,6 +42,19 @@ func bdProxiedCloseFail(t *testing.T, bd, dir string, args ...string) string {
 	return stdout + stderr
 }
 
+// lastJSONObjectLine returns the last line of s that looks like a compact JSON
+// object, or "". Partial-failure stderr is the per-id refusal prose followed by
+// the machine-readable summary, so the report is the last such line.
+func lastJSONObjectLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); strings.HasPrefix(line, "{") {
+			return line
+		}
+	}
+	return ""
+}
+
 func bdProxiedCloseJSON(t *testing.T, bd, dir string, args ...string) []*types.Issue {
 	t.Helper()
 	fullArgs := append([]string{"close", "--json"}, args...)
@@ -360,6 +373,81 @@ func TestProxiedServerClose(t *testing.T) {
 		db := openProxiedDB(t, p)
 		if got := readStatus(t, db, blocked.ID); got != types.StatusClosed {
 			t.Errorf("status with --force: got %q, want closed", got)
+		}
+	})
+
+	t.Run("close_partial_failure_exits_nonzero", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cpf")
+		closable := bdProxiedCreate(t, bd, p.dir, "Closable")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked", "--deps", "depends-on:"+blocker.ID)
+		out := bdProxiedCloseFail(t, bd, p.dir, closable.ID, blocked.ID)
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected partial-failure summary, got: %s", out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, closable.ID); got != types.StatusClosed {
+			t.Errorf("closable issue status = %q, want closed despite the refused sibling", got)
+		}
+		if got := readStatus(t, db, blocked.ID); got == types.StatusClosed {
+			t.Error("blocked issue should remain open without --force")
+		}
+	})
+
+	// The machine-readable half of the #6648 contract. A JSON consumer is
+	// exactly the caller the issue was filed for, so exit 1 must come with a
+	// payload naming the failed ids instead of prose it would have to scrape —
+	// while stdout keeps the success-shaped closed-issues array, the way
+	// bd update's reportUpdateFailures already splits them.
+	t.Run("close_partial_failure_json_names_the_failed_ids", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cpj")
+		closable := bdProxiedCreate(t, bd, p.dir, "JSON closable")
+		blocker := bdProxiedCreate(t, bd, p.dir, "JSON blocker")
+		blocked := bdProxiedCreate(t, bd, p.dir, "JSON blocked", "--deps", "depends-on:"+blocker.ID)
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", "--json", closable.ID, blocked.ID)
+		if err == nil {
+			t.Fatalf("expected a partial batch close to exit nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// stdout keeps the success shape: just the survivor.
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("expected the closed-issues array on stdout, got:\n%s", stdout)
+		}
+		var closed []*types.Issue
+		if jsonErr := json.Unmarshal([]byte(stdout[start:]), &closed); jsonErr != nil {
+			t.Fatalf("parse closed array: %v\nraw: %s", jsonErr, stdout[start:])
+		}
+		if len(closed) != 1 || closed[0].ID != closable.ID {
+			t.Fatalf("stdout closed array = %d issue(s) %v, want only the survivor %s", len(closed), closed, closable.ID)
+		}
+
+		// stderr's last line is the failure report.
+		line := lastJSONObjectLine(stderr)
+		if line == "" {
+			t.Fatalf("expected a compact JSON failure line on stderr, got:\n%s", stderr)
+		}
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if jsonErr := json.Unmarshal([]byte(line), &report); jsonErr != nil {
+			t.Fatalf("parse failure report: %v\nraw: %s", jsonErr, line)
+		}
+		if report.Error != "1 of 2 issues failed to close" {
+			t.Errorf("failure report error = %q, want the N of M summary", report.Error)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != blocked.ID {
+			t.Fatalf("failure report named %+v, want exactly the refused id %s", report.Failed, blocked.ID)
+		}
+		if report.Failed[0].Error == "" {
+			t.Errorf("failure report for %s carried no reason", blocked.ID)
 		}
 	})
 
