@@ -55,7 +55,36 @@ func (r *storeStatsReporter) Stats(ctx context.Context, req issueops.StatsReques
 		// summary becomes.
 		return issueops.StatsResult{}, nil
 	}
+	summary.InfraIssues = r.infraIssues(ctx)
 	return issueops.StatsResult{Summary: *summary}, nil
+}
+
+// infraIssues counts the durable rows of the configured infra types, the one
+// breakdown GetStatistics cannot compute because it needs configuration. See
+// workapi.CountStatsInfraIssues.
+//
+// It is a second read, outside the one GetStatistics ran, so the two counts
+// may come from adjacent snapshots - the same allowance AssigneeStats makes
+// for its two queries on this seam.
+//
+// A failed count leaves it zero rather than failing the summary, as the
+// unit-of-work route does and as AssigneeStats treats a ready-count failure: a
+// disclosure line is not worth every other number `bd status` prints. The set
+// itself cannot fail here - GetInfraTypes falls back to YAML and then the
+// built-in names on its own, for the listing as for this count.
+func (r *storeStatsReporter) infraIssues(ctx context.Context) int {
+	byType, err := r.store.CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
+	if err != nil {
+		return 0
+	}
+	return workapi.CountStatsInfraIssues(byType, r.listConfig(ctx))
+}
+
+// listConfig is the slice of the listing's configuration the infra breakdown
+// needs: the configured infra set, with the listing's own fallback to the
+// built-in names when none is configured.
+func (r *storeStatsReporter) listConfig(ctx context.Context) workapi.ListConfig {
+	return workapi.ListConfig{InfraSet: r.store.GetInfraTypes(ctx)}
 }
 
 // AssigneeStats asks storage its two questions and folds them through the
@@ -83,5 +112,5 @@ func (r *storeStatsReporter) AssigneeStats(ctx context.Context, req issueops.Ass
 		readyCount = len(ready)
 	}
 
-	return issueops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(issues, readyCount)}, nil
+	return issueops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(issues, readyCount, r.listConfig(ctx))}, nil
 }

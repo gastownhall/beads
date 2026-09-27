@@ -121,6 +121,11 @@ type StatsResult struct {
 // zero. AssigneeStats does merge it, and says so — one of the four places the
 // two methods differ.
 //
+// A FAILED INFRA BREAKDOWN IS REPORTED AS ZERO on both methods, not as an
+// error. InfraIssues needs the configured infra set and, workspace-wide, a
+// second per-type count; a failure to obtain either leaves it zero and the
+// rest of the summary is still returned, on every implementation.
+//
 // Reporting is a READ. Nothing here records a history entry, fires a completion
 // hook or changes a row, and a refusal changes nothing either. Deterministic
 // request-validation failures match ErrValidation; result values are
@@ -184,8 +189,9 @@ type StatsReporter interface {
 	// A FAILED READY-WORK QUERY IS REPORTED AS ZERO READY WORK, not as an
 	// error: the other five numbers are still right and the summary is still
 	// returned. That is the shipped behavior of both `bd status --assigned`
-	// routes, published here rather than quietly tightened, and it is the one
-	// place this role can hand back a number that is not an answer. A caller
+	// routes, published here rather than quietly tightened, and it is, with
+	// the infra breakdown above, one of the two places this role can hand back
+	// a number that is not an answer. A caller
 	// that must not confuse "none ready" with "could not tell" asks the
 	// ready-work question directly, where the failure is its own.
 	//

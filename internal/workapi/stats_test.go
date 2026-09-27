@@ -73,6 +73,12 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 		blocked    int
 		deferred   int
 		closed     int
+		gates      int
+		templates  int
+		infra      int
+		// cfg is the workspace's list configuration; the zero value is the
+		// built-in infra set (agent, role, message), as it is for the listing.
+		cfg ListConfig
 	}{
 		{
 			name: "counts every status and ready work",
@@ -101,11 +107,64 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 			issues: []*types.Issue{nil, {Status: types.StatusOpen}},
 			ready:  0, total: 1, open: 1,
 		},
+		{
+			// The rows a default `bd list --assignee` will not show. This
+			// route's filter sets only Assignee, so IsTemplate stays nil and
+			// the actor's gates and protos really are in these rows - leaving
+			// the two counts at zero would give the scoped answer the same
+			// silent disagreement with its own listing the workspace-wide
+			// answer had. They overlap the status buckets rather than forming
+			// their own, exactly as PinnedIssues does workspace-wide.
+			name: "gates and protos are broken out of the total, not removed from it",
+			issues: []*types.Issue{
+				{Status: types.StatusOpen},
+				{Status: types.StatusOpen, IssueType: types.TypeGate},
+				{Status: types.StatusClosed, IssueType: types.TypeGate},
+				{Status: types.StatusOpen, IsTemplate: true},
+			},
+			ready: 1, total: 4, open: 3, closed: 1, gates: 2, templates: 1,
+		},
+		{
+			// A gate that is also a proto is counted in both, since the two
+			// listing suppressions are independent.
+			name:   "a templated gate is counted in both breakdowns",
+			issues: []*types.Issue{{Status: types.StatusOpen, IssueType: types.TypeGate, IsTemplate: true}},
+			ready:  0, total: 1, open: 1, gates: 1, templates: 1,
+		},
+		{
+			// `bd list --assignee` excludes the infra types too, so the actor's
+			// infra-typed rows are the third breakdown. With nothing configured
+			// that is the built-in set.
+			name: "infra-typed rows are broken out under the built-in set",
+			issues: []*types.Issue{
+				{Status: types.StatusOpen, IssueType: types.TypeTask},
+				{Status: types.StatusOpen, IssueType: types.IssueType("agent")},
+				{Status: types.StatusClosed, IssueType: types.IssueType("message")},
+			},
+			ready: 1, total: 3, open: 2, closed: 1, infra: 2,
+		},
+		{
+			// A configured types.infra REPLACES the built-in set, and the
+			// breakdown must follow it: agent is an ordinary type here and
+			// gate is infra, so a gate lands in both the gate and infra
+			// counts, as the listing suppresses it on both grounds. The rows
+			// are chosen so the two sets DISAGREE - two gates and one agent
+			// give 2 under the configured set and 1 under the built-in one -
+			// so a fold that ignored cfg fails here.
+			name: "a configured infra set replaces the built-in one",
+			issues: []*types.Issue{
+				{Status: types.StatusOpen, IssueType: types.IssueType("agent")},
+				{Status: types.StatusOpen, IssueType: types.TypeGate},
+				{Status: types.StatusClosed, IssueType: types.TypeGate},
+			},
+			cfg:   ListConfig{InfraSet: map[string]bool{"gate": true}},
+			ready: 0, total: 3, open: 2, closed: 1, gates: 2, infra: 2,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FoldStatsAssigneeSummary(tt.issues, tt.ready)
+			got := FoldStatsAssigneeSummary(tt.issues, tt.ready, tt.cfg)
 			if got.TotalIssues != tt.total || got.OpenIssues != tt.open || got.InProgressIssues != tt.inProgress || got.DeferredIssues != tt.deferred || got.ClosedIssues != tt.closed {
 				t.Errorf("FoldStatsAssigneeSummary() = %+v, want total=%d open=%d in_progress=%d deferred=%d closed=%d", got, tt.total, tt.open, tt.inProgress, tt.deferred, tt.closed)
 			}
@@ -115,6 +174,9 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 			if got.ReadyIssues == nil || *got.ReadyIssues != tt.ready {
 				t.Errorf("ready issues = %v, want %d", got.ReadyIssues, tt.ready)
 			}
+			if got.GateIssues != tt.gates || got.TemplateIssues != tt.templates || got.InfraIssues != tt.infra {
+				t.Errorf("gate/template/infra issues = %d/%d/%d, want %d/%d/%d", got.GateIssues, got.TemplateIssues, got.InfraIssues, tt.gates, tt.templates, tt.infra)
+			}
 			// The three fields AssigneeStats says are always zero here. They
 			// are not "not yet implemented" on this path: the fold has no
 			// input that could produce them.
@@ -122,5 +184,23 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 				t.Errorf("extended fields = %d/%d/%v, want zeros", got.PinnedIssues, got.EpicsEligibleForClosure, got.AverageLeadTime)
 			}
 		})
+	}
+}
+
+// TestCountStatsInfraIssues pins that the workspace-wide infra breakdown sums
+// the CONFIGURED set, with the listing's fallback to the built-in names when
+// nothing is configured, and ignores every other type.
+func TestCountStatsInfraIssues(t *testing.T) {
+	byType := map[string]int{"task": 5, "agent": 2, "message": 1, "gate": 4}
+
+	if got := CountStatsInfraIssues(byType, ListConfig{}); got != 3 {
+		t.Errorf("built-in set: got %d, want 3 (agent + message)", got)
+	}
+	configured := ListConfig{InfraSet: map[string]bool{"gate": true, "role": true}}
+	if got := CountStatsInfraIssues(byType, configured); got != 4 {
+		t.Errorf("configured set {gate, role}: got %d, want 4 - agent is not infra once the set is replaced", got)
+	}
+	if got := CountStatsInfraIssues(nil, ListConfig{}); got != 0 {
+		t.Errorf("no rows: got %d, want 0", got)
 	}
 }

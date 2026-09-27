@@ -50,8 +50,39 @@ func (r *statsReporter) Stats(ctx context.Context, _ publicops.StatsRequest) (pu
 		if summary == nil {
 			return publicops.StatsResult{}, nil
 		}
+		summary.InfraIssues = statsInfraIssues(ctx, uw)
 		return publicops.StatsResult{Summary: *summary}, nil
 	})
+}
+
+// statsInfraIssues is the one breakdown GetStatistics cannot compute, because
+// it needs the configured infra set; see workapi.CountStatsInfraIssues.
+//
+// A failure to compute it - reading the set or counting by type - leaves it
+// zero rather than failing the summary, as the store-backed body does and as
+// AssigneeStats treats a ready-count failure: a disclosure line is not worth
+// every other number `bd status` prints.
+func statsInfraIssues(ctx context.Context, uw UnitOfWork) int {
+	cfg, err := statsListConfig(ctx, uw)
+	if err != nil {
+		return 0
+	}
+	byType, err := uw.IssueUseCase().CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
+	if err != nil {
+		return 0
+	}
+	return workapi.CountStatsInfraIssues(byType, cfg)
+}
+
+// statsListConfig reads the configured infra set the same way the listing
+// does, so the infra breakdown and `bd list`'s suppression agree on which
+// types are infra.
+func statsListConfig(ctx context.Context, uw UnitOfWork) (workapi.ListConfig, error) {
+	infraSet, err := uw.ConfigUseCase().GetInfraTypes(ctx)
+	if err != nil {
+		return workapi.ListConfig{}, fmt.Errorf("load infra types: %w", err)
+	}
+	return workapi.ListConfig{InfraSet: infraSet}, nil
 }
 
 // AssigneeStats folds one actor's rows and ready work into a summary, through
@@ -76,6 +107,13 @@ func (r *statsReporter) AssigneeStats(ctx context.Context, req publicops.Assigne
 		if ready, readyErr := uw.IssueUseCase().GetReadyWork(ctx, workapi.BuildStatsAssigneeWorkFilter(assignee)); readyErr == nil {
 			readyCount = len(ready.Items)
 		}
-		return publicops.StatsResult{Summary: workapi.FoldStatsAssigneeSummary(page.Items, readyCount)}, nil
+		// An unreadable infra set leaves InfraIssues zero rather than failing
+		// the summary, as the workspace-wide answer does (statsInfraIssues).
+		cfg, cfgErr := statsListConfig(ctx, uw)
+		summary := workapi.FoldStatsAssigneeSummary(page.Items, readyCount, cfg)
+		if cfgErr != nil {
+			summary.InfraIssues = 0
+		}
+		return publicops.StatsResult{Summary: summary}, nil
 	})
 }
