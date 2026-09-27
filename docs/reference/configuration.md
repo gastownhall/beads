@@ -106,7 +106,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
 | `prime.max-memory-chars` | `--max-memory-chars` | `BD_PRIME_MAX_MEMORY_CHARS` | `0` | Max total bytes of memory entries injected by `bd prime`, at whole-memory boundaries (0 = unlimited) |
-| `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | Create a Dolt history commit after each successful write (see [below](#auto-commit-sql-commits-vs-dolt-commits)) |
+| `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | `off\|on\|batch`: `on` creates a Dolt history commit after each successful write; `batch`/`off` defer it to `bd dolt commit` (see [below](#auto-commit-sql-commits-vs-dolt-commits)) |
 | `dolt.auto-push` | — | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (opt-in; see [below](#auto-push)) |
 | `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
@@ -195,6 +195,26 @@ Or in `config.yaml`:
 dolt:
   auto-commit: off
 ```
+
+`batch` and `off` defer the Dolt history commit instead of skipping the write: the change is
+still durable in the working set, and `bd dolt commit` records the accumulated batch as a single
+Dolt commit. This applies on every storage mode — embedded, direct SQL-server, and
+proxied-server. In proxied-server mode the deferral covers the writes the CLI makes on that
+route, including workspace config and version metadata, and `bd dolt commit` is the only flush
+point there: the SIGTERM/SIGHUP flush of a live batch-mode process needs an open store, which
+proxied mode never has (it does run in embedded and direct SQL-server modes).
+
+Two kinds of write stay outside the deferral, in every mode:
+
+- **Explicit commit points** — `bd batch` (whose commit message defaults to a synthesized one
+  when `-m` is absent, so every batch commits), `bd mol bond`, `bd mol pour`, `bd mol squash`,
+  `bd mol wisp create`, and the wisp half of `bd mol burn` — commit what they wrote, with the
+  message they were given: the commit is that command's contract rather than auto-commit
+  policy. Burning a *persistent* molecule is an ordinary delete, so it honors the policy and
+  defers with everything else.
+- **Writes made by a `bd serve` process**, whose HTTP API requests carry their own context
+  instead of the CLI's, so a daemon keeps committing per write even while the CLI on the same
+  database defers.
 
 ### Auto-backup
 

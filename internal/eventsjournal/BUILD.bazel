@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "eventsjournal",
+    srcs = [
+        "activation.go",
+        "autoprune.go",
+        "record.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/eventsjournal",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/storage",
+        "//internal/storage/issueops",
+    ],
+)
+
+go_test(
+    name = "eventsjournal_test",
+    srcs = [
+        "activation_test.go",
+        "autoprune_test.go",
+    ],
+    embed = [":eventsjournal"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/issueops",
+        "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+    ],
+)

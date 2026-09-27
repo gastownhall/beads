@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "git",
+    srcs = ["gitdir.go"],
+    importpath = "github.com/steveyegge/beads/internal/git",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "git_test",
+    srcs = [
+        "gitdir_test.go",
+        "jujutsu_test.go",
+    ],
+    embed = [":git"],
+)

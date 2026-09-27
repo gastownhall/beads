@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -276,9 +277,27 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// .git/info/exclude instead (matches bd init --stealth) and strip any beads section a
 			// previous run leaked into the tracked .gitignore so stealth leaves no trace.
 			if isStealthRepo(path) {
-				if err = addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false); err == nil {
-					_, err = removeBeadsProjectGitignoreSection(path)
+				// The two halves are independent: removing the leaked section needs only the
+				// tracked .gitignore, so it must still run when the exclude write fails (an
+				// unreadable .git/info/exclude would otherwise leave Dolt and credential
+				// patterns committed). bd init --stealth already runs both unconditionally
+				// (init.go), so join the errors instead of gating one on the other.
+				excludeErr := addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false)
+				removed, removeErr := removeBeadsProjectGitignoreSection(path)
+				if removed {
+					// The confirmation bd init --stealth prints for the same event (init.go).
+					// Without it a privacy repair that succeeded alongside a failed exclude
+					// write is invisible: the check reports only the exclude error.
+					fmt.Printf("  %s Removed leaked beads section from tracked .gitignore\n", ui.RenderPass("✓"))
 				}
+				if excludeErr != nil && removeErr == nil {
+					// Neither plane covers the patterns now: addExcludePatterns fails before (or
+					// on) its write, and the tracked section is confirmed gone. checkProjectExcludeStealth
+					// reports only the unreadable exclude, so name the lost coverage here, where it is lost.
+					fmt.Printf("  %s %s are ignored by neither .git/info/exclude nor the tracked .gitignore\n",
+						ui.RenderWarn("⚠"), strings.Join(doctor.ProjectGitignorePatterns, ", "))
+				}
+				err = errors.Join(excludeErr, removeErr)
 			} else {
 				err = doctor.FixProjectGitignore(path)
 			}

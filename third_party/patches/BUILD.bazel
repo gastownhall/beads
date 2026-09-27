@@ -1,0 +1,12 @@
+# Patches applied to third-party Go modules via go_deps.module_override in
+# MODULE.bazel. They replace WORKSPACE-era BUILD files shipped by some dolt
+# dependencies that do not resolve under bzlmod + gazelle.
+#
+# eventsapi_schema_build.patch, flatbuffers_v23_importpath.patch and
+# dolt_go_serial.patch are adapted from the gascity project
+# (github.com/gastownhall/gascity, third_party/patches). Keep them in sync
+# when bumping the pinned dolt versions in go.mod.
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*.patch"]))

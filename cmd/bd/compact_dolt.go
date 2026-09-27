@@ -91,30 +91,9 @@ Examples:
 
 		cutoff := time.Now().AddDate(0, 0, -compactDoltDays)
 
-		var oldCommits int
-		var recentHashes []string
-		var initialHash, boundaryHash string
-
-		for _, entry := range logEntries {
-			if entry.Date.Before(cutoff) {
-				oldCommits++
-				boundaryHash = entry.Hash
-			} else {
-				recentHashes = append(recentHashes, entry.Hash)
-			}
-		}
-		initialHash = logEntries[totalCommits-1].Hash
-		boundaryHash = ""
-		for _, entry := range logEntries {
-			if entry.Date.Before(cutoff) {
-				boundaryHash = entry.Hash
-				break
-			}
-		}
-
-		for i, j := 0, len(recentHashes)-1; i < j; i, j = i+1, j-1 {
-			recentHashes[i], recentHashes[j] = recentHashes[j], recentHashes[i]
-		}
+		plan := planCompaction(logEntries, cutoff)
+		oldCommits, recentHashes := plan.oldCommits, plan.recentHashes
+		initialHash, boundaryHash := plan.initialHash, plan.boundaryHash
 
 		recentCommits := len(recentHashes)
 

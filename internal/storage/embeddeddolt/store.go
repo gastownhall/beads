@@ -32,6 +32,7 @@ var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
@@ -52,6 +53,10 @@ type EmbeddedDoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
+	// versionedHistoryEnabled activates dual-write issue-version history for
+	// THIS store instance only (storage.VersionedHistoryConfigurer); never
+	// process-global.
+	versionedHistoryEnabled atomic.Bool
 	// readOnly marks a store opened via OpenReadOnly or
 	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
 	// migrations) were skipped and write transactions are refused
@@ -362,7 +367,69 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 // returns regardless of outcome.
 //
 // The database must already exist (created during initSchema).
-func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (err error) {
+func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) error {
+	pending, err := s.commitConn(ctx, commit, fn)
+	if err != nil {
+		return err
+	}
+	logBlockedRecheckFailure(pending, s.recheckBlockedAfterCommit(ctx, pending))
+	return nil
+}
+
+// logBlockedRecheckFailure reports a post-commit recheck failure instead of
+// returning it. The write it followed is committed and durable, and every
+// caller of a store write reads an error as "the mutation did not land":
+// surfacing this one would make automated callers retry and double-apply.
+// What is left behind is the stale is_blocked flag `bd doctor` and
+// `bd recompute-blocked` repair, which is the state every write had before
+// the recheck existed.
+//
+// The sentence is issueops.BlockedRecheckFailureMessage, shared with the Dolt
+// store; only the sink differs. This store has no metrics registry, so unlike
+// the Dolt store's counter this line is the whole signal.
+func logBlockedRecheckFailure(pending issueops.BlockedRecheck, err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s\n", issueops.BlockedRecheckFailureMessage(pending, err))
+}
+
+// recheckBlockedAfterCommit recomputes the blocked state of the dependents a
+// committed unblocking write recorded, on a fresh snapshot
+// (gastownhall/beads#6716).
+//
+// Embedded transactions serialize: commitConn opens a fresh OpenSQL handle
+// per transaction, and OpenSQL (open.go) waits in a backoff with no elapsed
+// time limit for the engine, so a second handle blocks until the first has
+// been cleaned up. Two transactions therefore never run against overlapping
+// snapshots in one process, and the skew of #6716 cannot occur here; no
+// embedded reproduction exists. The recheck is kept so the embedded store
+// honors the same contract as the server store — a stale row recorded by
+// one transaction is settled after its commit — and it runs only after the
+// first handle's cleanup, so it cannot deadlock on itself. It runs no SQL
+// when nothing was recorded.
+//
+// It runs on issueops.BlockedRecheckContext: the write it follows is durable,
+// so the repair must outlive that write's cancellation, and a recheck must
+// never start another recheck. The returned failure is for the caller to log,
+// never to return — see logBlockedRecheckFailure.
+func (s *EmbeddedDoltStore) recheckBlockedAfterCommit(ctx context.Context, pending issueops.BlockedRecheck) error {
+	if pending.Empty() || issueops.InBlockedRecheck(ctx) {
+		return nil
+	}
+	ctx, cancel := issueops.BlockedRecheckContext(ctx)
+	defer cancel()
+	if _, err := s.commitConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.RecomputeIsBlockedInTx(ctx, tx, pending.IssueIDs, pending.WispIDs)
+	}); err != nil {
+		return issueops.BlockedRecheckFailed(err)
+	}
+	return nil
+}
+
+// commitConn is withConn's transaction: it hands back the dependents the
+// transaction's unblocking writes recorded once it has committed.
+func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (pending issueops.BlockedRecheck, err error) {
 	if s.closed.Load() {
 		err = errClosed
 		return
@@ -392,6 +459,10 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
 	defer clearJournalScope()
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
+	defer clearVersionScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if fnErr := fn(tx); fnErr != nil {
 		err = errors.Join(fnErr, tx.Rollback())
@@ -408,12 +479,19 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 	committed = true
+	pending = issueops.TakeBlockedRecheck(tx)
 	return
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
 func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+}
+
+// SetVersionedHistoryEnabled activates dual-write issue-version history for
+// this store instance only.
+func (s *EmbeddedDoltStore) SetVersionedHistoryEnabled(enabled bool) {
+	s.versionedHistoryEnabled.Store(enabled)
 }
 
 // commitEmbeddedTx classifies an unconfirmed SQL commit response as

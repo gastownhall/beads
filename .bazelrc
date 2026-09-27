@@ -1,0 +1,46 @@
+# Bazel configuration for beads (side-by-side with the Go toolchain; `go build`
+# and `go test` are unaffected). Bzlmod only; Bazel version is pinned in
+# .bazelversion.
+common --enable_bzlmod
+common --color=no
+
+# ICU policy (engdocs/ICU-POLICY.md): build go-mysql-server with its pure-Go
+# regex backend so no target links libicu. MODULE.bazel carries the matching
+# gazelle_override for github.com/dolthub/go-mysql-server.
+build --@rules_go//go/config:tags=gms_pure_go
+
+# Keep the client PATH/env out of action keys.
+build --incompatible_strict_action_env
+
+test --test_output=errors
+# Test environment isolation (the pr-core `go test` environment of
+# scripts/ci/lib/test-env.sh): every test process runs under a wrapper that
+# gives it a private HOME, XDG_CONFIG_HOME, DOLT_ROOT_PATH, empty global
+# gitconfig and a short, per-process TMPDIR (unix-socket sun_path limit).
+# Client HOME/TMPDIR are never forwarded, so no host value enters the action key.
+test --run_under=//tools/bazel:test_env
+test --test_env=BD_DISABLE_METRICS=1
+test --test_env=BD_DISABLE_EVENT_FLUSH=1
+
+# PR-core parity: the same test selection as scripts/ci/pr-core.sh (race,
+# -short, skips, tag filters); the environment comes from the wrapper above.
+test:prcore --@rules_go//go/config:race
+test:prcore --test_arg=-test.short
+test:prcore --test_arg=-test.skip=^TestEmbedded
+test:prcore --test_env=BEADS_TEST_SKIP=dolt
+test:prcore --test_tag_filters=-requires-docker,-embedded,-manual
+
+test:ci --config=prcore
+test:ci --keep_going --test_summary=terse
+
+# Remote execution against any REAPI-compatible service. Only generic tuning
+# lives here; the executor endpoint and TLS credentials are never committed.
+# Developers put them in a gitignored user.bazelrc or .bazelrc.local; CI writes
+# a generated rc outside the workspace and passes it with --bazelrc.
+build:remote-exec --jobs=64
+build:remote-exec --remote_download_minimal
+build:remote-exec --remote_timeout=600
+build:remote-exec --remote_retries=3
+
+try-import %workspace%/.bazelrc.local
+try-import %workspace%/user.bazelrc

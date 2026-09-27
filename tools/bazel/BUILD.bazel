@@ -1,0 +1,9 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# Wraps every test process (`test --run_under` in .bazelrc) with the isolated
+# HOME/XDG/Dolt/git environment that scripts/ci/lib/test-env.sh gives `go test`.
+sh_binary(
+    name = "test_env",
+    srcs = ["test_env.sh"],
+    visibility = ["//visibility:public"],
+)

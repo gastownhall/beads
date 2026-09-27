@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -142,11 +143,40 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
+// treeCycleMarker is appended to a tree line whose issue is already an
+// ancestor on the current path. It mirrors the "(shown above)" arm of
+// bd dep tree but means something narrower: an ancestor of this very line,
+// not any node the walk happened to print earlier.
+//
+// It names the edge class rather than a command to run. childrenMap is built
+// from parent-child edges alone, so every cycle this marker can fire on is a
+// parent-child cycle — and no command reports that class today: bd dep cycles
+// and bd doctor both walk the blocking graph (DetectCycles uses
+// AppendBlockingGraphInTx deliberately; see issueops/cycles.go), which admits
+// blocks and conditional-blocks only. Sent there, the reader gets an
+// affirmative "No dependency cycles detected" for the very store that just
+// produced this line. Cite a command here only once one can see these edges.
+const treeCycleMarker = "(cycle: shown above; parent-child cycle in stored edges)"
+
 // printPrettyTree recursively prints the issue tree.
 // Children use the requested list order. With --deps, dependency order takes
 // precedence and the requested order breaks ties. When dr is set, each node's
 // dependency edges are annotated just beneath it.
 func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int) {
+	printPrettyTreePath(childrenMap, parentID, prefix, dr, compare, map[string]bool{parentID: true})
+}
+
+// printPrettyTreePath is printPrettyTree carrying the set of ancestors on the
+// current root-to-node path. childrenMap comes from stored edges, and a cycle
+// in it (parent-child rows imported without validation, or a build that nested
+// every dependency on an epic, as v1.2.2 did) must not recurse forever: the
+// walk allocates until the host swaps (GH#5887). A child already on the path
+// is printed once with a marker and not descended. The set is scoped to the
+// path, not the whole walk, so a node reachable through two parents still
+// renders under both; only a true ancestor counts as a cycle. Like the
+// "(shown above)" arm of bd dep tree, the marked line carries no --deps
+// annotations: they were printed with the node's first appearance.
+func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int, onPath map[string]bool) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
@@ -161,6 +191,10 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 		if isLast {
 			connector = "└── "
 		}
+		if onPath[child.ID] {
+			fmt.Printf("%s%s%s %s\n", prefix, connector, formatPrettyIssue(child), ui.RenderMuted(treeCycleMarker))
+			continue
+		}
 		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssue(child))
 
 		extension := "│   "
@@ -168,7 +202,9 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr, compare)
+		onPath[child.ID] = true
+		printPrettyTreePath(childrenMap, child.ID, prefix+extension, dr, compare, onPath)
+		delete(onPath, child.ID)
 	}
 }
 

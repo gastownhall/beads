@@ -1098,6 +1098,20 @@ paths:
         token here (a legacy row backfilled and not mutated since), so a client
         that defaulted a missing `revision` to 0 would compose guards that
         match exactly the rows it is most dangerous to be wrong about.
+
+
+        THE ROWS CARRY NO COMMENT BODIES, AND THE DETAIL READ DOES. This
+        operation has no `include_comments`: `comments` is always absent here
+        and `comments_omitted` is how a row says that its comment text exists
+        and was not sent, so a caller reads the bodies it wants one detail read
+        each (`GET /v0/beads/issues/{id}?include_comments=true`), as it does for
+        `revision` above. `bd list --include-comments` hydrates a whole page
+        because a CLI listing is one command's whole answer; the cost is a query
+        per commented row, which is a choice a local invocation makes for itself
+        and a served endpoint should not make on a caller's behalf by default.
+        Growing the parameter here is a later revision's call, and until it
+        happens the marker is this operation's answer rather than a hole it
+        cannot describe.
       parameters:
         - name: status
           in: query
@@ -6465,6 +6479,11 @@ components:
           items: { $ref: '#/components/schemas/Dependency' }
         comments:
           type: array
+          description: >-
+            The issue's comment bodies. On a listing they are populated only
+            when the caller opts in (`bd list --include-comments`); absent
+            otherwise, which is what `comment_count` and `comments_omitted`
+            report about.
           items: { $ref: '#/components/schemas/Comment' }
         sender: { type: string }
         ephemeral: { type: boolean }
@@ -6497,6 +6516,23 @@ components:
           description: Number of issues that depend on this one.
         comment_count:
           type: integer
+        comments_omitted:
+          type: boolean
+          description: >-
+            True when `comment_count` is nonzero and `comments` was left out —
+            every such row of a LIST response (`GET /v0/beads/issues`, and `bd
+            list --json` without `--include-comments`). Without it, an absent
+            `comments` key is ambiguous between "no comments" and "comments not
+            included in this response", and on a listing that ambiguity is what
+            makes a content search over the page answer with a plausible
+            non-empty result whose matching rows are missing.
+
+
+            IT IS SET BY THE LIST SURFACES ONLY. `GET /v0/beads/ready` and the
+            claim response carry this same schema and do not set it, so an
+            absent marker there says nothing about whether a row's comments
+            exist — read `comment_count`. Extending the marker to them is
+            tracked as be-ozp.
         parent:
           type: string
           description: Parent issue id, computed from the parent-child edge.

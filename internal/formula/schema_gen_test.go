@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula/schemagen"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // TestSchemaGenIsCurrent re-runs the schemagen walker over types.go
@@ -17,7 +18,7 @@ func TestSchemaGenIsCurrent(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	pkgDir := filepath.Dir(thisFile)
+	pkgDir := bazeltest.CallerDir(thisFile, "internal/formula")
 	typesPath := filepath.Join(pkgDir, "types.go")
 	committedPath := filepath.Join(pkgDir, "schema_gen.go")
 

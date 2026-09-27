@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gittraceenv",
+    srcs = ["gittraceenv.go"],
+    importpath = "github.com/steveyegge/beads/internal/gittraceenv",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/execenv"],
+)
+
+go_test(
+    name = "gittraceenv_test",
+    srcs = ["gittraceenv_test.go"],
+    embed = [":gittraceenv"],
+)

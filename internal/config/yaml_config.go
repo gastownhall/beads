@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
 )
 
@@ -178,14 +179,35 @@ func IsSecretKey(key string) bool {
 	return false
 }
 
-// isGitTracked returns true if the file at path is tracked by git
-// (i.e., has been git-added). Uses `git ls-files --error-unmatch`.
+// isGitTracked reports whether either the containing repository or the
+// inherited Git context tracks the file at path (i.e., it has been git-added).
+// Uses `git ls-files --error-unmatch`. If neither probe succeeds, errors count
+// as untracked — the secret guard only blocks writes it can prove are unsafe.
+//
+// The containing repository is probed first so inherited routing cannot hide a
+// tracked file. Exit 1 is git's "repository reached, path is not tracked"
+// answer and is final; any other failure means the scrubbed environment
+// reached no repository at all — as for a bare repository whose work tree is
+// named only by GIT_DIR/GIT_WORK_TREE — so the inherited context is consulted
+// before declaring the file untracked. Mirrors isGitTrackedFile in cmd/bd.
 func isGitTracked(path string) bool {
-	cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
-	cmd.Dir = filepath.Dir(path)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run() == nil
+	dir := filepath.Dir(path)
+	inherited := os.Environ()
+	for _, env := range [][]string{gitenv.ScrubRouting(inherited), inherited} {
+		cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
+		cmd.Dir = dir
+		cmd.Env = env
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		err := cmd.Run()
+		if err == nil {
+			return true
+		}
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+			return false
+		}
+	}
+	return false
 }
 
 var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are environment variable names, not credentials.
@@ -353,20 +375,77 @@ func WorkspaceYamlValue(beadsDir, key string) (string, bool) {
 // without conflating a malformed or unreadable file with an absent key. A
 // missing file or key returns present=false and no error; all other I/O and
 // YAML shape errors are returned to the caller.
+//
+// It reads config.yaml ONLY. Callers that must agree with the merged reader
+// (config.GetBool and friends) want WorkspaceYamlValueStrictWithLocal below,
+// which also honors the machine-local override layer Initialize merges.
 func WorkspaceYamlValueStrict(beadsDir, key string) (value string, present bool, err error) {
 	if beadsDir == "" {
 		return "", false, nil
 	}
-	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml")) //nolint:gosec // beadsDir is caller-resolved workspace state
+	return strictYamlValueAtPath(filepath.Join(beadsDir, ProjectConfigFileName), key)
+}
+
+// WorkspaceYamlValueStrictWithLocal reads one dotted key from ONE workspace's
+// project-level config the way Initialize's merged reader resolves it: a
+// config.local.yaml beside config.yaml is merged LAST there (the file-loading
+// block at the end of Initialize), i.e. it has the highest priority of the two,
+// so it is consulted first here.
+//
+// "Beside config.yaml" is a condition, not scenery. Initialize hangs its local
+// merge off the project config.yaml it actually found, so a .beads holding
+// config.local.yaml ALONE is never merged and config.GetBool answers from
+// defaults. This reader mirrors that and ignores a lone local file, because
+// honoring one would put it in the same position the layered read exists to
+// fix — the single resolver in the tree that answers from a file nothing else
+// reads — just pointed the other way.
+//
+// That layer is the documented way to hold machine-specific state out of the
+// git-tracked config.yaml (docs/reference/configuration.md), which makes it
+// load-bearing for exactly the settings a cross-workspace open has to resolve
+// against the target — a workspace can track `dolt.shared-server: true` for the
+// team and opt one machine out locally. A workspace-scoped reader that saw only
+// config.yaml would answer differently from every merged-config consumer in the
+// tree for that ordinary shape.
+//
+// Each layer keeps WorkspaceYamlValueStrict's strict contract: an absent file or
+// an absent key falls through to the next layer, while an unreadable file, an
+// unparseable one, or a non-scalar value at the key is returned as an error
+// rather than silently treated as absent. Initialize is equally strict — it
+// fails outright on a config.local.yaml it cannot merge.
+func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, present bool, err error) {
+	if beadsDir == "" {
+		return "", false, nil
+	}
+	names := []string{LocalConfigFileName, ProjectConfigFileName}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, ProjectConfigFileName)); statErr != nil {
+		// No project config.yaml here, so Initialize would have nothing to hang
+		// the local merge off: drop the local layer to stay in step with it. A
+		// stat error other than "not exist" drops it too, matching Initialize,
+		// whose own os.Stat probes for a project config.yaml fail the same way;
+		// the read below then surfaces that error rather than swallowing it.
+		names = names[1:]
+	}
+	for _, name := range names {
+		value, present, err = strictYamlValueAtPath(filepath.Join(beadsDir, name), key)
+		if err != nil || present {
+			return value, present, err
+		}
+	}
+	return "", false, nil
+}
+
+func strictYamlValueAtPath(path, key string) (value string, present bool, err error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is caller-resolved workspace state
 	if os.IsNotExist(err) {
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("reading workspace config.yaml: %w", err)
+		return "", false, fmt.Errorf("reading workspace %s: %w", filepath.Base(path), err)
 	}
 	var root map[string]interface{}
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return "", false, fmt.Errorf("parsing workspace config.yaml: %w", err)
+		return "", false, fmt.Errorf("parsing workspace %s: %w", filepath.Base(path), err)
 	}
 	if root == nil {
 		return "", false, nil
