@@ -42,9 +42,83 @@ func TestInitSafetyRecoveryDocCoversReCloneGotchas(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(lower, "outside") || !strings.Contains(lower, "data_dir") {
-		t.Errorf("docs/recovery/init-safety.md must say damaged/set-aside stores go OUTSIDE data_dir (the sql-server treats every data_dir subdirectory as a database)")
+	// Scope the headline rule to Gotcha 1's own section and match it as a
+	// phrase. Two independent whole-file substring checks ("outside" and
+	// "data_dir" anywhere in this ~400-line document) stayed green through a
+	// rewrite that inverted the advice, so they did not guard the rule this
+	// test's own failure message describes.
+	section, ok := docSection(string(data), gotcha1Heading)
+	if !ok {
+		t.Fatalf("docs/recovery/init-safety.md missing the %q section", gotcha1Heading)
 	}
+	if want := "move it outside data_dir"; !strings.Contains(flattenProse(section), want) {
+		t.Errorf("docs/recovery/init-safety.md %q section must tell the reader to %q: the sql-server treats every data_dir subdirectory as a database, so a set-aside store left inside it crash-loops the server",
+			gotcha1Heading, want)
+	}
+
+	// cmd/bd/init_safety_help.go links to #re-clone-gotchas from inside a Go
+	// string, which neither markdown link checker in docsync_test.go
+	// (TestDocsSiteLinks, TestEngdocsAndRootMarkdownLinks) can see. Pin the
+	// heading here and the link itself in the help test below so the anchor
+	// cannot rot on either side.
+	if !hasHeadingLine(string(data), reCloneGotchasHeading) {
+		t.Errorf("docs/recovery/init-safety.md must keep the %q heading: cmd/bd/init_safety_help.go links to #%s",
+			reCloneGotchasHeading, reCloneGotchasAnchor)
+	}
+}
+
+const (
+	// reCloneGotchasAnchor is the in-page anchor cmd/bd/init_safety_help.go
+	// sends readers to; reCloneGotchasHeading is the doc heading that
+	// generates it.
+	reCloneGotchasAnchor  = "re-clone-gotchas"
+	reCloneGotchasHeading = "## " + reCloneGotchasAnchor
+
+	gotcha1Heading = "### Gotcha 1"
+)
+
+// docSection returns the markdown between the heading line that starts with
+// prefix and the next heading line, ignoring headings inside fenced code
+// blocks.
+func docSection(doc, prefix string) (string, bool) {
+	var (
+		out    []string
+		inside bool
+		fenced bool
+	)
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			fenced = !fenced
+		} else if !fenced && strings.HasPrefix(line, "#") {
+			if inside {
+				break
+			}
+			inside = strings.HasPrefix(line, prefix)
+		}
+		if inside {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n"), inside
+}
+
+// hasHeadingLine reports whether doc contains heading as a whole line, so a
+// mention of the same text in prose does not satisfy the anchor pin.
+func hasHeadingLine(doc, heading string) bool {
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.TrimRight(line, " \t\r") == heading {
+			return true
+		}
+	}
+	return false
+}
+
+// flattenProse lowercases markdown prose and removes the emphasis, code
+// decoration, and hard line wrapping that would otherwise break a phrase
+// match. Underscores survive: `data_dir` is part of the phrase being matched.
+func flattenProse(s string) string {
+	s = strings.NewReplacer("*", "", "`", "").Replace(strings.ToLower(s))
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // TestInitSafetyCLIHelpCoversReCloneGotchas guards the same two re-clone
@@ -83,5 +157,10 @@ func TestInitSafetyCLIHelpCoversReCloneGotchas(t *testing.T) {
 		if !strings.Contains(lower, strings.ToLower(c.substr)) {
 			t.Errorf("cmd/bd/init_safety_help.go missing %s: expected to find %q in the Long help text", c.name, c.substr)
 		}
+	}
+
+	// The other half of the cross-reference pinned in the doc test above.
+	if want := "docs/recovery/init-safety.md#" + reCloneGotchasAnchor; !strings.Contains(string(data), want) {
+		t.Errorf("cmd/bd/init_safety_help.go must send readers to %q for the full detail", want)
 	}
 }

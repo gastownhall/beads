@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-09-08
+Last reviewed: 2026-09-27
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -343,18 +343,39 @@ move a damaged or superseded database directory aside but leave it *inside*
 entirely), the server tries to load the damaged copy too and dies on it —
 even though the healthy database sitting right next to it is fine.
 
+Check which mode you are in before you go looking for `data_dir`: in shared
+server mode (`BEADS_DOLT_SHARED_SERVER=1`, or the `dolt.shared-server` config
+key) it is `~/.beads/shared-server/dolt/` — or `$BEADS_SHARED_SERVER_DIR/dolt/`
+— and that takes precedence over both of the per-project knobs above. That is
+also where this gotcha bites hardest: one shared `data_dir` holds every
+project's database on the machine, so a single stray subdirectory crash-loops
+the server for all of them.
+
 **The fix**
 
 When you set a database directory aside by hand, move it *outside*
 `data_dir` — e.g. up to `/tmp/` or a sibling of `.beads/`, never to a
-sibling path still under `.beads/dolt/`. This is exactly what the automated
-recovery path already does: `bd doctor --fix`'s corrupt-manifest repair
-renames the *whole* `data_dir` directory itself to a timestamped
-`.<ts>.corrupt.backup` sibling (`data_dir` → `data_dir.<ts>.corrupt.backup`),
-landing next to `data_dir`, not inside it. Doing the equivalent by hand but
-leaving the renamed copy nested under the original `data_dir` is what
-triggers this gotcha; see `bd doctor --fix` for the automated, gotcha-free
-version of this move.
+sibling path still under `.beads/dolt/`.
+
+Do not wait for an automated repair to do it for you: no `bd doctor --fix`
+repair performs this move here. The two that come closest are:
+
+- The **corrupt-manifest repair** renames the damaged database's own
+  `.dolt/` directory *in place* — `<data_dir>/<db>/.dolt` →
+  `<data_dir>/<db>/.dolt.<ts>.corrupt.backup` — and reinitializes beside
+  it, so in the standard `<data_dir>/<db>/` layout the backup is nested
+  inside the database directory rather than becoming a new direct child of
+  `data_dir`. It also fires only once its scan can prove the store holds no
+  recoverable chunk data, so it will not touch the superseded-but-populated
+  copy this gotcha is about (`internal/doltserver/manifest_recovery.go`).
+- The rename that *does* move a whole `data_dir` to a timestamped sibling
+  (`data_dir` → `data_dir.<ts>.corrupt.backup`) belongs to a different
+  repair, the database-integrity recovery
+  (`cmd/bd/doctor/fix/database_integrity.go`) — and that one refuses
+  outright for a repo configured in Dolt server mode, so if the
+  crash-looping server is your configured backend it is unavailable too.
+
+Make the move by hand, and make sure it lands outside `data_dir`.
 
 ### Gotcha 2 — a fresh clone needs `bd migrate schema`
 
@@ -375,8 +396,21 @@ A handful of tables — `leases`, `wisps`, `wisp_*`, `events`, `bd_events_*`,
 `local_metadata`, `ignored_schema_migrations`, `repo_mtimes` — are
 dolt-ignored, clone-local tables: they exist on a running database but are
 deliberately excluded from what `bd dolt push`/`pull`/clone transfers, so a
-fresh clone starts without them. `bd`'s ordinary open does not recreate
-them.
+fresh clone starts without them.
+
+A writable open normally re-materializes them on its own, whether it is
+embedded or reaches the database through a server or proxied sql-server: it
+runs the schema migration pass, which replays the clone-local ("ignored")
+series whenever that series' cursor table is behind — and the cursor table,
+`ignored_schema_migrations`, is itself clone-local, so a fresh clone always
+qualifies (`internal/storage/schema/schema.go`,
+`internal/storage/uow/dolt_sql_provider.go`). Reaching the error above
+therefore means the open that hit it was *not* one of those self-healing
+opens. The kinds that skip the pass, or only verify, include a deliberately
+non-mutating read-only or preview open, a team-server open (it checks the
+schema rather than migrating it), the preview-attach path, and any open whose
+open-time migration gate refused. Run the migration explicitly to close the
+gap.
 
 **The fix**
 
