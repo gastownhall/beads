@@ -70,6 +70,68 @@ func TestApplyS3ChecksumEnvToCmd(t *testing.T) {
 	}
 }
 
+func TestSetCmdEnvUsesHostKeySemantics(t *testing.T) {
+	nearCollision := "DOLT_REMOTE_PAſSWORD=near-collision"
+	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
+	cmd.Env = []string{
+		"dolt_remote_password=mixed-stale",
+		"DOLT_REMOTE_PASSWORD=canonical-stale",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+
+	setCmdEnv(cmd, "DOLT_REMOTE_PASSWORD", "fresh")
+	want := []string{
+		"dolt_remote_password=mixed-stale",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+		"DOLT_REMOTE_PASSWORD=fresh",
+	}
+	if runtime.GOOS == "windows" {
+		want = want[1:]
+	}
+	if !slices.Equal(cmd.Env, want) {
+		t.Fatalf("setCmdEnv() = %q, want %q on %s", cmd.Env, want, runtime.GOOS)
+	}
+}
+
+func TestRemoteCredentialsChildEnvUsesHostKeySemantics(t *testing.T) {
+	nearCollision := "DOLT_REMOTE_PAſSWORD=near-collision"
+	base := []string{
+		"dolt_remote_user=mixed-stale-user",
+		"DOLT_REMOTE_USER=canonical-stale-user",
+		"dolt_remote_password=mixed-stale-password",
+		"DOLT_REMOTE_PASSWORD=canonical-stale-password",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+	original := slices.Clone(base)
+	creds := &remoteCredentials{username: "fresh-user", password: "fresh-password"}
+
+	got := creds.childEnv(base)
+	want := []string{
+		"dolt_remote_user=mixed-stale-user",
+		"dolt_remote_password=mixed-stale-password",
+		nearCollision,
+		"MALFORMED",
+		`=C:=C:\work`,
+		"DOLT_REMOTE_USER=fresh-user",
+		"DOLT_REMOTE_PASSWORD=fresh-password",
+	}
+	if runtime.GOOS == "windows" {
+		want = want[2:]
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("childEnv() = %q, want %q on %s", got, want, runtime.GOOS)
+	}
+	if !slices.Equal(base, original) {
+		t.Fatal("childEnv modified its input")
+	}
+}
+
 func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
 	creds := &remoteCredentials{username: "user", password: "pass"}
@@ -888,6 +950,9 @@ func clearCloudAuthEnv(t *testing.T) {
 }
 
 func TestCloudAuthCLIRouting(t *testing.T) {
+	if realDoltTestServerRequired() && testServerPort == 0 {
+		t.Fatal("Dolt server required for cloud-auth routing coverage")
+	}
 	skipIfNoServer(t)
 	clearCloudAuthEnv(t)
 	start := time.Now()
@@ -922,11 +987,12 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
 	}
 	// Shared store: creating one Dolt database per case (16 total) is what
-	// made this test slow (see the regression guard below). Each case gets
+	// made this test slow (see the shared-store guard below). Each case gets
 	// its own remote name (origin_0..origin_15) against a single store,
 	// since shouldUseCLIForCloudAuth's routing decision is keyed purely by
 	// remote name — distinct names are enough to keep cases isolated.
 	store := openCloudAuthTestStore(t, "route")
+	casesRun := 0
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -934,6 +1000,7 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 			if err := store.AddRemote(ctx, remote, tt.remoteURL); err != nil {
 				t.Fatalf("AddRemote: %v", err)
 			}
+			casesRun++
 			addCloudAuthCLIRemote(t, store, remote, tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
@@ -945,16 +1012,17 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		})
 	}
 
-	// Regression guard: this test previously created one Dolt database per
-	// case (16 total), each slower than the last as server load grew,
-	// pushing wall time into the hundreds of seconds for a test that only
-	// exercises a pure routing predicate. 90s sits below every measured
-	// unfixed run and comfortably above the shared-store fix's expected
-	// time, so it fails on the old per-case-store shape without flaking
-	// under normal CI load.
-	if elapsed := time.Since(start); elapsed > 90*time.Second {
-		t.Fatalf("TestCloudAuthCLIRouting took %s, want < 90s (regression: are per-case Dolt databases being created again instead of a shared store?)", elapsed)
+	// Every registered case must leave its distinct remote in the shared store.
+	// This verifies remote writes use that store; it cannot detect unused stores.
+	// Count only selected children so focused -run invocations still work.
+	remotes, err := store.ListRemotes(context.Background())
+	if err != nil {
+		t.Fatalf("ListRemotes: %v", err)
 	}
+	if len(remotes) != casesRun {
+		t.Errorf("shared store has %d remotes, want %d executed cases", len(remotes), casesRun)
+	}
+	t.Logf("%d cloud auth routing cases took %s", casesRun, time.Since(start))
 }
 
 func TestCloudAuthCLIRoutingStructural(t *testing.T) {

@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "fs",
+    srcs = ["provider.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/fs",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage/domain",
+        "//internal/storage/domain/fs",
+    ],
+)

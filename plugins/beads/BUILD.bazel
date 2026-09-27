@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "beads",
+    srcs = ["copilot_manifest.go"],
+    embedsrcs = [".copilot-plugin/plugin.json"],
+    importpath = "github.com/steveyegge/beads/plugins/beads",
+    visibility = ["//visibility:public"],
+)

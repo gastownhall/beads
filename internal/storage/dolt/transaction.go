@@ -226,6 +226,17 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
 	defer clearJournalScope()
+	// Versioned history binds to the SAME regular transaction the mutation runs
+	// in, for the same reason the journal does: RecordVersionInTx no-ops unless
+	// this scope is set. Without it every issues-plane mutation routed through
+	// runDoltTransaction — the whole doltTransaction mutator surface, reached
+	// from bd create, batch create/import, bd graph apply, merge_slot and the
+	// CLI transact wrappers — commits durably while minting no version row, so
+	// the bead has no creation version and the first later mutation that does
+	// run scoped is minted as revision 1: the history then asserts that the
+	// update IS the creation.
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, s.versionedHistoryEnabled.Load())
+	defer clearVersionScope()
 
 	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s, journalPinned: journalEnabled}
 
@@ -267,6 +278,12 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 		rollbackIgnored()
 		return wrapSQLCommitError("sql commit (regular)", err)
 	}
+
+	// The mutations in this transaction ran with versioned history scoped on
+	// regularTx (see runDoltTransaction), so anything they minted has to be
+	// staged with them or the version rows never reach this operation's Dolt
+	// commit. Marked here, once, rather than at each MarkDirty call site.
+	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistoryEnabled.Load())
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		rollbackIgnored()

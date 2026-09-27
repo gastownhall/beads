@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "beadserrors",
+    srcs = ["errors.go"],
+    importpath = "github.com/steveyegge/beads/beadserrors",
+    visibility = ["//visibility:public"],
+)

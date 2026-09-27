@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "storagecontract",
+    srcs = ["history_presence.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/storagecontract",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/storage"],
+)

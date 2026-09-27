@@ -1,0 +1,65 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "config",
+    srcs = [
+        "agent_profile.go",
+        "config.go",
+        "permissions.go",
+        "permissions_open_linux.go",
+        "permissions_open_nonlinux.go",
+        "permissions_windows.go",
+        "repos.go",
+        "sync.go",
+        "user_config_path.go",
+        "yaml_config.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/config",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/debug",
+        "@com_github_spf13_viper//:viper",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "config_test",
+    srcs = [
+        "agents_file_test.go",
+        "config_test.go",
+        "permissions_linux_test.go",
+        "permissions_test.go",
+        "repos_test.go",
+        "sync_test.go",
+        "testmain_test.go",
+        "user_config_path_test.go",
+        "user_config_path_windows_test.go",
+        "worktree_config_test.go",
+        "yaml_config_test.go",
+        "yaml_nested_roundtrip_test.go",
+        "yaml_unset_newline_test.go",
+    ],
+    embed = [":config"],
+    deps = [
+        "//internal/git",
+        "@com_github_spf13_viper//:viper",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)

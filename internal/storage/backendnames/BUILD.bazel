@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "backendnames",
+    srcs = ["backendnames.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/backendnames",
+    visibility = ["//:__subpackages__"],
+)

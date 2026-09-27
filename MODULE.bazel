@@ -1,0 +1,44 @@
+module(
+    name = "beads",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_go", version = "0.63.0")
+bazel_dep(name = "gazelle", version = "0.53.0")
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(
+    name = "go_sdk",
+    version = "1.26.7",
+)
+use_repo(go_sdk, "go_sdk")
+
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps.from_file(go_mod = "//:go.mod")
+
+# beads builds go-mysql-server with its stdlib-regex backend (ICU policy):
+# gazelle must see gms_pure_go as satisfied so it selects regex_pure.go and
+# drops the go-icu-regex (libicu, cgo) edge entirely.
+go_deps.gazelle_override(
+    directives = [
+        "gazelle:build_tags gms_pure_go",
+        "gazelle:exclude internal/regex/regex_cgo.go",
+    ],
+    path = "github.com/dolthub/go-mysql-server",
+)
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:eventsapi_schema_build.patch"],
+    path = "github.com/dolthub/eventsapi_schema",
+)
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:flatbuffers_v23_importpath.patch"],
+    path = "github.com/dolthub/flatbuffers/v23",
+)
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:dolt_go_serial.patch"],
+    path = "github.com/dolthub/dolt/go",
+)
+use_repo(go_deps, "com_github_anthropics_anthropic_sdk_go", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_charmbracelet_x_ansi", "com_github_data_dog_go_sqlmock", "com_github_dolthub_dolt_go", "com_github_dolthub_driver_v2", "com_github_dolthub_eventkit", "com_github_dolthub_go_mysql_server", "com_github_go_sql_driver_mysql", "com_github_google_uuid", "com_github_gowebpki_jcs", "com_github_invopop_jsonschema", "com_github_johanneskaufmann_html_to_markdown_v2", "com_github_mattn_go_sqlite3", "com_github_microcosm_cc_bluemonday", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_olebedev_when", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_spf13_viper", "com_github_stretchr_testify", "com_github_subosito_gotenv", "com_github_testcontainers_testcontainers_go", "com_github_testcontainers_testcontainers_go_modules_dolt", "com_github_yuin_goldmark", "in_gopkg_yaml_v3", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_exporters_stdout_stdoutmetric", "io_opentelemetry_go_otel_exporters_stdout_stdouttrace", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_metric", "io_opentelemetry_go_otel_trace", "io_rsc_script", "land_charm_glamour_v2", "land_charm_huh_v2", "land_charm_lipgloss_v2", "org_golang_x_mod", "org_golang_x_net", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term")

@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "contextinfo",
+    srcs = ["provider.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/contextinfo",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage/domain",
+        "//internal/storage/domain/fs",
+    ],
+)
+
+go_test(
+    name = "contextinfo_test",
+    srcs = ["provider_test.go"],
+    embed = [":contextinfo"],
+)

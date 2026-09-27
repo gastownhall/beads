@@ -1,0 +1,13 @@
+examples/library-usage
+examples/bd-example-extension-go
+integrations
+npm-package
+website
+node_modules
+.claude
+.worktrees
+.beads
+.dolt
+dist
+.runtime
+tmp

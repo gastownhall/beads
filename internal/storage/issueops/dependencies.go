@@ -656,6 +656,20 @@ func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID stri
 		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
 		return fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
 	}
+	// wisp_dependencies is part of the wisp deletion set (DeleteCascadeTables),
+	// but no delete path cleaned it: every wisp deletion orphaned its
+	// wisp_dependencies rows on both sides, accumulating dangling parent/child
+	// refs that reaper scans flag as anomalies. Remove the wisp's edges as
+	// child (issue_id) and as parent (depends_on_wisp_id). Two targeted
+	// DELETEs, not one OR query, so each hits its own index (ff-tqm).
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE issue_id = ?", wispID); err != nil {
+		return fmt.Errorf("delete wisp %s child rows from wisp_dependencies: %w", wispID, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
+		return fmt.Errorf("delete wisp %s parent rows from wisp_dependencies: %w", wispID, err)
+	}
 	return nil
 }
 
@@ -669,6 +683,19 @@ func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []
 		fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
 		args...); err != nil {
 		return fmt.Errorf("delete wisps from dependencies: %w", err)
+	}
+	// See DeleteWispFromDependenciesInTx: wisp_dependencies rows must go with
+	// the wisps, on both the child and parent side. Two targeted DELETEs, not
+	// one OR query, so each hits its own index (ff-tqm).
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE issue_id IN (%s)", inClause),
+		args...); err != nil {
+		return fmt.Errorf("delete wisps child rows from wisp_dependencies: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
+		args...); err != nil {
+		return fmt.Errorf("delete wisps parent rows from wisp_dependencies: %w", err)
 	}
 	return nil
 }
@@ -1116,6 +1143,9 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
+	// The dependent is exactly the row a racing unblocking write can leave
+	// stale, so nothing is excluded from the post-commit recheck.
+	noteBlockedRecheck(tx, fmt.Sprintf("dependency removal %s -> %s", issueID, dependsOnID), nil, affectedIssues, affectedWisps)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
 	// consumer as one from an explicit dep verb. The same holds for the

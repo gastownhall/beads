@@ -224,3 +224,72 @@ func newDoltDualWriteFixture(t *testing.T, prefix string, enabled bool) (conform
 		storeCleanup()
 	}
 }
+
+// TestDualWriteVersionRowsRideTheMutationsDoltCommit is the store-half
+// companion to the DualWriteFixture cases above, and it is deliberately shaped
+// around the two blind spots those cases have.
+//
+// First, it mutates through RunInTransaction — the doltTransaction surface fed
+// by runDoltTransaction — not through store.CreateIssue/UpdateIssue, which run
+// on the already-scoped withWriteTx arm. Activation is bound per transaction,
+// so a seam that mints fine on one arm can mint nothing at all on the other,
+// and every case above happened to exercise only the arm that worked.
+//
+// Second, it asserts the version rows are IN the operation's Dolt commit, by
+// requiring dolt_status to be clean for issue_versions afterwards. Counting
+// rows in the working set cannot tell a durable history from one that never
+// got staged: unstaged rows read back perfectly from SQL while being absent
+// from the commit that describes them, unreplicated, and liable to be swept
+// into whatever unrelated commit stages next. issue_versions replicates (see
+// issueops.VersionedHistoryStagedTables), so "present" and "committed" are
+// different claims and only the second one is the durability promise.
+func TestDualWriteVersionRowsRideTheMutationsDoltCommit(t *testing.T) {
+	store, storeCleanup := setupTestStore(t)
+	defer storeCleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	configurer, ok := any(store).(storage.VersionedHistoryConfigurer)
+	if !ok {
+		t.Fatalf("%T does not implement storage.VersionedHistoryConfigurer", store)
+	}
+	configurer.SetVersionedHistoryEnabled(true)
+	defer configurer.SetVersionedHistoryEnabled(false)
+
+	const id = "dwc-committed"
+	if err := store.RunInTransaction(ctx, "bd: create "+id, func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen,
+		}, "actor")
+	}); err != nil {
+		t.Fatalf("RunInTransaction create: %v", err)
+	}
+
+	var versions int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?`, id).Scan(&versions); err != nil {
+		t.Fatalf("count issue_versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("issue_versions rows for %s = %d, want 1 — a mutation routed through runDoltTransaction minted no version, so versioned history is not scoped on that transaction", id, versions)
+	}
+
+	var currentRevision int64
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT current_revision FROM issues WHERE id = ?`, id).Scan(&currentRevision); err != nil {
+		t.Fatalf("read current_revision: %v", err)
+	}
+	if currentRevision != 1 {
+		t.Fatalf("issues.current_revision for %s = %d, want 1", id, currentRevision)
+	}
+
+	for _, table := range []string{"issue_versions", "issues"} {
+		var dirty int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM dolt_status WHERE table_name = ?`, table).Scan(&dirty); err != nil {
+			t.Fatalf("read dolt_status for %s: %v", table, err)
+		}
+		if dirty != 0 {
+			t.Errorf("dolt_status still reports %s dirty after the mutation committed — the rows this operation wrote are outside its own Dolt commit: unreplicated, and waiting to be swept into whatever unrelated commit stages next", table)
+		}
+	}
+}

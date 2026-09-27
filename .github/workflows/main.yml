@@ -1226,6 +1226,13 @@ jobs:
         id: nix_help
         run: |
           nix run .#default -- --help > help.txt
+      # Every flake check for the runner's own system (today: hook-timeout-
+      # backends, checks.nix). `nix flake check` rather than a spelled-out
+      # `.#checks.x86_64-linux.<name>`: no hardcoded system, and a check added
+      # to checks.nix is run without a workflow edit.
+      - name: Run the flake checks
+        run: |
+          nix flake check -L
       - name: Verify help text
         if: steps.nix_help.outcome == 'success'
         run: |

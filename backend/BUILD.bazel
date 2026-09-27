@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "backend",
+    srcs = [
+        "backend.go",
+        "errors.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/backend",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "backend_test",
+    srcs = [
+        "completeness_test.go",
+        "errors_test.go",
+    ],
+    deps = [
+        ":backend",
+        "//backend/conformance",
+        "//internal/storage",
+    ],
+)

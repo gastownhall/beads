@@ -449,6 +449,15 @@ func TestProxiedServerClose(t *testing.T) {
 		if report.Failed[0].Error == "" {
 			t.Errorf("failure report for %s carried no reason", blocked.ID)
 		}
+
+		// failed[].error is the TYPED error, the same on this route as on the
+		// direct one — see the twin assertions in TestEmbeddedClose/
+		// close_partial_failure_json_names_the_failed_ids. The --force hint is
+		// advice for a human reader, so it belongs on the stderr line above and
+		// not in the field a --json consumer keys off; recording the decorated
+		// display line here gave the identical refusal two spellings depending
+		// on which route the caller was on.
+		assertCloseFailedErrorIsTyped(t, report.Failed[0].Error, stderr)
 	})
 
 	t.Run("close_pinned_refuses_without_force", func(t *testing.T) {

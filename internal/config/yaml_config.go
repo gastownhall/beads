@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
 )
 
@@ -178,14 +179,35 @@ func IsSecretKey(key string) bool {
 	return false
 }
 
-// isGitTracked returns true if the file at path is tracked by git
-// (i.e., has been git-added). Uses `git ls-files --error-unmatch`.
+// isGitTracked reports whether either the containing repository or the
+// inherited Git context tracks the file at path (i.e., it has been git-added).
+// Uses `git ls-files --error-unmatch`. If neither probe succeeds, errors count
+// as untracked — the secret guard only blocks writes it can prove are unsafe.
+//
+// The containing repository is probed first so inherited routing cannot hide a
+// tracked file. Exit 1 is git's "repository reached, path is not tracked"
+// answer and is final; any other failure means the scrubbed environment
+// reached no repository at all — as for a bare repository whose work tree is
+// named only by GIT_DIR/GIT_WORK_TREE — so the inherited context is consulted
+// before declaring the file untracked. Mirrors isGitTrackedFile in cmd/bd.
 func isGitTracked(path string) bool {
-	cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
-	cmd.Dir = filepath.Dir(path)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run() == nil
+	dir := filepath.Dir(path)
+	inherited := os.Environ()
+	for _, env := range [][]string{gitenv.ScrubRouting(inherited), inherited} {
+		cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
+		cmd.Dir = dir
+		cmd.Env = env
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		err := cmd.Run()
+		if err == nil {
+			return true
+		}
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+			return false
+		}
+	}
+	return false
 }
 
 var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are environment variable names, not credentials.

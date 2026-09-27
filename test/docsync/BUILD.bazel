@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "docsync_test",
+    srcs = [
+        "docsync_test.go",
+        "doltpin_test.go",
+    ],
+)

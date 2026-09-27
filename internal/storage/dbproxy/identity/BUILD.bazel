@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "identity",
+    srcs = [
+        "control.go",
+        "identity.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/identity",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/atomicfile"],
+)
+
+go_test(
+    name = "identity_test",
+    srcs = ["identity_test.go"],
+    embed = [":identity"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

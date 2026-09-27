@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "journalops",
+    srcs = [
+        "doc.go",
+        "errors.go",
+        "journal.go",
+    ],
+    importpath = "github.com/steveyegge/beads/journalops",
+    visibility = ["//visibility:public"],
+)

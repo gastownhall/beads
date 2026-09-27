@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -105,9 +106,13 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 	}
 
 	var existing string
+	var content []byte
 	// #nosec G304 - git config path
-	if content, rerr := os.ReadFile(excludePath); rerr == nil {
+	if readContent, rerr := os.ReadFile(excludePath); rerr == nil {
+		content = readContent
 		existing = string(content)
+	} else if !os.IsNotExist(rerr) {
+		return nil, excludePath, fmt.Errorf("failed to read git exclude file: %w", rerr)
 	}
 
 	for _, p := range patterns {
@@ -120,17 +125,14 @@ func addExcludePatterns(repoPath, header string, patterns []string) (added []str
 		return nil, excludePath, nil
 	}
 
-	newContent := existing
-	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
-		newContent += "\n"
+	lines := []string{header}
+	if len(content) > 0 {
+		lines = []string{"", header}
 	}
-	newContent += "\n" + header + "\n"
-	for _, p := range added {
-		newContent += p + "\n"
-	}
+	newContent := gitignore.AppendLines(content, append(lines, added...))
 
 	// #nosec G306 - config file needs 0644
-	if err = os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
+	if err = os.WriteFile(excludePath, newContent, 0644); err != nil {
 		return nil, excludePath, fmt.Errorf("failed to write git exclude file: %w", err)
 	}
 	return added, excludePath, nil
@@ -358,120 +360,4 @@ func promptForkExclude(upstreamURL string, quiet bool) (bool, error) {
 
 	// Default to yes (empty or "y" or "yes")
 	return response == "" || response == "y" || response == "yes", nil
-}
-
-// setupGlobalGitIgnore configures global gitignore to ignore beads and claude files for a specific project
-// DEPRECATED: This function uses absolute paths which don't work in gitignore (GitHub #704).
-// Use setupGitExclude instead for new code.
-func setupGlobalGitIgnore(homeDir string, projectPath string, verbose bool) error {
-	// Check if user already has a global gitignore file configured
-	cmd := exec.Command("git", "config", "--global", "core.excludesfile")
-	output, err := cmd.Output()
-
-	var ignorePath string
-
-	if err == nil && len(output) > 0 {
-		// User has already configured a global gitignore file, use it
-		ignorePath = strings.TrimSpace(string(output))
-
-		// Expand tilde if present (git config may return ~/... which Go doesn't expand)
-		if strings.HasPrefix(ignorePath, "~/") {
-			ignorePath = filepath.Join(homeDir, ignorePath[2:])
-		} else if ignorePath == "~" {
-			ignorePath = homeDir
-		}
-
-		if verbose {
-			fmt.Printf("Using existing configured global gitignore file: %s\n", ignorePath)
-		}
-	} else {
-		// No global gitignore file configured, check if standard location exists
-		configDir := filepath.Join(homeDir, ".config", "git")
-		standardIgnorePath := filepath.Join(configDir, "ignore")
-
-		if _, err := os.Stat(standardIgnorePath); err == nil {
-			// Standard global gitignore file exists, use it
-			// No need to set git config - git automatically uses this standard location
-			ignorePath = standardIgnorePath
-			if verbose {
-				fmt.Printf("Using existing global gitignore file: %s\n", ignorePath)
-			}
-		} else {
-			// No global gitignore file exists, create one in standard location
-			// No need to set git config - git automatically uses this standard location
-			ignorePath = standardIgnorePath
-
-			// Ensure config directory exists
-			if err := os.MkdirAll(configDir, 0755); err != nil {
-				return fmt.Errorf("failed to create git config directory: %w", err)
-			}
-
-			if verbose {
-				fmt.Printf("Creating new global gitignore file: %s\n", ignorePath)
-			}
-		}
-	}
-
-	// Read existing ignore file if it exists
-	var existingContent string
-	// #nosec G304 - user config path
-	if content, err := os.ReadFile(ignorePath); err == nil {
-		existingContent = string(content)
-	}
-
-	// Use absolute paths for this specific project (fixes GitHub #538)
-	// This allows other projects to use beads openly while this one stays stealth
-	beadsPattern := projectPath + "/.beads/"
-	claudePattern := projectPath + "/.claude/settings.local.json"
-
-	hasBeads := strings.Contains(existingContent, beadsPattern)
-	hasClaude := strings.Contains(existingContent, claudePattern)
-
-	if hasBeads && hasClaude {
-		if verbose {
-			fmt.Printf("Global gitignore already configured for stealth mode in %s\n", projectPath)
-		}
-		return nil
-	}
-
-	// Append missing patterns
-	newContent := existingContent
-	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
-		newContent += "\n"
-	}
-
-	if !hasBeads || !hasClaude {
-		newContent += fmt.Sprintf("\n# Beads stealth mode: %s (added by bd init --stealth)\n", projectPath)
-	}
-
-	if !hasBeads {
-		newContent += beadsPattern + "\n"
-	}
-	if !hasClaude {
-		newContent += claudePattern + "\n"
-	}
-
-	// Write the updated ignore file
-	// #nosec G306 - config file needs 0644
-	if err := os.WriteFile(ignorePath, []byte(newContent), 0644); err != nil {
-		fmt.Printf("\nUnable to write to %s (file is read-only)\n\n", ignorePath)
-		fmt.Printf("To enable stealth mode, add these lines to your global gitignore:\n\n")
-		if !hasBeads || !hasClaude {
-			fmt.Printf("# Beads stealth mode: %s\n", projectPath)
-		}
-		if !hasBeads {
-			fmt.Printf("%s\n", beadsPattern)
-		}
-		if !hasClaude {
-			fmt.Printf("%s\n", claudePattern)
-		}
-		fmt.Println()
-		return nil
-	}
-
-	if verbose {
-		fmt.Printf("Configured global gitignore for stealth mode in %s\n", projectPath)
-	}
-
-	return nil
 }

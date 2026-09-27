@@ -1,0 +1,51 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "domain",
+    srcs = [
+        "adaptive.go",
+        "beads.go",
+        "child_counter.go",
+        "comment.go",
+        "config.go",
+        "context.go",
+        "dependency.go",
+        "events.go",
+        "git.go",
+        "infra_types.go",
+        "issue.go",
+        "issue_delete.go",
+        "journal.go",
+        "label.go",
+        "raw_sql.go",
+        "remote.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/domain",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/configfile",
+        "//internal/idgen",
+        "//internal/storage",
+        "//internal/storage/dberrors",
+        "//internal/types",
+        "//internal/validation",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "domain_test",
+    srcs = [
+        "context_published_test.go",
+        "context_test.go",
+        "infra_types_test.go",
+        "issue_delete_missing_table_test.go",
+    ],
+    embed = [":domain"],
+    deps = [
+        "//internal/configfile",
+        "//internal/types",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)

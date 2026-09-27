@@ -102,7 +102,11 @@ func (r *gitRepositoryImpl) GetConfig(ctx context.Context, key string) (string, 
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return "", false, nil
+			// Git also uses exit 1 for invalid keys, with a diagnostic.
+			if exitErr.ExitCode() == 1 && len(bytes.TrimSpace(exitErr.Stderr)) == 0 {
+				return "", false, nil
+			}
+			return "", false, fmt.Errorf("git: GetConfig %s: %w: %s", key, err, bytes.TrimSpace(exitErr.Stderr))
 		}
 		return "", false, fmt.Errorf("git: GetConfig %s: %w", key, err)
 	}

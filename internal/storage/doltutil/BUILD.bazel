@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "doltutil",
+    srcs = [
+        "close.go",
+        "dsn.go",
+        "identifier.go",
+        "remotes.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/doltutil",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/doltremote",
+        "//internal/remotecache",
+        "//internal/storage",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+go_test(
+    name = "doltutil_test",
+    srcs = [
+        "close_test.go",
+        "dsn_test.go",
+        "identifier_test.go",
+        "persisted_remotes_test.go",
+        "remotes_test.go",
+    ],
+    embed = [":doltutil"],
+)

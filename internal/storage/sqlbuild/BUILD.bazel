@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sqlbuild",
+    srcs = [
+        "counts.go",
+        "filter.go",
+        "labels.go",
+        "ready.go",
+        "reclaim.go",
+        "sort.go",
+        "sqlbuild.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/sqlbuild",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "sqlbuild_test",
+    srcs = [
+        "filter_test.go",
+        "imports_boundary_test.go",
+        "keyset_test.go",
+        "labels_test.go",
+        "reclaim_test.go",
+        "sqlbuild_test.go",
+    ],
+    embed = [":sqlbuild"],
+    deps = ["//internal/types"],
+)

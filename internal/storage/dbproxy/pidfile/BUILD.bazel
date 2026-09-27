@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pidfile",
+    srcs = ["pidfile.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/pidfile",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/atomicfile"],
+)
+
+go_test(
+    name = "pidfile_test",
+    srcs = ["pidfile_test.go"],
+    embed = [":pidfile"],
+)

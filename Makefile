@@ -43,9 +43,10 @@ export PATH := $(GIT_WINDOWS_ROOT)/usr/bin;$(PATH)
 endif
 endif
 
-.PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
+.PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen githooks-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
 .PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
+.PHONY: bazel-sync
 
 # Default target
 all: build
@@ -288,6 +289,15 @@ corpus-regen:
 	@echo "Regenerating contract corpus..."
 	go test -tags "$(BUILD_TAGS)" ./cmd/bd/protocol -run TestCorpusGolden -corpus.update -count=1
 
+# The tracked .githooks/* carry the managed section cmd/bd/hooks.go generates;
+# TestTrackedManagedHookSectionsMatchGenerator holds them byte-equal. Run this
+# after changing the generator or after bumping Version in cmd/bd/version.go
+# (the section markers carry the version), then commit the regenerated hooks
+# alongside it.
+githooks-regen:
+	@echo "Regenerating managed sections in .githooks/*..."
+	BD_UPDATE_HOOKS_GOLDEN=1 go test -tags "$(BUILD_TAGS)" ./cmd/bd -run TestTrackedManagedHookSectionsMatchGenerator -count=1
+
 
 # Run performance benchmarks against Dolt storage backend
 # Requires CGO and Dolt; generates CPU profile files
@@ -399,6 +409,14 @@ diagrams-excalidraw:
 docs-dev:
 	./mint.sh dev
 
+# Bazel (side-by-side with the Go toolchain; `go build`/`go test` do not need
+# it). Regenerate BUILD.bazel files with gazelle and refresh the MODULE.bazel
+# use_repo list + MODULE.bazel.lock. Run after changing Go imports or go.mod.
+BAZEL ?= bazel
+bazel-sync:
+	$(BAZEL) run //:gazelle
+	$(BAZEL) mod tidy
+
 # Ensure -short is not used as an implicit CI tier boundary.
 check-testing-short:
 	@./scripts/check-testing-short.sh
@@ -447,6 +465,7 @@ help:
 	@echo "  make check-docs   - Validate docs against CLI flags"
 	@echo "  make api-gen      - Regenerate HTTP API types from the OpenAPI spec"
 	@echo "  make api-check    - OpenAPI drift gate (regenerate, diff-or-fail, spec tests)"
+	@echo "  make bazel-sync   - Regenerate Bazel BUILD files and tidy MODULE.bazel (gazelle + mod tidy)"
 	@echo "  make clean        - Remove build artifacts and profile files"
 	@echo "  make clean-test-tmp - Sweep orphaned cmd/bd test temp dirs from \$$TMPDIR"
 	@echo "  make help         - Show this help message"

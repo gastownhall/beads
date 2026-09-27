@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "git",
+    srcs = ["git.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/domain/git",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/git",
+        "//internal/storage/domain",
+    ],
+)
+
+go_test(
+    name = "git_test",
+    srcs = [
+        "git_test.go",
+        "suite_test.go",
+    ],
+    embed = [":git"],
+    deps = [
+        "//internal/storage/domain",
+        "@com_github_stretchr_testify//suite",
+    ],
+)

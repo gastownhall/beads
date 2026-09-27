@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "memoryops",
+    srcs = [
+        "doc.go",
+        "errors.go",
+        "memories.go",
+    ],
+    importpath = "github.com/steveyegge/beads/memoryops",
+    visibility = ["//visibility:public"],
+    deps = ["//beadserrors"],
+)

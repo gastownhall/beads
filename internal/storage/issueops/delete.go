@@ -51,6 +51,7 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) e
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
 	}
+	noteBlockedRecheck(tx, deleteRecheckLabel([]string{id}, ""), []string{id}, affectedIssues, affectedWisps)
 
 	return nil
 }
@@ -391,6 +392,7 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after batch delete: %w", err)
 	}
+	noteBlockedRecheck(tx, deleteRecheckLabel(set.All, ""), set.All, affectedIssues, affectedWisps)
 
 	return result, nil
 }

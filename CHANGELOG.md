@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd -C dir prime` now describes the target workspace instead of the launch
+  directory** ([#5509](https://github.com/gastownhall/beads/issues/5509)). `-C`
+  resolves `BEADS_DIR` but never changes directory, so prime's cwd-relative
+  surfaces still described wherever the command was launched: the clone-local
+  `.beads/PRIME.md` tier, the AGENTS.md/CLAUDE.md divergence reminder, the git
+  upstream/remote probes behind the template's git-authority wording, and the
+  redirect notice. All four now resolve against the `-C` target, matching
+  `cd dir && bd prime`; without `-C` the behavior is byte-for-byte unchanged.
+
+  Note for `-C` users: the git-remote probe prime shares with auto-backup
+  (`isBackupAutoEnabled`) follows the same change, so under
+  `bd -C dir <any command>` auto-backup enablement and the `bd backup status`
+  note are now decided by the `-C` target's git remote rather than the launch
+  directory's. That makes the probe agree with the store actually being backed
+  up, but it can flip auto-backup on or off for `-C` invocations whose launch
+  directory and target differ in remote configuration.
+
+- **Generated git hooks accept uutils coreutils `timeout` as a deadline helper**
+  ([#5541](https://github.com/gastownhall/beads/issues/5541)). The managed hook
+  section probes `timeout` and `gtimeout` with `--version` and accepted only the
+  GNU coreutils banner, so a host whose `timeout` is uutils coreutils
+  (Ubuntu 25.10+, or a distribution configured with `uutils-coreutils` in place
+  of GNU) failed the probe and fell through. Where Perl was
+  installed the shim still got a deadline from the Perl `alarm` arm — which Git
+  for Windows Perl does not guarantee across `exec` — so the missing deadline
+  bit uutils hosts *without* Perl, which ran `bd hooks run` unbounded (with the
+  documented warning). The probe now also accepts the
+  `timeout (uutils coreutils) ` banner; native Windows `timeout.exe` stays
+  rejected ([#5503](https://github.com/gastownhall/beads/issues/5503)). The
+  widened probe ships in the generated hook section, which is rewritten only by
+  `bd hooks install` — hosts that already installed hooks must run it once to
+  pick up the fix.
+
 - **`bd close` now exits non-zero when any issue in a batch fails to close**
   ([#6648](https://github.com/gastownhall/beads/issues/6648)). A batch with one
   refused id used to exit 0 as long as another id closed, so scripts could not
@@ -21,10 +54,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   close runs, while the proxied route refuses that argument and closes the
   rest.) In `--json` mode the summary is instead a compact JSON line on stderr
   naming the failed ids, matching `bd update`'s partial-failure report, while
-  stdout keeps the usual closed-issues array. `--claim-next` still claims when
+  stdout keeps the usual closed-issues array. Each `failed[]` entry carries the
+  refusal as the engine worded it, identically on both routes; the `--force`
+  hint and the route's own framing stay on the human-readable stderr line, which
+  is unchanged. `--claim-next` still claims when
   part of the batch closed — the claim commits inside the batch's own
   transaction and a sibling's refusal does not roll it back — so the summary
   names the claimed id rather than leaving it silently assigned.
+
+- Unblocking two blockers of one dependent at the same time — closing both,
+  or a close racing a `bd dep remove` or a delete of the other — no longer
+  leaves the dependent stuck as blocked and hidden from `bd ready` until
+  `bd recompute-blocked`: a write that takes a blocker away (a close, an
+  update to an inactive status, a dependency removal, a delete) and runs
+  through a Dolt store write transaction now rechecks the dependents it
+  recomputed once that transaction has committed
+  ([#6716](https://github.com/gastownhall/beads/issues/6716)). Writes that
+  reach the database another way still need the `bd doctor` /
+  `bd recompute-blocked` repair they needed before: `bd batch` (on both its
+  plain and its proxied transaction), `bd cook`, `bd mol squash`,
+  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
+  updates, deletes and demote-to-wisp.
 
 - **`bd list --watch --format` is refused instead of silently dropping the
   format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).

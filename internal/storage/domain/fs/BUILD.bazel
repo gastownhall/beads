@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "fs",
+    srcs = [
+        "beads.go",
+        "context.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/domain/fs",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/config",
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/storage/domain",
+        "//internal/utils",
+    ],
+)
+
+go_test(
+    name = "fs_test",
+    srcs = [
+        "beads_test.go",
+        "context_test.go",
+        "suite_test.go",
+    ],
+    embed = [":fs"],
+    deps = [
+        "//internal/beads",
+        "//internal/config",
+        "//internal/configfile",
+        "//internal/git",
+        "//internal/storage/backendnames",
+        "//internal/storage/domain",
+        "//internal/utils",
+        "@com_github_stretchr_testify//require",
+        "@com_github_stretchr_testify//suite",
+    ],
+)

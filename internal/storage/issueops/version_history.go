@@ -63,6 +63,18 @@ import (
 // not serialized on the issue row the way the claim/close CAS is; the
 // RunDualWrite* contract cases exclude concurrent writers, so no test
 // speaks to it. Tracked as gastownhall/beads#6379 (item 4).
+//
+// MINT COST, deferred deliberately: each mint adds ~5-6 round-trips inside
+// the write transaction (the GetIssueInTx snapshot and its label hydration,
+// the dependency load, the store_epoch read, the MAX(revision) scan, the
+// version INSERT, the current_revision UPDATE), and the MAX(revision) scan
+// grows with an issue's history depth -- on paths that previously ran one or
+// two statements, so it lengthens write-lock hold time. Harmless while the
+// flag is off, which is every build so far. Before any phase enables it, seed
+// the next ordinal from the current_revision the snapshot above already read
+// in this transaction and retire the aggregate scan -- a natural pairing with
+// the version_id UUID swap, since that swap is what makes the ordinal stop
+// being the key. Tracked as gastownhall/beads#6379 alongside item 4.
 
 var versionedHistoryTransactions sync.Map // map[DBTX]bool; entries live for one transaction
 
@@ -84,6 +96,36 @@ func versionedHistoryEnabled(tx DBTX) bool {
 	enabled, _ := versionedHistoryTransactions.Load(tx)
 	on, _ := enabled.(bool)
 	return on
+}
+
+// VersionedHistoryStagedTables names every table RecordVersionInTx writes, so
+// a staging path can add them to whatever it was already going to stage.
+//
+// THE PLANE DECISION, stated once here because the reviewer of #6675 rightly
+// refused to infer it: issue_versions and store_epoch REPLICATE. They are
+// ordinary synced Dolt tables, deliberately NOT dolt_ignore'd the way the
+// events journal's tables are (migration 0064), because a bead's version
+// history is part of the bead and has to travel with it — and because the
+// single-writer constraint this package documents at length is a statement
+// about what happens when two clones MERGE these tables, which is only
+// meaningful for a table that replicates at all.
+//
+// Replicating means every operation that mints has to STAGE what it minted,
+// or the rows sit dirty in the working set: unreplicated, absent from the
+// DOLT_COMMIT of the very mutation they describe, swept into whichever later
+// unrelated commit stages broadly, and able to trip DirtyTablesError on the
+// next migration. That is the same-transaction durability promise this seam
+// exists to keep, so staging is not an optimization here.
+//
+// `issues` is in the list because the mint's LAST write is
+// `UPDATE issues SET current_revision`. On issue-plane mutations that table is
+// already staged; on the dependency paths it is not, which is the case this
+// list exists for. Note that staging `issues` there is gated on versioned
+// history being active (see the store-side callers), so it does not widen what
+// an ordinary dep-add commit contains — the pre-existing unstaged-`issues`
+// gap on those paths is bd-2y9ke, and deliberately still theirs to fix.
+func VersionedHistoryStagedTables() []string {
+	return []string{"issue_versions", "store_epoch", "issues"}
 }
 
 // issue_versions.attribution_status is a NOT NULL column (migration 0068

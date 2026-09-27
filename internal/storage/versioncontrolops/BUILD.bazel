@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "versioncontrolops",
+    srcs = [
+        "automerge.go",
+        "backup.go",
+        "blocked_recompute.go",
+        "branches.go",
+        "clone.go",
+        "commit.go",
+        "compact.go",
+        "conflicts.go",
+        "db.go",
+        "envguards.go",
+        "fastforward.go",
+        "flatten.go",
+        "gc.go",
+        "mergesettle.go",
+        "remoterefs.go",
+        "remotes.go",
+        "version_control.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/versioncontrolops",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/githooksenv",
+        "//internal/gittraceenv",
+        "//internal/storage",
+        "//internal/storage/issueops",
+        "//internal/storage/kvkeys",
+    ],
+)
+
+go_test(
+    name = "versioncontrolops_test",
+    srcs = [
+        "automerge_test.go",
+        "backup_test.go",
+        "clone_test.go",
+        "commit_empty_test.go",
+        "conflicts_test.go",
+        "fastforward_test.go",
+        "gc_test.go",
+        "remotes_githooks_test.go",
+        "remotes_gittrace_test.go",
+    ],
+    embed = [":versioncontrolops"],
+    deps = [
+        "//internal/githooksenv",
+        "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+    ],
+)

@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "githooksenv",
+    srcs = ["githooksenv.go"],
+    importpath = "github.com/steveyegge/beads/internal/githooksenv",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "githooksenv_test",
+    srcs = ["githooksenv_test.go"],
+    embed = [":githooksenv"],
+)

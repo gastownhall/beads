@@ -1,0 +1,43 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "externaldeps",
+    srcs = [
+        "decorator.go",
+        "resolver.go",
+        "role_accessors.go",
+        "uow_decorator.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/externaldeps",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/storage/issueops",
+        "//internal/storage/uow",
+        "//internal/types",
+        "//internal/workapi",
+        "//internal/workapi/storereader",
+        "//internal/workapi/storereadycounter",
+        "//issueops",
+        "//memoryops",
+    ],
+)
+
+go_test(
+    name = "externaldeps_test",
+    srcs = [
+        "decorator_test.go",
+        "ready_wake_test.go",
+        "uow_decorator_test.go",
+    ],
+    embed = [":externaldeps"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/storage/issueops",
+        "//internal/storage/uow",
+        "//internal/types",
+        "//issueops",
+    ],
+)

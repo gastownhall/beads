@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -448,5 +450,136 @@ func TestSetupGitExclude_RegularRepo(t *testing.T) {
 	}
 	if !strings.Contains(string(content), ".claude/settings.local.json") {
 		t.Errorf("exclude file missing .claude/settings.local.json pattern: %s", content)
+	}
+}
+
+func TestAddExcludePatternsPreservesAppendLineEndings(t *testing.T) {
+	const lf = "\n# managed\n.beads/\ncache/\n"
+	const crlf = "\r\n# managed\r\n.beads/\r\ncache/\r\n"
+	for _, tc := range []struct{ name, existing, want, added string }{
+		{"empty", "", "# managed\n.beads/\ncache/\n", ".beads/,cache/"},
+		{"whitespace unterminated", " \t", " \t\n" + lf, ".beads/,cache/"},
+		{"blank LF", "\n", "\n" + lf, ".beads/,cache/"},
+		{"blank CRLF", "\r\n", "\r\n" + crlf, ".beads/,cache/"},
+		{"blank pending CR", "\r", "\r\n" + lf, ".beads/,cache/"},
+		{"delimiter-free", "local", "local\n" + lf, ".beads/,cache/"},
+		{"LF", "local\n", "local\n" + lf, ".beads/,cache/"},
+		{"CRLF", "local\r\n", "local\r\n" + crlf, ".beads/,cache/"},
+		{"CRLF unterminated", "local\r\nlast", "local\r\nlast\r\n" + crlf, ".beads/,cache/"},
+		{"CRLF pending CR", "local\r\nlast\r", "local\r\nlast\r\n" + crlf, ".beads/,cache/"},
+		{"LF pending CR", "local\nlast\r", "local\nlast\r\n" + lf, ".beads/,cache/"},
+		{"only pending CR", "local\r", "local\r\n" + lf, ".beads/,cache/"},
+		{"mixed", "a\r\nb\r\nc\n", "a\r\nb\r\nc\n" + lf, ".beads/,cache/"},
+		{"partial", ".beads/\r\n", ".beads/\r\n\r\n# managed\r\ncache/\r\n", "cache/"},
+		{"complete", ".beads/\r\ncache/", ".beads/\r\ncache/", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newGitRepo(t)
+			gitignorePath := filepath.Join(dir, ".gitignore")
+			const tracked = "user-rule\r\n"
+			if err := os.WriteFile(gitignorePath, []byte(tracked), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command("git", "-C", dir, "add", "--", ".gitignore").CombinedOutput(); err != nil {
+				t.Fatalf("track .gitignore: %v: %s", err, out)
+			}
+			path, err := resolveGitExcludePath(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.existing), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for pass := 0; pass < 2; pass++ {
+				added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/", "cache/"})
+				if err != nil || gotPath != path {
+					t.Fatalf("addExcludePatterns: path=%q, err=%v", gotPath, err)
+				}
+				wantAdded := tc.added
+				if pass == 1 {
+					wantAdded = ""
+				}
+				if strings.Join(added, ",") != wantAdded {
+					t.Errorf("pass %d added=%q, want %q", pass, added, wantAdded)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != tc.want {
+					t.Fatalf("pass %d exclude=%q, want %q: %v", pass, got, tc.want, err)
+				}
+				got, err = os.ReadFile(gitignorePath)
+				if err != nil || string(got) != tracked {
+					t.Fatalf("tracked .gitignore changed: %q: %v", got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAddExcludePatternsRefusesReadErrors(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		if os.Getenv("BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION") == "1" {
+			t.Fatal("exclude read-error coverage requires an unprivileged POSIX permission boundary")
+		}
+		t.Skip("write-only permission coverage requires an unprivileged POSIX host")
+	}
+	dir := newGitRepo(t)
+	path, err := resolveGitExcludePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const before = "user-rule\r\n"
+	if err := os.WriteFile(path, []byte(before), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0600); err != nil {
+			t.Errorf("restore exclude mode: %v", err)
+		}
+	})
+	if err := os.Chmod(path, 0200); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("read-denied precondition: %v", err)
+	}
+	// Prove a write would succeed without truncating the bytes being protected.
+	writable, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("write-allowed precondition: %v", err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/"})
+	if restoreErr := os.Chmod(path, 0600); restoreErr != nil {
+		t.Fatal(restoreErr)
+	}
+	if err == nil || !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "failed to read git exclude file") {
+		t.Errorf("expected contextual wrapped permission error, got %v", err)
+	}
+	if added != nil || gotPath != path {
+		t.Errorf("read failure returned added=%v path=%q, want nil and %q", added, gotPath, path)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != before {
+		t.Errorf("exclude bytes after read failure = %q, want %q: %v", got, before, err)
+	}
+}
+
+func TestAddExcludePatternsCreatesMissingFile(t *testing.T) {
+	dir := newGitRepo(t)
+	path, err := resolveGitExcludePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/"})
+	if err != nil || gotPath != path || len(added) != 1 || added[0] != ".beads/" {
+		t.Fatalf("create missing exclude: added=%v path=%q err=%v", added, gotPath, err)
+	}
+	const want = "# managed\n.beads/\n"
+	if got, err := os.ReadFile(path); err != nil || string(got) != want {
+		t.Errorf("created exclude = %q, want %q: %v", got, want, err)
 	}
 }

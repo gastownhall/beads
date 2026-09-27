@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "git",
+    srcs = ["provider.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/git",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage/domain",
+        "//internal/storage/domain/git",
+    ],
+)
