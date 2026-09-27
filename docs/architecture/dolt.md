@@ -216,6 +216,42 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+### Windows: Child Process Consoles
+
+On Windows, `bd` spawns `dolt` (and `git`) as console-subsystem child processes.
+A console application started from a parent that has **no console of its own** —
+an MCP server, a SessionStart hook, or the deliberately detached
+`bd db-proxy-child` — does not inherit one. Windows allocates a brand new
+console for the child, and with Windows Terminal registered as the default
+terminal application that surfaces as a real window on the user's desktop.
+
+`bd` suppresses this at every spawn site:
+
+- **Short-lived commands** (`dolt config`, `dolt init`, `dolt version`,
+  `git config`) are spawned with `CREATE_NO_WINDOW`. The child still receives a
+  console object, so anything querying console state keeps working, but it is
+  never displayed.
+- **The long-lived `dolt sql-server` spawns** use `DETACHED_PROCESS` alongside
+  `CREATE_NEW_PROCESS_GROUP`. Their stdout and stderr already go to a log file,
+  so they have no use for a console at all. `CREATE_NEW_PROCESS_GROUP` on its
+  own detaches signal handling but does **not** suppress console allocation.
+
+Both are no-ops on Linux and macOS.
+
+**Symptoms if this regresses:** a console window flashes or persists around
+`bd` invocations, or Windows Terminal reports
+
+```
+[error 2147942632 (0x800700E8) when launching ...dolt.exe init]
+```
+
+`0x800700E8` is `HRESULT_FROM_WIN32(ERROR_NO_DATA)` — "the pipe is being
+closed" — because the short-lived child exits before Windows Terminal finishes
+attaching to the pseudoconsole. Windows Terminal may then persist that hosted
+session and replay it on later launches from its own working directory,
+producing unexplained `mkdir C:\WINDOWS\system32\.dolt: Access is denied` or
+`Port 3307 already in use` errors from a tab nobody opened.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage

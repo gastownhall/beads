@@ -255,3 +255,6 @@ tmp/build/cli-docs/where.md
 tmp/build/cli-docs/worktree.md
 tmp/docs/CLI_REFERENCE.md
 *.gate.lock*
+
+# Serena MCP rewrites this on every start; not a build input
+.serena/

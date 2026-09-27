@@ -102,7 +102,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `identity` | `--identity` | `BEADS_IDENTITY` | (git user / hostname) | Sender identity for `bd mail` |
 | `no-db` | `--no-db` | `BD_NO_DAEMON` (related) | `false` | Run without opening the database |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push` |
-| `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol |
+| `no-git-ops` | — | — | `false` | Scope `bd prime` stealth guidance to Beads Git/GitHub features and omit Git commands from its close protocol; ordinary project `git`/`gh` authority is unchanged |
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
 | `prime.max-memory-chars` | `--max-memory-chars` | `BD_PRIME_MAX_MEMORY_CHARS` | `0` | Max total bytes of memory entries injected by `bd prime`, at whole-memory boundaries (0 = unlimited) |

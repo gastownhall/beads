@@ -74,7 +74,7 @@ bd config set agent.profile team-maintainer
 BD_AGENT_PROFILE=team-maintainer bd prime
 ```
 
-`bd prime` layers this explicit knob on top of its per-branch git-authority checks (stealth mode, no git remote, ephemeral branch, `no-push`); those hard constraints still take precedence, and `team-maintainer` remains subordinate to any explicit "do not commit"/"do not push" instruction. Beads never infers team-maintainer authority merely because a remote exists — it must be set via this knob (or, for tools without config access, via top-level project instructions).
+`bd prime` layers this explicit knob on top of its workflow checks (stealth mode, no git remote, ephemeral branch, `no-push`); those checks still take precedence in the generated Beads workflow, and `team-maintainer` remains subordinate to any explicit "do not commit"/"do not push" instruction. Stealth mode (`no-git-ops`) applies only to Beads features that use Git or GitHub. It does not restrict ordinary project `git` or `gh` CLI commands, which follow active user, orchestrator, and repository instructions; it also does not grant commit or push authority. Beads never infers team-maintainer authority merely because a remote exists — it must be set via this knob (or, for tools without config access, via top-level project instructions).
 
 ### Managed Sections
 
@@ -112,7 +112,7 @@ If the [beads Claude Code plugin](/integrations/claude-code-plugin) is installed
 | `--check` | Check both hooks and the managed `CLAUDE.md` beads section |
 | `--remove` | Remove beads hooks and the managed `CLAUDE.md` beads section |
 | `--global` | Install to `~/.claude/settings.json` instead of the project |
-| `--stealth` | Use `bd prime --stealth --hook-json` (flush only, no git operations) — useful in CI/CD where git operations might fail |
+| `--stealth` | Use `bd prime --stealth --hook-json` to omit Beads Git/GitHub operations from the workflow; ordinary project `git`/`gh` commands remain governed by active instructions |
 
 Restart Claude Code after installation for the hooks to take effect.
 
