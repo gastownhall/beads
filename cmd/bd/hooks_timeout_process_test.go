@@ -312,7 +312,13 @@ func testHookProcessReservedStatuses(t *testing.T) {
 		wantWarning   bool
 		wantDBWarning bool
 	}{
-		{name: "database-not-initialized is skipped", fixtures: gnu, bdExit: 3, wantDBWarning: true},
+		// GH#6751: "hooks" is in noDbCommands (cmd/bd/main.go), so a real
+		// `bd hooks run <name>` never opens a store and cannot itself exit 3
+		// for "database not initialized" — that exit code can only be a
+		// chained <name>.old hook's own status (runChainedHook passes it
+		// through verbatim), so it must propagate like any other nonzero
+		// exit rather than being swallowed as a DB-not-initialized warning.
+		{name: "exit 3 propagates like any other chained-hook failure", fixtures: gnu, bdExit: 3, wantExit: 3},
 		{name: "GNU owns 124", fixtures: gnu, bdExit: 124, wantWarning: true},
 		{name: "GNU preserves 137", fixtures: gnu, bdExit: 137, wantExit: 137},
 		{name: "GNU preserves 142", fixtures: gnu, bdExit: 142, wantExit: 142},
@@ -383,6 +389,232 @@ func testHookProcessRealPerlExpiry(t *testing.T) {
 	if result.elapsed > 9*time.Second {
 		t.Errorf("Perl expiry took %s, want at most 9s", result.elapsed)
 	}
+}
+
+// TestGeneratedHookChainsWhenBDUnavailable is the process-level regression
+// test for GH#6751's primary report: a chained <hookName>.old must not be
+// skipped just because bd is missing from PATH. It reproduces the issue's
+// own repro almost verbatim — a minimal PATH (/usr/bin:/bin, no bd) against
+// a real git repository and a real chained pre-commit.old — rather than the
+// `.`-sourced harness above, because `case "$0" in` in generateHookSection
+// only resolves the hooks directory correctly when the hook runs as git
+// actually runs it: as its own child process with $0 set to its own path.
+func TestGeneratedHookChainsWhenBDUnavailable(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not found")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH=/usr/bin:/bin is POSIX-specific; the Windows chain path is covered by testHookProcessWindowsSystemTimeoutCheckout")
+	}
+	for _, dir := range []string{"/usr/bin", "/bin"} {
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			t.Skipf("%s is required for the minimal-PATH repro but is unavailable", dir)
+		}
+	}
+
+	t.Run("bd missing, chained gate refuses", func(t *testing.T) {
+		repoDir, env := newHookProcessBDlessRepo(t)
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit"))
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit.old",
+			"#!/bin/sh\nprintf 'gate refused\\n' >&2\nexit 5\n")
+
+		if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, env, "add", "f")
+
+		commit := exec.Command(gitPath, "commit", "-m", "with-bd-missing")
+		commit.Dir = repoDir
+		commit.Env = env
+		output, commitErr := commit.CombinedOutput()
+		if commitErr == nil {
+			t.Fatalf("commit succeeded, want the chained gate to refuse it\n%s", output)
+		}
+		if !strings.Contains(string(output), "gate refused") {
+			t.Errorf("commit output missing the chained hook's own message, so it may not have run\n%s", output)
+		}
+	})
+
+	t.Run("bd missing, no chain, commit proceeds", func(t *testing.T) {
+		repoDir, env := newHookProcessBDlessRepo(t)
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit"))
+
+		if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, env, "add", "f")
+		runHookProcessGit(t, gitPath, repoDir, env, "commit", "-m", "with-bd-missing-no-chain")
+	})
+
+	// A successful chained .old must fall through to any user content after
+	// the managed section (documented at generateHookSection's own doc
+	// comment) instead of always exiting with the .old's status. Only a
+	// nonzero exit should be propagated.
+	t.Run("bd missing, chained gate succeeds, trailing user content still runs", func(t *testing.T) {
+		repoDir, env := newHookProcessBDlessRepo(t)
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit",
+			"#!/bin/sh\n"+generateHookSection("pre-commit")+"echo TRAILING_USER_CONTENT\n")
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit.old",
+			"#!/bin/sh\nprintf 'GATE_OK\\n'\nexit 0\n")
+
+		if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, env, "add", "f")
+
+		commit := exec.Command(gitPath, "commit", "-m", "chained-gate-succeeds")
+		commit.Dir = repoDir
+		commit.Env = env
+		output, commitErr := commit.CombinedOutput()
+		if commitErr != nil {
+			t.Fatalf("commit failed, want the successful chained gate to allow it\n%s", output)
+		}
+		if !strings.Contains(string(output), "GATE_OK") {
+			t.Errorf("commit output missing the chained hook's own message, so it may not have run\n%s", output)
+		}
+		if !strings.Contains(string(output), "TRAILING_USER_CONTENT") {
+			t.Errorf("commit output missing content written after the managed section — a successful chain must fall through, not exit\n%s", output)
+		}
+	})
+
+	// The .old classifier must not misclassify a foreign hook as bd-owned
+	// (and so skip chaining into it) just because it happens to mention the
+	// phrase "BEADS INTEGRATION" somewhere; it must match an actual marker
+	// line the way getHookVersion does.
+	t.Run("bd missing, foreign hook merely mentioning BEADS INTEGRATION still chains", func(t *testing.T) {
+		repoDir, env := newHookProcessBDlessRepo(t)
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit"))
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit.old",
+			"#!/bin/sh\n# unrelated hook, see BEADS INTEGRATION docs for context\nprintf 'MENTION_RAN\\n' >&2\nexit 9\n")
+
+		if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, env, "add", "f")
+
+		commit := exec.Command(gitPath, "commit", "-m", "foreign-hook-mentions-marker")
+		commit.Dir = repoDir
+		commit.Env = env
+		output, commitErr := commit.CombinedOutput()
+		if commitErr == nil {
+			t.Fatalf("commit succeeded, want the foreign chained gate to refuse it\n%s", output)
+		}
+		if !strings.Contains(string(output), "MENTION_RAN") {
+			t.Errorf("commit output missing the chained hook's own message, so it was likely misclassified as bd-owned and skipped\n%s", output)
+		}
+	})
+
+	// The classifier must require the actual "# --- BEGIN " marker prefix,
+	// not just any "# --- "-prefixed line. A foreign hook line that starts
+	// with "# --- " but is not the BEGIN marker (e.g. an unrelated "# --- "
+	// comment that happens to mention "BEADS INTEGRATION" later on the same
+	// line) must still chain, matching getHookVersion's own HasPrefix check
+	// against hookSectionBeginPrefix.
+	t.Run("bd missing, foreign hook starting with '# --- ' but not the BEGIN marker still chains", func(t *testing.T) {
+		repoDir, env := newHookProcessBDlessRepo(t)
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit"))
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit.old",
+			"#!/bin/sh\n# --- NOTE: not a BEADS INTEGRATION marker\nprintf 'NOTE_RAN\\n' >&2\nexit 9\n")
+
+		if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, env, "add", "f")
+
+		commit := exec.Command(gitPath, "commit", "-m", "foreign-hook-dash-prefix-not-begin-marker")
+		commit.Dir = repoDir
+		commit.Env = env
+		output, commitErr := commit.CombinedOutput()
+		if commitErr == nil {
+			t.Fatalf("commit succeeded, want the foreign chained gate to refuse it\n%s", output)
+		}
+		if !strings.Contains(string(output), "NOTE_RAN") {
+			t.Errorf("commit output missing the chained hook's own message, so it was likely misclassified as bd-owned and skipped\n%s", output)
+		}
+	})
+
+	// The classifier must require the CONTIGUOUS "# --- BEGIN BEADS
+	// INTEGRATION" prefix, not "# --- BEGIN " and "BEADS INTEGRATION" matched
+	// as two independently-anchored substrings. A foreign hook line that
+	// starts with the real begin marker's own prefix text but has extra
+	// words before "BEADS INTEGRATION" (e.g. a hook mentioning bd's
+	// integration in its own begin-style banner) is not the marker line
+	// getHookVersion recognizes and must still chain.
+	t.Run("bd missing, foreign hook begin-marker-shaped line with extra words still chains", func(t *testing.T) {
+		repoDir, env := newHookProcessBDlessRepo(t)
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit"))
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit.old",
+			"#!/bin/sh\n# --- BEGIN foo BEADS INTEGRATION\nprintf 'EXTRA_RAN\\n' >&2\nexit 9\n")
+
+		if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, env, "add", "f")
+
+		commit := exec.Command(gitPath, "commit", "-m", "foreign-hook-begin-marker-shaped-extra-words")
+		commit.Dir = repoDir
+		commit.Env = env
+		output, commitErr := commit.CombinedOutput()
+		if commitErr == nil {
+			t.Fatalf("commit succeeded, want the foreign chained gate to refuse it\n%s", output)
+		}
+		if !strings.Contains(string(output), "EXTRA_RAN") {
+			t.Errorf("commit output missing the chained hook's own message, so it was likely misclassified as bd-owned and skipped\n%s", output)
+		}
+	})
+
+	// A legacy inline bd hook (from `bd init`, GH#1120: no BEGIN/END marker,
+	// only the "# bd (beads)" comment) must still be recognized as bd-owned
+	// so it is never re-chained into.
+	t.Run("bd missing, legacy inline bd hook is not re-chained", func(t *testing.T) {
+		repoDir, env := newHookProcessBDlessRepo(t)
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit", "#!/bin/sh\n"+generateHookSection("pre-commit"))
+		writeHookProcessFixture(t, filepath.Join(repoDir, ".git", "hooks"), "pre-commit.old",
+			"#!/bin/sh\n# bd (beads)\nprintf 'INLINE_RAN\\n' >&2\nexit 9\n")
+
+		if err := os.WriteFile(filepath.Join(repoDir, "f"), []byte("x\n"), 0o600); err != nil {
+			t.Fatalf("write tracked fixture: %v", err)
+		}
+		runHookProcessGit(t, gitPath, repoDir, env, "add", "f")
+
+		commit := exec.Command(gitPath, "commit", "-m", "legacy-inline-bd-hook")
+		commit.Dir = repoDir
+		commit.Env = env
+		output, commitErr := commit.CombinedOutput()
+		if commitErr != nil {
+			t.Fatalf("commit failed, want the legacy inline bd hook to be skipped, not chained into\n%s", output)
+		}
+		if strings.Contains(string(output), "INLINE_RAN") {
+			t.Errorf("commit output contains the .old's message — it was chained into despite being a bd-owned inline hook\n%s", output)
+		}
+	})
+}
+
+// newHookProcessBDlessRepo creates a real git repository whose environment's
+// PATH is exactly /usr/bin:/bin (git's own repro for GH#6751) — enough for
+// git and a POSIX shell, deliberately excluding wherever bd is installed.
+func newHookProcessBDlessRepo(t *testing.T) (string, []string) {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not found")
+	}
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("create temporary repository: %v", err)
+	}
+	env := hookProcessGitEnv(t.TempDir())
+	for i, entry := range env {
+		if strings.HasPrefix(entry, "PATH=") {
+			env[i] = "PATH=/usr/bin:/bin"
+		}
+	}
+	runHookProcessGit(t, gitPath, repoDir, env, "init", "--initial-branch=main", ".")
+	runHookProcessGit(t, gitPath, repoDir, env, "config", "core.hooksPath", ".git/hooks")
+	runHookProcessGit(t, gitPath, repoDir, env, "config", "user.name", "Hook Test")
+	runHookProcessGit(t, gitPath, repoDir, env, "config", "user.email", "hook-test@example.invalid")
+	return repoDir, env
 }
 
 func testHookProcessWindowsSystemTimeoutCheckout(t *testing.T) {

@@ -41,6 +41,20 @@ exec < <(printf '%s\n' "$push_refs")
 
 # --- BEGIN BEADS INTEGRATION v1.3.0 ---
 # This section is managed by beads. Do not remove these markers.
+case "$0" in
+  */*) _bd_hook_dir=${0%/*} ;;
+  *) _bd_hook_dir=. ;;
+esac
+_bd_old_hook="$_bd_hook_dir/pre-push.old"
+_bd_chain_exists=0
+if [ -x "$_bd_old_hook" ]; then
+  _bd_chain_exists=1
+  while IFS= read -r _bd_old_line || [ -n "$_bd_old_line" ]; do
+    case "$_bd_old_line" in
+      "# --- BEGIN BEADS INTEGRATION"*|"# bd-shim "*|"# bd-hooks-version: "*|*"# bd (beads)"*) _bd_chain_exists=0; break ;;
+    esac
+  done < "$_bd_old_hook" 2>/dev/null
+fi
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
   _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
@@ -87,13 +101,21 @@ if command -v bd >/dev/null 2>&1; then
     fi
   fi
   if { [ "$_bd_timeout_backend" = coreutils ] && [ "$_bd_exit" -eq 124 ]; } || { [ "$_bd_timeout_backend" = perl ] && [ "$_bd_exit" -eq 142 ]; }; then
-    echo >&2 "beads: hook 'pre-push' timed out after ${_bd_timeout}s — continuing without beads"
-    _bd_exit=0
-  fi
-  if [ "$_bd_exit" -eq 3 ]; then
-    echo >&2 "beads: database not initialized — skipping hook 'pre-push'"
-    _bd_exit=0
+    if [ "$_bd_chain_exists" -eq 1 ]; then
+      echo >&2 "beads: hook 'pre-push' timed out after ${_bd_timeout}s — chained hook 'pre-push.old' outcome is unknown, refusing"
+      _bd_exit=1
+    else
+      echo >&2 "beads: hook 'pre-push' timed out after ${_bd_timeout}s — continuing without beads"
+      _bd_exit=0
+    fi
   fi
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
+elif [ "$_bd_chain_exists" -eq 1 ]; then
+  if "$_bd_old_hook" "$@"; then
+    _bd_old_exit=0
+  else
+    _bd_old_exit=$?
+  fi
+  if [ "$_bd_old_exit" -ne 0 ]; then exit "$_bd_old_exit"; fi
 fi
 # --- END BEADS INTEGRATION v1.3.0 ---

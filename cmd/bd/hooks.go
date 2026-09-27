@@ -62,7 +62,7 @@ const hookTimeoutSeconds = 300
 // via 'bd hooks run', and propagates exit codes — without preventing any user
 // content after the section from executing on success.
 //
-// Resilience (GH#2453, GH#2449):
+// Resilience (GH#2453, GH#2449, GH#6751):
 //   - A compatible timeout helper applies a best-effort soft deadline.
 //   - BEADS_HOOK_TIMEOUT accepts positive whole seconds only.
 //   - Helper argv is separated with -- so user input cannot become an option.
@@ -76,11 +76,83 @@ const hookTimeoutSeconds = 300
 //     coreutils) ..."), and the uutils multicall dispatches on the argv[0]
 //     suffix and then prints the canonical name ("timeout (uutils coreutils)
 //     ..." when invoked as gtimeout). checks.nix runs that case.
-//   - If the beads database is not initialized (exit code 3), the hook exits
-//     successfully with a warning so that git operations are not blocked.
+//   - A chained `<hookName>.old` (the mechanism `bd hooks run` uses to run a
+//     foreign tool's hook — see runChainedHook) must not be skipped just
+//     because `bd` itself is unavailable: when `command -v bd` fails, the
+//     section runs `.old` directly instead of silently doing nothing, so a
+//     PATH without bd on it (a GUI git client, cron, a minimal shell) cannot
+//     wave a foreign gate through unchecked (GH#6751).
+//   - For the two hooks whose nonzero exit aborts the git operation
+//     (pre-commit, pre-push), a chained hook whose outcome is unknown after
+//     BEADS_HOOK_TIMEOUT kills `bd hooks run` must not be waved through
+//     either: the section refuses instead of continuing (GH#6751). Hooks
+//     git treats as advisory (post-merge, post-checkout) keep the original
+//     continue-on-timeout behavior, since there is nothing here for them to
+//     wave through.
 func generateHookSection(hookName string) string {
+	// isGateHook hooks are exactly the ones GH#6751 names: a nonzero exit
+	// here aborts the git operation, so an unknown-after-timeout outcome for
+	// a chained gate cannot be silently treated as success.
+	isGateHook := hookName == "pre-commit" || hookName == "pre-push"
+
+	timeoutHandling := "  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n"
+	if isGateHook {
+		timeoutHandling += "" +
+			"    if [ \"$_bd_chain_exists\" -eq 1 ]; then\n" +
+			"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — chained hook '" + hookName + ".old' outcome is unknown, refusing\"\n" +
+			"      _bd_exit=1\n" +
+			"    else\n" +
+			"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+			"      _bd_exit=0\n" +
+			"    fi\n"
+	} else {
+		timeoutHandling += "" +
+			"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+			"    _bd_exit=0\n"
+	}
+	timeoutHandling += "  fi\n"
+
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
+		// _bd_hook_dir/_bd_chain_exists use only shell builtins ('case',
+		// parameter expansion, 'read' — no dirname/grep/cat): GH#6751's own
+		// scenarios are minimal-PATH shells, so the fallback that is meant
+		// to rescue those environments must not itself depend on an
+		// external command that a minimal PATH might not carry, and must
+		// not abort the section under a caller's 'set -e' if one is missing.
+		"case \"$0\" in\n" +
+		"  */*) _bd_hook_dir=${0%/*} ;;\n" +
+		"  *) _bd_hook_dir=. ;;\n" +
+		"esac\n" +
+		"_bd_old_hook=\"$_bd_hook_dir/" + hookName + ".old\"\n" +
+		// _bd_chain_exists mirrors getHookVersion's IsBdHook check (GH#843,
+		// GH#1120): a .old that is itself a bd-managed hook must never be
+		// chained into, or a bd shim renamed to <hookName>.old would chain
+		// into itself forever. The first pattern is the contiguous
+		// hookSectionBeginPrefix text itself (not split across two literals
+		// joined by a glob), so the match is exactly HasPrefix(line,
+		// hookSectionBeginPrefix) plus any suffix — the same test
+		// getHookVersion applies. A split "# --- BEGIN "*"BEADS INTEGRATION"*
+		// pattern is wider than that: it also matches a foreign hook line
+		// like "# --- BEGIN foo BEADS INTEGRATION", misclassifying it as
+		// bd-owned and skipping the chain into it (GH#6751). Writing the
+		// prefix text here means it now appears twice in the generated
+		// section (the real marker line, and this quoted case-arm literal);
+		// TestTrackedManagedHookSectionsMatchGenerator accounts for that by
+		// counting marker lines anchored at column 0, not raw substring
+		// occurrences, so the case arm's indented, quoted copy does not
+		// count as a second marker. The last pattern matches getHookVersion's
+		// inline-hook fallback (GH#1120): a legacy `bd init` hook has no
+		// marker line at all, only a "# bd (beads)" comment.
+		"_bd_chain_exists=0\n" +
+		"if [ -x \"$_bd_old_hook\" ]; then\n" +
+		"  _bd_chain_exists=1\n" +
+		"  while IFS= read -r _bd_old_line || [ -n \"$_bd_old_line\" ]; do\n" +
+		"    case \"$_bd_old_line\" in\n" +
+		"      \"" + hookSectionBeginPrefix + "\"*|\"# bd-shim \"*|\"# bd-hooks-version: \"*|*\"# bd (beads)\"*) _bd_chain_exists=0; break ;;\n" +
+		"    esac\n" +
+		"  done < \"$_bd_old_hook\" 2>/dev/null\n" +
+		"fi\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
@@ -126,15 +198,20 @@ func generateHookSection(hookName string) string {
 		"      _bd_exit=$?\n" +
 		"    fi\n" +
 		"  fi\n" +
-		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
-		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
-		"  fi\n" +
-		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
-		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
-		"    _bd_exit=0\n" +
-		"  fi\n" +
+		timeoutHandling +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
+		"elif [ \"$_bd_chain_exists\" -eq 1 ]; then\n" +
+		// A successful .old must fall through to any user content after this
+		// section, matching the "bd present" branch above (GH#6751): only a
+		// nonzero exit is propagated. Capturing the status inside this `if`
+		// keeps it exempt from a caller's `set -e` (.githooks/pre-commit sets
+		// -euo pipefail), so the observed code is always the real one.
+		"  if \"$_bd_old_hook\" \"$@\"; then\n" +
+		"    _bd_old_exit=0\n" +
+		"  else\n" +
+		"    _bd_old_exit=$?\n" +
+		"  fi\n" +
+		"  if [ \"$_bd_old_exit\" -ne 0 ]; then exit \"$_bd_old_exit\"; fi\n" +
 		"fi\n" +
 		hookSectionEndLine() + "\n"
 }
