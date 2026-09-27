@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Identity lookup ignores inherited Git routing** ([#6787](https://github.com/gastownhall/beads/issues/6787)).
+  The Git-name fallback in `internal/config.GetIdentity` no longer uses
+  custom `GIT_CONFIG_GLOBAL` paths or inline `GIT_CONFIG_*` overrides. A harness that supplied
+  `user.name` through those overrides can now resolve the ordinary repository or
+  global Git name instead, including the host user's name. Set `BEADS_IDENTITY`
+  explicitly when a caller of this helper needs a controlled identity:
+
+  ```bash
+  # Before: relying on this redirected Git configuration to supply user.name.
+  GIT_CONFIG_GLOBAL=/path/to/harness.gitconfig ./identity-harness
+  # After: choose the identity directly; it takes precedence over the Git lookup.
+  BEADS_IDENTITY=test-agent ./identity-harness
+  ```
+
+  An explicit identity argument still wins, followed by `BEADS_IDENTITY` or the
+  `identity` configuration setting, then the Git name, then the hostname. This
+  note covers the helper contract; the current CLI has no production callers of
+  `GetIdentity`.
+
+  Pending adoption: [#6461](https://github.com/gastownhall/beads/pull/6461) at
+  `e33ff244e82d7fca92ff1c1657f785e068e3124f` additionally retains explicit
+  system/global config suppression in this helper's Git lookup. For example,
+  `GIT_CONFIG_GLOBAL=/dev/null` hides a name supplied only by global Git config;
+  case-insensitive `NUL` is also recognized on Windows. If no earlier identity
+  override or remaining Git config supplies a name, the result falls back to
+  the hostname (`unknown` if no hostname is available). A repository-local name
+  still takes precedence over global config suppression.
+
+  A harness that suppresses Git config and needs a stable identity should set
+  `BEADS_IDENTITY` as well:
+
+  ```bash
+  BEADS_IDENTITY=test-agent GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null ./identity-harness
+  ```
+
+  This suppression behavior describes the pending PR, not a released change;
+  recheck the adopted implementation before including it in a release. Changing
+  whether identity lookup honors suppression is a separate policy decision. The
+  caller inventory above also holds at the reviewed #6461 head; it does not
+  establish an effect on CLI audit actors or mail-sender paths.
+
 ### Fixed
 
 - **`bd -C dir prime` now describes the target workspace instead of the launch
