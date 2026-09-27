@@ -1,0 +1,62 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "server",
+    srcs = [
+        "doltserver.go",
+        "external_dolt_server.go",
+        "server.go",
+        "testserver.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/server",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/procid",
+        "//internal/storage/dbproxy/identity",
+        "//internal/storage/dbproxy/pidfile",
+        "//internal/storage/dbproxy/util",
+        "//internal/storage/versioncontrolops",
+        "@com_github_cenkalti_backoff_v4//:backoff",
+        "@com_github_dolthub_dolt_go//libraries/doltcore/servercfg",
+        "@com_github_dolthub_dolt_go//libraries/utils/filesys",
+        "@com_github_go_sql_driver_mysql//:mysql",
+        "@org_golang_x_sync//errgroup",
+    ],
+)
+
+go_test(
+    name = "server_test",
+    srcs = [
+        "doltserver_test.go",
+        "external_dolt_server_test.go",
+        "testmain_test.go",
+        "testserver_test.go",
+    ],
+    embed = [":server"],
+    deps = [
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/lockfile",
+        "//internal/procid",
+        "//internal/storage/dbproxy/pidfile",
+        "//internal/testutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

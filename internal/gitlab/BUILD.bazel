@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gitlab",
+    srcs = [
+        "client.go",
+        "fieldmapper.go",
+        "links.go",
+        "mapping.go",
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/gitlab",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "gitlab_test",
+    srcs = [
+        "client_test.go",
+        "links_test.go",
+        "mapping_test.go",
+        "tracker_state_test.go",
+        "tracker_test.go",
+        "types_test.go",
+    ],
+    embed = [":gitlab"],
+    deps = [
+        "//internal/config",
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)

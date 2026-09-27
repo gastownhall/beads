@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "scripts_test",
+    srcs = [
+        "bazel_policy_test.go",
+        "check_build_tags_test.go",
+        "check_testing_short_test.go",
+        "ci_capability_selector_test.go",
+        "ci_workflow_apt_get_timeout_test.go",
+        "ci_workflow_test.go",
+        "complexity_script_test.go",
+        "conformance_script_test.go",
+        "install_dolt_test.go",
+        "pull_dolt_image_test.go",
+        "release_script_test.go",
+        "test_script_test.go",
+    ],
+    data = [
+        "ci/install-dolt.sh",
+        "ci/pull-dolt-image.sh",
+        "//:bazel_policy_files",
+        "//:workflow_files",
+        "//internal/testutil:testdoltcommon.go",
+        "//tools/bazel:dolt.bzl",
+    ],
+    deps = [
+        "//internal/formula",
+        "//internal/testutil/bazeltest",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+exports_files(
+    ["migration-test/release-catalog.json"],
+    visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+exports_files(
+    ["README.md"],
+    visibility = ["//:__pkg__"],
+)

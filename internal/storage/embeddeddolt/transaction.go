@@ -51,6 +51,11 @@ func (s *EmbeddedDoltStore) runTransactionWithMessage(ctx context.Context, fn fu
 		return err
 	}
 
+	// Anything the body minted ran with versioned history scoped on this
+	// store's transaction (withConn), so its version rows must be staged with
+	// the mutation they describe rather than left dirty in the working set.
+	tracker.MarkVersionedHistoryDirty(s.versionedHistoryEnabled.Load())
+
 	// Create a Dolt version commit from the working set changes.
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
 		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {

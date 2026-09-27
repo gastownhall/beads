@@ -1,0 +1,52 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "formula",
+    srcs = [
+        "advice.go",
+        "condition.go",
+        "controlflow.go",
+        "expand.go",
+        "parser.go",
+        "range.go",
+        "schema.go",
+        "schema_gen.go",
+        "stepcondition.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/formula",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/git",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "formula_test",
+    srcs = [
+        "advice_test.go",
+        "condition_test.go",
+        "controlflow_test.go",
+        "expand_test.go",
+        "intent_test.go",
+        "parser_test.go",
+        "range_test.go",
+        "schema_gen_test.go",
+        "schema_test.go",
+        "stepcondition_test.go",
+    ],
+    data = [
+        "schema_gen.go",
+        "types.go",
+    ],
+    embed = [":formula"],
+    deps = [
+        "//internal/beads",
+        "//internal/formula/schemagen",
+        "//internal/git",
+        "//internal/testutil",
+        "//internal/testutil/bazeltest",
+    ],
+)

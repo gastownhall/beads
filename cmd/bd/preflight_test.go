@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestCheckResult_Passed(t *testing.T) {
@@ -223,6 +224,21 @@ func TestRunLintCheck_SkipLintFlag(t *testing.T) {
 	}
 }
 
+// gofmtForTest returns the gofmt to run: the one on PATH under go test, and
+// under Bazel (no host toolchain) the Go SDK's, declared as data and named by
+// BEADS_TEST_GOFMT.
+func gofmtForTest(t *testing.T) string {
+	t.Helper()
+	if !bazeltest.IsBazel() {
+		return "gofmt"
+	}
+	path, err := bazeltest.RunfileEnv("BEADS_TEST_GOFMT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestRunFmtCheck_Formatted(t *testing.T) {
 	dir := t.TempDir()
 	// Write a properly formatted Go file
@@ -232,7 +248,7 @@ func TestRunFmtCheck_Formatted(t *testing.T) {
 	}
 
 	// Run gofmt -l in the temp dir
-	cmd := exec.Command("gofmt", "-l", ".")
+	cmd := exec.Command(gofmtForTest(t), "-l", ".")
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -251,7 +267,7 @@ func TestRunFmtCheck_Unformatted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("gofmt", "-l", ".")
+	cmd := exec.Command(gofmtForTest(t), "-l", ".")
 	cmd.Dir = dir
 	output, _ := cmd.CombinedOutput()
 	unformatted := strings.TrimSpace(string(output))

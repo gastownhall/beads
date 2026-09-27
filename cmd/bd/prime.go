@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -187,7 +188,7 @@ Memory injection caps:
 		// working under a custom template — matching the default-template behavior
 		// (GH#3941).
 		if !primeExportMode {
-			if content, ok := readCustomPrimeContent(beadsDir); ok {
+			if content, ok := readCustomPrimeContent(primeWorkspaceDir(), beadsDir); ok {
 				if !primeNoMemories {
 					if mem := formatMemoriesForPrime(false); mem != "" {
 						content += mem
@@ -209,7 +210,7 @@ Memory injection caps:
 		// Append the AGENTS.md/CLAUDE.md divergence reminder only when both
 		// files are independent regulars carrying the bd marker; otherwise this
 		// adds nothing (zero output, negligible cost).
-		buf.WriteString(primeDivergenceReminder(""))
+		buf.WriteString(primeDivergenceReminder(primeWorkspaceDir()))
 		emit(buf.String())
 		return nil
 	},
@@ -229,14 +230,16 @@ func init() {
 }
 
 // readCustomPrimeContent returns the contents of a custom PRIME.md override and
-// true when one is found. It checks, in priority order: the local .beads/PRIME.md
-// (clone-specific customization), the redirected workspace PRIME.md (shared
-// customization), then the global ~/.config/beads/PRIME.md. It returns ("", false)
-// when no override exists, so callers fall through to the generated default.
-func readCustomPrimeContent(beadsDir string) (string, bool) {
-	localPrimePath := filepath.Join(".beads", "PRIME.md")
-	// Try local first (user's clone-specific customization).
-	// #nosec G304 -- path is relative to cwd
+// true when one is found. It checks, in priority order: the workspace-local
+// .beads/PRIME.md under workspaceDir (clone-specific customization; "" means
+// the cwd), the redirected workspace PRIME.md under beadsDir (shared
+// customization), then the global ~/.config/beads/PRIME.md. It returns
+// ("", false) when no override exists, so callers fall through to the
+// generated default.
+func readCustomPrimeContent(workspaceDir, beadsDir string) (string, bool) {
+	// Try local first (user's clone-specific customization; 4021f4944 / GH#876).
+	localPrimePath := filepath.Join(workspaceDir, ".beads", "PRIME.md")
+	// #nosec G304 -- path is relative to the workspace root (-C target or cwd)
 	if content, err := os.ReadFile(localPrimePath); err == nil {
 		return string(content), true
 	}
@@ -254,6 +257,46 @@ func readCustomPrimeContent(beadsDir string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// primeWorkspaceDir returns the directory prime resolves workspace-relative
+// state against — the .beads/PRIME.md local tier, the AGENTS.md/CLAUDE.md
+// divergence reminder, the git probes behind the default template's
+// git-authority wording, and the template's redirect notice: the absolute -C
+// target when set, else "" (the process cwd). -C only redirects BEADS_DIR, it does not chdir, so this is what makes
+// `bd -C dir prime` match `cd dir && bd prime` (#5509). It is deliberately not
+// the parent of the resolved beads dir, which may have followed .beads/redirect
+// or walked up from a subdirectory (see the CASE A/B tests in
+// prime_divergence_test.go).
+func primeWorkspaceDir() string {
+	if strings.TrimSpace(changeDir) == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(changeDir)
+	if err != nil {
+		return filepath.Clean(changeDir)
+	}
+	return abs
+}
+
+// primeGitCmd returns the git command prime's repository probes run. Under -C
+// it runs in the -C target, so the upstream/remote checks describe the primed
+// workspace rather than the process cwd (#5509); otherwise it runs in the
+// cwd repository via GitCmdCWD, exactly as before.
+//
+// NOTE: the probes built here are not prime-only — see primeHasGitRemote for
+// the auto-backup consumer that inherits this directory choice.
+func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	if ws := primeWorkspaceDir(); ws != "" {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = ws
+		return cmd, nil
+	}
+	rc, err := internalbeads.GetRepoContext()
+	if err != nil {
+		return nil, err
+	}
+	return rc.GitCmdCWD(ctx, args...), nil
 }
 
 // outputHookJSON wraps content in the SessionStart hook JSON envelope shared
@@ -321,11 +364,10 @@ func isMCPActive() bool {
 var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
-	rc, err := internalbeads.GetRepoContext()
+	cmd, err := primeGitCmd(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	if err != nil {
 		return true // Default to ephemeral if we can't determine context
 	}
-	cmd := rc.GitCmdCWD(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	return cmd.Run() != nil
 }
 
@@ -343,12 +385,19 @@ var primeAgentProfile = func() config.AgentProfile {
 }
 
 // primeHasGitRemote detects if any git remote is configured (stubbable for tests)
+//
+// NOTE: despite the prime prefix, this has a consumer outside prime —
+// isBackupAutoEnabled (backup_auto.go) gates auto-backup and the
+// `bd backup status` note on it. Since it probes through primeGitCmd,
+// `bd -C dir <any command>` now keys that decision off the -C target's git
+// remote rather than the cwd's (#5509). That is the consistent answer, because
+// the store being backed up is the -C-resolved one, but it is a behavior
+// change beyond prime: check backup_auto before changing what this probes.
 var primeHasGitRemote = func() bool {
-	rc, err := internalbeads.GetRepoContext()
+	cmd, err := primeGitCmd(context.Background(), "remote")
 	if err != nil {
 		return false
 	}
-	cmd := rc.GitCmdCWD(context.Background(), "remote")
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -379,9 +428,18 @@ func primeDoltSyncBullets(doltSync bool, pushFirst bool) string {
 		"- `bd dolt push` - Push beads to Dolt remote\n"
 }
 
+// primeRedirectInfo reports the redirect state of the primed workspace: the
+// -C target when one is given (#5509), else the process cwd exactly as before.
+func primeRedirectInfo() beads.RedirectInfo {
+	if ws := primeWorkspaceDir(); ws != "" {
+		return internalbeads.GetRedirectInfoFrom(ws)
+	}
+	return beads.GetRedirectInfo()
+}
+
 // getRedirectNotice returns a notice string if beads is redirected
 func getRedirectNotice(verbose bool) string {
-	redirectInfo := beads.GetRedirectInfo()
+	redirectInfo := primeRedirectInfo()
 	if !redirectInfo.IsRedirected {
 		return ""
 	}

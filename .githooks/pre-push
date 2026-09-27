@@ -59,7 +59,7 @@ if command -v bd >/dev/null 2>&1; then
     if command -v "$_bd_timeout_candidate" >/dev/null 2>&1; then
       if _bd_timeout_version="$("$_bd_timeout_candidate" --version 2>/dev/null)"; then
         case "$_bd_timeout_version" in
-          "timeout (GNU coreutils) "*) _bd_timeout_command=$_bd_timeout_candidate; break ;;
+          "timeout (GNU coreutils) "*|"timeout (uutils coreutils) "*) _bd_timeout_command=$_bd_timeout_candidate; break ;;
         esac
       fi
     fi
