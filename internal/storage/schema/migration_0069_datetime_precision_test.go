@@ -8,77 +8,97 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-// Step 8 of migration 0068 (be-hs42e.8 / gastownhall/beads#6132, the
-// DATETIME(6) widening slice): 0067 creates issue_versions.change_at and
-// .removed_at as plain DATETIME -- precision 0, whole seconds only. Dolt's
-// datetime(0) does not truncate sub-second input; it ROUNDS half-up
-// (pinned for a different column by testAuditImportCommentSubSecond in
+// Migration 0069 (be-hs42e.8 / gastownhall/beads#6132, the DATETIME(6)
+// widening slice): 0067 creates issue_versions.change_at and .removed_at as
+// plain DATETIME -- precision 0, whole seconds only. Dolt's datetime(0) does
+// not truncate sub-second input; it ROUNDS half-up (pinned for a different
+// column by testAuditImportCommentSubSecond in
 // backend/conformance/audit_labels-comments-events.go, and reconfirmed
 // directly against issue_versions below). For a column whose entire job is
 // placing history in order, precision 0 has two consequences: a sub-second
 // write can read back rounded into the *next* second, and two writes less
 // than a second apart in real time can round onto the identical stored
 // value and become indistinguishable by change_at. The fix is a widen to
-// DATETIME(6) (microsecond), appended here as 0068's step 8 rather than
-// claiming a new slot -- this bead's exit contract, and 0068's own header,
-// both require reusing this still-unmerged file (see that header for why
-// 0069 and 0070 are already spoken for by a different bead).
+// DATETIME(6) (microsecond). It was first drafted as a step 8 appended to
+// the then-unmerged 0068; 0068 shipped on main without it
+// (gastownhall/beads#6650), which froze that file, so the widen has its own
+// slot here.
 //
 // removed_at widens in lockstep even though no Go code writes it yet (a
-// repo-wide grep for removed_at/RemovedAt turns up exactly two hits, both
-// schema: 0067's CREATE TABLE and this package's CLI-bundle mirror of it).
-// It is change_at's paired lifecycle column on the same row of the same
-// table, so leaving it at precision 0 while change_at moves to precision 6
-// would be exactly the asymmetry hazard this bead's own title warns
-// against ("before any store accumulates real history") -- a second
-// migration once removed_at gets a writer, instead of one now while the
-// table is still empty and the ALTER is free.
-const migration0068ChangeAtDatetimeGuard = "@issue_versions_change_at_needs_widen"
-const migration0068RemovedAtDatetimeGuard = "@issue_versions_removed_at_needs_widen"
+// repo-wide grep for removed_at/RemovedAt turns up only schema: 0067's
+// CREATE TABLE and this package's CLI-bundle mirror of it). It is
+// change_at's paired lifecycle column on the same row of the same table, so
+// leaving it at precision 0 while change_at moves to precision 6 would be
+// exactly the asymmetry hazard this bead's own title warns against ("before
+// any store accumulates real history") -- a second migration once
+// removed_at gets a writer, instead of one now while the table is still
+// empty and the ALTER is free.
+const migration0069Up = "0069_widen_issue_versions_datetime_precision.up.sql"
+const migration0069Down = "0069_widen_issue_versions_datetime_precision.down.sql"
 
-// TestMigration0068WidensChangeAtAndRemovedAtPrecision is the pure-Go,
+const migration0069ChangeAtDatetimeGuard = "@issue_versions_change_at_needs_widen"
+const migration0069RemovedAtDatetimeGuard = "@issue_versions_removed_at_needs_widen"
+
+// TestLatestVersionIncludesMigration0069 pins the real next free slot this
+// migration claims, superseding 0068's own version of this test
+// (LatestVersion() moved from 68 to 69 the moment this migration file was
+// added). Deliberately a hardcoded literal for the same reason 0067's and
+// 0068's were: LatestVersion() drifting to 69 for the wrong reason (an
+// unrelated migration landing first) should still be caught by this test
+// failing to explain why 69 is datetime-precision-shaped, which the CLI test
+// below checks.
+func TestLatestVersionIncludesMigration0069(t *testing.T) {
+	const want = 69
+	if got := LatestVersion(); got != want {
+		t.Fatalf("LatestVersion() = %d, want %d (issue_versions change_at/removed_at DATETIME(6) migration slot claimed by be-hs42e.8)", got, want)
+	}
+}
+
+// TestMigration0069WidensChangeAtAndRemovedAtPrecision is the pure-Go,
 // DB-independent half of the pin, mirroring
-// TestMigration0068AddsAttributionStatus's shape for steps 6/7: it checks
-// the frozen migration bytes and the CLI-bundle override text directly, no
-// `dolt` binary required. RED until step 8 is appended to both the up.sql
-// guarded-PREPARE block and cliMigration0068AddAttributionStatus.
-func TestMigration0068WidensChangeAtAndRemovedAtPrecision(t *testing.T) {
-	upSQL, err := MigrationSQL(migration0068Up)
+// TestMigration0068AddsAttributionStatus's shape: it checks the frozen
+// migration bytes and the CLI-bundle override text directly, no `dolt`
+// binary required.
+func TestMigration0069WidensChangeAtAndRemovedAtPrecision(t *testing.T) {
+	upSQL, err := MigrationSQL(migration0069Up)
 	if err != nil {
-		t.Fatalf("MigrationSQL(%s) error = %v, want the migration file to exist", migration0068Up, err)
+		t.Fatalf("MigrationSQL(%s) error = %v, want the migration file to exist", migration0069Up, err)
 	}
 	for _, want := range []string{
 		"ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL",
 		"ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6)",
-		migration0068ChangeAtDatetimeGuard,
-		migration0068RemovedAtDatetimeGuard,
+		migration0069ChangeAtDatetimeGuard,
+		migration0069RemovedAtDatetimeGuard,
 		"DATETIME_PRECISION",
 	} {
 		if !strings.Contains(upSQL, want) {
-			t.Errorf("0068 up migration missing %q (step 8, change_at/removed_at DATETIME(6) widen)\nfull SQL:\n%s", want, upSQL)
+			t.Errorf("0069 up migration missing %q (change_at/removed_at DATETIME(6) widen)\nfull SQL:\n%s", want, upSQL)
 		}
 	}
 	if !strings.Contains(strings.ToUpper(upSQL), "PREPARE STMT FROM @SQL") {
-		t.Error("0068 up migration must keep its guarded PREPARE block for every step including step 8 -- it is what makes a raw .up.sql replay onto an already-migrated store a no-op, and Dolt accepts no unprepared conditional MODIFY COLUMN")
+		t.Error("0069 up migration must keep its guarded PREPARE blocks -- they are what make a raw .up.sql replay onto an already-widened store a no-op, and Dolt accepts no unprepared conditional MODIFY COLUMN")
 	}
 
-	bundle := cliCompatibleMigrationSQL(migration0068Up, upSQL)
+	bundle := cliCompatibleMigrationSQL(migration0069Up, upSQL)
 	for _, want := range []string{
 		"ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL;",
 		"ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6);",
 	} {
 		if !strings.Contains(bundle, want) {
-			t.Errorf("0068's CLI bundle substitute (cliMigration0068AddAttributionStatus) missing direct DDL %q (step 8) -- without it a fresh CLI-built database keeps precision-0 change_at/removed_at while the runtime migration path widens them", want)
+			t.Errorf("0069's CLI bundle substitute (cliMigration0069WidenIssueVersionsDatetimePrecision) missing direct DDL %q -- without it a fresh CLI-built database keeps precision-0 change_at/removed_at while the runtime migration path widens them", want)
 		}
+	}
+	if cliSubstituteAssumesWispTables(migration0069Up) {
+		t.Error("0069's CLI substitute touches only issue_versions, which has no wisps-side counterpart table — it must not be listed in cliSubstituteAssumesWispTables")
 	}
 
 	// down.sql files are not part of the embedded FS (only
 	// migrations/*.up.sql is //go:embed'd -- see mainSource.files), so like
 	// TestMigration0068AddsAttributionStatus's own down check, this reads
 	// straight from disk by package-relative path.
-	downBytes, err := os.ReadFile("migrations/" + migration0068Down)
+	downBytes, err := os.ReadFile("migrations/" + migration0069Down)
 	if err != nil {
-		t.Fatalf("read %s: %v, want the migration file to exist", migration0068Down, err)
+		t.Fatalf("read %s: %v, want the migration file to exist", migration0069Down, err)
 	}
 	downSQL := string(downBytes)
 	for _, want := range []string{
@@ -88,12 +108,15 @@ func TestMigration0068WidensChangeAtAndRemovedAtPrecision(t *testing.T) {
 		"COLUMN_NAME = 'removed_at'",
 	} {
 		if !strings.Contains(downSQL, want) {
-			t.Errorf("0068 down migration missing %q (step 8 reverse)\nfull SQL:\n%s", want, downSQL)
+			t.Errorf("0069 down migration missing %q\nfull SQL:\n%s", want, downSQL)
 		}
+	}
+	if !strings.Contains(strings.ToUpper(downSQL), "PREPARE STMT FROM @SQL") {
+		t.Error("0069 down migration must guard its MODIFYs the way the up migration does, so a store that never took the widen, or was already rolled back, rolls back safely")
 	}
 }
 
-// TestMigration0068ChangeAtSurvivesSubSecondPrecisionThroughDoltCLI is the
+// TestMigration0069ChangeAtSurvivesSubSecondPrecisionThroughDoltCLI is the
 // live half: it demonstrates the bug against a real `dolt` binary (skipped
 // without one) and is be-hs42e.8's exit contract's own acceptance criteria,
 // verbatim -- "a sub-second write reading back rounded to the next second"
@@ -101,7 +124,7 @@ func TestMigration0068WidensChangeAtAndRemovedAtPrecision(t *testing.T) {
 // rounding direction were measured directly against dolt 2.3.3 before
 // writing this test (SELECT ... datetime_precision, and a scratch
 // DATETIME/DATETIME(6) round-trip), not assumed.
-func TestMigration0068ChangeAtSurvivesSubSecondPrecisionThroughDoltCLI(t *testing.T) {
+func TestMigration0069ChangeAtSurvivesSubSecondPrecisionThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
 	dir := t.TempDir()

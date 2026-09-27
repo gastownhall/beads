@@ -159,7 +159,7 @@ func TestMigration0067AddsVersionedBeadsSchemaThroughDoltCLI(t *testing.T) {
 	requireDoltColumnShape(t, dir, "issue_versions", "change_actor", "varchar(255)", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_agent", "varchar(255)", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_message", "text", "YES")
-	// 0068 step 8 widens both change_at and removed_at from DATETIME(0) to
+	// 0069 widens both change_at and removed_at from DATETIME(0) to
 	// DATETIME(6) (be-hs42e.8) to stop the column rounding sub-second writes
 	// up to the next second. This test runs the whole bundle (see the
 	// durable_state/attribution_status comments above for the same pattern),

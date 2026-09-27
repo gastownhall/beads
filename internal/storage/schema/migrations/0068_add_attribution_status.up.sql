@@ -1,9 +1,7 @@
 -- Migration 0068: Phase 2 dual-write schema for versioned beads (be-hs42e.3
 -- / gastownhall/beads#6135), step 6 of design section 16.3 (be-dt74u
 -- amendment, be-hs42e.3's design field), plus step 7 -- the durable_state
--- LONGBLOB retype added at review -- and step 8 -- the change_at/removed_at
--- DATETIME(6) widen (be-hs42e.8 / gastownhall/beads#6132). Steps 7 and 8
--- each have their own header further down.
+-- LONGBLOB retype added at review, which has its own header further down.
 --
 -- Steps 1-5 of section 16.3 (version_id CHAR(36) UUID PK swap;
 -- participation_generation BIGINT NULL on issues and its wisps shape-parity
@@ -56,23 +54,6 @@
 -- No wisps twin needed: issue_versions has no wisps-side counterpart table
 -- at all (design section 16.3), so cliSubstituteAssumesWispTables does not
 -- apply to this migration either.
---
--- DOLT PLANE, stated here because 0067 created these tables without saying
--- so and a reader has to know before writing to them: issue_versions and
--- store_epoch REPLICATE. They are ordinary synced tables, deliberately NOT
--- registered dolt_ignore'd the way 0064 registers the events journal's
--- clone-local pair. A bead's version history is part of the bead and has to
--- travel with it -- and the single-writer constraint above is a statement
--- about what happens when two clones MERGE these tables, which only means
--- anything for a table that replicates at all.
---
--- The obligation that buys: every operation that mints must STAGE what it
--- minted (issue_versions, store_epoch, and issues for the current_revision
--- advance), or the rows sit dirty in the working set -- outside the
--- DOLT_COMMIT of the very mutation they describe, unreplicated, and able to
--- trip DirtyTablesError on the next migration. The staging paths do this
--- from one list, issueops.VersionedHistoryStagedTables, keyed off whether
--- versioned history is active so no call site has to remember it.
 SET @issue_versions_as_needs_add = (
     SELECT IF(COUNT(*) = 0, 1, 0)
     FROM INFORMATION_SCHEMA.COLUMNS
@@ -121,61 +102,5 @@ SET @issue_versions_ds_needs_retype = (
 );
 SET @sql = IF(@issue_versions_ds_needs_retype = 1,
     'ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB',
-    'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- 0068 step 8 (be-hs42e.8 / gastownhall/beads#6132): widen
--- issue_versions.change_at and .removed_at from DATETIME (precision 0) to
--- DATETIME(6) (microsecond).
---
--- 0067 created both columns as plain DATETIME. Dolt's datetime(0) does not
--- truncate sub-second input -- it ROUNDS half-up (pinned for a different
--- column by testAuditImportCommentSubSecond in
--- backend/conformance/audit_labels-comments-events.go, reconfirmed directly
--- against issue_versions by
--- TestMigration0068ChangeAtSurvivesSubSecondPrecisionThroughDoltCLI in this
--- package). For a column whose entire job is placing history in order,
--- precision 0 has two consequences: a sub-second write can read back
--- rounded into the *next* second, and two writes less than a second apart
--- in real time can round onto the identical stored value and become
--- indistinguishable by change_at.
---
--- removed_at widens in lockstep even though no Go code writes it yet (a
--- repo-wide grep for removed_at/RemovedAt turns up exactly two hits, both
--- schema: this table's CREATE TABLE in 0067 and this package's CLI-bundle
--- mirror of it). It is change_at's paired lifecycle column on the same row
--- of the same table, so leaving it at precision 0 while change_at widens
--- would be exactly the asymmetry this bead's own title warns against
--- ("before any store accumulates real history").
---
--- No data conversion is needed: issue_versions is empty in the Phase 2 era
--- (see the attribution_status note above -- this migration and the table's
--- first writer ship in the same build), so each MODIFY changes only the
--- column type. Guarded on DATETIME_PRECISION the same way steps 6/7 guard
--- on COLUMN_NAME/DATA_TYPE: a raw-SQL replay of this file is a clean no-op
--- on an already-widened store. The CLI-bundle override
--- (cliMigration0068AddAttributionStatus) carries the direct MODIFY for the
--- same pre-2.3 CLI reason as steps 6/7.
-SET @issue_versions_change_at_needs_widen = (
-    SELECT IF(DATETIME_PRECISION <> 6, 1, 0)
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = 'issue_versions'
-      AND COLUMN_NAME = 'change_at'
-);
-SET @sql = IF(@issue_versions_change_at_needs_widen = 1,
-    'ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL',
-    'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @issue_versions_removed_at_needs_widen = (
-    SELECT IF(DATETIME_PRECISION <> 6, 1, 0)
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = 'issue_versions'
-      AND COLUMN_NAME = 'removed_at'
-);
-SET @sql = IF(@issue_versions_removed_at_needs_widen = 1,
-    'ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6)',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
