@@ -52,27 +52,10 @@ func runCompactProxiedServer(ctx context.Context) error {
 
 	cutoff := time.Now().AddDate(0, 0, -compactDoltDays)
 
-	var oldCommits int
-	var recentHashes []string
-	for _, entry := range logEntries {
-		if entry.Date.Before(cutoff) {
-			oldCommits++
-		} else {
-			recentHashes = append(recentHashes, entry.Hash)
-		}
-	}
-	initialHash := logEntries[totalCommits-1].Hash
-	boundaryHash := ""
-	for _, entry := range logEntries {
-		if entry.Date.Before(cutoff) {
-			boundaryHash = entry.Hash
-			break
-		}
-	}
+	plan := planCompaction(logEntries, cutoff)
+	oldCommits, recentHashes := plan.oldCommits, plan.recentHashes
+	initialHash, boundaryHash := plan.initialHash, plan.boundaryHash
 
-	for i, j := 0, len(recentHashes)-1; i < j; i, j = i+1, j-1 {
-		recentHashes[i], recentHashes[j] = recentHashes[j], recentHashes[i]
-	}
 	recentCommits := len(recentHashes)
 
 	if compactDoltDryRun {

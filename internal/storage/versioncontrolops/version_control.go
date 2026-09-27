@@ -43,16 +43,18 @@ func Status(ctx context.Context, db DBConn) (*storage.Status, error) {
 	return status, rows.Err()
 }
 
-// Log returns recent commit history up to limit entries.
+// Log returns recent commit history up to limit entries, newest commit date
+// first. Each entry also carries Dolt's commit_order so callers that need graph
+// (ancestry) order can sort by CommitOrder instead of trusting commit dates.
 // If limit is 0 or negative, all entries are returned.
 func Log(ctx context.Context, db DBConn, limit int) ([]storage.CommitInfo, error) {
 	var query string
 	var args []interface{}
 	if limit > 0 {
-		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log ORDER BY date DESC LIMIT ?"
+		query = "SELECT commit_hash, committer, email, date, message, commit_order FROM dolt_log ORDER BY date DESC LIMIT ?"
 		args = []interface{}{limit}
 	} else {
-		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log ORDER BY date DESC"
+		query = "SELECT commit_hash, committer, email, date, message, commit_order FROM dolt_log ORDER BY date DESC"
 	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -63,7 +65,7 @@ func Log(ctx context.Context, db DBConn, limit int) ([]storage.CommitInfo, error
 	var commits []storage.CommitInfo
 	for rows.Next() {
 		var c storage.CommitInfo
-		if err := rows.Scan(&c.Hash, &c.Author, &c.Email, &c.Date, &c.Message); err != nil {
+		if err := rows.Scan(&c.Hash, &c.Author, &c.Email, &c.Date, &c.Message, &c.CommitOrder); err != nil {
 			return nil, fmt.Errorf("scan commit: %w", err)
 		}
 		commits = append(commits, c)
