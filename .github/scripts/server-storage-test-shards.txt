@@ -2,13 +2,14 @@
 #
 # Format: <total_shards> <shard_number> <top_level_test_name>
 #
-# Unlike the embedded manifest, per-test timing is known for the tests
-# pinned below (see be-extn's investigation of CI job 95616282508):
-# TestCloudAuthCLIRouting alone costs ~9.5 minutes -- its 16 subtests each
-# call openCloudAuthTestStore, which does CREATE DATABASE + the full
-# migration chain + dolt init + dolt remote add + DROP DATABASE, and the
-# test uses t.Setenv so it can never run t.Parallel. It is pinned alone on
-# shard 1 so no other test shares its runtime. The remaining pins below
+# TestCloudAuthCLIRouting uses one shared outer store (#5841); its
+# environment-sensitive subtests run serially. #6396 checks that remote
+# writes use the shared fixture without imposing a machine-speed threshold.
+# Historically, be-extn's investigation of CI job 95616282508 measured 566s
+# (~9.5 minutes) when each of its 16 cases opened a separate database. That
+# measurement motivated the exclusive shard-1 pin; it is not a measurement
+# of the shared-store implementation or evidence that the pin is still needed.
+# The pin is retained pending fresh timing evidence. The remaining pins below
 # (TestCloudAuthCLIRoutingStructural, TestCreateGuard_* (9 tests),
 # TestFederationPeerCredentialLifecycleLazyKeyInit,
 # TestConcurrentWorkQueueDrain, TestHighContentionStress,
@@ -16,7 +17,7 @@
 # TestConcurrentCommentAndCloseWithoutCallerRetry, TestReadWriteMix, and
 # TestConcurrentIssueCreationWithoutCallerRetry) are each roughly 10-20s and
 # are spread across the remaining shards so they don't cluster on one.
-# Every other discovered test (the bulk of the 1126) is not listed here and
+# Every other discovered test is not listed here and
 # falls through to server-storage-test-shard.sh's hash(name) % total
 # fallback, the same mechanism the embedded manifest uses for its unlisted
 # tests. TestConformance is deliberately excluded -- it runs in the separate

@@ -16,15 +16,15 @@
 # hash(name) % total. Runs the matching subset using the pre-built test
 # binary at BEADS_TEST_SERVER_TEST_BINARY (or /tmp/dolt-conformance-test).
 #
-# This package hands 1126 top-level tests to a single job (be-extn): the
-# sibling embedded lane's test-embedded-storage shards 324 tests over 5 jobs.
-# Server mode is also slower per-test (real socket round-trips, per-test
-# CREATE/DROP DATABASE) than embedded. TestCloudAuthCLIRouting alone took 566s
-# (63% of the old 15m budget) across 16 subtests, each paying a full
-# CREATE DATABASE + migration chain + dolt init + dolt remote add + DROP
-# DATABASE (~35s) to test one routing predicate; it uses t.Setenv, so it can
-# never be parallel. The manifest pins it (and other known-heavy tests) to
-# distinct shards so they do not cluster.
+# Historically, be-extn's investigation of CI job 95616282508 measured
+# TestCloudAuthCLIRouting at 566s (~9.5 minutes, 63% of the old 15m budget).
+# Its 16 cases then each opened a database, ran migrations, initialized Dolt,
+# added a remote, and dropped the database. That motivated its exclusive pin.
+# Since #5841 the routing cases use one shared outer store; t.Setenv still
+# keeps them serial. The old timing does not measure this implementation or
+# establish that the exclusive pin is still needed. Pins are retained pending
+# fresh timing evidence. Unlisted tests use the discovery and hash fallback
+# below; no fixed test census is assumed.
 #
 # Environment:
 #   BEADS_TEST_ENV_RUN_DOLT=1               required (tests skip without it)
