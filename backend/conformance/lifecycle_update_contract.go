@@ -905,6 +905,145 @@ func RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T, ctx cont
 	maskedEvents.assert(t, "guard masked by the one before it", 0)
 }
 
+// RunLifecycleUpdateUpdatedAtFenceGatesOrdinaryEdits pins the fourth guard,
+// ExpectedUpdatedAt — the generation fence behind `--if-updated-at` — as a
+// PRECONDITION ON A PLAIN EDIT, beside the three field guards
+// RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits drives.
+//
+// The clause: ExpectedUpdatedAt "requires the issue row's current updated_at
+// to match" (issueops/issueops.go, UpdateRequest.ExpectedUpdatedAt), refused
+// with ErrUpdatedAtMismatch naming the current stamp, under the same
+// nothing-written promise as the sibling guards. COMPARISON IS
+// SECOND-PRECISION UTC — the column is DATETIME(0) while writers insert full
+// Go precision, so a satisfied leg that echoed a full-precision read back
+// MUST match: this case is the proof the truncation is real rather than
+// documented.
+//
+// THE ONE-SHOT ARM is the fence's teeth: a successful write ADVANCES
+// updated_at, so the stamp that authorized edit #1 refuses edit #2 — a fence
+// that did not advance the generation would let one stamp authorize unlimited
+// mutations. The refresh arm pins the per-generation (not per-identity)
+// other half: the NEW stamp re-fences cleanly.
+//
+// THE COMPOSITION ARMS pin the guard's precedence slot: identity first,
+// generation last — a stale assignee beside a stale stamp names the ASSIGNEE
+// (the sentinel order RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits
+// established for the field guards), and a holding assignee beside a stale
+// stamp names the stamp. Both refuse with nothing written.
+//
+// THE BLIND SPOT is documented, not asserted as a refusal: label mutations
+// bypass updated_at by design (upstream #5442), so a stamp read before a
+// label-only write still matches. This case drives that composition and pins
+// the MATCH, so an upstream fix that flips the expectation lands here rather
+// than silently changing the fence's meaning.
+func RunLifecycleUpdateUpdatedAtFenceGatesOrdinaryEdits(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lup-stampfence"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+	events := newLifecycleUpdateEventCounter(t, ctx, fixture, id)
+
+	priorityEdit := func(priority int) publicops.UpdateRequest {
+		return publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+			Priority: publicops.Field[int]{Set: true, Value: priority},
+		}}
+	}
+	assertPriority := func(label string, want int) {
+		t.Helper()
+		if got := lifecycleUpdateRow(t, ctx, fixture, id).Priority; got != want {
+			t.Errorf("%s = %d, want %d", label, got, want)
+		}
+	}
+
+	// THE SATISFIED LEG: the stamp a read reported, echoed verbatim (full
+	// precision and all), gates the edit through.
+	firstStamp := lifecycleUpdateRow(t, ctx, fixture, id).UpdatedAt
+	matching := priorityEdit(1)
+	matching.ExpectedUpdatedAt = &firstStamp
+	if result, err := fixture.Lifecycle.Update(ctx, matching); err != nil || !result.Changed {
+		t.Fatalf("edit fenced on the row's current stamp = %#v, %v; want the edit applied", result, err)
+	}
+	assertPriority("priority after a satisfied stamp fence", 1)
+	events.assert(t, "satisfied stamp fence", 1)
+
+	// ONE SHOT PER GENERATION: the same stamp now refuses — the write advanced
+	// updated_at — and the refusal writes nothing, not even an event.
+	after := lifecycleUpdateRow(t, ctx, fixture, id)
+	if !after.UpdatedAt.After(firstStamp) {
+		t.Fatalf("updated_at did not advance across the fenced write (%s -> %s); the fence could never re-refuse", firstStamp, after.UpdatedAt)
+	}
+	staleStamp := firstStamp
+	staleEdit := priorityEdit(0)
+	staleEdit.ExpectedUpdatedAt = &staleStamp
+	if _, err := fixture.Lifecycle.Update(ctx, staleEdit); !errors.Is(err, storage.ErrUpdatedAtMismatch) {
+		t.Fatalf("edit fenced on the pre-write stamp: err = %v, want ErrUpdatedAtMismatch", err)
+	}
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, id, "after the stale stamp fence", after)
+	events.assert(t, "stale stamp fence", 0)
+
+	// REFRESH RE-FENCES: the NEW stamp authorizes the next edit. Per
+	// generation, not per identity.
+	newStamp := lifecycleUpdateRow(t, ctx, fixture, id).UpdatedAt
+	refreshed := priorityEdit(2)
+	refreshed.ExpectedUpdatedAt = &newStamp
+	if result, err := fixture.Lifecycle.Update(ctx, refreshed); err != nil || !result.Changed {
+		t.Fatalf("edit fenced on the refreshed stamp = %#v, %v; want the edit applied", result, err)
+	}
+	assertPriority("priority after the refreshed stamp", 2)
+	events.assert(t, "refreshed stamp fence", 1)
+
+	// COMPOSITION, STALE FIELD GUARD BESIDE A HOLDING STAMP: the assignee
+	// sentinel wins (identity before generation), nothing written.
+	before := lifecycleUpdateRow(t, ctx, fixture, id)
+	currentStamp := before.UpdatedAt
+	staleAssignee := "nobody"
+	composed := priorityEdit(0)
+	composed.ExpectedAssignee = &staleAssignee
+	composed.ExpectedUpdatedAt = &currentStamp
+	if _, err := fixture.Lifecycle.Update(ctx, composed); !errors.Is(err, storage.ErrAssigneeMismatch) {
+		t.Fatalf("edit fenced on a stale assignee beside a holding stamp: err = %v, want ErrAssigneeMismatch", err)
+	}
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, id, "after the stale assignee beside a holding stamp", before)
+	events.assert(t, "stale assignee beside holding stamp", 0)
+
+	// COMPOSITION, HOLDING FIELD GUARD BESIDE A STALE STAMP: the stamp
+	// sentinel answers (the last guard is checked, not only the first).
+	before = lifecycleUpdateRow(t, ctx, fixture, id)
+	olderStamp := before.UpdatedAt.Add(-time.Second)
+	unassigned := ""
+	holderStamp := priorityEdit(0)
+	holderStamp.ExpectedAssignee = &unassigned
+	holderStamp.ExpectedUpdatedAt = &olderStamp
+	if _, err := fixture.Lifecycle.Update(ctx, holderStamp); !errors.Is(err, storage.ErrUpdatedAtMismatch) {
+		t.Fatalf("edit fenced on a holding assignee beside a stale stamp: err = %v, want ErrUpdatedAtMismatch", err)
+	}
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, id, "after a holding assignee beside a stale stamp", before)
+	events.assert(t, "holding assignee beside stale stamp", 0)
+
+	// THE #5442 BLIND SPOT, pinned as a MATCH: label mutations bypass
+	// updated_at by design, so the pre-label stamp still authorizes the next
+	// edit. If upstream ever fixes #5442, this arm flips to a refusal — change
+	// the expectation here and reference the fix.
+	before = lifecycleUpdateRow(t, ctx, fixture, id)
+	preLabelStamp := before.UpdatedAt
+	labelOnly := publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+		Labels: publicops.LabelPatch{Add: []string{"five-four-four-two"}},
+	}}
+	if _, err := fixture.Lifecycle.Update(ctx, labelOnly); err != nil {
+		t.Fatalf("label-only edit %s: %v", id, err)
+	}
+	afterLabel := lifecycleUpdateRow(t, ctx, fixture, id)
+	if !afterLabel.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("#5442 appears FIXED: a label-only write moved updated_at (%s -> %s); flip the blind-spot arm to expect ErrUpdatedAtMismatch", before.UpdatedAt, afterLabel.UpdatedAt)
+	}
+	blindSpot := priorityEdit(3)
+	blindSpot.ExpectedUpdatedAt = &preLabelStamp
+	if result, err := fixture.Lifecycle.Update(ctx, blindSpot); err != nil || !result.Changed {
+		t.Fatalf("edit fenced on the pre-label stamp = %#v, %v; want the edit applied (#5442: labels do not bump the generation)", result, err)
+	}
+	assertPriority("priority after the pre-label stamp", 3)
+}
+
 // RunLifecycleUpdateConditionalGuardAcceptsRespelledAssignee pins the
 // ga-5ksp5 fix beside RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits
 // above rather than inside it: that test's later "order-dependent composition"

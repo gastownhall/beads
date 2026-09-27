@@ -448,6 +448,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleUpdateRefusesUnknownIDsAndActorlessRequests,
 		RunLifecycleUpdateRefusalWritesNoMemberOfThePatch,
 		RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits,
+		RunLifecycleUpdateUpdatedAtFenceGatesOrdinaryEdits,
 		RunLifecycleUpdateConditionalGuardAcceptsRespelledAssignee,
 		RunLifecycleUpdateMetadataPatchOrdersMergeSetUnset,
 		RunLifecycleUpdateClosePolicy,
