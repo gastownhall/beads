@@ -170,10 +170,11 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 	})
 }
 
-// GenerateIssueIDInTable generates a unique ID, checking for collisions
-// in the specified table. Supports counter mode for non-ephemeral issues.
-//
-//nolint:gosec // G201: table is a hardcoded constant
+// GenerateIssueIDInTable generates an ID for an issue bound for table.
+// Supports counter mode for non-ephemeral issues. A hash candidate must be
+// free in BOTH planes, not only in table: issues and wisps share one ID space,
+// and the create path rejects an ID the sibling plane holds, so a
+// single-table probe would hand back that ID on every call.
 func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, issue *types.Issue, actor string) (string, error) {
 	// Counter mode only applies to the issues table (not wisps).
 	if table == "issues" {
@@ -201,13 +202,11 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
 
-			var count int
-			err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, table), candidate).Scan(&count)
+			taken, err := issueIDTakenTx(ctx, tx, candidate)
 			if err != nil {
 				return "", fmt.Errorf("failed to check for ID collision: %w", err)
 			}
-
-			if count == 0 {
+			if !taken {
 				return candidate, nil
 			}
 		}

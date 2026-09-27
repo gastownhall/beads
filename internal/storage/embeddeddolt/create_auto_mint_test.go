@@ -6,7 +6,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -76,5 +78,77 @@ func TestFailedAutoMintedCreateRestoresEmptyID(t *testing.T) {
 	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues", nil, &rows)
 	if rows != 0 {
 		t.Fatalf("issues holds %d rows after two failed creates, want 0", rows)
+	}
+}
+
+// TestAutoMintedHashIDSkipsSiblingPlaneOccupant pins that hash minting probes
+// both storage planes. issues and wisps share one ID space, and the create
+// guard rejects a candidate either plane holds. A minter that probed only its
+// own table returned the other plane's occupant, and since minting is
+// deterministic, every create of that issue failed the same way. Each case
+// occupies the nonce-0 candidate at every length the adaptive minter can start
+// from, in the plane the mint does NOT land in.
+func TestAutoMintedHashIDSkipsSiblingPlaneOccupant(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	const (
+		title = "sibling occupant fixture"
+		desc  = "an auto-minted ID must step past the other plane's occupant"
+		actor = "tester"
+	)
+	createdAt := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name          string
+		mintEphemeral bool   // plane the auto create lands in
+		mintPrefix    string // prefix the minter hashes with for that plane
+		mintTable     string
+		occupantTable string
+	}{
+		{name: "issue mint past wisp occupant", mintPrefix: "hs", mintTable: "issues", occupantTable: "wisps"},
+		{name: "wisp mint past issue occupant", mintEphemeral: true, mintPrefix: "hs-wisp", mintTable: "wisps", occupantTable: "issues"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			te := newTestEnv(t, "hs")
+			ctx := t.Context()
+
+			occupied := map[string]bool{}
+			for length := 3; length <= 8; length++ {
+				id := idgen.GenerateHashID(tc.mintPrefix, title, desc, actor, createdAt, length, 0)
+				occupant := &types.Issue{
+					ID:        id,
+					Title:     "occupant " + id,
+					Status:    types.StatusOpen,
+					Priority:  2,
+					IssueType: types.TypeTask,
+					Ephemeral: !tc.mintEphemeral,
+				}
+				if err := te.store.CreateIssue(ctx, occupant, actor); err != nil {
+					t.Fatalf("CreateIssue(occupant %s): %v", id, err)
+				}
+				occupied[id] = true
+			}
+
+			issue := &types.Issue{
+				Title:       title,
+				Description: desc,
+				Status:      types.StatusOpen,
+				Priority:    2,
+				IssueType:   types.TypeTask,
+				CreatedAt:   createdAt,
+				Ephemeral:   tc.mintEphemeral,
+			}
+			if err := te.store.CreateIssue(ctx, issue, actor); err != nil {
+				t.Fatalf("auto-minted CreateIssue: %v", err)
+			}
+			if occupied[issue.ID] {
+				t.Fatalf("auto-minted ID %q belongs to an occupant in %s", issue.ID, tc.occupantTable)
+			}
+			te.assertIssueTitle(t, ctx, tc.mintTable, issue.ID, title)
+			for id := range occupied {
+				te.assertIssueTitle(t, ctx, tc.occupantTable, id, "occupant "+id)
+				te.assertRowNotExists(t, ctx, tc.mintTable, id)
+			}
+		})
 	}
 }
