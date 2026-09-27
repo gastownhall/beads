@@ -73,6 +73,9 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	if request.Claim && (request.ExpectedAssignee != nil || request.ExpectedStatus != nil) {
 		return fmt.Errorf("%w: claim cannot use expected assignee or status", storage.ErrValidation)
 	}
+	if request.Claim && request.ExpectedUpdatedAt != nil {
+		return fmt.Errorf("%w: claim cannot use an expected updated_at guard (the claim has its own compare-and-set)", storage.ErrValidation)
+	}
 	if request.ForceAssigneeTransfer && (request.Claim || !request.Patch.Assignee.Set || request.ExpectedAssignee != nil) {
 		return fmt.Errorf("%w: invalid forced assignee transfer", storage.ErrValidation)
 	}

@@ -205,9 +205,10 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 // updateWispChecked updates a wisp with the optional atomic preconditions of
 // UpdateIssueChecked, mirroring updateWisp but first enforcing — in the SAME
 // transaction — opts.ExpectedVersion (issueops.CheckVersionInTx →
-// storage.ErrVersionMismatch) and the opts.ExpectedAssignee/ExpectedStatus
+// storage.ErrVersionMismatch), the opts.ExpectedAssignee/ExpectedStatus
 // field guards (issueops.CheckExpectedFieldsInTx → ErrAssigneeMismatch/
-// ErrStatusMismatch), so a stale precondition refuses before any write and the
+// ErrStatusMismatch) and the opts.ExpectedUpdatedAt generation fence
+// (ErrUpdatedAtMismatch), so a stale precondition refuses before any write and the
 // deferred Rollback discards the transaction (a true compare-and-swap). Like
 // updateWisp it uses a bare BeginTx/Commit with no withRetryTx (consistent with
 // the rest of the wisp write path — do not add one here); wisps live in
@@ -227,7 +228,7 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 			return err
 		}
 	}
-	if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+	if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus, opts.ExpectedUpdatedAt); err != nil {
 		return err
 	}
 	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {

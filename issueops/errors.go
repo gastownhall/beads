@@ -3,6 +3,7 @@ package issueops
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/beadserrors"
 )
@@ -176,6 +177,56 @@ var ErrVersionMismatch = errors.New("version mismatch")
 // issue was stale; the issue is left untouched. The assignee analog is
 // ErrAssigneeMismatch, shared with UnclaimIssueIfAssignee.
 var ErrStatusMismatch = errors.New("status mismatch")
+
+// ErrUpdatedAtMismatch is returned by a conditional mutation whose
+// ExpectedUpdatedAt does not match the issue row's current updated_at — the
+// generation fence behind `bd update/unclaim --if-updated-at`. The caller
+// carries the stamp verbatim from its own read; a miss means another writer
+// touched the row since, and the row is left untouched.
+//
+// IT FENCES THE ROW'S GENERATION, NOT AN IDENTITY FIELD, so it composes with
+// ExpectedAssignee/ExpectedStatus rather than replacing them: all supplied
+// guards must hold. COMPARISON IS SECOND-PRECISION UTC: the column is
+// DATETIME(0) and writers insert full Go precision, so both sides are
+// truncated to the second before comparing — an equivalent RFC3339 spelling
+// of the same instant (Z vs +00:00) matches.
+//
+// KNOWN BLIND SPOT (upstream issue #5442), documented rather than fixed here:
+// label mutations bypass issues.updated_at by design, so a stamp read before
+// a label-only write still matches. The guard covers the issues row only.
+var ErrUpdatedAtMismatch = errors.New("updated_at mismatch")
+
+// The stamp guard's comparison helpers live beside the sentinel because every
+// backend that raises the refusal must compare the same way, and they are
+// pure functions of two times — no database, no storage types — so the
+// public contract package can host them without dragging an implementation
+// in. UpdateSpec's use-case twin and the embedded CheckExpectedFieldsInTx
+// both call these, which is what keeps their verdicts identical.
+
+// TruncateStamp canonicalizes a stamp to the second precision the DATETIME(0)
+// updated_at column actually stores, in UTC: writers insert full Go
+// precision and the engine truncates on store, so a comparison at full
+// precision would never match.
+func TruncateStamp(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Second)
+}
+
+// UpdatedAtStampsEqual reports whether a row's current updated_at and the
+// caller's expected stamp name the same generation under the second-precision
+// rule TruncateStamp documents.
+func UpdatedAtStampsEqual(current, expected time.Time) bool {
+	return TruncateStamp(current).Equal(TruncateStamp(expected))
+}
+
+// UpdatedAtMismatchError builds the stamp-guard refusal: the sentinel above
+// followed by the CURRENT and EXPECTED stamps, both rendered in the canonical
+// RFC3339 UTC second form `bd show --json` reports, so a caller can feed the
+// current value straight back as its next attempt's stamp.
+func UpdatedAtMismatchError(id string, current, expected time.Time) error {
+	return fmt.Errorf("%w: %s was last updated %s, expected %s",
+		ErrUpdatedAtMismatch, id, TruncateStamp(current).Format(time.RFC3339),
+		TruncateStamp(expected).Format(time.RFC3339))
+}
 
 // ErrSelfDependency is returned when a dependency edge would point an issue at
 // itself. It is the static prefix of the formatted message, wrapped so callers

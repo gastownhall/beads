@@ -1031,11 +1031,11 @@ func (u *recordingIssueUC) ApplyUpdate(ctx context.Context, id string, spec doma
 }
 
 // specWrites reports whether spec asks ApplyUpdate to change anything. It
-// clears the three expectation fields and asks whether ANYTHING is left, rather
+// clears the four expectation fields and asks whether ANYTHING is left, rather
 // than listing the writing fields: a field added to UpdateSpec then counts as a
 // write until someone says otherwise, which is the safe direction for a hook.
 func specWrites(spec domain.UpdateSpec) bool {
-	spec.ExpectedVersion, spec.ExpectedAssignee, spec.ExpectedStatus = nil, nil, nil
+	spec.ExpectedVersion, spec.ExpectedAssignee, spec.ExpectedStatus, spec.ExpectedUpdatedAt = nil, nil, nil, nil
 	if len(spec.Fields) == 0 {
 		spec.Fields = nil
 	}

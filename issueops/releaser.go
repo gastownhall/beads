@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ReleaseRequest describes one release of a claim — the inverse of
@@ -85,6 +86,22 @@ type ReleaseRequest struct {
 	// holds it". That is the same rule UpdateRequest states for
 	// ForceAssigneeTransfer beside its own ExpectedAssignee.
 	ExpectedAssignee *string
+	// ExpectedUpdatedAt is a compare-and-set precondition on the row's
+	// generation: the release proceeds only while the issue's current
+	// updated_at still equals the caller's stamp, else it refuses with
+	// ErrUpdatedAtMismatch naming the current stamp and leaves the row
+	// untouched. nil DISABLES THE CHECK — a pointer, for the same reason the
+	// guards above are pointers. It composes with ExpectedAssignee: all
+	// supplied guards must hold.
+	//
+	// THE COMPARISON IS SECOND-PRECISION UTC (the column is DATETIME(0)), and
+	// the guard covers the issues ROW ONLY — label mutations bypass
+	// updated_at by design (upstream #5442).
+	//
+	// FORCE MUST BE FALSE WHEN IT IS NON-NIL, the same contradictory-intent
+	// rule ExpectedAssignee states: a fence and "release regardless" disagree
+	// about whether the row the caller saw is the row being released.
+	ExpectedUpdatedAt *time.Time
 	// Force bypasses the ownership fence, so an actor that is not the holder
 	// may release the claim. It is the escape hatch `bd unclaim --force` spells,
 	// for an abandoned claim whose holder crashed.

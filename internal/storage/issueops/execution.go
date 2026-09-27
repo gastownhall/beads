@@ -157,13 +157,13 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 			return publicops.UpdateResult{}, nil, err
 		}
 	}
+	var expectedStatus *string
 	if attempt.ExpectedStatus != nil {
 		status := string(*attempt.ExpectedStatus)
+		expectedStatus = &status
 		attempt.ExpectedStatus = nil
-		if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, &status); err != nil {
-			return publicops.UpdateResult{}, nil, err
-		}
-	} else if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, nil); err != nil {
+	}
+	if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, expectedStatus, attempt.ExpectedUpdatedAt); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {

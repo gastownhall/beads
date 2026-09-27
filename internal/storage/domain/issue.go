@@ -101,7 +101,7 @@ type IssueSQLRepository interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	UnclaimIssue(ctx context.Context, id, actor string, force bool) error
-	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string, expectedUpdatedAt *time.Time) error
 	HeartbeatIssue(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
 	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
@@ -299,6 +299,17 @@ type UpdateSpec struct {
 	// whole-attempt retry re-checks the guards on the redo.
 	ExpectedAssignee *string
 	ExpectedStatus   *string
+
+	// ExpectedUpdatedAt is the generation fence behind `--if-updated-at`:
+	// when non-nil the whole update applies only if the row's current
+	// updated_at still equals the caller's stamp, else ApplyUpdate refuses
+	// with storage.ErrUpdatedAtMismatch naming the current stamp and nothing
+	// is written. THE COMPARISON IS SECOND-PRECISION UTC via
+	// publicops.UpdatedAtStampsEqual (the column is DATETIME(0)); it
+	// fences the issues ROW only — label mutations bypass updated_at by
+	// design (upstream #5442). The read shares the unit of work's
+	// transaction, like the sibling guards.
+	ExpectedUpdatedAt *time.Time
 }
 
 type IssueUseCase interface {
@@ -321,7 +332,7 @@ type IssueUseCase interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	Unclaim(ctx context.Context, id, actor string, force bool) error
-	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string, expectedUpdatedAt *time.Time) error
 	Heartbeat(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
 	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
@@ -683,7 +694,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
 	}
 
-	if spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
+	if spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil || spec.ExpectedUpdatedAt != nil {
 		var current *types.Issue
 		if useWisp {
 			current, err = u.GetWisp(ctx, id)
@@ -706,6 +717,12 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		if spec.ExpectedStatus != nil && string(current.Status) != *spec.ExpectedStatus {
 			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
 				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
+		}
+		// The generation fence, last: identity first, generation last. The
+		// shared second-precision comparison keeps this twin agreeing with
+		// the embedded path's CheckExpectedFieldsInTx verdict for verdict.
+		if spec.ExpectedUpdatedAt != nil && !publicops.UpdatedAtStampsEqual(current.UpdatedAt, *spec.ExpectedUpdatedAt) {
+			return nil, publicops.UpdatedAtMismatchError(id, current.UpdatedAt, *spec.ExpectedUpdatedAt)
 		}
 	}
 
@@ -1897,11 +1914,16 @@ func (u *issueUseCaseImpl) Unclaim(ctx context.Context, id, actor string, force 
 // event recorded) because both reach the one classic implementation in
 // issueops — which is what makes `bd unclaim --if-assignee` behave identically
 // on the proxied-server and embedded backends.
-func (u *issueUseCaseImpl) UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error {
+//
+// A non-nil expectedUpdatedAt threads the `--if-updated-at` generation fence
+// into the same classic implementation: a stale stamp refuses with
+// storage.ErrUpdatedAtMismatch having written nothing, identically on both
+// backends.
+func (u *issueUseCaseImpl) UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string, expectedUpdatedAt *time.Time) error {
 	if id == "" {
 		return fmt.Errorf("UnclaimIfAssignee: id must not be empty")
 	}
-	if err := u.issueRepo.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee); err != nil {
+	if err := u.issueRepo.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee, expectedUpdatedAt); err != nil {
 		return fmt.Errorf("UnclaimIfAssignee: %w", err)
 	}
 	return nil

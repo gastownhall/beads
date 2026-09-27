@@ -278,7 +278,7 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
 				return err
 			}
-			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus, opts.ExpectedUpdatedAt); err != nil {
 				return err
 			}
 			return s.demoteToWispInTx(ctx, tx, id, updates, actor)
@@ -300,7 +300,7 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
 				return err
 			}
-			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus, opts.ExpectedUpdatedAt); err != nil {
 				return err
 			}
 			result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
@@ -519,11 +519,14 @@ func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, f
 // UnclaimIssueIfAssignee releases a claim only while the issue is still assigned
 // to expectedAssignee (compare-and-swap, the inverse of ClaimIssue). Returns
 // storage.ErrAssigneeMismatch, leaving the issue untouched, when the current
-// assignee differs. Delegates SQL work to issueops.UnclaimIssueIfAssigneeInTx;
-// handles Dolt-specific concerns (DOLT_ADD/COMMIT). Wrapped in withRetryTx like
-// UnclaimIssue so a concurrent writer that loses Dolt's optimistic commit-time
-// merge is retried rather than surfaced as a hard failure.
-func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+// assignee differs. A non-nil expectedUpdatedAt adds the `--if-updated-at`
+// generation fence: the release proceeds only while the row's updated_at still
+// equals that stamp, else it refuses with storage.ErrUpdatedAtMismatch. Delegates
+// SQL work to issueops.UnclaimIssueIfAssigneeInTx; handles Dolt-specific concerns
+// (DOLT_ADD/COMMIT). Wrapped in withRetryTx like UnclaimIssue so a concurrent
+// writer that loses Dolt's optimistic commit-time merge is retried rather than
+// surfaced as a hard failure.
+func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string, expectedUpdatedAt *time.Time) error {
 	// verify-by-re-read (bd-zccb9), same reasoning as UnclaimIssue: the write
 	// and its verification sit under withCircuitWrite so circuit success is
 	// recorded once at the boundary, only after verifiedClaimWrite confirms the
@@ -531,7 +534,7 @@ func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
 			return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-				if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee); err != nil {
+				if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee, expectedUpdatedAt); err != nil {
 					return err
 				}
 

@@ -5,17 +5,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
-// CheckExpectedFieldsInTx reads the current assignee and status for id and
-// returns ErrAssigneeMismatch/ErrStatusMismatch (wrapped with actual vs
-// expected) when a non-nil guard differs — the semantic-field compare-and-swap
-// behind `bd update --if-assignee/--if-status` (bd-wsqvw). A non-nil pointer to
-// "" is a real guard meaning "expected unassigned"; nil disables that check.
-// Routes to the issues or wisps table. Returns ErrNotFound when the row is
-// absent.
+// CheckExpectedFieldsInTx reads the current assignee, status and updated_at
+// for id and returns ErrAssigneeMismatch/ErrStatusMismatch/ErrUpdatedAtMismatch
+// (wrapped with actual vs expected) when a non-nil guard differs — the
+// semantic-field compare-and-swap behind
+// `bd update --if-assignee/--if-status/--if-updated-at` (bd-wsqvw). A non-nil
+// pointer to "" is a real guard meaning "expected unassigned"; nil disables
+// that check. Routes to the issues or wisps table. Returns ErrNotFound when
+// the row is absent.
 //
 // The CAS has the same two limbs as CheckVersionInTx: this read-side check
 // refuses a writer that committed before the caller's transaction began, and a
@@ -30,9 +33,17 @@ import (
 // AuthorizeAssigneeTransferWithPools; this was the third, previously-split
 // verbatim-comparison surface (ga-5ksp5, gate review on #5439).
 //
+// The updated_at guard is a TRANSACTIONAL READ-COMPARE, not a SQL predicate:
+// DATETIME(0) truncation happens on store, so an `AND updated_at = ?` clause
+// against a caller's stamp could miss on spelling alone. Reading the stamp in
+// the same transaction and comparing Go-side (UpdatedAtStampsEqual) keeps the
+// refusal atomic with the update and reports the CURRENT stamp in the error.
+// It fences the issues row only — label mutations bypass updated_at by design
+// (upstream #5442).
+//
 //nolint:gosec // G201: table name comes from WispTableRouting (hardcoded constants)
-func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAssignee, expectedStatus *string) error {
-	if expectedAssignee == nil && expectedStatus == nil {
+func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAssignee, expectedStatus *string, expectedUpdatedAt *time.Time) error {
+	if expectedAssignee == nil && expectedStatus == nil && expectedUpdatedAt == nil {
 		return nil
 	}
 	isWisp := IsActiveWispInTx(ctx, tx, id)
@@ -40,9 +51,10 @@ func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAs
 
 	var assignee sql.NullString
 	var status string
+	var updatedAtStr sql.NullString
 	err := tx.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT assignee, status FROM %s WHERE id = ?", issueTable), id,
-	).Scan(&assignee, &status)
+		fmt.Sprintf("SELECT assignee, status, updated_at FROM %s WHERE id = ?", issueTable), id,
+	).Scan(&assignee, &status, &updatedAtStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
@@ -54,6 +66,15 @@ func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAs
 	}
 	if expectedStatus != nil && status != *expectedStatus {
 		return fmt.Errorf("%w: %s has status %q, expected %q", storage.ErrStatusMismatch, id, status, *expectedStatus)
+	}
+	if expectedUpdatedAt != nil {
+		var current time.Time
+		if updatedAtStr.Valid {
+			current = ParseTimeString(updatedAtStr.String)
+		}
+		if !publicops.UpdatedAtStampsEqual(current, *expectedUpdatedAt) {
+			return publicops.UpdatedAtMismatchError(id, current, *expectedUpdatedAt)
+		}
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // UnclaimIssueInTx atomically releases a claimed issue: it clears the assignee,
@@ -153,8 +154,16 @@ func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id strin
 // storage.ErrAssigneeMismatch naming the current holder and leaves the row
 // untouched. actor is recorded as the event author.
 //
+// A non-nil expectedUpdatedAt adds the generation fence behind
+// `--if-updated-at`: the release proceeds only while the row's updated_at
+// still equals that stamp, else it refuses with storage.ErrUpdatedAtMismatch
+// naming the current stamp and leaves the row untouched. Checked against the
+// same in-transaction read as the assignee precheck (second-precision UTC —
+// see UpdatedAtStampsEqual), so no write can slip between the verdicts.
+// nil disables the check.
+//
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx DBTX, id string, actor string, expectedAssignee string) error {
+func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx DBTX, id string, actor string, expectedAssignee string, expectedUpdatedAt *time.Time) error {
 	if expectedAssignee == "" {
 		return fmt.Errorf("conditional unclaim of %s: expected assignee must not be empty (use UnclaimIssueInTx for an unconditional release)", id)
 	}
@@ -183,6 +192,15 @@ func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx DBTX, id string, actor s
 	// same row state.
 	if !actorMatches(oldIssue.Assignee, expectedAssignee) {
 		return fmt.Errorf("%w: %s is held by %q, expected %q", storage.ErrAssigneeMismatch, id, oldIssue.Assignee, expectedAssignee)
+	}
+
+	// The generation fence, checked against the same in-transaction read: a
+	// same-assignee heartbeat (identity unchanged, updated_at rewritten) is
+	// exactly the stale release this refuses (upstream #5442 caveat — label
+	// writes bypass updated_at, so they do not trip it; that is documented,
+	// not fixed, here).
+	if expectedUpdatedAt != nil && !publicops.UpdatedAtStampsEqual(oldIssue.UpdatedAt, *expectedUpdatedAt) {
+		return publicops.UpdatedAtMismatchError(id, oldIssue.UpdatedAt, *expectedUpdatedAt)
 	}
 
 	now := time.Now().UTC()

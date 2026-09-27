@@ -82,6 +82,17 @@ func ReleaseIssueInTx(ctx context.Context, tx DBTX, req publicops.ReleaseRequest
 			"%w: %s has no assignee to release", publicops.ErrNotClaimed, req.IssueID)
 	}
 
+	// THE GENERATION FENCE on the unconditional path. The conditional release
+	// below carries ExpectedUpdatedAt into the raw seam itself
+	// (UnclaimIssueIfAssigneeInTx checks it against its own read); the raw
+	// unconditional release takes no stamp, so the role checks it here against
+	// the same `before` snapshot — the refusal is second-precision UTC and
+	// names the current stamp, like the raw seam's own
+	// (issueops.ErrUpdatedAtMismatch via UpdatedAtMismatchError).
+	if req.ExpectedAssignee == nil && req.ExpectedUpdatedAt != nil && !publicops.UpdatedAtStampsEqual(before.UpdatedAt, *req.ExpectedUpdatedAt) {
+		return publicops.ReleaseResult{}, ReleaseWrite{}, publicops.UpdatedAtMismatchError(req.IssueID, before.UpdatedAt, *req.ExpectedUpdatedAt)
+	}
+
 	// EVERY OTHER REFUSAL IS THE RAW SEAM'S, and is deliberately not repeated
 	// here. The ownership fence and the assignee compare-and-set already answer
 	// with ErrNotOwner and ErrAssigneeMismatch — typed, wrapped, and in this
@@ -90,7 +101,7 @@ func ReleaseIssueInTx(ctx context.Context, tx DBTX, req publicops.ReleaseRequest
 	// Both copies WERE written, and both were deleted after a mutation removing
 	// them left the whole contract green.
 	if req.ExpectedAssignee != nil {
-		err = UnclaimIssueIfAssigneeInTx(ctx, tx, req.IssueID, req.Actor, *req.ExpectedAssignee)
+		err = UnclaimIssueIfAssigneeInTx(ctx, tx, req.IssueID, req.Actor, *req.ExpectedAssignee, req.ExpectedUpdatedAt)
 	} else {
 		err = UnclaimIssueInTx(ctx, tx, req.IssueID, req.Actor, req.Force)
 	}

@@ -239,6 +239,7 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 		ExpectedVersion:       item.ExpectedVersion,
 		ExpectedStatus:        item.ExpectedStatus,
 		ExpectedAssignee:      item.ExpectedAssignee,
+		ExpectedUpdatedAt:     item.ExpectedUpdatedAt,
 		ForceClosePolicy:      item.ForceClosePolicy,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
 	}

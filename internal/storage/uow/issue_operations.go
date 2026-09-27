@@ -265,6 +265,9 @@ func updatePreconditionsHold(request publicops.UpdateRequest, before *types.Issu
 	if request.ExpectedStatus != nil && *request.ExpectedStatus != before.Status {
 		return false
 	}
+	if request.ExpectedUpdatedAt != nil && !publicops.UpdatedAtStampsEqual(before.UpdatedAt, *request.ExpectedUpdatedAt) {
+		return false
+	}
 	return true
 }
 
@@ -355,16 +358,17 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 		setLabels = &labels
 	}
 	return domain.UpdateSpec{
-		Fields:           fields,
-		Claim:            request.Claim,
-		ExpectedVersion:  request.ExpectedVersion,
-		ExpectedAssignee: request.ExpectedAssignee,
-		ExpectedStatus:   statusPointer(request.ExpectedStatus),
-		Persistence:      persistence,
-		AddLabels:        append([]string(nil), patch.Labels.Add...),
-		RemoveLabels:     append([]string(nil), patch.Labels.Remove...),
-		SetLabels:        setLabels,
-		Reparent:         fieldStringPointer(patch.ParentID),
+		Fields:            fields,
+		Claim:             request.Claim,
+		ExpectedVersion:   request.ExpectedVersion,
+		ExpectedAssignee:  request.ExpectedAssignee,
+		ExpectedStatus:    statusPointer(request.ExpectedStatus),
+		ExpectedUpdatedAt: request.ExpectedUpdatedAt,
+		Persistence:       persistence,
+		AddLabels:         append([]string(nil), patch.Labels.Add...),
+		RemoveLabels:      append([]string(nil), patch.Labels.Remove...),
+		SetLabels:         setLabels,
+		Reparent:          fieldStringPointer(patch.ParentID),
 	}, nil
 }
 

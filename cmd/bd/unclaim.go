@@ -90,7 +90,7 @@ Examples:
 
 			var unclaimErr error
 			if conditional {
-				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, actor, ifAssignee)
+				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, actor, ifAssignee, nil)
 			} else {
 				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, actor, force)
 			}

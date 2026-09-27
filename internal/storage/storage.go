@@ -36,6 +36,7 @@ var (
 	ErrAlreadyIdentified = issueops.ErrAlreadyIdentified
 	ErrVersionMismatch   = issueops.ErrVersionMismatch
 	ErrStatusMismatch    = issueops.ErrStatusMismatch
+	ErrUpdatedAtMismatch = issueops.ErrUpdatedAtMismatch
 )
 
 // CloseOpenChildrenError reports the issue and open-child count that refused a
@@ -357,8 +358,12 @@ type Storage interface {
 	// UnclaimIssueIfAssignee releases a claim only while the issue is still
 	// assigned to expectedAssignee (compare-and-swap, the inverse of
 	// ClaimIssue). Returns ErrAssigneeMismatch, leaving the issue untouched,
-	// when the current assignee differs.
-	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error
+	// when the current assignee differs. A non-nil expectedUpdatedAt adds the
+	// generation fence (`--if-updated-at`): the release proceeds only while
+	// the row's updated_at still equals that stamp, else it refuses with
+	// ErrUpdatedAtMismatch — nil disables it. All supplied guards must hold;
+	// the reads and the release share one transaction.
+	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string, expectedUpdatedAt *time.Time) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	// CloseIssueChecked closes an issue, but refuses with ErrCloseOpenChildren
@@ -613,6 +618,18 @@ type UpdateIssueOptions struct {
 	// and refuses (the same invariant as ExpectedVersion).
 	ExpectedAssignee *string
 	ExpectedStatus   *string
+
+	// ExpectedUpdatedAt is the generation fence behind
+	// `--if-updated-at`: when non-nil, the update proceeds only if the row's
+	// current updated_at equals the caller's stamp, else it refuses atomically
+	// with ErrUpdatedAtMismatch naming the current stamp. nil disables the
+	// check. THE COMPARISON IS SECOND-PRECISION UTC (the column is DATETIME(0)
+	// while writers insert full Go precision, so both sides are truncated to
+	// the second before comparing), and it fences the issues ROW ONLY — label
+	// mutations bypass updated_at by design (upstream #5442). It composes with
+	// the guards above under the same all-must-hold and shared-transaction
+	// invariants.
+	ExpectedUpdatedAt *time.Time
 }
 
 // MergeSlotStatus is returned by MergeSlotCheck and describes the current

@@ -45,5 +45,14 @@ func ValidateReleaseRequest(in issueops.ReleaseRequest) error {
 				issueops.ErrValidation)
 		}
 	}
+	// The generation fence agrees with Force even less than the holder fence
+	// does: ExpectedUpdatedAt says "release only if the row is still the one I
+	// read", Force says "release regardless". Same contradictory-intent rule,
+	// stated independently of ExpectedAssignee so the stamp guard composes
+	// with the holder guard but never with the bypass.
+	if in.ExpectedUpdatedAt != nil && in.Force {
+		return fmt.Errorf("%w: force releases the issue regardless of its state and expected-updated-at releases only an unchanged generation; a request cannot ask for both",
+			issueops.ErrValidation)
+	}
 	return nil
 }

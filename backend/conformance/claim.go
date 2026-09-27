@@ -227,7 +227,7 @@ func testUnclaimIfAssigneeMatch(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ur-1", Title: "T"}), "a"))
 	must(t, s.ClaimIssue(ctx(), "ur-1", "worker1"))
 
-	must(t, s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1"))
+	must(t, s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1", nil))
 	got, err := s.GetIssue(ctx(), "ur-1")
 	must(t, err)
 	if got.Assignee != "" {
@@ -237,7 +237,7 @@ func testUnclaimIfAssigneeMatch(t *testing.T, f Factory) {
 		t.Errorf("after conditional release: status = %q, want open", got.Status)
 	}
 
-	err = s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1")
+	err = s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1", nil)
 	if !errors.Is(err, storage.ErrAssigneeMismatch) {
 		t.Errorf("repeat conditional release: err = %v, want ErrAssigneeMismatch", err)
 	}
@@ -254,7 +254,7 @@ func testUnclaimIfAssigneeStale(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ur-2", Title: "T"}), "a"))
 	must(t, s.ClaimIssue(ctx(), "ur-2", "worker2"))
 
-	err := s.UnclaimIssueIfAssignee(ctx(), "ur-2", "releaser", "worker1")
+	err := s.UnclaimIssueIfAssignee(ctx(), "ur-2", "releaser", "worker1", nil)
 	if !errors.Is(err, storage.ErrAssigneeMismatch) {
 		t.Errorf("stale conditional release: err = %v, want ErrAssigneeMismatch", err)
 	}

@@ -1233,8 +1233,8 @@ func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor str
 // released against the wisp tables on both backends. The mismatch verdict
 // (storage.ErrAssigneeMismatch, nothing written) is produced by the shared
 // helper, not restated here.
-func (r *issueSQLRepositoryImpl) UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error {
-	if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, r.runner, id, actor, expectedAssignee); err != nil {
+func (r *issueSQLRepositoryImpl) UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string, expectedUpdatedAt *time.Time) error {
+	if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, r.runner, id, actor, expectedAssignee, expectedUpdatedAt); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.UnclaimIssueIfAssignee: %w", err)
 	}
 	return nil

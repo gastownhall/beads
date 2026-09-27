@@ -46,11 +46,12 @@ func (s *EmbeddedDoltStore) UnclaimIssue(ctx context.Context, id string, actor s
 // UnclaimIssueIfAssignee releases a claim only while the issue is still assigned
 // to expectedAssignee (compare-and-swap, the inverse of ClaimIssue). Returns
 // storage.ErrAssigneeMismatch, leaving the issue untouched, when the current
-// assignee differs. Delegates SQL work to issueops; EmbeddedDolt auto-commits
-// the transaction.
-func (s *EmbeddedDoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+// assignee differs. A non-nil expectedUpdatedAt adds the `--if-updated-at`
+// generation fence (storage.ErrUpdatedAtMismatch on a stale stamp). Delegates
+// SQL work to issueops; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string, expectedUpdatedAt *time.Time) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee)
+		return issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee, expectedUpdatedAt)
 	})
 }
 
@@ -104,7 +105,7 @@ func (s *EmbeddedDoltStore) UpdateIssueChecked(ctx context.Context, id string, u
 				return err
 			}
 		}
-		if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+		if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus, opts.ExpectedUpdatedAt); err != nil {
 			return err
 		}
 		_, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)

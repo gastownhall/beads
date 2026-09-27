@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Ref names ONE issue, either by an id that already exists or by the Key a
@@ -149,6 +150,15 @@ type UpdateItem struct {
 	ExpectedVersion  *int64
 	ExpectedStatus   *Status
 	ExpectedAssignee *string
+	// ExpectedUpdatedAt is UpdateRequest's generation fence
+	// (`--if-updated-at`), per item, evaluated AS-MODIFIED like the sibling
+	// guards. It carries no already-touched rule: like ExpectedStatus and
+	// ExpectedAssignee it is an equality a caller can coherently state about a
+	// row its own earlier item just wrote — though a stamp is server-minted on
+	// write, so in practice a caller guards with the stamp it read, and an
+	// as-modified miss refuses with ErrUpdatedAtMismatch wrapped in the item's
+	// *ItemError.
+	ExpectedUpdatedAt *time.Time
 	// ForceClosePolicy and ForceAssigneeTransfer are UpdateRequest's, per item,
 	// with UpdateRequest's rules — including that ForceAssigneeTransfer without
 	// a Patch.Assignee is invalid.

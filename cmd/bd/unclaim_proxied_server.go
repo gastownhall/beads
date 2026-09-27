@@ -62,7 +62,7 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 
 			var uerr error
 			if expectedAssignee != "" {
-				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee)
+				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee, nil)
 			} else {
 				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, actor, force)
 			}

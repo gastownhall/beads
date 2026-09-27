@@ -300,6 +300,23 @@ type UpdateRequest struct {
 	// ExpectedStatus requires the current status to match. It must be nil when
 	// Claim is true.
 	ExpectedStatus *Status
+	// ExpectedUpdatedAt requires the issue row's current updated_at to match.
+	// It is the generation fence behind `--if-updated-at`: the caller carries
+	// the stamp verbatim from its own read and the mutation applies only while
+	// no other writer has touched the row since. A miss refuses with
+	// ErrUpdatedAtMismatch naming the current stamp and writes nothing. Like
+	// the guards above it must be nil when Claim is true (the claim has its
+	// own compare-and-set).
+	//
+	// THE COMPARISON IS SECOND-PRECISION UTC. The column is DATETIME(0) while
+	// writers insert full Go precision, so both sides are truncated to the
+	// second before comparing; an equivalent RFC3339 spelling of the same
+	// instant (Z vs +00:00) is the same stamp.
+	//
+	// IT FENCES THE ISSUES ROW ONLY. Label mutations bypass updated_at by
+	// design (upstream #5442), so a stamp read before a label-only write still
+	// matches; compose with the sibling guards for the fields they own.
+	ExpectedUpdatedAt *time.Time
 	// IssuePlaneOnly restricts the update to the issue plane: an ID that names
 	// a wisp is ErrNotFound rather than an ephemeral row to update. The zero
 	// value keeps the both-plane auto-resolve every caller gets today.

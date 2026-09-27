@@ -188,14 +188,17 @@ func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor
 	return err
 }
 
-func (s *InstrumentedStorage) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+func (s *InstrumentedStorage) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string, expectedUpdatedAt *time.Time) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("bd.issue.id", id),
 		attribute.String("bd.actor", actor),
 		attribute.String("bd.issue.expected_assignee", expectedAssignee),
 	}
+	if expectedUpdatedAt != nil {
+		attrs = append(attrs, attribute.String("bd.issue.expected_updated_at", expectedUpdatedAt.UTC().Format(time.RFC3339)))
+	}
 	ctx, span, t := s.op(ctx, "UnclaimIssueIfAssignee", attrs...)
-	err := s.inner.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee)
+	err := s.inner.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee, expectedUpdatedAt)
 	s.done(ctx, span, t, err, attrs...)
 	return err
 }
