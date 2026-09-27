@@ -145,6 +145,40 @@ func TestSetupForkExclude_Worktree(t *testing.T) {
 	}
 }
 
+// TestSetupForkExcludeIgnoresInheritedGitRouting pins the fork exclude writer to the repository the
+// command selected. detectForkSetup scrubs inherited Git routing, so under an inherited GIT_DIR bd
+// detects the fork in the selected repository; an unscrubbed writer would then append the beads
+// patterns to the inherited repository's .git/info/exclude instead — a write into an unrelated
+// repository, performed automatically in non-interactive mode.
+func TestSetupForkExcludeIgnoresInheritedGitRouting(t *testing.T) {
+	selected := newGitRepo(t)
+	foreign := newGitRepo(t)
+	foreignExcludePath := filepath.Join(foreign, ".git", "info", "exclude")
+	foreignBefore, _ := os.ReadFile(foreignExcludePath) // may not exist yet
+
+	t.Chdir(selected)
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	if err := setupForkExclude(false); err != nil {
+		t.Fatalf("setupForkExclude failed: %v", err)
+	}
+
+	selectedExcludePath := filepath.Join(selected, ".git", "info", "exclude")
+	content, err := os.ReadFile(selectedExcludePath)
+	if err != nil {
+		t.Fatalf("selected repo exclude %s not written: %v", selectedExcludePath, err)
+	}
+	if !strings.Contains(string(content), ".beads/") {
+		t.Errorf("selected repo exclude missing .beads/ pattern: %s", content)
+	}
+
+	foreignAfter, _ := os.ReadFile(foreignExcludePath)
+	if string(foreignAfter) != string(foreignBefore) {
+		t.Errorf("inherited GIT_DIR repository was written: %s changed from %q to %q",
+			foreignExcludePath, foreignBefore, foreignAfter)
+	}
+}
+
 // TestAddProjectPatternsToGitExclude_DoesNotTouchGitignore is a regression test for stealth mode
 // leaking into the tracked project-root .gitignore. In stealth mode bd must route the Dolt-file
 // ignore patterns into .git/info/exclude and must NEVER create or modify the project .gitignore

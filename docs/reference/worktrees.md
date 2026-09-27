@@ -12,6 +12,21 @@ separate from Git branch commits.
 All worktrees in the same repository use the same beads workspace unless you
 override discovery with `BEADS_DIR`.
 
+Startup *config* discovery — the `rev-parse` probe in `internal/config`'s
+`gitDirsForRepo`, which locates a linked worktree's shared `.beads` config —
+scrubs inherited Git routing variables such as `GIT_DIR` and `GIT_WORK_TREE`
+from its subprocess environment. Other startup Git probes still honor inherited
+routing, including `internal/git`'s process-cached repository context and the
+`.beads` database-discovery probes. Clearing
+those variables from the `bd` process environment applies only to `bd worktree`
+commands.
+
+The shared routing filter removes the whole `GIT_CONFIG*` prefix as well as
+repository-routing keys. Removing `GIT_CEILING_DIRECTORIES` permits a wider
+upward search; removing `GIT_DISCOVERY_ACROSS_FILESYSTEM` restores Git's default
+filesystem boundary and can narrow discovery. Subprocess filtering leaves the
+parent environment intact; process-lifetime clearing does not restore it later.
+
 ```
 project/
 ├── .git/                 # Shared Git directory
