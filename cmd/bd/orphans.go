@@ -51,10 +51,10 @@ Examples:
 			}
 		}()
 
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-		labels = utils.NormalizeLabels(labels)
-		labelsAny = utils.NormalizeLabels(labelsAny)
+		labels, labelsAny, err := parseOrphansLabelFilter(cmd)
+		if err != nil {
+			return err
+		}
 		fix, _ := cmd.Flags().GetBool("fix")
 		details, _ := cmd.Flags().GetBool("details")
 
@@ -224,10 +224,37 @@ func closeIssue(issueID string) error {
 	return closeIssueRunner(issueID)
 }
 
+// registerOrphansFlags declares `bd orphans`'s flag set on cmd. It is a
+// function rather than a block inside init so a test can stand up an
+// INDEPENDENT command carrying the same flags: cobra's AddFlagSet shares the
+// underlying *Flag values, so a test that set a flag on a copy would leak it
+// into the real command and into the next test. Mirrors registerCountFlags in
+// count.go.
+func registerOrphansFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolP("fix", "f", false, "Close orphaned issues with confirmation")
+	cmd.Flags().Bool("details", false, "Show full commit information")
+	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+}
+
+// parseOrphansLabelFilter gathers and validates `bd orphans`'s --label and
+// --label-any flags, returning them normalized. A filter that was actually
+// supplied but normalizes to nothing (e.g. --label "" or --label ",,") is
+// rejected rather than silently treated as no filter at all, matching the fix
+// applied to `bd ready`, `bd list` and `bd count`.
+func parseOrphansLabelFilter(cmd *cobra.Command) (labels, labelsAny []string, err error) {
+	labels, _ = cmd.Flags().GetStringSlice("label")
+	labelsAny, _ = cmd.Flags().GetStringSlice("label-any")
+	if err := rejectEmptyLabelFilter(cmd, "label", labels); err != nil {
+		return nil, nil, err
+	}
+	if err := rejectEmptyLabelFilter(cmd, "label-any", labelsAny); err != nil {
+		return nil, nil, err
+	}
+	return utils.NormalizeLabels(labels), utils.NormalizeLabels(labelsAny), nil
+}
+
 func init() {
-	orphansCmd.Flags().BoolP("fix", "f", false, "Close orphaned issues with confirmation")
-	orphansCmd.Flags().Bool("details", false, "Show full commit information")
-	orphansCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
-	orphansCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	registerOrphansFlags(orphansCmd)
 	rootCmd.AddCommand(orphansCmd)
 }

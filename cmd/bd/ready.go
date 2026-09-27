@@ -326,10 +326,24 @@ func rejectReadyMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
 	return rejectMaxRowsUnderProxiedServer(cmd)
 }
 
+// registerBlockedFlags declares `bd blocked`'s flag set on cmd. It is a
+// function rather than a block inside init so a test can stand up an
+// INDEPENDENT command carrying the same flags: cobra's AddFlagSet shares the
+// underlying *Flag values, so a test that set a flag on a copy would leak it
+// into the real command and into the next test. Mirrors registerCountFlags in
+// count.go and registerOrphansFlags in orphans.go.
+func registerBlockedFlags(cmd *cobra.Command) {
+	cmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
+	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	cmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+}
+
 // blockedFilterFromFlags builds the blocked-issue filter from blockedCmd's
 // flags. Both the direct and the proxied-server path call it, so the two
-// cannot drift as filtering flags are added.
-func blockedFilterFromFlags(cmd *cobra.Command) types.WorkFilter {
+// cannot drift as filtering flags are added -- which is also why the
+// supplied-but-empty refusal below only has to be written once to cover both.
+func blockedFilterFromFlags(cmd *cobra.Command) (types.WorkFilter, error) {
 	var filter types.WorkFilter
 	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
 		filter.ParentID = &parentID
@@ -345,10 +359,22 @@ func blockedFilterFromFlags(cmd *cobra.Command) types.WorkFilter {
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	for _, f := range []struct {
+		name string
+		raw  []string
+	}{
+		{"label", labels},
+		{"label-any", labelsAny},
+		{"exclude-label", excludeLabels},
+	} {
+		if err := rejectEmptyLabelFilter(cmd, f.name, f.raw); err != nil {
+			return types.WorkFilter{}, err
+		}
+	}
 	filter.Labels = utils.NormalizeLabels(labels)
 	filter.LabelsAny = utils.NormalizeLabels(labelsAny)
 	filter.ExcludeLabels = utils.NormalizeLabels(excludeLabels)
-	return filter
+	return filter, nil
 }
 
 var blockedCmd = &cobra.Command{
@@ -370,7 +396,10 @@ var blockedCmd = &cobra.Command{
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 		ctx := rootCtx
-		blockedFilter := blockedFilterFromFlags(cmd)
+		blockedFilter, err := blockedFilterFromFlags(cmd)
+		if err != nil {
+			return err
+		}
 		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -799,9 +828,6 @@ func init() {
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
 	addMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
-	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
-	blockedCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
-	blockedCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
-	blockedCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	registerBlockedFlags(blockedCmd)
 	rootCmd.AddCommand(blockedCmd)
 }

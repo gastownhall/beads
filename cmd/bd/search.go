@@ -14,6 +14,31 @@ import (
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
+// registerSearchLabelFlags declares the two label filters `bd search`
+// accepts. Only these two are factored out of init: they are the ones a test
+// needs on an independent command (cobra's AddFlagSet would share the real
+// command's values), and `bd search` has no --exclude-label.
+func registerSearchLabelFlags(cmd *cobra.Command) {
+	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
+	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
+}
+
+// parseSearchLabelFilter gathers and validates `bd search`'s label flags,
+// returning them normalized. Both search routes call it -- the direct one
+// here and runSearchProxiedServer -- so the two cannot drift, which is the
+// same reason blockedFilterFromFlags is shared.
+func parseSearchLabelFilter(cmd *cobra.Command) (labels, labelsAny []string, err error) {
+	rawLabels, _ := cmd.Flags().GetStringSlice("label")
+	rawLabelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	if err := rejectEmptyLabelFilter(cmd, "label", rawLabels); err != nil {
+		return nil, nil, err
+	}
+	if err := rejectEmptyLabelFilter(cmd, "label-any", rawLabelsAny); err != nil {
+		return nil, nil, err
+	}
+	return utils.NormalizeLabels(rawLabels), utils.NormalizeLabels(rawLabelsAny), nil
+}
+
 var searchCmd = &cobra.Command{
 	Use:     "search [query]",
 	GroupID: "issues",
@@ -74,8 +99,10 @@ Examples:
 		assignee, _ := cmd.Flags().GetString("assignee")
 		issueType, _ := cmd.Flags().GetString("type")
 		limit, _ := cmd.Flags().GetInt("limit")
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		labels, labelsAny, err := parseSearchLabelFilter(cmd)
+		if err != nil {
+			return err
+		}
 		longFormat, _ := cmd.Flags().GetBool("long")
 		sortBy, _ := cmd.Flags().GetString("sort")
 		reverse, _ := cmd.Flags().GetBool("reverse")
@@ -101,10 +128,6 @@ Examples:
 		emptyDesc, _ := cmd.Flags().GetBool("empty-description")
 		noAssignee, _ := cmd.Flags().GetBool("no-assignee")
 		noLabels, _ := cmd.Flags().GetBool("no-labels")
-
-		// Normalize labels
-		labels = utils.NormalizeLabels(labels)
-		labelsAny = utils.NormalizeLabels(labelsAny)
 
 		// Build filter
 		filter := types.IssueFilter{
@@ -361,8 +384,7 @@ func init() {
 	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'")
 	searchCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	searchCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
-	searchCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
-	searchCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
+	registerSearchLabelFlags(searchCmd)
 	searchCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50)")
 	searchCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	searchCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")

@@ -33,15 +33,10 @@ This helps identify:
 		days, _ := cmd.Flags().GetInt("days")
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetInt("limit")
-		// Normalized for the reason blockedFilterFromFlags gives: these are
-		// exact-match clauses, and every sibling label filter trims its input
-		// before building them.
-		rawLabels, _ := cmd.Flags().GetStringSlice("label")
-		rawLabelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-		rawExcludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
-		labels := utils.NormalizeLabels(rawLabels)
-		labelsAny := utils.NormalizeLabels(rawLabelsAny)
-		excludeLabels := utils.NormalizeLabels(rawExcludeLabels)
+		labels, labelsAny, excludeLabels, err := parseStaleLabelFilter(cmd)
+		if err != nil {
+			return err
+		}
 		if days < 1 {
 			return HandleErrorRespectJSON("--days must be at least 1")
 		}
@@ -97,13 +92,48 @@ func displayStaleIssues(issues []*types.Issue, days int) {
 		fmt.Println()
 	}
 }
+
+// registerStaleFlags declares `bd stale`'s flag set on cmd, for the reason
+// registerOrphansFlags in orphans.go gives: a test needs an independent
+// command carrying these flags, and copying cobra's flag set would share the
+// underlying values with the real command.
+func registerStaleFlags(cmd *cobra.Command) {
+	cmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
+	cmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked|deferred)")
+	cmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
+	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	cmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+}
+
+// parseStaleLabelFilter gathers and validates `bd stale`'s three label flags,
+// returning them normalized. Normalization is for the reason
+// blockedFilterFromFlags gives: these are exact-match clauses, and every
+// sibling label filter trims its input before building them. The refusal is
+// the empty-filter fix -- a flag that was supplied but normalizes to nothing
+// must not read as "no filter". Both routes reach it: the direct one and
+// runStaleProxiedServer, which takes the StaleFilter this builds.
+func parseStaleLabelFilter(cmd *cobra.Command) (labels, labelsAny, excludeLabels []string, err error) {
+	rawLabels, _ := cmd.Flags().GetStringSlice("label")
+	rawLabelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	rawExcludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	for _, f := range []struct {
+		name string
+		raw  []string
+	}{
+		{"label", rawLabels},
+		{"label-any", rawLabelsAny},
+		{"exclude-label", rawExcludeLabels},
+	} {
+		if err := rejectEmptyLabelFilter(cmd, f.name, f.raw); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return utils.NormalizeLabels(rawLabels), utils.NormalizeLabels(rawLabelsAny), utils.NormalizeLabels(rawExcludeLabels), nil
+}
+
 func init() {
-	staleCmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
-	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked|deferred)")
-	staleCmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
-	staleCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
-	staleCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
-	staleCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	registerStaleFlags(staleCmd)
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(staleCmd)
 }

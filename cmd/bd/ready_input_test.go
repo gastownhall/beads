@@ -416,6 +416,9 @@ func TestGatherReadyInputUsageErrorsRespectJSON(t *testing.T) {
 		{"metadata_field_syntax", []string{"--metadata-field", "team"}, "invalid --metadata-field"},
 		{"metadata_field_key", []string{"--metadata-field", "bad$key=x"}, "invalid --metadata-field key"},
 		{"has_metadata_key", []string{"--has-metadata-key", "bad$key"}, "invalid --has-metadata-key"},
+		{"label_empty", []string{"--label", ""}, "--label was supplied but contains no usable label"},
+		{"label_any_empty", []string{"--label-any", ""}, "--label-any was supplied but contains no usable label"},
+		{"exclude_label_empty", []string{"--exclude-label", ""}, "--exclude-label was supplied but contains no usable label"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -516,9 +519,11 @@ func TestGatherReadyInputKeepsDirectoryLabelVerbatim(t *testing.T) {
 	}
 }
 
-// TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven pins the two
-// halves of the default's gate: an explicit label suppresses it, and a label
-// that normalizes away does not.
+// TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven pins the
+// default's gate: an explicit, usable label suppresses it. A label that
+// normalizes away is covered separately by
+// TestGatherReadyInputBlankLabelErrorsBeforeDirectoryDefaultApplies, since
+// that case now errors rather than falling through to the default.
 func TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven(t *testing.T) {
 	const configured = "scope:web"
 
@@ -529,7 +534,6 @@ func TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven(t *testing.
 	}{
 		{"explicit_label_suppresses_default", []string{"--label", "chosen"}, nil},
 		{"explicit_label_any_wins_over_default", []string{"--label-any", "chosen"}, []string{"chosen"}},
-		{"blank_label_does_not_suppress_default", []string{"--label", "  "}, []string{configured}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -545,6 +549,101 @@ func TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven(t *testing.
 				}
 			}
 		})
+	}
+}
+
+// TestGatherReadyInputBlankLabelErrorsBeforeDirectoryDefaultApplies pins the
+// corrected behavior for a label that normalizes to nothing: it must error
+// before the directory-label default (GH#541) ever gets a chance to run, even
+// when a default is configured and would otherwise have filled the gap.
+// Before this fix, "--label '  '" silently fell through to the configured
+// default instead of failing loud on the empty filter the caller asked for.
+func TestGatherReadyInputBlankLabelErrorsBeforeDirectoryDefaultApplies(t *testing.T) {
+	pinJSONOutput(t, false)
+	configureDirectoryLabel(t, "scope:web")
+
+	got := runGatherReadyInput(t, newReadyFlagsCommand(t, "--label", "  "), nil)
+	if got.err == nil {
+		t.Fatalf("gatherReadyInput(--label '  ') = nil, want an error (got filter.LabelsAny = %q)", got.in.filter.LabelsAny)
+	}
+	if !strings.Contains(got.stderr, "--label was supplied but contains no usable label") {
+		t.Errorf("expected the empty-label error, got stderr:\n%s", got.stderr)
+	}
+}
+
+// TestGatherReadyInputRejectsEmptyLabelFilters pins the text-mode half of the
+// empty-label-filter contract: --label/--label-any/--exclude-label, each
+// supplied but normalizing to nothing, must fail loud rather than silently
+// behave as if the flag were never passed (which would match everything, the
+// opposite of what an explicit empty filter asked for).
+func TestGatherReadyInputRejectsEmptyLabelFilters(t *testing.T) {
+	pinJSONOutput(t, false)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"label", []string{"--label", ""}, "--label was supplied but contains no usable label"},
+		{"label_any", []string{"--label-any", ""}, "--label-any was supplied but contains no usable label"},
+		{"exclude_label", []string{"--exclude-label", ""}, "--exclude-label was supplied but contains no usable label"},
+		{"label_whitespace_only", []string{"--label", "   "}, "--label was supplied but contains no usable label"},
+		{"label_multiple_all_blank", []string{"--label", ",,"}, "--label was supplied but contains no usable label"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := runGatherReadyInput(t, newReadyFlagsCommand(t, c.args...), nil)
+			if got.err == nil {
+				t.Fatalf("gatherReadyInput(%v) = nil, want an error", c.args)
+			}
+			if !strings.Contains(got.stderr, c.want) {
+				t.Errorf("expected %q, got stderr:\n%s", c.want, got.stderr)
+			}
+		})
+	}
+}
+
+// TestGatherReadyInputToleratesEmptyElementsAmongUsableLabels is the
+// regression half of the empty-label-filter fix: a label list that mixes
+// empty elements with usable ones (e.g. "a,,b") must still filter on the
+// usable labels, exactly as it did before this fix. Only a filter that
+// normalizes to NOTHING is an error.
+func TestGatherReadyInputToleratesEmptyElementsAmongUsableLabels(t *testing.T) {
+	want := []string{"a", "b"}
+
+	cases := []struct {
+		name string
+		args []string
+		get  func(types.WorkFilter) []string
+	}{
+		{"label", []string{"--label", "a,,b"}, func(f types.WorkFilter) []string { return f.Labels }},
+		{"label_any", []string{"--label-any", "a,,b"}, func(f types.WorkFilter) []string { return f.LabelsAny }},
+		{"exclude_label", []string{"--exclude-label", "a,,b"}, func(f types.WorkFilter) []string { return f.ExcludeLabels }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := runGatherReadyInput(t, newReadyFlagsCommand(t, c.args...), nil)
+			if got.err != nil {
+				t.Fatalf("gatherReadyInput(%v): %v", c.args, got.err)
+			}
+			if have := c.get(got.in.filter); !slices.Equal(have, want) {
+				t.Errorf("got %q, want %q", have, want)
+			}
+		})
+	}
+}
+
+// TestGatherReadyInputNoLabelFlagsReturnsEverything is the regression half of
+// the empty-label-filter fix on the other side: omitting the label flags
+// entirely must keep meaning "no label filter", not trip the new supplied-
+// but-empty check (which only fires when the flag was actually supplied).
+func TestGatherReadyInputNoLabelFlagsReturnsEverything(t *testing.T) {
+	got := runGatherReadyInput(t, newReadyFlagsCommand(t), nil)
+	if got.err != nil {
+		t.Fatalf("gatherReadyInput(): %v", got.err)
+	}
+	if len(got.in.filter.Labels) != 0 || len(got.in.filter.LabelsAny) != 0 || len(got.in.filter.ExcludeLabels) != 0 {
+		t.Errorf("filter label sets = (%q, %q, %q), want all empty", got.in.filter.Labels, got.in.filter.LabelsAny, got.in.filter.ExcludeLabels)
 	}
 }
 

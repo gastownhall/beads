@@ -187,6 +187,86 @@ func TestParseCountRequestRejectsAnUnparseableDate(t *testing.T) {
 	}
 }
 
+// TestParseCountRequestRejectsEmptyLabelFilters pins the same fix `bd ready`
+// and `bd list` got: --label/--label-any, each supplied but normalizing to
+// nothing, must fail loud rather than silently behave as if the flag were
+// never passed (which would match everything, the opposite of what an
+// explicit empty filter asked for). `bd count` has no --exclude-label flag,
+// so only these two are in scope here.
+//
+// Like this file's other HandleErrorRespectJSON refusals (invalid
+// --metadata-field, an unparseable date, two --by-* flags at once), this only
+// checks err != nil: exitError.Error() never carries the message text (it is
+// only ever written to stderr/stdout as a side effect), so the wording itself
+// is pinned by ready's and list's tests instead.
+func TestParseCountRequestRejectsEmptyLabelFilters(t *testing.T) {
+	cases := []struct {
+		name  string
+		flag  string
+		value string
+	}{
+		{"label_empty", "label", ""},
+		{"label_any_empty", "label-any", ""},
+		{"label_whitespace_only", "label", "   "},
+		{"label_multiple_all_blank", "label", ",,"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			flags := newCountFlagSet(t)
+			if err := flags.Flags().Set(c.flag, c.value); err != nil {
+				t.Fatalf("set --%s=%q: %v", c.flag, c.value, err)
+			}
+			if _, _, err := parseCountRequest(flags); err == nil {
+				t.Fatalf("parseCountRequest(--%s=%q) = nil error, want a refusal", c.flag, c.value)
+			}
+		})
+	}
+}
+
+// TestParseCountRequestToleratesEmptyElementsAmongUsableLabels is the
+// regression half of the empty-label-filter fix: a label list that mixes
+// empty elements with usable ones (e.g. "a,,b") must not trip the new check.
+// It stays a plain refusal-vs-not test, not an equality check on the request:
+// parseCountRequest has never normalized Labels/LabelsAny (that lives in
+// workapi.BuildCountFilter, see the file doc comment above), and the fix must
+// not change that split.
+func TestParseCountRequestToleratesEmptyElementsAmongUsableLabels(t *testing.T) {
+	for _, flag := range []string{"label", "label-any"} {
+		t.Run(flag, func(t *testing.T) {
+			flags := newCountFlagSet(t)
+			if err := flags.Flags().Set(flag, "a,,b"); err != nil {
+				t.Fatalf("set --%s: %v", flag, err)
+			}
+			request, _, err := parseCountRequest(flags)
+			if err != nil {
+				t.Fatalf("parseCountRequest(--%s=a,,b): %v", flag, err)
+			}
+			got := request.Labels
+			if flag == "label-any" {
+				got = request.LabelsAny
+			}
+			want := []string{"a", "", "b"}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("--%s=a,,b produced %q, want the raw %q (parseCountRequest does not normalize)", flag, got, want)
+			}
+		})
+	}
+}
+
+// TestParseCountRequestNoLabelFlagsReturnsEverything is the regression half of
+// the empty-label-filter fix on the other side: omitting the label flags
+// entirely must keep meaning "no label filter", not trip the new supplied-
+// but-empty check (which only fires when the flag was actually supplied).
+func TestParseCountRequestNoLabelFlagsReturnsEverything(t *testing.T) {
+	request, _, err := parseCountRequest(newCountFlagSet(t))
+	if err != nil {
+		t.Fatalf("parseCountRequest with no flags set: %v", err)
+	}
+	if len(request.Labels) != 0 || len(request.LabelsAny) != 0 {
+		t.Errorf("Labels/LabelsAny = %q/%q, want both empty", request.Labels, request.LabelsAny)
+	}
+}
+
 // newCountFlagSet returns a command carrying `bd count`'s flags at their
 // defaults. It REGISTERS them rather than copying countCmd's set: cobra's
 // AddFlagSet shares the underlying *Flag values, so a case that set a flag on
