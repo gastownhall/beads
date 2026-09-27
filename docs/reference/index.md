@@ -20,6 +20,8 @@ rather than teach concepts (that's [How Beads Works](/core-concepts/index)).
   other power-user operations.
 - [JSON Output Schema Contract](/reference/json-schema) — the stability
   contract behind every `--json` flag.
+- [GraphQL Queries (bd gql)](/reference/graphql): read-only queries that
+  select fields and follow relations, with their limits and errors.
 - [Events Journal](/reference/events-journal) — the durable, replayable record
   of committed mutations that external tooling tails, and its boundaries.
 - [Observability (OpenTelemetry)](/reference/observability) — traces and

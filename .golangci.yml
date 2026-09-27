@@ -96,6 +96,24 @@ linters:
           deny:
             - pkg: github.com/steveyegge/beads/internal/workapi
               desc: "internal/httpapi is transport only: a read handler asks the provider for issueops.Reader and passes the whole request - it never builds a filter - see internal/httpapi/reads.go"
+        # internal/gqlapi answers bd gql documents over the issueops roles and
+        # nothing else, so every route serves it the same rows. Tests are
+        # exempt: one reads workapi.BuildQueryPlan to prove the default query
+        # expression carries no ID filter.
+        gqlapi-role-boundary:
+          list-mode: lax
+          files:
+            - "**/internal/gqlapi/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/steveyegge/beads/internal/storage
+              desc: "internal/gqlapi reads only through issueops roles handed to Execute - see internal/gqlapi/gqlapi.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi
+              desc: "internal/gqlapi builds no filter: it passes the whole request to issueops.Reader or issueops.Querier - see internal/gqlapi/gqlapi.go"
+            - pkg: github.com/spf13/cobra
+              desc: "internal/gqlapi is CLI-independent: cmd/bd/gql.go owns flags and output - see internal/gqlapi/gqlapi.go"
+            - pkg: net/http
+              desc: "internal/gqlapi is transport-independent - see internal/gqlapi/gqlapi.go"
         # The OTHER way past the roles, and the one the rule above does not
         # close. Denying internal/workapi stops a handler BUILDING a filter; it
         # does nothing about a handler taking uw.IssueUseCase() and calling the
