@@ -122,9 +122,13 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	outcomes, closeReasons := closeProxiedOutcomes(&pre, result)
 	post := closeProxiedRunPostClose(ctx, args, in, outcomes)
 
-	for _, e := range pre.errors {
+	// pre.errors is indexed by argument position, so args[i] is the id this
+	// refusal belongs to.
+	var failures []closeIDFailure
+	for i, e := range pre.errors {
 		if e != "" {
 			fmt.Fprintln(os.Stderr, e)
+			failures = append(failures, closeIDFailure{ID: args[i], Error: e})
 		}
 	}
 	for _, w := range post.warnings {
@@ -182,6 +186,9 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		}
 	}
 
+	if len(failures) > 0 {
+		return reportCloseFailures(failures, len(args), closeClaimedID(claimedNextIssue), in.jsonOut)
+	}
 	if len(args) > 0 && len(outcomes) == 0 {
 		return SilentExit()
 	}

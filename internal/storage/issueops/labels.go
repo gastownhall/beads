@@ -130,8 +130,18 @@ func getLabelsIntoFromTable(ctx context.Context, tx DBTX, labelTable string, ids
 
 // AddLabelInTx adds a label to an issue and records an event within an existing
 // transaction. Automatically routes to wisp tables if the ID is an active wisp.
-// Uses INSERT IGNORE for idempotency.
+// Uses INSERT IGNORE for idempotency. A label is part of the issue's durable
+// state, so a label that was actually inserted mints a version row; an
+// idempotent re-add (INSERT IGNORE affecting no row) mints nothing.
 func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
+	return addLabelInTx(ctx, tx, labelTable, eventTable, issueID, label, actor, true)
+}
+
+// addLabelInTx is the body of AddLabelInTx. mintVersion controls whether an
+// inserted label mints its own version row: the exported entry point always
+// does, while a label patch (applyLabelPatch) writes several rows for one
+// caller-visible mutation and mints once after the last of them.
+func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string, mintVersion bool) error {
 	// Reject an over-length label up front. The INSERT IGNORE below would
 	// otherwise silently truncate it to the VARCHAR(255) column, storing a label
 	// the caller never sent; a typed ErrFieldTooLong is the clean rejection.
@@ -149,8 +159,13 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		}
 	}
 	//nolint:gosec // G201: labelTable is from WispTableRouting ("labels" or "wisp_labels")
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label); err != nil {
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label)
+	if err != nil {
 		return fmt.Errorf("add label: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("add label: rows affected: %w", err)
 	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -163,15 +178,31 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	}
 	// A label is part of the bead snapshot, so a label write journals as an
 	// update carrying the complete post-mutation set.
-	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
+	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	// Version only when a row landed: INSERT IGNORE on an existing label is
+	// the no-op case, and a no-op mints nothing (the same gate the dependency
+	// helpers draw on their inserted/deleted row).
+	if !mintVersion || inserted == 0 {
+		return nil
+	}
+	return RecordVersionInTx(ctx, tx, issueID, actor)
 }
 
 // RemoveLabelInTx removes a label from an issue and records an event within
 // an existing transaction. Automatically routes to wisp tables if the ID is
-// an active wisp.
+// an active wisp. A deleted label row mints a version row; a DELETE that
+// matched no row is a no-op and mints nothing.
+func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
+	return removeLabelInTx(ctx, tx, labelTable, eventTable, issueID, label, actor, true)
+}
+
+// removeLabelInTx is the body of RemoveLabelInTx; mintVersion is
+// addLabelInTx's, for the same reason.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
+func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string, mintVersion bool) error {
 	if labelTable == "" || eventTable == "" {
 		isWisp := IsActiveWispInTx(ctx, tx, issueID)
 		_, lt, et, _ := WispTableRouting(isWisp)
@@ -182,8 +213,13 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 			eventTable = et
 		}
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label); err != nil {
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label)
+	if err != nil {
 		return fmt.Errorf("remove label: %w", err)
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("remove label: rows affected: %w", err)
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -194,5 +230,11 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	}); err != nil {
 		return fmt.Errorf("remove label: record event: %w", err)
 	}
-	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
+	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	if !mintVersion || deleted == 0 {
+		return nil
+	}
+	return RecordVersionInTx(ctx, tx, issueID, actor)
 }
