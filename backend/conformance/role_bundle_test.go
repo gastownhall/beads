@@ -27,9 +27,16 @@ import (
 // which is the same defect class as a test with correct assertions on a fixture
 // that cannot fail, one level up. So the expected set is DERIVED from the
 // package source rather than written down: every top-level func named Run* that
-// takes (*testing.T, context.Context, <name>Fixture) is a role-tier case, and
-// the entry points that take a Factory instead — RunAll, RunAudit and friends,
-// RunPortableMethods, RunSearchPaging, RunDeferredReads — are not.
+// takes (*testing.T, context.Context, <name>Fixture) where <name>Fixture is one
+// of RoleContractBundle's own field types is a role-tier case. That bundle-field
+// check is what keeps this scoped to the role tier specifically: the package
+// also holds other conformance tiers (e.g. the history-semantics contracts that
+// versioned_history_wiring_test.go wires directly, with no RoleContractBundle
+// field of their own — see that file's header) whose Run*Fixture-shaped
+// functions must NOT be swept in here, since nothing in RoleContractBundle ever
+// calls them. The entry points that take a Factory instead — RunAll, RunAudit
+// and friends, RunPortableMethods, RunSearchPaging, RunDeferredReads — are not
+// role-tier cases either.
 //
 // The table's own half of the comparison is derived too: roleCases resolves
 // each function VALUE back to its declared name (runFuncName), so a row cannot
@@ -314,9 +321,13 @@ func runProbeChild(t *testing.T, mode string) (string, error) {
 
 // parseRoleContractCases returns every role-tier case declared in this
 // package's non-test sources, in filename then declaration order — the order
-// roleContractCases is written in.
+// roleContractCases is written in. A Run*Fixture-shaped function whose Fixture
+// type is not one of RoleContractBundle's own field types belongs to a
+// different conformance tier and is not a role-tier case; see
+// roleTierFixtureNames.
 func parseRoleContractCases(t *testing.T) []string {
 	t.Helper()
+	roleFixtures := roleTierFixtureNames()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -341,7 +352,7 @@ func parseRoleContractCases(t *testing.T) []string {
 				if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Run") {
 					continue
 				}
-				if takesFixture(fn) {
+				if fixtureName, ok := takesFixture(fn); ok && roleFixtures[fixtureName] {
 					cases = append(cases, fn.Name.Name)
 				}
 			}
@@ -350,22 +361,54 @@ func parseRoleContractCases(t *testing.T) []string {
 	return cases
 }
 
+// roleTierFixtureNames returns the pointee type name of every *XxxFixture a
+// RoleContractBundle field produces. This is the role tier's actual membership
+// test: a Run*Fixture-shaped function is a role-tier case only if its Fixture
+// type appears here, because that is the only way RunRoleContracts could ever
+// reach it. Other conformance tiers in this package (e.g. Phase 0's
+// history-semantics contracts, wired directly by
+// versioned_history_wiring_test.go rather than through this bundle) mint their
+// own *Fixture types that intentionally never appear here.
+func roleTierFixtureNames() map[string]bool {
+	names := map[string]bool{}
+	bundleType := reflect.TypeOf(RoleContractBundle{})
+	for i := range bundleType.NumField() {
+		field := bundleType.Field(i).Type
+		if field.Kind() != reflect.Func || field.NumOut() != 1 {
+			continue
+		}
+		out := field.Out(0)
+		if out.Kind() != reflect.Ptr {
+			continue
+		}
+		names[out.Elem().Name()] = true
+	}
+	return names
+}
+
 // takesFixture reports whether fn has the role-tier case signature:
-// (t *testing.T, ctx context.Context, fixture <name>Fixture).
-func takesFixture(fn *ast.FuncDecl) bool {
+// (t *testing.T, ctx context.Context, fixture <name>Fixture), returning the
+// Fixture type's name so the caller can check it against the role tier's
+// actual membership (roleTierFixtureNames) rather than the signature shape
+// alone — the shape is necessary but not sufficient, since other conformance
+// tiers use it too.
+func takesFixture(fn *ast.FuncDecl) (fixtureName string, ok bool) {
 	if fn.Type.Params == nil || len(fn.Type.Params.List) != 3 {
-		return false
+		return "", false
 	}
 	params := fn.Type.Params.List
-	star, ok := params[0].Type.(*ast.StarExpr)
-	if !ok || !isQualified(star.X, "testing", "T") {
-		return false
+	star, starOk := params[0].Type.(*ast.StarExpr)
+	if !starOk || !isQualified(star.X, "testing", "T") {
+		return "", false
 	}
 	if !isQualified(params[1].Type, "context", "Context") {
-		return false
+		return "", false
 	}
-	fixture, ok := params[2].Type.(*ast.Ident)
-	return ok && strings.HasSuffix(fixture.Name, "Fixture")
+	fixture, identOk := params[2].Type.(*ast.Ident)
+	if !identOk || !strings.HasSuffix(fixture.Name, "Fixture") {
+		return "", false
+	}
+	return fixture.Name, true
 }
 
 func isQualified(expr ast.Expr, pkg, name string) bool {

@@ -202,6 +202,13 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
+			// An error that already carries an exit code came from a handler
+			// that has already rendered it (the typed --repo refusal writes
+			// its JSON to stdout). Re-wrapping would print a second line,
+			// "Error: exit code 1", after the real message.
+			if _, rendered := exitCodeFromError(err); rendered {
+				return err
+			}
 			return HandleError("%v", err)
 		}
 		return nil
@@ -315,7 +322,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
 			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
-			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status)
+			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 			printSkipLabelsFooter(in.SkipLabels)
 			return nil
 		}
@@ -324,7 +331,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
-		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status)
+		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil

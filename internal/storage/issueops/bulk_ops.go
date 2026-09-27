@@ -205,8 +205,9 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	}
 
 	// Edges are journaled before the rows go, while their source snapshots can
-	// still be read.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, issueIDs); err != nil {
+	// still be read. The source-repo wipe surface (storage.DeleteIssuesBySourceRepo,
+	// behind `bd repo remove`) carries no actor, so these record none.
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, issueIDs, ""); err != nil {
 		return 0, fmt.Errorf("journal dependency removals for source-repo delete: %w", err)
 	}
 

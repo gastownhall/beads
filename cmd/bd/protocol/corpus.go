@@ -280,9 +280,11 @@ func canonValue(v any) any {
 			// Replace per-write-random token values (the guarded-write revision /
 			// row_lock) with a placeholder: pin that bd show exposes a revision
 			// field, not its nondeterministic value. Unlike the provenance keys
-			// above this is unconditional — the value is a JSON number, not a
-			// string — but it stays a bare-key match, so keep the scope caveat in
-			// mind (see volatileValueKeys).
+			// above this is unconditional — the value is replaced whatever its
+			// JSON type, so the placeholder held when the token was a number and
+			// still holds now that it is a decimal string — but it stays a
+			// bare-key match, so keep the scope caveat in mind (see
+			// volatileValueKeys).
 			if ph, ok := volatileValueKeys[k]; ok {
 				t[k] = ph
 				continue

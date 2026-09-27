@@ -312,13 +312,33 @@ func ApplyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string)
 	return json.RawMessage(result), nil
 }
 
-// MetadataEditValue converts a --set-metadata string value to JSON. Per the CLI
-// contract (GH#4146), --set-metadata values are ALWAYS stored as JSON strings;
-// inferring numbers/booleans/null from string content silently broke
-// map[string]string round-trips for Go consumers (a numeric-looking id or a
-// version like "1e3" came back as a JSON number). Typed values go through the
-// explicit --metadata / --metadata-json path (MergeMetadataJSON).
+// MetadataEditValue converts a --set-metadata string value to JSON, inferring
+// the scalar type from the value's spelling: "null" is JSON null, "true"/"false"
+// are booleans, anything that scans as a float AND is valid JSON on its own is
+// emitted as that literal (so 5 -> 5, 1e3 -> 1e3, while 05, +5 and NaN stay
+// strings because they are not valid JSON), and everything else is a string.
+//
+// This is the shipped v1.2.2 CLI contract (v1.2.2's cmd/bd/update.go toJSONValue,
+// copied body-for-body so the parity claim stays checkable). GH#4146 asked for
+// string-always so that map[string]string Go consumers keep numeric-looking ids
+// and versions like "1e3" intact; that briefly landed here and silently changed
+// the CLI contract, so it is served instead by the explicitly typed routes —
+// `--metadata` / `--metadata-json` (MergeMetadataJSON) on the CLI and the typed
+// set map on the HTTP/Go path (issueops.applyTypedMetadataEdits).
 func MetadataEditValue(s string) json.RawMessage {
+	if s == "null" {
+		return json.RawMessage("null")
+	}
+	if s == "true" || s == "false" {
+		return json.RawMessage(s)
+	}
+	// Numbers (integer or float), but only when the spelling is also valid JSON
+	// on its own — that rejects NaN, Inf, "+5" and leading-zero forms.
+	if _, err := fmt.Sscanf(s, "%f", new(float64)); err == nil {
+		if json.Valid([]byte(s)) {
+			return json.RawMessage(s)
+		}
+	}
 	b, _ := json.Marshal(s)
 	return json.RawMessage(b)
 }

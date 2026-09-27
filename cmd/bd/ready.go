@@ -59,25 +59,21 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		if usesProxiedServer() {
-			// --claim consumes exactly one row, same reasoning as the
-			// direct-path fix in issueops/claim.go: a rig-wide cap sized
-			// for bulk list/ready reads must not block a single-row claim.
-			// Only the bulk (non-claim) proxied ready listing rejects an
-			// active cap.
-			if !claimReady {
-				if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
-					return err
-				}
-			} else {
-				// Still validate --max-rows/BEADS_MAX_ROWS here even though
-				// the resolved cap is ignored below: resolveMaxRows is also
-				// where a malformed value (e.g. --max-rows -1) is rejected
-				// with exit 1, and skipping it entirely for the claim-exempt
-				// branch would silently accept a usage error that every
-				// other command (direct or proxied) rejects.
-				if _, _, err := resolveMaxRows(cmd); err != nil {
-					return err
-				}
+			// The proxied ready role cannot enforce a row cap, including on
+			// --claim. Refuse any positive cap rather than silently dropping
+			// this safety limit; malformed values remain usage errors. The
+			// pre-provider front door refuses the same cap first, so this is
+			// its backstop — both raise proxy.max_rows.unsupported.
+			//
+			// --gated is skipped here as well as at the front door, and it has
+			// to be skipped in both places: this backstop calls
+			// AssertProxyCapability with an empty command, so it always
+			// resolves the mode-wide refusal and cannot honor the
+			// command-specific allow the front door's path-keyed assert reads.
+			// Exempting only the front door would move the split from one
+			// refusal site to the other, not close it.
+			if err := rejectReadyMaxRowsUnderProxiedServer(cmd); err != nil {
+				return err
 			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}
@@ -178,7 +174,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		if jsonOutput {
-			results, err := activeStore.GetReadyWorkWithCounts(ctx, filter)
+			// The page and the size of the whole ready set come back from ONE
+			// read transaction: the total rides the page's own ID query, so a
+			// capped listing no longer pays for a second counting pass (and a
+			// second defer-wake sweep) just to print "Showing N of M". Against
+			// a remote SQL server each of that pass's statements was a
+			// sequential round trip. The total is the same number the
+			// ReadyCounter role answers (storage.DoltStorage documents the
+			// identity), taken over the listing's own filter.
+			results, total, err := activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
 			if err != nil {
 				if capErr := handleMaxRowsError(err); capErr != nil {
 					return capErr
@@ -187,15 +191,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			totalReady := len(results)
 			truncated := false
-			if filter.Limit > 0 && len(results) == filter.Limit {
-				// The page is full, so there may be more ready work. The
-				// ReadyCounter role promises its answer equals
-				// len(Reader.Ready(Limit=0).Items), which is what makes this
-				// total describe the page above it.
-				if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(results) {
-					totalReady = n
-					truncated = true
-				}
+			if filter.Limit > 0 && len(results) == filter.Limit && total > len(results) {
+				totalReady = total
+				truncated = true
 			}
 			if results == nil {
 				results = []*types.IssueWithCounts{}
@@ -228,9 +226,10 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		totalReady := len(issues)
 		truncated := false
 		if filter.Limit > 0 && len(issues) == filter.Limit {
-			// The same question the --json branch asks, through the same role,
-			// so the "Showing X of N" a human reads and the total a script
-			// parses are one number.
+			// The same question the --json branch answers in-band, asked here
+			// of the ReadyCounter role, whose answer is the same identity, so
+			// the "Showing X of N" a human reads and the total a script parses
+			// are one number.
 			if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(issues) {
 				totalReady = n
 				truncated = true
@@ -281,6 +280,50 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		maybeShowTip(store)
 		return nil
 	},
+}
+
+// readyGatedArm reports whether this `bd ready` invocation dispatches to the
+// gate-resume arm — the same scan `bd mol ready --gated` runs, and the reason
+// the row cap does not apply to it. Both proxied refusal sites call this, so
+// the exemption cannot land on one and miss the other.
+//
+// The arm lists molecules whose gate closed, never ready rows: on the direct
+// route --gated reaches runMolReadyGatedCore above any cap resolution, and on
+// the proxied route runReadyProxiedGated discards its readyInput and calls the
+// same findGateReadyMolecules as runMolReadyGatedProxiedServer. `mol ready`,
+// the documented alias, carries a notApplicable() cap row for exactly that
+// reason; keying the refusal on `bd ready` alone split one documented command
+// line across its two spellings.
+//
+// --claim is excluded deliberately. `--claim --gated` is a usage error
+// (gatherReadyInput), not a gated run, so the claim arm keeps the refusal it is
+// owed on every code path and this exemption cannot reopen it.
+func readyGatedArm(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if gated, _ := cmd.Flags().GetBool("gated"); !gated {
+		return false
+	}
+	claim, _ := cmd.Flags().GetBool("claim")
+	return !claim
+}
+
+// rejectReadyMaxRowsUnderProxiedServer is `bd ready`'s in-RunE backstop for the
+// row cap the proxied ready role cannot enforce. It exists as a named function
+// rather than an inline `if` so the exemption is reachable from a unit test:
+// the front door's half runs against the real command tree in
+// TestProxyCapabilityFrontDoorAllowsSupportedCommands, but this half sits
+// behind usesProxiedServer() and would otherwise be pinned only by the
+// env-gated proxied e2e lane.
+//
+// Call it in place of rejectMaxRowsUnderProxiedServer on this command; every
+// other capped command wants the unconditional form.
+func rejectReadyMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
+	if readyGatedArm(cmd) {
+		return nil
+	}
+	return rejectMaxRowsUnderProxiedServer(cmd)
 }
 
 // blockedFilterFromFlags builds the blocked-issue filter from blockedCmd's
@@ -362,10 +405,13 @@ var blockedCmd = &cobra.Command{
 // readyTotal sizes the whole ready set for the request `bd ready` just listed
 // a page of, through the store's own ReadyCounter accessor.
 //
-// BOTH OUTPUT MODES CALL IT and only when the page came back full, which is
+// THE TEXT OUTPUT CALLS IT, and only when the page came back full, which is
 // the one situation where the answer can differ from what is already on
-// screen. The role has no --max-rows field to honor and needs none: the cap
-// bounds a page this machine materializes, and a count materializes no rows.
+// screen. The --json listing does not: it takes its total in-band from
+// GetReadyWorkWithCountsAndTotal, in the page's own transaction.
+//
+// The role has no --max-rows field to honor and needs none: the cap bounds a
+// page this machine materializes, and a count materializes no rows.
 //
 // A failed count is not a failed command — the page is already correct; all
 // that is lost is the "of N" beside it.

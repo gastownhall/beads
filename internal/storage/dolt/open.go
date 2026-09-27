@@ -80,11 +80,13 @@ func ApplyResolvedServerPort(beadsDir string, cfg *Config) {
 // requireDoltBackend keeps metadata-driven callers from bypassing the storage
 // factory and interpreting another backend's workspace as Dolt. Removed backend
 // identifiers deliberately remain recognizable in metadata so this check can fail
-// closed instead of opening a new, empty Dolt database.
-func requireDoltBackend(fileCfg *configfile.Config) error {
+// closed instead of opening a new, empty Dolt database. beadsDir is the workspace
+// the config came from, so the refusal can offer the metadata heal when that
+// workspace already holds a Dolt database.
+func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 	switch fileCfg.Backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
-		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetail(fileCfg.Backend))
+		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetailAt(fileCfg.Backend, beadsDir, fileCfg))
 	}
 	if !configfile.IsSupportedBackend(fileCfg.Backend) {
 		return fmt.Errorf("configured storage backend %q in metadata.json is not recognized and cannot be opened as Dolt; %s", fileCfg.Backend, configfile.BackendNotOpenedGuarantee)
@@ -114,7 +116,7 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	if err := requireDoltBackend(fileCfg); err != nil {
+	if err := requireDoltBackend(fileCfg, beadsDir); err != nil {
 		return nil, err
 	}
 
@@ -144,7 +146,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	if err := requireDoltBackend(fileCfg); err != nil {
+	if err := requireDoltBackend(fileCfg, beadsDir); err != nil {
 		return nil, err
 	}
 
@@ -313,6 +315,22 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
 
+	// config.yaml rung shared by the pool knobs below. It needs both reads:
+	// config.GetString reads a package-global viper populated only by
+	// cmd/bd's config.Initialize(), so for a library consumer it always
+	// returns "" and the project's configured values were silently ignored.
+	// Fall back to a direct read of the project's config.yaml, the same
+	// fallback dolt.auto-start carries above for this exact hole. The
+	// fallback follows GetStringFromDir's ladder, so when beadsDir is not
+	// the process CWD a user-level ~/.config/bd/config.yaml value outranks
+	// that project's file — same behavior as dolt.auto-start.
+	poolCfg := func(key string) string {
+		if v := config.GetString(key); v != "" {
+			return v
+		}
+		return config.GetStringFromDir(beadsDir, key)
+	}
+
 	// Pool size: env var > config.yaml > caller override > default (10).
 	// Useful for shared-server setups with many worktrees (GH#3140).
 	if cfg.MaxOpenConns == 0 {
@@ -323,7 +341,7 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		}
 	}
 	if cfg.MaxOpenConns == 0 {
-		if v := config.GetString("dolt.max-conns"); v != "" {
+		if v := poolCfg("dolt.max-conns"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxOpenConns = n
 			}
@@ -338,13 +356,13 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
 	}
 	if cfg.PoolReadTimeout == 0 {
-		cfg.PoolReadTimeout = parseTimeout(config.GetString("dolt.pool-read-timeout"), 0)
+		cfg.PoolReadTimeout = parseTimeout(poolCfg("dolt.pool-read-timeout"), 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
-		cfg.PoolWriteTimeout = parseTimeout(config.GetString("dolt.pool-write-timeout"), 0)
+		cfg.PoolWriteTimeout = parseTimeout(poolCfg("dolt.pool-write-timeout"), 0)
 	}
 
 	return nil

@@ -126,6 +126,28 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// itself is always present here: 0064's prepared RENAME executes on
 		// 2.2.0 (same measurement), so a fresh bundle always needs the column.
 		return cliMigration0066AddEventsJournalActor
+	case "0067_add_versioned_beads_schema.up.sql":
+		// Direct DDL for the same reason as 0060: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. Both planes always
+		// need the column here -- a fresh bundle runs the whole main series
+		// in order, so `issues` and `wisps` both exist and neither carries
+		// current_revision yet. The CREATE TABLEs are carried over verbatim:
+		// IF NOT EXISTS is ordinary unwrapped DDL that the CLI executes.
+		// Replays over a database that never synced the wisp tables must use
+		// the frozen source text instead -- see cliSubstituteAssumesWispTables.
+		return cliMigration0067AddVersionedBeadsSchema
+	case "0068_add_attribution_status.up.sql":
+		// Direct DDL for the same reason as 0067: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN and MODIFY COLUMN
+		// alike. issue_versions is always present here -- 0067 runs earlier
+		// in the same fresh-bundle series -- never carries attribution_status
+		// yet, and still has durable_state as the JSON type 0067 gave it, so
+		// both of 0068's steps always fire on a fresh bundle.
+		return cliMigration0068AddAttributionStatus
 	default:
 		return sqlText
 	}
@@ -157,6 +179,10 @@ func cliSubstituteAssumesWispTables(name string) bool {
 	case "0065_widen_wisp_comments_text.up.sql":
 		// cliMigration0065WidenWispCommentsText is a bare MODIFY on
 		// wisp_comments.
+		return true
+	case "0067_add_versioned_beads_schema.up.sql":
+		// cliMigration0067AddVersionedBeadsSchema drops the source's
+		// @wisps_cr_needs_add table-exists guard and ALTERs wisps directly.
 		return true
 	default:
 		return false
@@ -204,6 +230,46 @@ ALTER TABLE wisps ADD COLUMN storage_class VARCHAR(16);`
 
 const cliMigration0065WidenWispCommentsText = `ALTER TABLE wisp_comments MODIFY COLUMN text LONGTEXT NOT NULL;`
 const cliMigration0066AddEventsJournalActor = `ALTER TABLE bd_events_journal ADD COLUMN actor VARCHAR(255) NOT NULL DEFAULT '';`
+
+// cliMigration0067AddVersionedBeadsSchema is 0067 with its two guarded
+// PREPARE blocks replaced by the direct ALTERs they would run on a fresh
+// database. The CREATE TABLEs are the source file's own text: CREATE TABLE
+// IF NOT EXISTS executes on the CLI batch path unchanged.
+const cliMigration0067AddVersionedBeadsSchema = `CREATE TABLE IF NOT EXISTS issue_versions (
+    issue_id VARCHAR(255) NOT NULL,
+    revision BIGINT NOT NULL,
+    epoch INT NOT NULL,
+    durable_state JSON,
+    change_actor VARCHAR(255),
+    change_agent VARCHAR(255),
+    change_message TEXT,
+    change_at DATETIME NOT NULL,
+    removed_at DATETIME,
+    removed_reason VARCHAR(255),
+    PRIMARY KEY (issue_id, revision)
+);
+CREATE TABLE IF NOT EXISTS store_epoch (
+    id TINYINT(1) NOT NULL DEFAULT 1,
+    epoch INT NOT NULL DEFAULT 1,
+    bumped_at DATETIME,
+    bumped_reason VARCHAR(255),
+    PRIMARY KEY (id),
+    CONSTRAINT ck_store_epoch_singleton CHECK (id = 1)
+);
+ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;`
+
+// cliMigration0068AddAttributionStatus is 0068 with its two guarded PREPARE
+// blocks replaced by the direct ALTERs they would run on a fresh database:
+// step 6's ADD COLUMN attribution_status, and step 7's MODIFY COLUMN
+// durable_state LONGBLOB (the byte-preserving type the review on
+// gastownhall/beads#6358 item 4 asked for -- see the migration's step 7
+// header). issue_versions is created earlier in the same series by 0067,
+// which still creates durable_state as JSON and whose override is left
+// untouched: 0068 is what retypes it. So the column always needs adding and
+// the retype always fires here; no wisps twin exists for this table.
+const cliMigration0068AddAttributionStatus = `ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;
+ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

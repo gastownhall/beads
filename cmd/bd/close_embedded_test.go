@@ -113,6 +113,84 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// A batch still closes the IDs it can close, but a caller must receive a
+	// nonzero exit when any sibling was refused. Otherwise an orchestrator can
+	// record the whole batch as complete while a blocked issue remains open.
+	t.Run("mixed_batch_refusal_exits_nonzero_after_closing_survivor", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Mixed batch blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Mixed batch blocked", "--type", "task")
+		closable := bdCreate(t, bd, dir, "Mixed batch closable", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, dir, closable.ID, blocked.ID)
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected partial-close summary, got: %s", out)
+		}
+		if got := bdShow(t, bd, dir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, dir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+	})
+
+	// The --claim-next × partial-failure interaction, adjudicated rather than
+	// left implicit (#6648). --claim-next rides inside the batch transaction
+	// and fires whenever something LANDED, so a mixed batch claims and then
+	// exits 1. The claim is durable — the refused sibling does not roll it back
+	// — so the contract pinned here is "the claim stands and the failure
+	// summary names it", NOT "the claim is silently suppressed": suppressing
+	// only the report would leave an issue assigned to this actor with nothing
+	// saying so, which is strictly worse than announcing it.
+	//
+	// Its own project, because the assertion depends on exactly which issue is
+	// ready at claim time: once `closable` closes, `blocker` is the only ready
+	// issue left (`blocked` still depends on it), so the claim is deterministic.
+	t.Run("mixed_batch_claim_next_names_the_claim_it_kept", func(t *testing.T) {
+		kdir, _, _ := bdInit(t, bd, "--prefix", "kn")
+		closable := bdCreate(t, bd, kdir, "Claim-next batch closable", "--type", "task")
+		blocker := bdCreate(t, bd, kdir, "Claim-next batch blocker", "--type", "task")
+		blocked := bdCreate(t, bd, kdir, "Claim-next batch blocked", "--type", "task")
+		bdDepAdd(t, bd, kdir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, kdir, closable.ID, blocked.ID, "--claim-next")
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected the partial-close summary, got: %s", out)
+		}
+		if !strings.Contains(out, "already claimed "+blocker.ID) {
+			t.Errorf("expected the failure summary to name the claim it kept (%s), got: %s", blocker.ID, out)
+		}
+		if got := bdShow(t, bd, kdir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, kdir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+		// The claim really landed: the report is not describing a claim that
+		// was rolled back with the refusal.
+		if got := bdShow(t, bd, kdir, blocker.ID); got.Assignee == "" {
+			t.Errorf("claimed issue %s assignee = %q, want it assigned: the claim commits inside the batch transaction and the refused sibling does not undo it",
+				blocker.ID, got.Assignee)
+		}
+
+		// And retrying does NOT stack a second claim, which is what makes
+		// keeping the first one safe. `closable` is already closed on the way
+		// back through, so the batch lands nothing and an empty batch earns no
+		// claim (see the already-closed re-close subtest below). `spare` is
+		// created only now, so it is the one ready issue a repeat claim could
+		// take — without it this assertion would pass vacuously, since the
+		// first run left nothing else ready.
+		spare := bdCreate(t, bd, kdir, "Claim-next batch spare", "--type", "task")
+		out = bdCloseFail(t, bd, kdir, closable.ID, blocked.ID, "--claim-next")
+		if strings.Contains(out, "already claimed "+spare.ID) {
+			t.Errorf("a retry claimed %s as well, got: %s", spare.ID, out)
+		}
+		if got := bdShow(t, bd, kdir, spare.ID); got.Assignee != "" {
+			t.Errorf("retrying the same failed batch claimed a second issue (%s assignee = %q); the leak must be bounded at the one claim the first run earned",
+				spare.ID, got.Assignee)
+		}
+	})
+
 	// Proves the S7 delegation: `bd close` on a blocked issue now surfaces the
 	// engine's atomic guard (storage.ErrCloseBlocked) rather than a duplicated
 	// CLI pre-check. The refusal must be atomic — the issue stays open because the

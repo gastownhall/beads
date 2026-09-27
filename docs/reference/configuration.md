@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-07-10
+Last reviewed: 2026-08-28
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
 
@@ -281,6 +281,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `issue_id_mode` | `hash` (default) \| `counter` (see [below](#sequential-counter-ids)) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `3` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |
+| `claim.pools` | Comma-separated pool aliases: placeholder assignees that any actor can take with `bd update <id> --claim` (see [below](#claim-pools)). Unset by default, which turns pool claiming off |
 | `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show) |
 
 Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`.
@@ -353,6 +354,23 @@ bd config set max_collision_prob "0.01"   # Stricter collision tolerance (defaul
 bd config set min_hash_length "5"         # Force minimum 5-char IDs (default 3)
 bd config set max_hash_length "8"         # Upper bound (default 8)
 ```
+
+### Claim Pools
+
+A dispatcher can pre-assign issues to a pool alias, a placeholder assignee such as `fable-crew`, and let any actor take them with `bd update <id> --claim`. List the aliases in `claim.pools`:
+
+```bash
+bd config set claim.pools "fable-crew,night-crew"
+```
+
+Claiming reads this key from the database only. A `claim.pools` value in `config.yaml` or in an environment variable has no effect, even though `bd config show` lists a `config.yaml` value with the source `(config.yaml)`. A value that claiming uses shows the source `(database)`.
+
+- **Exact match.** The value is split on commas and each entry is trimmed of surrounding whitespace. An issue counts as pool-assigned only when its assignee equals one of the entries exactly, including case: `Crew-A` is not the pool `crew-a`.
+- **Claiming.** Taking a pool-assigned issue works like taking an unassigned one: the claimer becomes the assignee, the status moves to `in_progress`, and the claim gets the normal lease.
+- **Anti-steal.** Issues assigned to a real actor, or to an alias that is not listed, keep their protection: `--claim` refuses them.
+- **Reassigning.** `bd assign` and `bd update <id> --assignee` can move an `in_progress` issue that a pool alias holds without `--force`.
+- **`bd ready --claim`** takes only unassigned issues, so it skips pool-assigned ones even though `bd ready` lists them. Claim those by ID.
+- **Lease expiry.** If the claimer's lease expires, `bd reclaim` sets the issue back to `open` with no assignee. It does not return the issue to the pool alias, so a dispatcher that wants it back in the pool has to reassign it.
 
 ## Sync and Federation
 
@@ -457,6 +475,7 @@ Selected commonly-used variables:
 | `BD_NO_PAGER`, `BD_PAGER` | Pager behavior |
 | `BD_NON_INTERACTIVE` | Disable prompts |
 | `BD_DEBUG` | Enable debug logging |
+| `BD_MIGRATION_FREEZE_FILE` | Check this exact path for the freeze marker instead of walking ancestor directories; authoritative when set (see [Migration Freeze](#migration-freeze)) |
 | `BEADS_DIR` | Force the active beads workspace directory |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
@@ -467,6 +486,44 @@ Selected commonly-used variables:
 Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.
 
 `bd config show` will display the source of every effective key, making overrides explicit.
+
+## Migration Freeze
+
+Maintenance that runs outside `bd` — moving a database to a new host, rewriting schema by hand — needs a way to stop writes for its duration without uninstalling the tool. Create a file named `MIGRATION-FREEZE` and every write command refuses to run until you delete it.
+
+bd looks for the marker in the workspace directory and in the working directory, plus every ancestor of each, so one file above a tree of repositories freezes all of them at once — and targeting a frozen workspace from elsewhere (`BEADS_DIR=…`, `bd -C …`) is refused the same way.
+
+Markers found in a world-writable sticky directory such as `/tmp` are ignored: anyone on a shared machine could plant one there, and the sticky bit would stop you removing it. Put the marker at the root of the tree you are freezing.
+
+A freeze marker must be a regular file. A directory or a symlink named `MIGRATION-FREEZE` that the ancestor walk finds is ignored — the symlink with a one-line warning on stderr, so a stray link never disarms the gate in silence. To drive the freeze through an indirection on purpose, name that link with `BD_MIGRATION_FREEZE_FILE` (below), which bd follows.
+
+```bash
+touch MIGRATION-FREEZE     # the file's existence is the whole signal
+
+# Optional payload: operator, RFC3339 timestamp, and reason, tab-separated
+# on one line. bd echoes it back in the refusal.
+printf 'alice\t2026-08-16T12:00:00Z\tmoving to the new server\n' > MIGRATION-FREEZE
+
+bd create "new work"
+# ⛔ ERROR: workspace is frozen for migration (by alice).
+#    Reason: moving to the new server
+#    bd create is blocked by the freeze marker at /work/MIGRATION-FREEZE.
+#    To resume writes, remove that file.
+
+rm MIGRATION-FREEZE        # thaw
+```
+
+Blocked commands exit **14** — a stable code scripts branch on to tell "someone is migrating this workspace, come back later" from a generic failure worth an immediate retry. That includes the destructive ones: `bd init --reinit-local` and `bd bootstrap` are refused too.
+
+Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating.
+
+<Warning>
+A `bd serve` process started before the marker appeared keeps accepting HTTP writes: the freeze is a CLI-invocation gate, and a running server never re-reads it. Stop the server before you freeze.
+</Warning>
+
+If bd cannot tell whether a marker is present — a permission error on the marker or on a directory above it — it refuses the write and says so, rather than assuming the workspace is open.
+
+`BD_MIGRATION_FREEZE_FILE` names one explicit path to consult instead of walking ancestors, for markers that live outside the tree. It is authoritative: when it is set, nothing else is checked. Because you name that path deliberately, it may be a symlink — bd follows it and freezes when the link resolves to a regular marker file — so an indirection such as `current -> releases/42/MIGRATION-FREEZE` works as the authoritative signal.
 
 ## Security: Where Secrets Live
 

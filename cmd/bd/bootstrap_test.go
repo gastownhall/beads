@@ -355,9 +355,7 @@ func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testi
 		t.Fatal(err)
 	}
 	const syncRemote = "http://myserver:7007/mydb"
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: "+syncRemote+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	seedSyncRemote(t, beadsDir, syncRemote)
 	t.Setenv("BEADS_DIR", beadsDir)
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	if err := config.Initialize(); err != nil {
@@ -407,9 +405,7 @@ func TestDetectBootstrapAction_ExistingEmbeddedDBWithSyncRemoteIsNoOp(t *testing
 		t.Fatal(err)
 	}
 	const syncRemote = "http://myserver:7007/mydb"
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: "+syncRemote+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	seedSyncRemote(t, beadsDir, syncRemote)
 	t.Setenv("BEADS_DIR", beadsDir)
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	if err := config.Initialize(); err != nil {
@@ -1048,6 +1044,72 @@ func TestFindParentConfigDoesNotSkipCorruptNearestAncestor(t *testing.T) {
 	}
 }
 
+func TestFindParentConfigDoesNotAdoptOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(rootBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte(`{"dolt_database":"temp_root"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	requested := filepath.Join(tempRoot, "isolated", "project", ".beads")
+	cfg, err := findParentConfig(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg != nil {
+		t.Fatalf("findParentConfig() adopted OS temp-root database %q", cfg.GetDoltDatabase())
+	}
+}
+
+// TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd pins the $HOME
+// boundary's empty sentinel. os.UserHomeDir fails when HOME is unset, and
+// canonicalizing the resulting "" resolves it to the current working
+// directory, which silently turns "don't search above $HOME" into "stop at the
+// CWD". The walk here starts exactly at the CWD, so the ancestor workspace
+// config one level up is only reachable when "" still means "no boundary".
+func TestFindParentConfigWithoutHomeKeepsSearchingAboveCwd(t *testing.T) {
+	sandbox := t.TempDir()
+	workspace := filepath.Join(sandbox, "workspace")
+	workspaceBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(workspaceBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceBeadsDir, "metadata.json"), []byte(`{"dolt_database":"parent_workspace"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// findParentConfig starts at the parent of the requested .beads directory's
+	// project, which is <workspace>/rig here.
+	rig := filepath.Join(workspace, "rig")
+	requested := filepath.Join(rig, "project", ".beads")
+	if err := os.MkdirAll(requested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(rig)
+	// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	// os.UserHomeDir reads HOME everywhere except Windows, where it reads
+	// USERPROFILE; clear both so it fails the way an unset HOME does.
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	cfg, err := findParentConfig(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg == nil {
+		t.Fatal("findParentConfig() = nil, want the workspace config above the CWD")
+	}
+	if got := cfg.GetDoltDatabase(); got != "parent_workspace" {
+		t.Errorf("GetDoltDatabase() = %q, want %q", got, "parent_workspace")
+	}
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.
@@ -1327,8 +1389,18 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 	// sync.remote must be persisted so subsequent fresh clones (and
 	// bootstrap retries) can rediscover the remote without re-probing
 	// origin refs.
-	if !strings.Contains(yaml, "sync.remote: ") && !strings.Contains(yaml, "sync-remote: ") {
-		t.Errorf("config.yaml does not contain sync.remote entry:\n%s", yaml)
+	//
+	// Asserted by READING it back rather than by matching a spelling. This used
+	// to require a literal `sync.remote: ` line, which is a key whose name
+	// contains a dot — the shape config.GetStringFromDir and viper can never
+	// find, because both split on the dot and walk nested mappings. The writer
+	// now nests (bd-zj95), so the old assertion passed for exactly as long as
+	// the value was unreadable and failed the moment it became readable. What
+	// bootstrap owes its caller is a remote that can be read back, so that is
+	// what this checks.
+	if got := config.GetStringFromDir(beadsDir, "sync.remote"); got != syncRemote {
+		t.Errorf("config.GetStringFromDir(%q, \"sync.remote\") = %q, want %q:\n%s",
+			beadsDir, got, syncRemote, yaml)
 	}
 	if !strings.Contains(yaml, syncRemote) {
 		t.Errorf("config.yaml does not contain sync remote URL %q:\n%s", syncRemote, yaml)

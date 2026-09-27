@@ -89,11 +89,7 @@ func TestNewDoltServerUOWProvider_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	cfgPath := writeServerConfig(t, port)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
@@ -134,11 +130,7 @@ func TestNewDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) {
 	require.NoError(t, err)
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	cfgPath := writeServerConfig(t, port)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 

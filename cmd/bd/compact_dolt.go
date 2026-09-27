@@ -35,7 +35,13 @@ How it works:
   4. Swaps main branch to the compacted version
   5. Prunes remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)
-  6. Runs Dolt GC to reclaim space
+  6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+
+The GC pass is a full collection: Dolt storage is generational, and a default
+GC never revisits data an earlier GC moved to the old generation. On any store
+that has been GC'd before (bd gc, or a previous flatten or compact), only a
+full collection reclaims the squashed history. A full GC can take minutes on
+multi-gigabyte stores.
 
 Examples:
   bd compact --dry-run               # Preview: show commit breakdown
@@ -187,11 +193,7 @@ Examples:
 		}
 
 		// Reclaim disk space from orphaned old history
-		if gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector); ok {
-			if err := gc.DoltGC(ctx); err != nil {
-				WarnError("dolt gc after compact failed: %v", err)
-			}
-		}
+		gcMode := runPostRewriteGC(ctx, "compact")
 		sizeAfter := storeSizeBytes(ctx)
 
 		elapsed := time.Since(start)
@@ -207,6 +209,9 @@ Examples:
 				"remote_refs_pruned": pruned,
 				"tags_anchoring":     tags,
 				"elapsed_ms":         elapsed.Milliseconds(),
+			}
+			if gcMode != "" {
+				result["gc_mode"] = gcMode
 			}
 			addGCSizeJSON(result, sizeBefore, sizeAfter)
 			return outputJSON(result)

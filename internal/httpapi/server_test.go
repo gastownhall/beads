@@ -1233,6 +1233,10 @@ func TestStartupLines(t *testing.T) {
 	if provider.limits.ConnMaxIdleTime <= 0 || provider.limits.ConnMaxLifetime <= 0 {
 		t.Errorf("idle/lifetime caps unset: %+v", provider.limits)
 	}
+	if provider.limits.ConnMaxIdleTime != 20*time.Second {
+		t.Errorf("ConnMaxIdleTime = %s, want 20s below Dolt's supported 30s wait_timeout",
+			provider.limits.ConnMaxIdleTime)
+	}
 }
 
 // TestPoolLimitsUnavailableIsAnnounced: running unbounded is a decision, so it

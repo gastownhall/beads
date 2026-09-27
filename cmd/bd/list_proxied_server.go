@@ -22,7 +22,16 @@ import (
 
 func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer, in listInput) error {
 	if in.repoOverrideSet {
-		return errors.New("--repo is not supported with --proxied-server")
+		// Unreachable from the CLI: listCmd registers no --repo flag, so
+		// gatherListInput's Changed("repo") is always false. Kept as a
+		// defensive guard for the day one is added, and deliberately NOT keyed
+		// on proxyCommandCapabilities["list"] -- that row reads
+		// notApplicable() precisely because the flag is absent, so a
+		// command-keyed assert would resolve it to "allowed" and let a repo
+		// override through. The mode-wide rule is the one that still means
+		// something here, and it renders the same typed code/mutates on stdout
+		// under --json.
+		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
 	switch {
 	case in.watchMode:
@@ -101,10 +110,7 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {
-	if in.formatStr != "" {
-		return errors.New("--format under --proxied-server --watch is not supported")
-	}
-
+	// --format with --watch is refused in gatherListInput, on both routes.
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
 		return err
@@ -156,7 +162,7 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 	if err != nil {
 		return fmt.Errorf("initial query: %w", err)
 	}
-	displayPrettyListWithDeps(issues, true, deps, hasMore, in.ReadyFlag, in.Status)
+	displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 	printTruncationHint(hasMore, in.effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -183,7 +189,7 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayPrettyListWithDeps(issues, true, deps, hasMore, in.ReadyFlag, in.Status)
+				displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 				printTruncationHint(hasMore, in.effectiveLimit)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
@@ -239,7 +245,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status)
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil

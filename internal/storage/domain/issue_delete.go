@@ -163,10 +163,10 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return result, fmt.Errorf("delete: affected by deletion: %w", err)
 	}
 
-	if _, err := u.depRepo.DeleteAllForIDs(ctx, regularIDs, DepInsertOpts{}); err != nil {
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, regularIDs, DepInsertOpts{}, actor); err != nil {
 		return result, fmt.Errorf("delete: drop deps: %w", err)
 	}
-	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{UseWispsTable: true}); err != nil {
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{UseWispsTable: true}, actor); err != nil {
 		return result, fmt.Errorf("delete: drop wisp deps: %w", err)
 	}
 	// The SYNC-PLANE edges pointing at a deleted wisp, which are not the same
@@ -177,7 +177,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	// a row that no longer exists — dangling, not orphaned, which is not what
 	// issueops.DeleteRequest.Force promises. The store body has always done
 	// this (issueops.deleteIssueRowInTx -> DeleteWispFromDependenciesInTx).
-	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{}); err != nil {
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{}, actor); err != nil {
 		return result, fmt.Errorf("delete: drop sync-plane edges into deleted wisps: %w", err)
 	}
 	if _, err := u.labelRepo.DeleteAllForIDs(ctx, regularIDs, LabelOpts{}); err != nil {
@@ -193,11 +193,11 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return result, fmt.Errorf("delete: drop wisp events: %w", err)
 	}
 
-	issuesDeleted, err := u.issueRepo.DeleteByIDs(ctx, regularIDs, IssueTableOpts{})
+	issuesDeleted, err := u.issueRepo.DeleteByIDs(ctx, regularIDs, IssueTableOpts{}, actor)
 	if err != nil {
 		return result, fmt.Errorf("delete: drop issue rows: %w", err)
 	}
-	wispsDeleted, err := u.issueRepo.DeleteByIDs(ctx, wispIDs, IssueTableOpts{UseWispsTable: true})
+	wispsDeleted, err := u.issueRepo.DeleteByIDs(ctx, wispIDs, IssueTableOpts{UseWispsTable: true}, actor)
 	if err != nil {
 		return result, fmt.Errorf("delete: drop wisp rows: %w", err)
 	}
@@ -287,8 +287,12 @@ func (u *issueUseCaseImpl) previewDelete(ctx context.Context, ids []string) (Del
 	for _, iss := range fromIssues {
 		preview.Issues[iss.ID] = iss
 	}
+	// Only the WISPS table is optional here: this read is `FROM wisps LEFT
+	// JOIN leases`, so a blanket table-not-exist check reported a rig missing
+	// `leases` as a rig with no wisp plane and listed live wisps under
+	// NotFound (the WispPlaneIDs lesson, wy-237yfi).
 	fromWisps, err := u.issueRepo.GetByIDs(ctx, ids, IssueTableOpts{UseWispsTable: true})
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !dberrors.IsMissingTable(err, "wisps") {
 		return preview, fmt.Errorf("previewDelete: load wisps: %w", err)
 	}
 	for _, iss := range fromWisps {
@@ -383,8 +387,11 @@ func (u *issueUseCaseImpl) collectConnectedIssues(
 	for _, iss := range fromIssues {
 		out[iss.ID] = iss
 	}
+	// As in previewDelete: the wisp read joins `leases`, and only a missing
+	// `wisps` table means "this rig has no wisp plane". Anything else left
+	// the neighbors unhydrated behind a nil error.
 	fromWisps, err := u.issueRepo.GetByIDs(ctx, ids, IssueTableOpts{UseWispsTable: true})
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !dberrors.IsMissingTable(err, "wisps") {
 		return nil, nil, fmt.Errorf("hydrate neighbors (wisps): %w", err)
 	}
 	for _, iss := range fromWisps {

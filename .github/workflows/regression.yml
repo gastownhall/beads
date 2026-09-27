@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
   # Allow manual trigger
   workflow_dispatch:
 

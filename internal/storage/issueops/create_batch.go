@@ -181,6 +181,7 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 		if err != nil {
 			return publicops.CreateBatchResult{}, nil, err
 		}
+		OverlayCreateTimestamps(hydrated, issue)
 		result.Issues[i] = hydrated
 	}
 	return result, tables, nil

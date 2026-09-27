@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // skipIfNoDolt skips the test when no Dolt server is available.
@@ -178,6 +179,42 @@ func TestInitCommand(t *testing.T) {
 			// verifies these writes succeed; prefix/metadata correctness is also covered
 			// by dedicated Dolt storage tests.
 		})
+	}
+}
+
+func TestInitTargetsRequestedProjectBelowOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	tempBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(tempBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(tempRoot, "isolated", "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	originalDBPath := dbPath
+	dbPath = ""
+	t.Cleanup(func() { dbPath = originalDBPath })
+
+	selected := selectedNoDBBeadsDir(initCmd)
+	if selected != "" {
+		t.Fatalf("selectedNoDBBeadsDir(init) = %q, want no inherited temp-root store", selected)
+	}
+	prepareSelectedNoDBContext(selected)
+
+	want := filepath.Join(project, ".beads")
+	if got := resolveInitBeadsDir(); !utils.PathsEqual(got, want) {
+		t.Fatalf("resolveInitBeadsDir() = %q, want requested project %q", got, want)
 	}
 }
 
@@ -2093,6 +2130,12 @@ func TestInitDatabaseFlag(t *testing.T) {
 		bareDir, worktreeDir := setupBareParentInitWorktree(t)
 		bareBeadsDir := filepath.Join(bareDir, ".beads")
 
+		// Shared-server init daemonizes a dolt sql-server that nothing here
+		// stopped; it outlived the suite whose temp HOME it served
+		// (wy-j2zc8q). Registered before the first subprocess so the
+		// t.Fatalf paths are covered too.
+		stopSharedServerCleanup(t)
+
 		cmd := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
 		cmd.Dir = worktreeDir
 		cmd.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
@@ -2315,6 +2358,9 @@ func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
 	bareDir, worktreeDir := setupBareParentInitWorktree(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
 	sharedEnv := append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+
+	// Same daemonized shared server, same missing stop (wy-j2zc8q).
+	stopSharedServerCleanup(t)
 
 	initCmd := exec.Command(bd, "init", "--prefix", "bare-core", "--skip-hooks", "--quiet")
 	initCmd.Dir = worktreeDir
