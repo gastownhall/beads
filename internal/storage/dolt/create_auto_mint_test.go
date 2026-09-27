@@ -153,11 +153,24 @@ func TestCreateIssue_ReplayRemintsAutoMintedID(t *testing.T) {
 // TestCreateIssues_ReplayRemintsAutoMintedIDs is the batch-path twin of
 // TestCreateIssue_ReplayRemintsAutoMintedID, covering createIssuesWithFullOptions
 // instead of createIssue. Same collision-then-replay shape (a second writer
-// commits a "winner" under the first attempt's minted ID before it commits,
-// forcing withRetryTx to replay), but with two issues in the batch: loser A
-// collides with the winner, loser B does not. Loser B exists to prove the fix
-// resets every auto-minted ID in the batch on replay, not just the one whose
-// row actually collided.
+// commits "winner" rows under the first attempt's minted IDs before it
+// commits, forcing withRetryTx to replay), but with two issues in the batch,
+// both colliding independently: this proves the fix resets every auto-minted
+// ID in the batch on replay, not just the first one checked.
+//
+// Both losers must collide. The default (non-counter) ID mint,
+// idgen.GenerateHashID(prefix, title, description, creator, createdAt,
+// length, nonce), is a pure function of its inputs, not fresh entropy, and
+// createdAt freezes after the first PrepareIssueForInsert call. A replay
+// whose issue.ID is reset to "" but whose candidate is never actually
+// contested deterministically re-derives the SAME id it minted on attempt 1
+// — only a real collision forces the nonce (and so the candidate) to
+// advance. A batch fix that resets every issue's ID but is only exercised
+// against one real collision would look identical, on the uncontested
+// issue, to a fix that resets nothing at all: both produce the same final
+// ID. So both loser A and loser B need their first-attempt IDs claimed out
+// from under them here, or the second one's assertions can't actually tell
+// a reset apart from a no-op.
 //
 // Loser B also carries a dependency with an unset IssueID, covering fix spec
 // item 4: PersistDependenciesWithOptionsResult defaults an empty
@@ -165,8 +178,9 @@ func TestCreateIssue_ReplayRemintsAutoMintedID(t *testing.T) {
 // empty. Since Issue.Dependencies is a []*Dependency, that default survives a
 // replay the same way a minted issue ID does. A fix that resets issue.ID on
 // every attempt but not Dependencies[*].IssueID would leave the dependency
-// row pointing at loser B's abandoned first-attempt ID — an ID that is never
-// actually inserted anywhere, since the fixed code re-mints a fresh one.
+// row pointing at loser B's abandoned first-attempt ID once that ID is
+// forced to change — an ID that is never actually inserted anywhere, since
+// the fixed code re-mints a fresh one.
 func TestCreateIssues_ReplayRemintsAutoMintedIDs(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -226,9 +240,18 @@ func TestCreateIssues_ReplayRemintsAutoMintedIDs(t *testing.T) {
 		if err != nil {
 			return fmt.Errorf("winner batch context: %w", err)
 		}
-		winner := &types.Issue{ID: issue.ID, Title: "winner", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
-		if err := issueops.CreateIssueInTx(ctx, tx, bc, winner, "winner"); err != nil {
-			return fmt.Errorf("winner create: %w", err)
+		// Claim both first-attempt IDs, not just loser A's. See the doc
+		// comment above: without a real collision on loser B's slot too, its
+		// deterministic hash-based candidate is legitimately unchanged by a
+		// correct reset, so this test needs both to actually distinguish a
+		// fix that resets the whole batch from one that resets nothing.
+		winnerA := &types.Issue{ID: firstAID, Title: "winner A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := issueops.CreateIssueInTx(ctx, tx, bc, winnerA, "winner"); err != nil {
+			return fmt.Errorf("winner A create: %w", err)
+		}
+		winnerB := &types.Issue{ID: firstBID, Title: "winner B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := issueops.CreateIssueInTx(ctx, tx, bc, winnerB, "winner"); err != nil {
+			return fmt.Errorf("winner B create: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("winner commit: %w", err)
@@ -243,12 +266,19 @@ func TestCreateIssues_ReplayRemintsAutoMintedIDs(t *testing.T) {
 		t.Fatalf("create ran %d attempt(s); the winner's commit should have forced a replay", attempts)
 	}
 
-	winner, err := store.GetIssue(ctx, firstAID)
+	winnerA, err := store.GetIssue(ctx, firstAID)
 	if err != nil {
 		t.Fatalf("GetIssue(%s): %v", firstAID, err)
 	}
-	if winner.Title != "winner" {
-		t.Errorf("the replay overwrote the winner: %s title = %q, want %q", firstAID, winner.Title, "winner")
+	if winnerA.Title != "winner A" {
+		t.Errorf("the replay overwrote winner A: %s title = %q, want %q", firstAID, winnerA.Title, "winner A")
+	}
+	winnerB, err := store.GetIssue(ctx, firstBID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", firstBID, err)
+	}
+	if winnerB.Title != "winner B" {
+		t.Errorf("the replay overwrote winner B: %s title = %q, want %q", firstBID, winnerB.Title, "winner B")
 	}
 	if loserA.ID == firstAID {
 		t.Fatalf("loser A kept the first attempt's minted ID %q", firstAID)
