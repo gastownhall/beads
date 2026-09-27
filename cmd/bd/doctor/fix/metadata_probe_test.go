@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // TestProbeForCorrectDoltDatabaseQuotesIdentifier pins the call site, not just
@@ -66,7 +68,14 @@ func TestProbeForCorrectDoltDatabaseQuotesIdentifier(t *testing.T) {
 // matching; it does not capture queries sqlmock rejects before matching (an
 // unexpected query surfaces as an error the probe's `err == nil` path
 // swallows), so the assertions pair DeepEqual on the recording with
-// ExpectationsWereMet rather than claiming either alone sees everything.
+// ExpectationsWereMet, which together bound mid-sequence drift; a query issued
+// after the last expectation is fulfilled is caught by neither. In ordered mode
+// sqlmock's query() skips fulfilled expectations and returns "all expectations
+// were already fulfilled" before it reaches the matcher, so a trailing surplus
+// query is never recorded, and ExpectationsWereMet reports only unfulfilled
+// expectations, never surplus calls. sqlmock v1.5.2 offers no clean trailing
+// sentinel: an extra never-matching expectation would fail
+// ExpectationsWereMet unconditionally.
 func newRecordingMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *[]string) {
 	t.Helper()
 	var recorded []string
@@ -126,26 +135,36 @@ func TestProbeForCorrectDoltDatabaseEscapesHostileNames(t *testing.T) {
 	}
 }
 
+// The winner is a neutral name rather than configfile.DefaultDoltDatabase: the
+// sole production caller passes that default as skipDB (metadata.go:232), so it
+// is filtered on every real call and can never be the returned winner. This
+// test passes it as skipDB with a matching SHOW DATABASES row, which both keeps
+// the production argument shape and makes the filter observable — no expectation
+// is registered for it, so the recorded list below is the proof it was never
+// probed.
 func TestProbeForCorrectDoltDatabasePrefersFirstProbeableCandidate(t *testing.T) {
 	db, mock, recorded := newRecordingMock(t)
 
-	databases := sqlmock.NewRows([]string{"Database"}).AddRow("stale-db").AddRow("beads")
+	databases := sqlmock.NewRows([]string{"Database"}).
+		AddRow(configfile.DefaultDoltDatabase).
+		AddRow("stale-db").
+		AddRow("project-db")
 	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(databases)
-	// The first candidate's probe fails (no issues table): it is probed, not
-	// skipped, and the scan continues to the second candidate.
+	// The first surviving candidate's probe fails (no issues table): it is
+	// probed, not skipped, and the scan continues to the next candidate.
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `stale-db`.issues LIMIT 1")).
 		WillReturnError(errors.New("table not found"))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `beads`.issues LIMIT 1")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `project-db`.issues LIMIT 1")).
 		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(1))
 
-	if got := probeForCorrectDoltDatabase(db, ""); got != "beads" {
-		t.Fatalf("probeForCorrectDoltDatabase = %q, want %q", got, "beads")
+	if got := probeForCorrectDoltDatabase(db, configfile.DefaultDoltDatabase); got != "project-db" {
+		t.Fatalf("probeForCorrectDoltDatabase = %q, want %q", got, "project-db")
 	}
 
 	want := []string{
 		"SHOW DATABASES",
 		"SELECT COUNT(*) FROM `stale-db`.issues LIMIT 1",
-		"SELECT COUNT(*) FROM `beads`.issues LIMIT 1",
+		"SELECT COUNT(*) FROM `project-db`.issues LIMIT 1",
 	}
 	if !reflect.DeepEqual(*recorded, want) {
 		t.Fatalf("executed queries = %q, want %q", *recorded, want)
