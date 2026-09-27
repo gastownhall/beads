@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Unreadable Git exclude files are preserved during `bd init --stealth`.**
+  Init now refuses with a nonzero result instead of overwriting existing rules
+  when `.git/info/exclude` cannot be read. The error path prints the resolved
+  target and requested patterns to stderr so users can fix the file type/read
+  permissions and retry, or add the patterns manually. No patterns are reported
+  as installed on refusal; stdout/JSON output is unchanged ([#6819](https://github.com/gastownhall/beads/issues/6819)).
+
 - **`bd -C dir prime` now describes the target workspace instead of the launch
   directory** ([#5509](https://github.com/gastownhall/beads/issues/5509)). `-C`
   resolves `BEADS_DIR` but never changes directory, so prime's cwd-relative

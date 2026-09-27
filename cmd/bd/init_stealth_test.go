@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 )
@@ -527,7 +529,14 @@ func TestAddExcludePatternsPreservesAppendLineEndings(t *testing.T) {
 				t.Fatal(err)
 			}
 			for pass := 0; pass < 2; pass++ {
-				added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/", "cache/"})
+				var added []string
+				var gotPath string
+				stderr := captureStderr(t, func() {
+					added, gotPath, err = addExcludePatterns(dir, "# managed", []string{".beads/", "cache/"})
+				})
+				if stderr != "" {
+					t.Errorf("successful append/no-op printed remediation: %s", stderr)
+				}
 				if err != nil || gotPath != path {
 					t.Fatalf("addExcludePatterns: path=%q, err=%v", gotPath, err)
 				}
@@ -586,18 +595,93 @@ func TestAddExcludePatternsRefusesReadErrors(t *testing.T) {
 	if err := writable.Close(); err != nil {
 		t.Fatal(err)
 	}
-	added, gotPath, err := addExcludePatterns(dir, "# managed", []string{".beads/"})
+	var added []string
+	var gotPath string
+	stderr := captureStderr(t, func() {
+		added, gotPath, err = addExcludePatterns(dir, "# managed", []string{".beads/", "cache/"})
+	})
+	for _, want := range []string{path, "no patterns were added", "read permissions", "  .beads/\n", "  cache/\n"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("read refusal stderr missing %q: %s", want, stderr)
+		}
+	}
 	if restoreErr := os.Chmod(path, 0600); restoreErr != nil {
 		t.Fatal(restoreErr)
 	}
 	if err == nil || !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "failed to read git exclude file") {
 		t.Errorf("expected contextual wrapped permission error, got %v", err)
 	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != path {
+		t.Errorf("wrapped error lost the exclude target: %v", err)
+	}
 	if added != nil || gotPath != path {
 		t.Errorf("read failure returned added=%v path=%q, want nil and %q", added, gotPath, path)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != before {
 		t.Errorf("exclude bytes after read failure = %q, want %q: %v", got, before, err)
+	}
+}
+
+func TestInitStealthReadRefusalGuidance(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	bd := buildBDForTest(t)
+	for _, mode := range []string{"human", "json"} {
+		t.Run(mode, func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(newGitRepo(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := resolveGitExcludePath(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(path, "user-content")
+			if err := os.WriteFile(marker, []byte("preserve me\r\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.ReadFile(path); err == nil || os.IsNotExist(err) {
+				t.Fatalf("non-ENOENT read-error precondition: %v", err)
+			}
+			args := []string{"init", "--stealth", "--quiet", "--prefix", "test", "--non-interactive", "--skip-hooks", "--skip-agents"}
+			if mode == "json" {
+				args = append(args, "--json")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bd, args...)
+			cmd.Dir = dir
+			cmd.Env = testEnvNoPrompt()
+			stdout, err := cmd.Output()
+			if ctx.Err() != nil {
+				t.Fatalf("init exceeded its deadline: %v", ctx.Err())
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("expected a nonzero init result, got %v; stdout=%s", err, stdout)
+			}
+			stderr := string(exitErr.Stderr)
+			for _, want := range []string{"failed to read git exclude file", path, "no patterns were added", "read permissions", "  .beads/\n", "  .claude/settings.local.json\n"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("init stderr missing %q: %s", want, stderr)
+				}
+			}
+			if strings.Contains(string(stdout), "no patterns were added") || strings.Contains(string(stdout), "read permissions") {
+				t.Errorf("human remediation polluted stdout: %s", stdout)
+			}
+			if got, err := os.ReadFile(marker); err != nil || string(got) != "preserve me\r\n" {
+				t.Errorf("exclude target changed: %q, %v", got, err)
+			}
+			if entries, err := os.ReadDir(path); err != nil || len(entries) != 1 {
+				t.Errorf("exclude directory changed: %v, %v", entries, err)
+			}
+		})
 	}
 }
 
