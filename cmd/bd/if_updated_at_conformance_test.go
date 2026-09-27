@@ -29,8 +29,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -157,36 +159,47 @@ func ifupSeedClaimed(t *testing.T, bd, dir, title string) (string, string, strin
 	return issue.ID, current, stale, bdShow(t, bd, dir, issue.ID)
 }
 
-// ifupConvergeStamps advances rows until they all report the SAME updated_at.
-// The fence takes ONE stamp per invocation, so a per-ID batch needs a common
-// generation; writes landing across a second boundary would otherwise leave
-// the batch rows on different stamps. Each round re-reads and touches only
-// the laggards, so this converges in one or two rounds in practice.
-func ifupConvergeStamps(t *testing.T, bd, dir string, ids []string) string {
+// ifupImportBatchRows mints len(titles) rows sharing ONE updated_at
+// generation, deterministically, via `bd import` (the importer preserves the
+// JSONL updated_at verbatim and upserts; it works in both the embedded and
+// the proxied mode). Touch-based convergence is NOT an option here: every
+// row write lands its own updated_at second (measured ~1s per row on a
+// batch), so no two rows can be RELIABLY brought onto one stamp by writing —
+// the flake bd-fence-parity observed under load. The stamp is a fixed
+// constant, far from any real write time. runImport runs `bd import` with
+// the seed file path (embedded dir or crossModeEnv).
+func ifupImportBatchRows(t *testing.T, prefix string, titles []string, claimed bool, runImport func(path string)) ([]string, string) {
 	t.Helper()
-	for round := 0; round < 6; round++ {
-		stamps := make(map[string]string, len(ids))
-		first := ""
-		allSame := true
-		for _, id := range ids {
-			stamps[id] = ifupStamp(t, bd, dir, id)
-			if first == "" {
-				first = stamps[id]
-			} else if stamps[id] != first {
-				allSame = false
-			}
+	const stamp = "2026-09-27T00:00:00Z"
+	ids := make([]string, len(titles))
+	lines := make([]string, len(titles))
+	for i, title := range titles {
+		ids[i] = fmt.Sprintf("%s-imp%d", prefix, i+1)
+		row := map[string]interface{}{
+			"id":         ids[i],
+			"title":      title,
+			"status":     "open",
+			"issue_type": "task",
+			"priority":   2,
+			"created_at": stamp,
+			"updated_at": stamp,
 		}
-		if allSame {
-			return first
+		if claimed {
+			row["status"] = "in_progress"
+			row["assignee"] = "worker-a"
 		}
-		for _, id := range ids {
-			if stamps[id] != first {
-				bdUpdate(t, bd, dir, id, "--append-notes", "converge")
-			}
+		line, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal seed row: %v", err)
 		}
+		lines[i] = string(line)
 	}
-	t.Fatal("row stamps did not converge to a common generation after 6 rounds")
-	return ""
+	path := filepath.Join(t.TempDir(), "batch-seed.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write seed jsonl: %v", err)
+	}
+	runImport(path)
+	return ids, stamp
 }
 
 // ifupExtractJSON pulls the JSON record out of combined output that may carry
@@ -629,13 +642,14 @@ func TestIfUpdatedAtBatchPartialApplicationOnStaleRow(t *testing.T) {
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yzb")
 
-	var ids []string
-	for _, title := range []string{"Batch P", "Batch Q", "Batch R"} {
-		issue := bdCreate(t, bd, dir, title, "--type", "task")
-		ids = append(ids, issue.ID)
-	}
-	stamp := ifupConvergeStamps(t, bd, dir, ids)
+	ids, stamp := ifupImportBatchRows(t, "yzb", []string{"Batch P", "Batch Q", "Batch R"}, false,
+		func(path string) { ifupMustRun(t, bd, dir, "import", path) })
 	p, q, r := ids[0], ids[1], ids[2]
+	for _, id := range []string{p, q} {
+		if got := ifupStamp(t, bd, dir, id); got != stamp {
+			t.Fatalf("imported %s stamp = %s, want the common %s", id, got, stamp)
+		}
+	}
 	bdUpdate(t, bd, dir, r, "--append-notes", "bump") // R goes stale
 	rBaseline := bdShow(t, bd, dir, r)
 
@@ -665,12 +679,8 @@ func TestIfUpdatedAtBatchAllStaleWritesNothing(t *testing.T) {
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yzc2")
 
-	var ids []string
-	for _, title := range []string{"AllStale P", "AllStale Q", "AllStale R"} {
-		issue := bdCreate(t, bd, dir, title, "--type", "task")
-		ids = append(ids, issue.ID)
-	}
-	stamp := ifupConvergeStamps(t, bd, dir, ids)
+	ids, stamp := ifupImportBatchRows(t, "yzc2", []string{"AllStale P", "AllStale Q", "AllStale R"}, false,
+		func(path string) { ifupMustRun(t, bd, dir, "import", path) })
 	for _, id := range ids {
 		bdUpdate(t, bd, dir, id, "--append-notes", "bump")
 	}
@@ -732,13 +742,8 @@ func TestIfUpdatedAtUnclaimBatchStaleExits13(t *testing.T) {
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yze")
 
-	var ids []string
-	for _, title := range []string{"UnclaimBatch P", "UnclaimBatch Q", "UnclaimBatch R"} {
-		issue := bdCreate(t, bd, dir, title, "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--assignee", "worker-a", "--status", "in_progress")
-		ids = append(ids, issue.ID)
-	}
-	stamp := ifupConvergeStamps(t, bd, dir, ids)
+	ids, stamp := ifupImportBatchRows(t, "yze", []string{"UnclaimBatch P", "UnclaimBatch Q", "UnclaimBatch R"}, true,
+		func(path string) { ifupMustRun(t, bd, dir, "import", path) })
 	p, q, r := ids[0], ids[1], ids[2]
 	bdUpdate(t, bd, dir, r, "--append-notes", "bump")
 	rBaseline := bdShow(t, bd, dir, r)
@@ -1142,11 +1147,11 @@ func ifupParityScenario(t *testing.T, env crossModeEnv) ifupParityOutcome {
 		reflect.DeepEqual(raceBaseline, raceAfter)
 
 	// T16 (condensed): per-ID batch, one stale row → partial application.
-	var batchIDs []string
-	for _, title := range []string{"Parity batch P", "Parity batch Q", "Parity batch R"} {
-		batchIDs = append(batchIDs, env.create(t, title))
-	}
-	batchStamp := ifupConvergeCrossModeStamps(t, env, batchIDs)
+	probe := env.create(t, "Parity batch prefix probe")
+	batchPrefix := probe[:strings.Index(probe, "-")]
+	batchIDs, batchStamp := ifupImportBatchRows(t, batchPrefix,
+		[]string{"Parity batch P", "Parity batch Q", "Parity batch R"}, false,
+		func(path string) { env.mustRun(t, "import", path) })
 	env.mustRun(t, "update", batchIDs[2], "--append-notes", "bump")
 	rBaseline := env.show(t, batchIDs[2])
 	_, _, code = env.run(t, "update", batchIDs[0], batchIDs[1], batchIDs[2],
@@ -1166,34 +1171,6 @@ func ifupParityScenario(t *testing.T, env crossModeEnv) ifupParityOutcome {
 	}
 
 	return got
-}
-
-// ifupConvergeCrossModeStamps is ifupConvergeStamps for a crossModeEnv.
-func ifupConvergeCrossModeStamps(t *testing.T, env crossModeEnv, ids []string) string {
-	t.Helper()
-	for round := 0; round < 6; round++ {
-		stamps := make(map[string]string, len(ids))
-		first := ""
-		allSame := true
-		for _, id := range ids {
-			stamps[id] = ifupEnvStamp(t, env, id)
-			if first == "" {
-				first = stamps[id]
-			} else if stamps[id] != first {
-				allSame = false
-			}
-		}
-		if allSame {
-			return first
-		}
-		for _, id := range ids {
-			if stamps[id] != first {
-				env.mustRun(t, "update", id, "--append-notes", "converge")
-			}
-		}
-	}
-	t.Fatalf("[%s] row stamps did not converge to a common generation", env.mode)
-	return ""
 }
 
 // TestProxiedServerIfUpdatedAtParity — spec §3.5 T20. The fenced mutation
