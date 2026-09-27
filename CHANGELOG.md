@@ -166,6 +166,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Generation fence on guarded mutations: `bd update --if-updated-at` /
+  `bd unclaim --if-updated-at`** ([#5442](https://github.com/gastownhall/beads/issues/5442)).
+  The stamp guard closes the residual window the assignee guards cannot see: a
+  same-assignee heartbeat. A supervisor reads a claim, the holder heartbeats
+  (identity unchanged, the row's `updated_at` rewritten), and an
+  `--if-assignee`-only release then fires over a row that moved. When the flag
+  is present the mutation applies only if the issue row's current `updated_at`
+  still equals the stamp the caller read (the `updated_at` value `bd show
+  --json` reports, RFC3339 UTC second precision; equivalent spellings of the
+  same instant — `Z` vs `+00:00` — are one stamp). On a mismatch NOTHING is
+  written and the refusal names the current stamp:
+  `updated_at mismatch: <id> was last updated <current>, expected <expected>`
+  (typed as the new `storage.ErrUpdatedAtMismatch`); in `bd update --json`
+  mode the `failed[]` entry carries `"guard_mismatch": true` and the run exits
+  **13** when every failure was a stale guard — `bd update`'s existing guard
+  taxonomy, which the stamp guard joins.
+
+  `--if-updated-at` composes with `--if-assignee`/`--if-status` and
+  `ExpectedVersion` (all supplied guards must hold; on update the diagnosis
+  precedence is assignee → status → stamp). It requires a field update to ride
+  on and is mutually exclusive with `--claim` on `bd update`, and with
+  `--force` on both verbs — "only while the row is still the one I read" and
+  "override regardless" encode contradictory intent. Empty or unparseable
+  stamps are usage errors (exit 1) refused before any store access; relative
+  times (`+6h`, `tomorrow`) are deliberately NOT accepted — a stamp is a
+  snapshot identity, and a relative value would mean a different instant on
+  every run. `bd unclaim`'s own exit taxonomy is unchanged: a guard refusal —
+  holder or stamp — is one per-issue failure and exits 1, identically on the
+  embedded and proxied-server routes (the help's "Exit status" paragraph says
+  so).
+
+  KNOWN BLIND SPOT, documented rather than fixed here and the reason the
+  upstream issue is cited: label mutations bypass `issues.updated_at` by
+  design ([#5442](https://github.com/gastownhall/beads/issues/5442)), so a
+  stamp read before a label-only write still matches — the guard fences the
+  issues ROW's generation, not its graph. Library consumers thread the same
+  guard via `UpdateIssueOptions.ExpectedUpdatedAt` on `UpdateIssueChecked`
+  and the new `expectedUpdatedAt` parameter on `UnclaimIssueIfAssignee`;
+  the HTTP surface spells it `expected_updated_at` on
+  `POST /v0/beads/issues/{id}` and `POST /v0/beads/issues/{id}:release`
+  (composable with `expected_assignee`, 400 beside `force`).
+
 - **`bd backup` works on a proxied-server workspace bd runs the Dolt server
   for.** `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
   over the proxied provider; before this, a proxied workspace — the default
