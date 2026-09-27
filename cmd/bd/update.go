@@ -33,13 +33,14 @@ type commandIssueUpdater interface {
 // update. Both routes of `bd update` fill it in: the direct one below, and the
 // proxied-server claim path in update_proxied_server.go.
 type commandUpdateMutation struct {
-	actor            string
-	issueID          string
-	patch            issueops.IssuePatch
-	claim            bool
-	force            bool
-	expectedAssignee *string
-	expectedStatus   *issueops.Status
+	actor             string
+	issueID           string
+	patch             issueops.IssuePatch
+	claim             bool
+	force             bool
+	expectedAssignee  *string
+	expectedStatus    *issueops.Status
+	expectedUpdatedAt *time.Time
 	// provenance names the history entry the write records. Empty takes the
 	// backend's default, which is what the direct route wants; the proxied
 	// route spells the message it has always written.
@@ -60,6 +61,7 @@ func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, 
 		ForceClosePolicy:      mutation.force,
 		ExpectedAssignee:      mutation.expectedAssignee,
 		ExpectedStatus:        mutation.expectedStatus,
+		ExpectedUpdatedAt:     mutation.expectedUpdatedAt,
 		Provenance:            mutation.provenance,
 	})
 }
@@ -82,9 +84,9 @@ fail, the remaining issues are still updated, every failed ID is reported on
 stderr, and the command exits nonzero.
 
 Exit codes: 1 for general failures; 13 when every failure is a stale
---if-assignee/--if-status guard (the precondition no longer held, nothing was
-written — another actor won the race, so retrying the same guard is
-pointless).`,
+--if-assignee/--if-status/--if-updated-at guard (the precondition no longer
+held, nothing was written — another actor won the race, so retrying the same
+guard is pointless).`,
 	// The non-interactive no-ID refusal lives in argument validation, which
 	// cobra runs before root's PersistentPreRunE — so a scripted `bd update
 	// $ID ...` with an empty $ID fails fast, before the pre-run hooks can
@@ -388,8 +390,9 @@ pointless).`,
 		// Conditional-update guards (bd-wsqvw): validated against the same
 		// status set as --status, mutually exclusive with --claim (which is
 		// its own compare-and-set), and only meaningful with a field update
-		// to ride on.
-		ifAssignee, ifStatus, err := updateGuardsFromFlags(cmd, claimFlag, updates)
+		// to ride on. --if-updated-at parses and validates BEFORE any store
+		// access — an invalid stamp is a usage error, never a silent pass.
+		ifAssignee, ifStatus, ifUpdatedAt, err := updateGuardsFromFlags(cmd, claimFlag, updates)
 		if err != nil {
 			return err
 		}
@@ -528,13 +531,14 @@ pointless).`,
 			// through: `--force -s closed` is now a legitimate way to ask for
 			// the close-policy half alone.
 			updateResult, updateErr := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
-				actor:            actor,
-				issueID:          result.ResolvedID,
-				patch:            patch,
-				claim:            claimFlag,
-				force:            forceFlag,
-				expectedAssignee: ifAssignee,
-				expectedStatus:   expectedStatus,
+				actor:             actor,
+				issueID:           result.ResolvedID,
+				patch:             patch,
+				claim:             claimFlag,
+				force:             forceFlag,
+				expectedAssignee:  ifAssignee,
+				expectedStatus:    expectedStatus,
+				expectedUpdatedAt: ifUpdatedAt,
 			})
 			if updateErr != nil {
 				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
@@ -801,20 +805,21 @@ func warnNotesReplacement(id string) {
 }
 
 // ExitGuardMismatch is the exit code when a `bd update` run failed solely
-// because --if-assignee/--if-status guards did not match: the precondition no
-// longer held, nothing was written, and retrying is pointless — another actor
-// won the race. Scripts branch on it to tell "racer won, skip gracefully"
-// (13) from infra failure (1, retry/abort). Mixed batches — any failure that
-// is NOT a guard mismatch — exit 1, the conservative "something needs a
-// retry" verdict. The stderr line carries the machine-greppable sentinel
-// text ("assignee mismatch" / "status mismatch") either way.
+// because --if-assignee/--if-status/--if-updated-at guards did not match: the
+// precondition no longer held, nothing was written, and retrying is pointless
+// — another actor won the race. Scripts branch on it to tell "racer won, skip
+// gracefully" (13) from infra failure (1, retry/abort). Mixed batches — any
+// failure that is NOT a guard mismatch — exit 1, the conservative "something
+// needs a retry" verdict. The stderr line carries the machine-greppable
+// sentinel text ("assignee mismatch" / "status mismatch" / "updated_at
+// mismatch") either way.
 const ExitGuardMismatch = 13
 
 // isGuardMismatch reports whether err is a bd-wsqvw conditional-update guard
-// refusal (stale --if-assignee/--if-status), the failure class that exits
-// ExitGuardMismatch instead of 1.
+// refusal (stale --if-assignee/--if-status) or the --if-updated-at generation
+// fence, the failure class that exits ExitGuardMismatch instead of 1.
 func isGuardMismatch(err error) bool {
-	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch)
+	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch) || errors.Is(err, storage.ErrUpdatedAtMismatch)
 }
 
 // updateIDFailure records one issue ID that could not be updated and why.
@@ -843,7 +848,7 @@ func errStrayFlagValuePositional(args []string) error {
 
 // reportUpdateFailures emits a per-ID failure report on stderr and returns a
 // nonzero exit error — ExitGuardMismatch when every failure is a
-// --if-assignee/--if-status guard refusal, 1 otherwise. In --json mode the
+// --if-assignee/--if-status/--if-updated-at guard refusal, 1 otherwise. In --json mode the
 // report is a single compact JSON line — the last line on stderr — so
 // callers can parse which IDs failed while stdout keeps the plain
 // array-of-updated-issues success shape. In text mode the individual errors
@@ -913,17 +918,41 @@ func toJSONValue(s string) json.RawMessage {
 	return storage.MetadataEditValue(s)
 }
 
+// parseIfUpdatedAtFlag validates one `--if-updated-at <stamp>` value, shared
+// verbatim by both CLI routes (updateGuardsFromFlags here and
+// gatherUpdateInput in update_input.go) so the two cannot drift. The stamp is
+// a snapshot identity — the updated_at value a read reported — so ONLY an
+// RFC3339 instant is accepted: relative spellings ("+6h", "tomorrow") would
+// make the guard mean a different instant on every run. Empty is a usage
+// error too, because an empty stamp is not a generation (unlike
+// --if-assignee "", which is a real "expected unassigned" guard). The parsed
+// instant is canonicalized to the second-precision UTC form the column
+// stores, so equivalent RFC3339 spellings (Z vs +00:00) are one stamp.
+func parseIfUpdatedAtFlag(value string) (*time.Time, error) {
+	if value == "" {
+		return nil, HandleErrorRespectJSON("--if-updated-at requires a non-empty timestamp; an empty stamp is not a generation (RFC3339, e.g. 2026-09-27T20:35:45Z)")
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, HandleErrorRespectJSON("invalid --if-updated-at format %q. Use an RFC3339 timestamp, e.g. 2026-09-27T20:35:45Z (the updated_at value bd show --json reports)", value)
+	}
+	stamp := issueops.TruncateStamp(t)
+	return &stamp, nil
+}
+
 // updateGuardsFromFlags reads the bd-wsqvw conditional-update guards
-// (--if-assignee/--if-status) with presence detected via Changed(), so
-// `--if-assignee ""` is a real guard meaning "expected unassigned" rather than
-// "no guard" (the unclaim.go idiom). It rejects combining guards with --claim
-// (--claim is its own compare-and-set with claim-pool semantics; the guards
-// would silently duplicate or contradict it) and guards with no regular field
-// update to ride on (the CAS applies to the issues-row UPDATE; label and
-// parent edits run outside it and would not be guarded). An --if-status value
-// is validated against the same built-in + custom status set as --status, so a
-// typo fails fast instead of mismatching forever.
-func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, err error) {
+// (--if-assignee/--if-status) and the --if-updated-at generation fence with
+// presence detected via Changed(), so `--if-assignee ""` is a real guard
+// meaning "expected unassigned" rather than "no guard" (the unclaim.go
+// idiom). It rejects combining guards with --claim (--claim is its own
+// compare-and-set with claim-pool semantics; the guards would silently
+// duplicate or contradict it) and guards with no regular field update to ride
+// on (the CAS applies to the issues-row UPDATE; label and parent edits run
+// outside it and would not be guarded). An --if-status value is validated
+// against the same built-in + custom status set as --status, so a typo fails
+// fast instead of mismatching forever; an --if-updated-at value must parse as
+// RFC3339 (parseIfUpdatedAtFlag), before any store access.
+func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, ifUpdatedAt *time.Time, err error) {
 	if cmd.Flags().Changed("if-assignee") {
 		v, _ := cmd.Flags().GetString("if-assignee")
 		ifAssignee = &v
@@ -937,15 +966,29 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 			}
 		}
 		if !types.Status(v).IsValidWithCustom(customStatuses) {
-			return nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
+			return nil, nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
 		}
 		ifStatus = &v
 	}
-	if ifAssignee == nil && ifStatus == nil {
-		return nil, nil, nil
+	if cmd.Flags().Changed("if-updated-at") {
+		v, _ := cmd.Flags().GetString("if-updated-at")
+		var perr error
+		if ifUpdatedAt, perr = parseIfUpdatedAtFlag(v); perr != nil {
+			return nil, nil, nil, perr
+		}
+	}
+	if ifAssignee == nil && ifStatus == nil && ifUpdatedAt == nil {
+		return nil, nil, nil, nil
+	}
+	// The guard names in the two usage errors below are spelled per-case so
+	// the legacy bd-wsqvw messages stay byte-for-byte when no stamp guard is
+	// in play (parity tests pin them).
+	guardNames := "--if-assignee/--if-status"
+	if ifUpdatedAt != nil {
+		guardNames = "--if-assignee/--if-status/--if-updated-at"
 	}
 	if claimFlag {
-		return nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+		return nil, nil, nil, HandleErrorRespectJSON("cannot combine %s with --claim (--claim is already an atomic compare-and-set)", guardNames)
 	}
 	hasFieldUpdate := false
 	for k := range updates {
@@ -956,9 +999,9 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 		}
 	}
 	if !hasFieldUpdate {
-		return nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+		return nil, nil, nil, HandleErrorRespectJSON("%s require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard", guardNames)
 	}
-	return ifAssignee, ifStatus, nil
+	return ifAssignee, ifStatus, ifUpdatedAt, nil
 }
 
 func init() {
@@ -983,12 +1026,16 @@ func init() {
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().String("if-updated-at", "", "Apply the update only if the issue's current updated_at equals this stamp (RFC3339 UTC, e.g. 2026-09-27T20:35:45Z — the updated_at value bd show --json reports); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	// --force (unconditional bypass of the reassign fence) and --if-assignee
 	// (write only while a specific assignee still holds it) encode
 	// contradictory intent — same rationale as unclaim's pairing. Rejecting the
 	// combination stops a script that habitually passes --force from silently
-	// dropping its --if-assignee guard.
+	// dropping its --if-assignee guard. --if-updated-at joins the same group:
+	// "only while the row is still the one I read" and "override regardless"
+	// disagree about the same question.
 	updateCmd.MarkFlagsMutuallyExclusive("force", "if-assignee")
+	updateCmd.MarkFlagsMutuallyExclusive("force", "if-updated-at")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:
