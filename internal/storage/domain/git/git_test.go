@@ -5,9 +5,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"testing"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/stretchr/testify/require"
 )
 
 func (s *testSuite) TestIsGitRepo_FalseOutsideRepo() {
@@ -72,7 +77,6 @@ func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
 	}{
 		{"malformed_config", "beads.role", 128},
 		{"invalid_key", "invalid", 1},
-		{"invalid_routing_boolean", "beads.role", 128},
 	} {
 		s.Run(tc.name, func() {
 			switch tc.name {
@@ -84,8 +88,6 @@ func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
 						t.Errorf("restore repository config: %v", err)
 					}
 				})
-			case "invalid_routing_boolean":
-				s.T().Setenv("GIT_CONFIG_NOSYSTEM", "not-a-boolean")
 			}
 			value, found, err := s.repo.GetConfig(s.Ctx(), tc.key)
 			s.Require().Error(err)
@@ -103,6 +105,30 @@ func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
 				s.ErrorAs(roleErr, &exitErr)
 			}
 		})
+	}
+}
+
+// Constructor policy applies to every key, including beads.role. Real Git
+// diagnostics remain errors for the generic inherited-environment adapter.
+func (s *testSuite) TestConfig_ConstructorSelectsEnvironmentPolicy() {
+	s.gitInit()
+	s.Require().NoError(s.repo.SetConfig(s.Ctx(), "beads.role", "maintainer"))
+	s.T().Setenv("GIT_CONFIG_NOSYSTEM", "not-a-boolean")
+
+	selected := NewInitGitRepository(s.tmpDir)
+	value, found, err := selected.GetConfig(s.Ctx(), "beads.role")
+	s.Require().NoError(err)
+	s.True(found)
+	s.Equal("maintainer", value)
+
+	for _, key := range []string{"beads.role", "user.name"} {
+		value, found, err = s.repo.GetConfig(s.Ctx(), key)
+		s.Require().Error(err, key)
+		s.False(found)
+		s.Empty(value)
+		var exitErr *exec.ExitError
+		s.Require().ErrorAs(err, &exitErr)
+		s.Equal(128, exitErr.ExitCode())
 	}
 }
 
@@ -287,4 +313,194 @@ func (s *testSuite) TestExec_HappensInWorkDir() {
 	info, err := os.Stat(filepath.Join(s.tmpDir, ".git"))
 	s.Require().NoError(err)
 	s.True(info.IsDir())
+}
+
+func TestRoleConfigUsesConstructorEnvironment(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	runGit := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, tc := range []struct {
+		name, local, global, want string
+	}{
+		{"repository", "maintainer", "", "maintainer"},
+		{"inline_config", "maintainer", "", "maintainer"},
+		{"default_global", "", "contributor", "contributor"},
+		{"absent", "", "", ""},
+		{"literal", "custom role = exact", "", "custom role = exact"},
+		{"empty", " \t ", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, decoy := t.TempDir(), t.TempDir()
+			for _, dir := range []string{target, decoy} {
+				runGit(t, dir, "init", "--quiet")
+				runGit(t, dir, "config", "--local", "core.hooksPath", ".git/hooks")
+			}
+			runGit(t, target, "config", "--local", "test.marker", "target")
+			runGit(t, decoy, "config", "--local", "test.marker", "decoy")
+			runGit(t, decoy, "config", "--local", "beads.role", "decoy-role")
+			if tc.local != "" {
+				runGit(t, target, "config", "--local", "beads.role", tc.local)
+			}
+			global := ""
+			if tc.global != "" {
+				global = "[beads]\n\trole = " + tc.global + "\n"
+			}
+			globalPath := filepath.Join(home, ".gitconfig")
+			require.NoError(t, os.WriteFile(globalPath, []byte(global), 0600))
+			wantGeneric, wantGenericRole, changedDir := "decoy", "decoy-role", decoy
+			if tc.name == "inline_config" {
+				t.Setenv("GIT_CONFIG_COUNT", "2")
+				t.Setenv("GIT_CONFIG_KEY_0", "beads.role")
+				t.Setenv("GIT_CONFIG_VALUE_0", "injected-role")
+				t.Setenv("GIT_CONFIG_KEY_1", "test.marker")
+				t.Setenv("GIT_CONFIG_VALUE_1", "injected-marker")
+				wantGeneric, wantGenericRole, changedDir = "injected-marker", "injected-role", target
+			} else {
+				t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+				t.Setenv("GIT_WORK_TREE", decoy)
+			}
+			env := os.Environ()
+			before, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+			require.NoError(t, err)
+			useCase := domain.NewGitUseCase(target, NewInitGitRepository(target))
+			got, found, err := useCase.BeadsRole(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.want != "", found)
+			require.NoError(t, useCase.SetBeadsRole(t.Context(), "new role = exact"))
+			require.Equal(t, "new role = exact", runGit(t, target, "config", "--local", "--get", "beads.role"))
+			after, err := os.ReadFile(filepath.Join(decoy, ".git", "config"))
+			require.NoError(t, err)
+			require.Equal(t, string(before), string(after), "role write changed decoy")
+			// The generic constructor inherits the same environment for every key.
+			repo := NewGitRepository(target)
+			got, found, err = repo.GetConfig(t.Context(), "beads.role")
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, wantGenericRole, got)
+			require.NoError(t, repo.SetConfig(t.Context(), "beads.role", "inherited role"))
+			require.Equal(t, "inherited role", runGit(t, changedDir, "config", "--local", "--get", "beads.role"))
+			got, found, err = repo.GetConfig(t.Context(), "test.marker")
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, wantGeneric, got)
+			require.NoError(t, repo.SetConfig(t.Context(), "test.marker", "changed"))
+			require.Equal(t, "changed", runGit(t, changedDir, "config", "--local", "--get", "test.marker"))
+			globalAfter, err := os.ReadFile(globalPath)
+			require.NoError(t, err)
+			require.Equal(t, global, string(globalAfter))
+			require.True(t, slices.Equal(env, os.Environ()), "adapter changed inherited environment")
+		})
+	}
+}
+
+func TestInitGitRepositoryUsesSelectedDirectory(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	for _, kind := range []string{"ordinary", "nested", "linked", "bare", "nonrepo", "captured_home"} {
+		t.Run(kind, func(t *testing.T) {
+			target, decoy := t.TempDir(), t.TempDir()
+			runGit(decoy, "init", "--quiet")
+			runGit(decoy, "config", "test.marker", "decoy")
+			if kind == "bare" {
+				runGit(target, "init", "--bare", "--quiet")
+			} else if kind != "nonrepo" {
+				runGit(target, "init", "--quiet")
+			}
+			if kind != "nonrepo" {
+				runGit(target, "config", "test.marker", "target")
+			}
+			if kind == "nested" {
+				target = filepath.Join(target, "nested")
+				require.NoError(t, os.Mkdir(target, 0755))
+			} else if kind == "linked" {
+				runGit(target, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgSign=false", "-c", "core.hooksPath=", "commit", "--allow-empty", "-m", "seed")
+				linked := filepath.Join(t.TempDir(), "linked")
+				runGit(target, "-c", "core.hooksPath=", "worktree", "add", "--detach", linked)
+				target = linked
+			}
+			t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+			t.Setenv("GIT_WORK_TREE", decoy)
+			t.Chdir(decoy)
+			inherited := NewGitRepository(target)
+			marker, found, err := inherited.GetConfig(t.Context(), "test.marker")
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, "decoy", marker, "generic constructor must retain inherited routing")
+			env := os.Environ()
+			selected := NewInitGitRepository(target)
+			isRepo, err := selected.IsGitRepo(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, kind != "nonrepo", isRepo)
+			bare, err := selected.IsBareGitRepo(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, kind == "bare", bare)
+			marker, found, err = selected.GetConfig(t.Context(), "test.marker")
+			require.NoError(t, err)
+			require.Equal(t, kind != "nonrepo", found)
+			if found {
+				require.Equal(t, "target", marker)
+			}
+			require.True(t, slices.Equal(env, os.Environ()))
+			if kind == "captured_home" {
+				changedHome := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(changedHome, ".gitconfig"), []byte("[invalid\n"), 0600))
+				for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+					t.Setenv(key, changedHome)
+				}
+				// gastownhall/beads#6477 made the reader propagate Git's exit
+				// error instead of mapping it to absence, so the generic
+				// constructor now surfaces the changed HOME's broken .gitconfig
+				// rather than reporting the key missing. The failure is itself
+				// the proof that generic role reads still use the current caller
+				// environment: only that environment can see this .gitconfig.
+				role, found, err := inherited.GetConfig(t.Context(), "beads.role")
+				require.Error(t, err, "generic role reads still use the current caller environment")
+				var inheritedExit *exec.ExitError
+				require.ErrorAs(t, err, &inheritedExit)
+				require.Equal(t, 128, inheritedExit.ExitCode())
+				require.False(t, found)
+				require.Empty(t, role)
+				require.Error(t, inherited.SetConfig(t.Context(), "beads.role", "decoy"))
+				require.NoError(t, selected.SetConfig(t.Context(), "beads.role", "contributor"))
+				role, found, err = selected.GetConfig(t.Context(), "beads.role")
+				require.NoError(t, err)
+				require.True(t, found)
+				require.Equal(t, "contributor", role, "role reads and writes share the constructor's captured HOME")
+			}
+		})
+	}
 }

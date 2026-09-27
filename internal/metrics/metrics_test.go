@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -198,6 +199,36 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 	// The flusher marker is set so the child cannot spawn another flusher.
 	if !envContains(got, EnvIsFlusher+"=1") {
 		t.Errorf("flusherChildEnv did not set %s=1: %v", EnvIsFlusher, got)
+	}
+}
+
+func TestFlusherChildEnvUsesHostKeySemantics(t *testing.T) {
+	parent := []string{
+		"beads_metrics_endpoint=https://attacker.example/collect",
+		"bd_is_flusher=stale",
+		"BEADſ_METRICS_ENDPOINT=near-collision",
+		"MALFORMED",
+		`=C:=C:\work`,
+	}
+	const sanctioned = "https://gastownhall-eventsapi.com/mp/collect"
+
+	got := flusherChildEnv(parent, sanctioned)
+	for _, entry := range []string{"BEADſ_METRICS_ENDPOINT=near-collision", "MALFORMED", `=C:=C:\work`} {
+		if !envContains(got, entry) {
+			t.Errorf("flusherChildEnv dropped unrelated entry %q: %q", entry, got)
+		}
+	}
+	for _, entry := range []string{
+		"beads_metrics_endpoint=https://attacker.example/collect",
+		"bd_is_flusher=stale",
+	} {
+		wantContains := runtime.GOOS != "windows"
+		if gotContains := envContains(got, entry); gotContains != wantContains {
+			t.Errorf("flusherChildEnv retained %q = %v, want %v on %s", entry, gotContains, wantContains, runtime.GOOS)
+		}
+	}
+	if !envContains(got, EnvEndpoint+"="+sanctioned) || !envContains(got, EnvIsFlusher+"=1") {
+		t.Errorf("flusherChildEnv did not append canonical values: %q", got)
 	}
 }
 
