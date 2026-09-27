@@ -26,7 +26,10 @@ type unclaimProxiedResult struct {
 // compare-and-swap release, and empty means an unconditional one. There is no
 // third case — `--if-assignee ""` is rejected in unclaim.go before any issue is
 // touched, precisely so an unset shell variable can never downgrade a CAS to an
-// unconditional release.
+// unconditional release. expectedUpdatedAt carries `--if-updated-at`: a
+// non-nil stamp adds the generation fence to the conditional release (nil
+// disables it; the flag is parsed and validated in unclaim.go, shared with the
+// embedded route).
 //
 // The two releases differ only in which use-case verb runs: both apply the same
 // transition through the same classic issueops implementation, so a conditional
@@ -36,12 +39,14 @@ type unclaimProxiedResult struct {
 // EXIT CONTRACT (unchanged by the port, and deliberately identical to the
 // embedded path): a mismatched holder prints the storage.ErrAssigneeMismatch
 // error naming the current holder, writes NOTHING, and exits 1 via SilentExit.
-// `bd unclaim` has never had `bd update`'s ExitGuardMismatch(13) verdict —
-// see the "Exit status" paragraph of the command's help — and this port does
-// not invent one, because a proxied exit code that differs from the embedded
-// one for the same refusal is exactly the divergence this lane exists to
-// prevent.
-func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, force bool, expectedAssignee string) error {
+// A stale --if-updated-at stamp refuses the same way — the
+// storage.ErrUpdatedAtMismatch error names the current stamp, nothing is
+// written, exit 1. `bd unclaim` has never had `bd update`'s
+// ExitGuardMismatch(13) verdict — see the "Exit status" paragraph of the
+// command's help — and this port does not invent one, because a proxied exit
+// code that differs from the embedded one for the same refusal is exactly the
+// divergence this lane exists to prevent.
+func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, force bool, expectedAssignee string, expectedUpdatedAt *time.Time) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
@@ -62,7 +67,7 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 
 			var uerr error
 			if expectedAssignee != "" {
-				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee, nil)
+				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee, expectedUpdatedAt)
 			} else {
 				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, actor, force)
 			}
