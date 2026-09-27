@@ -35,7 +35,9 @@ specific worker's issue without ever clobbering someone else's live claim.
 (they encode contradictory intent).
 
 Exit status: 0 when every issue was released; 1 when any release failed
-(including an --if-assignee mismatch).
+(including an --if-assignee mismatch); 13 when every failure was a stale
+--if-updated-at guard (a racer won the generation, nothing was written —
+retry with a fresh stamp, not a blind re-run).
 
 Examples:
   bd unclaim bd-123
