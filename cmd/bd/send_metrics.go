@@ -22,11 +22,12 @@ var sendMetricsCmd = &cobra.Command{
 		// That same early exit means this Run returns before Cobra ever reaches
 		// PersistentPostRunE in main.go, so --mem-profile/BEADS_MEM_PROFILE/
 		// BEADS_MEM_STATS are silently inert for this subcommand unless honored
-		// here directly (be-wwy2.2). There is no --mem-profile flag on this
-		// hidden command, so pass "" and let it fall through to the env var,
-		// same as PersistentPostRunE does.
+		// here directly (be-wwy2.2). --mem-profile is registered on
+		// rootCmd.PersistentFlags(), so this hidden command inherits it and
+		// prints it in --help; pass memProfilePath exactly as PersistentPostRunE
+		// does, or the advertised flag would be parsed and then discarded.
 		code := metrics.RunSendMetrics()
-		writeMemDiagnostics("")
+		writeMemDiagnostics(memProfilePath)
 		os.Exit(code)
 	},
 }

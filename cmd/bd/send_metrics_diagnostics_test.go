@@ -12,6 +12,34 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 )
 
+// memStatsLine is the exact shape writeMemDiagnostics' MemStats summary writes.
+var memStatsLine = regexp.MustCompile(`^HeapAlloc=\d+ HeapSys=\d+ HeapInuse=\d+ HeapObjects=\d+\n$`)
+
+// requireHeapProfile fails unless path holds a real heap profile.
+// runtime/pprof.WriteHeapProfile always gzips its protobuf output, so
+// decompressing cleanly to a non-empty body is strong evidence a genuine profile
+// was written -- without pulling in a pprof-parsing dependency just for this
+// test. knob names the surface under test so a failure says which one broke.
+func requireHeapProfile(t *testing.T, knob, path string) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("%s file was not written: %v", knob, err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("%s is not valid gzip: %v", knob, err)
+	}
+	body, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("%s gzip stream corrupt: %v", knob, err)
+	}
+	if len(body) == 0 {
+		t.Fatalf("%s decompressed to 0 bytes, want a real heap profile", knob)
+	}
+}
+
 // TestSendMetricsHonorsMemDiagnostics is the be-wwy2.2 regression: send-metrics's
 // Run calls os.Exit() directly, so it returns before Cobra ever reaches
 // PersistentPostRunE (main.go) -- the one place --mem-profile / BEADS_MEM_PROFILE /
@@ -63,9 +91,8 @@ func TestSendMetricsHonorsMemDiagnostics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BEADS_MEM_STATS file was not written: %v", err)
 		}
-		want := regexp.MustCompile(`^HeapAlloc=\d+ HeapSys=\d+ HeapInuse=\d+ HeapObjects=\d+\n$`)
-		if !want.Match(data) {
-			t.Fatalf("BEADS_MEM_STATS content = %q, want match of %s", data, want)
+		if !memStatsLine.Match(data) {
+			t.Fatalf("BEADS_MEM_STATS content = %q, want match of %s", data, memStatsLine)
 		}
 	})
 
@@ -76,24 +103,81 @@ func TestSendMetricsHonorsMemDiagnostics(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("bd send-metrics: %v\noutput: %s", err, out)
 		}
-		f, err := os.Open(profilePath)
-		if err != nil {
-			t.Fatalf("BEADS_MEM_PROFILE file was not written: %v", err)
+		requireHeapProfile(t, "BEADS_MEM_PROFILE", profilePath)
+	})
+
+	// --mem-profile is registered on rootCmd.PersistentFlags() (main.go), so this
+	// hidden subcommand inherits it and advertises it in --help. The call site
+	// used to hardcode "", which parsed the flag and then discarded it -- the same
+	// "accepted but silently inert" state be-wwy2.2 exists to remove, one line
+	// below the fix. No BEADS_MEM_PROFILE here, so only the flag can produce the
+	// file.
+	t.Run("--mem-profile flag is honored, not just the env var", func(t *testing.T) {
+		profilePath := filepath.Join(t.TempDir(), "flag.pprof")
+		cmd := exec.Command(bdBin, metrics.SendMetricsSubcommand, "--mem-profile="+profilePath)
+		cmd.Env = baseEnv(t.TempDir())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd send-metrics --mem-profile: %v\noutput: %s", err, out)
 		}
-		defer f.Close()
-		// runtime/pprof.WriteHeapProfile always gzips its protobuf output;
-		// decompressing cleanly is strong evidence a real profile was written
-		// without pulling in a pprof-parsing dependency just for this test.
-		gz, err := gzip.NewReader(f)
-		if err != nil {
-			t.Fatalf("BEADS_MEM_PROFILE is not valid gzip: %v", err)
+		requireHeapProfile(t, "--mem-profile", profilePath)
+	})
+
+	// The detached flusher child inherits the parent's BEADS_MEM_* paths verbatim
+	// (flusherChildEnv strips only the endpoint and the flusher marker), and
+	// MaybeSpawnFlusher runs on main()'s post-ExecuteC tail -- after
+	// PersistentPostRunE already wrote them. Without a distinct destination the
+	// child's trivial profile would silently replace the profile of the command
+	// the user actually asked about. BD_IS_FLUSHER=1 is what production sets on
+	// the child, so driving it here is the real shape, not a contrivance.
+	t.Run("flusher child writes beside the parent's files instead of over them", func(t *testing.T) {
+		dir := t.TempDir()
+		profilePath := filepath.Join(dir, "heap.pprof")
+		statsPath := filepath.Join(dir, "stats.txt")
+
+		// Stand in for the parent command's own writeMemDiagnostics call, which
+		// has already happened by the time the flusher is spawned.
+		parentProfile := []byte("parent heap profile, must survive the spawn\n")
+		parentStats := []byte("parent memstats, must survive the spawn\n")
+		if err := os.WriteFile(profilePath, parentProfile, 0o600); err != nil {
+			t.Fatalf("seed parent profile: %v", err)
 		}
-		body, err := io.ReadAll(gz)
-		if err != nil {
-			t.Fatalf("BEADS_MEM_PROFILE gzip stream corrupt: %v", err)
+		if err := os.WriteFile(statsPath, parentStats, 0o600); err != nil {
+			t.Fatalf("seed parent stats: %v", err)
 		}
-		if len(body) == 0 {
-			t.Fatalf("BEADS_MEM_PROFILE decompressed to 0 bytes, want a real heap profile")
+
+		cmd := exec.Command(bdBin, metrics.SendMetricsSubcommand)
+		cmd.Env = append(baseEnv(t.TempDir()),
+			"BEADS_MEM_PROFILE="+profilePath,
+			"BEADS_MEM_STATS="+statsPath,
+			metrics.EnvIsFlusher+"=1",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd send-metrics as flusher child: %v\noutput: %s", err, out)
+		}
+
+		// The parent's data is untouched, byte for byte.
+		if got, err := os.ReadFile(profilePath); err != nil {
+			t.Fatalf("parent profile disappeared: %v", err)
+		} else if string(got) != string(parentProfile) {
+			t.Fatalf("flusher child overwrote the parent's heap profile: got %q, want %q", got, parentProfile)
+		}
+		if got, err := os.ReadFile(statsPath); err != nil {
+			t.Fatalf("parent stats disappeared: %v", err)
+		} else if string(got) != string(parentStats) {
+			t.Fatalf("flusher child overwrote the parent's MemStats: got %q, want %q", got, parentStats)
+		}
+
+		// ...and the child's own diagnostics are still produced, just beside
+		// them. This is the half that distinguishes suffixing the destination
+		// from simply scrubbing the vars out of the child's environment, which
+		// would reinstate the inertness be-wwy2.2 removes.
+		requireHeapProfile(t, "flusher child BEADS_MEM_PROFILE", profilePath+".send-metrics")
+		childStats, err := os.ReadFile(statsPath + ".send-metrics")
+		if err != nil {
+			t.Fatalf("flusher child wrote no MemStats of its own: %v", err)
+		}
+		if !memStatsLine.Match(childStats) {
+			t.Fatalf("flusher child MemStats content = %q, want match of %s", childStats, memStatsLine)
 		}
 	})
 
