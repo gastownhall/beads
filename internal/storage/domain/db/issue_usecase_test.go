@@ -3,9 +3,11 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -22,6 +24,11 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
 	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
+	s.Run("CounterModeJumpsPastExplicitIDs", s.useCaseMintCounterJumpsPastExplicitIDs)
+	s.Run("CounterModeJumpsPastExplicitWisps", s.useCaseMintCounterJumpsPastExplicitWisps)
+	s.Run("HashMintSkipsSiblingPlaneOccupant/IssuePastWispOccupant", s.useCaseMintHashSkipsWispOccupant)
+	s.Run("HashMintSkipsSiblingPlaneOccupant/WispPastIssueOccupant", s.useCaseMintWispHashSkipsIssueOccupant)
+	s.Run("MintedIDTakesCreateOnlyPath", s.useCaseMintedIDTakesCreateOnlyPath)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -241,6 +248,188 @@ func (s *testSuite) useCaseCreateAttachesNormalizedComments() {
 	s.Equal(createdAt, created.Issue.Comments[1].CreatedAt)
 
 	s.Equal("", params.Comments[0].IssueID, "create must not mutate caller comments")
+}
+
+// useCaseMintCounterJumpsPastExplicitIDs reproduces the counter-lag defect:
+// explicit IDs created ahead of the counter must not be silently overwritten
+// by a later auto-minted ID, and the counter must jump past them.
+func (s *testSuite) useCaseMintCounterJumpsPastExplicitIDs() {
+	s.resetMintConfig("lag", "counter")
+	uc := s.issueUseCase()
+
+	first, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "auto one", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("lag-1", first.Issue.ID)
+
+	for n := 2; n <= 4; n++ {
+		id := fmt.Sprintf("lag-%d", n)
+		title := fmt.Sprintf("explicit %d", n)
+		res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: id,
+		}, "tester")
+		s.Require().NoError(err)
+		s.Equal(id, res.Issue.ID)
+	}
+
+	fifth, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "auto two", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("lag-5", fifth.Issue.ID)
+
+	sixth, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "auto three", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("lag-6", sixth.Issue.ID)
+
+	for n := 2; n <= 4; n++ {
+		var title string
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT title FROM issues WHERE id = ?", fmt.Sprintf("lag-%d", n)).Scan(&title))
+		s.Equal(fmt.Sprintf("explicit %d", n), title, "explicit lag-%d title must not be overwritten", n)
+	}
+}
+
+// useCaseMintCounterJumpsPastExplicitWisps proves the counter-lag scan checks
+// wisps too, not just issues: an explicit wisp ahead of the counter must be
+// skipped the same way an explicit issue is.
+func (s *testSuite) useCaseMintCounterJumpsPastExplicitWisps() {
+	s.resetMintConfig("lagw", "counter")
+	uc := s.issueUseCase()
+
+	first, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "auto seed", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("lagw-1", first.Issue.ID)
+
+	for _, id := range []string{"lagw-2", "lagw-3"} {
+		res, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: "explicit wisp " + id, IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+			ExplicitID: id,
+		}, "tester")
+		s.Require().NoError(err)
+		s.Equal(id, res.Issue.ID)
+	}
+
+	next, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "auto after wisps", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("lagw-4", next.Issue.ID, "counter must skip past explicit wisps, not just explicit issues")
+}
+
+// useCaseMintHashSkipsWispOccupant reproduces the hash-sibling-plane defect
+// in the issue-past-wisp direction: an auto-minted issue must not take an ID
+// already held by a wisp.
+func (s *testSuite) useCaseMintHashSkipsWispOccupant() {
+	s.resetMintConfig("hs", "")
+	uc := s.issueUseCase()
+	createdAt := time.Date(2025, time.June, 1, 12, 0, 0, 0, time.UTC)
+
+	occupant := idgen.GenerateHashID("hs", "probe issue", "", "tester", createdAt, 3, 0)
+	_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "occupant wisp", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: occupant,
+		CreateOnly: true,
+	}, "tester")
+	s.Require().NoError(err)
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "probe issue", IssueType: types.TypeTask, Priority: 2, CreatedAt: createdAt},
+	}, "tester")
+	s.Require().NoError(err)
+	s.NotEqual(occupant, res.Issue.ID, "issue mint must not take a wisp occupant's ID")
+	s.True(strings.HasPrefix(res.Issue.ID, "hs-"), "expected hs- prefix, got %q", res.Issue.ID)
+
+	var issueCount, wispCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM issues WHERE id = ?", res.Issue.ID).Scan(&issueCount))
+	s.Equal(1, issueCount, "minted issue must exist in issues")
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM wisps WHERE id = ?", res.Issue.ID).Scan(&wispCount))
+	s.Equal(0, wispCount, "minted issue must not also exist in wisps")
+
+	var occupantTitle string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT title FROM wisps WHERE id = ?", occupant).Scan(&occupantTitle))
+	s.Equal("occupant wisp", occupantTitle, "wisp occupant must be untouched")
+}
+
+// useCaseMintWispHashSkipsIssueOccupant is the mirror direction: an
+// auto-minted wisp must not take an ID already held by a regular issue.
+func (s *testSuite) useCaseMintWispHashSkipsIssueOccupant() {
+	s.resetMintConfig("hsw", "")
+	uc := s.issueUseCase()
+	createdAt := time.Date(2025, time.June, 2, 12, 0, 0, 0, time.UTC)
+
+	occupant := idgen.GenerateHashID("hsw-wisp", "probe wisp", "", "tester", createdAt, 3, 0)
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "occupant issue", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: occupant,
+		CreateOnly: true,
+	}, "tester")
+	s.Require().NoError(err)
+
+	res, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "probe wisp", IssueType: types.TypeTask, Priority: 2, Ephemeral: true, CreatedAt: createdAt},
+	}, "tester")
+	s.Require().NoError(err)
+	s.NotEqual(occupant, res.Issue.ID, "wisp mint must not take an issue occupant's ID")
+	s.True(strings.HasPrefix(res.Issue.ID, "hsw-wisp-"), "expected hsw-wisp- prefix, got %q", res.Issue.ID)
+
+	var issueCount, wispCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM wisps WHERE id = ?", res.Issue.ID).Scan(&wispCount))
+	s.Equal(1, wispCount, "minted wisp must exist in wisps")
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM issues WHERE id = ?", res.Issue.ID).Scan(&issueCount))
+	s.Equal(0, issueCount, "minted wisp must not also exist in issues")
+
+	var occupantTitle string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT title FROM issues WHERE id = ?", occupant).Scan(&occupantTitle))
+	s.Equal("occupant issue", occupantTitle, "issue occupant must be untouched")
+}
+
+// useCaseMintedIDTakesCreateOnlyPath pins defect (1): a top-level auto-minted
+// ID must be inserted through the CreateOnly path (one local_metadata
+// coordination row written), while an explicit-ID create without CreateOnly
+// must not take that path (no coordination row written).
+func (s *testSuite) useCaseMintedIDTakesCreateOnlyPath() {
+	s.resetMintConfig("mcop", "")
+	uc := s.issueUseCase()
+
+	s.clearIssueCreateMetadata()
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "auto minted", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(1, s.countIssueCreateMetadata(), "a minted top-level ID must take the CreateOnly path")
+
+	s.clearIssueCreateMetadata()
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "explicit", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "mcop-explicit-1",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(0, s.countIssueCreateMetadata(), "an explicit ID without CreateOnly must not take the CreateOnly path")
+}
+
+func (s *testSuite) clearIssueCreateMetadata() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM local_metadata WHERE `key` LIKE 'issue-create/%'")
+	s.Require().NoError(err)
+}
+
+func (s *testSuite) countIssueCreateMetadata() int {
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM local_metadata WHERE `key` LIKE 'issue-create/%'").Scan(&count))
+	return count
 }
 
 func (s *testSuite) TestIssueUseCase_ApplyGraph() {
