@@ -122,14 +122,15 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		expectedStatus = &expected
 	}
 	result, err := runCommandUpdateMutation(ctx, ops, commandUpdateMutation{
-		actor:            actor,
-		issueID:          id,
-		patch:            patch,
-		claim:            in.claim,
-		force:            in.force,
-		expectedAssignee: in.ifAssignee,
-		expectedStatus:   expectedStatus,
-		provenance:       fmt.Sprintf("bd: update %s", id),
+		actor:             actor,
+		issueID:           id,
+		patch:             patch,
+		claim:             in.claim,
+		force:             in.force,
+		expectedAssignee:  in.ifAssignee,
+		expectedStatus:    expectedStatus,
+		expectedUpdatedAt: in.ifUpdatedAt,
+		provenance:        fmt.Sprintf("bd: update %s", id),
 	})
 	if err != nil {
 		// Cancellation is not a verdict on this issue — SIGINT cancels bd's

@@ -32,9 +32,12 @@ type updateInput struct {
 	clearDeferStatus bool
 	// bd-wsqvw conditional-update guards; non-nil only when the flag was
 	// explicitly passed (a pointer to "" is the real "expected unassigned"
-	// guard).
-	ifAssignee *string
-	ifStatus   *string
+	// guard). ifUpdatedAt carries the --if-updated-at generation fence,
+	// pre-parsed by the same parseIfUpdatedAtFlag the direct route uses, so
+	// the two CLI routes cannot diverge on stamp syntax.
+	ifAssignee  *string
+	ifStatus    *string
+	ifUpdatedAt *time.Time
 	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
 	// exclusive with --if-assignee at the flag-group level).
 	force bool
@@ -252,8 +255,10 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	// bd-wsqvw conditional-update guards, mirroring the non-proxied path's
 	// updateGuardsFromFlags rules: Changed()-detected presence (so
 	// `--if-assignee ""` guards on unassigned), --if-status validated against
-	// the live status set, mutually exclusive with --claim, and requiring a
-	// field update to ride on.
+	// the live status set, --if-updated-at parsed by the shared
+	// parseIfUpdatedAtFlag (RFC3339 only, empty refused, validated before
+	// store access), mutually exclusive with --claim, and requiring a field
+	// update to ride on.
 	if cmd.Flags().Changed("if-assignee") {
 		v, _ := cmd.Flags().GetString("if-assignee")
 		in.ifAssignee = &v
@@ -265,12 +270,24 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.ifStatus = &v
 	}
-	if in.ifAssignee != nil || in.ifStatus != nil {
+	if cmd.Flags().Changed("if-updated-at") {
+		v, _ := cmd.Flags().GetString("if-updated-at")
+		stamp, err := parseIfUpdatedAtFlag(v)
+		if err != nil {
+			return nil, err
+		}
+		in.ifUpdatedAt = stamp
+	}
+	if in.ifAssignee != nil || in.ifStatus != nil || in.ifUpdatedAt != nil {
+		guardNames := "--if-assignee/--if-status"
+		if in.ifUpdatedAt != nil {
+			guardNames = "--if-assignee/--if-status/--if-updated-at"
+		}
 		if in.claim {
-			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+			return nil, HandleErrorRespectJSON("cannot combine %s with --claim (--claim is already an atomic compare-and-set)", guardNames)
 		}
 		if len(in.fields) == 0 && !in.hasAppendNotes && len(in.mergeMetadataIn) == 0 && len(in.setMetadata) == 0 && len(in.unsetMetadata) == 0 {
-			return nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+			return nil, HandleErrorRespectJSON("%s require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard", guardNames)
 		}
 	}
 	return in, nil
