@@ -18,10 +18,11 @@ func AppendLineEnding(content []byte) string {
 // preserving existing bytes and completing any unterminated final line.
 // A trailing CR is completed with a bare LF.
 // Callers choose their own blank lines, headers and patterns.
-// With no lines, the returned slice aliases content without copying.
+// With no lines, content is returned unchanged as a copy: the branch cannot be
+// dropped, because an unterminated final line would otherwise be completed.
 func AppendLines(content []byte, lines []string) []byte {
 	if len(lines) == 0 {
-		return content
+		return bytes.Clone(content)
 	}
 	lineEnding := AppendLineEnding(content)
 	var buf bytes.Buffer

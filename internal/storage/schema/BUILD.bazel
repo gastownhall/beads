@@ -116,6 +116,7 @@ go_library(
         "migrations/ignored/0025_add_events_journal_actor.up.sql",
         "migrations/ignored/0026_dep_rekey_dedup_marker.up.sql",
         "migrations/ignored/0027_add_wisps_current_revision.up.sql",
+        "migrations/0069_widen_issue_versions_datetime_precision.up.sql",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/schema",
     visibility = ["//:__subpackages__"],
@@ -147,6 +148,7 @@ go_test(
         "lock_test.go",
         "migration_0067_versioned_beads_test.go",
         "migration_0068_add_attribution_status_test.go",
+        "migration_0069_datetime_precision_test.go",
         "migration_body_drain_test.go",
         "progress_test.go",
         "remote_migrate_gate_test.go",
@@ -155,6 +157,7 @@ go_test(
         "shared_store_migrate_gate_test.go",
         "smart_remote_migrate_gate_test.go",
     ],
+    data = [":migrations"],
     embed = [":schema"],
     deps = [
         "//internal/debug",
@@ -165,3 +168,24 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
+
+# Migration SQL (up, down, ignored/) and the nondeterminism allowlist, read
+# from disk by schema and issueops tests beyond what the library embeds.
+filegroup(
+    name = "migrations",
+    srcs = glob(["migrations/**"]),
+    visibility = ["//internal/storage:__subpackages__"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

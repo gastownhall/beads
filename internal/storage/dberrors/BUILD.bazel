@@ -20,3 +20,16 @@ go_test(
     embed = [":dberrors"],
     deps = ["@com_github_go_sql_driver_mysql//:mysql"],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

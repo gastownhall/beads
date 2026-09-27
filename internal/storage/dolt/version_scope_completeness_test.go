@@ -147,7 +147,7 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 // this second arm exists rather than being folded into the first.
 var txMintingWrappers = []string{
 	"DoltStore.runDoltTransaction",
-	"DoltStore.withWriteTx",
+	"DoltStore.commitWriteTx",
 }
 
 // TestTxMintingWrappersScopeVersionedHistory covers the half

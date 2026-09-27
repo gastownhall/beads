@@ -80,11 +80,33 @@ go_test(
         "role_coverage_scan_test.go",
         "versioned_history_wiring_test.go",
     ],
+    data = [
+        ":go_srcs",
+        "//beadserrors:go_srcs",
+        "//internal/types:go_srcs",
+        "//issueops:go_srcs",
+        "//journalops:go_srcs",
+        "//memoryops:go_srcs",
+    ],
     embed = [":conformance"],
     deps = [
         "//internal/storage",
+        "//internal/testutil/bazeltest",
         "//issueops",
         "//journalops",
         "//memoryops",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

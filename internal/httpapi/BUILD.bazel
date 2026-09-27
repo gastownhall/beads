@@ -81,6 +81,7 @@ go_test(
         "events_test.go",
         "events_watch_test.go",
         "get_issue_test.go",
+        "list_comments_omitted_test.go",
         "list_sort_test.go",
         "memories_test.go",
         "metadata_cas_test.go",
@@ -101,6 +102,11 @@ go_test(
         "tree_test.go",
         "update_test.go",
         "wire_bijection_test.go",
+    ],
+    data = [
+        "claim.go",
+        "//cmd/bd:list.go",
+        "//cmd/bd:ready.go",
     ],
     embed = [":httpapi"],
     deps = [

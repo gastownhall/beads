@@ -5,6 +5,7 @@ go_library(
     srcs = ["githooksenv.go"],
     importpath = "github.com/steveyegge/beads/internal/githooksenv",
     visibility = ["//:__subpackages__"],
+    deps = ["//internal/execenv"],
 )
 
 go_test(

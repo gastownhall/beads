@@ -496,3 +496,170 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 		t.Errorf("%s:%d: remote endpoint or credential %q in a tracked file; it belongs in a gitignored user.bazelrc/.bazelrc.local or a CI-generated rc outside the workspace", h.path, h.line, h.what)
 	}
 }
+
+// --- generated go_srcs filegroups are current -------------------------------
+
+// These checks walk the source checkout, which is not declared as Bazel data,
+// so they run under plain `go test` (the gating lane) and skip under Bazel.
+
+var (
+	treeGoSrcsRe  = regexp.MustCompile(`(?s)filegroup\(\s*name\s*=\s*"tree_go_srcs",\s*srcs\s*=\s*\[(.*?)\]`)
+	goSrcsLabelRe = regexp.MustCompile(`"//([^":]+):go_srcs"`)
+)
+
+// treeGoSrcsMembers returns the packages whose go_srcs a tree_go_srcs
+// filegroup aggregates, other than the tree root's own ":go_srcs".
+func treeGoSrcsMembers(build string) ([]string, bool) {
+	m := treeGoSrcsRe.FindStringSubmatch(stripStarlarkComments(build))
+	if m == nil {
+		return nil, false
+	}
+	var members []string
+	for _, l := range goSrcsLabelRe.FindAllStringSubmatch(m[1], -1) {
+		members = append(members, l[1])
+	}
+	return members, true
+}
+
+// bazelPackagesUnder lists the repo-relative directories below treeRel (not
+// treeRel itself) holding a BUILD.bazel, skipping the directories
+// tools/bazel/go_srcs.py skips.
+func bazelPackagesUnder(root, treeRel string) ([]string, error) {
+	var pkgs []string
+	err := filepath.WalkDir(filepath.Join(root, filepath.FromSlash(treeRel)), func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == "testdata" || name == "node_modules" || (strings.HasPrefix(name, ".") && name != ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "BUILD.bazel" {
+			return nil
+		}
+		rel, err := filepath.Rel(root, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		if rel = filepath.ToSlash(rel); rel != treeRel {
+			pkgs = append(pkgs, rel)
+		}
+		return nil
+	})
+	return pkgs, err
+}
+
+func diffStringSets(want, got []string) (missing, extra []string) {
+	gotSet := map[string]bool{}
+	for _, g := range got {
+		gotSet[g] = true
+	}
+	wantSet := map[string]bool{}
+	for _, w := range want {
+		wantSet[w] = true
+		if !gotSet[w] {
+			missing = append(missing, w)
+		}
+	}
+	for _, g := range got {
+		if !wantSet[g] {
+			extra = append(extra, g)
+		}
+	}
+	return missing, extra
+}
+
+// goSrcsTrees are the tools/bazel/go_srcs.py TREES roots. A test that walks
+// one of these trees under Bazel sees only the packages its tree_go_srcs
+// lists, so an unlisted package makes the walk pass vacuously.
+var goSrcsTrees = []string{"internal/storage"}
+
+func TestBazelTreeGoSrcsListsEveryPackage(t *testing.T) {
+	build := "filegroup(\n    name = \"tree_go_srcs\",\n    srcs = [\n        \":go_srcs\",\n        \"//a/b:go_srcs\",\n        # \"//a/c:go_srcs\",\n    ],\n)\n"
+	if got, ok := treeGoSrcsMembers(build); !ok || len(got) != 1 || got[0] != "a/b" {
+		t.Errorf("treeGoSrcsMembers(fixture) = %v, %v; want [a/b], true", got, ok)
+	}
+	if missing, extra := diffStringSets([]string{"a/b", "a/c"}, []string{"a/b", "a/d"}); len(missing) != 1 || missing[0] != "a/c" || len(extra) != 1 || extra[0] != "a/d" {
+		t.Errorf("diffStringSets fixture: missing=%v extra=%v", missing, extra)
+	}
+
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("walks the source checkout; runs under go test")
+	}
+	root := sourceRepoRoot(t)
+	script := readPolicyFile(t, root, "tools/bazel/go_srcs.py")
+	for _, tree := range goSrcsTrees {
+		if !strings.Contains(script, strconv.Quote(tree)) {
+			t.Errorf("tools/bazel/go_srcs.py no longer lists tree %q; update goSrcsTrees", tree)
+		}
+		members, ok := treeGoSrcsMembers(readPolicyFile(t, root, tree+"/BUILD.bazel"))
+		if !ok {
+			t.Errorf("%s/BUILD.bazel has no tree_go_srcs filegroup; run `make bazel-sync`", tree)
+			continue
+		}
+		pkgs, err := bazelPackagesUnder(root, tree)
+		if err != nil {
+			t.Fatalf("walk %s: %v", tree, err)
+		}
+		if len(pkgs) == 0 {
+			t.Fatalf("found no BUILD.bazel packages under %s; the walk is broken", tree)
+		}
+		missing, extra := diffStringSets(pkgs, members)
+		for _, m := range missing {
+			t.Errorf("//%s:tree_go_srcs does not list //%s:go_srcs; run `make bazel-sync` (tools/bazel/go_srcs.py)", tree, m)
+		}
+		for _, e := range extra {
+			t.Errorf("//%s:tree_go_srcs lists //%s:go_srcs, which has no BUILD.bazel; run `make bazel-sync`", tree, e)
+		}
+	}
+}
+
+// TestBazelGoSrcsBlocksCurrent runs `tools/bazel/go_srcs.py --check`, which
+// compares every managed block with what the script would generate.
+func TestBazelGoSrcsBlocksCurrent(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("reads the source checkout; runs under go test")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available; TestBazelTreeGoSrcsListsEveryPackage still guards tree membership")
+	}
+	cmd := exec.Command(python, filepath.Join("tools", "bazel", "go_srcs.py"), "--check")
+	cmd.Dir = sourceRepoRoot(t)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go_srcs.py --check: %v; run `make bazel-sync`\n%s", err, out)
+	}
+}
+
+// --- no Bazel packages under the docs trees ---------------------------------
+
+// //:docsync_files globs docs/** and engdocs/**; a glob stops at a package
+// boundary, so a BUILD file under either tree would silently drop that
+// subtree from //test/docsync's orphan and link checks.
+func TestBazelNoPackagesUnderDocsTrees(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("walks the source checkout; runs under go test")
+	}
+	root := sourceRepoRoot(t)
+	for _, tree := range []string{"docs", "engdocs"} {
+		err := filepath.WalkDir(filepath.Join(root, tree), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() && d.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			if !d.IsDir() && (d.Name() == "BUILD.bazel" || d.Name() == "BUILD") {
+				rel, _ := filepath.Rel(root, path)
+				t.Errorf("%s: no Bazel package may live under %s/ (it would cut that subtree out of //:docsync_files)", filepath.ToSlash(rel), tree)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", tree, err)
+		}
+	}
+}

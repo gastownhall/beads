@@ -264,6 +264,22 @@ func checkProjectExcludeStealth(repoPath string) doctor.DoctorCheck {
 	// #nosec G304 - git config path
 	if data, err := os.ReadFile(excludePath); err == nil {
 		content = string(data)
+	} else if !os.IsNotExist(err) {
+		check := doctor.DoctorCheck{
+			Name:    "Project Gitignore",
+			Status:  doctor.StatusWarning,
+			Message: "Unable to read .git/info/exclude",
+			Detail:  err.Error(),
+		}
+		if trackedGitignoreHasBeadsSection(repoPath) {
+			// The leak is the privacy failure, and --fix strips it from the tracked
+			// .gitignore whether or not the exclude can be read (doctor_fix.go runs both
+			// halves), so it stays the headline and keeps its actionable Fix.
+			check.Message = "Stealth mode: Dolt patterns are exposed in the tracked .gitignore"
+			check.Detail += "; tracked .gitignore also contains the beads section"
+			check.Fix = "Run: bd doctor --fix"
+		}
+		return check
 	}
 
 	var missing []string

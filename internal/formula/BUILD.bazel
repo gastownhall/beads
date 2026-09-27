@@ -37,11 +37,16 @@ go_test(
         "schema_test.go",
         "stepcondition_test.go",
     ],
+    data = [
+        "schema_gen.go",
+        "types.go",
+    ],
     embed = [":formula"],
     deps = [
         "//internal/beads",
         "//internal/formula/schemagen",
         "//internal/git",
         "//internal/testutil",
+        "//internal/testutil/bazeltest",
     ],
 )

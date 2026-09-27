@@ -14,6 +14,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	// ProjectConfigFileName is the tracked per-workspace config file, read from
+	// a .beads directory.
+	ProjectConfigFileName = "config.yaml"
+	// LocalConfigFileName sits beside ProjectConfigFileName and is merged LAST
+	// by Initialize, so it overrides the tracked file. It is the documented
+	// place for machine-specific settings that must not be committed
+	// (docs/reference/configuration.md). Named here so Initialize's own local
+	// merge (in the file-loading block at the end of Initialize) and the
+	// workspace-scoped reader in WorkspaceYamlValueStrictWithLocal cannot
+	// drift onto different files. ProjectConfigFileName binds the two
+	// workspace-scoped strict readers to each other; Initialize still spells
+	// config.yaml literally in the several places it probes for one.
+	LocalConfigFileName = "config.local.yaml"
+)
+
 var v *viper.Viper
 
 // overriddenKeys tracks keys explicitly set via Set() at runtime, so
@@ -377,7 +393,7 @@ func Initialize() error {
 
 		// Merge local config overrides if present (config.local.yaml)
 		// This allows machine-specific settings without polluting tracked config
-		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), "config.local.yaml")
+		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
 		if _, err := os.Stat(localConfigPath); err == nil {
 			v.SetConfigFile(localConfigPath)
 			if err := v.MergeInConfig(); err != nil {

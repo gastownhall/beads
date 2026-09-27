@@ -22,9 +22,24 @@ go_test(
         "completeness_test.go",
         "errors_test.go",
     ],
+    data = [":go_srcs"],
     deps = [
         ":backend",
         "//backend/conformance",
         "//internal/storage",
+        "//internal/testutil/bazeltest",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

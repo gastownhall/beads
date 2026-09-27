@@ -47,6 +47,10 @@ go_test(
         "plugin_layout_test.go",
         "utils_test.go",
     ],
+    data = [
+        "//:.claude-plugin/marketplace.json",
+        "//plugins/beads:plugin_files",
+    ],
     embed = [":setup"],
     deps = [
         "//internal/templates",

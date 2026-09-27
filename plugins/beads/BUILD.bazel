@@ -7,3 +7,16 @@ go_library(
     importpath = "github.com/steveyegge/beads/plugins/beads",
     visibility = ["//visibility:public"],
 )
+
+# Plugin manifests and skill commands checked by //cmd/bd/setup layout tests.
+filegroup(
+    name = "plugin_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "BUILD.bazel",
+            "*.go",
+        ],
+    ),
+    visibility = ["//cmd/bd/setup:__pkg__"],
+)

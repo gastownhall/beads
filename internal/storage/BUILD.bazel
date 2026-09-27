@@ -100,12 +100,69 @@ go_test(
         "metadata_test.go",
         "role_accessor_decorator_test.go",
     ],
+    data = [
+        ":tree_go_srcs",
+        "//backend/conformance:go_srcs",
+    ],
     embed = [":storage"],
     deps = [
         "//internal/hooks",
+        "//internal/testutil/bazeltest",
         "//internal/types",
         "//issueops",
         "//journalops",
         "//memoryops",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "tree_go_srcs",
+    srcs = [
+        ":go_srcs",
+        "//internal/storage/backendnames:go_srcs",
+        "//internal/storage/backends:go_srcs",
+        "//internal/storage/contextinfo:go_srcs",
+        "//internal/storage/dberrors:go_srcs",
+        "//internal/storage/dbproxy/identity:go_srcs",
+        "//internal/storage/dbproxy/pidfile:go_srcs",
+        "//internal/storage/dbproxy/proxy:go_srcs",
+        "//internal/storage/dbproxy/server:go_srcs",
+        "//internal/storage/dbproxy/util:go_srcs",
+        "//internal/storage/depid:go_srcs",
+        "//internal/storage/dolt:go_srcs",
+        "//internal/storage/doltutil:go_srcs",
+        "//internal/storage/domain:go_srcs",
+        "//internal/storage/domain/db:go_srcs",
+        "//internal/storage/domain/fs:go_srcs",
+        "//internal/storage/domain/git:go_srcs",
+        "//internal/storage/embeddeddolt:go_srcs",
+        "//internal/storage/embeddeddolt/cmd:go_srcs",
+        "//internal/storage/externaldeps:go_srcs",
+        "//internal/storage/fs:go_srcs",
+        "//internal/storage/git:go_srcs",
+        "//internal/storage/issueops:go_srcs",
+        "//internal/storage/journalscan:go_srcs",
+        "//internal/storage/kvkeys:go_srcs",
+        "//internal/storage/memoryops:go_srcs",
+        "//internal/storage/rowid:go_srcs",
+        "//internal/storage/schema:go_srcs",
+        "//internal/storage/sqlbuild:go_srcs",
+        "//internal/storage/storagecontract:go_srcs",
+        "//internal/storage/uow:go_srcs",
+        "//internal/storage/versioncontrolops:go_srcs",
+    ],
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

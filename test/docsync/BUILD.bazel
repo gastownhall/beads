@@ -5,5 +5,12 @@ go_test(
     srcs = [
         "docsync_test.go",
         "doltpin_test.go",
+        "init_safety_recovery_test.go",
     ],
+    data = [
+        "//:docsync_files",
+        "//cmd/bd:init_safety_help.go",
+        "//internal/testutil:testdoltcommon.go",
+    ],
+    deps = ["//internal/testutil/bazeltest"],
 )

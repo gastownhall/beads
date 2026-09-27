@@ -10,6 +10,7 @@ go_library(
         "blocked.go",
         "blocked_consistency.go",
         "blocked_merge.go",
+        "blocked_recheck.go",
         "blocked_state.go",
         "blocking_annotation.go",
         "bootstrap.go",
@@ -122,6 +123,7 @@ go_test(
         "batch_apply_test.go",
         "batching_test.go",
         "blocked_consistency_test.go",
+        "blocked_recheck_test.go",
         "blocked_state_result_test.go",
         "blocked_state_template_test.go",
         "close_test.go",
@@ -177,7 +179,12 @@ go_test(
         "version_history_test.go",
         "wisp_routing_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(["testdata/**"]) + [
+        ":go_srcs",
+        "//internal/storage/domain/db:go_srcs",
+        "//internal/storage/schema:migrations",
+        "//internal/storage/versioncontrolops:go_srcs",
+    ],
     embed = [":issueops"],
     deps = [
         "//internal/config",
@@ -194,3 +201,16 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

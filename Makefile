@@ -46,7 +46,7 @@ endif
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen githooks-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
 .PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
-.PHONY: bazel-sync
+.PHONY: bazel-sync bazel-sync-check
 
 # Default target
 all: build
@@ -411,11 +411,20 @@ docs-dev:
 
 # Bazel (side-by-side with the Go toolchain; `go build`/`go test` do not need
 # it). Regenerate BUILD.bazel files with gazelle and refresh the MODULE.bazel
-# use_repo list + MODULE.bazel.lock. Run after changing Go imports or go.mod.
+# use_repo list + MODULE.bazel.lock, then refresh the go_srcs filegroups that
+# source-scanning tests declare as data (tools/bazel/go_srcs.py). Run after
+# changing Go imports, go.mod, or packages.
 BAZEL ?= bazel
 bazel-sync:
 	$(BAZEL) run //:gazelle
+	python3 tools/bazel/go_srcs.py
 	$(BAZEL) mod tidy
+
+# Fail (printing a diff) when a go_srcs block that tools/bazel/go_srcs.py
+# manages is stale, e.g. after gazelle added a package under a scanned tree.
+# Needs no Bazel; scripts/bazel_policy_test.go runs the same check.
+bazel-sync-check:
+	python3 tools/bazel/go_srcs.py --check
 
 # Ensure -short is not used as an implicit CI tier boundary.
 check-testing-short:
@@ -466,6 +475,7 @@ help:
 	@echo "  make api-gen      - Regenerate HTTP API types from the OpenAPI spec"
 	@echo "  make api-check    - OpenAPI drift gate (regenerate, diff-or-fail, spec tests)"
 	@echo "  make bazel-sync   - Regenerate Bazel BUILD files and tidy MODULE.bazel (gazelle + mod tidy)"
+	@echo "  make bazel-sync-check - Fail if generated go_srcs Bazel filegroups are stale"
 	@echo "  make clean        - Remove build artifacts and profile files"
 	@echo "  make clean-test-tmp - Sweep orphaned cmd/bd test temp dirs from \$$TMPDIR"
 	@echo "  make help         - Show this help message"

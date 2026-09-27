@@ -3,12 +3,47 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 # gazelle:prefix github.com/steveyegge/beads
 # gazelle:build_tags gms_pure_go
+# integrations/ holds no Go; it stays visible to Bazel (not in .bazelignore)
+# only so //test/docsync can declare the markdown its link checks resolve.
+# gazelle:exclude integrations
 gazelle(name = "gazelle")
 
 exports_files([
     "go.mod",
     "go.sum",
 ])
+
+# Repository files read by source-scanning tests, declared as their `data` so
+# the tests run under `bazel test` and remote execution.
+exports_files(
+    [".gitattributes"],
+    visibility = ["//scripts/gitattributespolicy:__pkg__"],
+)
+
+exports_files(
+    [".claude-plugin/marketplace.json"],
+    visibility = ["//cmd/bd/setup:__pkg__"],
+)
+
+# //test/docsync: the Mintlify site, engdocs, root markdown, and the files
+# outside those trees that their local links point at.
+#
+# The out-of-tree link targets are hand-listed: a new docs/engdocs link to a
+# file outside these globs passes `go test` but fails under Bazel until the
+# target is added here. The globs stop at package boundaries, so no BUILD file
+# may live under docs/ or engdocs/ (enforced by scripts/bazel_policy_test.go).
+filegroup(
+    name = "docsync_files",
+    srcs = glob([
+        "*.md",
+        "docs/**",
+        "engdocs/**",
+    ]) + [
+        "integrations/beads-mcp/PYPI.md",
+        "//scripts:README.md",
+    ],
+    visibility = ["//test/docsync:__pkg__"],
+)
 
 # Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they
 # run under `bazel test` as well as `go test`.

@@ -112,3 +112,9 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":testutil"],
 )
+
+# Dolt image pin read as text by //test/docsync.
+exports_files(
+    ["testdoltcommon.go"],
+    visibility = ["//test/docsync:__pkg__"],
+)

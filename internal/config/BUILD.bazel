@@ -18,6 +18,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/debug",
+        "//internal/gitenv",
         "@com_github_spf13_viper//:viper",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ] + select({
@@ -36,6 +37,7 @@ go_test(
     srcs = [
         "agents_file_test.go",
         "config_test.go",
+        "git_routing_test.go",
         "permissions_linux_test.go",
         "permissions_test.go",
         "repos_test.go",
@@ -51,6 +53,7 @@ go_test(
     embed = [":config"],
     deps = [
         "//internal/git",
+        "//internal/gitenv",
         "@com_github_spf13_viper//:viper",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ] + select({

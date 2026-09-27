@@ -16,5 +16,6 @@ go_binary(
 go_test(
     name = "catalog_test",
     srcs = ["main_test.go"],
+    data = ["//scripts:migration-test/release-catalog.json"],
     embed = [":catalog_lib"],
 )

@@ -65,6 +65,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/memoryops",
         "//internal/storage/schema",
+        "//internal/storage/sqlbuild",
         "//internal/types",
         "//internal/workapi",
         "//issueops",
@@ -115,6 +116,7 @@ go_test(
         "lifecycle_create_contract_test.go",
         "lifecycle_role_hooks_test.go",
         "lifecycle_update_contract_test.go",
+        "list_comments_plane_test.go",
         "lostupdate_dolt_test.go",
         "memories_contract_test.go",
         "metadata_cas_contract_test.go",
@@ -147,6 +149,7 @@ go_test(
         "version_reconciler_contract_test.go",
         "workspace_config_contract_test.go",
     ],
+    data = [":go_srcs"],
     embed = [":uow"],
     deps = [
         "//backend/conformance",
@@ -175,3 +178,16 @@ go_test(
         "@com_github_stretchr_testify//require",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

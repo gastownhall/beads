@@ -95,6 +95,7 @@ go_test(
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
+        "blocked_recheck_internal_test.go",
         "blocked_recompute_test.go",
         "blocking_annotator_contract_test.go",
         "bootstrapper_contract_test.go",
@@ -231,3 +232,16 @@ go_test(
         "@org_golang_x_sync//errgroup",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

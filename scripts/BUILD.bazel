@@ -22,3 +22,13 @@ go_test(
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
+
+exports_files(
+    ["migration-test/release-catalog.json"],
+    visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+exports_files(
+    ["README.md"],
+    visibility = ["//:__pkg__"],
+)

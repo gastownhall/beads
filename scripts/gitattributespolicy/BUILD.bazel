@@ -7,4 +7,5 @@ go_test(
         "gitattributes_policy_test.go",
         "required_host_test.go",
     ],
+    data = ["//:.gitattributes"],
 )

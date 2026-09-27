@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/scripts/repro-dolt-prod-timeouts",
     visibility = ["//visibility:private"],
     deps = [
+        "//internal/execenv",
         "//internal/storage/depid",
         "//internal/storage/doltutil",
         "@com_github_go_sql_driver_mysql//:mysql",
@@ -23,6 +24,7 @@ go_test(
     srcs = ["main_test.go"],
     embed = [":repro-dolt-prod-timeouts_lib"],
     deps = [
+        "//internal/execenv",
         "//internal/storage/depid",
         "//internal/storage/doltutil",
         "//internal/storage/schema",

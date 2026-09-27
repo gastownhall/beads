@@ -77,6 +77,7 @@ go_library(
         "//internal/creds",
         "//internal/debug",
         "//internal/doltserver",
+        "//internal/execenv",
         "//internal/githooksenv",
         "//internal/gittraceenv",
         "//internal/idgen",
@@ -142,6 +143,7 @@ go_test(
         "cli_transfer_timeout_test.go",
         "close_issue_checked_test.go",
         "close_policy_gate_test.go",
+        "close_recheck_blocked_test.go",
         "commenter_contract_test.go",
         "commenter_persistence_test.go",
         "comments_page_test.go",
@@ -311,6 +313,7 @@ go_test(
         "update_same_status_test.go",
         "version_commit_deferred_test.go",
         "version_reconciler_contract_test.go",
+        "version_scope_completeness_test.go",
         "versioned_test.go",
         "wisp_custom_type_tx_test.go",
         "wisp_gc_test.go",
@@ -352,3 +355,16 @@ go_test(
         "@com_github_google_uuid//:uuid",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---
