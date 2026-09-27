@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,10 +23,57 @@ import (
 // error and is refused before the subprocess is built.
 var allowedPrimeArgs = map[string]bool{"--memories-only": true}
 
+// errPrimeTestBinary is returned by resolvePrimeExecutable when the running
+// binary is a test binary. Mirrors doctor/fix's ErrTestBinary: re-execing a
+// test binary with `prime` fork-bombs the suite.
+var errPrimeTestBinary = errors.New("running as test binary - cannot re-exec bd")
+
 // primeExecutable resolves the re-exec target for runBdPrime. A var so tests
 // can stub resolution and prove no subprocess is ever built from unexpected
 // input.
-var primeExecutable = os.Executable
+var primeExecutable = resolvePrimeExecutable
+
+// resolvePrimeExecutable is the production re-exec resolver. It restates
+// getBdBinary (cmd/bd/doctor/fix/common.go), the repo's existing answer to "bd
+// re-invokes bd": prefer the running binary, resolve symlinks so every re-exec
+// site agrees on one path, refuse a test binary so an unstubbed test call
+// fails loudly instead of fork-bombing, and fall back to a validated PATH
+// lookup when the running binary cannot be resolved. getBdBinary is
+// package-private to doctor/fix, so this restates the precedent rather than
+// reusing it.
+//
+// One trade-off is kept deliberately, and it is narrower than it looks. Linux
+// reports an unlinked image with a " (deleted)" suffix, but os.Executable
+// strips that suffix (os/executable_procfs.go), so no "(deleted)" path ever
+// reaches this resolver: a bd replaced in place mid-session (an ordinary
+// `go install ./cmd/bd`) still resolves to its own path, EvalSymlinks succeeds
+// against the new file, and the re-exec runs the replacement. The residual gap
+// is a bd deleted without being replaced: EvalSymlinks fails, that failure is
+// tolerated so the stale path is kept, and the PATH fallback is correctly not
+// taken because os.Executable itself returned no error. Accepted: the target is
+// PATH-independent because it contains a path separator (exec.Command calls
+// LookPath only when filepath.Base(name) == name), and both hook handlers treat
+// a prime failure as non-fatal, so the effect is a session primed without
+// context.
+func resolvePrimeExecutable() (string, error) {
+	exe, err := os.Executable()
+	if err == nil {
+		if resolved, linkErr := filepath.EvalSymlinks(exe); linkErr == nil {
+			exe = resolved
+		}
+		base := filepath.Base(exe)
+		if strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.") {
+			return "", errPrimeTestBinary
+		}
+		return exe, nil
+	}
+
+	bdPath, lookErr := exec.LookPath("bd")
+	if lookErr != nil {
+		return "", fmt.Errorf("bd binary not found in PATH: %w", lookErr)
+	}
+	return bdPath, nil
+}
 
 // validatePrimeArgs rejects any argument outside allowedPrimeArgs so the
 // re-exec below can never be steered by caller-supplied strings.
@@ -38,26 +86,38 @@ func validatePrimeArgs(args []string) error {
 	return nil
 }
 
+// primeCommand validates args, resolves the re-exec target, and builds the
+// `bd prime [args...]` command without running it. Split out from runBdPrime
+// so a test can assert the exec target and argv — the thing this seam exists
+// to guarantee — without launching a subprocess.
+func primeCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	if err := validatePrimeArgs(args); err != nil {
+		return nil, err
+	}
+	exe, err := primeExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("bd prime: resolve executable: %w", err)
+	}
+	cmdArgs := append([]string{"prime"}, args...)
+	// #nosec G204 - exe comes from primeExecutable (resolvePrimeExecutable in
+	// production: this bd binary re-invoking itself); cmdArgs is the fixed
+	// "prime" subcommand plus allowlisted internal flags, never
+	// attacker-controlled input. Documentation only: .golangci.yml excludes
+	// G204 repo-wide, so this annotation is not what keeps lint green.
+	return exec.CommandContext(ctx, exe, cmdArgs...), nil
+}
+
 // runBdPrime shells out to `bd prime [args...]` and returns its combined output.
 // The hooks exec a subprocess (rather than calling prime in process) to avoid
 // re-entrant store initialization.
 func runBdPrime(ctx context.Context, args ...string) (string, error) {
-	if err := validatePrimeArgs(args); err != nil {
+	cmd, err := primeCommand(ctx, args...)
+	if err != nil {
 		return "", err
 	}
-	exe, err := primeExecutable()
-	if err != nil {
-		return "", fmt.Errorf("bd prime: resolve executable: %w", err)
-	}
-	cmdArgs := append([]string{"prime"}, args...)
-	// #nosec G702 - exe comes from primeExecutable (os.Executable in
-	// production: this bd binary re-invoking itself); cmdArgs is the fixed
-	// "prime" subcommand plus allowlisted internal flags, never
-	// attacker-controlled input.
-	cmd := exec.CommandContext(ctx, exe, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("bd %s: %w: %s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("bd %s: %w: %s", strings.Join(cmd.Args[1:], " "), err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
 }
