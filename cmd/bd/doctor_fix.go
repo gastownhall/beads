@@ -438,7 +438,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 
 		if err != nil {
 			errorCount++
-			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
+			fmt.Printf("  %s Error: %s\n", ui.RenderFail("✗"), strings.ReplaceAll(err.Error(), "\n", "\n    "))
 			fmt.Printf("  Manual fix: %s\n", check.Fix)
 		} else {
 			fixedCount++

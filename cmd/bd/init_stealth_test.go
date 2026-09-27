@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // TestSetupGitExclude_Worktree verifies that setupGitExclude writes to the main
@@ -741,5 +742,68 @@ func TestApplyFixListStealthRemovesLeakWhenExcludeUnreadable(t *testing.T) {
 	}
 	if !strings.Contains(out, "are ignored by neither .git/info/exclude nor the tracked .gitignore") {
 		t.Errorf("the lost project-pattern coverage was not reported:\n%s", out)
+	}
+}
+
+func TestApplyFixListStealthErrorFormatting(t *testing.T) {
+	for _, name := range []string{"single", "joined"} {
+		t.Run(name, func(t *testing.T) {
+			isolateBeadsDirForTest(t)
+			dir := newGitRepo(t)
+			beadsDir := filepath.Join(dir, ".beads")
+			if err := os.Mkdir(beadsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("no-git-ops: true\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if !isStealthRepo(dir) {
+				t.Fatal("precondition: repo must be detected as stealth")
+			}
+			paths := []string{filepath.Join(dir, ".git", "info", "exclude")}
+			prefixes := []string{"failed to read git exclude file: "}
+			if name == "joined" {
+				paths = append(paths, filepath.Join(dir, ".gitignore"))
+				prefixes = append(prefixes, "failed to read .gitignore: ")
+			}
+			var failures []string
+			for i, path := range paths {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(path, "owned"), []byte("keep\r\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				_, err := os.ReadFile(path)
+				if err == nil || os.IsNotExist(err) {
+					t.Fatalf("non-ENOENT read-error precondition for %s: %v", path, err)
+				}
+				failures = append(failures, prefixes[i]+err.Error())
+			}
+			out := captureStdout(t, func() error {
+				applyFixList(dir, []doctorCheck{{Name: "Project Gitignore", Fix: "Run: bd doctor --fix"}})
+				return nil
+			})
+			want := "  " + ui.RenderFail("✗") + " Error: " + failures[0] + "\n"
+			if name == "joined" {
+				want += "    " + failures[1] + "\n"
+			}
+			want += "  Manual fix: Run: bd doctor --fix\n"
+			if !strings.Contains(out, want) {
+				t.Errorf("repair error block missing; want %q in:\n%s", want, out)
+			}
+			if strings.Count(out, "Error:") != 1 || strings.Contains(out, "Fixed") ||
+				!strings.Contains(out, "Fix summary: 0 fixed, 1 errors\n") {
+				t.Errorf("failed repair must count once without success:\n%s", out)
+			}
+			for _, path := range paths {
+				if got, err := os.ReadFile(filepath.Join(path, "owned")); err != nil || string(got) != "keep\r\n" {
+					t.Errorf("failed repair changed %s: %q (%v)", path, got, err)
+				}
+			}
+		})
 	}
 }
