@@ -152,3 +152,68 @@ func TestAutoMintedHashIDSkipsSiblingPlaneOccupant(t *testing.T) {
 		})
 	}
 }
+
+// TestAutoMintedCounterIDJumpsPastExplicitIDs pins that counter mode survives
+// explicit IDs created ahead of the counter. The counter bump runs inside the
+// create's transaction, so a create that failed on an occupied value rolled its
+// bump back, and every later auto create replayed the same occupied value: a
+// permanent wedge, and at this PR's base a silent overwrite of the explicit
+// row. The counter now jumps past the highest numeric suffix either plane
+// holds. In the wisp case an issues-only scan would land on an occupied value.
+func TestAutoMintedCounterIDJumpsPastExplicitIDs(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	for _, tc := range []struct {
+		name      string
+		ephemeral bool // plane the explicit IDs land in
+		explicit  []string
+		wantNext  []string
+	}{
+		{name: "explicit issues ahead", explicit: []string{"cl-2", "cl-3", "cl-4"}, wantNext: []string{"cl-5", "cl-6"}},
+		{name: "explicit wisps ahead", ephemeral: true, explicit: []string{"cl-2", "cl-3"}, wantNext: []string{"cl-4", "cl-5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			te := newTestEnv(t, "cl")
+			ctx := t.Context()
+
+			if err := te.store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+				t.Fatalf("SetConfig(issue_id_mode): %v", err)
+			}
+			if err := te.store.Commit(ctx, "enable counter mode"); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+
+			first := &types.Issue{Title: "auto first", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			if err := te.store.CreateIssue(ctx, first, "tester"); err != nil {
+				t.Fatalf("CreateIssue(first): %v", err)
+			}
+			if first.ID != "cl-1" {
+				t.Fatalf("first counter ID = %q, want cl-1", first.ID)
+			}
+
+			explicitTable := "issues"
+			if tc.ephemeral {
+				explicitTable = "wisps"
+			}
+			for _, id := range tc.explicit {
+				explicit := &types.Issue{ID: id, Title: "explicit " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: tc.ephemeral}
+				if err := te.store.CreateIssue(ctx, explicit, "tester"); err != nil {
+					t.Fatalf("CreateIssue(%s): %v", id, err)
+				}
+			}
+
+			for _, want := range tc.wantNext {
+				auto := &types.Issue{Title: "auto after lag", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+				if err := te.store.CreateIssue(ctx, auto, "tester"); err != nil {
+					t.Fatalf("auto CreateIssue (want %s): %v", want, err)
+				}
+				if auto.ID != want {
+					t.Fatalf("auto counter ID = %q, want %s", auto.ID, want)
+				}
+			}
+			for _, id := range tc.explicit {
+				te.assertIssueTitle(t, ctx, explicitTable, id, "explicit "+id)
+			}
+		})
+	}
+}

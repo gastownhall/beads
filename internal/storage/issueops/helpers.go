@@ -226,6 +226,12 @@ func IsCounterModeTx(ctx context.Context, tx DBTX) (bool, error) {
 }
 
 // NextCounterIDTx atomically increments and returns the next sequential issue ID.
+//
+// An explicit ID created after the counter's last bump can already hold the
+// next value. The counter then jumps past the highest numeric suffix either
+// plane holds, found with the scan that seeds an absent counter, so one step
+// lands on a free ID however far the counter lags: explicit prefix-2 through
+// prefix-4 ahead of a counter at 1 make the next ID prefix-5.
 func NextCounterIDTx(ctx context.Context, tx DBTX, prefix string) (string, error) {
 	res, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
 	if err != nil {
@@ -262,6 +268,27 @@ func NextCounterIDTx(ctx context.Context, tx DBTX, prefix string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("failed to read issue counter after increment for prefix %q: %w", prefix, err)
 	}
+	id := fmt.Sprintf("%s-%d", prefix, nextID)
+	taken, err := issueIDTakenTx(ctx, tx, id)
+	if err != nil {
+		return "", err
+	}
+	if !taken {
+		return id, nil
+	}
+
+	maxNum := 0
+	for _, table := range []string{"issues", "wisps"} {
+		n, err := maxNumericIDSuffixTx(ctx, tx, table, prefix)
+		if err != nil {
+			return "", err
+		}
+		maxNum = max(maxNum, n)
+	}
+	nextID = maxNum + 1
+	if _, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = ? WHERE prefix = ?", nextID, prefix); err != nil {
+		return "", fmt.Errorf("failed to advance issue counter for prefix %q past %d: %w", prefix, maxNum, err)
+	}
 	return fmt.Sprintf("%s-%d", prefix, nextID), nil
 }
 
@@ -277,10 +304,29 @@ func SeedCounterFromExistingIssuesTx(ctx context.Context, tx DBTX, prefix string
 		return fmt.Errorf("failed to check existing counter for prefix %q: %w", prefix, err)
 	}
 
-	// Find max numeric suffix among existing issues
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM issues WHERE id LIKE CONCAT(?, '-%')`, prefix)
+	maxNum, err := maxNumericIDSuffixTx(ctx, tx, "issues", prefix)
 	if err != nil {
-		return fmt.Errorf("failed to scan existing issues for prefix %q: %w", prefix, err)
+		return err
+	}
+
+	if maxNum > 0 {
+		_, err = tx.ExecContext(ctx, "INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", prefix, maxNum)
+		if err != nil {
+			return fmt.Errorf("failed to seed issue counter for prefix %q at %d: %w", prefix, maxNum, err)
+		}
+	}
+	return nil
+}
+
+// maxNumericIDSuffixTx returns the highest N among table's IDs of the form
+// prefix-N, or 0 if there are none. Hierarchical child IDs (prefix-N.M) are
+// skipped.
+//
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func maxNumericIDSuffixTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE id LIKE CONCAT(?, '-%%')`, table), prefix)
+	if err != nil {
+		return 0, fmt.Errorf("failed to scan existing %s for prefix %q: %w", table, prefix, err)
 	}
 	defer rows.Close()
 
@@ -300,16 +346,9 @@ func SeedCounterFromExistingIssuesTx(ctx context.Context, tx DBTX, prefix string
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to iterate issues for prefix %q: %w", prefix, err)
+		return 0, fmt.Errorf("failed to iterate %s for prefix %q: %w", table, prefix, err)
 	}
-
-	if maxNum > 0 {
-		_, err = tx.ExecContext(ctx, "INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", prefix, maxNum)
-		if err != nil {
-			return fmt.Errorf("failed to seed issue counter for prefix %q at %d: %w", prefix, maxNum, err)
-		}
-	}
-	return nil
+	return maxNum, nil
 }
 
 // GetAdaptiveIDLengthTx returns the appropriate hash length based on database size.
