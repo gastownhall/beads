@@ -90,11 +90,27 @@ func (c *claimCommitBoundaryConn) QueryContext(_ context.Context, query string, 
 			return &claimCommitBoundaryRows{columns: []string{"exists"}, values: [][]driver.Value{{int64(1)}}}, nil
 		}
 		return &claimCommitBoundaryRows{columns: []string{"exists"}}, nil
-	case strings.Contains(query, "SELECT assignee, status FROM issues WHERE id = ?"):
+	// TWO SHAPES live here since the --if-updated-at fence. The guarded CAS
+	// read (issueops.CheckExpectedFieldsInTx) SELECTs assignee, status AND
+	// updated_at together — the stamp guard compares Go-side. The verify
+	// re-read (claim_verify.go) keeps its two-column SELECT. One branch per
+	// shape, both answering the same driver state.
+	case strings.Contains(query, "SELECT assignee, status, updated_at FROM issues WHERE id = ?"):
 		c.driver.claimStateReads++
 		assignee := ""
 		status := types.StatusOpen
 		if c.driver.checkedUpdate && c.driver.claimStateReads > 1 {
+			assignee = c.driver.verifyAssignee
+			status = c.driver.verifyStatus
+		}
+		return &claimCommitBoundaryRows{
+			columns: []string{"assignee", "status", "updated_at"},
+			values:  [][]driver.Value{{assignee, string(status), "2026-01-02 15:04:05"}},
+		}, nil
+	case strings.Contains(query, "SELECT assignee, status FROM issues WHERE id = ?"):
+		assignee := ""
+		status := types.StatusOpen
+		if c.driver.checkedUpdate {
 			assignee = c.driver.verifyAssignee
 			status = c.driver.verifyStatus
 		}

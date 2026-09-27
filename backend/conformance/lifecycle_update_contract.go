@@ -966,11 +966,28 @@ func RunLifecycleUpdateUpdatedAtFenceGatesOrdinaryEdits(t *testing.T, ctx contex
 	assertPriority("priority after a satisfied stamp fence", 1)
 	events.assert(t, "satisfied stamp fence", 1)
 
-	// ONE SHOT PER GENERATION: the same stamp now refuses — the write advanced
-	// updated_at — and the refusal writes nothing, not even an event.
+	// ONE SHOT PER GENERATION — where a generation is a distinct SECOND. The
+	// column is DATETIME(0), so a write inside the same wall-clock second
+	// rewrites updated_at to the SAME value; that is inherent to the
+	// second-precision comparison the fence documents, not a gap. To pin the
+	// one-shot refusal deterministically, turn the second over with a
+	// same-assignee heartbeat write when the fenced edit landed in the seed's
+	// second — the exact identity-unchanged, generation-bumped move this flag
+	// exists to catch (T22's shape).
 	after := lifecycleUpdateRow(t, ctx, fixture, id)
 	if !after.UpdatedAt.After(firstStamp) {
-		t.Fatalf("updated_at did not advance across the fenced write (%s -> %s); the fence could never re-refuse", firstStamp, after.UpdatedAt)
+		time.Sleep(1100 * time.Millisecond)
+		heartbeat := publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+			AppendNotes: publicops.Field[string]{Set: true, Value: "heartbeat"},
+		}}
+		if _, err := fixture.Lifecycle.Update(ctx, heartbeat); err != nil {
+			t.Fatalf("heartbeat %s: %v", id, err)
+		}
+		after = lifecycleUpdateRow(t, ctx, fixture, id)
+		if !after.UpdatedAt.After(firstStamp) {
+			t.Fatalf("updated_at did not advance across a new-second write (%s -> %s); the fence could never re-refuse", firstStamp, after.UpdatedAt)
+		}
+		events.assert(t, "heartbeat", 1)
 	}
 	staleStamp := firstStamp
 	staleEdit := priorityEdit(0)
