@@ -359,6 +359,11 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// createIssueAttemptHook, when set, runs at the end of every createIssue
+	// transaction attempt, and its error fails that attempt. Tests use it to
+	// commit a competing writer inside the attempt's window; nil in production.
+	createIssueAttemptHook func(ctx context.Context, issue *types.Issue) error
 }
 
 // Config holds Dolt database configuration
