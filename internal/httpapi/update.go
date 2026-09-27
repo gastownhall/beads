@@ -34,7 +34,7 @@ const (
 // error string.
 var (
 	updateRequestMembers = []string{
-		"actor", "expected_assignee", "expected_status", "expected_version",
+		"actor", "expected_assignee", "expected_status", "expected_updated_at", "expected_version",
 		"force_assignee_transfer", "force_close_policy", updatePatchMember,
 	}
 	issuePatchMembers = []string{
@@ -159,6 +159,10 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	expectedUpdatedAt, ok := s.updateExpectedUpdatedAt(w, r, members)
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
 	forceClosePolicy, ok := s.booleanMember(w, r, members, "force_close_policy")
 	if !ok {
 		return issueops.UpdateRequest{}, false
@@ -195,10 +199,40 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		ExpectedVersion:       expectedVersion,
 		ExpectedStatus:        expectedStatus,
 		ExpectedAssignee:      expectedAssignee,
+		ExpectedUpdatedAt:     expectedUpdatedAt,
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
 		Provenance:            updateProvenance,
 	}, true
+}
+
+// updateExpectedUpdatedAt reads the generation fence member
+// (`expected_updated_at`): the updated_at stamp a prior read reported, which
+// the update re-fences on. Absent selects no fence; the value must be an
+// RFC3339 instant — it IS a timestamp, so a wrong spelling is a 400 naming the
+// member rather than a guard that could never match. The parsed instant is
+// canonicalized to the second-precision UTC form the column stores, matching
+// the storage layer's comparison (issueops.UpdatedAtStampsEqual), so
+// equivalent RFC3339 spellings (Z vs +00:00) are one stamp.
+func (s *Server) updateExpectedUpdatedAt(w http.ResponseWriter, r *http.Request, members map[string]json.RawMessage) (*time.Time, bool) {
+	raw, present := members["expected_updated_at"]
+	if !present {
+		return nil, true
+	}
+	refuse := func(detail string) (*time.Time, bool) {
+		s.fail(w, r, InvalidArgument("expected_updated_at", ReasonInvalidValue, detail))
+		return nil, false
+	}
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+		return refuse("`expected_updated_at` must be an RFC3339 timestamp string; omit it to release the fence")
+	}
+	stamp, err := time.Parse(time.RFC3339, *value)
+	if err != nil {
+		return refuse("`expected_updated_at` is not an RFC3339 timestamp (e.g. 2026-09-27T20:35:45Z): the updated_at value a read of this surface reports")
+	}
+	canonical := issueops.TruncateStamp(stamp)
+	return &canonical, true
 }
 
 // updateExpectedStatus reads the status precondition, preserving the difference
@@ -506,7 +540,8 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 	switch {
 	case errors.Is(err, issueops.ErrVersionMismatch),
 		errors.Is(err, issueops.ErrStatusMismatch),
-		errors.Is(err, issueops.ErrAssigneeMismatch):
+		errors.Is(err, issueops.ErrAssigneeMismatch),
+		errors.Is(err, issueops.ErrUpdatedAtMismatch):
 		s.fail(w, r, updatePreconditionResult(request, err))
 
 	case errors.Is(err, issueops.ErrCloseOpenChildren):
@@ -618,6 +653,11 @@ func updatePreconditionResult(request issueops.UpdateRequest, err error) Result 
 		res.Problem.Param = updateGuardParam("expected_status")
 		if request.ExpectedStatus != nil {
 			res = res.WithExpectedStatus(string(*request.ExpectedStatus))
+		}
+	case errors.Is(err, issueops.ErrUpdatedAtMismatch):
+		res.Problem.Param = updateGuardParam("expected_updated_at")
+		if request.ExpectedUpdatedAt != nil {
+			res = res.WithExpectedUpdatedAt(*request.ExpectedUpdatedAt)
 		}
 	default:
 		res.Problem.Param = updateGuardParam("expected_assignee")

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -1155,6 +1156,18 @@ func (r Result) WithExpectedStatus(expected string) Result {
 // `precondition_failed`. Same source and same rule as WithExpectedVersion.
 func (r Result) WithExpectedAssignee(expected string) Result {
 	r.Problem.ExpectedAssignee = &expected
+	return r
+}
+
+// WithExpectedUpdatedAt attaches the `expected_updated_at` member of a
+// `precondition_failed`: the generation stamp the request fenced on. Same
+// source and same rule as WithExpectedVersion — the REQUEST's value, echoed.
+// The request validation already canonicalized the caller's spelling to the
+// second-precision UTC instant (time.Time marshals back as exactly that
+// RFC3339 form), which is the same form a read of this surface reports, so
+// re-fencing from the echo works.
+func (r Result) WithExpectedUpdatedAt(expected time.Time) Result {
+	r.Problem.ExpectedUpdatedAt = &expected
 	return r
 }
 

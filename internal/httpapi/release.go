@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
@@ -18,6 +19,11 @@ const (
 	// same guard — but it does NOT admit the empty string, which is the one
 	// place the two disagree. See its schema.
 	releaseExpectedAssigneeMember = "expected_assignee"
+	// releaseExpectedUpdatedAtMember is the generation fence: the release
+	// lands only while the row's updated_at still equals this stamp. Unlike
+	// expected_assignee it CAN be combined with expected_assignee — the two
+	// answer different questions (whose claim, which generation) and compose.
+	releaseExpectedUpdatedAtMember = "expected_updated_at"
 	// releaseForceMember is the ownership-fence bypass.
 	releaseForceMember = "force"
 )
@@ -25,7 +31,7 @@ const (
 // releaseRequestMembers is the document's member list for ReleaseIssueRequest.
 // The schema is additionalProperties: false, so anything else is refused BY
 // NAME, the posture every body on this surface takes.
-var releaseRequestMembers = []string{claimActorMember, releaseExpectedAssigneeMember, releaseForceMember}
+var releaseRequestMembers = []string{claimActorMember, releaseExpectedAssigneeMember, releaseExpectedUpdatedAtMember, releaseForceMember}
 
 // handleRelease gives back the claim on one issue: the claim's inverse, and the
 // verb `bd unclaim` spells.
@@ -115,6 +121,10 @@ func (s *Server) releaseRequest(w http.ResponseWriter, r *http.Request, id strin
 	if !ok {
 		return issueops.ReleaseRequest{}, false
 	}
+	expectedUpdatedAt, ok := s.releaseExpectedUpdatedAt(w, r, members)
+	if !ok {
+		return issueops.ReleaseRequest{}, false
+	}
 	force, ok := s.booleanMember(w, r, members, releaseForceMember)
 	if !ok {
 		return issueops.ReleaseRequest{}, false
@@ -131,13 +141,51 @@ func (s *Server) releaseRequest(w http.ResponseWriter, r *http.Request, id strin
 			"`"+releaseForceMember+"` and `"+releaseExpectedAssigneeMember+"` disagree about which claim to release; send one"))
 		return issueops.ReleaseRequest{}, false
 	}
+	// The generation fence refuses force by the same rule, independently of
+	// expected_assignee: "only while the row is still the one I read" and
+	// "release regardless" disagree about whether that row is the one being
+	// released.
+	if force && expectedUpdatedAt != nil {
+		s.fail(w, r, InvalidArgument(releaseForceMember, ReasonInvalidValue,
+			"`"+releaseForceMember+"` and `"+releaseExpectedUpdatedAtMember+"` disagree about which state to release; send one"))
+		return issueops.ReleaseRequest{}, false
+	}
 
 	return issueops.ReleaseRequest{
-		Actor:            actor,
-		IssueID:          id,
-		ExpectedAssignee: expected,
-		Force:            force,
+		Actor:             actor,
+		IssueID:           id,
+		ExpectedAssignee:  expected,
+		ExpectedUpdatedAt: expectedUpdatedAt,
+		Force:             force,
 	}, true
+}
+
+// releaseExpectedUpdatedAt reads the generation fence member: the updated_at
+// stamp a prior read reported, which the release re-fences on. Absent selects
+// no fence; the value must be an RFC3339 instant — a wrong spelling is a 400
+// naming the member rather than a guard that could never match. The parsed
+// instant is canonicalized to the second-precision UTC form the column
+// stores, matching the storage comparison, so equivalent RFC3339 spellings
+// (Z vs +00:00) are one stamp.
+func (s *Server) releaseExpectedUpdatedAt(w http.ResponseWriter, r *http.Request, members map[string]json.RawMessage) (*time.Time, bool) {
+	raw, present := members[releaseExpectedUpdatedAtMember]
+	if !present {
+		return nil, true
+	}
+	refuse := func(detail string) (*time.Time, bool) {
+		s.fail(w, r, InvalidArgument(releaseExpectedUpdatedAtMember, ReasonInvalidValue, detail))
+		return nil, false
+	}
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+		return refuse("`" + releaseExpectedUpdatedAtMember + "` must be an RFC3339 timestamp string; omit it to release the fence")
+	}
+	stamp, err := time.Parse(time.RFC3339, *value)
+	if err != nil {
+		return refuse("`" + releaseExpectedUpdatedAtMember + "` is not an RFC3339 timestamp (e.g. 2026-09-27T20:35:45Z): the updated_at value a read of this surface reports")
+	}
+	canonical := issueops.TruncateStamp(stamp)
+	return &canonical, true
 }
 
 // releaseExpectedAssignee reads the optional compare-and-set guard.
@@ -217,6 +265,18 @@ func (s *Server) failRelease(w http.ResponseWriter, r *http.Request, request iss
 		}
 		s.fail(w, r, res)
 
+	// THE GENERATION FENCE, answered with the same 409 and its own param: the
+	// stamp the request fenced on is echoed in canonical RFC3339 UTC form, and
+	// the row's current stamp travels in the role's prose only — the rollback
+	// rule above applies here identically.
+	case errors.Is(err, issueops.ErrUpdatedAtMismatch):
+		res := PreconditionFailed()
+		res.Problem.Param = releaseUpdatedAtGuardParam()
+		if request.ExpectedUpdatedAt != nil {
+			res = res.WithExpectedUpdatedAt(*request.ExpectedUpdatedAt)
+		}
+		s.fail(w, r, res)
+
 	// THE OWNERSHIP FENCE, answered with the code updateIssue already gives the
 	// same situation: a live foreign owner refusing a write, with a force
 	// bypass and a name-the-holder bypass. No `assignee` member, for the reason
@@ -267,5 +327,12 @@ func (s *Server) failRelease(w http.ResponseWriter, r *http.Request, request iss
 // pointer on the envelope and a package-level address would be shared state.
 func releaseGuardParam() *string {
 	member := releaseExpectedAssigneeMember
+	return &member
+}
+
+// releaseUpdatedAtGuardParam is releaseGuardParam for the generation fence's
+// own param spelling.
+func releaseUpdatedAtGuardParam() *string {
+	member := releaseExpectedUpdatedAtMember
 	return &member
 }

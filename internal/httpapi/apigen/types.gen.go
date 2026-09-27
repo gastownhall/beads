@@ -1500,6 +1500,9 @@ type Problem struct {
 	// ExpectedStatus With `precondition_failed`: the status the request guarded on, echoed from the request. See `expected_version`.
 	ExpectedStatus *string `json:"expected_status,omitempty"`
 
+	// ExpectedUpdatedAt With `precondition_failed`: the updated_at generation stamp the request fenced on, echoed from the request in canonical RFC3339 UTC second form — the same form this surface's reads report, so re-fencing from the echo works. See `expected_version`.
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
+
 	// ExpectedVersion With `precondition_failed`: the row `revision` the request guarded on, echoed from the request itself.
 	//
 	// THE EXPECTED/ACTUAL PAIRS ARE SPLIT BY TYPE rather than carried as one polymorphic `expected`/`actual`, and the reason is this document's: a member that is "a version or a status or an assignee" is a schema alternation, and no composition keyword is available to spell one here (see `ApplyItem`). Three typed pairs cost three member names and are readable by a generated client without a cast.
@@ -1645,9 +1648,14 @@ type ReleaseIssueRequest struct {
 	// IT IS NOT LENGTH- OR PATTERN-BOUNDED the way `actor` is, and the asymmetry is deliberate: this value is COMPARED and never stored, so a value no assignee column could hold simply cannot match, and refusing it at the edge would be a refusal the role does not have.
 	ExpectedAssignee *string `json:"expected_assignee,omitempty"`
 
+	// ExpectedUpdatedAt Compare-and-set on the row's GENERATION (`bd unclaim --if-updated-at`'s wire spelling): the release proceeds only while the issue's current `updated_at` still equals this stamp, and otherwise refuses with `409` / `precondition_failed`, echoing this member back, having written nothing. The value is the `updated_at` this surface's reads report (RFC3339 UTC, second precision); the comparison is second-precision UTC, so an equivalent RFC3339 spelling of the same instant is the same stamp.
+	//
+	// IT COMPOSES WITH `expected_assignee` — the two answer different questions (whose claim, which generation) and both must hold — and it fences the issues ROW only: label mutations bypass `updated_at` by design (upstream issue #5442). Sending it beside `force` is a 400, the same contradictory-intent rule `expected_assignee` states: "only while the row is still the one I read" and "release regardless" disagree.
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
+
 	// Force Bypass the ownership fence, so an actor that is not the holder may release the claim. It is the escape hatch `bd unclaim --force` spells, for an abandoned claim whose holder crashed.
 	//
-	// IT BYPASSES THE FENCE AND NOTHING ELSE. It does not make an unheld row releasable, it does not make a closed one releasable, and it never bypasses a precondition — sending it beside `expected_assignee` is a 400 rather than a silent win for either.
+	// IT BYPASSES THE FENCE AND NOTHING ELSE. It does not make an unheld row releasable, it does not make a closed one releasable, and it never bypasses a precondition — sending it beside `expected_assignee` or `expected_updated_at` is a 400 rather than a silent win for either.
 	Force *bool `json:"force,omitempty"`
 }
 
@@ -1916,6 +1924,11 @@ type UpdateIssueRequest struct {
 	//
 	// Unlike `expected_version` this one is readable: `Issue.status` is on every read of this surface, so a caller can guard a status transition without any token at all.
 	ExpectedStatus *string `json:"expected_status,omitempty"`
+
+	// ExpectedUpdatedAt Requires the issue row's `updated_at` to equal this stamp before the patch — the generation fence. The value is the `updated_at` this surface's reads report (RFC3339 UTC, second precision); the comparison is second-precision UTC, so an equivalent RFC3339 spelling of the same instant (`Z` vs `+00:00`) is the same stamp. A miss refuses the whole request with `409 precondition_failed`, echoing this member back.
+	//
+	// It fences the ISSUES ROW's generation, not an identity field, so it composes with `expected_assignee`/`expected_status`/` expected_version` (all supplied guards must hold). KNOWN BLIND SPOT (upstream issue #5442), documented rather than fixed: label mutations bypass `updated_at` by design, so a stamp read before a label-only write still matches.
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 
 	// ExpectedVersion Requires the row's revision to equal this value before the patch. A miss refuses the WHOLE request with `409 precondition_failed` and writes nothing — `ApplyUpdateItem.expected_version`'s contract, on the operation that patches one row.
 	//
