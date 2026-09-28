@@ -10,11 +10,31 @@ import (
 	"github.com/steveyegge/beads/internal/gitenv"
 )
 
+// isolateGlobalGitConfig redirects git's config search path to a fresh temp home
+// so an ambient global `git config --global beads.role` cannot reach the role
+// checks, and returns that home.
+//
+// The role reads run git with gitenv.ScrubRoutingAndSuppression, which strips
+// every GIT_CONFIG* entry from the subprocess environment, so the usual
+// GIT_CONFIG_GLOBAL=/dev/null suppression cannot work here — the search path
+// itself has to move. System scope (/etc/gitconfig, or PROGRAMDATA on Windows)
+// stays visible either way: that scrub takes GIT_CONFIG_NOSYSTEM with it, so no
+// env-based way to close system scope exists from a test in this package. It is
+// inert for beads.role today and the limitation is shared with every caller on
+// this boundary; only a production-side config-scope override could close it.
+func isolateGlobalGitConfig(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	return home
+}
+
 func TestCheckBeadsRole_NotConfigured(t *testing.T) {
-	// Isolate from ambient global/system git config (e.g. a developer machine
-	// with `git config --global beads.role contributor` set).
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	// Isolate from ambient global git config (e.g. a developer machine with
+	// `git config --global beads.role contributor` set).
+	isolateGlobalGitConfig(t)
 
 	// Create a temp directory with git init but no beads.role config
 	tmpDir := newGitRepo(t)
@@ -94,11 +114,10 @@ func TestCheckBeadsRole_InvalidValue(t *testing.T) {
 }
 
 func TestCheckBeadsRole_NotGitRepo(t *testing.T) {
-	// Isolate from ambient global/system git config: "git config --get" reads
-	// global/system scope even outside a git repo, so without this an ambient
+	// Isolate from ambient global git config: "git config --get" reads global
+	// scope even outside a git repo, so without this an ambient
 	// `git config --global beads.role` leaks into a check that should be N/A.
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	isolateGlobalGitConfig(t)
 
 	tmpDir, err := os.MkdirTemp("", "beads-role-test")
 	if err != nil {
@@ -154,10 +173,7 @@ func TestCheckBeadsRoleIgnoresInheritedRouting(t *testing.T) {
 		{"default_global", "", "contributor", StatusOK, "Configured as contributor"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			t.Setenv("USERPROFILE", home)
-			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			home := isolateGlobalGitConfig(t)
 			if tc.global != "" {
 				if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\nrole = "+tc.global+"\n"), 0600); err != nil {
 					t.Fatal(err)
