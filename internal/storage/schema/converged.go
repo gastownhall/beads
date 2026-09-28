@@ -84,6 +84,30 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 		return false, nil
 	}
 
+	// The pattern being present does not mean it is in EFFECT. On a legacy
+	// lineage the ignored-lane cursor table is committed at HEAD, where
+	// dolt_ignore's add-delta semantics make the pattern inert and every pull
+	// wedges (gastownhall/beads#4356). MigrateUp reconciles that, and also
+	// cleans up after a reconcile some earlier open was killed midway
+	// through, so a database in either shape is not converged no matter how
+	// at-latest its cursors read.
+	//
+	// This asks for the WHOLE gate, not just the legacy-shape half of it. A
+	// term that MigrateUp acts on but this function does not evaluate is
+	// silently unreachable in server mode — the fast path returns before
+	// MigrateUp ever runs — and the leftover it would have cleaned up is a
+	// deliberately non-ignored table that the next pull's auto-commit puts
+	// into HEAD and push replicates fleet-wide.
+	//
+	// Two always-succeeding reads on the hot path, both bounded to one row.
+	state, err := readIgnoredCursorState(ctx, db, qualifier)
+	if err != nil {
+		return false, err
+	}
+	if state.reconcileNeeded() {
+		return false, nil
+	}
+
 	// LAST, and deliberately so: everything above is the cheap steady-state
 	// question and short-circuits first. This term closes the window where a
 	// peer is midway through a real migration pass. migrationWorkNeeded only

@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "execenv",
+    srcs = ["execenv.go"],
+    importpath = "github.com/steveyegge/beads/internal/execenv",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "execenv_test",
+    srcs = ["execenv_test.go"],
+    embed = [":execenv"],
+)

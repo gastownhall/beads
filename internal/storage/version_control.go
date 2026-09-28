@@ -12,6 +12,11 @@ type CommitInfo struct {
 	Email   string
 	Date    time.Time
 	Message string
+	// CommitOrder is Dolt's ancestry-derived position of the commit in the
+	// history graph (dolt_log.commit_order): a parent always has a lower value
+	// than its children, regardless of commit dates, which are not required to
+	// be monotonic along the parent chain.
+	CommitOrder int64
 }
 
 // StatusEntry represents a changed table in the working set.

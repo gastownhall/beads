@@ -549,9 +549,12 @@ const guardToken int64 = 9007199254740993
 // never-written version 0.
 func guard(v int64) *int64 { return &v }
 
-// revisionOf reads `revision` as the 64-BIT INTEGER the document declares,
-// which is the whole reason it exists beside decodeBody: that helper decodes
-// into `any`, and `any` is a float64.
+// revisionOf reads `revision` as the decimal STRING the document declares and
+// parses it back to the int64 the row holds. That is the whole reason it exists
+// beside decodeBody: that helper decodes into `any`, which would take the string
+// but hand back its text, and would silently have taken a float64 back when the
+// member was a number — which is the corruption the string exists to prevent.
+// Decoding into *string is what makes a number-typed member fail here.
 //
 // NEVER ORDER IT AND NEVER COMPUTE ONE. The token is opaque and compared for
 // equality alone, so "the previous revision" is not `revision - 1`; it is the
@@ -560,7 +563,7 @@ func revisionOf(t *testing.T, resp *http.Response) int64 {
 	t.Helper()
 	raw := readAll(t, resp)
 	var body struct {
-		Revision *int64 `json:"revision"`
+		Revision *string `json:"revision"`
 	}
 	if err := json.Unmarshal([]byte(raw), &body); err != nil {
 		t.Fatalf("decode revision from %q: %v", raw, err)
@@ -568,7 +571,11 @@ func revisionOf(t *testing.T, resp *http.Response) int64 {
 	if body.Revision == nil {
 		t.Fatalf("the response carries no `revision`: %s", raw)
 	}
-	return *body.Revision
+	token, err := types.ParseRevisionToken(*body.Revision)
+	if err != nil {
+		t.Fatalf("`revision` %q is not a decimal token: %v", *body.Revision, err)
+	}
+	return token
 }
 
 // TestCloseForwardsTheVersionGuard: the member reaches the role as the POINTER
@@ -584,8 +591,8 @@ func TestCloseForwardsTheVersionGuard(t *testing.T) {
 		body string
 		want *int64
 	}{
-		{"a guard is forwarded", `{"actor":"alice","expected_version":9007199254740993}`, guard(guardToken)},
-		{"the never-written version is a real guard", `{"actor":"alice","expected_version":0}`, guard(0)},
+		{"a guard is forwarded", `{"actor":"alice","expected_version":"9007199254740993"}`, guard(guardToken)},
+		{"the never-written version is a real guard", `{"actor":"alice","expected_version":"0"}`, guard(0)},
 		{"an absent guard stays nil", `{"actor":"alice"}`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -664,7 +671,7 @@ func TestCloseRefusesAStaleGuard(t *testing.T) {
 	lifecycle := &roleLifecycle{closeErr: fmt.Errorf("close bd-1: %w", issueops.ErrVersionMismatch)}
 	ts := newCloseServer(t, lifecycle)
 
-	resp := ts.closeIssue(t, closePath, `{"actor":"alice","expected_version":9007199254740993}`)
+	resp := ts.closeIssue(t, closePath, `{"actor":"alice","expected_version":"9007199254740993"}`)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
 	}
@@ -698,7 +705,7 @@ func TestCloseGuardOutranksClosePolicy(t *testing.T) {
 	lifecycle := &roleLifecycle{closeErr: fmt.Errorf("close bd-1: %w", issueops.ErrVersionMismatch)}
 	ts := newCloseServer(t, lifecycle)
 
-	resp := ts.closeIssue(t, closePath, `{"actor":"alice","expected_version":41,"force":false}`)
+	resp := ts.closeIssue(t, closePath, `{"actor":"alice","expected_version":"41","force":false}`)
 	body := decodeBody(t, resp)
 	if body["code"] != string(CodePreconditionFailed) {
 		t.Errorf("code = %v, want %s: the role checks the version before policy and the wire must not reorder it",
@@ -714,7 +721,7 @@ func TestCloseForceDoesNotBypassTheGuard(t *testing.T) {
 	lifecycle := &roleLifecycle{closeResult: issueops.CloseResult{Issue: closedIssue("bd-1"), Changed: true}}
 	ts := newCloseServer(t, lifecycle)
 
-	if resp := ts.closeIssue(t, closePath, `{"actor":"alice","force":true,"expected_version":41}`); resp.StatusCode != http.StatusOK {
+	if resp := ts.closeIssue(t, closePath, `{"actor":"alice","force":true,"expected_version":"41"}`); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
 	}
 	got := lifecycle.closeRequests()
@@ -726,11 +733,20 @@ func TestCloseForceDoesNotBypassTheGuard(t *testing.T) {
 	}
 }
 
-// TestCloseRefusesAMalformedGuard: the token is an integer and nothing else,
-// refused at the edge before any database work.
+// TestCloseRefusesAMalformedGuard: the token is a decimal STRING and nothing
+// else, refused at the edge before any database work.
+//
+// The bare number is the case that matters. It is what the member used to be, so
+// accepting it would be the transitional spelling this contract deliberately
+// does not have — and a JSON number is exactly the shape that arrives already
+// rounded from a double-based client.
 func TestCloseRefusesAMalformedGuard(t *testing.T) {
 	for _, body := range []string{
-		`{"actor":"alice","expected_version":"41"}`,
+		`{"actor":"alice","expected_version":41}`,
+		`{"actor":"alice","expected_version":9007199254740993}`,
+		`{"actor":"alice","expected_version":"41.5"}`,
+		`{"actor":"alice","expected_version":"not-a-token"}`,
+		`{"actor":"alice","expected_version":""}`,
 		`{"actor":"alice","expected_version":1.5}`,
 		`{"actor":"alice","expected_version":null}`,
 		`{"actor":"alice","expected_version":true}`,

@@ -33,6 +33,30 @@ func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.His
 	return result, err
 }
 
+// HistoricalIssueIDs reports which of ids appear in HEAD's committed history
+// of the issues table. Implements storage.HistoryPresence.
+//
+// Uses withReadTxLongTimeout for the same reason History does (ga-ahnxx): the
+// dolt_history_issues scan underneath is proportional to commits × revisions
+// and can outrun the shared pool's 10s ReadTimeout on a mature repo, where it
+// would surface as an intermittent i/o timeout rather than an answer.
+func (s *DoltStore) HistoricalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var present map[string]struct{}
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
+		var err error
+		present, err = issueops.HistoricalIssueIDsInTx(ctx, tx, ids)
+		if err != nil {
+			return wrapQueryError("check issue history presence", err)
+		}
+		return nil
+	})
+	return present, err
+}
+
+// The auto-export guard reaches this through storage.UnwrapStore, so the
+// assertion must keep holding on the concrete store.
+var _ storage.HistoryPresence = (*DoltStore)(nil)
+
 // AsOf returns the state of an issue at a specific commit hash or branch ref.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
@@ -164,12 +188,7 @@ func (s *DoltStore) ListBranches(ctx context.Context) ([]string, error) {
 // GetCurrentCommit returns the hash of the current HEAD commit.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
-	var hash string
-	err := s.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&hash)
-	if err != nil {
-		return "", fmt.Errorf("failed to get current commit: %w", err)
-	}
-	return hash, nil
+	return versioncontrolops.CurrentCommit(ctx, s.db)
 }
 
 // GetStateHash returns a hash of the entire database including the working

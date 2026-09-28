@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
@@ -399,6 +400,32 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the init flag surface.\n\n")
 			reinitLocal = true
 		}
+
+		// dc-6jaq: "init" is in noDbCommands, so PersistentPreRunE returns at
+		// the skip-store early return before its freeze gate ever runs, and
+		// init.go calls neither CheckReadonly nor the gate itself. That left
+		// the single most destructive command in the CLI free to run during a
+		// migration: `bd init --reinit-local` (or its --force alias) drops and
+		// recreates the very database the marker is protecting, permanently,
+		// and exited 0 without consulting the marker. Gate the destructive
+		// variants here — the earliest point where every one of them is
+		// resolved and nothing has been written yet, and ahead of the
+		// --proxied-server branch below, which reaches its own writes without
+		// passing through the init mutation gate at all.
+		//
+		// A plain first-time init is deliberately not gated: it creates a new
+		// database rather than touching the frozen one, and an existing
+		// workspace already refuses it via checkExistingBeadsData.
+		if reinitLocal || discardRemote {
+			op := "init --reinit-local"
+			if discardRemote {
+				op = "init --discard-remote"
+			}
+			if err := migrationFreezeGateFor(cmd, op, resolveInitBeadsDir()); err != nil {
+				return err
+			}
+		}
+
 		sharedServer, _ := cmd.Flags().GetBool("shared-server")
 		externalServer, _ := cmd.Flags().GetBool("external")
 		debugMode, _ := cmd.Flags().GetBool("debug")
@@ -639,6 +666,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				fromJSONL:              fromJSONL,
 				nonInteractive:         nonInteractive,
 			}); err != nil {
+				// runInitProxiedServer runs the same checkExistingBeadsData
+				// the route below does, but it runs it inside itself — so
+				// --init-if-missing used to end here as a plain exit-1
+				// "Aborting.", and its mismatch guards never ran at all. The
+				// check happens before any .beads/ write, so nothing has been
+				// touched by the time we get this error.
+				if initIfMissing && !reinitLocal && errors.Is(err, errWorkspaceAlreadyInitialized) {
+					return resolveInitIfMissingAlreadyInitialized(cmd, database, prefix, quiet)
+				}
 				return err
 			}
 			return nil
@@ -771,26 +807,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// directory) must still abort rather than be masked as a
 				// successful skip.
 				if initIfMissing && errors.Is(err, errWorkspaceAlreadyInitialized) {
-					// Guard against masking a genuine mismatch: an explicit
-					// --prefix or --database that does not match the existing
-					// workspace must abort, since silently skipping would ignore
-					// the request and reuse a different database. --database is
-					// the authoritative selector, so it is checked even when
-					// --prefix is also set.
-					existing := existingWorkspaceDBName()
-					if cmd.Flags().Changed("database") {
-						if initIfMissingDatabaseMismatch(existing, database) {
-							return fmt.Errorf("workspace already initialized as database %q, but --database %q was requested.\nRemove --database (or pass a matching value) to reuse the existing workspace", existing, database)
-						}
-					} else if cmd.Flags().Changed("prefix") {
-						if initIfMissingPrefixMismatch(existing, prefix) {
-							return fmt.Errorf("workspace already initialized as database %q, but --prefix %q was requested.\nRemove --prefix (or pass a matching value) to reuse the existing workspace", existing, prefix)
-						}
-					}
-					if !quiet {
-						fmt.Fprintln(os.Stderr, "Skipping init: workspace already initialized.")
-					}
-					return nil
+					return resolveInitIfMissingAlreadyInitialized(cmd, database, prefix, quiet)
 				}
 				return fmt.Errorf("%v", err)
 			}
@@ -999,7 +1016,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// reinit has passed its held-gate confirmation. Remote safety above
 		// still evaluates the flag before this point.
 		if stealth {
-			if err := setupStealthMode(!quiet); err != nil {
+			if err := setupStealthModeAt(cwd, !quiet); err != nil {
 				return fmt.Errorf("setting up stealth mode: %v", err)
 			}
 
@@ -1104,8 +1121,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// safe to call even if already in a git repo.
 		// Skip when BEADS_DIR is explicitly set — the caller may be creating a
 		// standalone .beads/ directory outside any git repo.
-		if !isGitRepo() && !hasExplicitBeadsDir {
-			gitInitCmd := exec.Command("git", "init")
+		if !hasExplicitBeadsDir && initArtifactGitCommand(cwd, "rev-parse", "--git-dir").Run() != nil {
+			gitInitCmd := initArtifactGitCommand(cwd, "init")
 			if output, err := gitInitCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("failed to initialize git repository: %v\n%s", err, output)
 			}
@@ -1289,6 +1306,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if syncFromRemote {
+			// A raw https:// forge URL would route through Dolt's remotesapi
+			// client and spin forever (#4421); its git+ form routes through
+			// the git remote factory. Non-forge URLs are untouched (GH#3339).
+			syncURL = doltRemoteURL(syncURL)
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 			disposition, err := runInitRemoteClone(syncURL, func(remoteURL string) error {
 				return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
@@ -1359,6 +1380,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			ServerMode:             initServerMode,
 			ProxiedServer:          initProxiedServer,
 			CreateIfMissing:        true, // bd init is the only path that should create databases
+			OpenedByInit:           true, // shapes the identity-mismatch advice (GH#5558)
 			AutoStart:              initServerMode && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 			ServerTLS:              initDoltServerTLSFromEnv(),
 		}
@@ -1480,6 +1502,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					printBootstrapRemoteBehindGuidance(os.Stderr, gateErr, syncURL, "bd init")
 				} else {
 					fmt.Fprint(os.Stderr, gateErr.UserMessage())
+					printInitJoinGuidance(os.Stderr, gateErr)
 				}
 				return &exitError{Code: 1}
 			}
@@ -1504,8 +1527,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// falling back to JSONL-as-sync. Gateway mode skips it: the hosted
 		// server owns the database, so DOLT_REMOTE('add', ...) must not run
 		// against it (see shouldWriteInitDoltRemote).
+		// The URL is routed here too, not just on the clone path: the
+		// no-Dolt-data-yet case (the pre-first-push wiring this is for) never
+		// clones, so without routing a raw https forge URL would be stored
+		// verbatim in dolt_remotes and the *first* `bd dolt push` would take
+		// it to the remotesapi client — the #4421 storm, one leg further down
+		// (#5743).
 		if shouldWriteInitDoltRemote(doltCfg.Gateway, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin, isDoltLocalOnly()) {
-			configureInitDoltRemote(ctx, store, syncURL, quiet)
+			configureInitDoltRemote(ctx, store, doltRemoteURL(syncURL), quiet)
 		}
 
 		// === CONFIGURATION METADATA (Pattern A: Fatal) ===
@@ -1740,7 +1769,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Must run AFTER createConfigYaml which creates the file.
 			// Persist the effective remote so future bootstrap and hooks know
 			// Dolt, not JSONL, is the cross-machine sync path. Plain git
-			// origins are valid here: the first push creates refs/dolt/data.
+			// origins are valid here: the first push creates refs/dolt/data,
+			// and bootstrap resolves such a URL by probing refs/dolt/data
+			// rather than rejecting it (#5743).
 			if err := persistInitSyncRemote(beadsDir, initRemote, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin); err != nil {
 				return fmt.Errorf("failed to persist sync.remote to config.yaml: %v", err)
 			}
@@ -1832,7 +1863,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// - Interactive terminal (stdin is TTY) and not --non-interactive
 		// - No explicit --contributor or --team flag provided
 		// - No explicit --role flag provided
-		if isGitRepo() && !contributor && !team && roleFlag == "" && !nonInteractive && shouldPromptForRole() {
+		if isInitRoleGitRepo(ctx) && !contributor && !team && roleFlag == "" && !nonInteractive && shouldPromptForRole() {
 			promptedContributor, err := promptContributorMode()
 			if err != nil {
 				if isCanceled(err) {
@@ -1847,7 +1878,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			} else if promptedContributor {
 				contributor = true // Triggers contributor wizard below
 			}
-		} else if isGitRepo() && !contributor && !team {
+		} else if isInitRoleGitRepo(ctx) && !contributor && !team {
 			// If prompt was skipped (non-interactive or CI environment),
 			// ensure beads.role is set to avoid "not configured" warning
 			// during diagnostics. Use --role flag if provided, otherwise default.
@@ -1883,7 +1914,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 			// Contributor setup must also pin role detection to contributor.
 			// Without this, SSH remotes can be inferred as maintainer and bypass routing.
-			if isGitRepo() {
+			if isInitRoleGitRepo(ctx) {
 				if err := setBeadsRole("contributor"); err != nil && !quiet {
 					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role=contributor: %v\n", err)
 				}
@@ -1909,7 +1940,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Earlier code paths may skip role-setting when BEADS_DIR is set,
 		// promptContributorMode fails, or edge-case flag combinations are used.
 		// This guarantees every init leaves a usable role-configured state.
-		if isGitRepo() {
+		//
+		// The gate and the pair answer on the same boundary: isInitRoleGitRepo
+		// scrubs inherited routing and config suppression exactly as
+		// getBeadsRole/setBeadsRole do, so the gate cannot open on a repository
+		// the write will then fail to reach. Gating on the inherited isGitRepo()
+		// instead is what used to make this safety net write the role into a
+		// redirected repository.
+		if isInitRoleGitRepo(ctx) {
 			if _, hasRole := getBeadsRole(); !hasRole {
 				fallbackRole := "maintainer"
 				if roleFlag != "" {
@@ -1924,7 +1962,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Auto-configure contributor routing for fork repos (bd-umbf Child 1).
 		// Non-interactive, idempotent; only fires when upstream remote detected
 		// and routing.contributor is not already set.
-		if !contributor && isGitRepo() {
+		// This gate also enables planning-repository creation and config.yaml updates.
+		if !contributor && isInitRoleGitRepo(ctx) {
 			if err := autoConfigureForkContributor(ctx, store, quiet || nonInteractive, roleFlag); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
 			}
@@ -1964,15 +2003,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		setupExclude, _ := cmd.Flags().GetBool("setup-exclude")
 		if setupExclude {
 			// Manual flag - always configure
-			if err := setupForkExclude(!quiet); err != nil {
+			if err := setupForkExcludeAt(cwd, !quiet); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to configure git exclude: %v\n", err)
 			}
-		} else if !stealth && isGitRepo() {
+		} else if !stealth && isInitRoleGitRepo(ctx) {
 			// Auto-detect fork and prompt (skip if stealth - it handles exclude already)
 			if isFork, upstreamURL := detectForkSetup(); isFork {
 				if nonInteractive {
 					// In non-interactive mode, auto-configure fork exclude
-					if err := setupForkExclude(!quiet); err != nil {
+					if err := setupForkExcludeAt(cwd, !quiet); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to configure git exclude: %v\n", err)
 					}
 				} else {
@@ -1984,7 +2023,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 						}
 					}
 					if shouldExclude {
-						if err := setupForkExclude(!quiet); err != nil {
+						if err := setupForkExcludeAt(cwd, !quiet); err != nil {
 							fmt.Fprintf(os.Stderr, "Warning: failed to configure git exclude: %v\n", err)
 						}
 					}
@@ -2117,61 +2156,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Auto-stage and commit beads files so bd doctor doesn't warn about
-		// untracked files or dirty working tree in a clean room setup.
-		// Only runs when not stealth, in a git repo, and using local storage.
-		if !stealth && isGitRepo() && useLocalBeads {
-			gitAddCmd := exec.Command("git", "add", ".beads/")
-			if _, addErr := gitAddCmd.CombinedOutput(); addErr == nil {
-				// Also stage the agents file if it exists
-				agentsFileToStage := config.SafeAgentsFile()
-				if _, statErr := os.Stat(agentsFileToStage); statErr == nil {
-					agentsCmd := exec.Command("git", "add", agentsFileToStage)
-					_ = agentsCmd.Run()
-				}
-				// Also stage Claude settings if created by init
-				claudeSettingsPath := filepath.Join(".claude", "settings.json")
-				if _, statErr := os.Stat(claudeSettingsPath); statErr == nil {
-					claudeCmd := exec.Command("git", "add", claudeSettingsPath)
-					_ = claudeCmd.Run()
-				}
-				// Also stage CLAUDE.md if created by setup
-				if _, statErr := os.Stat("CLAUDE.md"); statErr == nil {
-					claudeMdCmd := exec.Command("git", "add", "CLAUDE.md")
-					_ = claudeMdCmd.Run()
-				}
-				// Also stage Codex and Cursor project integration files if created
-				// by setup. Cursor project hooks/rules are meant to be committed
-				// (a no-op git add if .cursor/ is gitignored in this repo).
-				for _, path := range []string{".agents", ".codex", ".cursor"} {
-					if _, statErr := os.Stat(path); statErr == nil {
-						codexCmd := exec.Command("git", "add", path)
-						_ = codexCmd.Run()
-					}
-				}
-				// Also stage .gitignore if modified by EnsureProjectGitignore
-				if _, statErr := os.Stat(".gitignore"); statErr == nil {
-					giCmd := exec.Command("git", "add", ".gitignore")
-					_ = giCmd.Run()
-				}
-				// Hooks installed by this init can call back into bd. Skip all
-				// of them for the bootstrap commit to avoid self-deadlocking
-				// while init still owns the embedded Dolt lock. --no-verify
-				// alone does not skip prepare-commit-msg.
-				commitArgs := []string{"-c", "core.hooksPath=", "commit", "--no-verify", "-m", "bd init: initialize beads issue tracking"}
-				commitCmd := exec.Command("git", commitArgs...)
-				if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
-					if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {
-						fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)
-					}
-				} else if !quiet {
-					fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
-				}
-				// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
-				// directory — including noms/LOCK files. These are Dolt-internal files.
-				// Removing them WILL cause unrecoverable data corruption and data loss.
-				// Dolt manages these files itself; external interference is never safe.
-			}
+		if !stealth && useLocalBeads {
+			commitEmbeddedInitArtifacts(cwd, quiet)
 		}
 
 		// Check for missing git upstream and warn if not configured.
@@ -2280,7 +2266,7 @@ func init() {
 	initCmd.Flags().BoolP("quiet", "q", false, "Suppress output (quiet mode)")
 	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
 	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
-	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
+	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)")
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude/Codex/Cursor setup generation")
@@ -2463,7 +2449,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 		return fmt.Errorf("failed to load %s: %w; refusing to reinitialize automatically (restore the metadata or use --reinit-local after safeguarding existing data)", configfile.ConfigPath(beadsDir), cfgErr)
 	}
 	if cfg != nil {
-		if guardErr := validateConfiguredBackend(cfg); guardErr != nil {
+		if guardErr := validateConfiguredBackend(cfg, beadsDir); guardErr != nil {
 			return guardErr
 		}
 	}
@@ -2762,6 +2748,40 @@ func initIfMissingPrefixMismatch(existingDBName, requestedPrefix string) bool {
 	return requested != "" && !strings.EqualFold(existingDBName, requested)
 }
 
+// resolveInitIfMissingAlreadyInitialized decides what --init-if-missing does
+// once the workspace is known to be initialized already: nil for the benign
+// skip (message printed here), or the abort for a request that would be
+// silently ignored by skipping.
+//
+// Guard against masking a genuine mismatch: an explicit --prefix or --database
+// that does not match the existing workspace must abort, since silently
+// skipping would ignore the request and reuse a different database. --database
+// is the authoritative selector, so it is checked even when --prefix is also
+// set.
+//
+// Both init routes share this: the embedded/server route reaches it from its
+// own checkExistingBeadsData, the proxied-server route from the identical check
+// inside runInitProxiedServer. Before that wiring existed, --init-if-missing was
+// simply inert on the proxied route — an already-initialized workspace exited 1
+// with the "Aborting." banner, and the two mismatch guards this delegates to had
+// never once run.
+func resolveInitIfMissingAlreadyInitialized(cmd *cobra.Command, database, prefix string, quiet bool) error {
+	existing := existingWorkspaceDBName()
+	if cmd.Flags().Changed("database") {
+		if initIfMissingDatabaseMismatch(existing, database) {
+			return fmt.Errorf("workspace already initialized as database %q, but --database %q was requested.\nRemove --database (or pass a matching value) to reuse the existing workspace", existing, database)
+		}
+	} else if cmd.Flags().Changed("prefix") {
+		if initIfMissingPrefixMismatch(existing, prefix) {
+			return fmt.Errorf("workspace already initialized as database %q, but --prefix %q was requested.\nRemove --prefix (or pass a matching value) to reuse the existing workspace", existing, prefix)
+		}
+	}
+	if !quiet {
+		fmt.Fprintln(os.Stderr, "Skipping init: workspace already initialized.")
+	}
+	return nil
+}
+
 // initIfMissingDatabaseMismatch reports whether an explicit --database request
 // conflicts with the existing workspace. --database is the authoritative database
 // selector (it overrides prefix-based naming later in init), so an explicit
@@ -2920,10 +2940,49 @@ func shouldPromptForRole() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
+// isInitRoleGitRepo uses the same CWD and routing policy as getBeadsRole/setBeadsRole,
+// including their suppression scrub: rev-parse is config-sensitive through
+// safe.directory, so retaining suppression here could answer false for a
+// repository that is only reachable via a global safe.directory entry and skip
+// the role write the pair would have completed.
+func isInitRoleGitRepo(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
+	return cmd.Run() == nil
+}
+
 // getBeadsRole reads the beads.role git config value.
 // Returns the role and true if configured, or empty string and false if not set.
+//
+// Both halves of the pair run on the same authority boundary as every role
+// reader so init cannot report a role it wrote into a different repository:
+// an inherited GIT_DIR would redirect setBeadsRole's write, and inherited
+// config suppression would blind the read that decides whether to write at
+// all.
+//
+// Selection is then the working directory or a containing ancestor. The scrub
+// drops GIT_CEILING_DIRECTORIES along with the redirects, so it removes a
+// bound rather than installing one: measured from a non-repository directory
+// nested under a repository, `git config beads.role <value>` fails "not in a
+// git directory" while a ceiling below that repository is inherited, and
+// writes the repository's local config once the ceiling is scrubbed. cmd.Dir
+// is still not threaded through the pair, because no production path chdirs
+// away from the invocation directory before these run. Two residuals remain:
+// upward discovery from an unintended cwd, and `bd -C <dir>`, which redirects
+// project selection by setting BEADS_DIR without chdir-ing
+// (applyChangeDirSelection), so init can act on another project's workspace
+// while the pair still reads and writes beads.role in the invocation
+// repository; -C requires an existing beads project at the target, so that
+// pairing arises on re-init rather than first init, and the GH#2950 safety net
+// records the same BEADS_DIR skew. Threading init's resolved project root
+// through the pair would close that one, but it is a behavior change rather
+// than a boundary fix. clearWorktreeGitRoutingEnv discloses the same widening
+// for the bd worktree commands.
 func getBeadsRole() (string, bool) {
 	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return "", false
@@ -2935,9 +2994,11 @@ func getBeadsRole() (string, bool) {
 	return role, true
 }
 
-// setBeadsRole writes the beads.role git config value.
+// setBeadsRole writes the beads.role git config value. See getBeadsRole for
+// why the pair shares the role-authority environment boundary.
 func setBeadsRole(role string) error {
 	cmd := exec.Command("git", "config", "beads.role", role)
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	return cmd.Run()
 }
 
@@ -3400,6 +3461,15 @@ func initGlobalDatabaseConfig(ctx context.Context, projectCfg *dolt.Config, quie
 	globalStore, err := newDoltStore(ctx, globalCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to open global database: %v\n", err)
+		// The gate's own block prescribes `bd migrate schema`, which migrates
+		// the PROJECT database — on this path that leaves the global database
+		// exactly as refused. Name the command that actually reaches it
+		// (#5920); this warning is the only place the global refusal surfaces.
+		if schema.IsRemoteMigrateGateError(err) {
+			fmt.Fprintf(os.Stderr,
+				"  The global database is shared by every workspace on this server. To migrate it, run:\n        %s\n",
+				schema.SharedConsentCommandGlobal)
+		}
 		return
 	}
 	defer func() { _ = globalStore.Close() }()
@@ -3437,4 +3507,72 @@ func resolveInitDoltMode(proxiedFlag, sharedFlag, serverFlag bool) string {
 		return "server"
 	}
 	return "embedded"
+}
+
+// commitEmbeddedInitArtifacts stages the local init artifacts and preserves the
+// optional-add and nonfatal commit behavior of the embedded bootstrap.
+func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
+	if initArtifactGitCommand(workDir, "rev-parse", "--git-dir").Run() != nil {
+		if !quiet {
+			fmt.Fprintln(os.Stderr, "Note: skipped bootstrap commit because Git could not resolve the selected repository.")
+		}
+		return
+	}
+	gitAddCmd := initArtifactGitCommand(workDir, "add", ".beads/")
+	if _, addErr := gitAddCmd.CombinedOutput(); addErr == nil {
+		// Also stage the agents file if it exists
+		agentsFileToStage := config.SafeAgentsFile()
+		if _, statErr := os.Stat(filepath.Join(workDir, agentsFileToStage)); statErr == nil {
+			agentsCmd := initArtifactGitCommand(workDir, "add", agentsFileToStage)
+			_ = agentsCmd.Run()
+		}
+		// Also stage Claude settings if created by init
+		claudeSettingsPath := filepath.Join(".claude", "settings.json")
+		if _, statErr := os.Stat(filepath.Join(workDir, claudeSettingsPath)); statErr == nil {
+			claudeCmd := initArtifactGitCommand(workDir, "add", claudeSettingsPath)
+			_ = claudeCmd.Run()
+		}
+		// Also stage CLAUDE.md if created by setup
+		if _, statErr := os.Stat(filepath.Join(workDir, "CLAUDE.md")); statErr == nil {
+			claudeMdCmd := initArtifactGitCommand(workDir, "add", "CLAUDE.md")
+			_ = claudeMdCmd.Run()
+		}
+		// Also stage Codex and Cursor project integration files if created
+		// by setup. Cursor project hooks/rules are meant to be committed
+		// (a no-op git add if .cursor/ is gitignored in this repo).
+		for _, path := range []string{".agents", ".codex", ".cursor"} {
+			if _, statErr := os.Stat(filepath.Join(workDir, path)); statErr == nil {
+				codexCmd := initArtifactGitCommand(workDir, "add", path)
+				_ = codexCmd.Run()
+			}
+		}
+		// Also stage .gitignore if modified by EnsureProjectGitignore
+		if _, statErr := os.Stat(filepath.Join(workDir, ".gitignore")); statErr == nil {
+			giCmd := initArtifactGitCommand(workDir, "add", ".gitignore")
+			_ = giCmd.Run()
+		}
+		// Hooks installed by this init can call back into bd. Skip all
+		// of them for the bootstrap commit to avoid self-deadlocking
+		// while init still owns the embedded Dolt lock. --no-verify
+		// alone does not skip prepare-commit-msg.
+		commitArgs := []string{"-c", "core.hooksPath=", "commit", "--no-verify", "-m", "bd init: initialize beads issue tracking"}
+		commitCmd := initArtifactGitCommand(workDir, commitArgs...)
+		if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
+			if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {
+				fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)
+			}
+		} else if !quiet {
+			fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
+		}
+		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+		// directory — including noms/LOCK files. These are Dolt-internal files.
+		// Removing them WILL cause unrecoverable data corruption and data loss.
+		// Dolt manages these files itself; external interference is never safe.
+	}
+}
+
+func initArtifactGitCommand(workDir string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	cmd.Dir, cmd.Env = workDir, gitenv.ScrubRouting(os.Environ())
+	return cmd
 }

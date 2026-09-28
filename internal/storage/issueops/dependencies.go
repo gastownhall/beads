@@ -1,17 +1,36 @@
 package issueops
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/gowebpki/jcs"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// DependencyMetadataEqual reports whether two dependency metadata JSON
+// strings are semantically equal per RFC 8785 (JCS), not merely byte-equal.
+// Dolt's native JSON column re-canonicalizes stored text on write (spacing,
+// key order, number form), so a byte compare between newly-supplied metadata
+// and metadata just read back from the column falsely reports a change on
+// every non-empty value (#6650). Both dependency re-add idempotency checks
+// share this so they can't drift. Falls back to a byte compare if either
+// side fails to parse as JSON.
+func DependencyMetadataEqual(a, b string) bool {
+	aCanon, aErr := jcs.Transform([]byte(a))
+	bCanon, bErr := jcs.Transform([]byte(b))
+	if aErr != nil || bErr != nil {
+		return a == b
+	}
+	return bytes.Equal(aCanon, bCanon)
+}
 
 type DepTargetKind int
 
@@ -159,7 +178,8 @@ type DepTargetPrecheck struct {
 //   - Source/target existence validation
 //   - Hierarchy deadlock validation for blocking deps (GH#1495, bd-wg7ve)
 //   - Cycle detection via recursive CTE across both dependency tables
-//   - Idempotent same-type updates (metadata only)
+//   - Idempotent same-type re-adds: a metadata change updates it, a
+//     change-free re-add writes and journals nothing (#5898 R3)
 //   - Type conflict detection
 //
 // The caller is responsible for transaction lifecycle, dolt commits, and
@@ -170,11 +190,23 @@ type DepTargetPrecheck struct {
 // same-type re-add or a silent structural add. Callers that stage tables for a
 // Dolt commit stage the events table only when an event row exists, so a
 // no-event add cannot sweep unrelated pending rows into the commit (GH#2455).
+//
+// A genuinely new edge is a change to the referencing (source) issue's durable
+// state, so it mints one version row for the source — on EVERY leg that reaches
+// this helper (the dependency editor, the legacy store verbs, batch apply),
+// whether or not an audit event was requested. A same-type re-add that changes
+// metadata is the same kind of durable-state change and mints on the same
+// terms; only a genuinely change-free re-add (identical type and metadata)
+// mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
-	return addDependencyInTx(ctx, tx, dep, actor, opts, nil)
+	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
 }
 
-func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+// addDependencyInTx is the body of AddDependencyInTx. mintVersion controls
+// whether a new edge mints the source's version row here: the exported entry
+// point always does, while a parent patch (applyParentPatch) rewires several
+// edges for one caller-visible mutation and mints once after the last of them.
+func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
 	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
 		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
 	}
@@ -263,13 +295,24 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// target expression defensively so stale/reclassified rows in another typed
 	// target column cannot bypass the idempotency/conflict check.
 	var existingType string
+	var existingMetadataNS sql.NullString
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType)
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS)
 	if err == nil {
+		existingMetadata := existingMetadataNS.String
+		if !existingMetadataNS.Valid {
+			existingMetadata = "{}"
+		}
 		if existingType == string(dep.Type) {
-			// Same type — idempotent; update metadata. No event is written, so the
-			// caller must not stage the events table for this re-add.
+			if DependencyMetadataEqual(existingMetadata, metadata) {
+				// Same type, same metadata: a change-free write. Nothing is
+				// written and nothing is journaled (#5898 R3).
+				return false, nil
+			}
+			// Same type, different metadata — idempotent; update metadata. No
+			// event is written, so the caller must not stage the events table
+			// for this re-add.
 			//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
 			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
 				metadata, dep.IssueID, dep.DependsOnID); err != nil {
@@ -278,7 +321,15 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay even
 			// though no audit event is written.
-			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+			if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+				return false, err
+			}
+			// The metadata genuinely changed, so — unlike the change-free
+			// branch above — this re-add is a real durable-state mutation of
+			// the source issue and mints on the same terms as a new edge
+			// (#5898 leg 2: "a same-type re-add whose metadata actually
+			// changed mints EXACTLY ONE version carrying the new state").
+			return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 		}
 		return false, &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -351,15 +402,36 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+		if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+			return eventWritten, err
+		}
+		return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
-	// as real to a replaying consumer as one added by an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+	// as real to a replaying consumer as one added by an explicit dep verb —
+	// and neither is the version row minted beside it.
+	if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+		return eventWritten, err
+	}
+	return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
+}
+
+// mintDependencyVersion versions the referencing (source) issue of an edge that
+// was actually inserted, deleted, or had its metadata refreshed by a same-type
+// re-add: the version-history seam for every dependency write path, reached
+// from addDependencyInTx and removeDependencyInTx only past a real row write —
+// never from a genuinely change-free re-add or the absent-edge return, which
+// mint nothing. mint false defers to a caller that mints once for a
+// multi-edge mutation. A wisp source is excluded by the seam itself.
+func mintDependencyVersion(ctx context.Context, tx DBTX, issueID, actor string, mint bool) error {
+	if !mint {
+		return nil
+	}
+	return RecordVersionInTx(ctx, tx, issueID, actor)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -584,6 +656,20 @@ func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID stri
 		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
 		return fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
 	}
+	// wisp_dependencies is part of the wisp deletion set (DeleteCascadeTables),
+	// but no delete path cleaned it: every wisp deletion orphaned its
+	// wisp_dependencies rows on both sides, accumulating dangling parent/child
+	// refs that reaper scans flag as anomalies. Remove the wisp's edges as
+	// child (issue_id) and as parent (depends_on_wisp_id). Two targeted
+	// DELETEs, not one OR query, so each hits its own index (ff-tqm).
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE issue_id = ?", wispID); err != nil {
+		return fmt.Errorf("delete wisp %s child rows from wisp_dependencies: %w", wispID, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
+		return fmt.Errorf("delete wisp %s parent rows from wisp_dependencies: %w", wispID, err)
+	}
 	return nil
 }
 
@@ -597,6 +683,19 @@ func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []
 		fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
 		args...); err != nil {
 		return fmt.Errorf("delete wisps from dependencies: %w", err)
+	}
+	// See DeleteWispFromDependenciesInTx: wisp_dependencies rows must go with
+	// the wisps, on both the child and parent side. Two targeted DELETEs, not
+	// one OR query, so each hits its own index (ff-tqm).
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE issue_id IN (%s)", inClause),
+		args...); err != nil {
+		return fmt.Errorf("delete wisps child rows from wisp_dependencies: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
+		args...); err != nil {
+		return fmt.Errorf("delete wisps parent rows from wisp_dependencies: %w", err)
 	}
 	return nil
 }
@@ -765,6 +864,68 @@ func replaceDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column,
 			return fmt.Errorf("insert replacement dependency target: %w", err)
 		}
 	}
+	return rekeyDependencyTargetInTx(ctx, tx, table, column, newID)
+}
+
+// rekeyDependencyTargetInTx re-derives the surrogate primary key of every row
+// whose typed target column already carries newID but whose id was derived from
+// the pre-rename target.
+//
+// The typed target columns carry ON UPDATE CASCADE foreign keys
+// (fk_dep_issue_target, fk_wisp_dep_issue_target), and updateIssueIDInTx renames
+// the issues row FIRST, so by the time replaceDependencyTargetInTx runs the
+// cascade has already moved depends_on_issue_id from oldID to newID. Its
+// `WHERE <column> = oldID` therefore matches nothing and the row keeps
+// id = depid.New(issue_id, oldID) — a stale primary key that re-forks across
+// clones (#4259) and, once a later rename hands oldID to a different issue,
+// leaves two rows contending for one deterministic id, which is the chain the
+// migration-time re-key then has to untangle (#5268).
+//
+// This is the target-side mirror of rekeyDependencySourceInTx, which already
+// matches both the pre- and post-cascade state on the source column. Only rows
+// whose id is actually stale are touched, so it is a no-op on a converged table
+// and on the rows the loop above just reinserted with the right id.
+func rekeyDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column, newID string) error {
+	//nolint:gosec // table and column are hardcoded by callers.
+	queryRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external
+		FROM %s
+		WHERE %s = ?
+	`, table, column), newID)
+	if err != nil {
+		return fmt.Errorf("query renamed dependency targets in %s: %w", table, err)
+	}
+	type rekey struct{ oldRowID, newRowID string }
+	var rekeys []rekey
+	for queryRows.Next() {
+		var id, issueID string
+		var issueTarget, wispTarget, external sql.NullString
+		if err := queryRows.Scan(&id, &issueID, &issueTarget, &wispTarget, &external); err != nil {
+			_ = queryRows.Close()
+			return fmt.Errorf("scan renamed dependency target: %w", err)
+		}
+		// Resolve rather than assume newID: on a row that somehow holds several
+		// typed targets, the identity the unique keys and depid see is the first
+		// non-null in precedence order, which need not be the renamed column.
+		target, ok := resolveDependencyTarget(issueTarget, wispTarget, external)
+		if !ok {
+			continue // ck_dep_one_target guarantees one target; skip defensively
+		}
+		if want := depid.New(issueID, target); want != id {
+			rekeys = append(rekeys, rekey{oldRowID: id, newRowID: want})
+		}
+	}
+	_ = queryRows.Close()
+	if err := queryRows.Err(); err != nil {
+		return fmt.Errorf("iterate renamed dependency targets: %w", err)
+	}
+	for _, rk := range rekeys {
+		//nolint:gosec // table is hardcoded by callers.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET id = ? WHERE id = ?", table),
+			rk.newRowID, rk.oldRowID); err != nil {
+			return fmt.Errorf("rekey dependency target id %s -> %s in %s: %w", rk.oldRowID, rk.newRowID, table, err)
+		}
+	}
 	return nil
 }
 
@@ -922,10 +1083,15 @@ func checkRenameTargetCollision(ctx context.Context, tx DBTX, table, typedCol, n
 //
 //nolint:gosec // G201: depTable from WispTableRouting (hardcoded constants)
 func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (bool, error) {
-	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil)
+	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil, true)
 }
 
-func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+// removeDependencyInTx is the body of RemoveDependencyInTx. A deleted edge is a
+// change to the source issue's durable state and mints one version row for it,
+// whether or not an audit event was requested; an absent edge returns before
+// any write and mints nothing. mintVersion is addDependencyInTx's, for the
+// same reason.
+func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, depTable := WispTableRouting(isWisp)
 
@@ -977,10 +1143,17 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
+	// The dependent is exactly the row a racing unblocking write can leave
+	// stale, so nothing is excluded from the post-commit recheck.
+	noteBlockedRecheck(tx, fmt.Sprintf("dependency removal %s -> %s", issueID, dependsOnID), nil, affectedIssues, affectedWisps)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
-	// consumer as one from an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor)
+	// consumer as one from an explicit dep verb. The same holds for the
+	// version row minted beside it.
+	if err := RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor); err != nil {
+		return eventWritten, err
+	}
+	return eventWritten, mintDependencyVersion(ctx, tx, issueID, actor, mintVersion)
 }
 
 func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {

@@ -19,8 +19,13 @@ const deleteBatchSize = 50
 // discovered during recursive dependent traversal.
 const maxRecursiveResults = 10000
 
+// DeleteIssueInTx removes one row and everything that hangs off it, journaling
+// the delete and its edge removals to actor. Callers with a request behind them
+// pass its actor; the actorless system surfaces (storage.DeleteIssue,
+// Tx.DeleteIssue) pass "" — see the 0066 contract in journal.go.
+//
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
+func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 
 	var deletedIssues, deletedWisps []string
@@ -36,22 +41,23 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
 
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}); err != nil {
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}, actor); err != nil {
 		return fmt.Errorf("journal dependency removals for %s: %w", id, err)
 	}
-	if err := deleteIssueRowInTx(ctx, tx, id, isWisp); err != nil {
+	if err := deleteIssueRowInTx(ctx, tx, id, isWisp, actor); err != nil {
 		return err
 	}
 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
 	}
+	noteBlockedRecheck(tx, deleteRecheckLabel([]string{id}, ""), []string{id}, affectedIssues, affectedWisps)
 
 	return nil
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool) error {
+func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool, actor string) error {
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	result, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", issueTable), id)
 	if err != nil {
@@ -71,18 +77,54 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 	// deletes (DeleteIssueInTx) and the per-wisp branch of the bulk delete
 	// (DeleteResolvedSetInTx); the bulk regular-issue branch journals its own
 	// ids directly. The rows==0 return above is what keeps this
-	// actually-deleted-only. The delete plumbing (storage.DeleteIssue and the
-	// bulk/cascade resolvers) carries no actor, so the row records none.
-	if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
+	// actually-deleted-only.
+	if err := RecordDeleteInTx(ctx, tx, id, actor); err != nil {
 		return err
 	}
 	if isWisp {
 		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
 			return err
 		}
+		if err := DeleteWispAuxRowsInTx(ctx, tx, []string{id}); err != nil {
+			return err
+		}
 	} else if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
 		// A deleted issue holds no lease.
 		return err
+	}
+	return nil
+}
+
+// wispAuxCascadeTables lists the wisp auxiliary tables a wisp delete must also
+// clean up, mirroring internal/storage/schema/cli_migrations.go:300-315.
+// wisp_child_counters is keyed on parent_id (a wisp can be a parent whose
+// children hold the counter row); the other three are keyed on issue_id.
+// Some deployed stores enforce this via FK ON DELETE CASCADE and some do not
+// (be-zdqyl: the migration adding those FKs was never promoted out of
+// migrations/ignored/), so the delete paths must not rely on the database to
+// do it for them. wisp_dependencies is cleaned by DeleteWisp(s)FromDependenciesInTx.
+var wispAuxCascadeTables = []struct{ table, column string }{
+	{"wisp_labels", "issue_id"},
+	{"wisp_events", "issue_id"},
+	{"wisp_comments", "issue_id"},
+	{"wisp_child_counters", "parent_id"},
+}
+
+// DeleteWispAuxRowsInTx removes every row the given wisp ids own across
+// wispAuxCascadeTables. Shared by every wisp delete path (the DoltStore wisp
+// GC paths and deleteIssueRowInTx) so the table set cannot drift between them.
+func DeleteWispAuxRowsInTx(ctx context.Context, tx *sql.Tx, wispIDs []string) error {
+	if len(wispIDs) == 0 {
+		return nil
+	}
+	inClause, args := buildSQLInClause(wispIDs)
+	for _, aux := range wispAuxCascadeTables {
+		//nolint:gosec // G201: aux.table/aux.column come from the fixed wispAuxCascadeTables literal; inClause contains only ? placeholders
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", aux.table, aux.column, inClause),
+			args...); err != nil {
+			return fmt.Errorf("delete wisp aux rows from %s: %w", aux.table, err)
+		}
 	}
 	return nil
 }
@@ -134,7 +176,7 @@ func ResolveDeletionSetInTx(ctx context.Context, tx DBTX, ids []string, cascade 
 	return DeletionSet{WispIDs: wispIDs, RegularIDs: regularIDs, All: all}, nil
 }
 
-func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
+func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade bool, force bool, dryRun bool, actor string) (*types.DeleteIssuesResult, error) {
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
 	}
@@ -180,7 +222,7 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 		}
 	}
 
-	result, err := DeleteResolvedSetInTx(ctx, tx, set, dryRun)
+	result, err := DeleteResolvedSetInTx(ctx, tx, set, dryRun, actor)
 	if err != nil {
 		return nil, err
 	}
@@ -195,8 +237,14 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 // neighborhood BEFORE the delete and rewrite it AFTER against the SAME
 // DeletionSet the delete was handed.
 //
+// EVERY ROW IT JOURNALS — the deletes and the cascade edge removals alike —
+// carries actor, the identity whose request resolved this set. That includes
+// the rows the cascade pulled in and not just the named ids: the reference
+// rewrite already attributes its `update` rows the same way, and a consumer
+// reading `”` on a cascade row would take it for a system write.
+//
 //nolint:gosec // G201: inClause contains only ? placeholders
-func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dryRun bool) (*types.DeleteIssuesResult, error) {
+func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dryRun bool, actor string) (*types.DeleteIssuesResult, error) {
 	result := &types.DeleteIssuesResult{}
 	if len(set.All) == 0 {
 		return result, nil
@@ -295,12 +343,12 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 	}
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, set.All); err != nil {
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, set.All, actor); err != nil {
 		return nil, fmt.Errorf("journal dependency removals for batch delete: %w", err)
 	}
 
 	for _, id := range set.WispIDs {
-		if err := deleteIssueRowInTx(ctx, tx, id, true); err != nil {
+		if err := deleteIssueRowInTx(ctx, tx, id, true, actor); err != nil {
 			return nil, fmt.Errorf("delete wisp %s: %w", id, err)
 		}
 	}
@@ -334,10 +382,9 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 
 	// Journal every regular issue this bulk/cascade delete removed. Wisps went
 	// through deleteIssueRowInTx above, which journals each itself; set.All is
-	// cascade-expanded, so this records cascade deletes too. The delete
-	// plumbing carries no actor, so the rows record none.
+	// cascade-expanded, so this records cascade deletes too.
 	for _, id := range journaledDeletes {
-		if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
+		if err := RecordDeleteInTx(ctx, tx, id, actor); err != nil {
 			return nil, err
 		}
 	}
@@ -345,6 +392,7 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after batch delete: %w", err)
 	}
+	noteBlockedRecheck(tx, deleteRecheckLabel(set.All, ""), set.All, affectedIssues, affectedWisps)
 
 	return result, nil
 }

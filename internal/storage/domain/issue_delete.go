@@ -163,10 +163,10 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return result, fmt.Errorf("delete: affected by deletion: %w", err)
 	}
 
-	if _, err := u.depRepo.DeleteAllForIDs(ctx, regularIDs, DepInsertOpts{}); err != nil {
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, regularIDs, DepInsertOpts{}, actor); err != nil {
 		return result, fmt.Errorf("delete: drop deps: %w", err)
 	}
-	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{UseWispsTable: true}); err != nil {
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{UseWispsTable: true}, actor); err != nil {
 		return result, fmt.Errorf("delete: drop wisp deps: %w", err)
 	}
 	// The SYNC-PLANE edges pointing at a deleted wisp, which are not the same
@@ -177,7 +177,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	// a row that no longer exists — dangling, not orphaned, which is not what
 	// issueops.DeleteRequest.Force promises. The store body has always done
 	// this (issueops.deleteIssueRowInTx -> DeleteWispFromDependenciesInTx).
-	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{}); err != nil {
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{}, actor); err != nil {
 		return result, fmt.Errorf("delete: drop sync-plane edges into deleted wisps: %w", err)
 	}
 	if _, err := u.labelRepo.DeleteAllForIDs(ctx, regularIDs, LabelOpts{}); err != nil {
@@ -193,11 +193,11 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return result, fmt.Errorf("delete: drop wisp events: %w", err)
 	}
 
-	issuesDeleted, err := u.issueRepo.DeleteByIDs(ctx, regularIDs, IssueTableOpts{})
+	issuesDeleted, err := u.issueRepo.DeleteByIDs(ctx, regularIDs, IssueTableOpts{}, actor)
 	if err != nil {
 		return result, fmt.Errorf("delete: drop issue rows: %w", err)
 	}
-	wispsDeleted, err := u.issueRepo.DeleteByIDs(ctx, wispIDs, IssueTableOpts{UseWispsTable: true})
+	wispsDeleted, err := u.issueRepo.DeleteByIDs(ctx, wispIDs, IssueTableOpts{UseWispsTable: true}, actor)
 	if err != nil {
 		return result, fmt.Errorf("delete: drop wisp rows: %w", err)
 	}

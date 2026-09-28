@@ -7,7 +7,12 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
-func validateConfiguredBackend(cfg *configfile.Config) error {
+// validateConfiguredBackend fails closed on metadata that selects a removed or
+// unrecognized backend. beadsDir is the workspace whose metadata cfg came from;
+// the rejection inspects it (read-only) so a workspace that already holds a Dolt
+// database is told to fix the stale "backend" value rather than to export and
+// reinitialize. Pass "" only where there is genuinely no workspace directory.
+func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	if cfg == nil {
 		return nil
 	}
@@ -16,11 +21,11 @@ func validateConfiguredBackend(cfg *configfile.Config) error {
 	}
 	switch cfg.Backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
-		return configfile.RemovedBackendError(cfg.Backend)
+		return configfile.RemovedBackendErrorAt(cfg.Backend, beadsDir, cfg)
 	case "", configfile.BackendDolt:
 		return nil
 	default:
-		return configfile.UnknownBackendError(cfg.Backend)
+		return configfile.UnknownBackendErrorAt(cfg.Backend, beadsDir, cfg)
 	}
 }
 
@@ -33,8 +38,8 @@ func registeredBackendWorkspaceIsBeadsDir(cfg *configfile.Config) bool {
 	return backends.WorkspaceIsBeadsDir(cfg.GetBackend())
 }
 
-func requireDoltBackend(cfg *configfile.Config) error {
-	if err := validateConfiguredBackend(cfg); err != nil {
+func requireDoltBackend(cfg *configfile.Config, beadsDir string) error {
+	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return err
 	}
 	if cfg != nil && cfg.GetBackend() != configfile.BackendDolt {
@@ -64,7 +69,7 @@ func loadDoltBackendConfig(beadsDir string) (*configfile.Config, error) {
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
-	if err := requireDoltBackend(cfg); err != nil {
+	if err := requireDoltBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
 	return cfg, nil

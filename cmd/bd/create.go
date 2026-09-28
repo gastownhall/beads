@@ -52,7 +52,7 @@ var createCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("create") // also covers CheckMigrationFreeze (dc-6jaq)
+		CheckReadonly("create") // also covers the migration freeze check (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("create")
 		defer func() {
@@ -197,32 +197,9 @@ var createCmd = &cobra.Command{
 			return HandleError("--ephemeral and --no-history are mutually exclusive")
 		}
 		storageClassFlag, _ := cmd.Flags().GetString("storage-class")
-		storageClass, err := resolveStorageClass(storageClassFlag, types.IssueType(issueType).Normalize())
+		storageClass, wisp, err := resolveCreateStorageClass(storageClassFlag, types.IssueType(issueType), wisp, noHistory)
 		if err != nil {
 			return HandleError("%v", err)
-		}
-		// --storage-class ephemeral is the spelled-out spelling of --ephemeral
-		// (Protocol v0.1 C1.4: the wisp plane is today's ephemeral-class
-		// implementation). It routes to the wisp path exactly like the flag;
-		// the --no-history mutual exclusion above still applies.
-		if storageClass == types.StorageClassEphemeral {
-			if noHistory {
-				return HandleError("--storage-class ephemeral and --no-history are mutually exclusive")
-			}
-			wisp = true
-			storageClass = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
-		}
-		// Reconcile the requested durable class with the effective wisp plane
-		// (flag > config, Protocol v0.1 §C1.3): an explicit --storage-class
-		// contradicts --ephemeral/--no-history and is rejected, so the durable
-		// intent is preserved rather than silently collapsed into an
-		// effective-ephemeral record; a per-type config default yields to the
-		// explicit flag. versioned normalizes to the unset marker only after the
-		// check (C2.4).
-		var storageClassConflict bool
-		storageClass, storageClassConflict = reconcileStorageClassPlane(storageClass, storageClassFlag != "", wisp || noHistory)
-		if storageClassConflict {
-			return HandleError("--storage-class %s conflicts with --ephemeral/--no-history: wisp-plane records are storage class ephemeral", storageClass)
 		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
@@ -280,22 +257,11 @@ var createCmd = &cobra.Command{
 		var metadata json.RawMessage
 		if cmd.Flags().Changed("metadata") {
 			metadataValue, _ := cmd.Flags().GetString("metadata")
-			var metadataJSON string
-			if strings.HasPrefix(metadataValue, "@") {
-				filePath := metadataValue[1:]
-				// #nosec G304 -- user explicitly provides file path via @file.json syntax
-				data, err := os.ReadFile(filePath)
-				if err != nil {
-					return HandleError("failed to read metadata file %s: %v", filePath, err)
-				}
-				metadataJSON = string(data)
-			} else {
-				metadataJSON = metadataValue
+			parsed, err := readMetadataFlag(metadataValue)
+			if err != nil {
+				return HandleError("%v", err)
 			}
-			if !json.Valid([]byte(metadataJSON)) {
-				return HandleError("invalid JSON in --metadata: must be valid JSON")
-			}
-			metadata = json.RawMessage(metadataJSON)
+			metadata = parsed
 		}
 
 		validateTemplate, _ := cmd.Flags().GetBool("validate")
@@ -441,7 +407,7 @@ var createCmd = &cobra.Command{
 				var err error
 				targetStore, err = newDoltStoreFromConfig(rootCtx, targetBeadsDirPath)
 				if err != nil {
-					return HandleError("failed to open target store: %v", err)
+					return handleCreateTargetStoreError(err, targetBeadsDirPath, "failed to open target store: %v")
 				}
 			}
 
@@ -469,7 +435,11 @@ var createCmd = &cobra.Command{
 			var err error
 			parentLookupStore, err = openDryRunTargetStore(rootCtx, repoPath)
 			if err != nil {
-				return HandleError("%v", err)
+				targetPath := repoPath
+				if !remotecache.IsRemoteURL(repoPath) {
+					targetPath = filepath.Join(routing.ExpandPath(repoPath), ".beads")
+				}
+				return handleCreateTargetStoreError(err, targetPath, "%v")
 			}
 			defer func() { _ = parentLookupStore.Close() }()
 		}
@@ -759,6 +729,49 @@ func reconcileStorageClassPlane(class types.StorageClass, explicit, wispPlane bo
 	return class.Normalize(), false
 }
 
+// resolveCreateStorageClass is the ONE create-time storage-class decision every
+// `bd create` CLI door makes: parse the flag (or fall back to the per-type
+// storage-class.<type> config default), route the ephemeral spelling to the wisp
+// plane, and reject a durable class that contradicts the plane. Every door goes
+// through it so the direct, proxied, and --file routes cannot answer differently;
+// graphApplyNodeStorageClass is the per-node mirror, which additionally honors a
+// node's own pointer overrides.
+//
+// flagValue is the raw --storage-class spelling ("" when unset). wisp/noHistory
+// are the plane flags as the caller read them; the returned wisp is the plane
+// AFTER the ephemeral spelling has been folded in (Protocol v0.1 C1.4). The
+// returned class is already normalized (C2.4), so it can go straight onto the
+// issue.
+func resolveCreateStorageClass(flagValue string, issueType types.IssueType, wisp, noHistory bool) (types.StorageClass, bool, error) {
+	class, err := resolveStorageClass(flagValue, issueType.Normalize())
+	if err != nil {
+		return "", wisp, err
+	}
+	// --storage-class ephemeral is the spelled-out spelling of --ephemeral
+	// (Protocol v0.1 C1.4: the wisp plane is today's ephemeral-class
+	// implementation). It routes to the wisp path exactly like the flag; the
+	// --ephemeral/--no-history mutual exclusion still applies.
+	if class == types.StorageClassEphemeral {
+		if noHistory {
+			return "", wisp, errors.New("--storage-class ephemeral and --no-history are mutually exclusive")
+		}
+		wisp = true
+		class = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
+	}
+	// Reconcile the requested durable class with the effective wisp plane
+	// (flag > config, Protocol v0.1 §C1.3): an explicit --storage-class
+	// contradicts --ephemeral/--no-history and is rejected, so the durable
+	// intent is preserved rather than silently collapsed into an
+	// effective-ephemeral record; a per-type config default yields to the
+	// explicit flag. versioned normalizes to the unset marker only after the
+	// check (C2.4).
+	class, conflict := reconcileStorageClassPlane(class, flagValue != "", wisp || noHistory)
+	if conflict {
+		return "", wisp, fmt.Errorf("--storage-class %s conflicts with --ephemeral/--no-history: wisp-plane records are storage class ephemeral", class)
+	}
+	return class, wisp, nil
+}
+
 func buildCreateIssue(params createIssueParams) *types.Issue {
 	var externalRefPtr *string
 	if params.ExternalRef != "" {
@@ -941,9 +954,25 @@ func init() {
 	//   --defer=tomorrow    Hidden until tomorrow
 	createCmd.Flags().String("due", "", "Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
 	createCmd.Flags().String("defer", "", "Defer until date (issue hidden from bd ready until then). Same formats as --due")
-	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
+	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON object, or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
+}
+
+// handleCreateTargetStoreError preserves the existing text path for ordinary
+// store failures while rendering capability refusals as typed JSON when asked.
+func handleCreateTargetStoreError(err error, targetPath, fallbackFormat string) error {
+	var capErr *ProxyCapabilityError
+	if !errors.As(err, &capErr) {
+		return HandleError(fallbackFormat, err)
+	}
+
+	withContext := *capErr
+	withContext.Message = fmt.Sprintf("failed to open create target %q: %s", targetPath, capErr.Message)
+	if capErr.Code == "proxy.store.unrouted" {
+		withContext.Message = fmt.Sprintf("create target %q is a proxied-server workspace; bd cannot open it as a direct store", targetPath)
+	}
+	return HandleProxyCapabilityError(&withContext)
 }
 
 // formatTimeForRPC converts a *time.Time to RFC3339 string for RPC calls.

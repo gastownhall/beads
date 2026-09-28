@@ -1,5 +1,13 @@
--- Ignored migration 0026: ensure wisps.current_revision exists on every clone
+-- Ignored migration 0027: ensure wisps.current_revision exists on every clone
 -- (be-hs42e.2 / gastownhall/beads#6134).
+--
+-- Numbered 0026 on main until the v1.3.0 forward-port merge, which brought in
+-- release/1.3.0's own 0026 (dep_rekey_dedup_marker). That one is in the
+-- shipped v1.3.0 tag, so field stores have already recorded it at ordinal 26
+-- and it can never move; this one had not shipped in any release, so it moved
+-- here. Clones that applied it at 26 from a main build re-run it at 27, which
+-- the guard below makes a no-op, and the pending-27 pass is also what keeps
+-- 0026's forced re-key pass reaching them.
 --
 -- Synced migration 0067 adds current_revision to issues and wisps — but wisps
 -- is dolt-ignored (migration 0019), so its schema is clone-local, and a

@@ -98,6 +98,9 @@ func TestRyukDisabled_SwallowingCallerStillDies(t *testing.T) {
 		"BEADS_TEST_SKIP": "",
 		"HOME":            home,
 		"PATH":            stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		// The guard sits on the container path only; an inherited
+		// BEADS_TEST_DOLT_SERVER=local would route the child around it.
+		EnvDoltServerBackend: "container",
 	})
 
 	assertGuardExit(t, out, err)

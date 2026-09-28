@@ -18,6 +18,10 @@ type doltServerTx struct {
 	// releaseConn and poisonConn — so the activation entry cannot outlive the
 	// transaction it describes, whichever way the transaction ends.
 	clearJournalScope func()
+	// clearVersionScope is clearJournalScope's counterpart for dual-write
+	// issue-version history: same binding at BeginTx, same release at
+	// releaseConn/poisonConn.
+	clearVersionScope func()
 }
 
 var _ Tx = (*doltServerTx)(nil)
@@ -30,13 +34,28 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
 	}
+	// dolt.auto-commit=batch/off (GH#4995): defer the Dolt version commit to a
+	// later explicit commit point (bd dolt commit), the same as the embedded
+	// and direct SQL-server backends already do at their own commit sites
+	// (bd-4wamg) — persist the write into the working set via a plain SQL
+	// COMMIT below, without minting Dolt history, regardless of what message
+	// the caller named. issueOpsContext sets this on the context before the
+	// proxied CLI dispatch opens its unit of work.
+	if message != "" && issueops.VersionCommitDeferred(ctx) {
+		message = ""
+	}
 	// An empty message selects the EPHEMERAL commit form (bd-aq0ql): a plain
 	// SQL COMMIT persists the transaction's writes into the working set
-	// without minting a Dolt commit or history. This exists for work that
-	// touches ONLY dolt_ignored state — today the leases table (bd-lrgn1),
-	// whose heartbeats must never create commits — and is only reachable via
-	// uow.RunTxEphemeral: RunTx/RunTxResult treat an empty commitMsg as
-	// "nothing to commit" and never call Commit at all.
+	// without minting a Dolt commit or history. It has two entry points:
+	//
+	//   - uow.RunTxEphemeral, for work that touches ONLY dolt_ignored state —
+	//     today the leases table (bd-lrgn1), whose heartbeats must never create
+	//     commits. RunTx/RunTxResult treat an empty commitMsg as "nothing to
+	//     commit" and never call Commit at all, so they cannot reach it that way.
+	//   - RunTx/RunTxResult under a deferred-version-commit context, via the
+	//     blanking just above (GH#4995). There the writes are ordinary versioned
+	//     rows and the ONLY-dolt_ignored-state rationale does not apply: the
+	//     working set is meant to hold them until the explicit flush point.
 	stmt, args := "CALL DOLT_COMMIT('-Am', ?);", []interface{}{message}
 	if message == "" {
 		stmt, args = "COMMIT;", nil
@@ -155,6 +174,7 @@ func (t *doltServerTx) rollbackConn(ctx context.Context) error {
 
 func (t *doltServerTx) releaseConn() {
 	t.releaseJournalScope()
+	t.releaseVersionScope()
 	if t.conn != nil {
 		_ = t.conn.Close()
 		t.conn = nil
@@ -171,6 +191,15 @@ func (t *doltServerTx) releaseJournalScope() {
 	}
 }
 
+// releaseVersionScope is releaseJournalScope's counterpart for dual-write
+// issue-version history. Idempotent for the same reason.
+func (t *doltServerTx) releaseVersionScope() {
+	if t.clearVersionScope != nil {
+		t.clearVersionScope()
+		t.clearVersionScope = nil
+	}
+}
+
 // poisonConn discards the pinned session instead of returning it to the pool.
 // A session whose transaction may still be open must never be reused: because
 // go-sql-driver's ResetSession only performs a liveness check (no
@@ -179,6 +208,7 @@ func (t *doltServerTx) releaseJournalScope() {
 // database/sql close the connection and drop it from the pool.
 func (t *doltServerTx) poisonConn() {
 	t.releaseJournalScope()
+	t.releaseVersionScope()
 	if t.conn == nil {
 		return
 	}

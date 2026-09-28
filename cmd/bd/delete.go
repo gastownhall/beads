@@ -364,6 +364,14 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 
 	commandDidWrite.Store(true)
 
+	// Tell this command's own auto-export that these ids are supposed to be
+	// gone. Without it the export's orphan guard sees them as JSONL-only
+	// records absent from the store, refuses to overwrite, and never saves
+	// state — which is the permanent wedge of GH#5896. Recorded for the
+	// requested ids; anything cascade removed alongside them is proven later
+	// by the store's own history instead.
+	commandDeletedIssueIDs.add(resolvedIDs...)
+
 	// NO COMMIT COMPENSATION HERE, for the reason the single-id path gives:
 	// the role versions the deletion itself, on the store the rows were
 	// deleted from, and defers it in batch and off modes.

@@ -46,6 +46,8 @@ type createInput struct {
 	validate           bool
 	ephemeral          bool
 	noHistory          bool
+	storageClass       types.StorageClass
+	storageClassFlag   string
 	molType            types.MolType
 	wispType           types.WispType
 	eventCategory      string
@@ -180,6 +182,21 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	in.priority = priority
 
 	in.issueType, _ = cmd.Flags().GetString("type")
+
+	// The raw flag rides along for the --file batch, which resolves the class
+	// per template (the per-type config default needs a type to key on, and only
+	// a template has one). --graph rejects the flag outright, so the only route
+	// that resolves it here is the single-issue create, on both transports.
+	in.storageClassFlag, _ = cmd.Flags().GetString("storage-class")
+	if in.markdownFile == "" && in.graphFile == "" {
+		class, wisp, err := resolveCreateStorageClass(in.storageClassFlag, types.IssueType(in.issueType), in.ephemeral, in.noHistory)
+		if err != nil {
+			return in, HandleError("%v", err)
+		}
+		in.storageClass = class
+		in.ephemeral = wisp
+	}
+
 	in.status, _ = cmd.Flags().GetString("status")
 	in.assignee, _ = cmd.Flags().GetString("assignee")
 	in.externalRef, _ = cmd.Flags().GetString("external-ref")
@@ -255,22 +272,11 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 
 	if cmd.Flags().Changed("metadata") {
 		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			// #nosec G304 -- user explicitly provides file path via @file.json syntax
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return in, HandleError("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
+		metadata, err := readMetadataFlag(metadataValue)
+		if err != nil {
+			return in, HandleError("%v", err)
 		}
-		if !json.Valid([]byte(metadataJSON)) {
-			return in, HandleError("invalid JSON in --metadata: must be valid JSON")
-		}
-		in.metadata = json.RawMessage(metadataJSON)
+		in.metadata = metadata
 		in.metadataSet = true
 	}
 
@@ -333,6 +339,12 @@ func rejectSingleIssueFlagsForGraph(cmd *cobra.Command) error {
 	}
 	if cmd.Flags().Changed("mol-type") {
 		return HandleError("--mol-type is not valid with --graph (set mol_type per node in the plan instead)")
+	}
+	// Same shape as --mol-type: a plan-wide class would duplicate the per-node
+	// storage_class field (plus its per-type config default) that graph-apply
+	// already honors, so the flag is refused rather than accepted and ignored.
+	if cmd.Flags().Changed("storage-class") {
+		return HandleError("--storage-class is not valid with --graph (set storage_class per node in the plan instead)")
 	}
 	return nil
 }

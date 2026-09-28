@@ -31,13 +31,25 @@ import (
 func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (publicops.SweepResult, error) {
 	result := publicops.SweepResult{DryRun: req.DryRun}
 
-	candidates, err := SearchIssuesInTx(ctx, tx, "", workapi.BuildSweepCandidateFilter(req))
+	search := SearchIssuesInTx
+	if workapi.SweepSearchesWispsPlaneOnly(req) {
+		search = SearchWispsPlaneInTx
+	}
+	candidates, err := search(ctx, tx, "", workapi.BuildSweepCandidateFilter(req))
 	if err != nil {
 		return publicops.SweepResult{}, fmt.Errorf("listing sweep candidates: %w", err)
 	}
 
 	kept, skips := workapi.FilterSweepCandidates(candidates, req.IDPattern, req.ClosedBefore)
 	result.Skipped = skips
+
+	if req.ProtectLiveDependents {
+		protected, err := sweepLiveDependentsInTx(ctx, tx, kept)
+		if err != nil {
+			return publicops.SweepResult{}, err
+		}
+		kept, result.Skipped.LiveDependent = workapi.PartitionSweepLiveDependents(kept, protected)
+	}
 
 	if req.ProtectReferenced {
 		referenced, err := sweepReferencedInTx(ctx, tx, kept)
@@ -48,6 +60,8 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 		kept, count, result.ReferencedIDs = workapi.PartitionSweepReferenced(kept, referenced)
 		result.Skipped.Referenced = count
 	}
+
+	kept, result.Remaining = workapi.LimitSweepCandidates(kept, req.Limit)
 
 	if len(kept) == 0 {
 		return result, nil
@@ -62,7 +76,7 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 	// dependents outside the selection. The DRY RUN passes the same flags rather
 	// than the force=false the direct route used to pass, so a preview cannot
 	// fail where the real run would succeed.
-	deleted, err := DeleteIssuesInTx(ctx, tx, ids, false, true, req.DryRun)
+	deleted, err := DeleteIssuesInTx(ctx, tx, ids, false, true, req.DryRun, req.Actor)
 	if err != nil {
 		return publicops.SweepResult{}, err
 	}
@@ -71,6 +85,46 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	return result, nil
+}
+
+// sweepLiveDependentsInTx returns which of the candidates a live row depends
+// on through a protecting edge (issueops.SweepRequest.ProtectLiveDependents),
+// on the SAME transaction the candidates came off. Edges are read from both
+// dependency tables, and the sources' statuses from both planes.
+//
+// Reading the custom statuses is required for the reason sweepReferencedInTx
+// gives: a missed custom active status would under-protect.
+func sweepLiveDependentsInTx(ctx context.Context, tx *sql.Tx, candidates []*types.Issue) (map[string]bool, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(candidates))
+	for i, issue := range candidates {
+		ids[i] = issue.ID
+	}
+	incoming, err := GetDependentRecordsForIssuesInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading dependents for live-dependent protection: %w", err)
+	}
+	sources := workapi.SweepLiveDependentSources(incoming)
+	if len(sources) == 0 {
+		return nil, nil
+	}
+	custom, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
+	}
+	liveRows, err := SearchIssuesInTx(ctx, tx, "", workapi.BuildSweepLiveDependentScanFilter(sources, custom))
+	if err != nil {
+		return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
+	}
+	live := make(map[string]bool, len(liveRows))
+	for _, issue := range liveRows {
+		if issue != nil {
+			live[issue.ID] = true
+		}
+	}
+	return workapi.SweepLiveDependentTargets(incoming, live), nil
 }
 
 // sweepReferencedInTx returns which of the candidates are cited by a row that

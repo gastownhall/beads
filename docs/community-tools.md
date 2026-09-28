@@ -16,6 +16,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[perles](https://github.com/zjrosen/perles)** - Terminal UI search, dependency and kanban viewer powered by a custom BQL (Beads Query Language). Built by [@zjrosen](https://github.com/zjrosen). (Go)
 
+- **[beady-eye](https://github.com/CodeForBreakfast/beady-eye)** - Live terminal viewer that follows agents as they work through a tree of beads, redrawing as they claim and finish them. Integrates with [herdr](https://herdr.dev), and watches several projects at once. Read-only. Built by [@GraemeF](https://github.com/GraemeF). (Rust)
+
 ## Web UIs
 
 - **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
@@ -27,6 +29,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 - **[beads-web](https://github.com/weselow/beads-web)** - Actively maintained fork of beads-kanban-ui. Cross-platform single-binary distribution (macOS, Linux, Windows), 7 visual themes, Dolt direct SQL integration, Windows multi-drive path support, drag-and-drop status updates. Download from [GitHub Releases](https://github.com/weselow/beads-web/releases). Built by [@weselow](https://github.com/weselow). (TypeScript/Rust)
 
 - **[Bead Me Up, Scotty](https://github.com/brendan-appstart/bead-me-up-scotty)** - Polished multi-project web UI for creating, updating, and prioritizing beads across all your repos from one place. Kanban board with drag-and-drop status changes and reordering, plus list, epics (with progress bars), and dependency-graph views; faceted filtering and full-text search; live updates via SSE that react the moment `.beads/` changes; and human-vs-agent attribution throughout. Uses the `bd` CLI for full Dolt compatibility. Global install (`scotty`) opens the current directory's project in your browser, and a built-in Publish view generates a shareable static showcase site from your beads. Live demo at [beadmeupscotty.com](https://beadmeupscotty.com). Built by [@brendan-appstart](https://github.com/brendan-appstart). (Next.js/TypeScript)
+
+- **[Maggie](https://github.com/mulgadc/maggie)** - Single Go binary with the SPA embedded, serving dashboard, table, board and dependency graph views. Text, id glob, priority, type, assignee, label and status filters compose in one filter bar. Uses the `bd` CLI for every read and write, keeping no store of its own. Runs from a container that bundles `bd` and `dolt`, against either a local `.beads/` directory or a shared Dolt SQL server. Built by [@mulgadc](https://github.com/mulgadc). (Go/React)
 
 ## Editor Extensions
 

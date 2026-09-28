@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // TestServeFlags pins the flag surface. Every bound that is NOT here — the
@@ -400,7 +401,7 @@ func packageDir(t *testing.T) string {
 	if !ok {
 		t.Fatal("cannot resolve this test's source path")
 	}
-	return filepath.Dir(file)
+	return bazeltest.CallerDir(file, "cmd/bd")
 }
 
 // TestServeRefusesStrictReadonly.

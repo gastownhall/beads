@@ -94,6 +94,7 @@ var roleContractCases = []roleContract{
 		RunBatchCreatorRecordsOneHistoryEntry,
 		RunBatchCreatorRecordsNoHistoryForAnEphemeralBatch,
 		RunBatchCreatorDoesNotMutateTheCallerRequest,
+		RunBatchCreatorEchoesSubSecondTimestamps,
 	),
 
 	roleCases("BlockingAnnotator", "BlockingAnnotator()", oncePerRole,
@@ -244,6 +245,8 @@ var roleContractCases = []roleContract{
 		RunDependencyEditorRefusesCrossPlaneCycle,
 		RunDependencyEditorAddedEchoesTheRequestOrder,
 		RunDependencyEditorSameTypeReAddIsIdempotent,
+		RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion,
+		RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp,
 		RunDependencyEditorRepeatsWithinOneRequestCollapse,
 		RunDependencyEditorAttributesItsEventsToTheActor,
 		RunDependencyEditorRetypeRefusalLeavesTheOriginalEdge,
@@ -277,6 +280,24 @@ var roleContractCases = []roleContract{
 		RunDependencyEditorAcceptsADiamond,
 		RunDependencyEditorGateScopeFollowsTheEdgeType,
 		RunDependencyEditorAcceptsBlockingAcrossIssueTypes,
+	),
+
+	// The accessor named here is not an accessor at all, alone among these
+	// rows except Journal: storage.VersionedHistoryConfigurer is reached by
+	// TYPE ASSERTION, either on a store (the dolt and embedded-dolt legs) or
+	// on a unit-of-work provider (the uow leg), because enabling dual-write
+	// history is engine configuration rather than an issue-shaped operation
+	// storage.Storage publishes. A backend that does not implement Phase 2's
+	// dual-write mechanism leaves this field nil; see
+	// dualwrite_history_contract.go's header.
+	roleCases("DualWrite", "the storage.VersionedHistoryConfigurer type assertion", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *DualWriteFixture { return b.DualWrite },
+		RunDualWriteMintsOneVersionRowPerAcceptedMutation,
+		RunDualWriteNoOpMutationMintsNoRow,
+		RunDualWriteAttributionIsRecordedWithTheMutation,
+		RunDualWriteCurrentRevisionMatchesTheNewVersionRow,
+		RunDualWriteFlagOffProducesNoVersionRows,
+		RunDualWriteNoOpMutationLeavesThePriorVersionRowUnperturbed,
 	),
 
 	roleCases("EdgeReader", "EdgeReader()", oncePerRole,
@@ -412,6 +433,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleCreateRefusesAForeignIDPrefix,
 		RunLifecycleCreateInheritsParentLabels,
 		RunLifecycleCreateWritesEveryScalarField,
+		RunLifecycleCreateEchoesSubSecondTimestamps,
 	),
 
 	roleCases("LifecycleUpdate", "IssueLifecycle()", oncePerRole,
@@ -635,6 +657,11 @@ var roleContractCases = []roleContract{
 		RunSweeperEmptyMatchIsZeroAndNil,
 		RunSweeperRecordsExactlyOneHistoryEntry,
 		RunSweeperDoesNotMutateTheCallerRequest,
+		RunSweeperWispsPlaneClearsTheWholeWispsTable,
+		RunSweeperWispsPlaneRequiresAFilter,
+		RunSweeperProtectsLiveDependents,
+		RunSweeperProtectsLiveDependentsAcrossPlanes,
+		RunSweeperLimitTakesTheOldestClosedFirst,
 	),
 
 	roleCases("TreeWalker", "TreeWalker()", oncePerRole,

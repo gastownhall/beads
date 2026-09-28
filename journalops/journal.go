@@ -16,9 +16,10 @@ import "context"
 // bound rather than a per-row age test, for exactly this reason.
 //
 // Actor is the acting identity that performed the mutation, as resolved for
-// the audit-events table; empty when the mutation path has no actor (derived
-// maintenance, actorless delete plumbing, and rows written before the column
-// existed).
+// the audit-events table. A delete, and the dep_remove rows a cascading delete
+// produces, carry the identity that REQUESTED the delete. It is empty only
+// when the path genuinely has no actor: derived maintenance, system cleanup
+// with no request behind it, and rows written before the column existed.
 type Row struct {
 	Seq         int64
 	TS          string

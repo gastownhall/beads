@@ -72,11 +72,19 @@ type IssueSQLRepository interface {
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
-	Delete(ctx context.Context, id string, opts IssueTableOpts) error
-	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts) (int, error)
+	// Delete and DeleteByIDs take actor for the reason Close/Reopen/Claim do:
+	// the events journal records one row per removed bead and the identity that
+	// asked for the removal is only known above this seam. A caller with no
+	// request behind it passes "" (system/unknown), never a placeholder.
+	Delete(ctx context.Context, id string, opts IssueTableOpts, actor string) error
+	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts, actor string) (int, error)
 	PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, regularIDs []string, err error)
 	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
@@ -304,6 +312,10 @@ type IssueUseCase interface {
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -835,6 +847,14 @@ func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filte
 	out, err := u.issueRepo.SearchAcrossIssuesAndWisps(ctx, query, filter)
 	if err != nil {
 		return SearchPage{}, fmt.Errorf("SearchIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (u *issueUseCaseImpl) SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	out, err := u.issueRepo.SearchWispsPlane(ctx, query, filter)
+	if err != nil {
+		return nil, fmt.Errorf("SearchWispsPlane: %w", err)
 	}
 	return out, nil
 }

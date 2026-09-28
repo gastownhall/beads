@@ -18,6 +18,7 @@ import (
 // mapped host port, and Stop() to tear it down.
 type ContainerProvider struct {
 	container *dolt.DoltContainer
+	local     *localDoltServer // local backend instead of container
 	port      int
 }
 
@@ -25,6 +26,14 @@ type ContainerProvider struct {
 func NewContainerProvider() (*ContainerProvider, error) {
 	if state := checkDolt(); state != doltReady {
 		return nil, fmt.Errorf("cannot create container provider: %s", state)
+	}
+
+	if useLocalDoltServer() {
+		s, err := startLocalDoltServer()
+		if err != nil {
+			return nil, fmt.Errorf("starting local Dolt server: %w", err)
+		}
+		return &ContainerProvider{local: s, port: s.Port()}, nil
 	}
 	// After checkDolt, matching the other two entry points: a box with no
 	// container runtime should report "dolt not ready" and skip, not be killed
@@ -74,6 +83,11 @@ func (p *ContainerProvider) WritePortFile(serverDir string) error {
 
 // Stop terminates the container.
 func (p *ContainerProvider) Stop() error {
+	if p.local != nil {
+		p.local.terminate()
+		p.local = nil
+		return nil
+	}
 	if p.container == nil {
 		return nil
 	}

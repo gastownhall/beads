@@ -27,8 +27,17 @@ import (
 // what is stored is byte-for-byte what was digested.
 
 // AuxTimeLayout renders a UTC timestamp exactly as Dolt renders
-// CAST(created_at AS CHAR) for a DATETIME(0) column. It is part of the id
-// derivation and frozen with the column lists.
+// DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') for a DATETIME(0) column — the
+// rendering the digest column lists pin explicitly server-side (see
+// auxRekeyTables in internal/storage/schema), asserted byte-for-byte against
+// this layout by TestAuxTimeDateFormatMatchesGoRendering in
+// internal/storage/dolt. It is part of the id derivation and frozen with the
+// column lists.
+//
+// Historically the SQL side read these columns back as CAST(created_at AS CHAR),
+// which renders identically for a DATETIME(0) column — but that equality was an
+// engine default rather than a pinned contract, which is why the derivation no
+// longer names CAST.
 const AuxTimeLayout = "2006-01-02 15:04:05"
 
 // NowAuxTime returns the current UTC time in AuxTimeLayout.

@@ -46,8 +46,16 @@ type IssueFilter struct {
 
 // Client provides methods to interact with the GitLab REST API.
 type Client struct {
-	Token      string       // GitLab personal access token or OAuth token
-	BaseURL    string       // GitLab instance URL (e.g., "https://gitlab.com/api/v4")
+	Token string // GitLab personal access token or OAuth token
+
+	// BaseURL is the GitLab instance web root, e.g. "https://gitlab.com" — not
+	// an API endpoint. buildURL appends DefaultAPIEndpoint to it per request, so
+	// spelling it "https://gitlab.com/api/v4" doubles the suffix. It is also
+	// load-bearing for ref identity: createTaskWorkItem composes stored web_url
+	// refs from this value, and (*Tracker).onConfiguredHost matches refs back
+	// against it to decide which ones belong to this tracker.
+	BaseURL string
+
 	ProjectID  string       // Project ID or URL-encoded path (e.g., "group/project")
 	GroupID    string       // Optional group ID or path for group-level issue fetching
 	HTTPClient *http.Client // Optional custom HTTP client

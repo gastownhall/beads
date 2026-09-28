@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "validation",
+    srcs = [
+        "bead.go",
+        "issue.go",
+        "template.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/validation",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/types",
+        "//internal/utils",
+    ],
+)
+
+go_test(
+    name = "validation_test",
+    srcs = [
+        "bead_test.go",
+        "issue_test.go",
+        "template_lint_sections_test.go",
+        "template_test.go",
+    ],
+    embed = [":validation"],
+    deps = [
+        "//internal/config",
+        "//internal/types",
+    ],
+)
