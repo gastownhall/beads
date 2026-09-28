@@ -288,6 +288,7 @@ go_test(
         "search_counts_parity_test.go",
         "search_parity_test.go",
         "settlement_commit_boundary_test.go",
+        "setup_shared_db_test.go",
         "shared_server_predicate_test.go",
         "shared_store_migrate_gate_test.go",
         "slot_commit_boundary_test.go",
