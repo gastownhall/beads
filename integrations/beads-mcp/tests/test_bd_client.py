@@ -390,6 +390,7 @@ async def test_update_with_optional_fields(bd_client, mock_process):
         "acceptance_criteria": "Acceptance criteria",
         "notes": "Additional notes",
         "external_ref": "gh-456",
+        "labels": ["bug", "urgent"],
         "status": "in_progress",
         "priority": 0,
         "issue_type": "bug",
@@ -398,7 +399,7 @@ async def test_update_with_optional_fields(bd_client, mock_process):
     }
     mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
         params = UpdateIssueParams(
             issue_id="bd-1",
             assignee="alice",
@@ -406,11 +407,16 @@ async def test_update_with_optional_fields(bd_client, mock_process):
             acceptance_criteria="Acceptance criteria",
             notes="Additional notes",
             external_ref="gh-456",
+            labels=["bug", "urgent"],
         )
         issue = await bd_client.update(params)
 
     assert issue.id == "bd-1"
     assert issue.title == "Updated title"
+    command = mock_exec.call_args.args
+    assert command[1:4] == ("update", "bd-1", "--assignee")
+    assert "--set-labels" in command
+    assert command[command.index("--set-labels") + 1] == "bug,urgent"
 
 
 @pytest.mark.asyncio
@@ -424,6 +430,28 @@ async def test_update_invalid_response(bd_client, mock_process):
     ):
         params = UpdateIssueParams(issue_id="bd-1", status="in_progress")
         await bd_client.update(params)
+
+
+@pytest.mark.asyncio
+async def test_update_empty_labels_emits_explicit_clear(bd_client, mock_process):
+    issue_data = {
+        "id": "bd-1",
+        "title": "Labels cleared",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "labels": [],
+        "created_at": "2025-01-25T00:00:00Z",
+        "updated_at": "2025-01-25T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        issue = await bd_client.update(UpdateIssueParams(issue_id="bd-1", labels=[]))
+
+    assert issue.labels == []
+    command = mock_exec.call_args.args
+    assert command[command.index("--set-labels") + 1] == ""
 
 
 @pytest.mark.asyncio

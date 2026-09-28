@@ -508,6 +508,7 @@ async def beads_update_issue(
     acceptance_criteria: Annotated[str | None, "Acceptance criteria"] = None,
     notes: Annotated[str | None, "Additional notes"] = None,
     external_ref: Annotated[str | None, "External reference (e.g., gh-9, jira-ABC)"] = None,
+    labels: Annotated[list[str] | None, "Replace all labels (empty list clears labels)"] = None,
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
@@ -539,6 +540,7 @@ async def beads_update_issue(
         acceptance_criteria=acceptance_criteria,
         notes=notes,
         external_ref=external_ref,
+        labels=labels,
     )
     return await client.update(params)
 
