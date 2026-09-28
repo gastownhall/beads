@@ -274,10 +274,16 @@ var capabilityProbes = []probe{
 		direct: expectation{
 			outcome: outcomeHonored, substr: `"configured"`, reason: reasonNA,
 		},
+		// Refused by design where bd does not own the server (#6584): the
+		// backup remote is registered on the server, global to every client.
 		proxied: expectation{
 			outcome: outcomeRefusedTyped, code: "proxy.backup.unsupported",
 			substr: "backup status is not supported in proxied-server mode",
-			reason: reasonUnimplemented,
+			reason: reasonDesign,
+		},
+		// Honored on managed-local, where bd spawned the Dolt child (#6584).
+		override: map[string]expectation{
+			topoProxiedLocal: {outcome: outcomeHonored, substr: `"configured"`, reason: reasonNA},
 		},
 	},
 	{
@@ -289,7 +295,13 @@ var capabilityProbes = []probe{
 		proxied: expectation{
 			outcome: outcomeRefusedTyped, code: "proxy.backup.unsupported",
 			substr: "backup sync is not supported in proxied-server mode",
-			reason: reasonUnimplemented,
+			reason: reasonDesign,
+		},
+		// Honored on managed-local (#6584): it reaches the command, which
+		// fails on its own merits with no destination configured — the same
+		// answer every direct topology gives.
+		override: map[string]expectation{
+			topoProxiedLocal: {outcome: outcomeError, substr: "no backup destination configured", reason: reasonNA},
 		},
 	},
 
@@ -464,7 +476,7 @@ var deliberatelyNotProbed = map[string]string{
 	"restore": "`bd restore` restores an ISSUE, not a backup; the backup verb is `bd backup restore`, which is already " +
 		"covered by the backup rows. Probing it adds a row that says nothing about the backup family.",
 	"backup restore": "would need a real backup destination to distinguish a topology refusal from a missing-backup error. " +
-		"Covered indirectly by `backup status` / `backup sync`; revisit in slice S3 when the family gains a proxied route.",
+		"Covered indirectly by `backup status` / `backup sync`, and directly by TestManagedLocalProxiedBackupRoundTrip since slice S3 (#6584).",
 }
 
 // ---------------------------------------------------------------------------

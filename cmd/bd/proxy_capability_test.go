@@ -17,12 +17,12 @@ import (
 // #6575 proxied data-behind guidance is written against: the consent command
 // that guidance prescribes is NOT refused at the proxied front door.
 //
-// The refusal table keys on the full command path. It has rows for the bare
-// `migrate` verb and for `migrate hooks` / `migrate issues` / `migrate sync`,
-// but none for `migrate schema` — so that path falls through
-// validateProxyMaintenanceBeforeProvider's multi-word arm to `bd migrate
-// schema`'s own proxied arm, which reports the migration the provider open
-// already applied under this verb's consent.
+// The capability registry keys on the full command path. It refuses the bare
+// `migrate` verb and `migrate hooks` / `migrate issues` / `migrate sync`, but
+// permits `migrate schema` — so that path passes
+// validateProxyRegistryBeforeProvider to `bd migrate schema`'s own proxied
+// arm, which reports the migration the provider open already applied under
+// this verb's consent.
 //
 // An earlier revision of that guidance asserted the opposite on three runtime
 // surfaces and nothing failed, because no test called this function with this
@@ -51,7 +51,7 @@ func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
 
 	var allowErr error
 	out := captureStdout(t, func() error {
-		allowErr = validateProxyMaintenanceBeforeProvider(target)
+		allowErr = validateProxyRegistryBeforeProvider(target, ProxyTopologyManagedLocal)
 		return nil
 	})
 	if allowErr != nil {
@@ -70,7 +70,7 @@ func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
 	}
 	var bareErr error
 	refusal := captureStdout(t, func() error {
-		bareErr = validateProxyMaintenanceBeforeProvider(bare)
+		bareErr = validateProxyRegistryBeforeProvider(bare, ProxyTopologyManagedLocal)
 		return nil
 	})
 	if bareErr == nil {
@@ -139,6 +139,11 @@ func TestProxyCapabilityCommandRows(t *testing.T) {
 	}
 }
 
+// TestProxyMaintenanceNestedPathsRefuseBeforeProvider proves the gate resolves
+// a PARENT+CHILD path, which is where a nested command used to slip through.
+// It runs on external-tcp because that is the topology on which every path
+// listed here still refuses: the backup family is honored on managed-local
+// since slice S3, and asserting a refusal there would be asserting the bug.
 func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
 	oldJSON := jsonOutput
 	jsonOutput = true
@@ -151,7 +156,7 @@ func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
 		root.AddCommand(parent)
 		parent.AddCommand(child)
 		out := captureStdout(t, func() error {
-			_ = validateProxyMaintenanceBeforeProvider(child)
+			_ = validateProxyRegistryBeforeProvider(child, ProxyTopologyExternalTCP)
 			return nil
 		})
 		if !strings.Contains(out, `"code":`) {
@@ -171,7 +176,7 @@ func TestProxyFormulaSwarmMergeSlotRefusals(t *testing.T) {
 			cmd.AddCommand(child)
 			cmd = child
 		}
-		err := validateProxyMaintenanceBeforeProvider(cmd)
+		err := validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 		if err == nil {
 			t.Fatalf("%s unexpectedly allowed", path)
 		}
@@ -209,7 +214,7 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 			if !ok || row.Code != tc.code || row.Message != tc.message || row.ExitCode != 1 || row.Mutates {
 				t.Fatalf("row = %#v, ok=%v", row, ok)
 			}
-			var typed *ProxyCapabilityError = &ProxyCapabilityError{Code: row.Code, Message: row.Message, ExitCode: row.ExitCode, Mutates: row.Mutates}
+			typed := proxyCapabilityErrorFor(row)
 			if typed.Code != tc.code || typed.Message != tc.message || typed.ExitCode != 1 || typed.Mutates {
 				t.Fatalf("typed refusal = %#v", typed)
 			}
@@ -232,7 +237,7 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 			oldDidWrite := commandDidWrite.Load()
 			commandDidWrite.Store(false)
 			t.Cleanup(func() { commandDidWrite.Store(oldDidWrite) })
-			out := captureStdout(t, func() error { _ = validateProxyMaintenanceBeforeProvider(cmd); return nil })
+			out := captureStdout(t, func() error { _ = validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal); return nil })
 			var got map[string]any
 			if err := json.Unmarshal([]byte(out), &got); err != nil || got["code"] != tc.code || got["error"] != tc.message {
 				t.Fatalf("JSON refusal = %q (%v)", out, err)
@@ -251,8 +256,8 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 }
 
 func lookupProxyMaintenanceRuleForTest(path string) (proxyCapabilityRule, bool) {
-	rule, ok := proxyMaintenanceRefusals[path]
-	return rule, ok
+	row, ok := LookupCapabilityRow(path, "")
+	return row.Rule, ok
 }
 
 func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
@@ -269,7 +274,7 @@ func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
 	oldProvider := uowProvider
 	uowProvider = nil
 	t.Cleanup(func() { uowProvider = oldProvider })
-	err := validateProxyMaintenanceBeforeProvider(hooks)
+	err := validateProxyRegistryBeforeProvider(hooks, ProxyTopologyManagedLocal)
 	if err == nil {
 		t.Fatal("expected typed maintenance refusal")
 	}

@@ -199,12 +199,17 @@ func migrateFault(phase migratePhase) error {
 	return nil
 }
 
+// externalMigrationRefusal is a policy refusal rather than a registry row: it
+// depends on the workspace's endpoint, not on which command was typed. The
+// reason is design because someone else owns that endpoint and its schema —
+// no amount of plumbing on this side makes migrating it bd's business.
 func externalMigrationRefusal(message string) error {
 	return HandleProxyCapabilityError(&ProxyCapabilityError{
 		Code:     "proxy.migrate.external_endpoint",
 		Message:  message,
 		ExitCode: 1,
 		Mutates:  false,
+		Reason:   ProxyReasonDesign,
 	})
 }
 
