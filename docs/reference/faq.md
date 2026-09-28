@@ -275,6 +275,10 @@ Beads is a single static binary with no runtime dependencies — the Dolt engine
 
 Yes, three ways: `bd query` for the built-in query language (compound filters, boolean operators, date expressions), `bd sql` for raw SQL against the underlying database, and `--json` output on every command for building integrations.
 
+When `bd sql` can prove a query is read-only, it skips automatic JSONL import,
+so after a `git pull` the query may show the database state from before the
+newly pulled JSONL was imported.
+
 ### Does beads support Windows?
 
 Yes — native Windows support, no MSYS or MinGW required. A PowerShell script installs prebuilt releases, and everything works with Windows paths. See [Installation](/getting-started/installation#windows-11).
