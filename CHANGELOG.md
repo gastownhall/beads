@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A git hook beads never wrote is no longer reported as installed**
+  ([#6084](https://github.com/gastownhall/beads/issues/6084)). `getHookVersion`
+  returns no error for a readable hook file that carries no beads markers, so a
+  hand-written `pre-commit` — one beads does not own — was printed as
+  `✓ installed (version )` by `bd hooks list`, counted as installed by
+  `bd info`, and reported as no drift by `bd config drift`. Those surfaces now
+  report such a file as not installed. This is a user-visible change to a
+  scripted contract: in a repository whose hooks beads does not own,
+  `bd config drift` now exits 1 (drift detected) where it exited 0, so
+  automation keyed on that exit code should re-check those repositories before
+  upgrading. A hook that calls `bd hooks run <hook>` still counts as installed
+  even with no beads marker — that is the integration beads prescribes for
+  external hook managers such as lefthook and husky (GH#946) — and it is
+  version-agnostic, so it is never reported outdated and never prompts
+  `bd hooks install`, which would overwrite the manager's own hook.
+  `bd hooks list`, `bd info` and `bd config drift` now use the same predicate as
+  `bd doctor` for deciding whether a hook file is a beads hook; `bd doctor`'s own
+  installed/missing check still only tests for file existence and is tracked
+  separately.
+
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
   canonical spelling of a Go module version — and the string a build stamped
   from a Go pseudo-version reports and writes into `.local_version` itself —

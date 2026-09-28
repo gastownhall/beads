@@ -1443,6 +1443,7 @@ func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
 		name          string
 		body          string
 		wantInstalled bool
+		wantOutdated  bool
 	}{
 		{
 			name: "section-marker",
@@ -1463,7 +1464,21 @@ func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
 		{
 			name: "inline-marker",
 			// Old bd init style: no version line, just the inline comment.
+			// bd wrote this template, so a missing version still means
+			// "re-install me": Outdated stays true (GH#1120).
 			body:          "#!/bin/sh\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			wantInstalled: true,
+			wantOutdated:  true,
+		},
+		{
+			name: "bd-hooks-run-no-marker",
+			// The GH#946 integration: an external hook manager's own hook that
+			// calls bd hooks run and carries no beads marker. bd doctor counts
+			// it as a bd hook (doctor.IsBdHookContent), so bd hooks list must
+			// too, or bd config drift exits 1 on a supported setup. It is not
+			// outdated: bd itself supplies the behavior, and "run bd hooks
+			// install" would overwrite the manager's hook.
+			body:          "#!/bin/sh\nlefthook run pre-commit\nbd hooks run pre-commit \"$@\"\n",
 			wantInstalled: true,
 		},
 	}
@@ -1489,6 +1504,9 @@ func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
 					}
 					if s.Installed != tc.wantInstalled {
 						t.Errorf("pre-commit (%s): got Installed=%v, want %v", tc.name, s.Installed, tc.wantInstalled)
+					}
+					if s.Outdated != tc.wantOutdated {
+						t.Errorf("pre-commit (%s): got Outdated=%v, want %v", tc.name, s.Outdated, tc.wantOutdated)
 					}
 					return
 				}
