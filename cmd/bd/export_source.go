@@ -109,14 +109,30 @@ func (storeExportSource) LoadExportRelations(ctx context.Context, issues []*type
 	for i, issue := range issues {
 		issueIDs[i] = issue.ID
 	}
+	return loadClassicExportRelations(ctx, issueIDs)
+}
 
-	// Individual bulk-load failures deliberately degrade to empty maps rather
-	// than aborting the export — unchanged from the pre-seam classic behavior.
-	labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
-	commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
-	commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
-	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+func loadClassicExportRelations(ctx context.Context, issueIDs []string) (exportRelations, error) {
+	labelsMap, err := store.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load labels: %w", err)
+	}
+	allDeps, err := store.GetDependencyRecordsForIssues(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load dependencies: %w", err)
+	}
+	commentsMap, err := store.GetCommentsForIssues(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load comments: %w", err)
+	}
+	commentCounts, err := store.GetCommentCounts(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load comment counts: %w", err)
+	}
+	depCounts, err := store.GetDependencyCounts(ctx, issueIDs)
+	if err != nil {
+		return exportRelations{}, fmt.Errorf("load dependency counts: %w", err)
+	}
 
 	return exportRelations{
 		labels:        labelsMap,
