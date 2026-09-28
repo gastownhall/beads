@@ -619,7 +619,7 @@ func TestIfUpdatedAtUnclaimGuardComposition(t *testing.T) {
 	})
 
 	t.Run("T15d_both_stale_exits_1", func(t *testing.T) {
-		id, current, stale, _ := ifupSeedClaimed(t, bd, dir, "Compose both stale")
+		id, _, stale, _ := ifupSeedClaimed(t, bd, dir, "Compose both stale")
 		baseline := bdShow(t, bd, dir, id)
 		stdout, stderr, code := ifupRun(t, bd, dir, "unclaim", id,
 			"--actor", "supervisor-x", "--if-assignee", "bob", "--if-updated-at", stale)
@@ -628,9 +628,12 @@ func TestIfUpdatedAtUnclaimGuardComposition(t *testing.T) {
 			t.Fatalf("both-stale exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		}
 		ifupAssertUnchanged(t, bd, dir, id, baseline, "T15d")
+		// D8 precedence: with every guard stale the assignee precheck diagnoses
+		// first — the refusal names the guard that fired, not the stamps
+		// (stamps are asserted by T15c, where the stamp guard is the only one).
 		combined := stdout + stderr
-		if !strings.Contains(combined, current) || !strings.Contains(combined, stale) {
-			t.Errorf("refusal must name current %s and expected %s, got:\n%s", current, stale, combined)
+		if !strings.Contains(combined, "assignee mismatch") {
+			t.Errorf("both-stale refusal must diagnose the first failed guard (assignee), got:\n%s", combined)
 		}
 	})
 }
