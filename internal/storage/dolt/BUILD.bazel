@@ -303,6 +303,7 @@ go_test(
         "row_version_test.go",
         "schema_cli_parity_integration_test.go",
         "schema_cli_parity_test.go",
+        "schema_init_timeout_test.go",
         "schema_migration_dirty_test.go",
         "schema_migrations_conflict_test.go",
         "schema_parity_test.go",
