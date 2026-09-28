@@ -104,6 +104,11 @@ func createOnlyState() *engineUOWState {
 // the #6337 gate: a linked issue in forceIDs (conflict resolved in favor of the
 // local copy) is pushed by a real --create-only run, so the preview must show
 // it as an update, not a skip.
+//
+// The forced branch now names itself "Would overwrite ... (conflict
+// resolution)" rather than the generic "Would update". Only the wording moved:
+// the two invariants this gate exists for — no freshness fetch, and the issue
+// counted as Updated rather than Skipped — are asserted unchanged below.
 func TestEngineDryRunCreateOnlyForcedLinkedUpdates(t *testing.T) {
 	ctx := context.Background()
 	tracker := newMockTracker("test")
@@ -117,8 +122,8 @@ func TestEngineDryRunCreateOnlyForcedLinkedUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("doPush() dry-run error: %v", err)
 	}
-	if joined := strings.Join(msgs, "\n"); !strings.Contains(joined, "Would update in test: Already linked") {
-		t.Errorf("dry-run messages = %q, want an update preview for the forced linked issue", joined)
+	if joined := strings.Join(msgs, "\n"); !strings.Contains(joined, "Would overwrite in test (conflict resolution): Already linked") {
+		t.Errorf("dry-run messages = %q, want an overwrite preview for the forced linked issue", joined)
 	}
 	if tracker.fetchCalls != 0 || len(tracker.created) != 0 || len(tracker.updated) != 0 {
 		t.Fatalf("dry-run touched the tracker: fetch=%d created=%d updated=%d",
