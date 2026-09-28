@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "id": "https://work.example/types/task",
+      "name": "Task",
+      "describes": "bead"
+    },
+    {
+      "id": "https://work.example/types/assigned-to",
+      "name": "Assigned To",
+      "describes": "link"
+    }
+  ],
+  "next": null
+}

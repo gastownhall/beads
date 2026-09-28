@@ -1,0 +1,1131 @@
+{
+  "fixtureVersion": 1,
+  "id": "reference-read-v1",
+  "realization": "bdpbd",
+  "seed": 0,
+  "capabilities": [
+    "public-http",
+    "controlled-read-advertised-limits-v1",
+    "controlled-read-external-endpoint-v1",
+    "controlled-read-pagination-v1",
+    "controlled-read-problem-table-v1",
+    "controlled-read-scope-restore-v1",
+    "controlled-external-type-publisher-v1",
+    "exact-raw-request-target",
+    "reference-read-v1",
+    "reference-read-v1-single-page",
+    "cors-disabled",
+    "unexpected-internal-fault",
+    "alias-absent-v1",
+    "attribution-v1",
+    "content-derived-revisions-v1"
+  ],
+  "bindings": {
+    "bead.demo-a": "beads/demo-a",
+    "bead.demo-b": "beads/demo-b",
+    "bead.demo-c": "beads/demo-c",
+    "link.demo-b-a": "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+    "bead.demo-f": "beads/demo-f",
+    "alias.unknown": "alias/never-created",
+    "bead.absent": "beads/never-created"
+  },
+  "private": {
+    "internalFaultSentinel": "bdp-private-internal-fault-bdpbd-e69028371d4a"
+  },
+  "bd": {
+    "acceptedBuildIdentities": [
+      {
+        "provenance": "homebrew-local",
+        "versionJson": {
+          "branch": "v1.0.5",
+          "build": "Homebrew",
+          "schema_version": 1,
+          "version": "1.0.5"
+        },
+        "versionText": "bd version 1.0.5 (Homebrew)"
+      },
+      {
+        "provenance": "source-build-hosted-ci",
+        "versionJson": {
+          "build": "dev",
+          "schema_version": 1,
+          "version": "1.0.5"
+        },
+        "versionText": "bd version 1.0.5 (dev)"
+      }
+    ],
+    "actor": "bdp-conformance",
+    "prefix": "demo",
+    "beads": [
+      {
+        "id": "demo-a",
+        "title": "A",
+        "type": "task",
+        "priority": 2,
+        "status": "open",
+        "created_at": "2026-08-08T23:33:31Z"
+      },
+      {
+        "id": "demo-b",
+        "title": "B",
+        "type": "task",
+        "priority": 2,
+        "status": "open",
+        "created_at": "2026-08-08T23:33:32Z"
+      },
+      {
+        "id": "demo-c",
+        "title": "C",
+        "type": "feature",
+        "priority": 2,
+        "status": "closed",
+        "created_at": "2026-08-08T23:33:33Z"
+      },
+      {
+        "id": "demo-d",
+        "title": "D",
+        "type": "task",
+        "priority": 2,
+        "status": "open",
+        "created_at": "2026-08-08T23:33:34Z"
+      },
+      {
+        "id": "demo-e",
+        "title": "E",
+        "type": "bug",
+        "priority": 2,
+        "status": "deferred",
+        "created_at": "2026-08-08T23:33:35Z"
+      },
+      {
+        "id": "demo-f",
+        "title": "F",
+        "type": "decision",
+        "priority": 2,
+        "status": "open",
+        "created_at": "2026-08-08T23:33:36Z"
+      },
+      {
+        "id": "demo-i",
+        "title": "I",
+        "type": "task",
+        "priority": 2,
+        "status": "open",
+        "created_at": "2026-08-08T23:33:37Z"
+      },
+      {
+        "id": "demo-j",
+        "title": "J",
+        "type": "task",
+        "priority": 2,
+        "status": "open",
+        "created_at": "2026-08-08T23:33:38Z"
+      },
+      {
+        "id": "demo-k",
+        "title": "K",
+        "type": "task",
+        "priority": 2,
+        "status": "closed",
+        "created_at": "2026-08-08T23:33:39Z"
+      }
+    ],
+    "links": [
+      {
+        "source": "demo-b",
+        "target": "demo-a",
+        "type": "blocks"
+      },
+      {
+        "source": "demo-a",
+        "target": "demo-c",
+        "type": "blocks"
+      },
+      {
+        "source": "demo-d",
+        "target": "demo-c",
+        "type": "blocks"
+      },
+      {
+        "source": "demo-f",
+        "target": "demo-e",
+        "type": "blocks"
+      },
+      {
+        "source": "demo-e",
+        "target": "demo-f",
+        "type": "related"
+      },
+      {
+        "source": "demo-i",
+        "target": "demo-a",
+        "type": "blocks"
+      },
+      {
+        "source": "demo-i",
+        "target": "demo-c",
+        "type": "blocks"
+      },
+      {
+        "source": "demo-j",
+        "target": "demo-c",
+        "type": "blocks"
+      },
+      {
+        "source": "demo-j",
+        "target": "demo-k",
+        "type": "blocks"
+      }
+    ]
+  },
+  "typeDescriptors": [
+    {
+      "id": "https://work.example/types/tracked-item",
+      "name": "Tracked Item",
+      "describes": "bead",
+      "conformsTo": []
+    },
+    {
+      "id": "https://work.example/types/work-item",
+      "name": "Work Item",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/tracked-item"]
+    },
+    {
+      "id": "https://work.example/types/task",
+      "name": "Task",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/bug",
+      "name": "Bug",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/feature",
+      "name": "Feature",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/chore",
+      "name": "Chore",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/epic",
+      "name": "Epic",
+      "describes": "bead",
+      "conformsTo": ["https://work.example/types/work-item"]
+    },
+    {
+      "id": "https://work.example/types/decision",
+      "name": "Decision",
+      "describes": "bead",
+      "conformsTo": []
+    },
+    {
+      "id": "https://work.example/types/relationship",
+      "name": "Relationship",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/dependency",
+      "name": "Dependency",
+      "describes": "link",
+      "conformsTo": ["https://work.example/types/relationship"],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/blocks",
+      "name": "Blocks",
+      "describes": "link",
+      "conformsTo": ["https://work.example/types/dependency"],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/relates",
+      "name": "Relates",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    },
+    {
+      "id": "https://work.example/types/cites",
+      "name": "Cites",
+      "describes": "link",
+      "conformsTo": [],
+      "source": {
+        "conformsTo": []
+      },
+      "target": {
+        "conformsTo": []
+      }
+    }
+  ],
+  "oracles": {
+    "external-endpoint": {
+      "input": {
+        "linkIds": [
+          "links/b64_ZGVtby1m/b64_ZXh0ZXJuYWw6YmVhZHM6bW9sLXJ1bi1hc3NpZ25lZQ/b64_cmVsYXRlZA"
+        ]
+      },
+      "rows": [
+        [
+          "links/b64_ZGVtby1m/b64_ZXh0ZXJuYWw6YmVhZHM6bW9sLXJ1bi1hc3NpZ25lZQ/b64_cmVsYXRlZA",
+          "types/related",
+          ["beads/demo-f"],
+          ["external:beads:mol-run-assignee"]
+        ]
+      ],
+      "externalEndpoints": 1,
+      "localSource": 1,
+      "localTarget": 0
+    },
+    "scope-restore": {
+      "input": {
+        "stableId": "beads/demo-a",
+        "deletedId": "beads/demo-f",
+        "restoredScope": "https://scope.example/restored/",
+        "view": "restore-view",
+        "epoch": "restore-epoch"
+      },
+      "evidence": {
+        "mode": "new-scope",
+        "scopeChanged": true,
+        "stableIdentityChanged": true,
+        "deletedStatusAtRestoredScope": 200,
+        "deletedCodeAtRestoredScope": null,
+        "scopeEpochChanged": null,
+        "staleCursorStatus": null,
+        "staleCursorCode": null,
+        "oldStableStatus": 404,
+        "oldDeletedStatus": 404
+      }
+    },
+    "cross-target": {
+      "input": {
+        "relationshipRoles": [
+          {
+            "type": "https://work.example/types/blocks",
+            "role": "blocks"
+          },
+          {
+            "type": "types/related",
+            "role": "relates"
+          }
+        ]
+      },
+      "projection": {
+        "beadStatuses": [
+          ["A", "open", 2],
+          ["B", "open", 2],
+          ["C", "closed", 2],
+          ["D", "open", 2],
+          ["E", "deferred", 2],
+          ["F", "open", 2],
+          ["I", "open", 2],
+          ["J", "open", 2],
+          ["K", "closed", 2]
+        ],
+        "relationships": [
+          ["A", "C", "blocks"],
+          ["B", "A", "blocks"],
+          ["D", "C", "blocks"],
+          ["E", "F", "relates"],
+          ["F", "E", "blocks"],
+          ["I", "A", "blocks"],
+          ["I", "C", "blocks"],
+          ["J", "C", "blocks"],
+          ["J", "K", "blocks"]
+        ]
+      }
+    },
+    "pagination": {
+      "selector": {
+        "input": {
+          "collection": "beads",
+          "selector": "$[?@.properties.status == \"open\" && @.type == \"https://work.example/types/task\"]",
+          "limit": 2,
+          "syntaxSelector": "$[?]",
+          "overLimitSelector": "$[?@.properties.status == \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]",
+          "selectorLimits": {
+            "bytes": 128,
+            "depth": 16,
+            "nodes": 64
+          },
+          "authorizationExcludedId": "beads/demo-b",
+          "view": "view-a",
+          "epoch": "epoch-a"
+        },
+        "expectedIds": ["beads/demo-a", "beads/demo-d", "beads/demo-i", "beads/demo-j"],
+        "expectedPageSizes": [2, 2]
+      },
+      "collection-snapshot": {
+        "input": {
+          "collection": "beads",
+          "limit": 2,
+          "mutation": {
+            "candidateIds": ["beads/demo-k"],
+            "revision": "conformance-mutated-revision"
+          },
+          "view": "view-a",
+          "epoch": "epoch-a"
+        },
+        "expectedIds": [
+          "beads/demo-a",
+          "beads/demo-b",
+          "beads/demo-c",
+          "beads/demo-d",
+          "beads/demo-e",
+          "beads/demo-f",
+          "beads/demo-i",
+          "beads/demo-j",
+          "beads/demo-k"
+        ],
+        "expectedPageSizes": [2, 2, 2, 2, 1]
+      },
+      "cursor-errors": {
+        "input": {
+          "collection": "beads",
+          "limit": 2,
+          "malformedQuery": {
+            "cursor": "not-issued",
+            "limit": "2"
+          },
+          "clockAdvanceMs": 101,
+          "initialView": "view-a",
+          "foreignView": "view-b",
+          "initialEpoch": "epoch-a",
+          "foreignEpoch": "epoch-b"
+        }
+      },
+      "incident-links": {
+        "input": {
+          "collection": "links",
+          "bead": "beads/demo-a",
+          "direction": "both",
+          "limit": 1,
+          "mutation": {
+            "candidateIds": [
+              "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+              "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+              "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"
+            ],
+            "revision": "conformance-mutated-revision"
+          },
+          "clockAdvanceMs": 101,
+          "view": "view-a",
+          "epoch": "epoch-a"
+        },
+        "expectedCollectionIds": [
+          "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+          "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+          "links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz",
+          "links/b64_ZGVtby1l/b64_ZGVtby1m/b64_cmVsYXRlZA",
+          "links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz",
+          "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz",
+          "links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz",
+          "links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz",
+          "links/b64_ZGVtby1q/b64_ZGVtby1r/b64_YmxvY2tz"
+        ],
+        "expectedIncidentLinkIds": [
+          "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+          "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+          "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"
+        ],
+        "expectedCollectionPageSizes": [1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "expectedIncidentPageSizes": [1, 1, 1],
+        "publicRequests": 16
+      }
+    },
+    "resources": {
+      "bead.demo-a": {
+        "id": "beads/demo-a",
+        "properties": {
+          "id": "demo-a",
+          "title": "A",
+          "status": "open",
+          "priority": 2,
+          "issue_type": "task",
+          "owner": "bdp-conformance@invalid",
+          "created_at": "2026-08-08T23:33:31Z",
+          "created_by": "bdp-conformance",
+          "updated_at": "2026-08-08T23:33:31Z",
+          "dependencies": [
+            {
+              "issue_id": "demo-a",
+              "depends_on_id": "demo-c",
+              "type": "blocks",
+              "created_at": "2026-08-08T23:33:31Z",
+              "created_by": "bdp-conformance",
+              "metadata": "{}"
+            }
+          ],
+          "dependency_count": 1,
+          "dependent_count": 2,
+          "comment_count": 0
+        }
+      },
+      "link.demo-b-a": {
+        "id": "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "source": "beads/demo-b",
+        "target": "beads/demo-a",
+        "properties": {}
+      }
+    },
+    "collections": {
+      "bead-titles": ["A", "B", "C", "D", "E", "F", "I", "J", "K"],
+      "link-records": [
+        [
+          "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_DD4UJ_I7SO3dc6XWpLfJgGtAXKkZQXVknUWHavfs3gc",
+          "beads/demo-b",
+          "",
+          "beads/demo-a",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_qBFYW9JintFG74XeOqD5LJD6WY2InkI7A-WxLH0XZoc",
+          "beads/demo-a",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_Xk1f94AIaKtMd6E0Ix6cZ8vk7EdUITgjxDhUJUqeCGc",
+          "beads/demo-d",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_oSIf8_qOIk2yvdVk1BpcruqJOUHy77aRLDEok9E_2Ao",
+          "beads/demo-f",
+          "",
+          "beads/demo-e",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1l/b64_ZGVtby1m/b64_cmVsYXRlZA",
+          "types/related",
+          "sha256_opSosgC78qYE-aElmxZ5VqE37d0O7pbzCfSVaQcyNoQ",
+          "beads/demo-e",
+          "",
+          "beads/demo-f",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_L3svcS8QsedvjtpTwK8fTq_zqh5bPzBXuuFmEaMMVA0",
+          "beads/demo-i",
+          "",
+          "beads/demo-a",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_OTfZkHw-_YiGOHz3SqzK0B_tR8UO8dtYEZPCEmiyewU",
+          "beads/demo-i",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_odxEPnL2O7WhDNizLL-aP91fCH_wtS4igM2KGM6wrRo",
+          "beads/demo-j",
+          "",
+          "beads/demo-c",
+          "",
+          {}
+        ],
+        [
+          "links/b64_ZGVtby1q/b64_ZGVtby1r/b64_YmxvY2tz",
+          "https://work.example/types/blocks",
+          "sha256_FhD5IkHtE5DID6xBsSqBkrKTe3vVGlm721bZHiDEvhw",
+          "beads/demo-j",
+          "",
+          "beads/demo-k",
+          "",
+          {}
+        ]
+      ],
+      "type-ids": [
+        "https://work.example/types/tracked-item",
+        "https://work.example/types/work-item",
+        "https://work.example/types/task",
+        "https://work.example/types/bug",
+        "https://work.example/types/feature",
+        "https://work.example/types/chore",
+        "https://work.example/types/epic",
+        "https://work.example/types/decision",
+        "https://work.example/types/relationship",
+        "https://work.example/types/dependency",
+        "https://work.example/types/blocks",
+        "https://work.example/types/relates",
+        "types/related",
+        "https://work.example/types/cites"
+      ]
+    },
+    "structural-predicates": {
+      "beads-type": ["A", "B", "D", "I", "J", "K"],
+      "beads-type-is-exact": [],
+      "beads-conforms-to-declared-type": ["A", "B", "D", "I", "J", "K"],
+      "beads-conforms-to": ["A", "B", "C", "D", "E", "I", "J", "K"],
+      "beads-predicates-and": [],
+      "links-source-local": ["links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz"],
+      "links-target-absolute": [
+        "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz"
+      ],
+      "links-endpoint-or": [
+        "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"
+      ],
+      "links-type": [
+        "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1q/b64_ZGVtby1r/b64_YmxvY2tz"
+      ],
+      "links-type-is-exact": [],
+      "links-conforms-to-declared-type": [
+        "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1q/b64_ZGVtby1r/b64_YmxvY2tz"
+      ],
+      "links-conforms-to": [
+        "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1q/b64_ZGVtby1r/b64_YmxvY2tz"
+      ],
+      "links-conforms-to-cross-kind": [],
+      "links-predicates-and": ["links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz"],
+      "links-endpoint-pinned-target": [
+        "links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz",
+        "links/b64_ZGVtby1l/b64_ZGVtby1m/b64_cmVsYXRlZA"
+      ]
+    },
+    "incident-links": {
+      "demo-a-inbound": [
+        "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"
+      ],
+      "demo-a-outbound": ["links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz"],
+      "demo-b-outbound": ["links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz"],
+      "demo-b-inbound": [],
+      "demo-a-both": [
+        "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"
+      ],
+      "demo-a-default": [
+        "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz",
+        "links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz",
+        "links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"
+      ]
+    },
+    "ordering": {
+      "beads": [
+        ["beads/demo-a"],
+        ["beads/demo-b"],
+        ["beads/demo-c"],
+        ["beads/demo-d"],
+        ["beads/demo-e"],
+        ["beads/demo-f"],
+        ["beads/demo-i"],
+        ["beads/demo-j"],
+        ["beads/demo-k"]
+      ],
+      "links": [
+        ["links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1l/b64_ZGVtby1m/b64_cmVsYXRlZA"],
+        ["links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1q/b64_ZGVtby1r/b64_YmxvY2tz"]
+      ],
+      "order": "canonical-uri",
+      "types": [
+        ["types/related"],
+        ["https://work.example/types/blocks"],
+        ["https://work.example/types/bug"],
+        ["https://work.example/types/chore"],
+        ["https://work.example/types/cites"],
+        ["https://work.example/types/decision"],
+        ["https://work.example/types/dependency"],
+        ["https://work.example/types/epic"],
+        ["https://work.example/types/feature"],
+        ["https://work.example/types/relates"],
+        ["https://work.example/types/relationship"],
+        ["https://work.example/types/task"],
+        ["https://work.example/types/tracked-item"],
+        ["https://work.example/types/work-item"]
+      ],
+      "links-type": [
+        ["links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1k/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1m/b64_ZGVtby1l/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1p/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1q/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1q/b64_ZGVtby1r/b64_YmxvY2tz"]
+      ],
+      "demo-a-inbound": [
+        ["links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"]
+      ],
+      "demo-a-outbound": [["links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz"]],
+      "demo-a-both": [
+        ["links/b64_ZGVtby1h/b64_ZGVtby1j/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz"],
+        ["links/b64_ZGVtby1p/b64_ZGVtby1h/b64_YmxvY2tz"]
+      ]
+    },
+    "owned-links": {
+      "input": {
+        "bead": "beads/demo-f"
+      },
+      "ownedLinks": null
+    },
+    "attribution": {
+      "bead": {
+        "principal": "bdp-conformance",
+        "status": "unknown"
+      }
+    },
+    "wildcard-descriptors": {
+      "declaration": {
+        "input": {
+          "ids": [
+            "https://work.example/types/wildcard-probe-only",
+            "https://work.example/types/wildcard-probe-mixed",
+            "https://work.example/types/wildcard-probe-link"
+          ]
+        },
+        "descriptors": [
+          {
+            "id": "https://work.example/types/wildcard-probe-only",
+            "name": "only",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-mixed",
+            "name": "mixed",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 2
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-link",
+            "name": "link",
+            "describes": "link",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              }
+            },
+            "source": {
+              "conformsTo": []
+            },
+            "target": {
+              "conformsTo": []
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": "https://work.example/types/wildcard-probe-only",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-only",
+              "name": "only",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-mixed",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-mixed",
+              "name": "mixed",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                },
+                "https://work.example/types/cites": {
+                  "max": 2
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-link",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          }
+        ]
+      },
+      "max-required": {
+        "input": {
+          "ids": [
+            "https://work.example/types/wildcard-probe-missing",
+            "https://work.example/types/wildcard-probe-label",
+            "https://work.example/types/wildcard-probe-unknown",
+            "https://work.example/types/wildcard-probe-zero",
+            "https://work.example/types/wildcard-probe-negative",
+            "https://work.example/types/wildcard-probe-fraction",
+            "https://work.example/types/wildcard-probe-max-valid"
+          ]
+        },
+        "descriptors": [
+          {
+            "id": "https://work.example/types/wildcard-probe-missing",
+            "name": "missing",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {}
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-label",
+            "name": "label",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3,
+                "label": "no"
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-unknown",
+            "name": "unknown",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3,
+                "extra": true
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-zero",
+            "name": "zero",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 0
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-negative",
+            "name": "negative",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": -1
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-fraction",
+            "name": "fraction",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 1.5
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-max-valid",
+            "name": "missing",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 4
+              }
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": "https://work.example/types/wildcard-probe-missing",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-label",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-unknown",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-zero",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-negative",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-fraction",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-max-valid",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-max-valid",
+              "name": "missing",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 4
+                }
+              }
+            }
+          }
+        ]
+      },
+      "explicit-max-bounded": {
+        "input": {
+          "ids": [
+            "https://work.example/types/wildcard-probe-below",
+            "https://work.example/types/wildcard-probe-equal",
+            "https://work.example/types/wildcard-probe-above"
+          ]
+        },
+        "descriptors": [
+          {
+            "id": "https://work.example/types/wildcard-probe-below",
+            "name": "below",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 2
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-equal",
+            "name": "equal",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 3
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-above",
+            "name": "above",
+            "describes": "bead",
+            "conformsTo": [],
+            "ownsOutgoing": {
+              "*": {
+                "max": 3
+              },
+              "https://work.example/types/cites": {
+                "max": 4
+              }
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": "https://work.example/types/wildcard-probe-below",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-below",
+              "name": "below",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                },
+                "https://work.example/types/cites": {
+                  "max": 2
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-equal",
+            "outcome": "success",
+            "descriptor": {
+              "id": "https://work.example/types/wildcard-probe-equal",
+              "name": "equal",
+              "describes": "bead",
+              "conformsTo": [],
+              "ownsOutgoing": {
+                "*": {
+                  "max": 3
+                },
+                "https://work.example/types/cites": {
+                  "max": 3
+                }
+              }
+            }
+          },
+          {
+            "id": "https://work.example/types/wildcard-probe-above",
+            "outcome": "problem",
+            "code": "temporarily-unavailable"
+          }
+        ]
+      }
+    },
+    "ownership-inventory": {
+      "beadsWithOwnership": 0,
+      "input": {
+        "ids": [
+          "https://work.example/types/tracked-item",
+          "https://work.example/types/work-item",
+          "https://work.example/types/task",
+          "https://work.example/types/bug",
+          "https://work.example/types/feature",
+          "https://work.example/types/chore",
+          "https://work.example/types/epic",
+          "https://work.example/types/decision",
+          "https://work.example/types/relationship",
+          "https://work.example/types/dependency",
+          "https://work.example/types/blocks",
+          "https://work.example/types/relates",
+          "https://work.example/types/cites"
+        ]
+      },
+      "resolvedOwnedTypes": 0
+    },
+    "numeric-model": {
+      "declaration": {
+        "name": "bdpbd-projected-resource-v1",
+        "numberModel": "IEEE-754-binary64-ECMAScript-JSON",
+        "source": "packages/adapter-bd/README.md",
+        "description": "bdpbd-projected-resource-v1 uses IEEE-754-binary64-ECMAScript-JSON numbers: native JSON is parsed into JavaScript binary64 values and finite numbers are serialized with ECMAScript JSON.stringify (shortest round-trip form, negative zero as 0). The preimage is the complete projected Resource excluding only its revision member: id, type, attribution when present, properties, and Link endpoints when present. Objects use UTF-16 code-unit lexical key order recursively, arrays retain order, and strings use ECMAScript JSON.stringify escaping. The UTF-8 bytes are SHA-256 hashed and encoded as unpadded base64url with the sha256_ prefix. This local discipline does not claim RFC 8785/I-JSON conformance: the reader has no duplicate-member or lone-surrogate admission guarantee. It changes no token bytes and introduces no discovery member. Read observations cover numeric values actually returned by the supported bd projection, not write admission or arbitrary decimal preservation."
+      },
+      "input": {
+        "ids": ["beads/demo-a", "beads/demo-c", "links/b64_ZGVtby1i/b64_ZGVtby1h/b64_YmxvY2tz"],
+        "numberModel": "IEEE-754-binary64-ECMAScript-JSON"
+      }
+    }
+  },
+  "expectations": {
+    "readyTitles": ["J", "D", "A"],
+    "beadCount": 9,
+    "linkCount": 9,
+    "typeCount": 14
+  }
+}

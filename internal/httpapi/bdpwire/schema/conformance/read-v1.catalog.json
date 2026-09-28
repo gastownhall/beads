@@ -1,0 +1,768 @@
+{
+  "catalogVersion": 1,
+  "scenarios": [
+    {
+      "id": "read.discovery.scope-service-desc",
+      "title": "Scope response exposes service-desc discovery",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#scope-discovery-and-human-documentation",
+          "selectedText": "An ordinary `GET` of the Scope URI MUST return a successful response carrying a registered [`service-desc` link relation](https://www.rfc-editor.org/rfc/rfc8631.html) to the machine-readable JSON discovery document."
+        }
+      ]
+    },
+    {
+      "id": "read.discovery.document",
+      "title": "Read discovery has the exact required and prohibited members",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#scope-discovery-and-human-documentation",
+          "selectedText": "`bdpVersion`, `profile`, `scope`, `beads`, `links`, and `types` are required in every profile. `operations` is required in Read+Update and Transactional and prohibited in Read."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#scope-discovery-and-human-documentation",
+          "selectedText": "The optional\n`order` member names the collection order under\n[Collection retrieval and selection](#collection-retrieval-and-selection);\nomission means the `canonical-uri` baseline."
+        }
+      ]
+    },
+    {
+      "id": "read.discovery.canonical-navigation",
+      "title": "Discovery navigation is canonical and Scope-confined",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#scope-discovery-and-human-documentation",
+          "selectedText": "For the canonical Scope URL `S`, `beads` MUST equal the URL produced by resolving `beads/` against `S`, `links` MUST equal `links/` resolved against `S`, and `types` MUST equal `types/` resolved against `S`."
+        }
+      ]
+    },
+    {
+      "id": "read.discovery.optional-limits",
+      "title": "Advertised Read limits are valid and binding",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#advertised-limits",
+          "selectedText": "Omission means only that the bound is not pre-advertised; it does not mean infinite capacity and does not permit silent truncation, partial mutation, or a non-normative failure response."
+        }
+      ]
+    },
+    {
+      "id": "read.discovery.unsupported-client-input",
+      "title": "Generic clients reject unsupported versions and profiles",
+      "kind": "diagnostic",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "Profile negotiation MUST begin with Scope discovery and MUST reject unsupported BDP versions rather than guessing compatibility."
+        }
+      ]
+    },
+    {
+      "id": "read.resource.bead-record",
+      "title": "Individual Bead reads return complete canonical records",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#resource-records",
+          "selectedText": "Every successful `GET` of a Bead or Link returns one self-contained Resource record."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#effective-type-contracts",
+          "selectedText": "A successful Resource read returns the complete stored properties object, including properties not declared by any effective schema, and an update preserves every untouched property."
+        }
+      ]
+    },
+    {
+      "id": "read.resource.link-record",
+      "title": "Individual Link reads return complete canonical records",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#resource-records",
+          "selectedText": "Every successful `GET` of a Bead or Link returns one self-contained Resource record."
+        }
+      ]
+    },
+    {
+      "id": "read.resource.external-endpoint",
+      "title": "Link endpoint References stay opaque and pin-faithful",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "Any Reference may carry a pin: an authority MUST preserve and echo the pin byte-identically, MUST compare it only for equality, and MUST NOT validate, dereference, or interpret it in v0."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "Every Link endpoint MUST be a Reference: a URI, or a Pinned Reference with exactly `uri` and `revision`."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "An in-Scope endpoint MUST identify a live Bead by its canonical URL."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "At least one endpoint of every v0 Link MUST be an in-Scope Bead."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "A Bead whose\n  Type owns outgoing Link Types MUST carry its `ownedLinks` member — one\n  entry per declared owned type, keyed by Link Type URL, valued by the\n  owned Links' complete records in ascending code-unit order of their\n  canonical `id`s — on every record read, and the member MUST be absent\n  for Beads whose Type owns nothing."
+        }
+      ]
+    },
+    {
+      "id": "read.resource.properties-view",
+      "title": "Properties views return the complete open properties object",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#resource-views",
+          "selectedText": "`view=properties` is valid for both Beads and Links and returns exactly the complete stored `properties` object:"
+        }
+      ]
+    },
+    {
+      "id": "read.resource.default-bounded",
+      "title": "Default Bead reads do not embed incident Links",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#resource-views",
+          "selectedText": "The default Bead `GET` remains bounded and does not include Links."
+        }
+      ]
+    },
+    {
+      "id": "read.resource.not-found-nondisclosure",
+      "title": "Unknown, deleted, and non-visible Resources share one response",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#reads-after-deletion",
+          "selectedText": "After a Bead or Link is deleted, ordinary `GET`, `view=properties`, and, for a Bead, `view=links` return the same `404` `resource-not-found` problem used for an unknown or non-visible identity."
+        }
+      ]
+    },
+    {
+      "id": "read.types.inventory",
+      "title": "Type inventory returns paginated exact summaries",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#types-and-type-descriptors",
+          "selectedText": "Each page is an object containing `items` and `next`; each item is exactly the Type summary `{id, name, describes}`."
+        }
+      ]
+    },
+    {
+      "id": "read.types.descriptor",
+      "title": "Controlled Type publishers return closed descriptors",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#types-and-type-descriptors",
+          "selectedText": "Descriptor objects and endpoint-constraint objects are closed: no members are allowed except those defined above."
+        }
+      ]
+    },
+    {
+      "id": "read.types.no-eager-resolution",
+      "title": "Generic Resource reads do not require descriptor retrieval",
+      "kind": "diagnostic",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "A generic client MUST be able to parse and issue protocol requests without retrieving a Type Descriptor."
+        }
+      ]
+    },
+    {
+      "id": "read.collections.beads",
+      "title": "Bead collection returns complete records and continuation",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "An ordinary `GET` of a discovered collection returns a paginated `items` array and a `next` URL."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "The baseline order every authority MUST support is\n`canonical-uri` — ascending lexicographic comparison, by Unicode code\nunit, of each item's absolute canonical `id`."
+        }
+      ]
+    },
+    {
+      "id": "read.collections.links",
+      "title": "Link collection returns complete records and continuation",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "The `beads/` and `links/` collections return complete Resource records; the `types/` collection returns Type summaries."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "The baseline order every authority MUST support is\n`canonical-uri` — ascending lexicographic comparison, by Unicode code\nunit, of each item's absolute canonical `id`."
+        }
+      ]
+    },
+    {
+      "id": "read.collections.structural-predicates",
+      "title": "Collection structural predicates compose exactly",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "Different predicates are combined with logical AND. Within `endpoint`, source and target are combined with logical OR."
+        }
+      ]
+    },
+    {
+      "id": "read.collections.selector",
+      "title": "Bounded Selector evaluates over canonical candidate records",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "The structural predicates and Selector decide the complete matching set before pagination, but only within the request's Authorization View."
+        }
+      ]
+    },
+    {
+      "id": "read.collections.pagination-snapshot",
+      "title": "Collection continuations preserve one logical snapshot",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "A cursor continues one logical projected snapshot: every page belongs to the same selected set, authorization projection, and Resource revisions as the initial request."
+        }
+      ]
+    },
+    {
+      "id": "read.collections.cursor-errors",
+      "title": "Expired and foreign-view cursors fail without restart",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "If the authority can no longer continue the snapshot, or if the request no longer belongs to that projection, it returns an expired- or foreign-view-cursor problem rather than silently restarting against newer state."
+        }
+      ]
+    },
+    {
+      "id": "read.collections.invalid-query",
+      "title": "Unsupported and repeated collection parameters are rejected",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#collection-retrieval-and-selection",
+          "selectedText": "A parameter may occur at most once in BDP v0; repeated parameters are errors rather than implicit unions."
+        }
+      ]
+    },
+    {
+      "id": "read.bead-links.directions",
+      "title": "Incident Link direction selection and default are exact",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#incident-link-reads",
+          "selectedText": "`direction` is `inbound`, `outbound`, or `both`, and defaults to `both` when omitted."
+        }
+      ]
+    },
+    {
+      "id": "read.bead-links.pagination",
+      "title": "Incident Link continuations preserve one snapshot",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#incident-link-reads",
+          "selectedText": "As with collection pagination, that continuation walks one logical snapshot and an expired cursor is an error rather than a silent restart against newer state."
+        }
+      ]
+    },
+    {
+      "id": "read.http.get-head",
+      "title": "Application resources support GET and HEAD",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#problem-details",
+          "selectedText": "An implementation advertising the `read` profile MUST support `GET` and `HEAD` for application requests."
+        }
+      ]
+    },
+    {
+      "id": "read.http.method-405",
+      "title": "Unsupported methods receive 405 without a BDP Problem representation",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#problem-details",
+          "selectedText": "Every such `405` MUST include `Allow: GET, HEAD`, plus `OPTIONS` when cross-origin access is enabled, and MUST NOT include a BDP Problem body."
+        }
+      ]
+    },
+    {
+      "id": "read.http.problem-table",
+      "title": "Every Read Problem preserves its status, family, code, and retry row",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#problem-details",
+          "selectedText": "Each code fixes its HTTP status and retry disposition. The Read profile uses this closed table:"
+        }
+      ]
+    },
+    {
+      "id": "read.http.internal-fault",
+      "title": "Unexpected internal faults are body-less and redacted",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#problem-details",
+          "selectedText": "An implementation MUST respond to an unexpected internal server fault with a body-less `500 Internal Server Error`, MUST NOT include a BDP Problem body, and MUST keep internal fault details off the wire."
+        }
+      ]
+    },
+    {
+      "id": "read.http.cache-cors",
+      "title": "Read caching and optional CORS fields are observable",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#http-consistency-caching-and-cors-fields",
+          "selectedText": "Scope-bounded representations that depend on authorization use `Cache-Control: private, no-store`."
+        }
+      ]
+    },
+    {
+      "id": "read.http.raw-request-targets",
+      "title": "Raw invalid request targets cannot bypass Scope identity",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#scope-discovery-and-human-documentation",
+          "selectedText": "Empty, `.`, and `..` segments, controls, backslashes, queries, fragments, scheme-relative references, and encoded `/` or `\\` separators are invalid."
+        }
+      ]
+    },
+    {
+      "id": "read.transport.disconnect-recovery",
+      "title": "Coverage diagnostic for disconnect recovery",
+      "kind": "diagnostic",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#conformance-and-quality-requirements",
+          "selectedText": "The matrix MUST cover positive, negative, profile, concurrency, disconnect, expiry, restore, and cross-implementation cases applicable to each profile."
+        }
+      ]
+    },
+    {
+      "id": "read.scope.restore-identity",
+      "title": "Restore preserves identity or moves to a new Scope URL",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#scopes-and-identity",
+          "selectedText": "A restore that cannot preserve that guarantee creates a different logical Scope and therefore uses a different canonical Scope URL."
+        }
+      ]
+    },
+    {
+      "id": "read.client.malformed-response",
+      "title": "Coverage diagnostic for malformed client responses",
+      "kind": "diagnostic",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#conformance-and-quality-requirements",
+          "selectedText": "The conformance kit MUST validate normative schemas and observable semantics independently of the server implementation wherever practical, reducing common-mode defects."
+        }
+      ]
+    },
+    {
+      "id": "read.cross.reference-equivalence",
+      "title": "Portability diagnostic for cross-target fixture equivalence",
+      "kind": "diagnostic",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#normative-conformance-matrix",
+          "selectedText": "Tests exercise public HTTP behavior and consume the normative schema bundle; they do not inspect an implementation's storage or internal server interfaces."
+        }
+      ]
+    },
+    {
+      "id": "read.alias.resolution",
+      "title": "Alias URLs resolve with one redirect and disclose nothing",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#alias-resolution",
+          "selectedText": "a `GET` or `HEAD` of an alias URL —\n`alias/{alias-path}` resolved against the canonical Scope URL — returns\n`307 Temporary Redirect` with `Location` set to the target's absolute\ncanonical Bead URL and no body."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#alias-resolution",
+          "selectedText": "An unknown alias, an alias URL carrying a query or fragment, and any alias\nURL at an authority that does not advertise `aliases` return the same `404`\n`resource-not-found` used for unknown Resources"
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "Alias resolution MUST be\n  redirect-only: `GET` and `HEAD` return `307` with `Location` set to the\n  target's absolute canonical Bead URL and no body."
+        }
+      ]
+    },
+    {
+      "id": "read.alias.absent",
+      "title": "An alias-less authority discloses nothing at alias URLs",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#alias-resolution",
+          "selectedText": "An unknown alias, an alias URL carrying a query or fragment, and any alias\nURL at an authority that does not advertise `aliases` return the same `404`\n`resource-not-found` used for unknown Resources"
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "An unknown alias returns\n  the same `404` `resource-not-found` as an unknown Resource. An authority\n  without aliases omits the `aliases` discovery member."
+        }
+      ]
+    },
+    {
+      "id": "read.disclosure.gone",
+      "title": "Authorized disclosure distinguishes pruned from erased",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#reads-after-deletion",
+          "selectedText": "A\n`resource-pruned` problem MAY carry one `archivedAt` member — a Reference,\npossibly pinned, naming where the content went"
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#reads-after-deletion",
+          "selectedText": "A\n`resource-erased` problem carries no condition-specific extension members\nbeyond its ordinary problem members: even a pointer would disclose what\nerasure exists to remove."
+        }
+      ]
+    },
+    {
+      "id": "read.disclosure.gate",
+      "title": "Disclosure is authorization-gated, never an enumeration oracle",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#reads-after-deletion",
+          "selectedText": "To every other caller all\nthree conditions remain the uniform `404`; the disclosure vocabulary is\nnever an enumeration oracle."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "Unauthorized callers MUST receive the uniform\n  `404` `resource-not-found`."
+        }
+      ]
+    },
+    {
+      "id": "read.owned.closure",
+      "title": "Views are closed over owned Links",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "Because the member is covered, it is never authorization-filtered. An\nAuthorization View that projects a Bead projects its owned Links and\ntheir in-Scope target Beads: a view is closed over owned Links, and\nhiding a Bead from a view therefore requires hiding every Bead that owns\na Link to it."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "An Authorization View that projects\n  a Bead projects its owned Links and their in-Scope targets."
+        }
+      ]
+    },
+    {
+      "id": "read.attribution.carried",
+      "title": "Records carry attribution as data, not evidence",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#carried-attribution",
+          "selectedText": "Every Bead and Link record MAY carry an **`attribution`** member: a\ncommon, generic member in a common place, so that no Type has to declare\nattribution as a domain property."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#carried-attribution",
+          "selectedText": "It is outside `properties`, never part of\nthe `properties` view"
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "Bead and Link records MAY carry a common `attribution`\n  member — `{ principal, status }` with `status` one of `claimed`,\n  `unknown` — that is carried per version and never attested"
+        }
+      ]
+    },
+    {
+      "id": "read.attribution.link",
+      "title": "Link records carry attribution beside revision",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#carried-attribution",
+          "selectedText": "Every Bead and Link record MAY carry an **`attribution`** member: a\ncommon, generic member in a common place, so that no Type has to declare\nattribution as a domain property."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#carried-attribution",
+          "selectedText": "It is outside `properties`, never part of\nthe `properties` view"
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "Bead and Link records MAY carry a common `attribution`\n  member — `{ principal, status }` with `status` one of `claimed`,\n  `unknown` — that is carried per version and never attested"
+        }
+      ]
+    },
+    {
+      "id": "read.owned-wildcard.declaration",
+      "title": "A Bead Type Descriptor may own every outgoing Link Type through the wildcard entry",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "`ownsOutgoing` MAY also contain the **wildcard entry** `\"*\"`, whose value is exactly `{ max }`: it declares every outgoing Link Type not listed explicitly as owned."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "The wildcard MAY be the only entry."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#types-and-type-descriptors",
+          "selectedText": "The key MAY also be the wildcard `\"*\"`, whose value is exactly `{ max }`: it owns every outgoing Link Type not named explicitly, its `max` bounds the whole owned set, and explicit entries take precedence for the types they name, under [Owned Links](#owned-links). A Link Type Descriptor must not carry `ownsOutgoing`."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "A Bead Type's `ownsOutgoing` MAY carry the wildcard entry `\"*\"` — exactly `{ max }` — owning every outgoing Link Type not named explicitly"
+        }
+      ]
+    },
+    {
+      "id": "read.owned-wildcard.max-required",
+      "title": "The wildcard entry is exactly { max }",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "Each declaration MUST carry `max`, the largest owned set the Type permits."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "The wildcard entry carries no `label`: it names no Link Type."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#types-and-type-descriptors",
+          "selectedText": "Descriptor objects and endpoint-constraint objects are closed: no members are allowed except those defined above. An `ownsOutgoing` entry is closed the same way: `{ label?, max }` under a Link Type URL, `{ max }` under the wildcard."
+        }
+      ]
+    },
+    {
+      "id": "read.owned-wildcard.explicit-max-bounded",
+      "title": "An explicitly declared entry's max does not exceed the wildcard's max in the same descriptor",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "An explicitly declared entry's `max` therefore MUST NOT exceed the wildcard's `max` in the same descriptor — the excess could never be reached — and a descriptor that declares one is invalid: descriptor validation refuses it, and the Type is not installed."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "That rule compares two members, which the schema bundle cannot express; it is a descriptor-validation rule beyond the schema, and a descriptor the bundle accepts can still fail it."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#types-and-type-descriptors",
+          "selectedText": "An explicitly declared entry's `max` MUST NOT exceed the wildcard's `max` in the same descriptor, since the wildcard's `max` bounds the whole owned set: such a descriptor is invalid and is not installed — a descriptor-validation rule beyond the schema bundle, which cannot compare the two members — under [Owned Links](#owned-links)."
+        }
+      ]
+    },
+    {
+      "id": "read.owned-wildcard.present-entries",
+      "title": "A wildcard owner's ownedLinks carries present types plus empty explicit entries, never the wildcard",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "The member carries one entry for each owned Link Type actually present on the Bead — at least one owned Link of that type exists — plus an entry, possibly empty, for each explicitly declared Link Type; a Link Type owned only through the wildcard has an entry exactly when an owned Link of that type is present."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "The wildcard `\"*\"` is never a key: the member is keyed by Link Type URL alone."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "The member is present, possibly empty, for every Bead whose Type carries `ownsOutgoing`, and absent for Beads whose Type owns nothing."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#resource-records",
+          "selectedText": "A Bead whose Type owns outgoing Link Types additionally carries its `ownedLinks` member — one entry per owned Link Type present on the Bead and one, possibly empty, per explicitly declared Link Type, keyed by the Link Type URL and never by the wildcard `\"*\"`, valued by the owned Links' complete records in ascending code-unit order of their canonical `id`s — on every record read; the member is absent for Beads whose Type owns nothing."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "the `ownedLinks` member of such a Bead MUST carry one entry per owned Link Type present plus an empty entry per explicitly declared type, keyed by Link Type URL and never by `\"*\"`."
+        }
+      ]
+    },
+    {
+      "id": "read.owned-wildcard.closure",
+      "title": "A view is closed over wildcard-owned Links",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "Because the member is covered, it is never authorization-filtered. An Authorization View that projects a Bead projects its owned Links and their in-Scope target Beads: a view is closed over owned Links, and hiding a Bead from a view therefore requires hiding every Bead that owns a Link to it."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#owned-links",
+          "selectedText": "For a wildcard owner the consequence is stated plainly, because it is the price of inline, revision-covered references: such a Bead owns every outgoing Link it makes, so a Bead that owns a Link to a Bead hidden from a view is hidden from that view too — a Memory that cites a hidden Bead is hidden with it."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#authorization-views",
+          "selectedText": "A visible Bead need not expose hidden incident Links — a latitude confined to incoming and unowned Links: a visible source's owned Links, covered by its revision, are never withheld, and the view includes their in-Scope targets, under [Owned Links](#owned-links)."
+        }
+      ]
+    },
+    {
+      "id": "read.numeric-model.declared-token-model",
+      "title": "A content-derived revision-token scheme declares its number model by name",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#revisions",
+          "selectedText": "A revision-token scheme that derives tokens from content MUST declare, by name, the number model it serializes under: `sha256-jcs` means RFC 8785 serialization with numbers as binary64 under its Section 3.2.2.3, and is exact over admitted values by construction; a scheme over exact decimals is a different scheme with a different name."
+        },
+        {
+          "source": "docs/specs/bdp.md",
+          "anchor": "#revisions",
+          "selectedText": "On every admitted value the exact-decimal model and the binary64 model agree by construction."
+        },
+        {
+          "source": "docs/design/requirements.md",
+          "anchor": "#protocol-requirements",
+          "selectedText": "a content-derived revision-token scheme MUST declare its number model by name, and `sha256-jcs` names RFC 8785 serialization with numbers as binary64."
+        }
+      ]
+    }
+  ]
+}

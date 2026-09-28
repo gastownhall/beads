@@ -1,0 +1,963 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gastownhall/bdp/schemas/bdp-v0.schema.json",
+  "title": "BDP v0 schema bundle",
+  "description": "Normative JSON Schema 2020-12 bundle for the BDP v0 discovery and Read surface. Later-profile definitions are added to this same bundle before their implementation waves.",
+  "$defs": {
+    "absoluteHttpUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://.+"
+    },
+    "absoluteUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:"
+    },
+    "bdpVersion": {
+      "const": "0"
+    },
+    "protocolProfile": {
+      "enum": ["read", "read-update", "transactional"]
+    },
+    "retryDisposition": {
+      "enum": ["never", "after-state-change", "after-delay"]
+    },
+    "readProblemCode": {
+      "enum": [
+        "malformed-request",
+        "invalid-parameter",
+        "unauthenticated",
+        "forbidden",
+        "resource-not-found",
+        "resource-pruned",
+        "resource-erased",
+        "foreign-view",
+        "cursor-expired",
+        "request-too-large",
+        "limit-exceeded",
+        "rate-limited",
+        "temporarily-unavailable"
+      ]
+    },
+    "readProblem": {
+      "title": "BDP Read Problem Details",
+      "type": "object",
+      "required": ["type", "code", "retry"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer",
+          "enum": [400, 401, 403, 404, 409, 410, 413, 429, 503]
+        },
+        "detail": {
+          "type": "string"
+        },
+        "instance": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "code": {
+          "$ref": "#/$defs/readProblemCode"
+        },
+        "retry": {
+          "$ref": "#/$defs/retryDisposition"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "malformed-request"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/request"
+              },
+              "status": {
+                "const": 400
+              },
+              "retry": {
+                "const": "never"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "invalid-parameter"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/request"
+              },
+              "status": {
+                "const": 400
+              },
+              "retry": {
+                "const": "never"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "unauthenticated"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/authentication"
+              },
+              "status": {
+                "const": 401
+              },
+              "retry": {
+                "const": "after-state-change"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "forbidden"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/authorization"
+              },
+              "status": {
+                "const": 403
+              },
+              "retry": {
+                "const": "after-state-change"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "resource-not-found"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/not-found"
+              },
+              "status": {
+                "const": 404
+              },
+              "retry": {
+                "const": "after-state-change"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "foreign-view"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/conflict"
+              },
+              "status": {
+                "const": 409
+              },
+              "retry": {
+                "const": "after-state-change"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "cursor-expired"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/gone"
+              },
+              "status": {
+                "const": 410
+              },
+              "retry": {
+                "const": "after-state-change"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "request-too-large"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/size"
+              },
+              "status": {
+                "const": 413
+              },
+              "retry": {
+                "const": "never"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "limit-exceeded"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/size"
+              },
+              "status": {
+                "const": 413
+              },
+              "retry": {
+                "const": "never"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "rate-limited"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/rate-limit"
+              },
+              "status": {
+                "const": 429
+              },
+              "retry": {
+                "const": "after-delay"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "temporarily-unavailable"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/unavailable"
+              },
+              "status": {
+                "const": 503
+              },
+              "retry": {
+                "const": "after-delay"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "resource-pruned"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/gone"
+              },
+              "status": {
+                "const": 410
+              },
+              "retry": {
+                "const": "never"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "resource-erased"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "https://github.com/gastownhall/bdp/problems/gone"
+              },
+              "status": {
+                "const": 410
+              },
+              "retry": {
+                "const": "never"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "resource-pruned"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "archivedAt": {
+                "$ref": "#/$defs/reference"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "not": {
+              "properties": {
+                "code": {
+                  "const": "resource-pruned"
+                }
+              },
+              "required": ["code"]
+            }
+          },
+          "then": {
+            "properties": {
+              "archivedAt": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "resource-erased"
+              }
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "pointer": false
+            }
+          }
+        }
+      ]
+    },
+    "typeIdArray": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/absoluteHttpUrl"
+      },
+      "uniqueItems": true
+    },
+    "endpointConstraint": {
+      "type": "object",
+      "required": ["conformsTo"],
+      "properties": {
+        "conformsTo": {
+          "$ref": "#/$defs/typeIdArray"
+        },
+        "external": {
+          "enum": ["none", "opaque", "bead"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "typeDescriptor": {
+      "title": "BDP Type Descriptor",
+      "type": "object",
+      "required": ["id", "name", "describes", "conformsTo"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "describes": {
+          "enum": ["bead", "link"]
+        },
+        "conformsTo": {
+          "$ref": "#/$defs/typeIdArray"
+        },
+        "propertiesSchema": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "source": {
+          "$ref": "#/$defs/endpointConstraint"
+        },
+        "target": {
+          "$ref": "#/$defs/endpointConstraint"
+        },
+        "ownsOutgoing": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "anyOf": [
+              {
+                "const": "*"
+              },
+              {
+                "$ref": "#/$defs/absoluteHttpUrl"
+              }
+            ]
+          },
+          "properties": {
+            "*": {
+              "$ref": "#/$defs/ownedWildcardDeclaration"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/ownedLinkDeclaration"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "describes": {
+                "const": "link"
+              }
+            },
+            "required": ["describes"]
+          },
+          "then": {
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/endpointConstraint"
+              },
+              "target": {
+                "$ref": "#/$defs/endpointConstraint"
+              }
+            },
+            "required": ["source", "target"]
+          },
+          "else": {
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/endpointConstraint"
+              },
+              "target": {
+                "$ref": "#/$defs/endpointConstraint"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["source"]
+                },
+                {
+                  "required": ["target"]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "describes": {
+                "const": "link"
+              }
+            },
+            "required": ["describes"]
+          },
+          "then": {
+            "properties": {
+              "ownsOutgoing": false
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "typeSummary": {
+      "type": "object",
+      "required": ["id", "name", "describes"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "describes": {
+          "enum": ["bead", "link"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "typesInventory": {
+      "type": "object",
+      "required": ["items", "next"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/typeSummary"
+          }
+        },
+        "next": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/absoluteHttpUrl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "properties": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "beadRecord": {
+      "type": "object",
+      "required": ["id", "type", "revision", "properties"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "type": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attribution": {
+          "$ref": "#/$defs/attribution"
+        },
+        "properties": {
+          "$ref": "#/$defs/properties"
+        },
+        "links": {
+          "$ref": "#/$defs/linkCollection"
+        },
+        "ownedLinks": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/absoluteHttpUrl"
+          },
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/linkRecord"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "linkRecord": {
+      "type": "object",
+      "required": ["id", "type", "revision", "source", "target", "properties"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "type": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attribution": {
+          "$ref": "#/$defs/attribution"
+        },
+        "source": {
+          "$ref": "#/$defs/reference"
+        },
+        "target": {
+          "$ref": "#/$defs/reference"
+        },
+        "properties": {
+          "$ref": "#/$defs/properties"
+        }
+      },
+      "additionalProperties": false
+    },
+    "beadCollection": {
+      "type": "object",
+      "required": ["items", "next"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/beadRecord"
+          }
+        },
+        "next": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/absoluteHttpUrl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "linkCollection": {
+      "type": "object",
+      "required": ["items", "next"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/linkRecord"
+          }
+        },
+        "next": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/absoluteHttpUrl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "iso8601Duration": {
+      "type": "string",
+      "pattern": "^P(?!$)"
+    },
+    "advertisedLimits": {
+      "type": "object",
+      "properties": {
+        "page": {
+          "type": "object",
+          "properties": {
+            "defaultItems": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "maximumItems": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          },
+          "additionalProperties": false
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "targetBytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "bodyBytes": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          },
+          "additionalProperties": false
+        },
+        "resource": {
+          "type": "object",
+          "properties": {
+            "representationBytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "propertiesBytes": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          },
+          "additionalProperties": false
+        },
+        "selector": {
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "depth": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "nodes": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          },
+          "additionalProperties": false
+        },
+        "patch": {
+          "type": "object",
+          "properties": {
+            "operations": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "pathBytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "pathDepth": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          },
+          "additionalProperties": false
+        },
+        "sequence": {
+          "type": "object",
+          "properties": {
+            "operations": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          },
+          "additionalProperties": false
+        },
+        "transaction": {
+          "type": "object",
+          "properties": {
+            "operations": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "examinedResources": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "matchedResources": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "mutatedResources": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "inducedEvents": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "duration": {
+              "$ref": "#/$defs/iso8601Duration"
+            }
+          },
+          "additionalProperties": false
+        },
+        "retention": {
+          "type": "object",
+          "properties": {
+            "idempotency": {
+              "$ref": "#/$defs/iso8601Duration"
+            },
+            "receipt": {
+              "$ref": "#/$defs/iso8601Duration"
+            },
+            "maximumSnapshotLifetime": {
+              "$ref": "#/$defs/iso8601Duration"
+            },
+            "replay": {
+              "$ref": "#/$defs/iso8601Duration"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "maximumEndpointMultiplicityPolicy": {
+      "type": "object",
+      "required": ["linkConformsTo", "endpoint", "max"],
+      "properties": {
+        "linkConformsTo": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "endpoint": {
+          "enum": ["source", "target"]
+        },
+        "max": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      },
+      "additionalProperties": false
+    },
+    "readDiscovery": {
+      "type": "object",
+      "required": ["bdpVersion", "profile", "scope", "beads", "links", "types"],
+      "properties": {
+        "bdpVersion": {
+          "$ref": "#/$defs/bdpVersion"
+        },
+        "profile": {
+          "const": "read"
+        },
+        "scope": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "beads": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "links": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "types": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "aliases": {
+          "$ref": "#/$defs/absoluteHttpUrl"
+        },
+        "order": {
+          "enum": ["canonical-uri"]
+        },
+        "limits": {
+          "$ref": "#/$defs/advertisedLimits"
+        },
+        "maximumEndpointMultiplicity": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/maximumEndpointMultiplicityPolicy"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "reference": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        {
+          "$ref": "#/$defs/pinnedReference"
+        }
+      ]
+    },
+    "pinnedReference": {
+      "type": "object",
+      "required": ["uri", "revision"],
+      "properties": {
+        "uri": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ownedLinkDeclaration": {
+      "type": "object",
+      "required": ["max"],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ownedWildcardDeclaration": {
+      "type": "object",
+      "required": ["max"],
+      "properties": {
+        "max": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      },
+      "additionalProperties": false
+    },
+    "attribution": {
+      "type": "object",
+      "required": ["principal", "status"],
+      "properties": {
+        "principal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": ["claimed", "unknown"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

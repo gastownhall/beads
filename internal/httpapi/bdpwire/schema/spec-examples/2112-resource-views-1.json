@@ -1,0 +1,24 @@
+{
+  "id": "https://beads.example/acme/beads/task-42",
+  "type": "https://work.example/types/task",
+  "revision": "opaque-task-revision",
+  "properties": {
+    "title": "Specify BDP mutation",
+    "status": "open"
+  },
+  "links": {
+    "items": [
+      {
+        "id": "https://beads.example/acme/links/assigned-to-81",
+        "type": "https://work.example/types/assigned-to",
+        "revision": "opaque-link-revision",
+        "source": "https://beads.example/acme/beads/task-42",
+        "target": "https://beads.example/acme/beads/person-7",
+        "properties": {
+          "since": "2026-08-04"
+        }
+      }
+    ],
+    "next": "https://beads.example/acme/beads/task-42?view=links&direction=both&cursor=opaque-cursor"
+  }
+}
