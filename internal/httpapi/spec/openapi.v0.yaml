@@ -6706,6 +6706,12 @@ components:
             those rows `dependents` is absent by design, so a difference taken
             against it would report every dependent the issue has as
             unresolvable.
+
+
+            Note the plane disagreement this creates: `bd show` in text mode
+            reads dependents unconditionally and therefore always discloses
+            the inbound direction on stderr, while a client of this field sees
+            it only when it asked for `include_dependents`.
         epic_total_children:
           type: integer
         epic_closed_children:

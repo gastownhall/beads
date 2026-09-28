@@ -41,20 +41,30 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 		dependents depListing
 		wantWarn   bool
 		wantText   string
+		// The recovery pointer follows the OUTBOUND direction alone, because
+		// `bd dep list <id> <id>` is outbound-only (dep.go:1101/1144). An
+		// issue short only on dependent edges gets the inbound note instead,
+		// and these two fields are what stop a later edit from quietly
+		// pointing a reader at a command that cannot answer.
+		wantPointer    bool
+		wantInboundNak bool
 	}{
 		{
-			name:     "one unrenderable outgoing edge",
-			counter:  fakeDepCounter{depCount: 1},
-			deps:     depListing{rows: 0},
-			wantWarn: true,
-			wantText: "1 dependency edge(s)",
+			name:        "one unrenderable outgoing edge",
+			counter:     fakeDepCounter{depCount: 1},
+			deps:        depListing{rows: 0},
+			wantWarn:    true,
+			wantText:    "1 dependency edge(s)",
+			wantPointer: true,
 		},
 		{
-			name:       "one unrenderable incoming edge",
-			counter:    fakeDepCounter{rdepCount: 3},
-			dependents: depListing{rows: 1},
-			wantWarn:   true,
-			wantText:   "2 dependent edge(s)",
+			name:           "one unrenderable incoming edge",
+			counter:        fakeDepCounter{rdepCount: 3},
+			dependents:     depListing{rows: 1},
+			wantWarn:       true,
+			wantText:       "2 dependent edge(s)",
+			wantPointer:    false,
+			wantInboundNak: true,
 		},
 		{
 			// The negative control. Without it every assertion above is
@@ -94,13 +104,17 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 		},
 		{
 			// One direction is diagnosable and the other is not: the healthy
-			// half must still be reported.
-			name:       "outgoing failed, incoming still reportable",
-			counter:    fakeDepCounter{depCount: 4, rdepCount: 2},
-			deps:       depListing{rows: 0, err: boom},
-			dependents: depListing{rows: 0},
-			wantWarn:   true,
-			wantText:   "2 dependent edge(s)",
+			// half must still be reported. It is the INBOUND half here, so the
+			// outbound-only pointer must stay away even though the outbound
+			// direction is the one that failed.
+			name:           "outgoing failed, incoming still reportable",
+			counter:        fakeDepCounter{depCount: 4, rdepCount: 2},
+			deps:           depListing{rows: 0, err: boom},
+			dependents:     depListing{rows: 0},
+			wantWarn:       true,
+			wantText:       "2 dependent edge(s)",
+			wantPointer:    false,
+			wantInboundNak: true,
 		},
 	}
 
@@ -117,12 +131,24 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 				if tc.wantText != "" && !strings.Contains(out, tc.wantText) {
 					t.Errorf("warning did not mention %q, got:\n%q", tc.wantText, out)
 				}
-				if !strings.Contains(out, "bd dep list rp-1 rp-1") {
-					t.Errorf("warning did not name the recovery command, got:\n%q", out)
+				wantPointers := 0
+				if tc.wantPointer {
+					wantPointers = 1
+					if !strings.Contains(out, "bd dep list rp-1 rp-1") {
+						t.Errorf("warning did not name the recovery command, got:\n%q", out)
+					}
 				}
-				// The pointer is printed once however many directions warn.
-				if n := strings.Count(out, "For raw edge records"); n != 1 {
-					t.Errorf("recovery pointer printed %d times, want 1:\n%q", n, out)
+				// The pointer is printed once however many directions warn,
+				// and not at all when only the inbound direction did.
+				if n := strings.Count(out, "For raw edge records"); n != wantPointers {
+					t.Errorf("recovery pointer printed %d times, want %d:\n%q", n, wantPointers, out)
+				}
+				wantNaks := 0
+				if tc.wantInboundNak {
+					wantNaks = 1
+				}
+				if n := strings.Count(out, "bd dep list is outbound-only"); n != wantNaks {
+					t.Errorf("inbound no-listing note printed %d times, want %d:\n%q", n, wantNaks, out)
 				}
 			} else if out != "" {
 				t.Errorf("expected silence, got:\n%q", out)
@@ -140,6 +166,12 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 		}
 		if n := strings.Count(out, "For raw edge records"); n != 1 {
 			t.Errorf("recovery pointer printed %d times, want 1:\n%q", n, out)
+		}
+		// Both facts are true at once and both are said: the pointer covers
+		// the outbound edges it can list, the note covers the inbound ones no
+		// command can.
+		if n := strings.Count(out, "bd dep list is outbound-only"); n != 1 {
+			t.Errorf("inbound no-listing note printed %d times, want 1:\n%q", n, out)
 		}
 	})
 
@@ -161,11 +193,13 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 	//
 	// SCOPE, stated because it would otherwise read as more than it is: this
 	// pins the SUBTRACTION only. The call-site ORDER that produces the
-	// stale-low count lives in show.go and show_display.go, which this test
-	// does not exercise; the split into readDepCounts plus
-	// warnUnresolvableDepEdges is what makes that order visible at those call
-	// sites, and TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable
-	// is the case that actually fails when an order is reversed.
+	// stale-low count lives in show.go, show_display.go and
+	// show_proxied_server.go, none of which this test exercises. The split
+	// into readDepCounts plus warnUnresolvableDepEdges makes that order
+	// READABLE at those call sites and does not pin it — reversing it at all
+	// three leaves this package green, and
+	// TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable, one tier
+	// down on BuildIssueDetails, is the only case that actually fails.
 	t.Run("a stale-low count is suppressed, not reported", func(t *testing.T) {
 		counts := readDepCounts(context.Background(), fakeDepCounter{depCount: 1}, "rp-1")
 		out := captureStderr(t, func() {

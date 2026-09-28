@@ -1218,6 +1218,14 @@ type IssueDetails struct {
 	// signal — the same distinction CommentsOmitted draws above.
 	// UnresolvableDependents is therefore set only under
 	// DetailOptions.IncludeDependents, where the rows are collected.
+	//
+	// That gate is on this field only, and the two planes disagree because of
+	// it: `bd show` in text mode reads dependents unconditionally, so a human
+	// always sees the inbound notice, while a --json caller sees this field
+	// only with --include-dependents (itself --json only). Recorded rather
+	// than fixed — the per-field restriction above is the correct half, and
+	// suppressing the text notice to match would lose a disclosure that is
+	// already sound.
 	UnresolvableDependencies *int64 `json:"unresolvable_dependencies,omitempty"`
 	UnresolvableDependents   *int64 `json:"unresolvable_dependents,omitempty"`
 

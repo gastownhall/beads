@@ -1061,6 +1061,8 @@ go_test(
         "show_proxied_watch_integration_test.go",
         "show_test.go",
         "show_unit_helpers_test.go",
+        "show_unresolvable_deps_embedded_test.go",
+        "show_unresolvable_deps_unit_test.go",
         "show_watch_loop_test.go",
         "show_watch_test.go",
         "simple_helpers_test.go",

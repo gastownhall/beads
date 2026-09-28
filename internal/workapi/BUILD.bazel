@@ -43,6 +43,7 @@ go_test(
         "count_test.go",
         "delete_test.go",
         "detail_test.go",
+        "detail_unresolvable_test.go",
         "list_comments_test.go",
         "list_ephemeral_test.go",
         "list_golden_test.go",

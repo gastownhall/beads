@@ -173,8 +173,11 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 		printDepSection(sec)
 	}
 
-	// Shared with the non-watch path in show.go so the two renders cannot
-	// drift apart in what they disclose (be-lpi).
+	// Shared with the non-watch path in show.go and with proxiedRenderIssue in
+	// show_proxied_server.go, so all THREE text renders of `bd show` disclose
+	// the same fact (be-lpi). --refs and --children are deliberately out of
+	// scope: they answer an alternate query with no count beside it to
+	// contradict.
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
 		depListing{rows: len(depsWithMeta), err: depsErr},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
@@ -230,15 +233,28 @@ type unresolvableDepCounter interface {
 }
 
 // readDepCounts and warnUnresolvableDepEdges are split so the COUNTS ARE READ
-// BEFORE THE ROW LISTINGS, which the callers do. The store issues a connection
-// per call, so a concurrent write can land between the count and the listing;
-// counting first puts that skew on the safe side, because an edge ADDED in the
-// window leaves the count stale-LOW and the difference goes negative and is
-// suppressed. Counting afterwards would announce a freshly added local edge as
-// unresolvable. A concurrent DELETE still produces a spurious notice — the
-// residual, and the reason this is an ordering mitigation rather than a fix
-// (be-lpi; the real fix is a shared snapshot or a direct count of edges whose
-// target has no row).
+// BEFORE THE ROW LISTINGS, which all three call sites do. The store issues a
+// connection per call, so a concurrent write can land between the count and the
+// listing; counting first puts that skew on the safe side, because an edge
+// ADDED in the window leaves the count stale-LOW and the difference goes
+// negative and is suppressed. Counting afterwards would announce a freshly
+// added local edge as unresolvable. A concurrent DELETE still produces a
+// spurious notice — the residual, and the reason this is an ordering mitigation
+// rather than a fix (be-lpi; the real fix is a shared snapshot or a direct
+// count of edges whose target has no row).
+//
+// SCOPE OF THAT ORDER, because the split is easy to read as more than it is:
+// it makes the order VISIBLE at the call sites, and does not enforce it.
+// Nothing in this package fails if a later edit moves a readDepCounts call
+// below its listings — measured, not assumed: moving it in all three of
+// show.go, show_display.go and show_proxied_server.go leaves the whole cmd/bd
+// selector green, including the embedded production-path test and the proxied
+// integration test, because the unit test drives
+// warnUnresolvableDepEdges directly and no CLI test can land a write inside
+// the window. The only automated pin is one tier down, on
+// TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable, which covers
+// BuildIssueDetails rather than these three renders. Treat the order here as a
+// convention carried by this comment.
 //
 // warnUnresolvableDepEdges prints a stderr-only notice when an issue has
 // dependency edges that the rendered listings could not show.
@@ -272,28 +288,40 @@ func readDepCounts(ctx context.Context, store unresolvableDepCounter, issueID st
 }
 
 func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents depListing) {
-	reported := false
-	report := func(kind string, count int64, countErr error, listing depListing) {
+	report := func(kind string, count int64, countErr error, listing depListing) bool {
 		// BOTH reads have to have succeeded. The count alone cannot tell a
 		// SHORT listing from a FAILED one — each leaves an empty slice — and
 		// warning on the second turns a transient backend error into a claim
 		// about the data, which is the more expensive of the two mistakes.
 		if countErr != nil || listing.err != nil {
-			return
+			return false
 		}
 		missing := count - int64(listing.rows)
 		if missing <= 0 {
-			return
+			return false
 		}
-		reported = true
 		fmt.Fprintf(os.Stderr, "warning: %s has %d %s edge(s) whose far end has no row in this database (cross-repo/external) and are not shown above\n",
 			issueID, missing, kind)
+		return true
 	}
-	report("dependency", counts.deps.n, counts.deps.err, deps)
-	report("dependent", counts.dependents.n, counts.dependents.err, dependents)
-	if reported {
+	outbound := report("dependency", counts.deps.n, counts.deps.err, deps)
+	inbound := report("dependent", counts.dependents.n, counts.dependents.err, dependents)
+
+	// The recovery pointer is OUTBOUND-ONLY, because the command it names is.
+	// `bd dep list <id> <id>` reaches raw edge records through the duplicate-id
+	// form, which dep.go:1101 selects on `batchMode && direction == "down"`
+	// (--direction defaults to "down"); the other branch is the Relations
+	// query, which has the very far-end gap being reported here. dep.go:1144
+	// records in the repo's own words that "up" has the same gap and no
+	// inbound EdgeReader role exists to close it. Printing the pointer for an
+	// issue short only on DEPENDENT edges would hand the reader a command that
+	// cannot show them, so that case says what is actually true instead.
+	if outbound {
 		// Named once, after both directions, so an issue short on each gets
 		// one pointer rather than two.
 		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", issueID, issueID)
+	}
+	if inbound {
+		fmt.Fprintln(os.Stderr, "The unrenderable dependent edges have no raw CLI listing yet: bd dep list is outbound-only.")
 	}
 }
