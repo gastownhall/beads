@@ -203,3 +203,26 @@ func TestSelectivePullPrefersHydratingFetch(t *testing.T) {
 		}
 	})
 }
+
+// A proxied store offers neither CommentReader nor CommentImporter, so a
+// remote thread must not mark the issue pending: the update path could not
+// import those comments anyway, and reporting pending would rewrite every
+// commented issue on every pull and never settle.
+func TestPullCommentsPendingIgnoresThreadWithoutCommentCapability(t *testing.T) {
+	engine := NewEngine(newMockTracker("test"), NewUOWStore(&engineUOWProvider{state: createOnlyState()}), "test-actor")
+	if _, ok := engine.Store.(CommentReader); ok {
+		t.Fatal("proxied store unexpectedly implements CommentReader; retarget this test")
+	}
+	if _, ok := engine.Store.(CommentImporter); ok {
+		t.Fatal("proxied store unexpectedly implements CommentImporter; retarget this test")
+	}
+
+	at := time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC)
+	remote := &types.Issue{
+		Comments:  []*types.Comment{{Author: "alice", Text: "hi", CreatedAt: at}},
+		CreatedAt: at,
+	}
+	if engine.pullCommentsPending(context.Background(), &types.Issue{ID: "bd-linked"}, remote) {
+		t.Error("pullCommentsPending() = true without a comment capability, want false (no import is possible, so the issue must still settle)")
+	}
+}

@@ -610,8 +610,11 @@ func (e *Engine) pullCommentsPending(ctx context.Context, existing *types.Issue,
 	}
 	reader, ok := e.Store.(CommentReader)
 	if !ok {
-		// Cannot compare: report pending so the update path runs.
-		return true
+		// A store that cannot read the local thread cannot import into it
+		// either (the proxied adapter offers neither capability), so comments
+		// must not influence the skip decision: reporting pending here would
+		// rewrite every commented issue on every pull and never settle.
+		return false
 	}
 	comments, err := reader.GetIssueComments(ctx, existing.ID)
 	if err != nil {
