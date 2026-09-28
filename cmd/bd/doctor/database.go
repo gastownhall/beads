@@ -26,6 +26,10 @@ type localConfig struct {
 // with the current server-only architecture. The ensureDoltInit function
 // auto-recovers these at server start; this check provides early detection.
 func CheckDoltFormat(path string) DoctorCheck {
+	if IsRemoteServerMode(path) {
+		return SkipForRemoteServer("Dolt Format", CategoryCore)
+	}
+
 	_, beadsDir := getBackendAndBeadsDir(path)
 	doltDir := filepath.Join(beadsDir, "dolt")
 
