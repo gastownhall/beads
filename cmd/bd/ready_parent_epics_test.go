@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"testing"
 
@@ -15,6 +16,15 @@ type parentEpicFixture struct {
 	getIssueCalls   int
 	getByIDsCalls   int
 	getByIDsRequest []string
+
+	// getByIDsErr makes the batch lookup fail, which is the only contract this
+	// conversion changed: the base loop skipped the one parent whose GetIssue
+	// failed, the batch drops every suffix on the page.
+	getByIDsErr error
+	// omitParents drops the named parents from the batch result, standing in
+	// for IDs the IN clause matched no row for. Base reached the same state via
+	// GetIssue returning a nil parent.
+	omitParents map[string]bool
 }
 
 func (f *parentEpicFixture) issues() []*types.Issue {
@@ -40,10 +50,23 @@ func (f *parentEpicFixture) getIssuesByIDs(ids []string) ([]*types.Issue, error)
 	f.getByIDsCalls++
 	f.getByIDsRequest = append([]string(nil), ids...)
 	sort.Strings(f.getByIDsRequest)
-	return []*types.Issue{
+	if f.getByIDsErr != nil {
+		return nil, f.getByIDsErr
+	}
+	parents := []*types.Issue{
 		{ID: "epic-1", Title: "Auth Overhaul", IssueType: types.TypeEpic},
 		{ID: "task-1", Title: "Not an epic", IssueType: types.TypeTask},
-	}, nil
+	}
+	if len(f.omitParents) == 0 {
+		return parents, nil
+	}
+	kept := make([]*types.Issue, 0, len(parents))
+	for _, parent := range parents {
+		if !f.omitParents[parent.ID] {
+			kept = append(kept, parent)
+		}
+	}
+	return kept, nil
 }
 
 func (f *parentEpicFixture) check(t *testing.T, result map[string]string) {
@@ -120,4 +143,51 @@ func TestBuildParentEpicMap_FetchesParentsInOneBatch(t *testing.T) {
 func TestBuildParentEpicMapProxied_FetchesParentsInOneBatch(t *testing.T) {
 	f := &parentEpicFixture{}
 	f.check(t, buildParentEpicMapProxied(context.Background(), parentEpicUOW{f: f}, f.issues()))
+}
+
+// checkBatchError asserts the degrade this conversion introduced: a failed
+// batch costs every epic suffix on the page, but bd ready still renders the
+// list, because displayReadyList treats a nil map as "no annotations".
+func (f *parentEpicFixture) checkBatchError(t *testing.T, result map[string]string) {
+	t.Helper()
+	if result != nil {
+		t.Errorf("a failed parent batch should degrade to a nil map, got %v", result)
+	}
+	if f.getByIDsCalls != 1 {
+		t.Errorf("the batch should still be attempted exactly once, got %d calls", f.getByIDsCalls)
+	}
+}
+
+func TestBuildParentEpicMap_BatchErrorDegradesToNilMap(t *testing.T) {
+	f := &parentEpicFixture{getByIDsErr: errors.New("batch lookup failed")}
+	f.checkBatchError(t, buildParentEpicMap(context.Background(), parentEpicStore{f: f}, f.issues()))
+}
+
+func TestBuildParentEpicMapProxied_BatchErrorDegradesToNilMap(t *testing.T) {
+	f := &parentEpicFixture{getByIDsErr: errors.New("batch lookup failed")}
+	f.checkBatchError(t, buildParentEpicMapProxied(context.Background(), parentEpicUOW{f: f}, f.issues()))
+}
+
+// checkMissingParent pins the other contract the conversion rests on: a parent
+// the batch does not return is silently unannotated, matching the base loop's
+// `parent == nil -> continue`. It is also the cheap guard on the keying change,
+// since the lookup now has to match a returned ID against a requested one.
+func (f *parentEpicFixture) checkMissingParent(t *testing.T, result map[string]string) {
+	t.Helper()
+	if title, ok := result["child-of-epic"]; ok {
+		t.Errorf("a parent missing from the batch should leave its child unannotated, got %q", title)
+	}
+	if f.getByIDsCalls != 1 {
+		t.Errorf("the batch should be attempted exactly once, got %d calls", f.getByIDsCalls)
+	}
+}
+
+func TestBuildParentEpicMap_MissingParentIsOmitted(t *testing.T) {
+	f := &parentEpicFixture{omitParents: map[string]bool{"epic-1": true}}
+	f.checkMissingParent(t, buildParentEpicMap(context.Background(), parentEpicStore{f: f}, f.issues()))
+}
+
+func TestBuildParentEpicMapProxied_MissingParentIsOmitted(t *testing.T) {
+	f := &parentEpicFixture{omitParents: map[string]bool{"epic-1": true}}
+	f.checkMissingParent(t, buildParentEpicMapProxied(context.Background(), parentEpicUOW{f: f}, f.issues()))
 }

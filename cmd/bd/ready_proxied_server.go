@@ -506,6 +506,7 @@ func buildParentEpicMapProxied(ctx context.Context, uw uow.UnitOfWork, issues []
 	}
 	allDeps, err := uw.DependencyUseCase().GetForIssueIDs(ctx, ids)
 	if err != nil {
+		debug.Logf("warning: failed to get dependency records for parents: %v", err)
 		return nil
 	}
 	parentIDs := make(map[string]bool)

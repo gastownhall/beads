@@ -439,6 +439,7 @@ func buildParentEpicMap(ctx context.Context, s storage.DoltStorage, issues []*ty
 	}
 	allDeps, err := s.GetDependencyRecordsForIssues(ctx, issueIDs)
 	if err != nil {
+		debug.Logf("warning: failed to get dependency records for parents: %v", err)
 		return nil
 	}
 
