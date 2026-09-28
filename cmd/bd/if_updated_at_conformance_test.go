@@ -140,10 +140,14 @@ func ifupAssertUnchanged(t *testing.T, bd, dir, id string, before *types.Issue, 
 // (id, currentStamp, staleStamp, rowAfterBump). The row is bumped once after
 // the stale stamp is read, so `stale` is a valid earlier generation and
 // `current` is the row's live generation; `row` is the zero-mutation baseline.
+// The bump crosses a whole-second boundary first: updated_at is DATETIME(0),
+// so a same-second bump would mint the SAME stamp and `stale` would silently
+// stop being an earlier generation (the exact flake this barrier removes).
 func ifupSeedOpen(t *testing.T, bd, dir, title string) (string, string, string, *types.Issue) {
 	t.Helper()
 	issue := bdCreate(t, bd, dir, title, "--type", "task")
 	stale := ifupStamp(t, bd, dir, issue.ID)
+	waitPastStampBoundary(t)
 	bdUpdate(t, bd, dir, issue.ID, "--append-notes", "heartbeat")
 	current := ifupStamp(t, bd, dir, issue.ID)
 	return issue.ID, current, stale, bdShow(t, bd, dir, issue.ID)
@@ -156,6 +160,7 @@ func ifupSeedClaimed(t *testing.T, bd, dir, title string) (string, string, strin
 	issue := bdCreate(t, bd, dir, title, "--type", "task")
 	bdUpdate(t, bd, dir, issue.ID, "--assignee", "worker-a", "--status", "in_progress")
 	stale := ifupStamp(t, bd, dir, issue.ID)
+	waitPastStampBoundary(t)
 	bdUpdate(t, bd, dir, issue.ID, "--append-notes", "heartbeat")
 	current := ifupStamp(t, bd, dir, issue.ID)
 	return issue.ID, current, stale, bdShow(t, bd, dir, issue.ID)
@@ -235,8 +240,12 @@ func TestIfUpdatedAtUpdateMatchAppliesAndAdvancesGeneration(t *testing.T) {
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yz1")
 
-	id, _, stale, _ := ifupSeedOpen(t, bd, dir, "Fence match")
-	stdout, stderr, code := ifupRun(t, bd, dir, "update", id, "--priority", "1", "--if-updated-at", stale)
+	id, stamp, _, _ := ifupSeedOpen(t, bd, dir, "Fence match")
+	// The advance pin below needs the accepting write to land in a LATER
+	// second than `stamp` (DATETIME(0) keeps same-second writes on one
+	// generation), so cross a boundary before the fenced call.
+	waitPastStampBoundary(t)
+	stdout, stderr, code := ifupRun(t, bd, dir, "update", id, "--priority", "1", "--if-updated-at", stamp)
 	if code != 0 {
 		t.Fatalf("exact-stamp update exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
@@ -247,7 +256,7 @@ func TestIfUpdatedAtUpdateMatchAppliesAndAdvancesGeneration(t *testing.T) {
 	if row.Priority != 1 {
 		t.Errorf("matched fence did not apply the update: priority = %d, want 1", row.Priority)
 	}
-	if got := ifupStamp(t, bd, dir, id); got == stale {
+	if got := ifupStamp(t, bd, dir, id); got == stamp {
 		t.Errorf("matched fence did not advance the generation: updated_at still %s", got)
 	}
 }
@@ -261,9 +270,12 @@ func TestIfUpdatedAtUnclaimMatchSupervisorShape(t *testing.T) {
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yz2")
 
-	id, _, stale, _ := ifupSeedClaimed(t, bd, dir, "Fence unclaim match")
+	id, stamp, _, _ := ifupSeedClaimed(t, bd, dir, "Fence unclaim match")
+	// Same advance-pin requirement as T1: the release write must land in a
+	// later second than `stamp`, or the generation check below cannot see it.
+	waitPastStampBoundary(t)
 	stdout, stderr, code := ifupRun(t, bd, dir, "unclaim", id,
-		"--actor", "supervisor-x", "--if-assignee", "worker-a", "--if-updated-at", stale)
+		"--actor", "supervisor-x", "--if-assignee", "worker-a", "--if-updated-at", stamp)
 	if code != 0 {
 		t.Fatalf("exact-stamp unclaim exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
@@ -274,7 +286,7 @@ func TestIfUpdatedAtUnclaimMatchSupervisorShape(t *testing.T) {
 	if row.Assignee != "" || row.Status != types.StatusOpen {
 		t.Errorf("after fenced release: assignee=%q status=%q, want empty/open", row.Assignee, row.Status)
 	}
-	if got := ifupStamp(t, bd, dir, id); got == stale {
+	if got := ifupStamp(t, bd, dir, id); got == stamp {
 		t.Errorf("fenced release did not advance the generation: updated_at still %s", got)
 	}
 }
@@ -288,11 +300,15 @@ func TestIfUpdatedAtMatchIsOneShotPerGeneration(t *testing.T) {
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yz3")
 
-	id, _, stale, _ := ifupSeedOpen(t, bd, dir, "One-shot fence")
-	ifupMustRun(t, bd, dir, "update", id, "--priority", "1", "--if-updated-at", stale)
+	id, stamp, _, _ := ifupSeedOpen(t, bd, dir, "One-shot fence")
+	// The accepting write must land in a LATER second than `stamp`: under
+	// DATETIME(0) a same-second write keeps the same generation and the
+	// replay below would legitimately pass instead of refusing.
+	waitPastStampBoundary(t)
+	ifupMustRun(t, bd, dir, "update", id, "--priority", "1", "--if-updated-at", stamp)
 	after := ifupStamp(t, bd, dir, id)
 
-	stdout, stderr, code := ifupRun(t, bd, dir, "update", id, "--priority", "2", "--if-updated-at", stale)
+	stdout, stderr, code := ifupRun(t, bd, dir, "update", id, "--priority", "2", "--if-updated-at", stamp)
 	if code != ExitGuardMismatch {
 		t.Fatalf("replayed stale stamp exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, ExitGuardMismatch, stdout, stderr)
 	}
@@ -300,8 +316,8 @@ func TestIfUpdatedAtMatchIsOneShotPerGeneration(t *testing.T) {
 		t.Errorf("replayed fence mutated the row: priority = %d, want 1", row.Priority)
 	}
 	combined := stdout + stderr
-	if !strings.Contains(combined, stale) || !strings.Contains(combined, after) {
-		t.Errorf("replay refusal must name expected stamp %s and current stamp %s, got:\n%s", stale, after, combined)
+	if !strings.Contains(combined, stamp) || !strings.Contains(combined, after) {
+		t.Errorf("replay refusal must name expected stamp %s and current stamp %s, got:\n%s", stamp, after, combined)
 	}
 }
 
@@ -397,7 +413,10 @@ func TestIfUpdatedAtSameAssigneeHeartbeatRaceRegression(t *testing.T) {
 	issue := bdCreate(t, bd, dir, "Heartbeat race", "--type", "task")
 	bdUpdate(t, bd, dir, issue.ID, "--assignee", "worker-a", "--status", "in_progress")
 	supervisorStamp := ifupStamp(t, bd, dir, issue.ID)
-	// The holder heartbeats: same identity, new generation.
+	// The holder heartbeats: same identity, new generation. Cross a second
+	// boundary first — a same-second heartbeat keeps the OLD stamp under
+	// DATETIME(0) and the race this regression pins never happens.
+	waitPastStampBoundary(t)
 	bdUpdate(t, bd, dir, issue.ID, "--append-notes", "alive")
 	liveStamp := ifupStamp(t, bd, dir, issue.ID)
 	baseline := bdShow(t, bd, dir, issue.ID)
@@ -487,6 +506,9 @@ func TestIfUpdatedAtUpdateGuardCompositionMatrix(t *testing.T) {
 			issue := bdCreate(t, bd, dir, "Matrix "+cell.name, "--type", "task")
 			bdUpdate(t, bd, dir, issue.ID, "--assignee", "worker-a") // status stays open
 			stale := ifupStamp(t, bd, dir, issue.ID)
+			// The bump must land in a LATER second than `stale`, or the X=stamp
+			// cells would fence against the live generation and pass.
+			waitPastStampBoundary(t)
 			bdUpdate(t, bd, dir, issue.ID, "--append-notes", "bump")
 			current := ifupStamp(t, bd, dir, issue.ID)
 			baseline := bdShow(t, bd, dir, issue.ID)
@@ -502,6 +524,11 @@ func TestIfUpdatedAtUpdateGuardCompositionMatrix(t *testing.T) {
 				"--if-status", val(cell.s, "open", "in_progress"),
 				"--if-updated-at", val(cell.u, current, stale)}
 
+			if cell.wantCode == 0 {
+				// Happy cells carry an advance pin: the accepting write must
+				// land in a later second than `current` (DATETIME(0)).
+				waitPastStampBoundary(t)
+			}
 			stdout, stderr, code := ifupRun(t, bd, dir, args...)
 			combined := stdout + stderr
 			if code != cell.wantCode {
@@ -541,6 +568,7 @@ func TestIfUpdatedAtUpdateGuardCompositionMatrix(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Matrix JSON stamp", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--assignee", "worker-a")
 		stale := ifupStamp(t, bd, dir, issue.ID)
+		waitPastStampBoundary(t)
 		bdUpdate(t, bd, dir, issue.ID, "--append-notes", "bump")
 
 		stdout, stderr, code := ifupRun(t, bd, dir, "update", issue.ID, "--priority", "1",
@@ -793,7 +821,10 @@ func TestIfUpdatedAtEmptyStampIsUsageError(t *testing.T) {
 	}
 	ifupAssertUnchanged(t, bd, dir, id, baseline, "T24 update")
 	combined := stdout + stderr
-	if !strings.Contains(combined, "invalid") || !strings.Contains(combined, "--if-updated-at") {
+	// Shape pin, not a full-string pin: the empty stamp is refused as a
+	// distinct usage case ("requires a non-empty timestamp ..."), which the
+	// unparseable-value message ("invalid") deliberately does not cover.
+	if !strings.Contains(combined, "non-empty timestamp") || !strings.Contains(combined, "--if-updated-at") {
 		t.Errorf("empty stamp must be a usage error naming the flag, got:\n%s", combined)
 	}
 
@@ -1129,6 +1160,9 @@ func ifupParityScenario(t *testing.T, env crossModeEnv) ifupParityOutcome {
 	// T1: exact stamp applies and advances the generation.
 	match := env.create(t, "Parity fence match")
 	stamp := ifupEnvStamp(t, env, match)
+	// Advance must be visible under DATETIME(0): cross a second boundary so
+	// the accepting write lands in a later second than `stamp`.
+	waitPastStampBoundary(t)
 	env.mustRun(t, "update", match, "--priority", "1", "--if-updated-at", stamp)
 	got.matchCode = 0
 	row := env.show(t, match)
@@ -1138,6 +1172,7 @@ func ifupParityScenario(t *testing.T, env crossModeEnv) ifupParityOutcome {
 	// T4: stale stamp refuses, writes nothing, names both stamps.
 	staleRow := env.create(t, "Parity fence stale")
 	oldStamp := ifupEnvStamp(t, env, staleRow)
+	waitPastStampBoundary(t)
 	env.mustRun(t, "update", staleRow, "--append-notes", "heartbeat")
 	curStamp := ifupEnvStamp(t, env, staleRow)
 	staleBaseline := env.show(t, staleRow)
@@ -1151,6 +1186,7 @@ func ifupParityScenario(t *testing.T, env crossModeEnv) ifupParityOutcome {
 	race := env.create(t, "Parity heartbeat race")
 	env.mustRun(t, "update", race, "--assignee", "worker-a", "--status", "in_progress")
 	raceOld := ifupEnvStamp(t, env, race)
+	waitPastStampBoundary(t)
 	env.mustRun(t, "update", race, "--append-notes", "alive")
 	raceBaseline := env.show(t, race)
 	_, _, code = env.run(t, "unclaim", race,
