@@ -186,6 +186,7 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		if count == 0 {
 			return fmt.Errorf("add label: issue %s does not exist", issueID)
 		}
+		return nil
 	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -255,6 +256,9 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	if err != nil {
 		return fmt.Errorf("remove label: rows affected: %w", err)
 	}
+	if deleted == 0 {
+		return nil
+	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
@@ -266,9 +270,6 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	}
 	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
 		return err
-	}
-	if deleted == 0 {
-		return nil
 	}
 	if err := TouchIssueUpdatedAtInTx(ctx, tx, issueID, useWisps); err != nil {
 		return fmt.Errorf("remove label: %w", err)
