@@ -108,9 +108,16 @@ func CanonicalCyclePaths(graph map[string][]string) [][]string {
 // and a scheduling edge outside every component lies on no cycle at all.
 //
 // BOUND: at most one cycle per scheduling edge inside a component plus one per
-// default-walk cycle, so never more than twice the distinct scheduling edges. A
-// cycle made only of tracks edges is never reported, which keeps out the
-// "thousands of cycles" regression AppendMixedCycleGraphInTx documents.
+// default-walk cycle, so never more than twice the distinct scheduling edges.
+// That is the whole of the volume guarantee, and it counts EDGES, not
+// deadlocks. A cycle made only of tracks edges is never reported, which rules
+// out the pure-tracks shape AppendMixedCycleGraphInTx documents and nothing
+// beyond it: one tracks-only loop fuses its whole neighborhood into a single
+// component, after which every scheduling edge inside is on a cycle and is
+// reported, however acyclic the scheduling edges are on their own. So the
+// exclusion does not keep the report small on a tracks-dense graph — the edge
+// count does, which is why this walk is opt-in and why `bd dep cycles`
+// truncates its rendering.
 //
 // COST: one breadth-first search per distinct scheduling-edge target inside a
 // component, confined to that component, and shared by every edge into that

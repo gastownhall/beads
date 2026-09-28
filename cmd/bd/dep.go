@@ -1366,7 +1366,8 @@ var depCyclesCmd = &cobra.Command{
 		// Both routes, one body: the only difference between them is which
 		// accessor answers, and that is inside openCycleDetector.
 		includeTracks, _ := cmd.Flags().GetBool("include-tracks")
-		return runDepCycles(includeTracks)
+		limit, _ := cmd.Flags().GetInt("limit")
+		return runDepCycles(includeTracks, limit)
 	},
 }
 
@@ -1671,9 +1672,20 @@ func init() {
 
 	// Widens the report, never narrows it: every cycle the default walk finds is
 	// kept, and cycles that close through tracks edges are added. A loop made
-	// only of tracks edges is still not reported, so ordinary convoy topology
-	// stays silent. See issueops.DetectCyclesRequest.IncludeTracks.
+	// only of tracks edges is still not reported, but that is the only thing
+	// the guard excludes: a tracks loop fuses a component and every scheduling
+	// edge inside it is then reported, so a tracks-dense workspace can print
+	// many cycles here even where the default walk prints none — hence
+	// --limit. See issueops.DetectCyclesRequest.IncludeTracks.
 	depCyclesCmd.Flags().Bool("include-tracks", false, "Also walk 'tracks' edges: reports every cycle the default walk finds plus cycles that close through a tracks edge, never a loop made only of tracks edges (diagnostic for molecule-root deadlocks hidden by tracks-only propagation)")
+	// Caps the RENDERED list only, and on BOTH walks: this does not consult
+	// --include-tracks, so it bounds the default invocation's rendering too.
+	// The widened walk is what makes the cap necessary rather than what scopes
+	// it — bounded by the scheduling-edge count, not by the number of
+	// deadlocks, so a tracks-dense workspace can report more cycles than a
+	// reader can use. The printed total stays the whole report's and --json is
+	// never truncated.
+	depCyclesCmd.Flags().Int("limit", 50, "Maximum cycles to print (0 = no limit); the reported total is always the whole count, and --json is never truncated")
 
 	// Issue ID completions for dep subcommands
 	depAddCmd.ValidArgsFunction = issueIDCompletion

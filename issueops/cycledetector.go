@@ -12,8 +12,10 @@ import (
 // honest shape rather than a placeholder: a cycle is a property of the graph
 // as a whole, so there is no predicate that narrows it — narrowing the EDGE
 // set would delete cycles that exist and narrowing the reported set would need
-// an anchor this question does not have. `bd dep cycles` takes no flags to
-// narrow either question for the same reason.
+// an anchor this question does not have. `bd dep cycles` takes no flag that
+// narrows either ANSWER for the same reason: its `--limit` caps how much of the
+// report is PRINTED and never what the report holds, which is why it does not
+// contradict this paragraph either.
 //
 // IncludeTracks is the one WIDENING option, not a narrowing one, which is why
 // it does not contradict the paragraph above. It exists as a field rather than
@@ -35,6 +37,17 @@ type DetectCyclesRequest struct {
 	// edges — the closing edge included — is a blocks/conditional-blocks
 	// edge; tracks edges may only complete a path, never make one up alone.
 	//
+	// THAT GUARD IS NECESSARY, NOT SUFFICIENT, and it excludes a PURE tracks
+	// loop and nothing more. It is not a bound on volume: one tracks-only
+	// loop fuses everything it touches into a single strongly connected
+	// component, and every blocks/conditional-blocks edge inside a component
+	// lies on a cycle and is reported — even where those scheduling edges
+	// alone form a strictly acyclic chain and the default walk reports
+	// nothing. A molecule whose entry step tracks back to its root therefore
+	// yields about one report per scheduling edge beneath it. What the option
+	// promises is the bound below, which counts EDGES and not deadlocks; that
+	// is why it is opt-in, and why `bd dep cycles` truncates its rendering.
+	//
 	// IT ONLY ADDS TO THE ANSWER. Every cycle the default request reports on
 	// the same data is also in this report, so turning the option on never
 	// hides a blocks-only deadlock, even where tracks edges join separate
@@ -45,8 +58,10 @@ type DetectCyclesRequest struct {
 	// blocks/conditional-blocks edges.
 	//
 	// Default false: the base walk this type's doc above describes is
-	// unchanged.
-	IncludeTracks bool `json:"include_tracks,omitempty"`
+	// unchanged. Its RENDERING is not — `bd dep cycles` caps the printed list
+	// at `--limit` without consulting this field, so the default invocation
+	// prints at most 50 cycles of a report that still holds every one of them.
+	IncludeTracks bool
 }
 
 // CycleMember is one node on a detected cycle.

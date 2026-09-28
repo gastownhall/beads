@@ -202,9 +202,13 @@ func TestBuildCyclesLeavesACompleteCycleUnmarked(t *testing.T) {
 // conditional-blocks) edge is also on it. This is the gc-818bx guard: the
 // shape it exists to surface is a molecule root that blocks-depends
 // (transitively) on its own entry step, which tracks-depends back to the
-// root, WITHOUT reopening the "thousands of cycles" regression a
-// tracks-in-the-plain-walk change caused and had to revert (ordinary convoy
-// topology loops constantly through tracks alone).
+// root, without reporting the pure-tracks loops that a
+// tracks-in-the-plain-walk change reported when it caused the "thousands of
+// cycles" regression and had to revert (ordinary convoy topology loops
+// constantly through tracks alone). That requirement is NECESSARY AND NOT
+// SUFFICIENT: it excludes the pure-tracks loop only, and
+// TestCanonicalMixedCyclePathsBoundsAFusedMoleculeByItsSchedulingEdges pins
+// what it leaves standing.
 
 // TestCanonicalMixedCyclePathsIgnoresAPureTracksLoop pins the regression
 // guard directly: a loop made entirely of tracks edges — the shape a convoy
@@ -217,6 +221,50 @@ func TestCanonicalMixedCyclePathsIgnoresAPureTracksLoop(t *testing.T) {
 	}
 	if got := mustMixedCyclePaths(t, graph); len(got) != 0 {
 		t.Errorf("pure-tracks loop reported %v, want no cycles: tracks-only convoy topology is not a deadlock", got)
+	}
+}
+
+// TestCanonicalMixedCyclePathsBoundsAFusedMoleculeByItsSchedulingEdges pins
+// what the "at least one scheduling edge" requirement does NOT buy, the
+// direction TestCanonicalMixedCyclePathsKeepsDeadlocksATracksEdgeFuses leaves
+// open. That test fuses two REAL deadlocks and checks neither is lost; this one
+// fuses none at all. The single tracks edge from an entry step back to its root
+// pulls the whole molecule into one strongly connected component, and every
+// scheduling edge inside a component lies on a cycle — so a strictly acyclic
+// blocks chain, which the default walk reports nothing for, still yields one
+// cycle per blocks edge. The requirement excludes a PURE tracks loop and
+// nothing else, which is why the guarantee on this walk is the BOUND (here 9,
+// inside twice the 9 distinct scheduling edges) and never a count of real
+// deadlocks.
+func TestCanonicalMixedCyclePathsBoundsAFusedMoleculeByItsSchedulingEdges(t *testing.T) {
+	const steps = 10
+	graph := map[string][]MixedCycleEdge{}
+	schedulingOnly := map[string][]string{}
+	for i := range steps {
+		step := fmt.Sprintf("step-%03d", i)
+		// root -tracks-> step: the stored direction of a convoy's edge to an
+		// issue it tracks.
+		graph["root"] = append(graph["root"], MixedCycleEdge{To: step})
+		if i == 0 {
+			continue
+		}
+		// A strictly ACYCLIC blocks chain down the steps. Nothing here closes.
+		previous := fmt.Sprintf("step-%03d", i-1)
+		graph[step] = append(graph[step], MixedCycleEdge{To: previous, Scheduling: true})
+		schedulingOnly[step] = append(schedulingOnly[step], previous)
+	}
+	// The entry step tracks back to the root: one edge, and the only cycle in
+	// the graph runs through it.
+	graph["step-000"] = append(graph["step-000"], MixedCycleEdge{To: "root"})
+
+	if plain := CanonicalCyclePaths(schedulingOnly); len(plain) != 0 {
+		t.Fatalf("the blocks chain alone reported %v, want none: this fixture only measures fusion while its scheduling edges are acyclic", plain)
+	}
+
+	schedulingEdges := steps - 1
+	if got := mustMixedCyclePaths(t, graph); len(got) != schedulingEdges {
+		t.Errorf("a tracks-fused molecule over an ACYCLIC blocks chain reported %d cycles, want %d — one per scheduling edge inside the fused component: %v",
+			len(got), schedulingEdges, got)
 	}
 }
 

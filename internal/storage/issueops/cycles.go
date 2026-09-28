@@ -143,7 +143,11 @@ type MixedCycleEdge struct {
 // reported: ordinary convoy topology loops constantly through tracks alone,
 // and reporting every one of those loops is the "thousands of cycles"
 // regression a previous change to the plain (blocks-only) walk caused and had
-// to revert; this widened walk must not reintroduce it under a different name.
+// to revert. That exclusion covers the pure-tracks shape and nothing more: a
+// tracks loop still fuses a component, and every scheduling edge inside a
+// fused component is reported, so this walk is bounded by the scheduling-edge
+// count rather than by the number of real deadlocks. See
+// CanonicalMixedCyclePaths's BOUND.
 //
 //nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
 func AppendMixedCycleGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]MixedCycleEdge) error {
@@ -161,6 +165,9 @@ func AppendMixedCycleGraphInTx(ctx context.Context, tx DBTX, depTables []string,
 				_ = rows.Close()
 				return fmt.Errorf("mixed cycle graph: scan %s: %w", depTable, err)
 			}
+			// The backend conformance cases are this switch's pin: the
+			// package tests build their graphs by hand, so only
+			// RunCycleDetectorIncludeTracks* reads a row through it.
 			switch types.DependencyType(depType) {
 			case types.DepBlocks, types.DepConditionalBlocks:
 				graph[issueID] = append(graph[issueID], MixedCycleEdge{To: dependsOnID, Scheduling: true})
