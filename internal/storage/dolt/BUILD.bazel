@@ -225,6 +225,7 @@ go_test(
         "generated_dependency_target_repro_test.go",
         "git_remote_shared_server_test.go",
         "git_remote_test.go",
+        "gm2g3g5r_leak_repro_test.go",
         "graph_counter_contract_test.go",
         "history_presence_contract_test.go",
         "history_test.go",
