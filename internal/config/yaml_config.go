@@ -1095,6 +1095,13 @@ func scalarStyleFor(value string) yaml.Style {
 }
 
 func commentOutYamlKey(content, key string) (string, error) {
+	// Normalize CRLF up front. The old implementation scanned with
+	// bufio.Scanner, whose ScanLines drops a trailing "\r", so a CRLF file came
+	// back LF-only; splitting on "\n" instead (below, to keep the file's final
+	// newline) would otherwise carry every "\r" through and change that
+	// long-standing behavior.
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+
 	if err := unsupportedUnsetShape(content, key); err != nil {
 		return "", err
 	}
