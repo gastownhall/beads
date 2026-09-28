@@ -72,7 +72,7 @@ func TestIssueOperationCloneFunctionsKeepFrozenRequestFields(t *testing.T) {
 
 	requestMutable := map[reflect.Type]map[string]bool{
 		reflect.TypeOf(publicops.CreateRequest{}): {"Issue": true, "Dependencies": true, "WaitsFor": true},
-		reflect.TypeOf(publicops.UpdateRequest{}): {"ExpectedVersion": true, "ExpectedAssignee": true, "ExpectedStatus": true},
+		reflect.TypeOf(publicops.UpdateRequest{}): {"ExpectedVersion": true, "ExpectedAssignee": true, "ExpectedStatus": true, "ExpectedUpdatedAt": true},
 		reflect.TypeOf(publicops.CloseRequest{}):  {"ExpectedVersion": true},
 		reflect.TypeOf(publicops.ReopenRequest{}): {"ExpectedVersion": true},
 	}

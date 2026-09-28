@@ -10387,8 +10387,8 @@ components:
 
 
             It fences the ISSUES ROW's generation, not an identity field, so
-            it composes with `expected_assignee`/`expected_status`/`
-            expected_version` (all supplied guards must hold). KNOWN BLIND
+            it composes with `expected_assignee`, `expected_status` and
+            `expected_version` (all supplied guards must hold). KNOWN BLIND
             SPOT (upstream issue #5442), documented rather than fixed: label
             mutations bypass `updated_at` by design, so a stamp read before a
             label-only write still matches.

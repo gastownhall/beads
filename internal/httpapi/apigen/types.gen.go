@@ -1927,7 +1927,7 @@ type UpdateIssueRequest struct {
 
 	// ExpectedUpdatedAt Requires the issue row's `updated_at` to equal this stamp before the patch — the generation fence. The value is the `updated_at` this surface's reads report (RFC3339 UTC, second precision); the comparison is second-precision UTC, so an equivalent RFC3339 spelling of the same instant (`Z` vs `+00:00`) is the same stamp. A miss refuses the whole request with `409 precondition_failed`, echoing this member back.
 	//
-	// It fences the ISSUES ROW's generation, not an identity field, so it composes with `expected_assignee`/`expected_status`/` expected_version` (all supplied guards must hold). KNOWN BLIND SPOT (upstream issue #5442), documented rather than fixed: label mutations bypass `updated_at` by design, so a stamp read before a label-only write still matches.
+	// It fences the ISSUES ROW's generation, not an identity field, so it composes with `expected_assignee`, `expected_status` and `expected_version` (all supplied guards must hold). KNOWN BLIND SPOT (upstream issue #5442), documented rather than fixed: label mutations bypass `updated_at` by design, so a stamp read before a label-only write still matches.
 	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 
 	// ExpectedVersion Requires the row's revision to equal this value before the patch. A miss refuses the WHOLE request with `409 precondition_failed` and writes nothing — `ApplyUpdateItem.expected_version`'s contract, on the operation that patches one row.
