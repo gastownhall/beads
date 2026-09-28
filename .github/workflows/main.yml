@@ -868,9 +868,14 @@ jobs:
   # Reuses the cmd/bd test binary compiled once by build-artifacts (bd-cmd-test):
   # the proxied tests share the package and are gated at runtime by
   # BEADS_TEST_PROXIED_SERVER=1. Shard assignment is committed in
-  # .github/scripts/proxied-cmd-test-shards.txt; newly-added TestProxiedServer*
-  # tests hash-distribute until listed there. Adopt the
-  # `TestProxiedServer<Subcommand>` naming convention for new entry points.
+  # .github/scripts/proxied-cmd-test-shards.txt; newly-added
+  # TestProxiedServer*/TestServerMode* tests hash-distribute until listed there.
+  # Prefer the `TestProxiedServer<Subcommand>` naming convention for new entry
+  # points; server-mode-topology suites named TestServerMode* are also
+  # discovered among the cmd/bd/*_test.go entry points, so neither family is
+  # left out of this lane. That glob is non-recursive: a container-gated suite
+  # added under cmd/bd/<subpkg>/ is still never selected here whatever it is
+  # named, so keep new proxied/server-mode entry points at the top level.
   test-proxied-cmd:
     name: Test (proxied-server cmd ${{ matrix.shard }}/15)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

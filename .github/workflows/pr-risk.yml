@@ -64,7 +64,8 @@ jobs:
   # tests live in the same package and are gated at runtime by
   # BEADS_TEST_PROXIED_SERVER=1, so no separate build is needed. Shard
   # assignment is committed in .github/scripts/proxied-cmd-test-shards.txt;
-  # newly-added TestProxiedServer* tests hash-distribute until listed there.
+  # newly-added TestProxiedServer*/TestServerMode* tests hash-distribute until
+  # listed there.
   test-proxied-cmd:
     name: Test (Proxied Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [detect-ci-tier, build-embedded]
