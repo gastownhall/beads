@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // Fast CLI tests converted from scripttest suite
@@ -1016,13 +1018,11 @@ func init() {
 	// Prebuilt fast path (scripts/test.sh and CI export this), else build
 	// once. No repo-root ./bd reuse: a stale checkout-root binary silently
 	// substitutes itself for the source under test (wy-4mtr0).
-	if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
-		if abs, err := filepath.Abs(prebuilt); err == nil {
-			if _, statErr := os.Stat(abs); statErr == nil {
-				testBD = abs
-				return
-			}
-		}
+	if prebuilt, err := findPrebuiltBDBinary(); err == nil && prebuilt != "" {
+		testBD = prebuilt
+		return
+	} else if bazeltest.IsBazel() {
+		panic(fmt.Sprintf("bd binary for tests: %v", err))
 	}
 	bdBinary := "bd"
 	if runtime.GOOS == "windows" {

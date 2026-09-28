@@ -20,6 +20,12 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
+	// Explicit commit point, like the `transact` in cloneSubgraph the direct
+	// route reaches through spawnMoleculeWithOptions (GH#4995). The wisp tables
+	// are dolt_ignored, so the commit this preserves is whatever tracked rows
+	// the spawn touches — the class membership is what matters here, not the
+	// size of the commit.
+	ctx = explicitCommitPointContext(ctx)
 
 	vars, err := parseVarFlags(in.varFlags)
 	if err != nil {

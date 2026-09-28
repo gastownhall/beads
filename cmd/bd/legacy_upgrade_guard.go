@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
@@ -245,7 +246,11 @@ func guardUndiscoveredLegacyWorkspace() error {
 	}
 	dir := utils.CanonicalizePath(cwd)
 	boundary := utils.CanonicalizePath(git.GetRepoRoot())
+	bound := ceiling.For(dir)
 	for {
+		if bound.Excludes(dir) {
+			return nil
+		}
 		if err := guardLegacyUpgradeWorkspace(filepath.Join(dir, ".beads")); err != nil {
 			return err
 		}

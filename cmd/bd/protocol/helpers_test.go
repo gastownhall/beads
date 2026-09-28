@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // ---------------------------------------------------------------------------
@@ -100,6 +101,12 @@ func requireDoltStore(t *testing.T, what string) {
 func buildBD(t *testing.T) string {
 	t.Helper()
 	bdOnce.Do(func() {
+		// Under Bazel the binary is injected (//cmd/bd:bd_for_tests); there is
+		// no toolchain or module tree to build from. Plain go test is unchanged.
+		if bazeltest.IsBazel() {
+			bdPath, bdErr = bazeltest.PrebuiltBD()
+			return
+		}
 		bin := "bd-protocol"
 		if runtime.GOOS == "windows" {
 			bin += ".exe"
@@ -122,6 +129,9 @@ func buildBD(t *testing.T) string {
 			bdErr = fmt.Errorf("go build: %w\n%s", err, out)
 		}
 	})
+	if bdErr != nil && bazeltest.IsBazel() {
+		t.Fatalf("bd binary for tests: %v", bdErr) // a wiring bug, never a skip
+	}
 	if bdErr != nil {
 		t.Skipf("skipping: failed to build bd: %v", bdErr)
 	}

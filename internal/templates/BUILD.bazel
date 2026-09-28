@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "templates",
+    srcs = ["agent_skill.go"],
+    embedsrcs = [
+        "skills/beads/SKILL.md",
+        "skills/beads/agents/openai.yaml",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/templates",
+    visibility = ["//:__subpackages__"],
+)

@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "recipes",
+    srcs = [
+        "recipes.go",
+        "template.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/recipes",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//plugins/beads",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "recipes_test",
+    srcs = ["recipes_test.go"],
+    embed = [":recipes"],
+    deps = ["//plugins/beads"],
+)

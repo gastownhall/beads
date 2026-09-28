@@ -72,6 +72,10 @@ type IssueSQLRepository interface {
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -308,6 +312,10 @@ type IssueUseCase interface {
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -839,6 +847,14 @@ func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filte
 	out, err := u.issueRepo.SearchAcrossIssuesAndWisps(ctx, query, filter)
 	if err != nil {
 		return SearchPage{}, fmt.Errorf("SearchIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (u *issueUseCaseImpl) SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	out, err := u.issueRepo.SearchWispsPlane(ctx, query, filter)
+	if err != nil {
+		return nil, fmt.Errorf("SearchWispsPlane: %w", err)
 	}
 	return out, nil
 }

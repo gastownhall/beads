@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "jira",
+    srcs = [
+        "client.go",
+        "fieldmapper.go",
+        "refs.go",
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/jira",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/debug",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "jira_test",
+    srcs = [
+        "client_test.go",
+        "refs_test.go",
+        "retry_test.go",
+        "tracker_test.go",
+    ],
+    embed = [":jira"],
+    deps = [
+        "//internal/config",
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+        "//issueops",
+        "//memoryops",
+    ],
+)

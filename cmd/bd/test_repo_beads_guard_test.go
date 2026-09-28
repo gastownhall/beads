@@ -50,7 +50,9 @@ type testRunner interface {
 }
 
 func runTestsAndSweep(m testRunner) int {
+	stdout, stderr := os.Stdout, os.Stderr
 	code := m.Run()
+	code = checkStdioAfterRun(code, stdout, stderr)
 	swept := doltserver.SweepSuiteTestServers(testTempRoot)
 	return doltserver.ApplyLeakPolicy("cmd/bd", code, swept)
 }
@@ -196,6 +198,8 @@ func testMainInner(m *testing.M) int {
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.
 	// Each test that needs a .beads directory should set BEADS_DIR explicitly.
+	// This is startup isolation only: fresh in-process command fixtures should
+	// use isolateBeadsDirForTest before setup to contain later dispatch mutations.
 	origBeadsDir := os.Getenv("BEADS_DIR")
 	os.Unsetenv("BEADS_DIR")
 	defer func() {

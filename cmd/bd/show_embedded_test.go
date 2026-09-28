@@ -230,6 +230,26 @@ func TestEmbeddedShow(t *testing.T) {
 		}
 	})
 
+	// GH#5565: the direct/embedded twin of the proxied
+	// show_wisp_comments_default_count_only. A wisp's comments live in
+	// wisp_comments; the default count-only view must count them there.
+	t.Run("show_json_wisp_comment_count", func(t *testing.T) {
+		wisp := bdCreate(t, bd, dir, "Wisp w/comments", "--type", "task", "--ephemeral")
+		for i := 0; i < 2; i++ {
+			if out, err := bdRunWithFlockRetry(t, bd, dir, "comments", "add", wisp.ID, fmt.Sprintf("wisp comment %d", i)); err != nil {
+				t.Fatalf("bd comments add failed: %v\n%s", err, out)
+			}
+		}
+
+		m := bdShowDetails(t, bd, dir, wisp.ID)
+		if got, _ := m["comment_count"].(float64); got != 2 {
+			t.Errorf("comment_count: got %v, want 2", m["comment_count"])
+		}
+		if _, ok := m["comments"]; ok {
+			t.Errorf("comments slice should be absent by default")
+		}
+	})
+
 	// ===== --short =====
 
 	t.Run("show_short", func(t *testing.T) {

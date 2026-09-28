@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -513,10 +514,42 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 	if glShorthandPattern.MatchString(ref) {
 		return true
 	}
-	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") {
+	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") && !t.onConfiguredHost(ref) {
 		return false
 	}
 	return issueIIDPattern.MatchString(ref) || milestoneIDPattern.MatchString(ref)
+}
+
+// onConfiguredHost reports whether ref is a URL on the same host (and base
+// path, for GitLab served from a sub-path) as the configured gitlab.url.
+// Self-hosted instances need not have "gitlab" in their hostname.
+//
+// Matching is host-scoped, not project-scoped: with GitLab at the host root
+// this claims every issue/work-item URL on the host, other projects' included.
+// That is what the "gitlab" substring arm already does for gitlab.com, and
+// keying on the project would silently stop recognizing self-hosted refs,
+// since gitlab.project_path is optional and Init discards its load error.
+//
+// Hosts are compared literally, so gitlab.url must name the host the way
+// GitLab spells it in the web_url values it returns: an explicit default port
+// ("https://host:443") matches none of them, and the ref is left to the legacy
+// substring arms. Scheme is not compared, so an http:// ref on an https://
+// instance is still claimed — leniency only, since the IID patterns below
+// still decide what is ultimately recognized.
+func (t *Tracker) onConfiguredHost(ref string) bool {
+	if t.client == nil || t.client.BaseURL == "" {
+		return false
+	}
+	base, err := url.Parse(t.client.BaseURL)
+	if err != nil || base.Host == "" {
+		return false
+	}
+	u, err := url.Parse(ref)
+	if err != nil || !strings.EqualFold(u.Host, base.Host) {
+		return false
+	}
+	basePath := strings.TrimRight(base.Path, "/")
+	return basePath == "" || u.Path == basePath || strings.HasPrefix(u.Path, basePath+"/")
 }
 
 // ExtractIdentifier extracts the issue IID from a GitLab URL or shorthand ref.

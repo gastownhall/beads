@@ -83,7 +83,17 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		}
 		// The same tables a sweep stages; the neighbor rewrite lands in
 		// `issues`, which is already on the list.
-		for _, table := range sweptTables {
+		//
+		// THE VERSIONED-HISTORY TABLES ARE NOT on that list, and the rewrite
+		// writes them: RewriteDeletedReferencesInTx updates every surviving
+		// neighbor through UpdateIssueInTx, the seam's minting entry point, and
+		// this transaction is scoped for minting because commitWriteTx scopes
+		// the transaction withWriteTx hands to the body above. Staging the
+		// fixed list alone would leave those rows in the working set, outside
+		// the commit that describes them — the exact loss withVersionedHistoryTables
+		// exists to prevent, and for store_epoch the unrecoverable kind (see the
+		// append-only note in doltAddAndCommitInTx's HAZARD block).
+		for _, table := range s.store.withVersionedHistoryTables(sweptTables) {
 			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		msg := fmt.Sprintf("bd: delete %d issue(s)", result.Deleted)

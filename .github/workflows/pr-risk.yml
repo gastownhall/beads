@@ -70,7 +70,7 @@ jobs:
     needs: [detect-ci-tier, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -106,6 +106,7 @@ jobs:
         run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test proxied-server cmd shard
+        timeout-minutes: 16
         env:
           BEADS_TEST_PROXIED_SERVER: "1"
           BEADS_TEST_BD_BINARY: /tmp/bd-proxied
@@ -430,6 +431,13 @@ jobs:
         id: nix_help
         run: |
           nix run .#default -- --help > help.txt
+      # Every flake check for the runner's own system (today: hook-timeout-
+      # backends, checks.nix). `nix flake check` rather than a spelled-out
+      # `.#checks.x86_64-linux.<name>`: no hardcoded system, and a check added
+      # to checks.nix is run without a workflow edit.
+      - name: Run the flake checks
+        run: |
+          nix flake check -L
       - name: Verify help text
         if: steps.nix_help.outcome == 'success'
         run: |

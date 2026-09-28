@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -96,7 +97,9 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 		eg.Go(func() error {
 			t.Logf("proc %d: starting", procN)
 			cmd := exec.CommandContext(egCtx, testBin, "-test.run=^TestHelperProcess$", "-test.v")
-			cmd.Env = append(os.Environ(),
+			// ShardFreeEnv: a sharded parent's TEST_SHARD_* would filter the
+			// child's one -test.run test away.
+			cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()),
 				"BEADS_EMBEDDED_DOLT_HELPER=1",
 				"BEADS_EMBEDDED_DOLT_DIR="+sharedDir,
 				"BEADS_EMBEDDED_DOLT_ITERS="+strconv.Itoa(iters),

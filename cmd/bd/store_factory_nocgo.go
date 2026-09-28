@@ -83,7 +83,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		return nil, errProxiedStoreUnrouted()
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(beadsDir, cfg) {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
@@ -108,7 +108,7 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		return nil, errProxiedStoreUnrouted()
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(beadsDir, cfg) {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)

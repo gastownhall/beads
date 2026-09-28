@@ -1,0 +1,91 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":dolt.bzl", "hermetic_bin")
+
+# Platforms with a pinned dolt release; elsewhere (e.g. windows) the hermetic
+# test wrapper is skipped by `bazel build //...` instead of failing analysis.
+_DOLT_PLATFORMS_ONLY = select({
+    ":darwin_amd64": [],
+    ":darwin_arm64": [],
+    ":linux_amd64": [],
+    ":linux_arm64": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+# DOLT_VERSION is read as text by the dolt pin tests in //scripts.
+exports_files(
+    ["dolt.bzl"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# sh_test src for a second test target over an existing go_test binary (see
+# the script header), e.g. //cmd/bd/doctor/fix:fix_docker_test.
+exports_files(
+    ["go_test_variant.sh"],
+    visibility = ["//visibility:public"],
+)
+
+# Wraps every test process (`test --run_under` in .bazelrc) with the isolated
+# HOME/XDG/Dolt/git environment that scripts/ci/lib/test-env.sh gives `go test`.
+# Bazel merges the run_under target's runfiles into every test's runfiles, so
+# each test action declares the pinned dolt as an input and the wrapper puts
+# it first on PATH.
+sh_binary(
+    name = "test_env",
+    srcs = ["test_env.sh"],
+    data = [":hermetic_bin"],
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
+    visibility = ["//visibility:public"],
+)
+
+# The dolt tests actually run (via test_env) reports DOLT_VERSION. Guards
+# against a stale download (or a mismatched digest table) the text-only pin
+# tests in //scripts cannot see.
+sh_test(
+    name = "dolt_version_test",
+    srcs = ["dolt_version_test.sh"],
+    data = ["dolt.bzl"],
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
+)
+
+# PATH directory holding the hermetic host tools, at
+# <runfiles>/_main/tools/bazel/hermetic_bin/.
+hermetic_bin(
+    name = "hermetic_bin",
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
+    tools = {":dolt": "dolt"},
+)
+
+# The pinned Dolt CLI (tools/bazel/dolt.bzl) for the platform tests run on.
+alias(
+    name = "dolt",
+    actual = select(
+        {
+            ":darwin_amd64": "@dolt_darwin_amd64//:dolt",
+            ":darwin_arm64": "@dolt_darwin_arm64//:dolt",
+            ":linux_amd64": "@dolt_linux_amd64//:dolt",
+            ":linux_arm64": "@dolt_linux_arm64//:dolt",
+            "//conditions:default": ":no_pinned_dolt",
+        },
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# Stand-in on platforms without a pinned dolt release: incompatible, so
+# `bazel build //...` skips its dependents there instead of failing analysis.
+filegroup(
+    name = "no_pinned_dolt",
+    target_compatible_with = ["@platforms//:incompatible"],
+)
+
+[
+    config_setting(
+        name = "{}_{}".format(os, cpu),
+        constraint_values = [
+            "@platforms//os:" + ("osx" if os == "darwin" else os),
+            "@platforms//cpu:" + ("x86_64" if cpu == "amd64" else "aarch64"),
+        ],
+    )
+    for os in ("darwin", "linux")
+    for cpu in ("amd64", "arm64")
+]

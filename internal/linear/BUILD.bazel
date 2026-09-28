@@ -1,0 +1,65 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "linear",
+    srcs = [
+        "client.go",
+        "fieldmapper.go",
+        "idempotency.go",
+        "mapping.go",
+        "oauth.go",
+        "parent_reconcile.go",
+        "staleness.go",
+        "synclock.go",
+        "synclock_info_inline.go",
+        "synclock_info_windows.go",
+        "synclock_unix.go",
+        "synclock_wasm.go",
+        "synclock_windows.go",
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/linear",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/debug",
+        "//internal/idgen",
+        "//internal/lockfile",
+        "//internal/tracker",
+        "//internal/types",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "linear_test",
+    srcs = [
+        "client_test.go",
+        "idempotency_test.go",
+        "mapping_test.go",
+        "oauth_test.go",
+        "parent_reconcile_test.go",
+        "staleness_test.go",
+        "synclock_info_windows_test.go",
+        "synclock_test.go",
+        "synclock_windows_test.go",
+        "tracker_test.go",
+    ],
+    embed = [":linear"],
+    deps = [
+        "//internal/tracker",
+        "//internal/types",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/lockfile",
+            "//internal/testutil/bazeltest",
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
+)

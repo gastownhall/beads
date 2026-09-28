@@ -2,10 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"maps"
 	"os"
 	"slices"
@@ -99,6 +97,96 @@ func TestProxyCapabilityPolicyKeysResolveInRealCommandTree(t *testing.T) {
 	}
 }
 
+// proxyCapabilityFlagNames records the command-line flag each capability
+// governs. They happen to be the same strings as the capability constants, and
+// this map exists so that stays a checked fact rather than a coincidence: a
+// capability renamed away from its flag would turn the guard below into a
+// no-op that still passes.
+var proxyCapabilityFlagNames = map[ProxyCapability]string{
+	ProxyCapReadonly: "readonly",
+	ProxyCapMaxRows:  "max-rows",
+	ProxyCapWatch:    "watch",
+	ProxyCapRepo:     "repo",
+}
+
+// commandAcceptsFlag reports whether this command would accept --name on a real
+// command line, counting flags inherited from parents (--readonly is a root
+// persistent flag) as well as locally registered ones.
+func commandAcceptsFlag(cmd *cobra.Command, name string) bool {
+	if cmd.Flags().Lookup(name) != nil {
+		return true
+	}
+	return cmd.InheritedFlags().Lookup(name) != nil
+}
+
+// TestProxyCapabilityRowsNameFlagsTheCommandRegisters is the flag-level half of
+// the policy drift guard, and the sibling above is the reason it is needed: that
+// one pins PATHS, so a row can name a command that genuinely exists and still
+// describe a flag the command has never had. `bd list` carried a
+// ProxyCapRepo: repoRefusal row promising a typed refusal for `bd list --repo`,
+// which cobra rejects at parse time as an unknown flag — a policy row no command
+// line could reach, plus a changelog contract no wrapper could observe. The path
+// guard could not see it.
+//
+// The rule runs in both directions, because each direction is a different lie:
+//
+//   - a refused/honored row says the command handles the flag, so the command
+//     must register it — otherwise the row is unreachable policy;
+//   - a notApplicable() row says the command has no such flag, so the command
+//     must NOT register it — otherwise a live flag is silently unpoliced, and
+//     the front door's command-keyed assert resolves it to "allowed".
+func TestProxyCapabilityRowsNameFlagsTheCommandRegisters(t *testing.T) {
+	// Vacuity guard: a flag name that no command registers would let every
+	// "must not register" assertion below pass for the wrong reason.
+	registrars := map[string]int{}
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		for _, name := range proxyCapabilityFlagNames {
+			if c.Flags().Lookup(name) != nil {
+				registrars[name]++
+			}
+		}
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(rootCmd)
+	for capability, name := range proxyCapabilityFlagNames {
+		if capability == ProxyCapReadonly {
+			continue // root persistent flag; no command registers it locally
+		}
+		if registrars[name] == 0 {
+			t.Errorf("no command in the real tree registers --%s (capability %q); the flag name is stale", name, capability)
+		}
+	}
+
+	for _, path := range slices.Sorted(maps.Keys(proxyCommandCapabilities)) {
+		cmd := realCommandAtPath(t, path)
+		for mode, capabilities := range proxyCommandCapabilities[path] {
+			for capability, rule := range capabilities {
+				name, ok := proxyCapabilityFlagNames[capability]
+				if !ok {
+					t.Errorf("proxyCommandCapabilities[%q][%s] uses capability %q with no recorded flag name; add one so this guard keeps covering it",
+						path, mode, capability)
+					continue
+				}
+				registered := commandAcceptsFlag(cmd, name)
+				if rule.Outcome == ProxyOutcomeNA {
+					if registered {
+						t.Errorf("proxyCommandCapabilities[%q][%s][%s] is notApplicable(), but `bd %s` accepts --%s; the row denies a flag the command has",
+							path, mode, capability, path, name)
+					}
+					continue
+				}
+				if !registered {
+					t.Errorf("proxyCommandCapabilities[%q][%s][%s] is %q, but `bd %s` accepts no --%s; no command line can reach this row",
+						path, mode, capability, rule.Outcome, path, name)
+				}
+			}
+		}
+	}
+}
+
 // TestProxyFrontDoorBranchesUseRealCommandPaths pins the command paths the
 // three front-door branches key on by hand: the two validators, plus the
 // skipsStoreInit route into validateProxyRegistryBeforeProvider in main.go.
@@ -125,6 +213,7 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 	t.Cleanup(func() { jsonOutput = oldJSON })
 	for _, tc := range []struct {
 		path       string
+		flags      []string
 		cappedEnv  bool
 		wantRefuse bool
 	}{
@@ -139,11 +228,26 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 		{path: "dep tree", cappedEnv: true},
 		{path: "compact"},
 		{path: "compact", cappedEnv: true},
+		// `bd ready --gated` is the documented alias for the row above and runs
+		// the identical gate-resume scan, so a cap that leaves `bd mol ready
+		// --gated` alone must leave this spelling alone too. Keying the refusal
+		// on the command rather than the arm split one command line in half.
+		{path: "ready", flags: []string{"gated"}},
+		{path: "ready", flags: []string{"gated"}, cappedEnv: true},
 		// `bd ready` is the command the max-rows refusal was written for, so
 		// it must still refuse an active cap.
 		{path: "ready", cappedEnv: true, wantRefuse: true},
+		// ...on every arm that actually lists ready rows. --claim is not
+		// exempt, and neither is --gated in combination with it: that pair is a
+		// usage error rather than a gated run, so the claim arm keeps its
+		// refusal on every path into it.
+		{path: "ready", flags: []string{"claim"}, cappedEnv: true, wantRefuse: true},
+		{path: "ready", flags: []string{"claim", "gated"}, cappedEnv: true, wantRefuse: true},
 	} {
 		name := tc.path
+		for _, flag := range tc.flags {
+			name += " --" + flag
+		}
 		if tc.cappedEnv {
 			name += " with " + maxRowsEnvVar
 		}
@@ -154,6 +258,23 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 				t.Setenv(maxRowsEnvVar, "")
 			}
 			cmd := realCommandAtPath(t, tc.path)
+			// These are the real commands off rootCmd, so a flag set here
+			// outlives the subtest unless it is put back.
+			for _, flagName := range tc.flags {
+				flag := cmd.Flags().Lookup(flagName)
+				if flag == nil {
+					t.Fatalf("bd %s has no --%s flag to set", tc.path, flagName)
+				}
+				if err := cmd.Flags().Set(flagName, "true"); err != nil {
+					t.Fatalf("set --%s on bd %s: %v", flagName, tc.path, err)
+				}
+				t.Cleanup(func() {
+					if err := flag.Value.Set(flag.DefValue); err != nil {
+						t.Errorf("restore --%s on bd %s: %v", flagName, tc.path, err)
+					}
+					flag.Changed = false
+				})
+			}
 			var err error
 			stderr := captureStderr(t, func() {
 				err = validateProxyCapabilitiesBeforeProvider(cmd)
@@ -218,57 +339,88 @@ func TestProxyCapabilityRulesAlwaysCarryAMessage(t *testing.T) {
 	}
 }
 
-// TestListRepoRowMatchesShippedBehavior pins the row against the runtime
-// refusal it is supposed to describe. The table documents itself as the
-// deterministic audit source of truth, so a row that disagrees with the
-// command is worse than an absent one.
-func TestListRepoRowMatchesShippedBehavior(t *testing.T) {
-	err := AssertProxyCommandCapability("list", ProxyModeProxied, ProxyCapRepo)
+// TestRepoRowsMatchShippedBehavior pins the --repo rows against the commands
+// they describe, in both directions. The table documents itself as the
+// deterministic audit source of truth, so a row that disagrees with the command
+// is worse than an absent one — and that cuts the same way whether the
+// disagreement over- or under-states the refusal.
+func TestRepoRowsMatchShippedBehavior(t *testing.T) {
+	// `bd create --repo` is the reachable site: create.go registers the flag and
+	// the pre-provider gate asserts the mode-wide rule for it, so that rule must
+	// carry the documented message.
+	err := AssertProxyCapability(ProxyModeProxied, ProxyCapRepo)
 	if err == nil {
-		t.Fatal("list --repo asserted nil; bd list --repo is refused under --proxied-server")
+		t.Fatal("--repo asserted nil; bd create --repo is refused under --proxied-server")
 	}
 	if got, want := err.Error(), "--repo is not supported with --proxied-server"; got != want {
-		t.Fatalf("list --repo refusal = %q, want %q", got, want)
+		t.Fatalf("--repo refusal = %q, want %q", got, want)
+	}
+
+	// `bd list --repo` is NOT a reachable site: listCmd registers no --repo, so
+	// the row reads notApplicable() and a command-keyed assert must come back
+	// allowed. An earlier version of this test asserted the opposite — that the
+	// list row refuses — which pinned a promise no command line could collect,
+	// since cobra rejects `bd list --repo` as an unknown flag before any of this
+	// runs.
+	if err := AssertProxyCommandCapability("list", ProxyModeProxied, ProxyCapRepo); err != nil {
+		t.Fatalf("list --repo asserted %v; bd list has no --repo flag, so its row must be notApplicable()", err)
 	}
 }
 
-// TestListRepoProxiedRefusalIsStrictJSON pins the refusal's SHAPE, where the
-// test above pins only its text. `bd list --repo` is the one --repo refusal
-// the pre-provider gate does not shadow (it covers `create` only), so this
-// call site is where the contract is actually observed — and a message-only
-// assertion is exactly what let the site go untyped while the row still
-// promised a code. A wrapper parsing --json must get the stable code and the
-// mutates flag on stdout, and the error must still carry exit 1.
-func TestListRepoProxiedRefusalIsStrictJSON(t *testing.T) {
+// TestRepoProxiedRefusalIsStrictJSON pins the --repo refusal's SHAPE, where the
+// test above pins only its text: a wrapper parsing --json must get the stable
+// code and the mutates flag on stdout, and the error must still carry exit 1.
+//
+// It drives `bd create --repo` through the REAL command tree, and that is the
+// whole point of the test. `bd create` is the only command that registers
+// --repo (create.go), so its pre-provider gate is the only site a user can
+// actually reach this refusal from. An earlier version of this test called
+// runListProxiedServer directly with a hand-built listInput{repoOverrideSet:
+// true} — which cannot happen, because listCmd has no --repo flag for cobra to
+// mark Changed, and `bd list --repo` dies at parse time as an unknown flag. A
+// direct-call assertion looks like coverage while proving nothing about any
+// command line.
+func TestRepoProxiedRefusalIsStrictJSON(t *testing.T) {
 	oldJSON := jsonOutput
 	jsonOutput = true
 	t.Cleanup(func() { jsonOutput = oldJSON })
 
-	root := &cobra.Command{Use: "bd"}
-	cmd := &cobra.Command{Use: "list"}
-	root.AddCommand(cmd)
+	cmd := realCommandAtPath(t, "create")
+	flag := cmd.Flags().Lookup("repo")
+	if flag == nil {
+		t.Fatal("bd create no longer registers --repo; the refusal has no reachable site")
+	}
+	if err := cmd.Flags().Set("repo", "/somewhere/else"); err != nil {
+		t.Fatalf("set --repo on bd create: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := flag.Value.Set(flag.DefValue); err != nil {
+			t.Errorf("restore --repo on bd create: %v", err)
+		}
+		flag.Changed = false
+	})
 
 	var gotErr error
 	out := captureStdout(t, func() error {
-		gotErr = runListProxiedServer(cmd, context.Background(), io.Discard, listInput{repoOverrideSet: true})
+		gotErr = validateProxyCapabilitiesBeforeProvider(cmd)
 		return nil
 	})
 
 	if code, ok := exitCodeFromError(gotErr); !ok || code != 1 {
-		t.Fatalf("list --repo refusal exit = %v (typed=%v), want 1", code, ok)
+		t.Fatalf("create --repo refusal exit = %v (typed=%v), want 1", code, ok)
 	}
 	var got map[string]any
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
-		t.Fatalf("list --repo refusal is not JSON on stdout: %q (%v)", out, err)
+		t.Fatalf("create --repo refusal is not JSON on stdout: %q (%v)", out, err)
 	}
 	if got["code"] != "proxy.repo.unsupported" {
-		t.Fatalf("list --repo refusal code = %v, want proxy.repo.unsupported (out=%q)", got["code"], out)
+		t.Fatalf("create --repo refusal code = %v, want proxy.repo.unsupported (out=%q)", got["code"], out)
 	}
 	if got["error"] != "--repo is not supported with --proxied-server" {
-		t.Fatalf("list --repo refusal error = %v", got["error"])
+		t.Fatalf("create --repo refusal error = %v", got["error"])
 	}
 	if got["mutates"] != false {
-		t.Fatalf("list --repo refusal mutates = %v, want false", got["mutates"])
+		t.Fatalf("create --repo refusal mutates = %v, want false", got["mutates"])
 	}
 }
 

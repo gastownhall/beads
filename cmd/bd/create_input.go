@@ -272,22 +272,11 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 
 	if cmd.Flags().Changed("metadata") {
 		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			// #nosec G304 -- user explicitly provides file path via @file.json syntax
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return in, HandleError("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
+		metadata, err := readMetadataFlag(metadataValue)
+		if err != nil {
+			return in, HandleError("%v", err)
 		}
-		if !json.Valid([]byte(metadataJSON)) {
-			return in, HandleError("invalid JSON in --metadata: must be valid JSON")
-		}
-		in.metadata = json.RawMessage(metadataJSON)
+		in.metadata = metadata
 		in.metadataSet = true
 	}
 

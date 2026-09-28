@@ -470,6 +470,72 @@ func TestTempDirRootsRejectsOverbroadTMPDIR(t *testing.T) {
 	})
 }
 
+// TestTempDirRootsCoverGOTMPDIR pins the deleted-cwd bound to where Go puts a
+// test's temp dirs. Since Go 1.26, testing.T.TempDir creates them under
+// GOTMPDIR when it is set, whatever TMPDIR says, while os.TempDir() still
+// reads TMPDIR alone. A host that EXPORTS GOTMPDIR as a disk path and leaves
+// TMPDIR unset therefore puts every t.TempDir() outside both os.TempDir() and
+// /tmp, and unless GOTMPDIR is itself a root the arm can never fire there.
+// (`go env -w GOTMPDIR` does not produce that shape: cmd/go keeps the config
+// value out of the test binary's environment, so testing.T.TempDir ignores it
+// too.) GOTMPDIR is as much an environment variable as TMPDIR, so it gets the
+// same bound on the bound.
+//
+// Only "GOTMPDIR outside TMPDIR is covered" discriminates this change: the
+// unset case and the four drop cases pass against the old tempDirRoots() as
+// well, and guard isCredibleTempRoot against a future widening rather than
+// pinning the new root.
+func TestTempDirRootsCoverGOTMPDIR(t *testing.T) {
+	const home = "/home/beads-fixture"
+	const gotmp = "/var/tmp/gotmp"
+	t.Setenv("HOME", home)
+	// Empty TMPDIR sends os.TempDir() to /tmp: the shape that strands a
+	// GOTMPDIR-rooted t.TempDir() outside every TMPDIR-derived root.
+	t.Setenv("TMPDIR", "")
+
+	t.Run("GOTMPDIR outside TMPDIR is covered", func(t *testing.T) {
+		t.Setenv("GOTMPDIR", gotmp)
+		roots := tempDirRoots()
+		if !underAnyRoot(filepath.Join(gotmp, "TestSomething1234", "001", ".beads", "dolt"), roots) {
+			t.Errorf("tempDirRoots() = %v with GOTMPDIR=%s, want GOTMPDIR covered", roots, gotmp)
+		}
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+
+	t.Run("unset GOTMPDIR adds no root", func(t *testing.T) {
+		t.Setenv("GOTMPDIR", "")
+		roots := tempDirRoots()
+		if underAnyRoot(filepath.Join(gotmp, "TestSomething1234", "001", ".beads", "dolt"), roots) {
+			t.Errorf("tempDirRoots() = %v covers %s with GOTMPDIR unset", roots, gotmp)
+		}
+	})
+
+	for _, tc := range []struct{ name, gotmpdir string }{
+		{"GOTMPDIR=/ is dropped", "/"},
+		{"GOTMPDIR=$HOME is dropped", home},
+		{"GOTMPDIR containing HOME is dropped", "/home"},
+		{"relative GOTMPDIR is dropped", "gotmp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GOTMPDIR", tc.gotmpdir)
+			roots := tempDirRoots()
+			if underAnyRoot(filepath.Join(home, "project", ".beads", "dolt"), roots) {
+				t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q covers a workspace under the home directory", roots, tc.gotmpdir)
+			}
+			for _, root := range roots {
+				if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
+					t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q, want no relative or filesystem-root entry", roots, tc.gotmpdir)
+				}
+			}
+			if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+				t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q, want /tmp still covered", roots, tc.gotmpdir)
+			}
+		})
+	}
+}
+
 // TestIsCredibleTempRoot tables the predicate directly, including the shapes
 // no environment on this box can produce.
 func TestIsCredibleTempRoot(t *testing.T) {
@@ -589,6 +655,132 @@ func TestSandboxHomeUnderPerUserTempRoot(t *testing.T) {
 		if !underAnyRoot(filepath.Join(os.TempDir(), "beads-bd-tests-xyz", ".beads", "dolt"), roots) {
 			t.Errorf("tempDirRoots() = %v with HOME=%s, want os.TempDir() %q still covered",
 				roots, home, os.TempDir())
+		}
+	})
+}
+
+// TestSandboxHomeUnderVarTmpTMPDIR is the /var/tmp counterpart to
+// TestSandboxHomeUnderPerUserTempRoot: a Linux gate host can point TMPDIR at
+// a disk-backed /var/tmp path instead of a tmpfs /tmp, and
+// scripts/ci/lib/test-env.sh mktemp -ds the sandbox HOME under WHATEVER
+// TMPDIR is, not a hardcoded /tmp. Judging sandbox-ness against /tmp alone
+// left that HOME disqualifying os.TempDir() itself, so tempDirRoots()
+// collapsed to [/tmp] and stranded every t.TempDir() actually rooted under
+// TMPDIR (TestTempDirRootsBoundTheOrphanArm, be-n9ile / be-35sef).
+func TestSandboxHomeUnderVarTmpTMPDIR(t *testing.T) {
+	t.Run("fixed temp roots include /var/tmp", func(t *testing.T) {
+		cases := []struct {
+			path string
+			goos string
+			want bool
+		}{
+			{"/var/tmp/beads-test-env-abc123/home", "linux", true},
+			{"/var/tmp/beads-test-env-abc123/home", "darwin", true},
+			{"/private/var/tmp/beads-test-env-abc123/home", "darwin", true},
+			// The invariant still holds: a real home is never a sandbox
+			// home, whatever TMPDIR says.
+			{"/home/runner", "linux", false},
+			{"/home/runner", "darwin", false},
+		}
+		for _, tc := range cases {
+			if got := isUnderFixedTempRoots(tc.path, tc.goos); got != tc.want {
+				t.Errorf("isUnderFixedTempRoots(%q, %q) = %v, want %v", tc.path, tc.goos, got, tc.want)
+			}
+		}
+
+		linuxRoots := fixedTempRoots("linux")
+		if !slices.Contains(linuxRoots, "/var/tmp") {
+			t.Errorf("fixedTempRoots(%q) = %v, missing %q", "linux", linuxRoots, "/var/tmp")
+		}
+		darwinRoots := fixedTempRoots("darwin")
+		if !slices.Contains(darwinRoots, "/private/var/tmp") {
+			t.Errorf("fixedTempRoots(%q) = %v, missing the literal %q", "darwin", darwinRoots, "/private/var/tmp")
+		}
+	})
+
+	// The bound on the carve-out, tabled from any platform: an entry may
+	// vouch for a sandbox HOME without ever becoming a sweep root itself.
+	// /tmp is the one deliberate opt-out — tempDirRoots() hardcodes it, so
+	// excluding it here widens nothing (see sharedTempRoots).
+	t.Run("shared temp roots by platform", func(t *testing.T) {
+		cases := []struct {
+			root string
+			goos string
+			want bool
+		}{
+			{"/var/tmp", "linux", true},
+			{"/var/tmp", "darwin", true},
+			{"/private/var/tmp", "darwin", true},
+			{"/var/folders", "darwin", true},
+			{"/private/var/folders", "darwin", true},
+			// Nested inside a shared root: still rescuable, which is the
+			// whole point — this is the shape test-env.sh builds.
+			{"/var/tmp/beads-gate-probe", "linux", false},
+			{"/var/folders/zz/qqqqqqqq/T", "darwin", false},
+			// The /tmp family is excluded on purpose.
+			{"/tmp", "linux", false},
+			{"/tmp", "darwin", false},
+			{"/private/tmp", "darwin", false},
+		}
+		for _, tc := range cases {
+			if got := isSharedTempRoot(tc.root, tc.goos); got != tc.want {
+				t.Errorf("isSharedTempRoot(%q, %q) = %v, want %v", tc.root, tc.goos, got, tc.want)
+			}
+		}
+	})
+
+	// End to end: TMPDIR pointed at a disk-backed /var/tmp path, with the
+	// sandbox HOME nested under it exactly the way test-env.sh builds one.
+	// os.TempDir() must survive as a root, or the deleted-cwd arm goes inert
+	// on every host that sets TMPDIR this way.
+	t.Run("HOME inside a /var/tmp-rooted TMPDIR keeps it a root", func(t *testing.T) {
+		const tmpdir = "/var/tmp/beads-gate-probe"
+		t.Setenv("TMPDIR", tmpdir)
+		t.Setenv("HOME", tmpdir+"/beads-test-env-abc123/home")
+
+		roots := tempDirRoots()
+		if len(roots) == 0 {
+			t.Fatal("tempDirRoots() is empty; the deleted-cwd arm could never fire")
+		}
+		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v with TMPDIR=%s, want it still covered", roots, tmpdir)
+		}
+		// The rescue is scoped to this TMPDIR, not to /var/tmp at large.
+		// Note this assertion does not by itself pin the widening: under a
+		// SUBdirectory TMPDIR the sibling is out of range at base too. The
+		// bare-TMPDIR subtest below is the pin.
+		const sibling = "/var/tmp/some-other-users-production-server/.beads/dolt"
+		if underAnyRoot(sibling, roots) {
+			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
+		}
+	})
+
+	// Safety bound: crediting the process's OWN TMPDIR-rooted sandbox must
+	// not widen the arm into crediting every /var/tmp path on the box. The
+	// degenerate case is a BARE TMPDIR=/var/tmp, where mktemp -d lands the
+	// sandbox HOME directly under the shared root — so the carve-out is
+	// asked to spare /var/tmp itself, and another user's production server
+	// with a deleted cwd would come into range of the kill arm. Adding
+	// /var/tmp to fixedTempRoots without isSharedTempRoot does exactly
+	// that; this is the subtest that catches it.
+	t.Run("a sandbox HOME never rescues bare /var/tmp as a root", func(t *testing.T) {
+		t.Setenv("TMPDIR", "/var/tmp")
+		t.Setenv("HOME", "/var/tmp/tmp.abc123/home")
+
+		roots := tempDirRoots()
+		for _, root := range roots {
+			if filepath.Clean(root) == "/var/tmp" {
+				t.Errorf("tempDirRoots() = %v kept the shared root /var/tmp", roots)
+			}
+		}
+		const sibling = "/var/tmp/some-other-users-production-server/.beads/dolt"
+		if underAnyRoot(sibling, roots) {
+			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
+		}
+		// Bounded, not disabled: the hardcoded /tmp fallback still has to
+		// come through, or the arm would be inert rather than scoped.
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
 		}
 	})
 }

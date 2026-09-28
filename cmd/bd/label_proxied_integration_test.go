@@ -243,6 +243,40 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 	})
 
+	// GH#5988: a no-op edit reports itself on this route exactly as on the
+	// direct one, text and JSON, and still exits 0.
+	t.Run("noop_edit_reports_unchanged", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "no")
+		issue := bdProxiedCreate(t, bd, p.dir, "No-op label")
+		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "have")
+
+		if out := bdProxiedLabel(t, bd, p.dir, "remove", issue.ID, "never"); !strings.Contains(out, "Label 'never' was not on "+issue.ID) {
+			t.Errorf("remove of an absent label text = %s", out)
+		}
+		if out := bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "have"); !strings.Contains(out, issue.ID+" already has label 'have'") {
+			t.Errorf("add of a present label text = %s", out)
+		}
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "label", "remove", issue.ID, "have,never", "--json")
+		if err != nil {
+			t.Fatalf("label remove --json failed: %v\nstderr:\n%s", err, stderr)
+		}
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in remove output:\n%s", stdout)
+		}
+		var rows []struct {
+			Status string `json:"status"`
+			Label  string `json:"label"`
+		}
+		if err := json.Unmarshal([]byte(stdout[start:]), &rows); err != nil {
+			t.Fatalf("parse remove JSON: %v\nraw: %s", err, stdout[start:])
+		}
+		if len(rows) != 2 || rows[0].Label != "have" || rows[0].Status != "removed" || rows[1].Label != "never" || rows[1].Status != "unchanged" {
+			t.Fatalf("mixed remove rows = %+v, want have=removed never=unchanged", rows)
+		}
+	})
+
 	t.Run("remove_comma_separated_multi", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rm")
