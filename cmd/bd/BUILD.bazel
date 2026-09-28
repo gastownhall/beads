@@ -981,6 +981,7 @@ go_test(
         "search_embedded_test.go",
         "search_proxied_integration_test.go",
         "search_test.go",
+        "send_metrics_diagnostics_test.go",
         "serve_batch_close_proxied_integration_test.go",
         "serve_claim_next_proxied_integration_test.go",
         "serve_claim_proxied_integration_test.go",
