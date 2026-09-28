@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestReleaseScriptUsesVerifiedInstalledBDBeforeStaleRepoBD(t *testing.T) {
@@ -209,7 +210,9 @@ func sourceRepoRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	return filepath.Dir(filepath.Dir(file))
+	// Under Bazel the caller path is workspace-relative; CallerDir rebuilds it
+	// under the runfiles root, which holds the files scripts_test declares.
+	return filepath.Dir(bazeltest.CallerDir(file, "scripts"))
 }
 
 func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {

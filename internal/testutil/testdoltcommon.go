@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
@@ -16,7 +18,8 @@ const DoltDockerImage = "dolthub/dolt-sql-server:2.2.0"
 // RequireDoltBinary ensures the `dolt` CLI binary is available, and honors
 // BEADS_TEST_SKIP=dolt for tests that also depend on the shared
 // containerized Dolt SQL server. The test is skipped locally when dolt is
-// missing but fatally fails under GitHub Actions (GITHUB_ACTIONS=true). CI
+// missing but fatally fails under GitHub Actions (GITHUB_ACTIONS=true) and
+// under bazel test, which always provides the pinned dolt. CI
 // is expected to install dolt; a missing binary there means the workflow is
 // broken, not that the test should be skipped.
 func RequireDoltBinary(t *testing.T) {
@@ -45,6 +48,12 @@ func requireDoltBinaryPresent(t *testing.T) {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
 			t.Fatalf("dolt binary missing under GITHUB_ACTIONS: %v — the CI workflow must install dolt (see .github/workflows/ci.yml)", err)
+		}
+		// Under Bazel the test wrapper (tools/bazel/test_env.sh) puts the
+		// pinned dolt from runfiles first on PATH. A skip here would be a
+		// vacuous PASS that the shared remote cache then serves to everyone.
+		if bazeltest.IsBazel() {
+			t.Fatalf("dolt binary missing under bazel test: %v — tools/bazel/test_env.sh must put //tools/bazel:dolt on PATH", err)
 		}
 		t.Skipf("dolt binary not found: %v", err)
 	}

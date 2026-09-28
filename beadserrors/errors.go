@@ -26,6 +26,12 @@
 //
 // The package imports stdlib and nothing else, and it must stay that way: it
 // sits beneath every leaf, so anything it imports is imported by all of them.
+//
+// # Stability
+//
+// EXPERIMENTAL. This package is not yet covered by the project's compatibility
+// promise and may change in a minor release. Every leaf re-exports from here,
+// so a change to this vocabulary reaches all of them at once.
 package beadserrors
 
 import (

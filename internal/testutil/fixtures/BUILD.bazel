@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "fixtures",
+    srcs = ["fixtures.go"],
+    importpath = "github.com/steveyegge/beads/internal/testutil/fixtures",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage/dolt",
+        "//internal/types",
+    ],
+)

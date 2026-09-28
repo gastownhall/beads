@@ -1,0 +1,51 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "protocol",
+    srcs = ["corpus.go"],
+    importpath = "github.com/steveyegge/beads/cmd/bd/protocol",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "protocol_test",
+    srcs = [
+        "assignee_test.go",
+        "blocked_status_test.go",
+        "blocked_test.go",
+        "blocking_semantics_test.go",
+        "canonicalize_test.go",
+        "child_id_test.go",
+        "children_test.go",
+        "close_guard_test.go",
+        "comments_test.go",
+        "corpus_test.go",
+        "defer_test.go",
+        "dep_identity_test.go",
+        "errors_contract_test.go",
+        "exit_codes_init_test.go",
+        "exit_codes_test.go",
+        "helpers_test.go",
+        "input_validation_test.go",
+        "interchange_test.go",
+        "json_contract_test.go",
+        "lease_claim_test.go",
+        "lifecycle_test.go",
+        "memory_contract_test.go",
+        "preservation_test.go",
+        "ready_front_test.go",
+        "roundtrip_test.go",
+        "stale_test.go",
+        "status_validation_test.go",
+        "versioning_contract_test.go",
+        "wp4_helpers_test.go",
+    ],
+    data = glob(["testdata/**"]) + ["//cmd/bd:bd_for_tests"],
+    embed = [":protocol"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+    deps = [
+        "//internal/storage/schema",
+        "//internal/testutil",
+        "//internal/testutil/bazeltest",
+    ],
+)

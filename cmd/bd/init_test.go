@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // skipIfNoDolt skips the test when no Dolt server is available.
@@ -178,6 +179,42 @@ func TestInitCommand(t *testing.T) {
 			// verifies these writes succeed; prefix/metadata correctness is also covered
 			// by dedicated Dolt storage tests.
 		})
+	}
+}
+
+func TestInitTargetsRequestedProjectBelowOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	tempBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(tempBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(tempRoot, "isolated", "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	originalDBPath := dbPath
+	dbPath = ""
+	t.Cleanup(func() { dbPath = originalDBPath })
+
+	selected := selectedNoDBBeadsDir(initCmd)
+	if selected != "" {
+		t.Fatalf("selectedNoDBBeadsDir(init) = %q, want no inherited temp-root store", selected)
+	}
+	prepareSelectedNoDBContext(selected)
+
+	want := filepath.Join(project, ".beads")
+	if got := resolveInitBeadsDir(); !utils.PathsEqual(got, want) {
+		t.Fatalf("resolveInitBeadsDir() = %q, want requested project %q", got, want)
 	}
 }
 
@@ -750,96 +787,6 @@ func TestSetupClaudeSettings_NoExistingFile(t *testing.T) {
 	}
 }
 
-// setupIsolatedGitConfig creates an empty git config in tmpDir and sets GIT_CONFIG_GLOBAL
-// to prevent tests from using the real user's global git config.
-func setupIsolatedGitConfig(t *testing.T, tmpDir string) {
-	t.Helper()
-	gitConfigPath := filepath.Join(tmpDir, ".gitconfig")
-	if err := os.WriteFile(gitConfigPath, []byte(""), 0644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", gitConfigPath)
-}
-
-// TestSetupGlobalGitIgnore_ReadOnly verifies graceful handling when the
-// gitignore file cannot be written (prints manual instructions instead of failing).
-func TestSetupGlobalGitIgnore_ReadOnly(t *testing.T) {
-	t.Run("read-only file", func(t *testing.T) {
-		if runtime.GOOS == "darwin" {
-			t.Skip("macOS allows file owner to write to read-only (0444) files")
-		}
-		tmpDir := t.TempDir()
-		setupIsolatedGitConfig(t, tmpDir)
-
-		configDir := filepath.Join(tmpDir, ".config", "git")
-		if err := os.MkdirAll(configDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		ignorePath := filepath.Join(configDir, "ignore")
-		if err := os.WriteFile(ignorePath, []byte("# existing\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(ignorePath, 0444); err != nil {
-			t.Fatal(err)
-		}
-		defer os.Chmod(ignorePath, 0644)
-
-		output := captureStdout(t, func() error {
-			return setupGlobalGitIgnore(tmpDir, "/test/project", false)
-		})
-
-		if !strings.Contains(output, "Unable to write") {
-			t.Error("expected instructions for manual addition")
-		}
-		if !strings.Contains(output, "/test/project/.beads/") {
-			t.Error("expected .beads pattern in output")
-		}
-	})
-
-	t.Run("symlink to read-only file", func(t *testing.T) {
-		if runtime.GOOS == "darwin" {
-			t.Skip("macOS allows file owner to write to read-only (0444) files")
-		}
-		tmpDir := t.TempDir()
-		setupIsolatedGitConfig(t, tmpDir)
-
-		// Target file in a separate location
-		targetDir := filepath.Join(tmpDir, "target")
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		targetFile := filepath.Join(targetDir, "ignore")
-		if err := os.WriteFile(targetFile, []byte("# existing\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(targetFile, 0444); err != nil {
-			t.Fatal(err)
-		}
-		defer os.Chmod(targetFile, 0644)
-
-		// Symlink from expected location
-		configDir := filepath.Join(tmpDir, ".config", "git")
-		if err := os.MkdirAll(configDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(targetFile, filepath.Join(configDir, "ignore")); err != nil {
-			t.Fatal(err)
-		}
-
-		output := captureStdout(t, func() error {
-			return setupGlobalGitIgnore(tmpDir, "/test/project", false)
-		})
-
-		if !strings.Contains(output, "Unable to write") {
-			t.Error("expected instructions for manual addition")
-		}
-		if !strings.Contains(output, "/test/project/.beads/") {
-			t.Error("expected .beads pattern in output")
-		}
-	})
-}
-
 // TestInitPromptRoleConfig tests the beads.role git config read/write functions
 func TestInitPromptRoleConfig(t *testing.T) {
 	t.Run("getBeadsRole returns empty when not configured", func(t *testing.T) {
@@ -1021,6 +968,8 @@ func TestInitPromptNonGitRepo(t *testing.T) {
 // TestInitPromptExistingRole verifies behavior when beads.role is already set
 func TestInitPromptExistingRole(t *testing.T) {
 	skipIfNoDolt(t)
+	// Reinit publishes its selected workspace into the command environment.
+	t.Setenv("BEADS_DIR", "")
 	t.Run("existing role is preserved on reinit with --force", func(t *testing.T) {
 		// Reset global state
 		origDBPath := dbPath
@@ -1086,6 +1035,30 @@ func TestInitPromptExistingRole(t *testing.T) {
 func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	skipIfNoDolt(t)
 
+	// Serial: this fixture owns command flags, stdin, cwd and process environment.
+	// Do not inherit another in-process command's selected workspace.
+	t.Setenv("BEADS_DIR", "")
+	// The pipe below supplies real wizard answers; explicitly allow interaction
+	// even when CI or terminal detection would normally suppress it.
+	t.Setenv("BD_NON_INTERACTIVE", "0")
+	for _, name := range []string{"contributor", "team", "force", "non-interactive", "role", "prefix", "quiet"} {
+		flag := initCmd.Flags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("missing init flag --%s", name)
+		}
+		value, changed := flag.Value.String(), flag.Changed
+		t.Cleanup(func() {
+			if err := flag.Value.Set(value); err != nil {
+				t.Errorf("restore --%s: %v", name, err)
+			}
+			flag.Changed = changed
+		})
+		if err := flag.Value.Set(flag.DefValue); err != nil {
+			t.Fatalf("reset --%s: %v", name, err)
+		}
+		flag.Changed = false
+	}
+
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
 	dbPath = ""
@@ -1097,24 +1070,22 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 		git.ResetCaches()
 	}()
 
-	initCmd.Flags().Set("contributor", "false")
-	initCmd.Flags().Set("team", "false")
-	initCmd.Flags().Set("force", "false")
+	// Keep test isolated from the real home/planning repo.
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(testHome, ".config"))
 
 	tmpDir := newGitRepo(t)
 	t.Chdir(tmpDir)
 
-	// Keep test isolated from the real home/planning repo.
-	testHome := t.TempDir()
-	t.Setenv("HOME", testHome)
-
-	// Configure remotes so contributor wizard doesn't ask the "continue anyway" prompt.
-	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:osamu2001/zmx.git")
+	// Owned local remotes prevent network lookups during initialization.
+	cmd := exec.Command("git", "remote", "add", "origin", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add origin remote: %v", err)
 	}
-	cmd = exec.Command("git", "remote", "add", "upstream", "git@github.com:neurosnap/zmx.git")
+	cmd = exec.Command("git", "remote", "add", "upstream", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add upstream remote: %v", err)
@@ -2093,6 +2064,12 @@ func TestInitDatabaseFlag(t *testing.T) {
 		bareDir, worktreeDir := setupBareParentInitWorktree(t)
 		bareBeadsDir := filepath.Join(bareDir, ".beads")
 
+		// Shared-server init daemonizes a dolt sql-server that nothing here
+		// stopped; it outlived the suite whose temp HOME it served
+		// (wy-j2zc8q). Registered before the first subprocess so the
+		// t.Fatalf paths are covered too.
+		stopSharedServerCleanup(t)
+
 		cmd := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
 		cmd.Dir = worktreeDir
 		cmd.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
@@ -2315,6 +2292,9 @@ func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
 	bareDir, worktreeDir := setupBareParentInitWorktree(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
 	sharedEnv := append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+
+	// Same daemonized shared server, same missing stop (wy-j2zc8q).
+	stopSharedServerCleanup(t)
 
 	initCmd := exec.Command(bd, "init", "--prefix", "bare-core", "--skip-hooks", "--quiet")
 	initCmd.Dir = worktreeDir

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -24,7 +25,9 @@ import (
 func TestUnixSocket_ConnectAndQuery(t *testing.T) {
 	doltBin := integration.RequireDolt(t)
 
-	tmpDir := t.TempDir()
+	// Exercise data paths longer than either Linux's or macOS's socket-path
+	// budget, as happens with a long TMPDIR plus a suite-owned root.
+	tmpDir := filepath.Join(t.TempDir(), strings.Repeat("long-", 24))
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")
 	if err := os.MkdirAll(doltDir, 0700); err != nil {
@@ -40,7 +43,15 @@ func TestUnixSocket_ConnectAndQuery(t *testing.T) {
 		t.Fatalf("dolt init: %v\n%s", err, out)
 	}
 
-	socketPath := filepath.Join(tmpDir, "dolt.sock")
+	// Keep only the socket outside the owned data root: Unix socket paths
+	// have a small fixed budget (104 bytes on macOS), independent of TMPDIR.
+	// The private directory is removed after the server cleanup registered below.
+	socketDir, err := os.MkdirTemp("/tmp", "bd-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "dolt.sock")
 	portListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("allocate TCP port: %v", err)

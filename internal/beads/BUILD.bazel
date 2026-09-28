@@ -1,0 +1,43 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "beads",
+    srcs = [
+        "beads.go",
+        "context.go",
+        "fingerprint.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/beads",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/configfile",
+        "//internal/git",
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/utils",
+    ],
+)
+
+go_test(
+    name = "beads_test",
+    srcs = [
+        "beads_coverage_test.go",
+        "beads_inherited_artifacts_test.go",
+        "beads_test.go",
+        "context_test.go",
+        "cwd_priority_test.go",
+        "fingerprint_test.go",
+        "sqlite_database_path_test.go",
+        "suite_temp_test.go",
+        "testmain_default_test.go",
+        "testmain_test.go",
+    ],
+    embed = [":beads"],
+    deps = [
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/git",
+        "//internal/testutil",
+        "//internal/utils",
+    ],
+)

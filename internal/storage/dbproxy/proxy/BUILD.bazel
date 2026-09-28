@@ -1,0 +1,98 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "proxy",
+    srcs = [
+        "backend.go",
+        "control.go",
+        "endpoint.go",
+        "endpoint_unix.go",
+        "endpoint_windows.go",
+        "force_stop.go",
+        "process_executable_darwin.go",
+        "process_executable_linux.go",
+        "process_executable_windows.go",
+        "proxy.go",
+        "read_status.go",
+        "server.go",
+        "shutdown.go",
+        "stats.go",
+        "unverified_process_darwin.go",
+        "unverified_process_linux.go",
+        "unverified_process_unsupported.go",
+        "unverified_process_windows.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/proxy",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/atomicfile",
+        "//internal/configfile",
+        "//internal/debug",
+        "//internal/fdhygiene",
+        "//internal/lockfile",
+        "//internal/procid",
+        "//internal/storage/dbproxy/identity",
+        "//internal/storage/dbproxy/pidfile",
+        "//internal/storage/dbproxy/server",
+        "//internal/storage/dbproxy/util",
+        "@com_github_cenkalti_backoff_v4//:backoff",
+        "@org_golang_x_sync//errgroup",
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "proxy_test",
+    srcs = [
+        "backend_dial_timeout_test.go",
+        "control_test.go",
+        "endpoint_mismatch_test.go",
+        "endpoint_no_data_probe_test.go",
+        "endpoint_security_test.go",
+        "endpoint_spawn_stop_unix_test.go",
+        "external_transport_lifecycle_internal_test.go",
+        "force_stop_linux_test.go",
+        "server_epoch_internal_test.go",
+        "server_test.go",
+    ],
+    embed = [":proxy"],
+    deps = [
+        "//internal/configfile",
+        "//internal/procid",
+        "//internal/storage/dbproxy/identity",
+        "//internal/storage/dbproxy/pidfile",
+        "//internal/storage/dbproxy/server",
+        "//internal/storage/dbproxy/util",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

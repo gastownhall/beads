@@ -62,7 +62,7 @@ func SweepInTx(ctx context.Context, tx *sql.Tx, req publicops.SweepRequest) (pub
 	// dependents outside the selection. The DRY RUN passes the same flags rather
 	// than the force=false the direct route used to pass, so a preview cannot
 	// fail where the real run would succeed.
-	deleted, err := DeleteIssuesInTx(ctx, tx, ids, false, true, req.DryRun)
+	deleted, err := DeleteIssuesInTx(ctx, tx, ids, false, true, req.DryRun, req.Actor)
 	if err != nil {
 		return publicops.SweepResult{}, err
 	}

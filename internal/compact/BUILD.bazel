@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "compact",
+    srcs = [
+        "compactor.go",
+        "git.go",
+        "haiku.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/compact",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/audit",
+        "//internal/beads",
+        "//internal/config",
+        "//internal/telemetry",
+        "//internal/types",
+        "@com_github_anthropics_anthropic_sdk_go//:anthropic-sdk-go",
+        "@com_github_anthropics_anthropic_sdk_go//option",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel//codes",
+        "@io_opentelemetry_go_otel_metric//:metric",
+    ],
+)
+
+go_test(
+    name = "compact_test",
+    srcs = [
+        "compactor_unit_test.go",
+        "git_test.go",
+        "haiku_test.go",
+    ],
+    embed = [":compact"],
+    deps = [
+        "//internal/config",
+        "//internal/types",
+        "@com_github_anthropics_anthropic_sdk_go//:anthropic-sdk-go",
+    ],
+)

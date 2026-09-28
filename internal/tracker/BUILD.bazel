@@ -1,0 +1,60 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tracker",
+    srcs = [
+        "engine.go",
+        "errors.go",
+        "multiproject.go",
+        "registry.go",
+        "store.go",
+        "tracker.go",
+        "types.go",
+        "uow_store.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/tracker",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/storage/issueops",
+        "//internal/storage/uow",
+        "//internal/types",
+        "//internal/ui",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel//attribute",
+        "@io_opentelemetry_go_otel//codes",
+        "@io_opentelemetry_go_otel_trace//:trace",
+    ],
+)
+
+go_test(
+    name = "tracker_test",
+    srcs = [
+        "engine_close_policy_test.go",
+        "engine_create_only_test.go",
+        "engine_external_ref_history_test.go",
+        "engine_history_gate_cgo_test.go",
+        "engine_pull_failure_test.go",
+        "engine_ratelimit_test.go",
+        "engine_selective_test.go",
+        "engine_test.go",
+        "multiproject_test.go",
+        "registry_test.go",
+        "store_test.go",
+        "test_helpers_pure_test.go",
+        "testmain_test.go",
+        "uow_store_engine_test.go",
+    ],
+    embed = [":tracker"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/dolt",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/storage/issueops",
+        "//internal/storage/uow",
+        "//internal/testutil",
+        "//internal/types",
+    ],
+)

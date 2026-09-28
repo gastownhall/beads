@@ -1,0 +1,137 @@
+load("@gazelle//:def.bzl", "gazelle")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# gazelle:prefix github.com/steveyegge/beads
+# gazelle:build_tags gms_pure_go
+# integrations/ holds no Go; it stays visible to Bazel (not in .bazelignore)
+# only so //test/docsync can declare the markdown its link checks resolve.
+# gazelle:exclude integrations
+gazelle(name = "gazelle")
+
+exports_files([
+    "go.mod",
+    "go.sum",
+])
+
+# Repository files read by source-scanning tests, declared as their `data` so
+# the tests run under `bazel test` and remote execution.
+exports_files(
+    [".gitattributes"],
+    visibility = ["//scripts/gitattributespolicy:__pkg__"],
+)
+
+# //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
+# primitive fixtures.
+filegroup(
+    name = "bd_test_files",
+    srcs = glob([
+        ".githooks/*",
+        "examples/formulas/primitives/**",
+    ]),
+    visibility = ["//cmd/bd:__pkg__"],
+)
+
+exports_files(
+    [".claude-plugin/marketplace.json"],
+    visibility = ["//cmd/bd/setup:__pkg__"],
+)
+
+# //test/docsync: the Mintlify site, engdocs, root markdown, and the files
+# outside those trees that their local links point at.
+#
+# The out-of-tree link targets are hand-listed: a new docs/engdocs link to a
+# file outside these globs passes `go test` but fails under Bazel until the
+# target is added here. The globs stop at package boundaries, so no BUILD file
+# may live under docs/ or engdocs/ (enforced by scripts/bazel_policy_test.go).
+filegroup(
+    name = "docsync_files",
+    srcs = glob([
+        "*.md",
+        "docs/**",
+        "engdocs/**",
+    ]) + [
+        "integrations/beads-mcp/PYPI.md",
+        "//scripts:README.md",
+    ],
+    visibility = ["//test/docsync:__pkg__"],
+)
+
+# //scripts:scripts_test dolt pin tests (ci_workflow_test.go): the workflows
+# must install the pinned dolt.
+filegroup(
+    name = "workflow_files",
+    srcs = glob([".github/workflows/*.yml"]),
+    visibility = ["//scripts:__pkg__"],
+)
+
+# Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they
+# run under `bazel test` as well as `go test`.
+filegroup(
+    name = "bazel_policy_files",
+    srcs = [
+        ".bazelrc",
+        ".bazelversion",
+        ".gitignore",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "go.mod",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+go_library(
+    name = "beads",
+    srcs = [
+        "beads.go",
+        "beads_cgo.go",
+        "beads_nocgo.go",
+        "claim.go",
+    ],
+    importpath = "github.com/steveyegge/beads",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/beads",
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/storage/dolt",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/storage/schema",
+        "//internal/types",
+        "//internal/workspacegate",
+    ],
+)
+
+go_test(
+    name = "beads_test",
+    srcs = [
+        "beads_gated_test.go",
+        "beads_test.go",
+        "claim_roundtrip_test.go",
+        "claim_test.go",
+        "errors_test.go",
+        "export_dependency_add_options_test.go",
+        "issue_lifecycle_external_test.go",
+        "issue_roles_external_test.go",
+        "open_backend_selection_test.go",
+        "open_nocgo_test.go",
+        "query_interfaces_cgo_test.go",
+        "query_interfaces_test.go",
+    ],
+    embed = [":beads"],
+    deps = [
+        "//internal/hooks",
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/storage/dolt",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/telemetry",
+        "//internal/testutil",
+        "//internal/types",
+        "//internal/workspacegate",
+        "//issueops",
+    ],
+)

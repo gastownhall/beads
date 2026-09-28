@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "conformance",
+    srcs = [
+        "http.go",
+        "run.go",
+        "store.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/tracker/conformance",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "conformance_test",
+    srcs = ["conformance_test.go"],
+    embed = [":conformance"],
+    deps = [
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)

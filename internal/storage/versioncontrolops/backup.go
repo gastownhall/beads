@@ -48,7 +48,20 @@ func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force boo
 }
 
 // DirToFileURL resolves dir to an absolute path and returns a file:// URL.
+//
+// An input that already carries a scheme is rejected rather than prefixed.
+// filepath.Abs would happily turn "https://doltremoteapi.dolthub.com/u/r" into
+// "file:///cwd/https:/doltremoteapi.dolthub.com/u/r" — a syntactically valid
+// URL naming a local directory that does not exist, which DOLT_BACKUP would
+// then fail on, or worse create. No caller can reach that today (`bd backup
+// restore` os.Stats its argument first, so a URL never gets here), but every
+// caller is a restore path and restore-from-a-remote is an open capability
+// question — see backupRemoteSchemeTracking in cmd/bd/capability_registry.go.
+// Whoever closes it should get an error here, not a mangled path.
 func DirToFileURL(dir string) (string, error) {
+	if scheme, _, found := strings.Cut(dir, "://"); found {
+		return "", fmt.Errorf("%q is a %s URL, not a directory: this path takes a local directory to turn into a file:// URL", dir, scheme)
+	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute path: %w", err)

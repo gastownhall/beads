@@ -160,9 +160,7 @@ func resolveViaPrefixRouting(ctx context.Context, id string) (*RoutedResult, err
 // the command inside that rig; false keeps the read-only open that guarantees a
 // routed read cannot mutate the target (bd-6dnrw.32).
 func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable bool) (*RoutedResult, error) {
-	// Extract prefix from the bead ID (e.g., "hr-" from "hr-8wn.1")
-	prefix := extractBeadPrefix(id)
-	if prefix == "" {
+	if strings.Index(id, "-") <= 0 {
 		return nil, fmt.Errorf("no prefix in ID %q", id)
 	}
 
@@ -178,17 +176,12 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		return nil, fmt.Errorf("no routes available")
 	}
 
-	// Find matching route for this prefix
-	var matchedRoute *prefixRoute
-	for i, r := range routes {
-		if r.Prefix == prefix {
-			matchedRoute = &routes[i]
-			break
-		}
-	}
+	// Find the most specific route for this ID
+	matchedRoute := matchPrefixRoute(routes, id)
 	if matchedRoute == nil {
-		return nil, fmt.Errorf("no route for prefix %q", prefix)
+		return nil, fmt.Errorf("no route for ID %q", id)
 	}
+	prefix := matchedRoute.Prefix
 
 	// Skip if the route points to current directory (town-level, already checked)
 	if matchedRoute.Path == "." {
@@ -246,17 +239,22 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	return result, nil
 }
 
-// extractBeadPrefix extracts the prefix from a bead ID.
-// For example, "hr-8wn.1" returns "hr-", "hq-cv-abc" returns "hq-".
-func extractBeadPrefix(beadID string) string {
-	if beadID == "" {
-		return ""
+// matchPrefixRoute returns the route whose prefix is the longest leading match
+// for beadID, or nil if none matches. Route prefixes end in "-", so a
+// multi-hyphen prefix such as "claude-os-" matches "claude-os-76l", and with
+// both "hq-" and "hq-cv-" configured, "hq-cv-abc" takes the "hq-cv-" route
+// (GH#5048).
+func matchPrefixRoute(routes []prefixRoute, beadID string) *prefixRoute {
+	var best *prefixRoute
+	for i, r := range routes {
+		if !strings.HasSuffix(r.Prefix, "-") || !strings.HasPrefix(beadID, r.Prefix) {
+			continue
+		}
+		if best == nil || len(r.Prefix) > len(best.Prefix) {
+			best = &routes[i]
+		}
 	}
-	idx := strings.Index(beadID, "-")
-	if idx <= 0 {
-		return ""
-	}
-	return beadID[:idx+1]
+	return best
 }
 
 // loadPrefixRoutes loads prefix-to-path routes from routes.jsonl in the beads directory.

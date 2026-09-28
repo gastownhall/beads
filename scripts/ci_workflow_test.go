@@ -61,6 +61,29 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRCoreRequiresExcludeReadPermissionCoverage(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-core-wrapper")
+	if job.RunsOn != "ubuntu-latest" || job.If != "" || job.ContinueOnError {
+		t.Error("exclude permission coverage must remain in the required Linux PR Core job")
+	}
+	step := job.Steps[job.stepIndex(t, "Run PR core wrapper")]
+	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) || strings.TrimSpace(step.Run) != "make ci-pr-core" {
+		t.Error("exclude permission coverage must run through the nonoptional PR Core wrapper")
+	}
+	if step.Env["BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION"] != "1" {
+		t.Error("PR Core must require actual exclude read-permission coverage")
+	}
+	gate := workflow.job(t, "ci-gate")
+	evaluate := gate.step(t, "Evaluate CI gate")
+	if gate.If != "${{ always() }}" || gate.ContinueOnError || evaluate.If != "" || (evaluate.ContinueOnError != nil && evaluate.ContinueOnError != false) {
+		t.Error("CI gate must propagate required PR Core failures")
+	}
+	if !contains(gate.Needs, "pr-core-wrapper") || evaluate.Env["PR_CORE_WRAPPER"] != "${{ needs.pr-core-wrapper.result }}" || !contains(strings.Fields(evaluate.Env["CI_GATE_REQUIRED"]), "PR_CORE_WRAPPER") {
+		t.Error("CI gate must require the PR Core result")
+	}
+}
+
 func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "complexity-report")
@@ -139,6 +162,22 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	}
 	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
 		t.Error("ci-gate required set omits pr-preflight-platforms")
+	}
+}
+
+func TestPRWorkflowExercisesWindowsEnvironmentHelpers(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	// The benchmark test owns this shared job's matrix and CI Gate propagation.
+	job := workflow.job(t, "pr-preflight-platforms")
+	step := job.step(t, "Check shared environment key semantics")
+	if step.If != "matrix.os == 'windows-latest'" || step.Shell != "bash" {
+		t.Errorf("environment helpers need native Windows Bash: if=%q shell=%q", step.If, step.Shell)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Error("environment helper step may not continue on error")
+	}
+	if got := strings.TrimSpace(step.Run); got != "bash scripts/ci/test-windows-env-helpers.sh" {
+		t.Errorf("environment helper entrypoint = %q", got)
 	}
 }
 
@@ -298,13 +337,18 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
 		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
-		prTestCommand     = "go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./..."
-		mainTestCommand   = "go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./..."
-		// The macOS leg is the only consumer of main.yml's matrix test-flags (the
-		// ubuntu leg's coverage step hardcodes its own), and it carries an explicit
-		// per-package -timeout because go test's 10m default is what made the ubuntu
-		// leg flaky (wy-5b5fbl). Keep the two legs' deadlines in step when either moves.
-		mainMacOSTestFlags = "-v -race -short -timeout=25m"
+		// -timeout=30m is pinned on both lanes because ./cmd/bd has outgrown
+		// `go test`'s 10m per-package default (#6091, and wy-5b5fbl before it —
+		// that default is what made these legs flaky). In main.yml it sits on
+		// the invocation rather than in matrix.test-flags, so editing the
+		// matrix cannot silently drop it, and so the macOS leg cannot drift
+		// away from the ubuntu -race lanes' deadline.
+		prTestCommand   = "go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./..."
+		mainTestCommand = "go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./..."
+		// The macOS leg is the only consumer of main.yml's matrix test-flags
+		// (the ubuntu leg's coverage step hardcodes its own). The deadline is
+		// deliberately NOT here — see mainTestCommand.
+		mainMacOSTestFlags = "-v -race -short"
 	)
 
 	workflows := map[string]ciWorkflow{
@@ -1297,8 +1341,9 @@ func TestWorkflowsInstallPinnedDolt(t *testing.T) {
 	}
 }
 
-// TestPinnedDoltCLIMatchesContainerImage keeps the CLI pin and the sql-server
-// container pin on the same Dolt release. Server-mode tests run both at once
+// TestPinnedDoltCLIMatchesContainerImage keeps the CLI pin, the sql-server
+// container pin and the hermetic Bazel dolt (tools/bazel/dolt.bzl) on the same
+// Dolt release. Server-mode tests run both at once
 // against the same databases; a drifting pair tests a combination no release
 // ever shipped.
 func TestPinnedDoltCLIMatchesContainerImage(t *testing.T) {
@@ -1322,9 +1367,15 @@ func TestPinnedDoltCLIMatchesContainerImage(t *testing.T) {
 	}
 	pullVersion := captureOne(t, `dolthub/dolt-sql-server:([0-9]+\.[0-9]+\.[0-9]+)`, string(pullScript), "scripts/ci/pull-dolt-image.sh")
 
-	if cliVersion != imageVersion || cliVersion != pullVersion {
-		t.Errorf("dolt pins disagree: CLI %s, DoltDockerImage %s, pull-dolt-image.sh %s",
-			cliVersion, imageVersion, pullVersion)
+	bazelRule, err := os.ReadFile(filepath.Join(root, "tools", "bazel", "dolt.bzl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bazelVersion := captureOne(t, `(?m)^DOLT_VERSION = "([0-9]+\.[0-9]+\.[0-9]+)"$`, string(bazelRule), "tools/bazel/dolt.bzl:DOLT_VERSION")
+
+	if cliVersion != imageVersion || cliVersion != pullVersion || cliVersion != bazelVersion {
+		t.Errorf("dolt pins disagree: CLI %s, DoltDockerImage %s, pull-dolt-image.sh %s, tools/bazel/dolt.bzl %s",
+			cliVersion, imageVersion, pullVersion, bazelVersion)
 	}
 }
 

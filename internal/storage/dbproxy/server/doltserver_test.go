@@ -26,6 +26,15 @@ import (
 
 const stopTimeout = 15 * time.Second
 
+const (
+	// backendExitTimeout is how long a fixture waits for the dolt sql-server
+	// to leave the process table after Stop returned. It is generous on
+	// purpose: this only decides between "took a while" and "still there",
+	// and only the second one is a defect.
+	backendExitTimeout = 30 * time.Second
+	backendExitPoll    = 50 * time.Millisecond
+)
+
 func requireDolt(t *testing.T) string {
 	t.Helper()
 	p, err := exec.LookPath("dolt")
@@ -70,8 +79,142 @@ func newDoltServer(t *testing.T) (*server.DoltServer, string) {
 	// Close the log file handle before t.TempDir's RemoveAll runs.
 	// On Windows, an open handle prevents directory removal; Stop is
 	// idempotent so this is safe even when the test calls Stop itself.
-	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+	verifiedStopCleanup(t, s, rootDir)
 	return s, rootDir
+}
+
+// verifiedStopCleanup is the stop the standard fixture registers. It
+// stops the server and then asserts the `dolt sql-server` it recorded is
+// actually gone.
+//
+// This cleanup used to be `_ = s.Stop(context.Background())`. Discarding the
+// error made a failed stop indistinguishable from a clean one, and the
+// t.TempDir() holding the server's working directory is removed AFTER this
+// cleanup runs (t.TempDir registers its own cleanup first, so it runs last).
+// A server that survives its Stop therefore ends the test as a live daemon
+// serving a deleted directory. The suite-scoped post-run sweep catches that
+// leak at package granularity; verifying here also names the responsible test
+// before its cleanup deletes the evidence (wy-j2zc8q).
+//
+// The check runs on the clean path too, not only when Stop reports an error:
+// "Stop returned nil" and "the server exited" are two different claims, and
+// this is the fixture whose job is to hold the second one. It costs one
+// identity probe against a record that a clean Stop has already removed.
+func verifiedStopCleanup(t *testing.T, s *server.DoltServer, rootDir string) {
+	t.Helper()
+	t.Cleanup(func() {
+		// Read the backend's record BEFORE stopping: a clean Stop removes
+		// the pid file, so afterwards there is nothing left to verify
+		// against.
+		record := backendServerRecord(t, rootDir)
+		ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+		defer cancel()
+		if err := s.Stop(ctx); err != nil {
+			t.Logf("DoltServer.Stop(%s): %v", rootDir, err)
+		}
+		requireBackendExited(t, record)
+	})
+}
+
+// backendServerRecord returns the pid file this package's DoltServer wrote
+// for its `dolt sql-server` child. nil means there is nothing to verify: no
+// server was started, or it shut down cleanly and removed its record.
+//
+// The whole record is returned, not just the PID: Birth is the process-birth
+// token that makes the PID safe to act on at all.
+func backendServerRecord(t *testing.T, rootDir string) *pidfile.PidFile {
+	t.Helper()
+	pf, err := pidfile.Read(rootDir, server.PIDFileName)
+	if err != nil {
+		t.Logf("read %s in %s: %v", server.PIDFileName, rootDir, err)
+		return nil
+	}
+	if pf == nil || pf.Pid <= 0 {
+		return nil
+	}
+	return pf
+}
+
+// requireBackendExited fails the test if the recorded dolt sql-server is
+// still running after Stop returned, then force-kills it so the leak does not
+// outlive the run.
+//
+// Every step is gated on procid birth identity rather than the bare PID. Stop
+// reaps the child, so its PID is reusable the instant it exits; signalling an
+// unverified PID here could hit an unrelated process. A record with no birth
+// token, or one whose token no longer matches, is left alone: not the server
+// we recorded, nothing to report.
+func requireBackendExited(t *testing.T, pf *pidfile.PidFile) {
+	t.Helper()
+	if pf == nil || pf.Pid <= 0 {
+		return
+	}
+	if pf.Birth == "" {
+		// A record from before birth tokens were written. There is no safe
+		// way to ask about that PID, so the check is skipped — say so, rather
+		// than looking like a silent pass.
+		t.Logf("backend record for pid %d carries no birth token; skipping the survived-Stop check", pf.Pid)
+		return
+	}
+	token := procid.Token(pf.Birth)
+
+	deadline := time.Now().Add(backendExitTimeout)
+	for {
+		same, err := procid.Verify(pf.Pid, token)
+		if err != nil {
+			t.Logf("procid.Verify(%d): %v", pf.Pid, err)
+			return
+		}
+		if !same {
+			// Either the process is gone, or the PID now belongs to
+			// something else. Either way our server is not running.
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(backendExitPoll)
+	}
+
+	handle, err := procid.Open(pf.Pid, token)
+	if err != nil {
+		if backendStillRunning(t, pf.Pid, token) {
+			t.Errorf("dolt sql-server pid %d survived Stop by more than %s and could not be opened to kill: %v",
+				pf.Pid, backendExitTimeout, err)
+		}
+		return
+	}
+	killErr := handle.Kill()
+	_ = handle.Close()
+	if killErr != nil {
+		if backendStillRunning(t, pf.Pid, token) {
+			t.Errorf("dolt sql-server pid %d survived Stop by more than %s and could not be killed: %v",
+				pf.Pid, backendExitTimeout, killErr)
+		}
+		return
+	}
+	t.Errorf("dolt sql-server pid %d survived Stop by more than %s (force-killed)", pf.Pid, backendExitTimeout)
+}
+
+// backendStillRunning re-checks birth identity after procid.Open or
+// Handle.Kill failed, and reports whether the recorded server is verifiably
+// still there.
+//
+// Both calls verify the token themselves and return a plain "does not match
+// token" error when it no longer does — which is exactly what a process that
+// exited between the wait loop's last poll and the kill attempt produces.
+// Without this second look, a server that shut down a few milliseconds late
+// would be reported as one that survived Stop entirely. A verify that itself
+// errors reports "not running": the run is over, and an inconclusive probe is
+// not evidence of a leak.
+func backendStillRunning(t *testing.T, pid int, token procid.Token) bool {
+	t.Helper()
+	same, err := procid.Verify(pid, token)
+	if err != nil {
+		t.Logf("procid.Verify(%d) after a failed kill attempt: %v", pid, err)
+		return false
+	}
+	return same
 }
 
 func stopWithTimeout(t *testing.T, s *server.DoltServer) {

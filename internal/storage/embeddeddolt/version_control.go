@@ -198,9 +198,14 @@ func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message s
 }
 
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
+	return s.AddRemoteWithRef(ctx, name, url, "")
+}
+
+// AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
+// see storage.RemoteStore.
+func (s *EmbeddedDoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
-		return err
+		return versioncontrolops.AddRemote(ctx, db, name, url, ref)
 	})
 }
 
@@ -273,6 +278,26 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 	})
 	return exists, err
 }
+
+// HistoricalIssueIDs reports which of ids appear in HEAD's committed history
+// of the issues table. Implements storage.HistoryPresence.
+//
+// This is the capability that lets embedded mode — the default open path, and
+// the one with no DiffStore — prove a deletion for auto-export's orphan guard
+// instead of wedging on it forever (GH#5896). Same body as the server-backed
+// store; only the connection differs.
+func (s *EmbeddedDoltStore) HistoricalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var present map[string]struct{}
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		present, err = issueops.HistoricalIssueIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return present, err
+}
+
+// The auto-export guard reaches this through storage.UnwrapStore.
+var _ storage.HistoryPresence = (*EmbeddedDoltStore)(nil)
 
 func (s *EmbeddedDoltStore) Status(ctx context.Context) (*storage.Status, error) {
 	var status *storage.Status

@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dberrors",
+    srcs = [
+        "errors.go",
+        "mergerefusal.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/dberrors",
+    visibility = ["//:__subpackages__"],
+    deps = ["@com_github_go_sql_driver_mysql//:mysql"],
+)
+
+go_test(
+    name = "dberrors_test",
+    srcs = [
+        "errors_test.go",
+        "mergerefusal_test.go",
+    ],
+    embed = [":dberrors"],
+    deps = ["@com_github_go_sql_driver_mysql//:mysql"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

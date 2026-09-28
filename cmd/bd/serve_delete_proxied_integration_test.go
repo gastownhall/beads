@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -90,10 +89,10 @@ func TestProxiedServerServeDelete(t *testing.T) {
 		}
 		second := revisionOf(t, raw)
 		if second == first {
-			t.Fatalf("revision = %d after a second write; a token that does not move makes the guard vacuous", second)
+			t.Fatalf("revision = %q after a second write; a token that does not move makes the guard vacuous", second)
 		}
 
-		status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],"actor":"http-agent","expected_version":`+strconv.FormatInt(first, 10)+`}`)
+		status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],"actor":"http-agent","expected_version":`+revisionGuard(first)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("stale delete: status = %d, want 409: %s", status, raw)
 		}
@@ -108,7 +107,7 @@ func TestProxiedServerServeDelete(t *testing.T) {
 		// to do about OTHER beads; neither says the bead named is still the one
 		// the caller read.
 		for _, flags := range []string{`"force":true`, `"cascade":true`, `"force":true,"cascade":true`} {
-			status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],`+flags+`,"expected_version":`+strconv.FormatInt(first, 10)+`}`)
+			status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],`+flags+`,"expected_version":`+revisionGuard(first)+`}`)
 			if status != http.StatusConflict {
 				t.Fatalf("stale delete with %s: status = %d, want 409: %s", flags, status, raw)
 			}
@@ -118,14 +117,14 @@ func TestProxiedServerServeDelete(t *testing.T) {
 		// A DRY RUN REFUSES WHERE THE REAL RUN WOULD, which is the whole value
 		// of previewing a guarded delete: a clean preview means the real request
 		// will not stop half-explained.
-		status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],"dry_run":true,"expected_version":`+strconv.FormatInt(first, 10)+`}`)
+		status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],"dry_run":true,"expected_version":`+revisionGuard(first)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("stale dry run: status = %d, want 409: %s", status, raw)
 		}
 		stillThere(t, bd, p.dir, issue.ID)
 
 		// And the fresh token lands.
-		status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+		status, raw = sp.deleteIssues(t, `{"ids":["`+issue.ID+`"],"actor":"http-agent","expected_version":`+revisionGuard(second)+`}`)
 		if status != http.StatusOK {
 			t.Fatalf("guarded delete: status = %d, want 200: %s", status, raw)
 		}
@@ -149,7 +148,7 @@ func TestProxiedServerServeDelete(t *testing.T) {
 		a := bdProxiedCreate(t, bd, p.dir, "arity a", "-p", "2")
 		b := bdProxiedCreate(t, bd, p.dir, "arity b", "-p", "2")
 
-		status, raw := sp.deleteIssues(t, `{"ids":["`+a.ID+`","`+b.ID+`"],"expected_version":41}`)
+		status, raw := sp.deleteIssues(t, `{"ids":["`+a.ID+`","`+b.ID+`"],"expected_version":"41"}`)
 		if status != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400: %s", status, raw)
 		}
@@ -183,7 +182,7 @@ func TestProxiedServerServeDelete(t *testing.T) {
 		token := revisionOf(t, raw)
 
 		status, raw = sp.deleteIssues(t,
-			`{"ids":["`+issue.ID+`","`+issue.ID+`"],"actor":"http-agent","expected_version":`+strconv.FormatInt(token, 10)+`}`)
+			`{"ids":["`+issue.ID+`","`+issue.ID+`"],"actor":"http-agent","expected_version":`+revisionGuard(token)+`}`)
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want 200 — duplicates collapse to one bead: %s", status, raw)
 		}
@@ -194,7 +193,7 @@ func TestProxiedServerServeDelete(t *testing.T) {
 	// be stale about, so the caller is told about the typo rather than about a
 	// version it cannot check.
 	t.Run("an absent id outranks the guard", func(t *testing.T) {
-		status, raw := sp.deleteIssues(t, `{"ids":["bd-nosuchbead"],"expected_version":41}`)
+		status, raw := sp.deleteIssues(t, `{"ids":["bd-nosuchbead"],"expected_version":"41"}`)
 		if status != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404: %s", status, raw)
 		}
