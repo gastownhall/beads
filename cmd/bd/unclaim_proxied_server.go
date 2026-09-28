@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/workapi"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type unclaimProxiedResult struct {
@@ -29,7 +30,10 @@ type unclaimProxiedResult struct {
 // unconditional release. expectedUpdatedAt carries `--if-updated-at`: a
 // non-nil stamp adds the generation fence to the conditional release (nil
 // disables it; the flag is parsed and validated in unclaim.go, shared with the
-// embedded route).
+// embedded route). A LONELY stamp — present without --if-assignee — is its own
+// fence and rides the role's ReleaseRequest below rather than the
+// unconditional Unclaim, exactly as the embedded route routes it through
+// Releaser.Release: a stamp-only release still refuses on a moved row.
 //
 // The two releases differ only in which use-case verb runs: both apply the same
 // transition through the same classic issueops implementation, so a conditional
@@ -68,6 +72,18 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 			var uerr error
 			if expectedAssignee != "" {
 				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee, expectedUpdatedAt)
+			} else if expectedUpdatedAt != nil {
+				// A stamp WITHOUT a holder guard is still a fence: the role's
+				// ReleaseRequest carries ExpectedUpdatedAt on its own
+				// (issueops.ReleaseIssueInTx checks the generation even when
+				// ExpectedAssignee is nil), so the lonely stamp rides it rather
+				// than falling into the unconditional Unclaim — which would
+				// release regardless of the very row the caller fenced on.
+				_, _, uerr = uw.IssueUseCase().ReleaseIssue(ctx, publicops.ReleaseRequest{
+					Actor:             actor,
+					IssueID:           fullID,
+					ExpectedUpdatedAt: expectedUpdatedAt,
+				})
 			} else {
 				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, actor, force)
 			}

@@ -992,7 +992,8 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 
 	case errors.Is(err, issueops.ErrVersionMismatch),
 		errors.Is(err, issueops.ErrStatusMismatch),
-		errors.Is(err, issueops.ErrAssigneeMismatch):
+		errors.Is(err, issueops.ErrAssigneeMismatch),
+		errors.Is(err, issueops.ErrUpdatedAtMismatch):
 		s.fail(w, r, applyPreconditionResult(request, itemErr, err, at))
 
 	// A target an update or a close NAMED is a resource this request failed to
@@ -1030,6 +1031,17 @@ func applyPreconditionResult(request issueops.ApplyBatchRequest, itemErr *issueo
 		res = at(res, "expected_status")
 		if item := applyUpdateAt(request, itemErr); item != nil && item.ExpectedStatus != nil {
 			res = res.WithExpectedStatus(string(*item.ExpectedStatus))
+		}
+	case errors.Is(err, issueops.ErrUpdatedAtMismatch):
+		// UpdateItem.ExpectedUpdatedAt is the CLI-usable generation fence; the
+		// wire member is deliberately NOT on ApplyUpdateItem yet (the openapi
+		// surface is out of scope for the fence's first cut), so this branch
+		// maps the typed refusal for any producer that reaches it rather than
+		// letting it fall to the 500 default. The param still names the guard
+		// member the way the single-update operation spells it.
+		res = at(res, "expected_updated_at")
+		if item := applyUpdateAt(request, itemErr); item != nil && item.ExpectedUpdatedAt != nil {
+			res = res.WithExpectedUpdatedAt(*item.ExpectedUpdatedAt)
 		}
 	default:
 		res = at(res, "expected_assignee")

@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var unclaimCmd = &cobra.Command{
@@ -35,13 +36,17 @@ specific worker's issue without ever clobbering someone else's live claim.
 --if-assignee requires a non-empty assignee and cannot be combined with --force
 (they encode contradictory intent).
 
-With --if-updated-at, the release additionally fences on the row's generation:
-it lands only while the issue's current updated_at still equals the stamp the
-caller read (RFC3339 UTC, e.g. 2026-09-27T20:35:45Z — the updated_at value
-bd show --json reports). A stale stamp — e.g. the holder heartbeated after the
-supervisor read the claim — writes nothing and the release fails, naming the
-current stamp. The guard composes with --if-assignee (all supplied guards must
-hold), requires a non-empty timestamp, and cannot be combined with --force.
+With --if-updated-at, alone or beside --if-assignee, the release fences on
+the row's generation: it lands only while the issue's current updated_at
+still equals the stamp the caller read (RFC3339 UTC, e.g.
+2026-09-27T20:35:45Z — the updated_at value bd show --json reports). A stale
+stamp — e.g. the holder heartbeated after the supervisor read the claim —
+writes nothing and the release fails, naming the current stamp. The guard
+composes with --if-assignee (all supplied guards must hold), requires a
+non-empty timestamp, and cannot be combined with --force. Alone it KEEPS the
+ownership rule — the actor must still be the holder, just as with no guard at
+all; a generation stamp names the row's state, not its owner, so only a
+matching --if-assignee (or --force) authorizes releasing someone else's claim.
 
 Exit status: 0 when every issue was released; 1 when any release failed
 (including an --if-assignee or --if-updated-at mismatch).
@@ -115,6 +120,24 @@ Examples:
 			var unclaimErr error
 			if conditional {
 				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, actor, ifAssignee, ifUpdatedAt)
+			} else if ifUpdatedAt != nil {
+				// A stamp WITHOUT a holder guard is still a fence, not a
+				// decoration on one: route it through the Releaser role, whose
+				// ReleaseRequest carries ExpectedUpdatedAt on its own
+				// (issueops.ReleaseIssueInTx checks the generation even when
+				// ExpectedAssignee is nil). Falling into the unconditional
+				// UnclaimIssue here would invert the flag's contract — a
+				// release-regardless on the very row the caller fenced on.
+				releaser, rerr := issueStore.Releaser()
+				if rerr != nil {
+					unclaimErr = rerr
+				} else {
+					_, unclaimErr = releaser.Release(ctx, issueops.ReleaseRequest{
+						Actor:             actor,
+						IssueID:           fullID,
+						ExpectedUpdatedAt: ifUpdatedAt,
+					})
+				}
 			} else {
 				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, actor, force)
 			}
