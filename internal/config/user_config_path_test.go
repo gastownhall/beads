@@ -4,8 +4,134 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
+	t.Setenv("HOME", "~")
+	t.Setenv("USERPROFILE", "~")
+	t.Setenv("home", "~")
+	t.Setenv("APPDATA", "relative-appdata")
+	for _, xdg := range []string{"relative-xdg", ""} {
+		name := "XDG configured"
+		wantSource := "XDG_CONFIG_HOME"
+		if xdg == "" {
+			name, wantSource = "XDG absent", "HOME"
+		}
+		switch runtime.GOOS {
+		case "windows":
+			wantSource = "APPDATA"
+		case "darwin", "ios":
+			wantSource = "HOME"
+		case "plan9":
+			wantSource = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", xdg)
+			path, err := UserConfigYamlPath()
+			if err == nil || path != "" {
+				t.Fatalf("unsafe roots produced path %q, err=%v", path, err)
+			}
+			wantLabel := "native user config directory (" + wantSource + ")"
+			if wantSource == "XDG_CONFIG_HOME" {
+				// Go rejects relative XDG roots before returning a directory;
+				// preserve its source-bearing error under the generic label.
+				wantLabel = "native user config directory: "
+			}
+			if !strings.Contains(err.Error(), wantLabel) || !strings.Contains(err.Error(), wantSource) {
+				t.Errorf("native config error %q does not identify %s", err, wantSource)
+			}
+		})
+	}
+}
+
+func TestUserConfigYamlCandidatesOwnNativeDiagnostics(t *testing.T) {
+	wantSource := "HOME"
+	if runtime.GOOS == "windows" {
+		wantSource = "APPDATA"
+	} else if runtime.GOOS == "plan9" {
+		wantSource = "home"
+	}
+	t.Run("validation identifies its source", func(t *testing.T) {
+		candidates := buildUserConfigYamlCandidates(t.TempDir(), nil, "relative-native", nil)
+		want := "native user config directory (" + wantSource + ")"
+		if candidates.nativeErr == nil || !strings.Contains(candidates.nativeErr.Error(), want) {
+			t.Fatalf("builder native error = %v, want label %q", candidates.nativeErr, want)
+		}
+	})
+	t.Run("resolver diagnostic and identity are preserved", func(t *testing.T) {
+		resolverErr := errors.New("XDG_CONFIG_HOME resolver diagnostic")
+		candidates := buildUserConfigYamlCandidates(t.TempDir(), nil, "", resolverErr)
+		if !errors.Is(candidates.nativeErr, resolverErr) {
+			t.Fatalf("builder native error = %v, want original resolver error", candidates.nativeErr)
+		}
+		if got, want := candidates.nativeErr.Error(), "native user config directory: "+resolverErr.Error(); got != want {
+			t.Fatalf("builder native error = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestUserConfigYamlCandidatesShareDiagnosticGrammar(t *testing.T) {
+	nativeSource := "HOME"
+	if runtime.GOOS == "windows" {
+		nativeSource = "APPDATA"
+	} else if runtime.GOOS == "plan9" {
+		nativeSource = "home"
+	}
+	homeResolutionErr := errors.New("home lookup failed")
+	nativeResolutionErr := errors.New("config lookup failed")
+	for _, tc := range []struct {
+		name                 string
+		home, native         string
+		homeErr, nativeErr   error
+		wantHome, wantNative string
+	}{
+		{
+			name:       "relative paths",
+			home:       "relative \"home\"",
+			native:     "relative \"native\"",
+			wantHome:   "user home directory (HOME/USERPROFILE) \"relative \\\"home\\\"\" is not an absolute native path",
+			wantNative: "native user config directory (" + nativeSource + ") \"relative \\\"native\\\"\" is not an absolute native path",
+		},
+		{
+			name:       "resolver errors",
+			homeErr:    homeResolutionErr,
+			nativeErr:  nativeResolutionErr,
+			wantHome:   "user home directory (HOME/USERPROFILE): home lookup failed",
+			wantNative: "native user config directory: config lookup failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidates := buildUserConfigYamlCandidates(tc.home, tc.homeErr, tc.native, tc.nativeErr)
+			if candidates.homeErr == nil || candidates.nativeErr == nil {
+				t.Fatalf("unsafe roots lack sibling errors: %#v", candidates)
+			}
+			if got := candidates.homeErr.Error(); got != tc.wantHome {
+				t.Errorf("home diagnostic = %q, want %q", got, tc.wantHome)
+			}
+			if got := candidates.nativeErr.Error(); got != tc.wantNative {
+				t.Errorf("native diagnostic = %q, want %q", got, tc.wantNative)
+			}
+			path, err := selectUserConfigYamlPath(candidates)
+			if path != "" || err == nil {
+				t.Fatalf("unsafe roots produced path %q, error %v", path, err)
+			}
+			if got, want := err.Error(), "resolve user config.yaml: "+tc.wantHome+"\n"+tc.wantNative; got != want {
+				t.Errorf("joined diagnostic = %q, want %q", got, want)
+			}
+			for _, pair := range []struct{ got, original error }{
+				{candidates.homeErr, tc.homeErr},
+				{candidates.nativeErr, tc.nativeErr},
+			} {
+				if pair.original != nil && (!errors.Is(pair.got, pair.original) || !errors.Is(err, pair.original)) {
+					t.Errorf("resolver error %v lost its identity in builder or joined diagnostic", pair.original)
+				}
+			}
+		})
+	}
+}
 
 func TestSelectUserConfigYamlPathPrecedence(t *testing.T) {
 	t.Run("existing documented path wins", func(t *testing.T) {
@@ -140,8 +266,14 @@ func TestRelativeUserRootsNeverReachImplicitOrExplicitFilesystemPaths(t *testing
 	if err := Initialize(); err != nil {
 		t.Fatalf("Initialize should skip unsafe user roots, got: %v", err)
 	}
-	if err := SetUserYamlConfig("metrics.disabled", "true"); err == nil {
+	setErr := SetUserYamlConfig("metrics.disabled", "true")
+	if setErr == nil {
 		t.Fatal("SetUserYamlConfig returned nil error for unsafe roots")
+	}
+	for _, variable := range []string{"HOME", "USERPROFILE"} {
+		if !strings.Contains(setErr.Error(), variable) {
+			t.Errorf("SetUserYamlConfig error %q does not name %s", setErr, variable)
+		}
 	}
 	if err := UnsetUserYamlConfig("metrics.disabled"); err == nil {
 		t.Fatal("UnsetUserYamlConfig returned nil error for unsafe roots")
