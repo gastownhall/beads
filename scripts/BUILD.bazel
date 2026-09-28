@@ -5,7 +5,7 @@ load("@rules_go//go:def.bzl", "go_test")
 #
 # Tags:
 #   host-tools: the scripts and fixtures run the host's git, python3, awk,
-#     sed, find, grep and timeout (beyond the bash the test wrapper needs).
+#     sed, find, grep, timeout and GNU Make (beyond the bash the test wrapper needs).
 #     Under Bazel a missing git or bash fails the test (under go test it
 #     skips).
 #   no-remote-exec: so they always run where that inventory is known (the
@@ -27,12 +27,14 @@ go_test(
         "conformance_script_test.go",
         "host_tools_test.go",
         "install_dolt_test.go",
+        "make_smoke_candidate_test.go",
         "pull_dolt_image_test.go",
         "release_script_test.go",
         "test_script_test.go",
     ],
     data = [
         ":scripts_files",
+        "//:Makefile",
         "//:bazel_policy_files",
         "//:test_sh_files",
         "//:workflow_files",

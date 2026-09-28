@@ -13,6 +13,11 @@ exports_files([
     "go.sum",
 ])
 
+exports_files(
+    ["Makefile"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # Repository files read by source-scanning tests, declared as their `data` so
 # the tests run under `bazel test` and remote execution.
 exports_files(
