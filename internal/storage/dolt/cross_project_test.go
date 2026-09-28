@@ -69,11 +69,10 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		CreateIfMissing: true,
 	}
 
-	// Each cold open gets its own budget (openStoreWithOwnBudget); ctx below
-	// covers only the cheap SetConfig calls, which are not cold opens.
-	ctx, cancel := testContext(t)
-	defer cancel()
-
+	// Every call here gets its own budget. A shared context would not work even
+	// though only the opens are expensive: deadlines are absolute, so the two
+	// cold opens would drain a context created here and the cheap SetConfig
+	// calls would be the ones to report "context deadline exceeded".
 	storeA, err = openStoreWithOwnBudget(t, cfgA)
 	if err != nil {
 		os.RemoveAll(tmpDirA)
@@ -81,7 +80,7 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		t.Fatalf("failed to create store A: %v", err)
 	}
 
-	if err := storeA.SetConfig(ctx, "issue_prefix", prefixA); err != nil {
+	if err := setConfigWithOwnBudget(t, storeA, "issue_prefix", prefixA); err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
@@ -96,7 +95,7 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		t.Fatalf("failed to create store B: %v", err)
 	}
 
-	if err := storeB.SetConfig(ctx, "issue_prefix", prefixB); err != nil {
+	if err := setConfigWithOwnBudget(t, storeB, "issue_prefix", prefixB); err != nil {
 		storeA.Close()
 		storeB.Close()
 		os.RemoveAll(tmpDirA)
@@ -780,7 +779,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.
 
 	initCfg := f.config()
 	initCfg.OpenedByInit = true
-	initStore, err := New(ctx, initCfg)
+	initStore, err := openStoreWithOwnBudget(t, initCfg)
 	if err == nil {
 		initStore.Close()
 		t.Fatalf("expected identity mismatch error for the bd init open, got nil")
