@@ -39,6 +39,29 @@ func TestFmtCheckReportsUnformattedFiles(t *testing.T) {
 	}
 }
 
+// TestFmtCheckReportsGofmtVersion pins describe_gofmt's version-bearing arm,
+// the "<version> (<path>)" form.
+//
+// The cases above inject a bash script, for which `go version` errors and the
+// version is always empty, so only the bare-path else arm is exercised there --
+// deleting the whole version block leaves all three of them green. The version
+// is the half that makes a toolchain skew legible as a skew, which is the whole
+// justification for the reporting change, so it needs a real Go-built binary.
+func TestFmtCheckReportsGofmtVersion(t *testing.T) {
+	goBin := testGo(t)
+	shim := buildNoopGoBinary(t, goBin, "gofmt")
+	want := goBuildVersion(t, goBin, shim)
+
+	output, err := runFmtCheckWithGofmt(t, shim)
+	if err != nil {
+		t.Fatalf("fmt-check failed: %v\n%s", err, output)
+	}
+	line := "Using gofmt " + want + " (" + shim + ")\n"
+	if !strings.Contains(output, line) {
+		t.Fatalf("missing %q in output:\n%s", line, output)
+	}
+}
+
 func TestFmtCheckPreservesGofmtFailure(t *testing.T) {
 	_, output, err := runFmtCheck(t, "printf 'synthetic gofmt failure\\n' >&2\nexit 42\n")
 	if got := processExitCode(err); got != 42 {
@@ -74,6 +97,15 @@ func runFmtCheck(t *testing.T, gofmtBody string) (string, string, error) {
 	writeShellExecutable(t, bash, shim, "#!/usr/bin/env bash\nset -euo pipefail\n"+gofmtBody)
 	gofmt := shellVisiblePath(shim)
 
+	output, err := runFmtCheckWithGofmt(t, gofmt)
+	return gofmt, output, err
+}
+
+// runFmtCheckWithGofmt runs scripts/ci/fmt-check.sh with GOFMT pointing at an
+// already-built binary, and returns its combined output.
+func runFmtCheckWithGofmt(t *testing.T, gofmt string) (string, error) {
+	t.Helper()
+	bash := testBash(t)
 	cmd := exec.Command(
 		bash,
 		"--noprofile",
@@ -92,7 +124,47 @@ func runFmtCheck(t *testing.T, gofmtBody string) (string, string, error) {
 		"SHELLOPTS": "",
 	})
 	output, err := cmd.CombinedOutput()
-	return gofmt, normalizeNewlines(string(output)), err
+	return normalizeNewlines(string(output)), err
+}
+
+// buildNoopGoBinary compiles a do-nothing program under the given name and
+// returns its shell-visible path. `go version` reports the toolchain that built
+// it, which is what the caller needs and what a shell shim can never provide.
+func buildNoopGoBinary(t *testing.T, goBin, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(base, content string) {
+		if err := os.WriteFile(filepath.Join(dir, base), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module noopgobinary\n")
+	write("main.go", "package main\n\nfunc main() {}\n")
+
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	binary := filepath.Join(dir, name)
+	cmd := exec.Command(goBin, "build", "-o", binary, ".")
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build a no-op %s: %v\n%s", name, err, output)
+	}
+	return shellVisiblePath(binary)
+}
+
+// goBuildVersion returns the "goX.Y.Z" that `go version <binary>` reports.
+func goBuildVersion(t *testing.T, goBin, binary string) string {
+	t.Helper()
+	output, err := exec.Command(goBin, "version", binary).CombinedOutput()
+	if err != nil {
+		t.Fatalf("go version %s: %v\n%s", binary, err, output)
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		t.Fatalf("go version %s printed no fields", binary)
+	}
+	return fields[len(fields)-1]
 }
 
 func writeShellExecutable(t *testing.T, bash, path, body string) {
