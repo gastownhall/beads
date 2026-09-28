@@ -488,6 +488,7 @@ go_test(
         "aaa_stdio_baseline_test.go",
         "actor_test.go",
         "ado_test.go",
+        "agent_hook_test.go",
         "assign_fence_embedded_test.go",
         "assign_fence_proxied_test.go",
         "auto_import_upgrade_test.go",

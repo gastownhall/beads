@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"testing"
 )
 
 // Shared helpers for the agent lifecycle hook commands (codex-hook, cursor-hook).
@@ -61,8 +62,14 @@ func resolvePrimeExecutable() (string, error) {
 		if resolved, linkErr := filepath.EvalSymlinks(exe); linkErr == nil {
 			exe = resolved
 		}
+		// testing.Testing() is the authoritative signal and must come first:
+		// rules_go links test binaries as <name>_test (cmd/bd's is bd_test),
+		// which no ".test" name check can see, so under the Bazel lane the
+		// name checks alone would let an unstubbed call re-exec the test
+		// binary. The name checks remain for binaries built with `go test -c`
+		// and run outside the harness. Mirrors doctor/fix's isTestBinary.
 		base := filepath.Base(exe)
-		if strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.") {
+		if testing.Testing() || strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.") {
 			return "", errPrimeTestBinary
 		}
 		return exe, nil
