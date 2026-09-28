@@ -109,9 +109,11 @@ Config options:
 	Workflow customization:
 	- Place a PRIME.md file to override the default workflow text. Checked in this
 	  order, once bd resolves a workspace (outside one, prime emits no content):
-	  (1) .beads/PRIME.md relative to the current directory;
+	  (1) .beads/PRIME.md relative to the current directory (the -C target
+	      when -C is set);
 	  (2) PRIME.md in the .beads directory bd resolves for this workspace
-	      (honors $BEADS_DIR; a redirected .beads is followed);
+	      (honors $BEADS_DIR, which -C overrides; a redirected .beads is
+	      followed);
 	  (3) the global PRIME.md in bd's user config dir:
 	      ~/.config/beads/ on Linux ($XDG_CONFIG_HOME/beads/ if set),
 	      ~/Library/Application Support/beads/ on macOS,

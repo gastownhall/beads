@@ -818,7 +818,9 @@ func TestPrime_RawMarkdown_NotJSON_WithoutFlag(t *testing.T) {
 // their actual lookup order, not just the first tier.
 func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
 	// Each needle carries its (N) label so that swapping only the labels,
-	// not the descriptions, still fails the ordering check below.
+	// not the descriptions, is caught by the presence check below: the swap
+	// drives every strings.Index to -1, which the ordering loop explicitly
+	// skips.
 	needles := []string{
 		"(1) .beads/PRIME.md relative to the current directory",
 		"(2) PRIME.md in the .beads directory bd resolves for this workspace",
