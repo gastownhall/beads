@@ -928,6 +928,8 @@ go_test(
         "orphans_test.go",
         "output_test.go",
         "pour_proxied_integration_test.go",
+        "pour_unknown_vars_pipeline_test.go",
+        "pour_unknown_vars_test.go",
         "pour_wisp_var_validation_test.go",
         "preflight_test.go",
         "prime_divergence_test.go",
