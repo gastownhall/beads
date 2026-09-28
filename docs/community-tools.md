@@ -18,6 +18,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beady-eye](https://github.com/CodeForBreakfast/beady-eye)** - Live terminal viewer that follows agents as they work through a tree of beads, redrawing as they claim and finish them. Integrates with [herdr](https://herdr.dev), and watches several projects at once. Read-only. Built by [@GraemeF](https://github.com/GraemeF). (Rust)
 
+- **[LazyBeads](https://github.com/lesliesrussell/lazybeads)** (`lb`) - Terminal operator console that ranks ready work, explains why each bead is ready, and claims, closes and links beads with confirmation. The TUI and `lb status --watch` follow the events journal and redraw as agents change beads; on Dolt-server workspaces it uses `bd serve`, and the `bd` CLI otherwise. Not related to the earlier lazybeads listed under Historical. Built by [@lesliesrussell](https://github.com/lesliesrussell). (Go)
+
 ## Web UIs
 
 - **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
