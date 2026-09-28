@@ -1,0 +1,250 @@
+# Bazel side-by-side lane (advisory). Runs `bazel test //... --config=ci`, the
+# PR Core-parity selection (race, -short, dolt skip, -requires-docker), on the
+# same commit as pr.yml's go test lanes. It is NOT in ci-gate's
+# CI_GATE_REQUIRED; promotion needs the equivalence record described in
+# tools/bazel/equivalence.py and a human decision.
+#
+# Execution mode, passed to .github/actions/setup-bazel:
+#   repo variable RBE_WEST_WORKERS=true plus secrets RBE_WEST_EXECUTOR (grpcs://
+#     endpoint), RBE_TLS_CERT, RBE_TLS_KEY (base64; RBE_TLS_CA optional):
+#     remote execution on rbe-west, instance "oss" (shared with gascity).
+#   fork PRs and rbe=off dispatches: local execution, slower but the same
+#     results. Same-repo runs are skipped while RBE_WEST_WORKERS is unset.
+# workflow_dispatch with rbe=off simulates a fork run.
+#
+# Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
+# and same-repo pull_request runs, code from the PR head runs with the RBE
+# client certificate. setup-bazel is itself PR code, the key file is readable
+# by every later step and by locally executed Bazel actions, and a .bazelrc
+# edit can point the BEP or the executor anywhere. Anyone who can push a
+# branch here can therefore use or copy the certificate and write to the
+# farm's cache. Fork PRs never get it: pull_request from a fork receives no
+# secrets, this workflow has no pull_request_target trigger, and forks cannot
+# write the runner cache. In place: secrets are referenced by the setup step
+# alone and never by a workflow- or job-level env (policy-tested), decoded key
+# material is masked in logs, and CI uploads only remotely executed results
+# (--noremote_upload_local_results in the generated rc), and the certificate
+# is issued to beads CI alone, so it can be revoked without affecting other
+# clients. Maintainers decided (2026-09-28) that same-repo PRs keep remote
+# execution under this model. Still open: a beads-only RBE_INSTANCE and
+# farm-side denial of client action-cache writes. The lane is advisory and
+# nothing downstream consumes artifacts built here.
+#
+# Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
+# 2 GB (Bazel's --repository_cache plus Bazelisk's Bazel download), written
+# only by a push to main that missed it. No --disk_cache: remote runs use the
+# remote cache, and local runs would need about 7 GB more.
+#
+# Workflow-file changes suppress pull_request runs under the org approval
+# policy; validate edits to this file with workflow_dispatch on the branch.
+name: Bazel
+
+on:
+  pull_request:
+    branches: [ main, 'release/**' ]
+  merge_group:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      rbe:
+        description: "Remote execution: on (use secrets) or off (fork simulation)"
+        required: true
+        type: choice
+        default: "on"
+        options: [ "on", "off" ]
+      details:
+        description: "List every equivalence divergence"
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      rbe:
+        type: string
+        required: false
+        default: "on"
+      details:
+        type: boolean
+        required: false
+        default: true
+      go-test-json-artifact:
+        description: >
+          Artifact (from the calling run) holding go-test.json, PR Core's
+          `go-test -json` on this commit; enables the equivalence skip-parity
+          check. nightly.yml sets it.
+        type: string
+        required: false
+        default: ""
+
+# Main runs always finish (they may save the runner cache); PR runs supersede.
+concurrency:
+  group: bazel-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+  # Phase B report-only budget for T1/T2 (tools/bazel/critpath.py).
+  BAZEL_BUDGET_SECONDS: "420"
+
+jobs:
+  bazel-test:
+    name: Bazel / test (advisory)
+    # Remote-execution runs use the org's Blacksmith pool (the farm's edge
+    # admits it; GitHub-hosted runners are refused) and do not count against
+    # GitHub's concurrent-job cap. Fork PRs and rbe=off have no remote
+    # executor and build everything locally, so they get the larger
+    # GitHub-hosted runner.
+    runs-on: ${{ (inputs.rbe || 'on') != 'off' && github.event.pull_request.head.repo.fork != true && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # Remote execution goes to rbe-west (instance "oss", the Blacksmith-backed
+    # worker pool shared with gascity), switched on by the repo variable
+    # RBE_WEST_WORKERS. Until it is set, only fork PRs and rbe=off dispatches
+    # run (locally); same-repo runs are skipped rather than failing on an
+    # unreachable executor.
+    if: ${{ vars.RBE_WEST_WORKERS == 'true' || inputs.rbe == 'off' || github.event.pull_request.head.repo.fork == true }}
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      # Go is for tools/bazel/equivalence.py's `go list` and for make; Bazel
+      # uses its own hermetic SDK.
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      # Read-only: main.yml's build-artifacts job owns this cache.
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ (inputs.rbe || 'on') != 'off' && vars.RBE_WEST_WORKERS == 'true' && 'oss' || '' }}
+
+      # T1: remote + restored repository cache; T2: remote, cold runner; local:
+      # no remote execution (reported, never budgeted).
+      - name: Measurement tier
+        id: tier
+        env:
+          REMOTE: ${{ steps.bazel.outputs.remote }}
+          RESTORED: ${{ steps.bazel.outputs.cache-restored }}
+        run: |
+          if [ "$REMOTE" = "true" ] && [ "$RESTORED" = "true" ]; then tier=T1
+          elif [ "$REMOTE" = "true" ]; then tier=T2
+          else tier=local; fi
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Bazel / test (advisory)"
+            echo
+            echo "Tier **$tier**: remote execution $REMOTE, runner cache restored $RESTORED."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --profile and --build_event_json_file are command options, so they go
+      # after `test` (a startup position fails).
+      - name: bazel test //... --config=ci
+        id: test
+        timeout-minutes: 90
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... --config=ci \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Critical-path report
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        env:
+          TIER: ${{ steps.tier.outputs.tier }}
+        run: |
+          budget=()
+          if [ "$TIER" != "local" ]; then budget=(--budget "$BAZEL_BUDGET_SECONDS"); fi
+          python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" \
+            --tier "$TIER" --log "$RUNNER_TEMP/bazel-test.log" "${budget[@]}"
+
+      # nightly.yml's PR Core `go test -json` on the same commit.
+      - name: Download go-test results
+        if: ${{ always() && inputs.go-test-json-artifact != '' && steps.test.outcome != 'skipped' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.go-test-json-artifact }}
+          path: ${{ runner.temp }}/go-test-json
+
+      # Fails on any Go test that `go test` runs and Bazel did not (tag filter,
+      # manual, missing target, empty shard) unless it is allowlisted. With
+      # go test results (nightly) it also fails on tests that passed under go
+      # test and were skipped under Bazel; a PR run cannot see those.
+      - name: Go test equivalence
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        timeout-minutes: 15
+        env:
+          DETAILS: ${{ inputs.details && '--details' || '' }}
+          GO_TEST_JSON: ${{ inputs.go-test-json-artifact != '' && format('{0}/go-test-json/go-test.json', runner.temp) || '' }}
+        run: |
+          args=()
+          if [ -n "$DETAILS" ]; then args+=("$DETAILS"); fi
+          if [ -n "$GO_TEST_JSON" ]; then args+=(--go-test-json "$GO_TEST_JSON"); fi
+          python3 tools/bazel/equivalence.py --bep "$RUNNER_TEMP/bazel-bep.json" "${args[@]}"
+
+      # Runs last: it rewrites BUILD files in the checkout. main moves BUILD
+      # inputs (imports, go.mod) without touching Bazel, so drift shows up here
+      # first.
+      - name: BUILD files in sync (gazelle, go_srcs, MODULE.bazel)
+        if: ${{ always() && steps.bazel.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          start=$(date +%s)
+          make bazel-sync-check
+          make bazel-sync
+          drift="$(git status --porcelain --untracked-files=all)"
+          echo "BUILD sync check: $(( $(date +%s) - start ))s" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$drift" ]; then
+            echo "::error title=Bazel BUILD files out of sync::run 'make bazel-sync' and commit the result"
+            echo "$drift"
+            git diff | head -200
+            echo "BUILD files **out of sync**; run \`make bazel-sync\` and commit the result." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Only a push to main that missed the exact key writes the runner cache.
+      # Its content (--repository_cache and Bazelisk's download, never the rc
+      # or credentials) is fixed by .bazelversion and MODULE.bazel.lock, so one
+      # entry per lock is enough and later pushes do not churn the quota.
+      - name: Save Bazel runner cache
+        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bazel-ci-cache
+          key: bazel-repo-v2-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}

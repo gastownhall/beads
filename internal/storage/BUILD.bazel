@@ -54,6 +54,7 @@ go_library(
         "metadata.go",
         "metadata_cas.go",
         "remote.go",
+        "remote_ref.go",
         "storage.go",
         "sync.go",
         "version_control.go",
@@ -98,6 +99,7 @@ go_test(
         "metadata_jsonpath_test.go",
         "metadata_schema_test.go",
         "metadata_test.go",
+        "remote_ref_test.go",
         "role_accessor_decorator_test.go",
     ],
     data = [

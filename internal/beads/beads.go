@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -786,10 +787,14 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 // when they agree on which ancestors exist. The ceiling is not extended to "/"
 // because it guards against ambient state in a world-writable shared root,
 // which the filesystem root is not.
+//
+// BEADS_CEILING_DIRECTORIES (package ceiling) also ends the walk: no directory
+// at or above a ceiling containing the origin is yielded.
 type AncestorDirWalk struct {
 	next     string
 	origin   string
 	tempRoot string
+	bound    *ceiling.Bound
 	done     bool
 }
 
@@ -797,10 +802,12 @@ type AncestorDirWalk struct {
 // caller's actual discovery start even when startDir begins a later segment of
 // a bounded walk.
 func NewAncestorDirWalk(startDir, originDir string) *AncestorDirWalk {
+	origin := canonicalizeAncestorWalkPath(originDir)
 	return &AncestorDirWalk{
 		next:     canonicalizeAncestorWalkPath(startDir),
-		origin:   canonicalizeAncestorWalkPath(originDir),
+		origin:   origin,
 		tempRoot: canonicalizeAncestorWalkPath(os.TempDir()),
+		bound:    ceiling.For(origin),
 	}
 }
 
@@ -832,12 +839,17 @@ func canonicalizeAncestorWalkPath(path string) string {
 	}
 }
 
-// Next returns the next directory permitted by the temp-root ceiling.
+// Next returns the next directory permitted by the temp-root and
+// BEADS_CEILING_DIRECTORIES ceilings.
 func (w *AncestorDirWalk) Next() (string, bool) {
 	if w == nil || w.done || w.next == "" || w.next == "." {
 		return "", false
 	}
 	dir := w.next
+	if w.bound.Excludes(dir) {
+		w.done = true
+		return "", false
+	}
 	if w.tempRoot != "" && dir == w.tempRoot && dir != w.origin {
 		w.done = true
 		return "", false

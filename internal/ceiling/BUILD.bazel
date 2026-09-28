@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ceiling",
+    srcs = ["ceiling.go"],
+    importpath = "github.com/steveyegge/beads/internal/ceiling",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "ceiling_test",
+    srcs = ["ceiling_test.go"],
+    embed = [":ceiling"],
+)

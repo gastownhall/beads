@@ -944,6 +944,13 @@ func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWispsWithCounts(ctx contex
 	return r.searchAcrossIssuesAndWispsWithCounts(ctx, query, filter)
 }
 
+// SearchWispsPlane runs the shared wisps-plane search body on this
+// repository's transaction, so the unit-of-work provider and the two store
+// backends read the plane through one function.
+func (r *issueSQLRepositoryImpl) SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	return issueops.SearchWispsPlaneInTx(ctx, r.runner, query, filter)
+}
+
 func (r *issueSQLRepositoryImpl) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
 	return issueops.SearchIssueIDsInTx(ctx, r.runner, query, filter)
 }

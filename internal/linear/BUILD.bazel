@@ -57,6 +57,7 @@ go_test(
     ] + select({
         "@rules_go//go/platform:windows": [
             "//internal/lockfile",
+            "//internal/testutil/bazeltest",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],

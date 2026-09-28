@@ -85,6 +85,7 @@ echo '{"source":"/tmp/stale.formula.toml"}'
 }
 
 func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testing.T) {
+	skipReleaseFormulaUnderBazel(t)
 	repoRoot := sourceRepoRoot(t)
 	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
@@ -118,6 +119,7 @@ func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testi
 }
 
 func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.T) {
+	skipReleaseFormulaUnderBazel(t)
 	repoRoot := sourceRepoRoot(t)
 	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
@@ -202,6 +204,17 @@ func releaseTestTempDir(t *testing.T) string {
 	// works from read-only checkouts); shellPath converts the resulting
 	// host path for Bash separately at the call sites that need it.
 	return t.TempDir()
+}
+
+// skipReleaseFormulaUnderBazel skips tests that read
+// .beads/formulas/beads-release.formula.toml under Bazel: .beads holds live
+// Dolt data and is in .bazelignore, so no target can declare the formula.
+// These tests run under `go test`.
+func skipReleaseFormulaUnderBazel(t *testing.T) {
+	t.Helper()
+	if bazeltest.IsBazel() {
+		t.Skip(".beads/ is in .bazelignore, so the release formula cannot be declared as data; runs under go test")
+	}
 }
 
 func sourceRepoRoot(t *testing.T) string {

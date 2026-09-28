@@ -140,6 +140,7 @@ go_test(
         "claim_verify_test.go",
         "claim_wrapper_smoke_test.go",
         "claimer_contract_test.go",
+        "cli_mirror_ref_test.go",
         "cli_transfer_timeout_test.go",
         "close_issue_checked_test.go",
         "close_policy_gate_test.go",
@@ -359,7 +360,15 @@ go_test(
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_google_uuid//:uuid",
-    ],
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/testutil/bazeltest",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

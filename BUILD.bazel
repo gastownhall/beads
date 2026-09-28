@@ -56,11 +56,23 @@ filegroup(
     visibility = ["//test/docsync:__pkg__"],
 )
 
-# //scripts:scripts_test dolt pin tests (ci_workflow_test.go): the workflows
-# must install the pinned dolt.
+# //scripts:scripts_test workflow-policy and CI-script tests: the whole
+# .github tree (workflows, composite actions, CI helper scripts) they parse
+# and run. The one whole-tree input the plan allows (it is small).
 filegroup(
     name = "workflow_files",
-    srcs = glob([".github/workflows/*.yml"]),
+    srcs = glob([".github/**"]),
+    visibility = ["//scripts:__pkg__"],
+)
+
+# //scripts:scripts_test runs scripts/test.sh, which sources the canonical
+# build flags and reads the known-broken-test skip list.
+filegroup(
+    name = "test_sh_files",
+    srcs = [
+        ".buildflags",
+        ".test-skip",
+    ],
     visibility = ["//scripts:__pkg__"],
 )
 

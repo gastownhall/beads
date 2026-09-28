@@ -3,4 +3,6 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "prlintmake_test",
     srcs = ["prlintmake_test.go"],
+    data = ["//scripts:ci/fmt-check.sh"],
+    deps = ["//internal/testutil/bazeltest"],
 )

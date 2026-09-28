@@ -24,6 +24,7 @@ import (
 	"github.com/subosito/gotenv"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
@@ -789,7 +790,8 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return beadsDir
 	}
 
-	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+	bound := ceiling.For(filepath.Dir(dbPath))
+	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		candidate := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate

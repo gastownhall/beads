@@ -657,6 +657,11 @@ var roleContractCases = []roleContract{
 		RunSweeperEmptyMatchIsZeroAndNil,
 		RunSweeperRecordsExactlyOneHistoryEntry,
 		RunSweeperDoesNotMutateTheCallerRequest,
+		RunSweeperWispsPlaneClearsTheWholeWispsTable,
+		RunSweeperWispsPlaneRequiresAFilter,
+		RunSweeperProtectsLiveDependents,
+		RunSweeperProtectsLiveDependentsAcrossPlanes,
+		RunSweeperLimitTakesTheOldestClosedFirst,
 	),
 
 	roleCases("TreeWalker", "TreeWalker()", oncePerRole,

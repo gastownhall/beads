@@ -98,6 +98,21 @@ func hasTestSkip(service string) bool {
 	return false
 }
 
+// EnvRequireDoltContainer, set to "1", turns a missing Dolt test container into
+// a test failure instead of a skip in RequireDoltContainer and
+// StartIsolatedDoltContainer(Handle). Lanes that exist to run the container
+// suites (Bazel's requires-docker variants) set it so they cannot pass green
+// having run nothing.
+const EnvRequireDoltContainer = "BEADS_TEST_REQUIRE_DOLT_CONTAINER"
+
+func skipOrFailDoltUnavailable(t *testing.T, state doltReadiness) {
+	t.Helper()
+	if os.Getenv(EnvRequireDoltContainer) == "1" {
+		t.Fatalf("Dolt test container unavailable (%s) but %s=1; this lane must not skip", state, EnvRequireDoltContainer)
+	}
+	t.Skipf("skipping test: %s", state)
+}
+
 // checkDolt returns the readiness state for Dolt integration tests.
 // It composes hasTestSkip, isDockerAvailable, isDoltImageCached, and
 // isDoltRepoImageCached, caching the result.
@@ -349,7 +364,7 @@ func (c *IsolatedDoltContainer) Exec(ctx context.Context, cmd []string) (int, st
 func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
 	t.Helper()
 	if state := checkDolt(); state != doltReady {
-		t.Skipf("skipping test: %s", state)
+		skipOrFailDoltUnavailable(t, state)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
@@ -420,7 +435,7 @@ func EnsureDoltContainerForTestMain() error {
 func RequireDoltContainer(t *testing.T) {
 	t.Helper()
 	if state := checkDolt(); state != doltReady {
-		t.Skipf("skipping test: %s", state)
+		skipOrFailDoltUnavailable(t, state)
 	}
 
 	ensureSharedContainer()

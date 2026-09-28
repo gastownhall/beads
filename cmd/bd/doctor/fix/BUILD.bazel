@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "fix",
@@ -93,6 +94,30 @@ go_test(
         "//internal/types",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+# The Dolt-backed half of fix_test, as pr.yml's "Test doctor/fix (Dolt-backed,
+# hard-require container)" job runs it: TestMain starts a dolt sql-server
+# container through testcontainers, and BEADS_FIX_REQUIRE_DOLT=1 turns a
+# missing container into a failure instead of a silent skip. fix_test itself
+# stays untagged: under --config=prcore (BEADS_TEST_SKIP=dolt, like pr-core's
+# `go test`) it never touches docker and runs anywhere.
+#
+# Tags:
+#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
+#     selected by --config=docker.
+#   no-remote-exec: the daemon is on the host, not on remote workers.
+sh_test(
+    name = "fix_docker_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :fix_test)"],
+    data = [":fix_test"],
+    env = {"BEADS_FIX_REQUIRE_DOLT": "1"},
+    tags = [
+        "no-remote-exec",
+        "requires-docker",
     ],
 )
 

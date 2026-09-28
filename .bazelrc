@@ -32,6 +32,22 @@ test:prcore --test_tag_filters=-requires-docker,-embedded,-manual
 
 test:ci --config=prcore
 test:ci --keep_going --test_summary=terse
+# tools/bazel/equivalence.py compares the Go tests Bazel ran with the ones
+# `go test` would run, from each target's test.xml. rules_go only lists passing
+# tests in test.xml under -test.v, and --remote_download_minimal would leave
+# test.xml on the remote side, so ask for both.
+test:ci --test_env=GO_TEST_WRAP_TESTV=1
+test:ci --remote_download_regex=.*/test\.xml$
+
+# Docker lane: only the requires-docker targets (pr.yml's container-backed
+# jobs), on a host with a docker daemon. Race like those jobs, but no -short
+# and no BEADS_TEST_SKIP=dolt, which would keep the containers from starting.
+# Those targets are also tagged no-remote-exec, so they run on the host even
+# with --config=remote-exec.
+test:docker --@rules_go//go/config:race
+test:docker --test_tag_filters=requires-docker
+test:docker --build_tests_only
+test:docker --keep_going
 
 # Remote execution against any REAPI-compatible service. Only generic tuning
 # lives here; the executor endpoint and TLS credentials are never committed.

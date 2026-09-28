@@ -12,4 +12,5 @@ go_test(
     name = "workspacegate_test",
     srcs = ["gate_test.go"],
     embed = [":workspacegate"],
+    deps = ["//internal/testutil/bazeltest"],
 )

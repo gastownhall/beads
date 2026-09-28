@@ -28,6 +28,7 @@ go_library(
         "//internal/idgen",
         "//internal/storage",
         "//internal/storage/dberrors",
+        "//internal/storage/doltutil",
         "//internal/types",
         "//internal/validation",
         "//issueops",
@@ -41,6 +42,7 @@ go_test(
         "context_test.go",
         "infra_types_test.go",
         "issue_delete_missing_table_test.go",
+        "remote_test.go",
     ],
     embed = [":domain"],
     deps = [

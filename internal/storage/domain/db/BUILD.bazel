@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "db",
@@ -94,6 +95,7 @@ go_test(
         "ready_work_counts_test.go",
         "ready_work_missing_table_test.go",
         "ready_work_test.go",
+        "remote_test.go",
         "reopen_test.go",
         "reopen_usecase_test.go",
         "suite_test.go",
@@ -118,6 +120,30 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@com_github_stretchr_testify//suite",
+    ],
+)
+
+# The Dolt-backed db suite (TestDomainDB) as pr.yml's "Test (storage domain +
+# uow)" job runs it: the suite starts a dolt sql-server container through
+# testcontainers, and BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 turns a missing
+# container into a failure instead of a silent skip. db_test itself stays
+# untagged: under --config=prcore (BEADS_TEST_SKIP=dolt) the suite skips, as in
+# pr-core's `go test`.
+#
+# Tags:
+#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
+#     selected by --config=docker.
+#   no-remote-exec: the daemon is on the host, not on remote workers.
+sh_test(
+    name = "db_docker_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :db_test)"],
+    data = [":db_test"],
+    env = {"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"},
+    tags = [
+        "no-remote-exec",
+        "requires-docker",
     ],
 )
 

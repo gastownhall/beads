@@ -37,6 +37,28 @@ export GIT_CONFIG_GLOBAL="$root/gitconfig"
 export TMPDIR="$root/tmp"
 export BEADS_TEST_IGNORE_REPO_CONFIG=1
 
+# Discovery ceilings. bd walks up from its working directory for .beads and
+# .beads/config.yaml, and git walks up for a repository. A test's working
+# directory is in the runfiles tree under the output base, which is usually
+# below the developer's HOME, so an unbounded walk would read and write their
+# real ~/.beads (and a host config would decide test results). Every walk stops
+# below the runfiles root, TEST_TMPDIR and this wrapper's root; a test's own
+# directories under them stay discoverable. Relying on the ceiling rather than
+# failing on an ancestor .beads is deliberate: a live ~/.beads above the output
+# base is normal on a developer machine.
+ceilings=""
+for d in "${TEST_SRCDIR:-}" "${TEST_TMPDIR:-}" "$root"; do
+	if [[ -n "$d" && -d "$d" ]]; then
+		ceilings="${ceilings:+$ceilings:}$(cd "$d" && pwd -P)"
+	fi
+done
+export BEADS_CEILING_DIRECTORIES="$ceilings"
+export GIT_CEILING_DIRECTORIES="$ceilings"
+# The migration-freeze marker walk is deliberately not bounded by the ceiling;
+# point it at a path that never exists so a MIGRATION-FREEZE file above the
+# output base cannot make write commands refuse inside tests.
+export BD_MIGRATION_FREEZE_FILE="$root/no-freeze-marker"
+
 # Same scrub as beads_test_env_enter; `--test_env=NAME` on a command line must
 # not be able to point a test at a live workspace or Dolt server.
 unset BEADS_DIR BEADS_DB BD_DB BD_JSON BD_NO_DB BD_NO_DAEMON BD_ACTOR \

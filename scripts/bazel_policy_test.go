@@ -663,3 +663,225 @@ func TestBazelNoPackagesUnderDocsTrees(t *testing.T) {
 		}
 	}
 }
+
+// --- test tag taxonomy ---------------------------------------------------------
+
+// allowedBazelTestTags is the tag taxonomy. A target with no tags is hermetic
+// and runs everywhere (local, remote, PR). Every other tag must be one of
+// these and must be justified in a comment right above the rule that uses it.
+var allowedBazelTestTags = map[string]string{
+	"requires-dolt":   "uses the hermetic pinned dolt CLI (informational)",
+	"host-tools":      "needs host tools (bash/git/make/jq/...) beyond the test wrapper's",
+	"no-remote-exec":  "must run on the Bazel client's host, never on a remote worker",
+	"no-remote-cache": "result depends on the host, so it is neither read from nor uploaded to the remote cache",
+	"requires-docker": "needs a docker daemon; excluded from --config=prcore/ci, run by --config=docker",
+	"embedded":        "embedded-Dolt tier variant; its own config",
+	"manual":          "repro/bench harness; never part of //...",
+}
+
+// bazelTagsRequiring maps tags whose targets depend on the host to the tags
+// they must also carry: no-remote-exec, or remote execution would run them on a
+// worker that lacks the tool or daemon; and for host-tools, no-remote-cache,
+// because the action key does not cover the host's tool inventory, so a result
+// produced on one host must not be served to another. (requires-docker
+// targets fail rather than skip without their daemon, so their passes are
+// safe to share.)
+var bazelTagsRequiring = map[string][]string{
+	"host-tools":      {"no-remote-exec", "no-remote-cache"},
+	"requires-docker": {"no-remote-exec"},
+}
+
+var (
+	bazelTagsAttrRe  = regexp.MustCompile(`\btags\s*=\s*`)
+	bazelTopRuleRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*\(`)
+	bazelQuotedStrRe = regexp.MustCompile(`"([^"]*)"`)
+)
+
+// checkBazelBuildTags checks every `tags = [...]` in one BUILD file: the list
+// is a literal, each tag is in the taxonomy and is named in the comment block
+// directly above its rule, and host-bound tags come with no-remote-exec.
+func checkBazelBuildTags(name, build string) []error {
+	var errs []error
+	lines := strings.Split(build, "\n")
+	for _, loc := range bazelTagsAttrRe.FindAllStringIndex(build, -1) {
+		line := strings.Count(build[:loc[0]], "\n")
+		rest := build[loc[1]:]
+		if !strings.HasPrefix(rest, "[") {
+			errs = append(errs, errors.New(name+":"+strconv.Itoa(line+1)+": tags must be a literal list"))
+			continue
+		}
+		end := strings.Index(rest, "]")
+		if end < 0 {
+			errs = append(errs, errors.New(name+":"+strconv.Itoa(line+1)+": unterminated tags list"))
+			continue
+		}
+		// `tags = ["x"] + OTHER` is not a literal either: only a comma, the
+		// rule's closing paren or the end of the line may follow the list.
+		if after := strings.TrimLeft(rest[end+1:], " \t"); after != "" && !strings.ContainsAny(after[:1], ",)\n#") {
+			errs = append(errs, errors.New(name+":"+strconv.Itoa(line+1)+": tags must be a literal list"))
+			continue
+		}
+		var tags []string
+		for _, m := range bazelQuotedStrRe.FindAllStringSubmatch(rest[:end], -1) {
+			tags = append(tags, m[1])
+		}
+
+		// The rule is the nearest top-level call above; its justification is
+		// the contiguous comment block right above that.
+		start := line
+		for start > 0 && !bazelTopRuleRe.MatchString(lines[start]) {
+			start--
+		}
+		var comment strings.Builder
+		for i := start - 1; i >= 0 && strings.HasPrefix(strings.TrimSpace(lines[i]), "#"); i-- {
+			comment.WriteString(lines[i])
+			comment.WriteByte('\n')
+		}
+		where := name + ":" + strconv.Itoa(start+1)
+
+		have := map[string]bool{}
+		for _, tag := range tags {
+			have[tag] = true
+			if _, ok := allowedBazelTestTags[tag]; !ok {
+				errs = append(errs, errors.New(where+": tag "+strconv.Quote(tag)+" is not in the taxonomy (allowedBazelTestTags)"))
+				continue
+			}
+			if !strings.Contains(comment.String(), tag) {
+				errs = append(errs, errors.New(where+": tag "+strconv.Quote(tag)+" is not justified in a comment directly above the rule"))
+			}
+		}
+		for _, tag := range tags {
+			for _, need := range bazelTagsRequiring[tag] {
+				if !have[need] {
+					errs = append(errs, errors.New(where+": tag "+strconv.Quote(tag)+" also requires "+need))
+				}
+			}
+		}
+	}
+	return errs
+}
+
+func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
+	for name, good := range map[string]string{
+		"docker": "# Tags:\n#   requires-docker: needs a daemon.\n#   no-remote-exec: the daemon is local.\n" +
+			"sh_test(\n    name = \"x\",\n    tags = [\n        \"no-remote-exec\",\n        \"requires-docker\",\n    ],\n)\n",
+		"host-tools": "# host-tools, no-remote-exec, no-remote-cache: git.\n" +
+			"go_test(\n    name = \"x\",\n    tags = [\"host-tools\", \"no-remote-exec\", \"no-remote-cache\"],  # why\n)\n",
+	} {
+		if errs := checkBazelBuildTags(name, good); len(errs) != 0 {
+			t.Errorf("%s: justified fixture rejected: %v", name, errs)
+		}
+	}
+	for name, build := range map[string]string{
+		"unknown tag":     "# flaky: why\ngo_test(\n    name = \"x\",\n    tags = [\"flaky\"],\n)\n",
+		"no comment":      "go_test(\n    name = \"x\",\n    tags = [\"manual\"],\n)\n",
+		"comment too far": "# manual: harness\n\ngo_test(\n    name = \"x\",\n    tags = [\"manual\"],\n)\n",
+		"other rule's":    "# manual: harness\ngo_test(name = \"a\", tags = [\"manual\"])\n\ngo_test(\n    name = \"b\",\n    tags = [\"manual\"],\n)\n",
+		"docker unpinned": "# requires-docker: daemon\ngo_test(\n    name = \"x\",\n    tags = [\"requires-docker\"],\n)\n",
+		"not a literal":   "# manual\ngo_test(\n    name = \"x\",\n    tags = MANUAL,\n)\n",
+		"literal plus":    "# manual\ngo_test(\n    name = \"x\",\n    tags = [\"manual\"] + MORE,\n)\n",
+		"host cacheable":  "# host-tools no-remote-exec\ngo_test(\n    name = \"x\",\n    tags = [\"host-tools\", \"no-remote-exec\"],\n)\n",
+		"one-line rule":   "go_test(name = \"x\", tags = [\"manual\"])\n",
+	} {
+		if errs := checkBazelBuildTags(name, build); len(errs) == 0 {
+			t.Errorf("%s: expected a tag policy error for fixture:\n%s", name, build)
+		}
+	}
+
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("walks every BUILD file in the source checkout; runs under go test")
+	}
+	root := sourceRepoRoot(t)
+	pkgs, err := bazelPackagesUnder(root, ".")
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(pkgs) == 0 {
+		t.Fatal("found no BUILD.bazel packages; the walk is broken")
+	}
+	for _, pkg := range append([]string{"."}, pkgs...) {
+		rel := filepath.ToSlash(filepath.Join(pkg, "BUILD.bazel"))
+		for _, err := range checkBazelBuildTags(rel, readPolicyFile(t, root, rel)) {
+			t.Error(err)
+		}
+	}
+}
+
+// checkBazelrcPrcoreTagFilter requires --config=prcore to exclude the tags
+// that never run in the PR-core lane. Every --test_tag_filters set by prcore or
+// by a config that expands it (test:ci) is checked, since a later one would
+// override the first.
+func checkBazelrcPrcoreTagFilter(bazelrc string) error {
+	type option struct{ config, flag string }
+	var opts []option
+	for _, line := range strings.Split(bazelrc, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		_, config, ok := strings.Cut(fields[0], ":")
+		if !ok {
+			continue
+		}
+		for i := 1; i < len(fields); i++ {
+			flag := fields[i]
+			if (flag == "--config" || flag == "--test_tag_filters") && i+1 < len(fields) {
+				i++
+				flag += "=" + fields[i]
+			}
+			opts = append(opts, option{config, flag})
+		}
+	}
+
+	lane := map[string]bool{"prcore": true}
+	for grew := true; grew; {
+		grew = false
+		for _, o := range opts {
+			if !lane[o.config] && strings.HasPrefix(o.flag, "--config=") && lane[strings.TrimPrefix(o.flag, "--config=")] {
+				lane[o.config] = true
+				grew = true
+			}
+		}
+	}
+
+	prcoreFilter := false
+	for _, o := range opts {
+		if !lane[o.config] || !strings.HasPrefix(o.flag, "--test_tag_filters=") {
+			continue
+		}
+		prcoreFilter = prcoreFilter || o.config == "prcore"
+		filters := map[string]bool{}
+		for _, f := range strings.Split(strings.TrimPrefix(o.flag, "--test_tag_filters="), ",") {
+			filters[f] = true
+		}
+		for _, tag := range []string{"requires-docker", "embedded", "manual"} {
+			if !filters["-"+tag] {
+				return errors.New(o.config + " --test_tag_filters does not exclude " + tag)
+			}
+		}
+	}
+	if !prcoreFilter {
+		return errors.New(".bazelrc has no test:prcore --test_tag_filters line")
+	}
+	return nil
+}
+
+func TestBazelrcPrcoreExcludesNonPRTags(t *testing.T) {
+	if err := checkBazelrcPrcoreTagFilter(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")); err != nil {
+		t.Fatal(err)
+	}
+	for name, rc := range map[string]string{
+		"missing":   "test:ci --keep_going\n",
+		"no docker": "test:prcore --test_tag_filters=-embedded,-manual\n",
+		"ci override": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
+			"test:ci --config=prcore\ntest:ci --test_tag_filters=requires-docker\n",
+		"second prcore line": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
+			"test:prcore --test_tag_filters=-manual\n",
+		"transitive": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
+			"test:ci --config=prcore\nbuild:nightly --config ci --test_tag_filters=\n",
+	} {
+		if err := checkBazelrcPrcoreTagFilter(rc); err == nil {
+			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)
+		}
+	}
+}

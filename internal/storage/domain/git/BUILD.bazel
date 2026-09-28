@@ -7,6 +7,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/git",
+        "//internal/gitenv",
         "//internal/storage/domain",
     ],
 )
@@ -19,7 +20,9 @@ go_test(
     ],
     embed = [":git"],
     deps = [
+        "//internal/gitenv",
         "//internal/storage/domain",
+        "@com_github_stretchr_testify//require",
         "@com_github_stretchr_testify//suite",
     ],
 )

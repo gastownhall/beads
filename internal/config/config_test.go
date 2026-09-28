@@ -282,6 +282,46 @@ func TestInitialize_IgnoresModuleRootConfigWhenRequested(t *testing.T) {
 	}
 }
 
+// TestInitialize_StopsAtBeadsCeiling pins that BEADS_CEILING_DIRECTORIES keeps
+// the config.yaml walk from reaching a .beads at or above the ceiling — here
+// an unparseable one that would fail Initialize if it were read.
+func TestInitialize_StopsAtBeadsCeiling(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configDir := filepath.Join(tmpDir, "xdg-config")
+	ceilingDir := filepath.Join(tmpDir, "ceiling")
+	workDir := filepath.Join(ceilingDir, "work")
+	for _, dir := range []string{homeDir, configDir, workDir, filepath.Join(tmpDir, ".beads"), filepath.Join(ceilingDir, ".beads")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{tmpDir, ceilingDir} {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("json: [unclosed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Setenv("BEADS_CEILING_DIRECTORIES", ceilingDir)
+	t.Chdir(workDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() read config at or above the ceiling: %v", err)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Fatalf("ConfigFileUsed() = %q, want none below the ceiling", got)
+	}
+}
+
 func TestLocalConfigOverride(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)

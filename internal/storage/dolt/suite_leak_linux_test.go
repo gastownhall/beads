@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // This process boundary exercises the real TestMain allocation and exit policy,
@@ -75,6 +76,7 @@ func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSuiteFixtureLeakFailsOwningSuite$", "-test.count=1")
+	child.Env = bazeltest.ShardFreeEnv(os.Environ())
 	child.ExtraFiles = []*os.File{readEnd}
 	out, err := child.CombinedOutput()
 	var exitErr *exec.ExitError
