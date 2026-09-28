@@ -271,6 +271,7 @@ go_test(
         "metadata_merge_test.go",
         "metadata_schema_test.go",
         "metadata_validation_test.go",
+        "migration_0052_test.go",
         "mixed_table_lifecycle_test.go",
         "multistore_multiprocess_test.go",
         "open_test.go",
