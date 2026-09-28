@@ -156,12 +156,13 @@ var versionedEntryPoints = []string{
 var versionExemptions = map[string]string{
 	// comments — a separate table, not part of durable_state (GetIssueInTx
 	// hydrates labels, not comments), so a comment write versions nothing.
-	"AddIssueCommentInTx":    "comments are not in durable_state",
-	"ImportIssueCommentInTx": "comments are not in durable_state",
-	"ExecuteAddComment":      "comments are not in durable_state",
-	"AddCommentEventInTx":    "comments are not in durable_state",
-	"PersistComments":        "constituent comment write of a create; comments are not in durable_state",
-	"InsertDerivedComment":   "raw comment insert; comments are not in durable_state",
+	"AddIssueCommentInTx":     "comments are not in durable_state",
+	"ImportIssueCommentInTx":  "comments are not in durable_state",
+	"ExecuteAddComment":       "comments are not in durable_state",
+	"AddCommentEventInTx":     "comments are not in durable_state",
+	"PersistComments":         "constituent comment write of a create; comments are not in durable_state",
+	"InsertDerivedComment":    "raw comment insert; comments are not in durable_state",
+	"TouchIssueUpdatedAtInTx": "constituent snapshot touch; the label mutation caller mints the complete post-mutation version",
 
 	// is_blocked — derived readiness state, recomputed from the graph, never
 	// a mutation of the bead in its own right.
