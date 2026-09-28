@@ -886,6 +886,7 @@ go_test(
         "migrate_test.go",
         "migration_freeze_gate_test.go",
         "mol_bond_compound_label_test.go",
+        "mol_bond_dryrun_validation_test.go",
         "mol_bond_gwn_test.go",
         "mol_bond_proxied_integration_test.go",
         "mol_bond_test.go",

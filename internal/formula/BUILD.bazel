@@ -36,6 +36,7 @@ go_test(
         "schema_gen_test.go",
         "schema_test.go",
         "stepcondition_test.go",
+        "validation_sentinel_test.go",
     ],
     data = [
         "schema_gen.go",
