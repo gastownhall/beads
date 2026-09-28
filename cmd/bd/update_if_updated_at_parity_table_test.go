@@ -46,9 +46,9 @@ type ifupTableOutcome struct {
 //
 //	update:   match→repeat (exit 13, one-shot per generation / T3),
 //	          empty stamp (exit 1 usage error / D3), invalid stamp (1 / D2)
-//	unclaim:  fenced release→repeat (exit 13 / D1+A1: the new stamp guard
-//	          adopts ExitGuardMismatch on unclaim too, unlike the legacy
-//	          --if-assignee exit-1 wording), empty stamp (1 / D3),
+//	unclaim:  fenced release→repeat (exit 1 / per-verb exit taxonomy, bead
+//	          y30h.3.30.2: unclaim rides the SilentExit release contract —
+//	          stamp-mismatch exits 1; update exits 13), empty stamp (1 / D3),
 //	          invalid stamp (1 / D2)
 //
 // Exit classes and write-visibility must be identical on the classic and
@@ -117,8 +117,9 @@ func TestProxiedServerIfUpdatedAtRefusalClassParity(t *testing.T) {
 		}
 		for i, name := range names {
 			got := table[i]
+			// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
 			want := 1
-			if i%3 == 0 {
+			if i == 0 {
 				want = ExitGuardMismatch
 			}
 			if got.code != want {

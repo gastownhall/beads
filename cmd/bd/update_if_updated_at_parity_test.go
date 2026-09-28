@@ -237,10 +237,11 @@ func TestProxiedServerUpdateIfUpdatedAtParity(t *testing.T) {
 // TestProxiedServerUnclaimIfUpdatedAtParity runs the fenced-release case
 // against both transports. This is the AF unclaim-redispatch shape
 // (T2/T5/T22): a supervisor releases a worker's claim fenced on the stamp it
-// read. Stale exits 13 here by design (D1) even though the LEGACY unclaim
-// --if-assignee mismatch keeps its documented exit 1 — the new guard adopts
-// update's taxonomy, and a proxied exit that disagrees with the embedded one
-// for the same refusal is exactly the divergence this lane prevents.
+// read. Per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the
+// SilentExit release contract — stamp-mismatch exits 1; update exits 13 —
+// the same documented exit 1 the LEGACY unclaim --if-assignee mismatch uses,
+// and a proxied exit that disagrees with the embedded one for the same
+// refusal is exactly the divergence this lane prevents.
 func TestProxiedServerUnclaimIfUpdatedAtParity(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -273,9 +274,9 @@ func TestProxiedServerUnclaimIfUpdatedAtParity(t *testing.T) {
 		got.matchStampAdvanced = !after.UpdatedAt.Equal(before.UpdatedAt)
 
 		// 2. Repeat application: the release already fired; both guards are
-		// now stale (holder gone, generation advanced). Spec A1 pins 13: the
-		// stamp refusal dominates the legacy unclaim assignee-exit-1 wording
-		// because every failure in the run is a stale guard.
+		// now stale (holder gone, generation advanced). Per-verb exit
+		// taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release
+		// contract — stamp-mismatch exits 1; update exits 13.
 		_, _, code = fencedRelease(env, held, "worker-a", stamp)
 		got.repeatCode = code
 		got.repeatZeroMutation = rowUnchanged(after, env.show(t, held))
@@ -284,7 +285,7 @@ func TestProxiedServerUnclaimIfUpdatedAtParity(t *testing.T) {
 		// regression this feature exists for): worker-b holds the claim,
 		// the supervisor reads the stamp, THEN the holder heartbeats.
 		// Identity is unchanged, the generation is not; the fenced release
-		// must refuse with 13, report the CURRENT updated_at, and leave the
+		// must refuse with 1, report the CURRENT updated_at, and leave the
 		// live claim byte-for-byte intact.
 		live := env.create(t, "Heartbeated release")
 		env.mustRun(t, "update", live, "--assignee", "worker-b", "--status", "in_progress")
@@ -322,16 +323,18 @@ func TestProxiedServerUnclaimIfUpdatedAtParity(t *testing.T) {
 		if !got.matchStampAdvanced {
 			t.Errorf("[%s] authorized release did not advance updated_at off %s", env.mode, stamp)
 		}
-		if got.repeatCode != ExitGuardMismatch {
-			t.Errorf("[%s] repeat fenced release exit = %d, want %d (D1/A1: the stamp guard exits 13 on unclaim too)",
-				env.mode, got.repeatCode, ExitGuardMismatch)
+		// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+		if got.repeatCode != 1 {
+			t.Errorf("[%s] repeat fenced release exit = %d, want 1 (per-verb taxonomy: unclaim stamp refusal exits 1, not 13)",
+				env.mode, got.repeatCode)
 		}
 		if !got.repeatZeroMutation {
 			t.Errorf("[%s] repeat fenced release mutated the row", env.mode)
 		}
-		if got.staleCode != ExitGuardMismatch {
-			t.Errorf("[%s] stale fenced release exit = %d, want %d (D1: the new stamp guard adopts ExitGuardMismatch on BOTH verbs)",
-				env.mode, got.staleCode, ExitGuardMismatch)
+		// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+		if got.staleCode != 1 {
+			t.Errorf("[%s] stale fenced release exit = %d, want 1 (per-verb taxonomy: unclaim stamp refusal exits 1, update exits 13)",
+				env.mode, got.staleCode)
 		}
 		if !got.staleNamesCurrent {
 			t.Errorf("[%s] stale refusal must report the CURRENT updated_at %s (parsed from the output), got:\n%s",

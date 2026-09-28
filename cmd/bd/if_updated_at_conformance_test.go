@@ -15,8 +15,10 @@ package main
 // One test per case of the conformance spec (y30h-3302-test-spec.md); the
 // comment on each test maps it to its spec case and the pinned D-decision
 // (D1–D10). Exit taxonomy under test: 0 = guard matched (or benign no-op),
-// 13 = stale-guard refusal with ZERO mutation (ExitGuardMismatch), 1 = usage
-// error / not-found / mixed batch.
+// 13 = stale-guard refusal with ZERO mutation on update (ExitGuardMismatch),
+// 1 = usage error / not-found / mixed batch. Per-verb exit taxonomy (bead
+// y30h.3.30.2): unclaim rides the SilentExit release contract —
+// stamp-mismatch exits 1; update exits 13.
 //
 // Harness mirrors the existing family-test conventions
 // (update_conditional_embedded_test.go, unclaim_conditional_embedded_test.go,
@@ -354,11 +356,12 @@ func TestIfUpdatedAtUpdateStaleRefusesWithZeroMutation(t *testing.T) {
 	}
 }
 
-// TestIfUpdatedAtUnclaimStaleExits13 — spec §3.2 T5, pinning D1: the NEW
-// stamp guard exits 13 on unclaim too, even though the legacy unclaim
-// --if-assignee mismatch exits 1 (documented divergence, unchanged). A stale
-// stamp leaves the claim byte-identical.
-func TestIfUpdatedAtUnclaimStaleExits13(t *testing.T) {
+// TestIfUpdatedAtUnclaimStaleExits1 — spec §3.2 T5. Per-verb exit taxonomy
+// (bead y30h.3.30.2): unclaim rides the SilentExit release contract —
+// stamp-mismatch exits 1; update exits 13 — the same class as the legacy
+// unclaim --if-assignee mismatch. A stale stamp leaves the claim
+// byte-identical.
+func TestIfUpdatedAtUnclaimStaleExits1(t *testing.T) {
 	bd := ifupGate(t)
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yz6")
@@ -366,8 +369,9 @@ func TestIfUpdatedAtUnclaimStaleExits13(t *testing.T) {
 	id, current, stale, baseline := ifupSeedClaimed(t, bd, dir, "Stale unclaim refusal")
 	stdout, stderr, code := ifupRun(t, bd, dir, "unclaim", id,
 		"--actor", "supervisor-x", "--if-assignee", "worker-a", "--if-updated-at", stale)
-	if code != ExitGuardMismatch {
-		t.Fatalf("stale-stamp unclaim exit = %d, want %d (D1)\nstdout:\n%s\nstderr:\n%s", code, ExitGuardMismatch, stdout, stderr)
+	// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+	if code != 1 {
+		t.Fatalf("stale-stamp unclaim exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	ifupAssertUnchanged(t, bd, dir, id, baseline, "stale-stamp unclaim refusal")
 	combined := stdout + stderr
@@ -383,7 +387,7 @@ func TestIfUpdatedAtUnclaimStaleExits13(t *testing.T) {
 // regression this feature exists for (bead acceptance: "stale same-assignee
 // heartbeat race is covered by a regression test"). The holder's identity is
 // UNCHANGED since the supervisor read the row; only its heartbeat bumped the
-// generation. The fenced supervisor release must refuse (13) and leave the
+// generation. The fenced supervisor release must refuse (1) and leave the
 // LIVE claim untouched — the unfenced release would clobber it.
 func TestIfUpdatedAtSameAssigneeHeartbeatRaceRegression(t *testing.T) {
 	bd := ifupGate(t)
@@ -400,8 +404,9 @@ func TestIfUpdatedAtSameAssigneeHeartbeatRaceRegression(t *testing.T) {
 
 	stdout, stderr, code := ifupRun(t, bd, dir, "unclaim", issue.ID,
 		"--actor", "supervisor-x", "--if-assignee", "worker-a", "--if-updated-at", supervisorStamp)
-	if code != ExitGuardMismatch {
-		t.Fatalf("heartbeat-race release exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, ExitGuardMismatch, stdout, stderr)
+	// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+	if code != 1 {
+		t.Fatalf("heartbeat-race release exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	ifupAssertUnchanged(t, bd, dir, issue.ID, baseline, "heartbeat-race refusal")
 	combined := stdout + stderr
@@ -558,11 +563,11 @@ func TestIfUpdatedAtUpdateGuardCompositionMatrix(t *testing.T) {
 // ===== §3.3 unclaim composition subset =====
 
 // TestIfUpdatedAtUnclaimGuardComposition — spec §3.3 T15a–d, pinning A1 and
-// A10. On unclaim the stamp guard composes with --if-assignee, and the two
-// guards keep DIFFERENT exit codes by design: the legacy assignee mismatch
-// stays 1 (A10, help text unchanged), the new stamp refusal exits 13 (D1),
-// and when BOTH are stale the stamp's 13 dominates (A1 — every failure is a
-// stale guard).
+// A10. On unclaim the stamp guard composes with --if-assignee. Per-verb exit
+// taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract
+// — stamp-mismatch exits 1; update exits 13 — so both refusal classes share
+// unclaim's documented exit 1; zero mutation and the named stamps are what
+// distinguish them.
 func TestIfUpdatedAtUnclaimGuardComposition(t *testing.T) {
 	bd := ifupGate(t)
 	t.Parallel()
@@ -597,13 +602,14 @@ func TestIfUpdatedAtUnclaimGuardComposition(t *testing.T) {
 		}
 	})
 
-	t.Run("T15c_stale_stamp_exits_13", func(t *testing.T) {
+	t.Run("T15c_stale_stamp_exits_1", func(t *testing.T) {
 		id, current, stale, _ := ifupSeedClaimed(t, bd, dir, "Compose stale stamp")
 		baseline := bdShow(t, bd, dir, id)
 		stdout, stderr, code := ifupRun(t, bd, dir, "unclaim", id,
 			"--actor", "supervisor-x", "--if-assignee", "worker-a", "--if-updated-at", stale)
-		if code != ExitGuardMismatch {
-			t.Fatalf("stale stamp exit = %d, want %d (D1)\nstdout:\n%s\nstderr:\n%s", code, ExitGuardMismatch, stdout, stderr)
+		// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+		if code != 1 {
+			t.Fatalf("stale stamp exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		}
 		ifupAssertUnchanged(t, bd, dir, id, baseline, "T15c")
 		combined := stdout + stderr
@@ -612,13 +618,14 @@ func TestIfUpdatedAtUnclaimGuardComposition(t *testing.T) {
 		}
 	})
 
-	t.Run("T15d_both_stale_stamp_dominates", func(t *testing.T) {
+	t.Run("T15d_both_stale_exits_1", func(t *testing.T) {
 		id, current, stale, _ := ifupSeedClaimed(t, bd, dir, "Compose both stale")
 		baseline := bdShow(t, bd, dir, id)
 		stdout, stderr, code := ifupRun(t, bd, dir, "unclaim", id,
 			"--actor", "supervisor-x", "--if-assignee", "bob", "--if-updated-at", stale)
-		if code != ExitGuardMismatch {
-			t.Fatalf("both-stale exit = %d, want %d (A1: stamp guard dominates the taxonomy)\nstdout:\n%s\nstderr:\n%s", code, ExitGuardMismatch, stdout, stderr)
+		// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+		if code != 1 {
+			t.Fatalf("both-stale exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		}
 		ifupAssertUnchanged(t, bd, dir, id, baseline, "T15d")
 		combined := stdout + stderr
@@ -733,11 +740,12 @@ func TestIfUpdatedAtBatchMixedFailureClassesExit1(t *testing.T) {
 	}
 }
 
-// TestIfUpdatedAtUnclaimBatchStaleExits13 — spec §3.4 T19, pinning A7: the
-// stamp guard's NEW taxonomy (13 when every failure is a stale guard) applies
-// to unclaim batches too; the legacy unclaim batch exit-1 wording is NOT
-// extended to it. Matching rows release, the stale row's claim survives.
-func TestIfUpdatedAtUnclaimBatchStaleExits13(t *testing.T) {
+// TestIfUpdatedAtUnclaimBatchStaleExits1 — spec §3.4 T19, pinning A7:
+// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit
+// release contract — stamp-mismatch exits 1; update exits 13 — so a stale
+// row in an unclaim batch exits 1 with the batch's per-ID failure bullets.
+// Matching rows release, the stale row's claim survives.
+func TestIfUpdatedAtUnclaimBatchStaleExits1(t *testing.T) {
 	bd := ifupGate(t)
 	t.Parallel()
 	dir, _, _ := bdInit(t, bd, "--prefix", "yze")
@@ -750,8 +758,9 @@ func TestIfUpdatedAtUnclaimBatchStaleExits13(t *testing.T) {
 
 	stdout, stderr, code := ifupRun(t, bd, dir, "unclaim", p, q, r,
 		"--actor", "supervisor-x", "--if-assignee", "worker-a", "--if-updated-at", stamp)
-	if code != ExitGuardMismatch {
-		t.Fatalf("unclaim batch with one stale row exit = %d, want %d (A7)\nstdout:\n%s\nstderr:\n%s", code, ExitGuardMismatch, stdout, stderr)
+	// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+	if code != 1 {
+		t.Fatalf("unclaim batch with one stale row exit = %d, want 1 (A7)\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	for _, id := range []string{p, q} {
 		row := bdShow(t, bd, dir, id)
@@ -1037,8 +1046,9 @@ func TestIfUpdatedAtLabelOnlyDoesNotBumpGeneration_5442(t *testing.T) {
 // substring `--if-updated-at` and then emits the flag on BOTH verbs, so the
 // flag must ship registered and NON-HIDDEN on both in the same release (a
 // hidden flag does not render in cobra help and would fail the probe). Also
-// pins the D1 docs amendment: unclaim's "Exit status" paragraph documents 13
-// for the stamp guard.
+// pins the per-verb docs contract (bead y30h.3.30.2): unclaim rides the
+// SilentExit release contract — stamp-mismatch exits 1; update exits 13 — so
+// unclaim's "Exit status" paragraph must NOT promise 13.
 func TestIfUpdatedAtHelpSurfaceOnBothVerbs(t *testing.T) {
 	bd := ifupGate(t)
 	t.Parallel()
@@ -1052,8 +1062,9 @@ func TestIfUpdatedAtHelpSurfaceOnBothVerbs(t *testing.T) {
 	if !strings.Contains(unclaimHelp, "--if-updated-at") {
 		t.Errorf("bd unclaim --help must advertise --if-updated-at verbatim (the AF probe greps for it; hidden flags fail the probe)")
 	}
-	if !strings.Contains(unclaimHelp, "Exit status") || !strings.Contains(unclaimHelp, "13") {
-		t.Errorf("unclaim help must document exit 13 for the stamp guard in its Exit status paragraph (D1), got:\n%s", unclaimHelp)
+	// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+	if !strings.Contains(unclaimHelp, "Exit status") || strings.Contains(unclaimHelp, "13") {
+		t.Errorf("unclaim help must keep exit 13 out of its Exit status paragraph (stamp-mismatch exits 1, not 13), got:\n%s", unclaimHelp)
 	}
 
 	stdout, stderr, code = ifupRun(t, bd, dir, "update", "--help")
@@ -1176,7 +1187,7 @@ func ifupParityScenario(t *testing.T, env crossModeEnv) ifupParityOutcome {
 // TestProxiedServerIfUpdatedAtParity — spec §3.5 T20. The fenced mutation
 // must be indistinguishable across transports: the same case bodies run
 // against a classic embedded workspace and a proxied-server workspace, and
-// every observable (exit codes 0/13, zero-mutation outcomes, sentinel
+// every observable (exit codes 0/13/1, zero-mutation outcomes, sentinel
 // semantics, JSON guard_mismatch) must match. Gated on
 // BEADS_TEST_PROXIED_SERVER=1 like the other proxied lanes; the embedded
 // halves of the same cases are covered unconditionally by the tests above.
@@ -1208,9 +1219,10 @@ func TestProxiedServerIfUpdatedAtParity(t *testing.T) {
 		if !got.staleHasCur || !got.staleHasOld {
 			t.Errorf("[%s] stale refusal must name current and expected stamps on stderr", mode)
 		}
-		if got.claimRaceCode != ExitGuardMismatch || !got.claimIntact {
-			t.Errorf("[%s] heartbeat-race release must exit %d with the claim intact, got code=%d intact=%v",
-				mode, ExitGuardMismatch, got.claimRaceCode, got.claimIntact)
+		// per-verb exit taxonomy (bead y30h.3.30.2): unclaim rides the SilentExit release contract — stamp-mismatch exits 1; update exits 13.
+		if got.claimRaceCode != 1 || !got.claimIntact {
+			t.Errorf("[%s] heartbeat-race release must exit 1 with the claim intact, got code=%d intact=%v",
+				mode, got.claimRaceCode, got.claimIntact)
 		}
 		if got.batchCode != ExitGuardMismatch || !got.batchPartial || !got.batchSafe {
 			t.Errorf("[%s] one-stale batch must exit %d with partial application (D5), got %+v", mode, ExitGuardMismatch, got)
