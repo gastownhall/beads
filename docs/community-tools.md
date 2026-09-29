@@ -20,6 +20,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[LazyBeads](https://github.com/lesliesrussell/lazybeads)** (`lb`) - Terminal operator console that ranks ready work, explains why each bead is ready, and claims, closes and links beads with confirmation. The TUI and `lb status --watch` follow the events journal and redraw as agents change beads; on Dolt-server workspaces it uses `bd serve`, and the `bd` CLI otherwise. Not related to the earlier lazybeads listed under Historical. Built by [@lesliesrussell](https://github.com/lesliesrussell). (Go)
 
+- **[b9s](https://github.com/vanderheijden86/b9s)** - Keyboard-driven terminal UI for Beads, modelled on k9s: issue tree, a list of the latest changes, and a kanban board with epic swimlanes, all updating live as you and your agents work. The same app runs in a desktop or phone browser with full feature parity (see Web UIs). Live demo at [demo.b9s.osen.co](https://demo.b9s.osen.co). Built by [@vanderheijden86](https://github.com/vanderheijden86). (Go)
+
 ## Web UIs
 
 - **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
@@ -35,6 +37,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 - **[Maggie](https://github.com/mulgadc/maggie)** - Single Go binary with the SPA embedded, serving dashboard, table, board and dependency graph views. Text, id glob, priority, type, assignee, label and status filters compose in one filter bar. Uses the `bd` CLI for every read and write, keeping no store of its own. Runs from a container that bundles `bd` and `dolt`, against either a local `.beads/` directory or a shared Dolt SQL server. Built by [@mulgadc](https://github.com/mulgadc). (Go/React)
 
 - **[beadcyte](https://gitlab.com/incytestudios/beadcyte)** - Local web app that draws two things that look alike and are not: what happened, which is measured, and what it expects to happen, which is a model's opinion. Three models drive the projection — a historical-median duration estimator, a greedy WIP-cap scheduler calibrated against your real throughput, and an eight-signal triage score — each shown with its own uncertainty rather than a flat number. Views for what to do next, the team's frontier, what-if plan diffs, and cost per week; a single self-contained SVG export with no server (`beadcyte --out gantt.svg`); and a changelog generated from closed beads that carry ship evidence. Reads and writes through the `bd` CLI (`bd list --all --json`, `bd show`, `bd history`); `beadcyte freeze` additionally reads the embedded Dolt database directly (read-only, opt out with `--no-dolt`) — never `.beads/issues.jsonl`. Run with `npx beadcyte start`. Built by [Incyte Studios](https://incytestudios.com) ([@treystout](https://github.com/treystout)). (Node.js/Vue)
+
+- **[b9s web](https://github.com/vanderheijden86/b9s)** - The b9s terminal UI (see Terminal UIs) in your browser, with full feature parity: tree, kanban board, search and editing, all updating live. Responsive from a phone screen to a wide desktop board with drag-and-drop. Live demo at [demo.b9s.osen.co](https://demo.b9s.osen.co). Built by [@vanderheijden86](https://github.com/vanderheijden86). (Go)
 
 ## Editor Extensions
 
