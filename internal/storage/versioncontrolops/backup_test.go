@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -162,6 +164,14 @@ func TestResolveBackupSource(t *testing.T) {
 		{name: "missing directory", source: filepath.Join(dir, "missing"), wantErr: "backup source does not exist"},
 		{name: "regular file", source: file, wantErr: "backup source is not a directory"},
 		{name: "uppercase scheme is stat'ed as a path", source: "S3://bucket/db", wantErr: "backup source does not exist"},
+
+		// file:// is the one backup URL that names a local directory, so it is
+		// the one that is stat'ed. It still passes through verbatim; what the
+		// stat buys is the refusal, because DOLT_BACKUP creates a missing
+		// file:// source rather than failing on it.
+		{name: "file URL to an existing directory passes through", source: "file://" + dir, want: "file://" + dir},
+		{name: "file URL to a missing directory", source: "file://" + filepath.Join(dir, "missing"), wantErr: "backup source does not exist"},
+		{name: "file URL to a regular file", source: "file://" + file, wantErr: "backup source is not a directory"},
 	}
 
 	for _, tt := range tests {
@@ -186,6 +196,126 @@ func TestResolveBackupSource(t *testing.T) {
 	}
 }
 
+// TestResolveBackupSourceRefusesFileURLsDoltReadsElsewhere pins the file://
+// paths a stat and DOLT_BACKUP read differently. Every directory below exists
+// where the stat looks, so the stat alone passes each row, while Dolt opens a
+// different directory: it creates it and, under --force, drops the live
+// database before the restore fails. The refusal is all that stops that.
+func TestResolveBackupSourceRefusesFileURLsDoltReadsElsewhere(t *testing.T) {
+	work := t.TempDir()
+	// Dolt resolves a relative path against its data directory, never this
+	// one, so relbak exists here and not where Dolt would look.
+	t.Chdir(work)
+	if err := os.Mkdir("relbak", 0o750); err != nil {
+		t.Fatalf("mkdir relbak: %v", err)
+	}
+
+	const relative, notPlain = "not an absolute file:// path", "not a plain file:// path"
+	type row struct{ source, wantErr string }
+	rows := []row{
+		{"file://relbak", relative},
+		{"file://./relbak", relative},
+	}
+	// Dolt decodes %41 to A, ends the path at # or ?, and reads \ as /, so it
+	// opens bkA, bk or bk/1.
+	escaped := []string{"bk%41", "bk#1"}
+	if runtime.GOOS != "windows" { // ? is not legal in a Windows file name, and \ is the separator
+		escaped = append(escaped, "bk?1", `bk\1`)
+	}
+	for _, name := range escaped {
+		dir := filepath.Join(work, name)
+		if err := os.Mkdir(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %q: %v", dir, err)
+		}
+		rows = append(rows, row{"file://" + dir, notPlain})
+	}
+
+	for _, r := range rows {
+		got, err := ResolveBackupSource(r.source)
+		if err == nil || !strings.Contains(err.Error(), r.wantErr) {
+			t.Errorf("ResolveBackupSource(%q) = %q, %v; want a refusal containing %q", r.source, got, err, r.wantErr)
+		}
+	}
+
+	// The remedy the refusal names works: passed as a directory, the same
+	// relative path is resolved here and sent as an absolute file:// URL.
+	want, err := DirToFileURL("relbak")
+	if err != nil {
+		t.Fatalf("DirToFileURL(relbak): %v", err)
+	}
+	if got, err := ResolveBackupSource("relbak"); err != nil || got != want {
+		t.Errorf("ResolveBackupSource(relbak) = %q, %v; want %q", got, err, want)
+	}
+}
+
+// TestResolveBackupSourceStatsTheCleanedFileURLPath pins that the stat looks
+// where Dolt will. Dolt cleans a file:// path lexically, so link/../bk is the
+// bk beside link, not the one beside link's target. The raw path reaches an
+// existing directory through the symlink; the cleaned one is missing, and Dolt
+// would create it.
+func TestResolveBackupSourceStatsTheCleanedFileURLPath(t *testing.T) {
+	work := t.TempDir()
+	target := filepath.Join(work, "far", "near")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatalf("mkdir %q: %v", target, err)
+	}
+	if err := os.Mkdir(filepath.Join(work, "far", "bk"), 0o750); err != nil {
+		t.Fatalf("mkdir far/bk: %v", err)
+	}
+	link := filepath.Join(work, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	sep := string(filepath.Separator)
+	source := "file://" + link + sep + ".." + sep + "bk"
+	if got, err := ResolveBackupSource(source); err == nil || !strings.Contains(err.Error(), "backup source does not exist") {
+		t.Errorf("ResolveBackupSource(%q) = %q, %v; want the missing-source refusal for %s",
+			source, got, err, filepath.Join(work, "bk"))
+	}
+}
+
+// TestResolveBackupSourceRedactsTheSourceItQuotes covers the arm a credentialed
+// URL actually lands on. IsBackupURL is case-sensitive by design, so S3:// —
+// and az://, which backupSchemes deliberately omits — is stat'ed as a path,
+// and the *fs.PathError carries its own copy of the source. Wrapping it with
+// %w put the whole thing, credentials included, into the error a failed
+// restore prints: the same leak the redaction in BackupRestore exists to close,
+// one arm over.
+func TestResolveBackupSourceRedactsTheSourceItQuotes(t *testing.T) {
+	const (
+		key    = "AKIAEXAMPLE"
+		secret = "wJalrXUtnFEMI/K7MDENG"
+	)
+
+	for _, source := range []string{
+		"S3://" + key + ":" + secret + "@bucket/db",
+		"az://" + key + ":" + secret + "@container/db",
+	} {
+		if IsBackupURL(source) {
+			t.Fatalf("fixture %q is a recognized backup URL, so it passes through rather than reaching the stat arm", source)
+		}
+
+		got, err := ResolveBackupSource(source)
+		if err == nil {
+			t.Fatalf("ResolveBackupSource(%q) = %q, want the stat arm's refusal", source, got)
+		}
+		if !strings.Contains(err.Error(), "backup source does not exist") {
+			t.Errorf("ResolveBackupSource(%q) error %q dropped the load-bearing prefix", source, err)
+		}
+		for _, leaked := range []string{key, secret} {
+			if strings.Contains(err.Error(), leaked) {
+				t.Errorf("ResolveBackupSource(%q) error %q echoes %q", source, err, leaked)
+			}
+		}
+		// The reason stays wrapped, so a caller can still classify the failure
+		// without parsing the message.
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("ResolveBackupSource(%q) error %q no longer answers errors.Is(fs.ErrNotExist)", source, err)
+		}
+	}
+}
+
 func TestRedactBackupURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -200,14 +330,55 @@ func TestRedactBackupURL(t *testing.T) {
 		{name: "file URL", source: "file:///var/backups/x", want: "file:///var/backups/x"},
 		{name: "plain path", source: "/var/backups/x", want: "/var/backups/x"},
 		{name: "clean URL", source: "s3://bucket/db", want: "s3://bucket/db"},
+
+		// One row per separator class, with the separator INSIDE the secret.
+		// A secret is arbitrary bytes, so each of these used to defeat the
+		// redaction: the authority was bounded at the first "/" and the
+		// "?#" cut ran before the "@" search. The "/" row is the common
+		// case, not a corner one — AWS secret access keys are base64.
+		{name: "slash in secret", source: "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/db", want: "aws://bucket/db"},
+		{name: "fragment in secret", source: "aws://AKIAEXAMPLE:sec#ret@bucket/db", want: "aws://bucket/db"},
+		{name: "question mark in secret", source: "aws://AKIAEXAMPLE:sec?ret@bucket/db", want: "aws://bucket/db"},
+		{name: "at sign in secret", source: "aws://AKIAEXAMPLE:sec@ret@bucket/db", want: "aws://bucket/db"},
+
+		// Over-stripping is the direction this is allowed to fail in: an "@"
+		// in a query parameter costs the host and path in a debug message,
+		// where taking the first "@" instead would leak every secret that
+		// contains one.
+		{name: "at sign in query over-strips", source: "s3://bucket/db?endpoint=user@minio.local", want: "s3://minio.local"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := redactBackupURL(tt.source); got != tt.want {
-				t.Errorf("redactBackupURL(%q) = %q, want %q", tt.source, got, tt.want)
+			if got := RedactBackupURL(tt.source); got != tt.want {
+				t.Errorf("RedactBackupURL(%q) = %q, want %q", tt.source, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRedactBackupURLLeaksNoSecret is the property the table rows are examples
+// of: whatever shape the userinfo takes, neither the access key nor the secret
+// survives into the redacted string. A table row pins one spelling; this pins
+// the claim the function's doc comment makes.
+func TestRedactBackupURLLeaksNoSecret(t *testing.T) {
+	const (
+		key    = "AKIAEXAMPLE"
+		secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCY?EXAMPLE#KEY@x"
+	)
+
+	for _, source := range []string{
+		"aws://" + key + ":" + secret + "@bucket/db",
+		"s3://" + key + ":" + secret + "@bucket/db?X-Amz-Signature=abc",
+		"aws://" + secret + "@bucket/db",
+	} {
+		got := RedactBackupURL(source)
+		if strings.Contains(got, secret) {
+			t.Errorf("RedactBackupURL(%q) = %q, still carries the secret", source, got)
+		}
+		if strings.Contains(got, key) {
+			t.Errorf("RedactBackupURL(%q) = %q, still carries the access key", source, got)
+		}
 	}
 }
 

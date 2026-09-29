@@ -526,6 +526,7 @@ go_test(
         "backup_proxied_external_integration_test.go",
         "backup_proxied_local_integration_test.go",
         "backup_proxied_policy_test.go",
+        "backup_restore_source_test.go",
         "backup_restore_test.go",
         "backup_status_test.go",
         "backup_test.go",

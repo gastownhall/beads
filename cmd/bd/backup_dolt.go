@@ -207,11 +207,18 @@ Run 'bd backup init <path>' first to configure a destination.`,
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
 // Filesystem paths get resolved to absolute and prefixed with file://
 // URLs (https://, http://) are passed through as-is.
+//
+// The scheme test is versioncontrolops.IsBackupURL rather than a prefix list
+// of its own. This helper and that predicate answer the same question about
+// the same vocabulary, and they had already drifted: this list was missing
+// s3://, which runBackupRestore feeds it through registerBackupRemote with the
+// source of a just-completed restore. A missing scheme is not a pass-through
+// that fails — it absolutizes, so `bd backup restore s3://bucket/beads` would
+// register file://$PWD/s3:/bucket/beads as the default backup remote and
+// persist it, breaking the `bd backup sync` this registration exists to enable.
 func resolveDoltBackupURL(raw string) string {
 	// DoltHub or other remote URLs — pass through
-	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") ||
-		strings.HasPrefix(raw, "file://") || strings.HasPrefix(raw, "aws://") ||
-		strings.HasPrefix(raw, "gs://") {
+	if versioncontrolops.IsBackupURL(raw) {
 		return raw
 	}
 
