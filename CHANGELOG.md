@@ -19,7 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such a `BEADS_DIR`, so `bd init` initializes the named directory and other
   commands fail with "no beads database found". `bd import`/`bd setup` and
   `bd bootstrap` target the named directory when they create a workspace.
-  Behaviour with `BEADS_DIR` unset is unchanged.
+  Behaviour with `BEADS_DIR` unset is unchanged. **Behaviour change:** a
+  `BEADS_DIR` that points at a project root rather than its `.beads`
+  directory (for example `BEADS_DIR=$repo` instead of `BEADS_DIR=$repo/.beads`),
+  or at a `.beads` that does not exist yet, used to work by accident because
+  discovery walked up to the nearest workspace; it now fails with "no beads
+  database found". Point `BEADS_DIR` at the `.beads` directory itself.
+  ([#6938](https://github.com/gastownhall/beads/pull/6938))
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
