@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,11 +16,13 @@ import (
 // TestDeferUntilFormatHintCoversCompactUnits keeps the --until failure message
 // and the parser it describes in step. "+3mo" is rejected while "+3m" is three
 // months, so a message naming one example leaves the caller trying units one at
-// a time to find the boundary.
+// a time to find the boundary. "min" is the sharpest case: "+3m" is months and
+// "+30min" is minutes, which is why the parser's own doc comment spells out
+// "m = months (NOT minutes; use \"min\" for minutes)".
 func TestDeferUntilFormatHintCoversCompactUnits(t *testing.T) {
 	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 
-	for _, unit := range []string{"h", "d", "w", "m", "y"} {
+	for _, unit := range []string{"min", "h", "d", "w", "m", "y"} {
 		value := "+3" + unit
 		if _, err := timeparsing.ParseRelativeTime(value, now); err != nil {
 			t.Errorf("parser rejected %q, which the --until hint names as supported: %v", value, err)
@@ -62,7 +65,7 @@ func TestDeferUntilRejectionNamesUnitSet(t *testing.T) {
 	if !strings.Contains(output, `invalid --until format "+3mo"`) {
 		t.Fatalf("expected the rejected value in the error, got: %s", output)
 	}
-	for _, unit := range []string{"h=hours", "d=days", "w=weeks", "m=months", "y=years"} {
+	for _, unit := range []string{"min=minutes", "h=hours", "d=days", "w=weeks", "m=months", "y=years"} {
 		if !strings.Contains(output, unit) {
 			t.Errorf("expected the error to name %q, got: %s", unit, output)
 		}
@@ -77,6 +80,12 @@ func TestDeferUntilRejectionNamesUnitSet(t *testing.T) {
 // call-level test while sending that caller back on the hunt, which is why the
 // uniformity is pinned at the source. Blunt line matching, in the style of
 // TestCobraParallelPolicyGuard.
+//
+// The matching is deliberately per-line, which constrains how a site may be
+// written: a compliant call wrapped so that the format string and
+// deferUntilFormatHint land on different lines would be reported here. All nine
+// sites today are single-line, so keep them that way rather than loosening the
+// guard.
 func TestRelativeTimeRejectionsShareTheHint(t *testing.T) {
 	sources, err := filepath.Glob("*.go")
 	if err != nil {
@@ -119,7 +128,7 @@ func TestGatherInputRejectionsNameUnitSet(t *testing.T) {
 	jsonOutput = false
 	t.Cleanup(func() { jsonOutput = prevJSON })
 
-	units := []string{"h=hours", "d=days", "w=weeks", "m=months", "y=years"}
+	units := []string{"min=minutes", "h=hours", "d=days", "w=weeks", "m=months", "y=years"}
 
 	assertNamesUnits := func(t *testing.T, flag, output string) {
 		t.Helper()
@@ -164,4 +173,52 @@ func TestGatherInputRejectionsNameUnitSet(t *testing.T) {
 			assertNamesUnits(t, flag, output)
 		})
 	}
+
+	// The four update sites use HandleErrorRespectJSON, which under --json emits
+	// the message on STDOUT inside a JSON error payload instead of on stderr. The
+	// subtests above pin jsonOutput = false, so that branch -- the one machine
+	// consumers read -- would otherwise carry this ~190-char hint untested.
+	// Assert on the DECODED message, not the raw bytes: json.Encoder HTML-escapes
+	// the angle brackets in the hint's "[+-]?<n><unit>" notation, so a
+	// strings.Contains over stdout would fail on a perfectly correct payload.
+	t.Run("update --defer json", func(t *testing.T) {
+		jsonOutput = true
+		t.Cleanup(func() { jsonOutput = false })
+
+		cmd := &cobra.Command{Use: "update"}
+		cmd.Flags().String("due", "", "Due date")
+		cmd.Flags().String("defer", "", "Defer until")
+		cmd.Flags().Bool("json", false, "JSON output")
+		if err := cmd.ParseFlags([]string{"--defer", "+3mo"}); err != nil {
+			t.Fatalf("parse update flags: %v", err)
+		}
+
+		var err error
+		output := captureStdout(t, func() error {
+			_, err = gatherUpdateInput(t.Context(), cmd)
+			return nil
+		})
+		if err == nil {
+			t.Fatal("expected --defer=+3mo to fail")
+		}
+
+		var payload struct {
+			Error string `json:"error"`
+			Data  struct {
+				Error string `json:"error"`
+			} `json:"data"`
+		}
+		if jsonErr := json.Unmarshal([]byte(output), &payload); jsonErr != nil {
+			t.Fatalf("stdout was not a JSON error payload (%v), got: %s", jsonErr, output)
+		}
+		message := payload.Error
+		if message == "" {
+			// BD_JSON_ENVELOPE=1 nests the same fields under "data".
+			message = payload.Data.Error
+		}
+		if message == "" {
+			t.Fatalf("no error message in the JSON payload, got: %s", output)
+		}
+		assertNamesUnits(t, "--defer", message)
+	})
 }

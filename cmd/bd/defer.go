@@ -14,7 +14,12 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-const deferUntilFormatHint = "Use a relative offset [+-]<n><unit> with unit h=hours, d=days, w=weeks, m=months, y=years (+1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)"
+// deferUntilFormatHint restates the vocabulary of
+// timeparsing.ParseCompactDuration for every flag that reaches it. The unit set
+// and its order track that parser's doc comment, so a unit added there must be
+// added here too -- TestDeferUntilFormatHintCoversCompactUnits only catches
+// units this constant already names.
+const deferUntilFormatHint = "Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)"
 
 var deferCmd = &cobra.Command{
 	Use:   "defer [id...]",
