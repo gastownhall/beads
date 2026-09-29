@@ -740,6 +740,7 @@ go_test(
         "gc_embedded_test.go",
         "gc_prune_test.go",
         "git_repo_template_test.go",
+        "github_link_scope_test.go",
         "gitlab_integration_test.go",
         "gitlab_test.go",
         "global_identity_integration_test.go",
