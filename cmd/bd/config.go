@@ -827,6 +827,10 @@ func runConfigUnsetYamlOnly(key string) error {
 		payload := map[string]interface{}{
 			"key":      key,
 			"location": location,
+			// The human branch gets an explicit "was not set" sentence; without
+			// this the machine branch cannot tell that no-op apart from an
+			// unpopulated field, since both render location as "".
+			"changed": changed,
 		}
 		if config.IsSecretKey(key) {
 			cleanup.jsonFields(payload)
@@ -841,7 +845,15 @@ func runConfigUnsetYamlOnly(key string) error {
 		fmt.Printf("%s was not set in %s\n", key, file)
 		cleanup.describe(key, file)
 	}
-	printConfigSideEffects(checkConfigUnsetSideEffects(key))
+	// Gate the hint on the write, uniformly across all three arms above. Every
+	// key in checkConfigUnsetSideEffects is phrased in the completed past tense
+	// ("Backup config removed...") and three of the four hand the operator a
+	// follow-up command, so on the no-op branch the command contradicted the
+	// line it had just printed. This covers the jsonOutput arm too: the hint
+	// goes to stderr, so --json never suppressed it.
+	if changed {
+		printConfigSideEffects(checkConfigUnsetSideEffects(key))
+	}
 	return nil
 }
 

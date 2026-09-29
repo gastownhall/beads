@@ -261,6 +261,88 @@ func TestEmbeddedConfig(t *testing.T) {
 		}
 	})
 
+	// Both --json routes changed shape in this PR and neither was pinned. The
+	// yaml-only payload carries `changed` because `location` is "" both when
+	// the key was never set and when a field is merely unpopulated — the human
+	// branch got an explicit "was not set" sentence for exactly that reason and
+	// the machine branch had no way to tell the two apart. The stderr
+	// side-effect hint is gated on the same bool: every hint is phrased in the
+	// completed past tense ("Backup config removed..."), so printing one on the
+	// no-op branch contradicts the line printed just above it.
+	t.Run("config_unset_json_payloads_and_no_op_hint", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		original, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.WriteFile(configPath, original, 0600); err != nil {
+				t.Fatalf("restore config.yaml: %v", err)
+			}
+		})
+		if strings.Contains(string(original), "backup.enabled") {
+			t.Skipf("this workspace's config.yaml already carries backup.enabled; the no-op probe needs a key it does not")
+		}
+
+		run := func(args ...string) (string, string) {
+			t.Helper()
+			cmd := exec.Command(bd, append([]string{"config"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd config %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			return stdout.String(), stderr.String()
+		}
+		decode := func(out string) map[string]interface{} {
+			t.Helper()
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &payload); err != nil {
+				t.Fatalf("unset --json did not emit an object: %v\n%s", err, out)
+			}
+			return payload
+		}
+
+		// yaml-only route, key absent: no write, so no location, no hint.
+		stdout, stderr := run("unset", "--json", "backup.enabled")
+		payload := decode(stdout)
+		if changed, ok := payload["changed"].(bool); !ok || changed {
+			t.Errorf("yaml-only --json payload changed = %v (present=%v), want false: %s", payload["changed"], ok, stdout)
+		}
+		if payload["location"] != "" {
+			t.Errorf("yaml-only --json payload named a location for a key that was never set: %s", stdout)
+		}
+		if strings.Contains(stderr, "Hint:") {
+			t.Errorf("the no-op branch printed a side-effect hint asserting a removal that never happened:\n%s", stderr)
+		}
+
+		// yaml-only route, key present: the write is reported, and the hint
+		// that describes it is the one thing that should appear on stderr.
+		if err := os.WriteFile(configPath, append(original, []byte("\nbackup.enabled: true\n")...), 0600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+		stdout, stderr = run("unset", "--json", "backup.enabled")
+		payload = decode(stdout)
+		if changed, ok := payload["changed"].(bool); !ok || !changed {
+			t.Errorf("yaml-only --json payload changed = %v, want true for a key the file carried: %s", payload["changed"], stdout)
+		}
+		if payload["location"] != "config.yaml" {
+			t.Errorf("yaml-only --json payload location = %v, want config.yaml: %s", payload["location"], stdout)
+		}
+		if !strings.Contains(stderr, "Backup config removed") {
+			t.Errorf("a real removal dropped its side-effect hint:\n%s", stderr)
+		}
+
+		// database-backed route: its payload names the layers it cleared.
+		run("set", "no-hooks", "true")
+		stdout, _ = run("unset", "--json", "no-hooks")
+		payload = decode(stdout)
+		if loc, _ := payload["location"].(string); !strings.Contains(loc, "database") {
+			t.Errorf("database-backed --json payload location = %v, want it to name the database: %s", payload["location"], stdout)
+		}
+	})
+
 	// ===== Validate =====
 	// Note: config validate checks dolt server connectivity which doesn't
 	// apply to embedded mode, so we skip it here.

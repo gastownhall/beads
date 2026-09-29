@@ -612,11 +612,21 @@ func UnsetUserYamlConfig(key string) (bool, error) {
 		return false, fmt.Errorf("failed to read user config.yaml: %w", err)
 	}
 
-	newContent, err := commentOutYamlKey(string(content), key)
+	// Normalize before the call, not after it. commentOutYamlKey rewrites CRLF
+	// to LF as its first statement, so comparing its result against the raw
+	// bytes asks whether the bytes moved rather than whether the key was
+	// commented out: on any CRLF file those always differ, and an unset of an
+	// absent key reported "Unset <key> (in config.yaml)" — the false claim this
+	// path exists to remove — while rewriting the whole file to LF. Comparing
+	// against the same normalized form the callee answered from keeps the bool
+	// meaning "the key was there", and skipping the write on false leaves a
+	// CRLF file byte-identical.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	newContent, err := commentOutYamlKey(normalized, key)
 	if err != nil {
 		return false, err
 	}
-	if newContent == string(content) {
+	if newContent == normalized {
 		return false, nil
 	}
 
@@ -691,10 +701,15 @@ func GetYamlConfig(key string) string {
 // not in config.yaml" is the correct answer to give there, not a failure.
 //
 // A workspace with no project config.yaml at all is reported separately, as
-// ErrNoProjectConfigYaml, because the two callers of this function need opposite
-// answers for it and only they can tell which applies. Resolution stays here so
-// neither of them re-derives it: pre-checking in the caller is what produced the
-// false "(in config.yaml)" claims this whole path exists to remove.
+// ErrNoProjectConfigYaml, because the callers need different answers for it and
+// only they can tell which applies. The two `bd config unset` routes need
+// opposite ones — the yaml-only route reports it, the database-backed route
+// tolerates it via errors.Is, since there the database write is the whole unset.
+// The two `sync.remote` cleanup sites (cmd/bd/dolt.go and
+// cmd/bd/dolt_remote_proxied_server.go) take a third: they deliberately keep
+// their base warn-on-any-error behavior. Resolution stays here so none of them
+// re-derives it: pre-checking in the caller is what produced the false
+// "(in config.yaml)" claims this whole path exists to remove.
 func UnsetYamlConfig(key string) (bool, error) {
 	configPath, err := findProjectConfigYaml()
 	if err != nil {
@@ -709,11 +724,15 @@ func UnsetYamlConfig(key string) (bool, error) {
 		return false, fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
-	newContent, err := commentOutYamlKey(string(content), key)
+	// Normalize before the call so the comparison below answers "was the key
+	// commented out", not "did the bytes move" — see UnsetUserYamlConfig for
+	// the CRLF false-positive this avoids.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	newContent, err := commentOutYamlKey(normalized, key)
 	if err != nil {
 		return false, err
 	}
-	if newContent == string(content) {
+	if newContent == normalized {
 		return false, nil
 	}
 

@@ -581,7 +581,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key whose value is the indented block beneath it (a mapping or a list), which
   used to comment out the key line and orphan the block into a `config.yaml`
   that no longer parsed, is now refused alongside the flow-style and
-  block-scalar shapes above. An unset also keeps the file's trailing newline.
+  block-scalar shapes above. An unset also keeps the file's trailing newline,
+  and an unset that changes nothing now leaves the file byte-identical - on a
+  CRLF `config.yaml` it previously reported a write for a key that was never
+  there and rewrote every line ending to LF. The stderr side-effect hint is
+  gated on the write too, so a no-op no longer announces a removal it did not
+  make, and the `--json` payload for a yaml-only key carries a `changed` boolean
+  so the machine branch can tell an absent key from an unpopulated field.
 
 ## [1.3.0] - 2026-09-15
 
