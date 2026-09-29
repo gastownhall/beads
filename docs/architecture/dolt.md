@@ -53,10 +53,10 @@ proxied-server mode use. Embedded mode is unaffected either way: it links the
 Dolt engine into `bd` at the version in `go.mod`, currently the commit tagged
 v2.2.0 upstream, no matter which `dolt` CLI is on your PATH.
 
-Dolt releases after 2.2.0 and before 2.3.2 can break
+Dolt 2.2.4 through 2.3.1 can break
 `CALL DOLT_RESET('--hard')`
 ([dolthub/dolt#11581](https://github.com/dolthub/dolt/issues/11581), first
-reported against 2.3.0 and also seen on 2.2.4). Some freshly created
+reported against 2.3.0; 2.2.4 is the first affected release). Some freshly created
 databases (a few percent to over a third in the measurements below, more
 under concurrent load) come up with that procedure unusable —
 every call answers `Error 1105 (HY000): context canceled`, from any session
@@ -69,10 +69,13 @@ Upstream fixed it in 2.3.2
 ([dolthub/dolt#11652](https://github.com/dolthub/dolt/pull/11652)), and 2.3.4
 also fixes a related journal-writer race on a canceled context
 ([dolthub/dolt#11796](https://github.com/dolthub/dolt/pull/11796)). Use
-**2.2.0** or **2.3.4 or newer**; avoid 2.2.1 through 2.3.1.
+**2.2.0** or **2.3.4 or newer**; avoid 2.2.4 through 2.3.1. 2.2.1 through
+2.2.3 measured clean (below, and in the per-version table on
+[dolthub/dolt#11581](https://github.com/dolthub/dolt/issues/11581)); they are
+simply not the pinned version.
 
 Measured by creating fresh databases and immediately calling the procedure
-(first four rows), and again with the method below (last three rows):
+(first four rows), and again with the method below (the other rows):
 
 | Dolt version | Fresh databases with `DOLT_RESET('--hard')` broken |
 |--------------|----------------------------------------------------|
@@ -81,7 +84,11 @@ Measured by creating fresh databases and immediately calling the procedure
 | 2.3.0        | 3 / 60                                             |
 | 2.3.1        | 3 / 100                                            |
 | 2.2.0        | 0 / 200; 8 clients: 0 / 200                        |
+| 2.2.1        | 8 clients: 0 / 200                                 |
+| 2.2.3        | 8 clients: 0 / 200                                 |
+| 2.2.4        | 8 clients: 74 / 200                                |
 | 2.3.1        | 32 / 200; 8 clients: 78 / 200 and 68 / 160         |
+| 2.3.4        | 8 clients: 0 / 200                                 |
 | 2.3.5        | 0 / 200; 8 clients: 0 / 200; 16 clients: 0 / 640   |
 
 The second measurement starts a fresh `dolt sql-server` per version and runs
@@ -90,7 +97,7 @@ connection. Per fresh database: `CREATE DATABASE`, then
 `CALL DOLT_RESET('--hard')`; `CREATE TABLE` with an `AUTO_INCREMENT` key;
 `CALL DOLT_COMMIT('-Am', …)`, then `CALL DOLT_RESET('--hard')` again. A
 failing step is retried twice, and `SELECT 1` on the same database is the
-control. On 2.3.1 every failure was `Error 1105 (HY000): context canceled`,
+control. On 2.2.4 and 2.3.1 every failure was `Error 1105 (HY000): context canceled`,
 both retries failed too, and `SELECT 1` succeeded.
 
 Raise the pin only to a release confirmed clean by that same measurement —
@@ -101,7 +108,7 @@ Pin rather than track `latest` for a second, independent reason: the upstream
 highest version, so it can move backwards — v1.88.2 was created on
 2026-08-17, after both v2.2.4 and v2.3.0.
 
-#### If you are running 2.2.1 through 2.3.1
+#### If you are running 2.2.4 through 2.3.1
 
 Whether a database is affected is decided per database, when it is created —
 two databases on the same server can differ — so check each one you care
@@ -265,7 +272,7 @@ bd prune --older-than 90d --ignore-references --force
 transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
-**On Dolt 2.2.1 through 2.3.1, storage-reclaim operations can fail
+**On Dolt 2.2.4 through 2.3.1, storage-reclaim operations can fail
 partway.** `bd flatten` and the Dolt-history compaction in `bd admin compact`
 both build a temporary branch and then hard-reset `main` onto it, and the
 merge-settle path behind `bd dolt pull` / `bd sync` falls back to a hard reset

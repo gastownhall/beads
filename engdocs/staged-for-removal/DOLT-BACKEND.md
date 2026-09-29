@@ -21,7 +21,7 @@ Beads uses [Dolt](https://www.dolthub.com/) as its default storage backend. Dolt
 
 ### 1. Install Dolt
 
-Do not install `releases/latest` — Dolt 2.2.1 through 2.3.1 have a
+Do not install `releases/latest` — Dolt 2.2.4 through 2.3.1 have a
 data-operation defect that breaks `bd flatten` and `bd admin compact`. Use the
 pinned version and install method in
 [docs/architecture/dolt.md](../../docs/architecture/dolt.md), which carries

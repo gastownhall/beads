@@ -21,7 +21,7 @@ bd version     # must be 0.59.0+
 dolt version   # must match the pinned version
 ```
 
-Install a specific Dolt version rather than `releases/latest`. On Dolt 2.2.1
+Install a specific Dolt version rather than `releases/latest`. On Dolt 2.2.4
 through 2.3.1 some freshly created databases come up with `CALL
 DOLT_RESET('--hard')` broken for the life of the server process, which breaks
 `bd flatten`, `bd admin compact` and the rollback behind `bd dolt pull`;

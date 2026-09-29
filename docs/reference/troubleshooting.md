@@ -406,7 +406,7 @@ version floor, so an older dolt can still be used at your own risk. To
 resolve it, install the pinned dolt version — see
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
 — and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
-Install that specific version rather than `latest`: 2.2.1 through 2.3.1
+Install that specific version rather than `latest`: 2.2.4 through 2.3.1
 satisfy this warning but carry a
 [separate data-operation defect](/architecture/dolt#which-dolt-version-to-install).
 
@@ -691,7 +691,7 @@ below.
 `bd flatten` and the Dolt-history compaction in `bd admin compact` finish by
 hard-resetting `main` onto a temporary branch; the merge-settle path behind
 `bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On Dolt 2.2.1 through 2.3.1 some freshly created databases come up
+merge. On Dolt 2.2.4 through 2.3.1 some freshly created databases come up
 with `CALL DOLT_RESET('--hard')` broken for the life of the server process, so
 on an affected database those commands stop with:
 
