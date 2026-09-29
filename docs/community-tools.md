@@ -18,6 +18,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beady-eye](https://github.com/CodeForBreakfast/beady-eye)** - Live terminal viewer that follows agents as they work through a tree of beads, redrawing as they claim and finish them. Integrates with [herdr](https://herdr.dev), and watches several projects at once. Read-only. Built by [@GraemeF](https://github.com/GraemeF). (Rust)
 
+- **[b9s](https://github.com/vanderheijden86/b9s)** - Keyboard-driven terminal UI for Beads, modelled on k9s: issue tree, a list of the latest changes, and a kanban board with epic swimlanes, all updating live as you and your agents work. The same app runs in a desktop or phone browser with full feature parity (see Web UIs). Live demo at [demo.b9s.osen.co](https://demo.b9s.osen.co). Built by [@vanderheijden86](https://github.com/vanderheijden86). (Go)
+
 ## Web UIs
 
 - **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
@@ -31,6 +33,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 - **[Bead Me Up, Scotty](https://github.com/brendan-appstart/bead-me-up-scotty)** - Polished multi-project web UI for creating, updating, and prioritizing beads across all your repos from one place. Kanban board with drag-and-drop status changes and reordering, plus list, epics (with progress bars), and dependency-graph views; faceted filtering and full-text search; live updates via SSE that react the moment `.beads/` changes; and human-vs-agent attribution throughout. Uses the `bd` CLI for full Dolt compatibility. Global install (`scotty`) opens the current directory's project in your browser, and a built-in Publish view generates a shareable static showcase site from your beads. Live demo at [beadmeupscotty.com](https://beadmeupscotty.com). Built by [@brendan-appstart](https://github.com/brendan-appstart). (Next.js/TypeScript)
 
 - **[Maggie](https://github.com/mulgadc/maggie)** - Single Go binary with the SPA embedded, serving dashboard, table, board and dependency graph views. Text, id glob, priority, type, assignee, label and status filters compose in one filter bar. Uses the `bd` CLI for every read and write, keeping no store of its own. Runs from a container that bundles `bd` and `dolt`, against either a local `.beads/` directory or a shared Dolt SQL server. Built by [@mulgadc](https://github.com/mulgadc). (Go/React)
+
+- **[b9s web](https://github.com/vanderheijden86/b9s)** - The b9s terminal UI (see Terminal UIs) in your browser, with full feature parity: tree, kanban board, search and editing, all updating live. Responsive from a phone screen to a wide desktop board with drag-and-drop. Live demo at [demo.b9s.osen.co](https://demo.b9s.osen.co). Built by [@vanderheijden86](https://github.com/vanderheijden86). (Go)
 
 ## Editor Extensions
 
