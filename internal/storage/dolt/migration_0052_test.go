@@ -35,13 +35,13 @@ import (
 // Isolation, and why it is load-bearing here rather than incidental: this test
 // DROPs and re-CREATEs shared indexes (idx_issues_status_updated_at among
 // them) partway through. That is only safe because setupTestStore puts each
-// test on its own Dolt branch via testutil.StartTestBranch (dolt_test.go:174).
-// On the shared testSharedDB without that branch, a concurrent test in this
-// package would observe the table mid-round-trip with its indexes missing — a
-// package-wide hazard, not a local one. Do not "optimize" the per-test branch
-// away. (setupTestStore calls t.Parallel() itself at dolt_test.go:140, so this
-// test does run in parallel with the rest of the package — the branch, not
-// serialization, is what makes that safe.)
+// test on its own Dolt branch via testutil.StartTestBranch. On the shared
+// testSharedDB without that branch, a concurrent test in this package would
+// observe the table mid-round-trip with its indexes missing — a package-wide
+// hazard, not a local one. Do not "optimize" the per-test branch away.
+// (setupTestStore calls t.Parallel() itself, so this test does run in parallel
+// with the rest of the package — the branch, not serialization, is what makes
+// that safe.)
 //
 // Up/down SQL is run via the existing runMigrationSQL(path) helper
 // (pr4107_corruption_test.go), which reads the file from disk and executes
@@ -55,7 +55,7 @@ func TestMigration0052_RoundTrip(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
-	// Seed + DDL round-trip needs more wall-time than the default 30s
+	// Seed + DDL round-trip needs more wall-time than the package's default
 	// testTimeout; use 5x so this stays well inside -timeout 600s without
 	// flaking on slower Dolt server startups.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*testTimeout)
@@ -76,10 +76,23 @@ func TestMigration0052_RoundTrip(t *testing.T) {
 	}
 	legacyStatusIndex := []string{"idx_issues_status"}
 
+	// The composition each name must carry, in key-part order. Asserting this
+	// alongside the names is what makes the round-trip a D4v2 gate rather than
+	// a name-set gate: (status, updated_at) reversed, or a legacy index
+	// restored on the wrong column, yields the same names.
+	d4v2Columns := map[string][]string{
+		"idx_issues_status_updated_at": {"status", "updated_at"},
+		"idx_issues_defer_until":       {"defer_until"},
+	}
+	legacyStatusColumns := map[string][]string{
+		"idx_issues_status": {"status"},
+	}
+
 	// Phase 1: post-initial-migration. Composite + defer_until must exist,
 	// and the legacy idx_issues_status must be gone, because setupTestStore
 	// runs every embedded .up.sql including 0052.
 	assertIndexesPresent(t, ctx, store, d4v2Indexes, "after initial migration")
+	assertIndexColumns(t, ctx, store, d4v2Columns, "after initial migration")
 	assertIndexesAbsent(t, ctx, store, legacyStatusIndex, "after initial migration")
 
 	// Seed 2K permanent issues — enough to prove the DDL round-trip under a
@@ -100,6 +113,7 @@ func TestMigration0052_RoundTrip(t *testing.T) {
 	runMigrationSQL(t, ctx, store, downSQLPath)
 	assertIndexesAbsent(t, ctx, store, d4v2Indexes, "after down migration")
 	assertIndexesPresent(t, ctx, store, legacyStatusIndex, "after down migration")
+	assertIndexColumns(t, ctx, store, legacyStatusColumns, "after down migration")
 	if got := countIssues(t, ctx, store); got != wantCount {
 		t.Fatalf("down migration changed row count: got %d, want %d", got, wantCount)
 	}
@@ -108,6 +122,7 @@ func TestMigration0052_RoundTrip(t *testing.T) {
 	// drops again; rows must still be byte-identical against the sample.
 	runMigrationSQL(t, ctx, store, upSQLPath)
 	assertIndexesPresent(t, ctx, store, d4v2Indexes, "after re-running up migration")
+	assertIndexColumns(t, ctx, store, d4v2Columns, "after re-running up migration")
 	assertIndexesAbsent(t, ctx, store, legacyStatusIndex, "after re-running up migration")
 	if got := countIssues(t, ctx, store); got != wantCount {
 		t.Fatalf("up re-run changed row count: got %d, want %d", got, wantCount)
@@ -118,13 +133,16 @@ func TestMigration0052_RoundTrip(t *testing.T) {
 // assertIndexesPresent runs SHOW INDEX FROM issues and asserts each named
 // index appears at least once. SHOW INDEX lists one row per key-part, so a
 // composite index like idx_issues_status_updated_at surfaces twice (once
-// per column); presence — not cardinality — is the invariant.
+// per column); presence — not cardinality — is the invariant here.
+//
+// Presence is necessary but NOT sufficient for the D4v2 claim: see
+// assertIndexColumns, which pins the composition the index exists for.
 func assertIndexesPresent(t *testing.T, ctx context.Context, store *DoltStore, indexes []string, phase string) {
 	t.Helper()
-	got := indexNames(t, ctx, store)
+	got := indexColumns(t, ctx, store)
 	var missing []string
 	for _, want := range indexes {
-		if !got[want] {
+		if _, ok := got[want]; !ok {
 			missing = append(missing, want)
 		}
 	}
@@ -135,10 +153,10 @@ func assertIndexesPresent(t *testing.T, ctx context.Context, store *DoltStore, i
 
 func assertIndexesAbsent(t *testing.T, ctx context.Context, store *DoltStore, indexes []string, phase string) {
 	t.Helper()
-	got := indexNames(t, ctx, store)
+	got := indexColumns(t, ctx, store)
 	var present []string
 	for _, unwanted := range indexes {
-		if got[unwanted] {
+		if _, ok := got[unwanted]; ok {
 			present = append(present, unwanted)
 		}
 	}
@@ -147,7 +165,46 @@ func assertIndexesAbsent(t *testing.T, ctx context.Context, store *DoltStore, in
 	}
 }
 
-func indexNames(t *testing.T, ctx context.Context, store *DoltStore) map[string]bool {
+// assertIndexColumns pins each named index to its exact column list, in key-part
+// order.
+//
+// A name-only assertion is too weak to carry the D4v2 claim, because the whole
+// justification for idx_issues_status_updated_at is column ORDER: status is the
+// equality prefix and updated_at the range suffix (0052_add_date_indexes.up.sql).
+// A migration that created it as (updated_at, status) — or that restored the
+// legacy idx_issues_status on some other column — produces an identical
+// Key_name set, so it would satisfy every presence and absence assertion in
+// this test while making the index useless for the two queries it was added
+// for. Order is the invariant, so order is what gets asserted.
+func assertIndexColumns(t *testing.T, ctx context.Context, store *DoltStore, want map[string][]string, phase string) {
+	t.Helper()
+	got := indexColumns(t, ctx, store)
+	for name, wantCols := range want {
+		gotCols, ok := got[name]
+		if !ok {
+			t.Fatalf("%s: index %s absent; got %v", phase, name, sortedKeys(got))
+		}
+		if len(gotCols) != len(wantCols) {
+			t.Fatalf("%s: index %s has columns %v; want %v", phase, name, gotCols, wantCols)
+		}
+		for i := range wantCols {
+			if !strings.EqualFold(gotCols[i], wantCols[i]) {
+				t.Fatalf("%s: index %s column %d is %q; want %q (full: got %v, want %v)",
+					phase, name, i+1, gotCols[i], wantCols[i], gotCols, wantCols)
+			}
+		}
+	}
+}
+
+// indexColumns runs SHOW INDEX FROM issues and returns each index name mapped
+// to its columns in key-part order.
+//
+// SHOW INDEX emits one row per key-part and already carries both Seq_in_index
+// and Column_name, so the composition is available without a second query —
+// this helper used to scan those two columns and discard them one line before
+// use. Columns are placed by Seq_in_index rather than by row arrival order,
+// because SHOW INDEX is not contractually ordered.
+func indexColumns(t *testing.T, ctx context.Context, store *DoltStore) map[string][]string {
 	t.Helper()
 	rows, err := store.db.QueryContext(ctx, "SHOW INDEX FROM issues")
 	if err != nil {
@@ -159,18 +216,24 @@ func indexNames(t *testing.T, ctx context.Context, store *DoltStore) map[string]
 	if err != nil {
 		t.Fatalf("SHOW INDEX columns: %v", err)
 	}
-	keyNameCol := -1
-	for i, c := range cols {
-		if strings.EqualFold(c, "Key_name") {
-			keyNameCol = i
-			break
+	// Locate by case-insensitive name rather than by fixed position: the column
+	// set of SHOW INDEX varies across MySQL-compatible engines.
+	colIndex := func(name string) int {
+		for i, c := range cols {
+			if strings.EqualFold(c, name) {
+				return i
+			}
 		}
+		t.Fatalf("SHOW INDEX output has no %s column; got %v", name, cols)
+		return -1
 	}
-	if keyNameCol < 0 {
-		t.Fatalf("SHOW INDEX output has no Key_name column; got %v", cols)
-	}
+	keyNameCol := colIndex("Key_name")
+	seqCol := colIndex("Seq_in_index")
+	columnNameCol := colIndex("Column_name")
 
-	got := make(map[string]bool)
+	// Key-parts keyed by Seq_in_index so a non-sequential result set still
+	// yields the declared order.
+	bySeq := make(map[string]map[int]string)
 	for rows.Next() {
 		scanDest := make([]any, len(cols))
 		holders := make([]sql.NullString, len(cols))
@@ -180,12 +243,35 @@ func indexNames(t *testing.T, ctx context.Context, store *DoltStore) map[string]
 		if err := rows.Scan(scanDest...); err != nil {
 			t.Fatalf("SHOW INDEX scan: %v", err)
 		}
-		if holders[keyNameCol].Valid {
-			got[holders[keyNameCol].String] = true
+		if !holders[keyNameCol].Valid {
+			continue
 		}
+		name := holders[keyNameCol].String
+		if _, ok := bySeq[name]; !ok {
+			bySeq[name] = make(map[int]string)
+		}
+		seq, err := strconv.Atoi(holders[seqCol].String)
+		if err != nil {
+			t.Fatalf("SHOW INDEX %s: unparseable Seq_in_index %q: %v", name, holders[seqCol].String, err)
+		}
+		bySeq[name][seq] = holders[columnNameCol].String
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("SHOW INDEX iter: %v", err)
+	}
+
+	got := make(map[string][]string, len(bySeq))
+	for name, parts := range bySeq {
+		seqs := make([]int, 0, len(parts))
+		for seq := range parts {
+			seqs = append(seqs, seq)
+		}
+		sort.Ints(seqs)
+		ordered := make([]string, 0, len(seqs))
+		for _, seq := range seqs {
+			ordered = append(ordered, parts[seq])
+		}
+		got[name] = ordered
 	}
 	return got
 }
@@ -193,7 +279,7 @@ func indexNames(t *testing.T, ctx context.Context, store *DoltStore) map[string]
 // sortedKeys returns the map's keys in ascending order. Map iteration is
 // randomized, so without the sort the index names in a failure message
 // reorder between runs and two reports of the same failure do not compare.
-func sortedKeys(m map[string]bool) []string {
+func sortedKeys(m map[string][]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -320,7 +406,19 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*testTimeout)
 	defer cancel()
 
-	seedDateIndexFixture(t, ctx, store, 1_000)
+	const fixtureSize = 1_000
+	seedDateIndexFixture(t, ctx, store, fixtureSize)
+
+	// seedDateIndexFixture deliberately leaves every date column NULL, which
+	// makes both probe predicates match ZERO rows: defer_until IS NOT NULL is
+	// false everywhere, and rows carry the create path's current timestamp so
+	// nothing is older than the stale cutoff. The plans below would then be
+	// asserted over an empty match set — identical output to a 0-row table, so
+	// the 1K seed would buy no signal, and a planner regression that only
+	// appears once these columns hold values would be outside what this gate
+	// can see. Shape a non-NULL minority first, then assert a non-zero match
+	// count next to each plan so a PASS cannot mean "matched nothing".
+	shapeDatePredicateMinority(t, ctx, store, fixtureSize/10)
 
 	// Dolt's EXPLAIN doesn't accept bind parameters, and the tabular EXPLAIN
 	// output has NULL bigint columns (rows, filtered) that the MySQL driver
@@ -330,6 +428,10 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 	cases := []struct {
 		label string
 		query string
+		// countQuery is the same predicate as query, counted rather than
+		// explained: the input-size witness for this probe. A selective,
+		// non-empty match set is what makes the plan assertion meaningful.
+		countQuery string
 		// wantIndex is the substring Dolt's EXPLAIN FORMAT=TREE emits on the
 		// IndexedTableAccess node for the index this shape must use.
 		//
@@ -347,27 +449,49 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 	}{
 		{
 			// Target: idx_issues_status_updated_at. Matches the
-			// GetStaleIssuesInTx predicate (issueops/stale.go:26-32):
-			// status IN (...) as the equality prefix, updated_at < cutoff
-			// as the range suffix, ORDER BY updated_at aligning with the
-			// suffix so no sort step.
-			label:     "bd stale (status IN + updated_at < cutoff)",
-			query:     "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE status IN ('open','in_progress') AND updated_at < '2020-01-01' AND (ephemeral = 0 OR ephemeral IS NULL) ORDER BY updated_at ASC LIMIT 50",
-			wantIndex: "index: [issues.status,issues.updated_at]",
+			// GetStaleIssuesInTx predicate (internal/storage/issueops/
+			// stale.go): status IN (...) as the equality prefix,
+			// updated_at < cutoff as the range suffix.
+			//
+			// The ORDER BY is NOT eliminated by the index, and the captured
+			// plan says so: it contains a TopN(Limit: [50]; updated_at ASC)
+			// node. Dolt runs status IN (...) as two index range scans and
+			// merges them, so the composite buys ACCESS — the equality
+			// prefix plus a bounded range — while the ordering is satisfied
+			// by a TopN over the already-filtered rows. That is still the
+			// reason the index exists; it is just not a sort-free plan.
+			label:      "bd stale (status IN + updated_at < cutoff)",
+			query:      "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE status IN ('open','in_progress') AND updated_at < '2020-01-01' AND (ephemeral = 0 OR ephemeral IS NULL) ORDER BY updated_at ASC LIMIT 50",
+			countQuery: "SELECT COUNT(*) FROM issues WHERE status IN ('open','in_progress') AND updated_at < '2020-01-01' AND (ephemeral = 0 OR ephemeral IS NULL)",
+			wantIndex:  "index: [issues.status,issues.updated_at]",
 		},
 		{
 			// Target: idx_issues_defer_until. Matches the
 			// getChildrenOfDeferredParentsInTx predicate
-			// (ready_work.go:279): defer_until IS NOT NULL skips the
-			// NULL-majority leaf, then range scan on defer_until > now.
-			label:     "bd ready deferred-parents (defer_until IS NOT NULL AND defer_until > now)",
-			query:     "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()",
-			wantIndex: "index: [issues.defer_until]",
+			// (internal/storage/issueops/ready_work.go): defer_until IS NOT
+			// NULL skips the NULL-majority leaf, then range scan on
+			// defer_until > now.
+			label:      "bd ready deferred-parents (defer_until IS NOT NULL AND defer_until > now)",
+			query:      "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()",
+			countQuery: "SELECT COUNT(*) FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()",
+			wantIndex:  "index: [issues.defer_until]",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
+			// Input-size witness: a plan assertion over an empty match set
+			// reads PASS while proving nothing about the index under load.
+			var matched int
+			if err := store.db.QueryRowContext(ctx, tc.countQuery).Scan(&matched); err != nil {
+				t.Fatalf("match count for %q: %v", tc.label, err)
+			}
+			if matched == 0 {
+				t.Fatalf("%s: predicate matched 0 of %d fixture rows, so the plan below would be asserted over an empty match set; "+
+					"shapeDatePredicateMinority did not produce rows this probe can see", tc.label, fixtureSize)
+			}
+			t.Logf("%s: predicate matches %d of %d fixture rows", tc.label, matched, fixtureSize)
+
 			rows, err := store.db.QueryContext(ctx, tc.query)
 			if err != nil {
 				t.Fatalf("EXPLAIN %q: %v", tc.label, err)
@@ -398,6 +522,46 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 					tc.label, tc.wantIndex, planText.String())
 			}
 		})
+	}
+}
+
+// shapeDatePredicateMinority backdates updated_at and sets defer_until on the
+// first n rows of the date-idx fixture, so the two plan probes in
+// TestMigration0052_ExplainCapture have something to match.
+//
+// A minority, not the whole fixture: real distribution is NULL-majority (the
+// premise seedDateIndexFixture is built on), and a predicate matching every row
+// is not a range scan the planner has any reason to serve from an index — it
+// would test the opposite of what these probes exist for. n/total around 10%
+// keeps both predicates selective and non-empty.
+//
+// updated_at is assigned explicitly in the same statement that sets
+// defer_until. The column is declared ON UPDATE CURRENT_TIMESTAMP
+// (0001_create_issues.up.sql), so an UPDATE that did not name it would silently
+// bump every touched row to now — re-emptying the very match set this helper
+// exists to create.
+func shapeDatePredicateMinority(t *testing.T, ctx context.Context, store *DoltStore, n int) {
+	t.Helper()
+	if n <= 0 {
+		t.Fatalf("shapeDatePredicateMinority: n must be positive, got %d", n)
+	}
+	// Ids are a zero-padded sequence, so a string upper bound selects the first
+	// n rows without arithmetic on the id.
+	upperBound := fmt.Sprintf("date-idx-%06d", n-1)
+	res, err := store.db.ExecContext(ctx,
+		`UPDATE issues
+		    SET defer_until = '2099-01-01 00:00:00',
+		        updated_at  = '2019-06-01 00:00:00'
+		  WHERE id LIKE 'date-idx-%' AND id <= ?`, upperBound)
+	if err != nil {
+		t.Fatalf("shape date predicate minority: %v", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("shape date predicate minority rows affected: %v", err)
+	}
+	if affected != int64(n) {
+		t.Fatalf("shape date predicate minority: updated %d rows, want %d (fixture id shape changed?)", affected, n)
 	}
 }
 
