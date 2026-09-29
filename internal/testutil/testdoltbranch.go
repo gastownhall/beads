@@ -336,9 +336,12 @@ func commitAllowEmpty(ctx context.Context, db doltBranchSQL, message string) err
 // databaseExistsOnServer (internal/storage/dolt/store.go) uses, and the one
 // dolt.New() actually depends on. Success means the connection that ran the
 // query has observed the server's catalog refresh for dbName — not a
-// guarantee for every connection in db's pool. Bounded to ~10s — far longer
-// than any catalog-refresh window observed in practice — so a real failure
-// surfaces a clear error instead of hanging the test binary.
+// guarantee for every connection in db's pool. Polling is bounded to ~10s —
+// far longer than any catalog-refresh window observed in practice — and the
+// deadline is checked before the sleep, so the call returns within ~11.2s
+// worst case (12 probes: the last capped delay lands past the bound). Either
+// way a real failure surfaces a clear error instead of hanging the test
+// binary.
 func waitForDatabaseVisible(ctx context.Context, db *sql.DB, dbName string) error {
 	const maxElapsed = 10 * time.Second
 	deadline := time.Now().Add(maxElapsed)
@@ -360,8 +363,10 @@ func waitForDatabaseVisible(ctx context.Context, db *sql.DB, dbName string) erro
 		case <-time.After(delay):
 		}
 		// Cap is checked before doubling, so delay can reach ~1.6s (not 1s)
-		// on the iteration that crosses the threshold; harmless within the
-		// 10s bound above.
+		// on the iteration that crosses the threshold. The deadline is
+		// checked before this sleep, so that last delay runs past the ~10s
+		// polling bound rather than inside it — harmless, and it is why the
+		// doc above states a ~11.2s worst-case return.
 		if delay < time.Second {
 			delay *= 2
 		}

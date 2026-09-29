@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,9 +20,15 @@ import (
 // after testutil.SetupSharedTestDB runs CREATE DATABASE, a freshly-opened
 // connection from dolt.New() — which dials the same Dolt server with the new
 // database in the DSN — fails with "Error 1049 (HY000): database not found".
-// The diagnosis (be-nx7 reviewer notes): the CREATE DATABASE is left in the
-// working set without an explicit DOLT_COMMIT, so a fresh connection that
-// opens its own session does not see it.
+// The original diagnosis (be-nx7 reviewer notes): the CREATE DATABASE is left
+// in the working set without an explicit DOLT_COMMIT, so a fresh connection
+// that opens its own session does not see it. That mechanism is superseded by
+// the catalog-refresh-race diagnosis: the visibility wait added for be-s9d
+// succeeds BEFORE any DOLT_COMMIT runs (initSharedSchema commits only after
+// SetupSharedTestDB returns), so the invisibility is a transient window in
+// which Dolt has not yet registered the database in the server catalog — what
+// SHOW DATABASES and dolt.New() actually check — not a permanent working-set
+// state. Do not "complete" the fix with a redundant post-CREATE DOLT_COMMIT.
 //
 // These tests pin the behavioral contract: after SetupSharedTestDB returns,
 // the new database MUST be visible to a brand-new *sql.DB connection — both a
@@ -223,6 +230,16 @@ func TestSetupSharedTestDB_FreshConnAfterSecondSetupCall(t *testing.T) {
 // fail with a clear refusal message and must not open a connection. This is
 // a defensive contract — the fix in be-s9d touches SetupSharedTestDB and
 // the firewall must remain intact through any refactor.
+//
+// The assertion deliberately matches only "production", the one token the
+// firewall itself emits. Accepting "refused" or "3307" as well would make
+// this test vacuous: it carries no skipIfNoServer guard, so it also runs on
+// hosts with nothing listening on 3307, and there a deleted firewall falls
+// through to CREATE DATABASE and fails with
+// "dial tcp 127.0.0.1:3307: connect: connection refused" — a string that
+// contains both of those needles. Same single-specific-needle pattern as
+// TestSetupSharedTestDB_RefusesAmbientPortMismatch in
+// internal/testutil/testdoltbranch_test.go.
 func TestSetupSharedTestDB_RefusesProductionPort(t *testing.T) {
 	conn, err := testutil.SetupSharedTestDB(DefaultSQLPort, "should_never_be_created")
 	if err == nil {
@@ -235,8 +252,11 @@ func TestSetupSharedTestDB_RefusesProductionPort(t *testing.T) {
 		_ = conn.Close()
 		t.Errorf("SetupSharedTestDB on production port returned a non-nil *sql.DB; firewall must close any handle before returning the error")
 	}
-	if !containsAny(err.Error(), "refused", "production", "3307") {
+	if !strings.Contains(err.Error(), "production") {
 		t.Errorf("error message should clearly refuse the production port, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "dial tcp") {
+		t.Errorf("refusal must come from the firewall, not from dialing the port, got: %v", err)
 	}
 }
 
