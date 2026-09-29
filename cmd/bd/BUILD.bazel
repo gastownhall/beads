@@ -404,6 +404,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "//internal/storage/sqlclass",
         "//internal/storage/uow",
         "//internal/storage/versioncontrolops",
         "//internal/telemetry",
@@ -1325,6 +1326,62 @@ sh_test(
     },
     shard_count = 20,
     tags = ["embedded"],
+)
+
+# bd_test as PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs run it: shard k
+# runs .github/scripts/proxied-test-shard.sh k+1 15 (the TestProxiedServer*
+# functions, assigned by the committed manifest) against this configuration's
+# (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
+# bd_for_tests as the subprocess binary, like the jobs' /tmp/bd-cmd-test and
+# /tmp/bd-proxied. (main.yml's twin job runs the same shard script against
+# build-artifacts' non-race bd-cmd-test; race here is the stricter one.)
+# The shared proxied harness gets its dolt sql-server from
+# internal/testutil's local backend (the pinned dolt in the test wrapper's
+# runfiles) instead of the jobs' container, and fails instead of skipping
+# when it cannot start one. It repeats bd_test's `env`. shard_count must
+# stay equal to the manifest's shard total.
+#
+# Tags:
+#   dolt-server-proxied: the proxied-server tier; starts hermetic dolt
+#     sql-servers; excluded from --config=prcore/ci, selected by
+#     --config=doltserver-proxied.
+sh_test(
+    name = "bd_proxied_test",
+    size = "large",
+    # The script's -test.timeout=15m fires (with a goroutine dump) before
+    # Bazel's 1200s action limit (eternal under the lane's --test_timeout).
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
+    args = [
+        "$(rootpath //:.github/scripts/proxied-test-shard.sh)",
+        "BEADS_TEST_CMD_BINARY",
+        "$(rootpath :bd_test)",
+    ],
+    data = [
+        ":bd_for_tests",
+        ":bd_test",
+        ":go_srcs",
+        "//:.github/scripts/proxied-cmd-test-shards.txt",
+        "//:.github/scripts/proxied-test-shard.sh",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        # The jobs' "Configure Git and Dolt identity" global git identity
+        # (tools/bazel/test_env.sh).
+        "BEADS_TEST_GIT_IDENTITY": "1",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PROXIED_SERVER": "1",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # The 4-vCPU runner shape: -test.parallel defaults to GOMAXPROCS, and
+        # the job runs 4 tests at once, not one per worker core (39
+        # concurrent `bd init --proxied-server` against one server hung a
+        # 192-core worker).
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 15,
+    tags = ["dolt-server-proxied"],
 )
 
 # CLI flag registrations pinned by //internal/httpapi spec parity tests.

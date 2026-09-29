@@ -28,8 +28,14 @@ import (
 // flag has to move — removing the one closed child of an any-children gate
 // can block its waiter, and the recheck settles that too. Writes that add a
 // blocker (a reopen, a dependency add, a parent-child add) recompute the same
-// way and are not recorded here; a racing pair where the last committer adds
-// a blocker can leave a dependent flagged ready while blocked.
+// way and are not recorded here, and the residue they leave runs in both
+// directions. A racing pair whose last committer adds a plain blocks edge can
+// leave a dependent flagged ready while blocked. A parent-child add is not
+// monotonic, though — an already-closed child can satisfy an any-children
+// waits-for gate (see addDependencyInTx) — so an add of a still-open child
+// racing the close of that child leaves the waiter flagged blocked while
+// ready and hidden from `bd ready`: the #6716 shape itself, reached through
+// `bd dep add` or `bd create --parent`.
 //
 // # What is scoped, and what is not
 //

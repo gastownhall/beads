@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+<<<<<<< HEAD
 - **A proxied workspace's proxy retires when its Dolt backend exits
   cleanly.** The proxy noticed its `dolt sql-server` child exiting only when
   the exit status was non-zero. A backend that shut down gracefully (for
@@ -22,6 +23,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `proxy_pid` still set), including for a stranded proxy started by an older
   bd. ([#6937](https://github.com/gastownhall/beads/pull/6937))
 
+||||||| 9cb22b790c
+=======
+- **`bd sql` no longer drops the rows of CTE queries or CALL result sets**
+  ([#6932](https://github.com/gastownhall/beads/pull/6932)). In proxied-server
+  mode, `WITH name(cols) AS (...) SELECT ...` and `WITH RECURSIVE ...` queries
+  were misread as writes and printed `OK, 0 rows affected` with no error; they
+  now return their rows. Statements are now classified with the Dolt SQL
+  parser (shared by the proxied and direct paths): reads return rows, plain
+  writes (including CTE-prefixed `UPDATE`/`DELETE`) commit and report
+  `rows_affected`, and anything that may both write and return rows (`CALL`,
+  `EXPLAIN ANALYZE` of a write, `RETURNING`) or that the parser cannot
+  classify is committed and prints whatever rows it returns, so
+  `CALL DOLT_BRANCH(...)`-style result sets are rendered instead of discarded.
+  Visible changes for scripts: in direct server mode a multi-statement write,
+  or a single write statement the parser cannot classify, now prints `OK` /
+  `{"status":"ok"}` (as proxied mode already did) instead of
+  `OK, N rows affected` / `{"rows_affected":N}`; and `--readonly` now refuses
+  statements it cannot parse (for example `PRAGMA`) instead of treating them
+  as reads.
+
+>>>>>>> origin/main
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
   from the yaml-only key list that holds the other tracker secrets, so
@@ -109,8 +131,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach the database another way still need the `bd doctor` /
   `bd recompute-blocked` repair they needed before: `bd batch` (on both its
   plain and its proxied transaction), `bd cook`, `bd mol squash`,
-  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
-  updates, deletes and demote-to-wisp.
+  `bd mol burn`, `bd duplicates --merge`, the wisp writes — closes, updates,
+  deletes and demote-to-wisp — and every write served through the
+  proxied-server (uow/domain-db) route, which under `--proxied-server` is the
+  ordinary single verbs as well: `bd close`, `bd update`, `bd delete` and
+  `bd dep remove`.
 
 
 - **`bd list --watch --format` is refused instead of silently dropping the
