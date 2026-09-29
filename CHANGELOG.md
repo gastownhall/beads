@@ -332,9 +332,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `is_blocked` recompute is a real example — but until now a slow one and a
   wedged one looked identical from outside: `bd` simply stopped printing. A
   watchdog now emits a WARN naming the migration's version, name, and elapsed
-  time once it passes the interval, and repeats every interval while it keeps
-  running, so an operator reading logs can tell "still working" from "stopped
-  emitting anything". Set `BEADS_MIGRATION_WATCHDOG_INTERVAL` to change the
+  time once the migration's own SQL has been running past the interval, and
+  repeats every interval while it keeps running, so an operator reading logs
+  can tell "still working" from "stopped emitting anything". Coverage is the
+  migration body specifically — the per-step Dolt commit that follows it on
+  the production embedded path is outside the watchdog, so a stall there is
+  still quiet. Set `BEADS_MIGRATION_WATCHDOG_INTERVAL` to change the
   5-minute default; it accepts durations like `10m` and bare seconds like `90`,
   and falls back to the default when unset or unparsable. This is observability
   only and never a circuit breaker: the migration receives the caller's exact

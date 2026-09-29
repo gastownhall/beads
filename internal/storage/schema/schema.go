@@ -141,10 +141,20 @@ func runMigrationWithWatchdog(ctx context.Context, out io.Writer, version int, n
 		}
 	}()
 
-	err := fn(ctx)
-	close(done)
-	wg.Wait()
-	return err
+	// Deferred so the warner is stopped on every exit path, including a panic
+	// out of fn — Dolt's embedded engine can panic out of DDL, and a caller
+	// that recovers rather than dying (internal/httpapi/server.go's middleware
+	// recovers everything except http.ErrAbortHandler and keeps serving) would
+	// otherwise orphan the ticker goroutine, which goes on writing "still
+	// running" to the un-gated watchdogStderr for a migration that is no longer
+	// running. A straight-line close/wait after fn returns leaks in exactly
+	// that case.
+	defer func() {
+		close(done)
+		wg.Wait()
+	}()
+
+	return fn(ctx)
 }
 
 // humanMigrationName turns "0033_add_date_indexes.up.sql" into
@@ -1907,6 +1917,18 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		// risks leaving Dolt in a partially-migrated state with no clean
 		// rollback. Full scoping rationale and rejected alternatives:
 		// bd show be-m65rs.
+		//
+		// The wrap deliberately covers the migration's own SQL body and
+		// nothing else: the dirty-table snapshot and preMigrationRepair above
+		// and the cursor INSERT and commitMigrationStep below all run outside
+		// it, including the per-step DOLT_ADD/DOLT_COMMIT that the comment
+		// further down calls the expensive, fallible part of this step on the
+		// production embedded path. Widening the boundary to the whole step
+		// means moving this loop's snapshot/commit ordering — the atomicity
+		// contract documented on runMigrations and in commitMigrationStep
+		// (#4566, #4690) — which is more risk than an observability change
+		// should carry. So a wedge inside the per-step commit is still silent;
+		// CHANGELOG.md scopes the user-facing promise to match.
 		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
 			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
 		); err != nil {

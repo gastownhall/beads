@@ -141,6 +141,66 @@ func TestRunMigrationWithWatchdog_ErrorPassthrough(t *testing.T) {
 	}
 }
 
+// syncWriter serializes writes so the panic test below can read what the
+// watchdog has emitted so far without racing it. The other tests in this file
+// use a bare bytes.Buffer because the watchdog goroutine is always joined
+// before they read; the panic case reads at a point where a leaked goroutine
+// would still be writing, which is the leak it exists to catch.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// TestRunMigrationWithWatchdog_StopsWarnerWhenFnPanics pins the deferred
+// close(done)/wg.Wait(): Dolt's embedded engine can panic out of DDL, and a
+// caller that recovers instead of dying (internal/httpapi/server.go's
+// middleware recovers everything except http.ErrAbortHandler and keeps
+// serving) leaves the process alive afterwards. Stopping the warner on the
+// straight-line path after fn returns is skipped by a panic, which orphans the
+// ticker goroutine into warning about a migration that is no longer running —
+// on the deliberately un-gated watchdogStderr — for the rest of that process's
+// lifetime.
+func TestRunMigrationWithWatchdog_StopsWarnerWhenFnPanics(t *testing.T) {
+	const interval = 10 * time.Millisecond
+	out := &syncWriter{}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("want fn's panic to propagate to the caller unchanged, got none")
+			}
+		}()
+		_ = runMigrationWithWatchdog(context.Background(), out, 47, "recompute_mixed_is_blocked", interval,
+			func(ctx context.Context) error {
+				time.Sleep(35 * time.Millisecond)
+				panic("dolt engine panicked out of DDL")
+			})
+	}()
+
+	// The warner must already be joined by the time the panic reaches here, so
+	// the line count cannot grow any further.
+	settled := strings.Count(out.String(), "WARN")
+	if settled == 0 {
+		t.Fatalf("want at least one WARN before the panic, otherwise the check below is vacuous; got %q", out.String())
+	}
+	time.Sleep(5 * interval)
+	if after := strings.Count(out.String(), "WARN"); after != settled {
+		t.Errorf("watchdog goroutine outlived the panicking migration: %d WARN lines when the panic unwound, %d after a further %s", settled, after, 5*interval)
+	}
+}
+
 // TestMigrationWatchdogIntervalDuration covers be-yyzzs: the threshold must
 // default to 5 minutes and be overridable via BEADS_MIGRATION_WATCHDOG_INTERVAL,
 // following this codebase's existing timeoutFromEnv/BEADS_*_TIMEOUT convention
@@ -174,6 +234,16 @@ func TestMigrationWatchdogIntervalDuration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.setEnv {
 				t.Setenv(migrationWatchdogIntervalEnv, tc.envVal)
+			} else {
+				// The "unset" arm has to actually unset: t.Setenv registers the
+				// restore of whatever the ambient value was, then os.Unsetenv
+				// removes it for the duration of the subtest. Without this,
+				// a shell exporting BEADS_MIGRATION_WATCHDOG_INTERVAL (this
+				// repo has a history of ambient BEADS_* reddening tests) flows
+				// straight into the call and the compiled-in default this
+				// subtest exists to pin is never exercised.
+				t.Setenv(migrationWatchdogIntervalEnv, "")
+				os.Unsetenv(migrationWatchdogIntervalEnv)
 			}
 			if got := migrationWatchdogIntervalDuration(); got != tc.want {
 				t.Errorf("migrationWatchdogIntervalDuration() = %v; want %v", got, tc.want)
