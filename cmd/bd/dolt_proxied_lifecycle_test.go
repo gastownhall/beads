@@ -151,6 +151,27 @@ func TestRenderProxiedDoltStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("text does not call a proxy over a dead managed backend running", func(t *testing.T) {
+		defer restoreJSONOutput(t)()
+		jsonOutput = false
+		stranded := running
+		stranded.BackendRunning, stranded.BackendPID, stranded.BackendPort = false, 0, 0
+		out := captureStdout(t, func() error { renderProxiedDoltStatus(stranded); return nil })
+		if strings.Contains(out, "Dolt server: running") {
+			t.Errorf("proxy with a dead backend reported as running:\n%s", out)
+		}
+		for _, want := range []string{
+			"Dolt server: not serving (proxied-server)",
+			"Proxy PID:  111",
+			"Backend:    not running",
+			"bd dolt stop",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s", want, out)
+			}
+		}
+	})
+
 	t.Run("text marks an external backend as somebody else's", func(t *testing.T) {
 		defer restoreJSONOutput(t)()
 		jsonOutput = false

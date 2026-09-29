@@ -928,6 +928,7 @@ go_test(
         "provenance_test.go",
         "proxied_direct_only_refusal_frontdoor_test.go",
         "proxied_integration_helpers_test.go",
+        "proxied_local_backend_exit_test.go",
         "proxied_local_dolt_lifecycle_test.go",
         "proxied_local_helpers_test.go",
         "proxied_local_identity_lifecycle_linux_test.go",
