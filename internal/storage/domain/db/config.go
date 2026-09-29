@@ -126,6 +126,29 @@ func (r *configSQLRepositoryImpl) GetAllConfig(ctx context.Context) (map[string]
 	return out, nil
 }
 
+// GetConfigByPrefix retrieves only the config rows whose key starts with
+// prefix, pushing the filter into SQL (domain.ConfigPrefixReader — the
+// optional fast path `bd kv list --prefix` discovers by assertion).
+func (r *configSQLRepositoryImpl) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	rows, err := r.runner.QueryContext(ctx, issueops.ConfigPrefixLikeQuery, issueops.ConfigPrefixPattern(prefix))
+	if err != nil {
+		return nil, fmt.Errorf("db: GetConfigByPrefix %s: %w", prefix, err)
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("db: GetConfigByPrefix %s: scan: %w", prefix, err)
+		}
+		out[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: GetConfigByPrefix %s: read: %w", prefix, err)
+	}
+	return out, nil
+}
+
 func (r *configSQLRepositoryImpl) GetCustomTypes(ctx context.Context) ([]string, error) {
 	fromTable, err := r.readCustomTypesTable(ctx)
 	if err != nil {
