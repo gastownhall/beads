@@ -250,9 +250,7 @@ Examples:
 
 		// GH#4993: assess once, before any branch that can write. Lazy so
 		// read-only paths skip the probe; memoised so repeats cannot disagree.
-		schemaGate := sync.OnceValue(func() doctor.FixGate {
-			return doctor.AssessSchemaFixGate(absPath)
-		})
+		schemaGate := newSchemaGate(absPath)
 
 		// artifacts, conventions, and pollution work in embedded mode and run
 		// unconditionally; validate still requires a server-mode connection
@@ -260,13 +258,8 @@ Examples:
 		if doctorCheckFlag != "" {
 			// GH#4993: these handlers return directly, so their destructive
 			// paths bypassed the gate. Refuse at the single branch point.
-			if checkFlagWrites(doctorCheckFlag, doctorClean, doctorFix) {
-				if gate := schemaGate(); gate.DBReachable && !gate.AllowDBFix {
-					return HandleErrorWithHint(
-						fmt.Sprintf("refusing destructive 'bd doctor --check=%s': %s", doctorCheckFlag, gate.Reason),
-						"Re-run without --clean/--fix to inspect read-only, or resolve the schema state first",
-					)
-				}
+			if err := destructiveCheckRefusal(doctorCheckFlag, doctorClean, doctorFix, schemaGate); err != nil {
+				return err
 			}
 			switch doctorCheckFlag {
 			case "artifacts":
@@ -1216,6 +1209,66 @@ func checkFlagWrites(flag string, clean, fix bool) bool {
 		return fix
 	}
 	return false
+}
+
+// checkFlagFixName names the classified repair a destructive `--check=<flag>`
+// performs, so the schema gate can admit it through the same policy that governs
+// the equivalent `bd doctor --fix` repair (GH#4993). "" means the flag's
+// destructive work maps to no single classified fix and is therefore treated as
+// schema-writing, exactly like an unlisted fix name in filesystemOnlyFixes.
+//
+// `pollution --clean` and `validate --fix` deliberately have no entry: both
+// delete or rewrite rows through an opened store.
+func checkFlagFixName(flag string) string {
+	if flag == "artifacts" {
+		// --clean removes the same on-disk artifacts as the "Classic Artifacts"
+		// fix, which fix_gate.go classifies filesystem-only.
+		return "Classic Artifacts"
+	}
+	return ""
+}
+
+// assessSchemaFixGate is the schema-gate assessor, indirected so tests can
+// observe when and how often it is evaluated. Production always uses
+// doctor.AssessSchemaFixGate.
+var assessSchemaFixGate = doctor.AssessSchemaFixGate
+
+// newSchemaGate returns this invocation's schema gate accessor (GH#4993). Lazy
+// so a read-only path never probes the database, and memoised so every consumer
+// in one invocation sees one verdict that repeats cannot disagree with.
+func newSchemaGate(absPath string) func() doctor.FixGate {
+	return sync.OnceValue(func() doctor.FixGate {
+		return assessSchemaFixGate(absPath)
+	})
+}
+
+// destructiveCheckRefusal returns the refusal for a destructive `bd doctor
+// --check=<flag>` the schema gate does not admit, or nil when the command may
+// proceed (GH#4993). gate is an accessor rather than a value so a read-only
+// --check never probes the database.
+//
+// The gate is consulted here, before the caller's switch dispatches to a
+// handler, because the handler's own store open is the hazard: the migrating
+// factory auto-starts a stopped server and applies pending migrations before the
+// write lands.
+func destructiveCheckRefusal(flag string, clean, fix bool, gate func() doctor.FixGate) error {
+	if !checkFlagWrites(flag, clean, fix) {
+		return nil
+	}
+	g := gate()
+	if !g.BlocksDestructiveWrites() {
+		return nil
+	}
+	// Filesystem-only cleanup is not what the gate is about: `bd doctor --fix`
+	// admits the same repair under the same blocked gate, so refusing it here
+	// would leave the two planes disagreeing about one operation.
+	if name := checkFlagFixName(flag); name != "" && g.AllowsFix(name) {
+		return nil
+	}
+	return HandleErrorWithHint(
+		fmt.Sprintf("refusing destructive 'bd doctor --check=%s': %s", flag, g.Reason),
+		"Re-run without --clean/--fix to inspect read-only, or resolve the schema state first",
+	)
 }
 
 // sanitizeFixAdvice rewrites each Fix tip in place so no emitter publishes

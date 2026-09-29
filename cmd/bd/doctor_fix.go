@@ -113,11 +113,17 @@ func applyFixes(result doctorResult, gate doctor.FixGate) {
 	// database is unreachable (FixGate.AllowsFix); everything else is withheld
 	// whenever the gate blocks. Admission is AllowsFix alone, never
 	// gate.Reason == "".
+	// Everything AllowsFix rejects is reported. Qualifying this with
+	// !IsFilesystemOnlyFix would drop a withheld filesystem-only fix from both
+	// lists, silently no-opping it: unreachable while every constructed gate sets
+	// AllowFSFix, but a future gate shape that does not would fix nothing and say
+	// nothing. The label stays generic for the same reason — the withheld set is
+	// whatever the gate blocked, not necessarily database work.
 	var fixableIssues, withheld []doctorCheck
 	for _, issue := range append(append([]doctorCheck{}, fsFixes...), dbFixes...) {
 		if gate.AllowsFix(issue.Name) {
 			fixableIssues = append(fixableIssues, issue)
-		} else if !doctor.IsFilesystemOnlyFix(issue.Name) {
+		} else {
 			withheld = append(withheld, issue)
 		}
 	}
@@ -126,7 +132,7 @@ func applyFixes(result doctorResult, gate doctor.FixGate) {
 		if reason == "" {
 			reason = "database schema state could not be assessed"
 		}
-		fmt.Printf("\n%s Skipping %d database fix(es) — %s\n",
+		fmt.Printf("\n%s Skipping %d gated fix(es) — %s\n",
 			ui.RenderFail("✗"), len(withheld), reason)
 		for _, issue := range withheld {
 			fmt.Printf("    · %s\n", issue.Name)

@@ -643,6 +643,7 @@ go_test(
         "diff_embedded_test.go",
         "directory_flag_test.go",
         "doctor_backend_guard_test.go",
+        "doctor_check_gate_test.go",
         "doctor_context_test.go",
         "doctor_conventions_test.go",
         "doctor_embedded_test.go",

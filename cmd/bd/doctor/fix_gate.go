@@ -3,9 +3,11 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/schema"
 )
 
@@ -13,12 +15,24 @@ import (
 // relationship (GH#4993): opening the store can apply pending migrations.
 // Callers ask three distinct questions, so it answers three.
 type FixGate struct {
-	// Determined is false when the DB was reachable but its version could not
-	// be read. Unknown is not safe.
+	// Determined is false when a database exists but its version could not be
+	// read — either the connection failed or the query did. Unknown is not safe.
 	Determined bool
-	// DBReachable is false when there is no database at all (no server, no
-	// repo) — no schema hazard exists, so filesystem repair is unaffected.
+	// DBReachable is false whenever this process did not get a working
+	// connection. That covers both "there is no database" and "there is one but
+	// it could not be connected to", so it is not on its own a statement about
+	// hazard — see DBPresent.
 	DBReachable bool
+	// DBPresent is true when a beads database exists for this repo: either the
+	// connection succeeded, or a connection was impossible but the on-disk
+	// database is still there (a stopped server, a wrong port). It is the hazard
+	// question — a database that exists has a schema that a migrating open can
+	// rewrite, whether or not this process could read it. Without a connection,
+	// "exists" is databaseExistsOnDisk's verdict, and a workspace with no
+	// metadata.json reads as absent there even with a data directory on disk —
+	// see that function for why. DBReachable implies DBPresent; the converse
+	// does not hold.
+	DBPresent bool
 
 	// RecommendFix allows printed advice to steer at `bd doctor --fix`.
 	RecommendFix bool
@@ -34,14 +48,19 @@ type FixGate struct {
 	Pending       bool // binary knows migrations the DB has not applied
 }
 
-// AssessSchemaFixGate compares schema_migrations to this binary. Assess once
-// per invocation, before anything that can write, and thread the result
-// through: probing at print time cannot guard writes that already happened.
+// AssessSchemaFixGate compares schema_migrations to this binary. It yields one
+// memoised verdict per invocation, evaluated before any *gated* write and
+// threaded through to every consumer: probing at print time cannot guard writes
+// that already happened. The bd-jgxi auto-migrate that runs earlier in the
+// command (cmd/bd/version_tracking.go) is deliberately outside this gate's
+// jurisdiction — it is the sanctioned migration path, not a repair the gate
+// withholds — so "before any gated write" is the contract, not "before
+// anything that touches the schema".
 func AssessSchemaFixGate(path string) FixGate {
 	binary := schema.LatestVersion()
 
-	// No DB reachable: scoped allowance, not a fail-open — DB fixes stay
-	// disallowed because there is no DB to fix.
+	// No database at all: scoped allowance, not a fail-open — DB fixes stay
+	// disallowed because there is no DB to fix, and no schema exists to skew.
 	unreachable := FixGate{
 		BinaryVersion: binary,
 		Determined:    true,
@@ -52,7 +71,25 @@ func AssessSchemaFixGate(path string) FixGate {
 	beadsDir := ResolveBeadsDirForRepo(path)
 	db, _, err := openDoltDB(beadsDir)
 	if err != nil {
-		return unreachable
+		// A failed connection is not evidence that there is no database. When
+		// the database is still on disk — a stopped server, a moved port — the
+		// schema hazard is real and unmeasured: every gated repair opens the
+		// store through the migrating factory, which auto-starts the server and
+		// applies pending migrations before writing. Fail closed on that, and
+		// keep the genuine no-database case above as the only no-hazard shape.
+		// Recovery fixers stay available either way (AllowsFix keys them on
+		// DBReachable, which is false here too) because they are the cure for a
+		// database that cannot be opened.
+		if !databaseExistsOnDisk(beadsDir) {
+			return unreachable
+		}
+		return FixGate{
+			BinaryVersion: binary,
+			DBPresent:     true,
+			AllowFSFix:    true,
+			Reason: "database exists but could not be opened, so its schema version is unknown; " +
+				"`bd doctor --fix` may apply migrations blind — start the database and re-run",
+		}
 	}
 	defer db.Close()
 
@@ -60,6 +97,7 @@ func AssessSchemaFixGate(path string) FixGate {
 	undetermined := FixGate{
 		BinaryVersion: binary,
 		DBReachable:   true,
+		DBPresent:     true,
 		AllowFSFix:    true,
 		Reason: "database schema version could not be determined; " +
 			"`bd doctor --fix` may apply migrations blind — resolve the database state first",
@@ -74,6 +112,7 @@ func AssessSchemaFixGate(path string) FixGate {
 	gate := FixGate{
 		Determined:    true,
 		DBReachable:   true,
+		DBPresent:     true,
 		DBVersion:     dbVer,
 		BinaryVersion: binary,
 		AllowFSFix:    true,
@@ -100,6 +139,52 @@ func AssessSchemaFixGate(path string) FixGate {
 	}
 
 	return gate
+}
+
+// databaseExistsOnDisk reports whether a beads database is present for this
+// workspace, independent of whether anything can currently connect to it. It
+// stats the path autoMigrateOnVersionBump stats (cmd/bd/version_tracking.go)
+// and, like it, reads only ENOENT as absent: a path that cannot be stat'ed for
+// any other reason is unknown, and unknown is not safe. An unloadable
+// metadata.json reads as absent in both, which is safe: the store factory
+// refuses to open such a workspace at all.
+//
+// It departs from that probe deliberately in two arms:
+//
+//   - No metadata.json reads as absent, where auto-migrate falls back to
+//     DefaultConfig. The gate cannot connect without metadata.json (openDoltDB
+//     requires it), so a fail-closed verdict here could never be cleared by
+//     starting a server, and it would rewrite doctor's own advice for this
+//     state — regenerate metadata.json with `bd doctor --fix`, a
+//     filesystem-only repair — into "Do NOT run 'bd doctor --fix'". The cost is
+//     one unguarded state: server mode selected by the environment or
+//     config.yaml while metadata.json is missing, where a gated repair still
+//     reaches the server's schema unmeasured.
+//   - A proxied-server workspace reads as present when its data directory is
+//     on disk. Auto-migrate skips proxied workspaces because their migration
+//     runs later, at UOW-provider init, not because they lack a local database:
+//     the proxied root defaults to this same directory. `bd doctor` itself is
+//     refused up front in proxied-server mode (proxy.doctor.unsupported); this
+//     arm fails closed so that it is already safe when doctor gains a proxied
+//     route.
+func databaseExistsOnDisk(beadsDir string) bool {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return false
+	}
+	if _, err := os.Stat(cfg.DatabasePath(beadsDir)); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
+// BlocksDestructiveWrites reports whether an operation that can resume
+// migrations must be refused outright. It is the hazard question rather than the
+// connectivity one: a database that exists but whose schema state does not
+// permit schema-writing repair blocks, whether or not this process reached it.
+// A workspace with no database never blocks — there is nothing to skew.
+func (g FixGate) BlocksDestructiveWrites() bool {
+	return g.DBPresent && !g.AllowDBFix
 }
 
 func pluralMigrations(n int) string {
@@ -153,6 +238,16 @@ func SanitizeFixRecommendation(fix string, gate FixGate) string {
 // filesystemOnlyFixes are repairs that provably touch only files on disk.
 // Unlisted names are treated as database-touching, so a fix added later is
 // guarded by default rather than escaping the gate silently.
+//
+// Every name in applyFixList's dispatch switch (cmd/bd/doctor_fix.go) was
+// audited against that rule. The ones deliberately left out open a store, so
+// being withheld under a blocked gate is correct rather than an omission:
+// "Database", "Database Integrity", "Fresh Clone", "Schema Compatibility",
+// "Repo Fingerprint" (fix.RepoFingerprint and fix.FixMissingMetadata both write
+// through the store), "Dolt Schema", "Pending Migrations", and the row-level
+// data repairs. "Sync Divergence", "JSONL Config" and "Untracked Files" are
+// retired no-ops that write nothing at all; they stay unlisted because they are
+// not filesystem repairs, and withholding a no-op costs the user nothing.
 var filesystemOnlyFixes = map[string]bool{
 	"Gitignore":             true,
 	"Project Gitignore":     true,
@@ -161,11 +256,14 @@ var filesystemOnlyFixes = map[string]bool{
 	"Last-Touched Tracking": true,
 	"Tracked Runtime Files": true,
 	"Git Hooks":             true,
+	"Hooks Path":            true, // git-config unset, beads-managed paths only
 	"Permissions":           true,
 	"Lock Files":            true,
 	"Legacy MQ Files":       true,
 	"Classic Artifacts":     true,
 	"Btrfs NoCOW (dolt)":    true,
+	"Circuit Breaker":       true, // removes stale circuit-breaker marker files
+	"Database Config":       true, // rewrites metadata.json only; refuses Dolt outright
 }
 
 // IsFilesystemOnlyFix reports whether the named fix touches only the
