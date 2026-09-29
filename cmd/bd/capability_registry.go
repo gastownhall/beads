@@ -239,7 +239,10 @@ func backupRefusal(path string) capabilityRow {
 // every topology; it now exempts the schemes versioncontrolops.IsBackupURL
 // recognizes and lets ResolveBackupSource be the single stat point. That says
 // nothing about the refusal above it, which is about WHERE the remote is
-// registered, not about which schemes bd can name.
+// registered, not about which schemes bd can name. This S3-enablement layer is
+// narrower in PROXIED mode: that route executes restore through the installed
+// Dolt binary rather than the embedded engine upgraded here, so the command
+// refuses a URL before dispatch and continues to accept local directories.
 const backupRemoteSchemeTracking = "open question, not a verdict: remote-scheme (DoltHub/aws/gs/s3) backup on a server " +
 	"bd does not own — revisit with S4, which settles the same server-env credential question for dolt push"
 

@@ -121,13 +121,10 @@ func TestBackupRestoreCommandKeepsDirectoryValidation(t *testing.T) {
 	}
 }
 
-// TestBackupRestoreCommandReportsTheJSONSourceVerbatim pins the success-path
-// echo. "source" is data: a caller compares it with the argument it passed, so
-// it is the argument byte-for-byte and not a redacted copy. A remote with a
-// query parameter makes the distinction observable without putting a
-// credential in the fixture: the success payload stays verbatim, while
-// RedactBackupURL would remove the query.
-func TestBackupRestoreCommandReportsTheJSONSourceVerbatim(t *testing.T) {
+// TestBackupRestoreCommandReportsTheJSONSourceRedacted pins the success-path
+// echo. JSON output is routinely retained in scripts and CI logs, so remote
+// URL credentials must be handled by the same canonical redactor as prose.
+func TestBackupRestoreCommandReportsTheJSONSourceRedacted(t *testing.T) {
 	oldStore := store
 	oldRootCtx := rootCtx
 	oldProxiedServerMode := proxiedServerMode
@@ -170,30 +167,21 @@ func TestBackupRestoreCommandReportsTheJSONSourceVerbatim(t *testing.T) {
 	if !payload.Restored {
 		t.Fatalf("--json payload %q does not report the restore", out)
 	}
-	if payload.Source != source {
-		t.Errorf("--json source = %q, want the argument verbatim, %q", payload.Source, source)
+	want := versioncontrolops.RedactBackupURL(source)
+	if payload.Source != want {
+		t.Errorf("--json source = %q, want redacted source %q", payload.Source, want)
 	}
 	if fake.restoreSource != source {
 		t.Errorf("RestoreDatabase source = %q, want %q", fake.restoreSource, source)
 	}
 }
 
-// TestBackupRestoreCommandProxiedAcceptsBackupURL is the proxiedServerMode=true
-// case the other tests in this file do not cover, and it is the topology where
-// the URL path was still broken: validateBackupRestoreDir is exempted for a
-// backup URL before the route split, but runBackupRestoreProxied then built its
-// URL with DirToFileURL, which hard-rejects any input containing "://". So
-// `bd backup restore s3://…` failed on every proxied-server workspace with
-// `"s3://bucket/beads" is a s3 URL, not a directory` — later than before, but
-// just as unreachable — while the command's help text advertises the feature
-// with no topology caveat.
-//
-// The discriminator is that refusal string: only DirToFileURL produces it.
-// ResolveBackupSource passes a remote backup URL through un-stat'ed, so the
-// route runs on to the live provider and dies there instead. That is also what
-// keeps this test serverless — it stops at the first step that needs a running
-// topology, which is two steps past the URL build.
-func TestBackupRestoreCommandProxiedAcceptsBackupURL(t *testing.T) {
+// TestBackupRestoreCommandProxiedRefusesBackupURL pins the E-layer topology
+// boundary. #5950 left the proxied resolver capable of carrying a URL, but the
+// route executes it through the installed Dolt binary rather than the embedded
+// engine upgraded here. The command therefore refuses before reaching either
+// the resolver's directory guard or a live provider.
+func TestBackupRestoreCommandProxiedRefusesBackupURL(t *testing.T) {
 	_, fake := useProxiedRestoreWorkspace(t)
 
 	const source = "s3://bucket/beads"
@@ -206,27 +194,22 @@ func TestBackupRestoreCommandProxiedAcceptsBackupURL(t *testing.T) {
 	if refusal == nil {
 		t.Fatalf("backup restore %q on a proxied workspace = nil; this fixture has no live topology to restore into", source)
 	}
-	if strings.Contains(stderr, "not a directory") {
-		t.Fatalf("backup restore %q said %q: that refusal can only come from DirToFileURL, "+
-			"so the proxied route still rejects every backup URL", source, stderr)
+	if !strings.Contains(stderr, "not supported in proxied-server mode") {
+		t.Fatalf("backup restore %q said %q, want the topology refusal", source, stderr)
 	}
-	if !strings.Contains(stderr, "provider") {
-		t.Fatalf("backup restore %q said %q, want the live-provider failure that follows a resolved URL", source, stderr)
+	if strings.Contains(stderr, "not a directory") || strings.Contains(stderr, "provider") {
+		t.Fatalf("backup restore %q said %q, want refusal before resolution or provider startup", source, stderr)
 	}
 	if fake.restoreCalls != 0 {
 		t.Fatalf("RestoreDatabase calls = %d, want 0: the proxied route runs DOLT_BACKUP itself", fake.restoreCalls)
 	}
 }
 
-// TestBackupRestoreCommandProxiedRefusesMissingFileURL covers the one backup
-// URL the proxied route has to stat. The command exempts every recognized URL
-// from validateBackupRestoreDir, and file:// is recognized, but it names a
-// local directory: handed a missing one, DOLT_BACKUP creates it, opens it as an
-// empty backup and, under --force, drops the live database before the restore
-// fails. On this route ResolveBackupSource is the only check before the
-// topology is taken down, so its refusal has to arrive before the live-provider
-// step the s3:// case above dies at.
-func TestBackupRestoreCommandProxiedRefusesMissingFileURL(t *testing.T) {
+// TestBackupRestoreCommandProxiedRefusesFileURL keeps the command's local-only
+// contract literal: proxied callers pass a directory, not a file:// spelling
+// of one. The lower-level resolver still validates file URLs for storage paths
+// that call it directly.
+func TestBackupRestoreCommandProxiedRefusesFileURL(t *testing.T) {
 	workspace, fake := useProxiedRestoreWorkspace(t)
 
 	source := "file://" + filepath.Join(workspace, "no-such-backup")
@@ -237,8 +220,8 @@ func TestBackupRestoreCommandProxiedRefusesMissingFileURL(t *testing.T) {
 	if refusal == nil {
 		t.Fatalf("backup restore %q on a proxied workspace = nil, want a refusal", source)
 	}
-	if !strings.Contains(stderr, "backup source does not exist") {
-		t.Fatalf("backup restore %q said %q, want ResolveBackupSource's missing-source refusal", source, stderr)
+	if !strings.Contains(stderr, "not supported in proxied-server mode") {
+		t.Fatalf("backup restore %q said %q, want the topology refusal", source, stderr)
 	}
 	if strings.Contains(stderr, "provider") {
 		t.Fatalf("backup restore %q said %q: it got past the URL build to the live provider", source, stderr)
@@ -480,5 +463,262 @@ func assertBackupWarningRedacted(t *testing.T, stderr string) {
 		if strings.Contains(stderr, leaked) {
 			t.Errorf("warning %q echoes %q", stderr, leaked)
 		}
+	}
+}
+
+func writeDoltBackupConfig(t *testing.T, beadsDir, backupURL string) {
+	t.Helper()
+	data, err := json.Marshal(doltBackupConfig{BackupURL: backupURL, BackupName: defaultDoltBackupName})
+	if err != nil {
+		t.Fatalf("marshal backup config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-backup.json"), data, 0o600); err != nil {
+		t.Fatalf("write backup config: %v", err)
+	}
+}
+
+// TestBackupRestoreCommandRefusesURLInProxiedServerMode covers the branch every
+// E-only test below otherwise pins OFF. #5950's lower route can resolve a URL,
+// but proxied restore executes through the installed Dolt server rather than
+// the embedded engine upgraded by this PR, so the command refuses before
+// provider startup.
+func TestBackupRestoreCommandRefusesURLInProxiedServerMode(t *testing.T) {
+	oldStore := store
+	oldRootCtx := rootCtx
+	oldProxiedServerMode := proxiedServerMode
+	t.Cleanup(func() {
+		store = oldStore
+		rootCtx = oldRootCtx
+		proxiedServerMode = oldProxiedServerMode
+	})
+
+	fake := &backupRestoreRecordingStore{restoreErr: errBackupRestoreReachedStorage}
+	store = fake
+	rootCtx = context.Background()
+	proxiedServerMode = true
+
+	// The signed query doubles as a leak check on the new message.
+	const source = "s3://bucket/path?X-Amz-Signature=deadbeefsignature"
+	const wantNamed = "s3://bucket/path"
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = backupRestoreCmd.RunE(backupRestoreCmd, []string{source})
+	})
+	if err == nil {
+		t.Fatalf("backup restore error = nil, want a refusal")
+	}
+	if fake.restoreCalls != 0 {
+		t.Fatalf("RestoreDatabase calls = %d, want 0", fake.restoreCalls)
+	}
+	if !strings.Contains(stderr, "not supported in proxied-server mode") {
+		t.Fatalf("refusal %q does not explain the proxied-mode limit", stderr)
+	}
+	if !strings.Contains(stderr, wantNamed) {
+		t.Fatalf("refusal %q does not name the source %q", stderr, wantNamed)
+	}
+	if strings.Contains(stderr, "not a directory") {
+		t.Fatalf("refusal fell through to the DirToFileURL guard: %q", stderr)
+	}
+	if strings.Contains(stderr, "deadbeefsignature") {
+		t.Fatalf("refusal echoed the signed query: %q", stderr)
+	}
+}
+
+// TestBackupRestoreCommandRefusesNoArgWhenDestinationIsRemote pins the other
+// half of the widened surface: after `bd backup init s3://…` a bare
+// `bd backup restore` used to fall through to backupDir(), which CREATES the
+// directory it returns, so the existence check passed on a fresh empty dir and
+// the failure surfaced as an opaque Dolt error over a file:// source. Its twin,
+// ...RestoresRecordedBackupWhenDestinationIsRemote, differs by one setup line.
+func TestBackupRestoreCommandRefusesNoArgWhenDestinationIsRemote(t *testing.T) {
+	oldStore := store
+	oldRootCtx := rootCtx
+	oldProxiedServerMode := proxiedServerMode
+	t.Cleanup(func() {
+		store = oldStore
+		rootCtx = oldRootCtx
+		proxiedServerMode = oldProxiedServerMode
+	})
+
+	beadsDir := backupConfigTestDir(t)
+	// A "/" in the secret is the case the redaction helper used to miss.
+	writeDoltBackupConfig(t, beadsDir, "aws://AKIAEXAMPLE:se/cret@bucket/db")
+
+	fake := &backupRestoreRecordingStore{restoreErr: errBackupRestoreReachedStorage}
+	store = fake
+	rootCtx = context.Background()
+	proxiedServerMode = false
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = backupRestoreCmd.RunE(backupRestoreCmd, nil)
+	})
+	if err == nil {
+		t.Fatalf("backup restore error = nil, want a refusal")
+	}
+	if fake.restoreCalls != 0 {
+		t.Fatalf("RestoreDatabase calls = %d, want 0", fake.restoreCalls)
+	}
+	if !strings.Contains(stderr, "configured backup destination is a remote URL") {
+		t.Fatalf("refusal %q does not explain the configured destination", stderr)
+	}
+	if !strings.Contains(stderr, "aws://bucket/db") {
+		t.Fatalf("refusal %q does not name the destination", stderr)
+	}
+	if !strings.Contains(stderr, "no local backup is recorded") {
+		t.Fatalf("refusal %q does not say why the backup directory was not used", stderr)
+	}
+	if strings.Contains(stderr, "se/cret") {
+		t.Fatalf("refusal echoed the secret: %q", stderr)
+	}
+}
+
+// TestBackupRestoreCommandNoArgRestoresRecordedBackupWhenDestinationIsRemote is
+// the twin of the refusal above, one setup line apart. Auto-backup writes to
+// the backup directory whatever destination `bd backup init` recorded, and the
+// remote schemes were persisted verbatim long before s3:// was accepted — so a
+// recorded local backup must still restore with no argument, as it always did.
+func TestBackupRestoreCommandNoArgRestoresRecordedBackupWhenDestinationIsRemote(t *testing.T) {
+	oldStore := store
+	oldRootCtx := rootCtx
+	oldProxiedServerMode := proxiedServerMode
+	t.Cleanup(func() {
+		store = oldStore
+		rootCtx = oldRootCtx
+		proxiedServerMode = oldProxiedServerMode
+	})
+
+	beadsDir := backupConfigTestDir(t)
+	writeDoltBackupConfig(t, beadsDir, "aws://AKIAEXAMPLE:se/cret@bucket/db")
+	dir, err := backupDir()
+	if err != nil {
+		t.Fatalf("backupDir: %v", err)
+	}
+	if err := saveBackupState(dir, &backupState{LastDoltCommit: "0123456789abcdef"}); err != nil {
+		t.Fatalf("record a local backup: %v", err)
+	}
+
+	fake := &backupRestoreRecordingStore{}
+	store = fake
+	rootCtx = context.Background()
+	proxiedServerMode = false
+
+	stderr := captureStderr(t, func() {
+		err = backupRestoreCmd.RunE(backupRestoreCmd, nil)
+	})
+	if err != nil {
+		t.Fatalf("backup restore error = %v, want nil (stderr %q)", err, stderr)
+	}
+	if fake.restoreCalls != 1 {
+		t.Fatalf("RestoreDatabase calls = %d, want 1", fake.restoreCalls)
+	}
+	if fake.restoreSource != dir {
+		t.Fatalf("RestoreDatabase source = %q, want the backup directory %q", fake.restoreSource, dir)
+	}
+	if !strings.Contains(stderr, "aws://bucket/db") {
+		t.Fatalf("note %q does not name the destination it did not use", stderr)
+	}
+	if strings.Contains(stderr, "se/cret") {
+		t.Fatalf("note echoed the secret: %q", stderr)
+	}
+}
+
+// TestBackupRestoreCommandJSONReportRedactsRemoteSource pins the success-path
+// echo: every error redacts the source, and the --json report is the output
+// scripts and CI logs keep. Only remote URLs are rewritten; #5949's canonical
+// helper keeps file URL paths containing "@" intact, and local directory data
+// remains byte-identical too.
+func TestBackupRestoreCommandJSONReportRedactsRemoteSource(t *testing.T) {
+	oldStore := store
+	oldRootCtx := rootCtx
+	oldProxiedServerMode := proxiedServerMode
+	oldJSONOutput := jsonOutput
+	t.Cleanup(func() {
+		store = oldStore
+		rootCtx = oldRootCtx
+		proxiedServerMode = oldProxiedServerMode
+		jsonOutput = oldJSONOutput
+	})
+	t.Setenv("BD_JSON_ENVELOPE", "0")
+
+	localDir := filepath.Join(t.TempDir(), "beads@2024-01")
+	if err := os.MkdirAll(localDir, 0o700); err != nil {
+		t.Fatalf("create backup directory: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name, source, want, secret string
+	}{
+		{"signed s3 query", "s3://bucket/db?X-Amz-Signature=deadbeefsignature", "s3://bucket/db", "deadbeefsignature"},
+		{"aws userinfo", "aws://AKIAEXAMPLE:se/cret@bucket/db", "aws://bucket/db", "se/cret"},
+		{"file url with at sign", "file:///var/backups/beads@2024-01/db", "file:///var/backups/beads@2024-01/db", ""},
+		{"directory with at sign", localDir, localDir, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backupConfigTestDir(t)
+			fake := &backupRestoreRecordingStore{}
+			store = fake
+			rootCtx = context.Background()
+			proxiedServerMode = false
+			jsonOutput = true
+
+			out := captureStdout(t, func() error {
+				return backupRestoreCmd.RunE(backupRestoreCmd, []string{tc.source})
+			})
+			if fake.restoreSource != tc.source {
+				t.Fatalf("RestoreDatabase source = %q, want the unredacted %q", fake.restoreSource, tc.source)
+			}
+			var report struct {
+				Restored bool   `json:"restored"`
+				Source   string `json:"source"`
+			}
+			if err := json.Unmarshal([]byte(out), &report); err != nil {
+				t.Fatalf("parse success report %q: %v", out, err)
+			}
+			if !report.Restored || report.Source != tc.want {
+				t.Fatalf("success report = %+v, want restored with source %q", report, tc.want)
+			}
+			if tc.secret != "" && strings.Contains(out, tc.secret) {
+				t.Fatalf("success report echoed the secret: %q", out)
+			}
+		})
+	}
+}
+
+// TestBackupRestoreCommandNoArgKeepsBackupDirForFileDestination is the control
+// for the guard above. resolveDoltBackupURL writes file://<abs> for every local
+// `bd backup init`, and those satisfy IsBackupURL too — so the guard is scoped
+// to REMOTE schemes and the long-standing directory default is untouched.
+func TestBackupRestoreCommandNoArgKeepsBackupDirForFileDestination(t *testing.T) {
+	oldStore := store
+	oldRootCtx := rootCtx
+	oldProxiedServerMode := proxiedServerMode
+	t.Cleanup(func() {
+		store = oldStore
+		rootCtx = oldRootCtx
+		proxiedServerMode = oldProxiedServerMode
+	})
+
+	beadsDir := backupConfigTestDir(t)
+	writeDoltBackupConfig(t, beadsDir, "file:///somewhere/else")
+
+	fake := &backupRestoreRecordingStore{}
+	store = fake
+	rootCtx = context.Background()
+	proxiedServerMode = false
+
+	want, err := backupDir()
+	if err != nil {
+		t.Fatalf("backupDir: %v", err)
+	}
+	if err := backupRestoreCmd.RunE(backupRestoreCmd, nil); err != nil {
+		t.Fatalf("backup restore error = %v, want nil", err)
+	}
+	if fake.restoreCalls != 1 {
+		t.Fatalf("RestoreDatabase calls = %d, want 1", fake.restoreCalls)
+	}
+	if fake.restoreSource != want {
+		t.Fatalf("RestoreDatabase source = %q, want the backup directory %q", fake.restoreSource, want)
 	}
 }
