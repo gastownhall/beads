@@ -37,8 +37,8 @@ func TestNeutralizeAmbientDoltPort_ClearsBothVariables(t *testing.T) {
 }
 
 // TestNeutralizeAmbientDoltPort_IsIdempotent guards the unset-when-already-unset
-// path, which both failure branches of EnsureDoltContainerForTestMain can hit
-// in sequence on a host that never had the variables set.
+// path, which the failure path of EnsureDoltContainerForTestMain hits on any
+// host that never had the variables set.
 func TestNeutralizeAmbientDoltPort_IsIdempotent(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "59999")
 	t.Setenv("BEADS_DOLT_PORT", "59999")

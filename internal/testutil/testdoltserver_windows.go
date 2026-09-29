@@ -23,6 +23,12 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 // force would let a test-mode store resolve onto whatever server the
 // environment names. Here the fail-open was unconditional rather than merely
 // likely -- this stub never succeeds.
+//
+// The clear is unconditional here, without the !windows implementation's
+// harness-provisioned exception (BEADS_TEST_SHARED_DOLT_SERVER): the only
+// writer of that marker is scripts/test.sh, a bash harness the Windows lane
+// does not run. Should that change, this stub needs the same exception; the
+// stricter behavior is the safe direction to be wrong in.
 func EnsureDoltContainerForTestMain() error {
 	neutralizeAmbientDoltPort()
 	fmt.Fprintln(os.Stderr, "WARN: Docker not available on Windows CI, skipping test server")

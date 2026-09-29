@@ -20,7 +20,7 @@ const reproProdPort = "59999"
 // TestApplyConfigDefaults_TestModeBlocksNonDefaultProductionPort documents a
 // residual gap, not the gm-2g3g5r leak itself: the leak's actual root cause
 // (EnsureDoltContainerForTestMain failing open on the ambient port) is fixed
-// and covered by TestEnsureDoltContainerForTestMain_NeutralizesAmbientPortOnFailure
+// and covered by TestEnsureDoltContainerForTestMain_ClearsAmbientPortWhenNotReady
 // in internal/testutil. This test bypasses that fix entirely -- it injects a
 // production port directly via env var to probe applyConfigDefaults /
 // productionPortReasons in isolation. Rule 1 of productionPortReasons only
@@ -90,11 +90,20 @@ func TestProductionPortReasons_BlindWithoutBeadsDir(t *testing.T) {
 }
 
 // TestApplyConfigDefaults_NoResolvablePortFailsClosed closes the loop on the
-// proposed fix: once the harness neutralizes the ambient port vars, nothing
-// resolves a port, and the existing BEADS_TEST_MODE guard's `ServerPort == 0`
-// branch (store.go:1504-1508) forces port 1. This already passes today --- it
-// is the invariant the fix relies on, asserted so a future change cannot
-// remove it silently.
+// proposed fix, for the case the fixture builds: once the harness neutralizes
+// the ambient port vars, and with nothing else in the resolution chain to
+// supply one, the BEADS_TEST_MODE guard's `ServerPort == 0` branch
+// (store.go:1683-1687) forces port 1. This already passes today --- it is the
+// invariant the fix relies on, asserted so a future change cannot remove it
+// silently.
+//
+// Scope, because the fixture is the claim: neutralizing the env vars is not
+// the same as "no port is resolvable". Resolution falls through to the file
+// chain and derives a directory from filepath.Dir(cfg.Path) when BeadsDir is
+// empty (store.go:1661-1664), so a reachable dolt-server.port still yields a
+// non-zero port and this branch does not fire; detection, not resolution, is
+// what would have to catch that, and the two tests above are exactly why it
+// does not. The empty beadsDir below is what excludes that path here.
 func TestApplyConfigDefaults_NoResolvablePortFailsClosed(t *testing.T) {
 	beadsDir := t.TempDir() // no dolt-server.port, no config.yaml
 	t.Setenv("BEADS_TEST_MODE", "1")
