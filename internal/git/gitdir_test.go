@@ -194,12 +194,17 @@ func TestResolveHooksContext(t *testing.T) {
 	t.Chdir(decoy)
 	ResetCaches()
 	t.Cleanup(ResetCaches)
-	check := func(t *testing.T, dir string, env []string, repo, hooks string) HooksContext {
+	selectedContext := HooksContext{
+		HooksDir:     filepath.Join(canonical(selected), ".git", "hooks"),
+		CommonDir:    filepath.Join(canonical(selected), ".git"),
+		RepoRoot:     canonical(selected),
+		MainRepoRoot: canonical(selected),
+	}
+	check := func(t *testing.T, dir string, env []string, want HooksContext) HooksContext {
 		t.Helper()
 		got, err := ResolveHooksContext(dir, env)
-		want := HooksContext{HooksDir: hooks, CommonDir: filepath.Join(canonical(selected), ".git"), RepoRoot: canonical(repo), MainRepoRoot: canonical(selected)}
 		if err != nil || got != want {
-			t.Errorf("selected context = %+v, %v; want %+v", got, err, want)
+			t.Errorf("context from %q = %+v, %v; want %+v", dir, got, err, want)
 		}
 		return got
 	}
@@ -224,7 +229,9 @@ func TestResolveHooksContext(t *testing.T) {
 				git(selected, "config", scope, "core.hooksPath", tc.configured)
 				defer git(selected, "config", scope, "--unset", "core.hooksPath")
 			}
-			check(t, tc.dir, cleanEnv, tc.repo, tc.want)
+			want := selectedContext
+			want.HooksDir, want.RepoRoot = tc.want, canonical(tc.repo)
+			check(t, tc.dir, cleanEnv, want)
 			t.Chdir(tc.dir)
 			ResetCaches()
 			legacy, err := GetGitHooksDir()
@@ -238,7 +245,7 @@ func TestResolveHooksContext(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		check(t, relative, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+		check(t, relative, cleanEnv, selectedContext)
 	})
 	t.Run("routing_environment", func(t *testing.T) {
 		t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
@@ -254,12 +261,9 @@ func TestResolveHooksContext(t *testing.T) {
 			MainRepoRoot: canonical(decoy),
 		}
 		for _, env := range [][]string{nil, os.Environ()} {
-			got, err := ResolveHooksContext(selected, env)
-			if err != nil || got != routed {
-				t.Fatalf("supplied/inherited routing = %+v, %v; want %+v", got, err, routed)
-			}
+			check(t, selected, env, routed)
 		}
-		check(t, selected, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+		check(t, selected, cleanEnv, selectedContext)
 	})
 	t.Run("empty_environment", func(t *testing.T) {
 		localHooks, ambientHooks := filepath.Join(home, "local"), filepath.Join(home, "inline")
@@ -268,7 +272,9 @@ func TestResolveHooksContext(t *testing.T) {
 		t.Setenv("GIT_CONFIG_COUNT", "1")
 		t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
 		t.Setenv("GIT_CONFIG_VALUE_0", ambientHooks)
-		check(t, selected, nil, selected, ambientHooks)
+		inherited := selectedContext
+		inherited.HooksDir = ambientHooks
+		check(t, selected, nil, inherited)
 		// The supplied-empty arm deliberately drops every fence this fixture set,
 		// GIT_CONFIG_NOSYSTEM included, because "a nonnil env is supplied
 		// unchanged, including an empty one" is part of the documented contract
@@ -277,13 +283,17 @@ func TestResolveHooksContext(t *testing.T) {
 		// set just above outranks system scope, and a system safe.directory
 		// requirement cannot reject a fixture repository this process created
 		// and owns. Keep the arm free of environment so it keeps covering that.
-		check(t, selected, []string{}, selected, localHooks)
+		empty := selectedContext
+		empty.HooksDir = localHooks
+		check(t, selected, []string{}, empty)
 	})
 	t.Run("process_tilde_home", func(t *testing.T) {
 		git(selected, "config", "core.hooksPath", "~/process hooks")
 		defer git(selected, "config", "--unset", "core.hooksPath")
 		childEnv := append(append([]string{}, cleanEnv...), "HOME="+t.TempDir())
-		check(t, selected, childEnv, selected, filepath.Join(home, "process hooks"))
+		want := selectedContext
+		want.HooksDir = filepath.Join(home, "process hooks")
+		check(t, selected, childEnv, want)
 	})
 	for _, cachedFailure := range []bool{false, true} {
 		name := "cached_success"
@@ -300,7 +310,7 @@ func TestResolveHooksContext(t *testing.T) {
 				t.Fatalf("cache precondition: %v", err)
 			}
 			before := gitCtx
-			check(t, selected, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+			check(t, selected, cleanEnv, selectedContext)
 			if gitCtx != before {
 				t.Fatal("explicit context changed legacy cache")
 			}
@@ -364,6 +374,6 @@ func TestResolveHooksContext(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
-		check(t, link, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+		check(t, link, cleanEnv, selectedContext)
 	})
 }
