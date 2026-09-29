@@ -82,6 +82,12 @@ func startMinio(t *testing.T) *minioServer {
 	t.Setenv("AWS_ACCESS_KEY_ID", creds.accessKey)
 	t.Setenv("AWS_SECRET_ACCESS_KEY", creds.secretKey)
 	t.Setenv("AWS_REGION", creds.region)
+	// Clear, don't just overwrite: the SDK credential chain combines an ambient
+	// AWS_SESSION_TOKEN (common after `aws sso login`) with the static MinIO
+	// keys set above, and MinIO then rejects the signature — an opaque auth
+	// failure on a developer machine rather than a run.
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_PROFILE", "")
 
 	binary := minioBinary(t)
 	var attempts strings.Builder
