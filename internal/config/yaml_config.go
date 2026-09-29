@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,14 @@ import (
 	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrNoProjectConfigYaml reports that the workspace has no project config.yaml
+// for a YAML-only write to edit - an external BEADS_DIR, or a database-only
+// workspace. It is a sentinel because the answer is caller-dependent: a caller
+// whose whole job is the YAML edit has failed and must say so, while a caller
+// mirroring a database write into the YAML layer has nothing to clear and has
+// not.
+var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspace")
 
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
 // rather than the database. These are "startup" settings that are
@@ -678,15 +687,18 @@ func GetYamlConfig(key string) string {
 //
 // The bool reports whether the file was actually changed, so a caller can name
 // where the unset landed rather than asserting a write it did not make. It is
-// false, with a nil error, when the workspace has no project config.yaml at all
-// (an external BEADS_DIR or a database-only workspace) and when the key is not
-// present in the file. Neither is a failure: "the key is not in config.yaml" is
-// the correct answer to give, and erroring on it left a database-backed unset
-// half-applied - the row deleted, the command exiting non-zero.
+// false, with a nil error, when the key is not present in the file: "the key is
+// not in config.yaml" is the correct answer to give there, not a failure.
+//
+// A workspace with no project config.yaml at all is reported separately, as
+// ErrNoProjectConfigYaml, because the two callers of this function need opposite
+// answers for it and only they can tell which applies. Resolution stays here so
+// neither of them re-derives it: pre-checking in the caller is what produced the
+// false "(in config.yaml)" claims this whole path exists to remove.
 func UnsetYamlConfig(key string) (bool, error) {
 	configPath, err := findProjectConfigYaml()
 	if err != nil {
-		return false, nil
+		return false, fmt.Errorf("%w: %w", ErrNoProjectConfigYaml, err)
 	}
 
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml

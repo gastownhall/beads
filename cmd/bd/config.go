@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -915,7 +916,12 @@ var configUnsetCmd = &cobra.Command{
 		// existed, since the storage seam discards the affected-row count.
 		location := "database"
 		yamlCleared, err := config.UnsetYamlConfig(result.Key)
-		if err != nil {
+		// A workspace with no project config.yaml has no YAML layer to clear, so
+		// the database write above is the whole unset and this succeeds - that is
+		// the case that used to fail the command after the row was already gone.
+		// A config.yaml that exists and refused the edit is the opposite: the key
+		// is still effective from the file, so that still fails.
+		if err != nil && !errors.Is(err, config.ErrNoProjectConfigYaml) {
 			return HandleError("%s is still set in config.yaml (any database row was removed): %v", result.Key, err)
 		}
 		if yamlCleared {
