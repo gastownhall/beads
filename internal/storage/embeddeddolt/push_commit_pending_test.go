@@ -50,11 +50,19 @@ func TestPushCommitsPendingChangesFirst(t *testing.T) {
 		// on "remote not found" -- still proves CommitPending ran first,
 		// since that failure only happens after this fix's guard clause.
 		wantErr func(t *testing.T, err error)
+		// clean runs the verb with nothing pending instead of creating an issue
+		// first. The guard must tolerate an empty working set -- CommitPending
+		// -> commitAll(tolerateEmpty=true) maps Dolt's "nothing to commit" to
+		// (false, nil) -- and still reach the remote entry point with HEAD
+		// unmoved. That is the common case for a push against an
+		// already-committed store, and nothing else in this package covers it.
+		clean bool
 	}{
-		{"Push", func(s *EmbeddedDoltStore) error { return s.Push(ctx) }, wantStopRemote},
-		{"ForcePush", func(s *EmbeddedDoltStore) error { return s.ForcePush(ctx) }, wantStopRemote},
-		{"PushRemote", func(s *EmbeddedDoltStore) error { return s.PushRemote(ctx, defaultRemote, false) }, wantStopRemote},
-		{"PushTo", func(s *EmbeddedDoltStore) error { return s.PushTo(ctx, defaultRemote) }, wantRemoteNotFound},
+		{name: "Push", call: func(s *EmbeddedDoltStore) error { return s.Push(ctx) }, wantErr: wantStopRemote},
+		{name: "ForcePush", call: func(s *EmbeddedDoltStore) error { return s.ForcePush(ctx) }, wantErr: wantStopRemote},
+		{name: "PushRemote", call: func(s *EmbeddedDoltStore) error { return s.PushRemote(ctx, defaultRemote, false) }, wantErr: wantStopRemote},
+		{name: "PushTo", call: func(s *EmbeddedDoltStore) error { return s.PushTo(ctx, defaultRemote) }, wantErr: wantRemoteNotFound},
+		{name: "PushCleanStore", call: func(s *EmbeddedDoltStore) error { return s.Push(ctx) }, wantErr: wantStopRemote, clean: true},
 	}
 
 	for _, tc := range cases {
@@ -79,23 +87,28 @@ func TestPushCommitsPendingChangesFirst(t *testing.T) {
 				t.Fatalf("GetCurrentCommit (before create): %v", err)
 			}
 
-			issue := &types.Issue{
-				ID:        "fedauth-" + tc.name,
-				Title:     "pending change",
-				Status:    types.StatusOpen,
-				Priority:  2,
-				IssueType: types.TypeTask,
-			}
-			if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
-				t.Fatalf("CreateIssue: %v", err)
-			}
+			beforePush := beforeCreate
 
-			afterCreate, err := store.GetCurrentCommit(ctx)
-			if err != nil {
-				t.Fatalf("GetCurrentCommit (after create): %v", err)
-			}
-			if afterCreate != beforeCreate {
-				t.Fatalf("test invariant broken: CreateIssue committed on its own (HEAD moved %s -> %s) -- this test needs a genuinely pending change to be meaningful", beforeCreate, afterCreate)
+			if !tc.clean {
+				issue := &types.Issue{
+					ID:        "fedauth-" + tc.name,
+					Title:     "pending change",
+					Status:    types.StatusOpen,
+					Priority:  2,
+					IssueType: types.TypeTask,
+				}
+				if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+					t.Fatalf("CreateIssue: %v", err)
+				}
+
+				afterCreate, err := store.GetCurrentCommit(ctx)
+				if err != nil {
+					t.Fatalf("GetCurrentCommit (after create): %v", err)
+				}
+				if afterCreate != beforeCreate {
+					t.Fatalf("test invariant broken: CreateIssue committed on its own (HEAD moved %s -> %s) -- this test needs a genuinely pending change to be meaningful", beforeCreate, afterCreate)
+				}
+				beforePush = afterCreate
 			}
 
 			tc.wantErr(t, tc.call(store))
@@ -104,7 +117,13 @@ func TestPushCommitsPendingChangesFirst(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetCurrentCommit (after %s): %v", tc.name, err)
 			}
-			if afterPush == afterCreate {
+			if tc.clean {
+				if afterPush != beforePush {
+					t.Fatalf("%s on a clean store must not create a commit: HEAD moved %s -> %s (the guard's tolerateEmpty tolerance is broken)", tc.name, beforePush, afterPush)
+				}
+				return
+			}
+			if afterPush == beforePush {
 				t.Fatalf("%s must commit pending changes before pushing (#5433): HEAD did not move (%s), the created issue is still uncommitted", tc.name, afterPush)
 			}
 		})
