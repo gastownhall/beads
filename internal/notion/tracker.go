@@ -75,7 +75,10 @@ func (t *Tracker) maxQueryPages(ctx context.Context) (int, error) {
 	}
 	pages, err := strconv.Atoi(raw)
 	if err != nil || pages <= 0 {
-		return 0, fmt.Errorf("notion.max_query_pages must be a positive integer, got %q", raw)
+		// Name both levers: the value may have come from either, and an operator
+		// told only about the config key will not think to look at their
+		// environment for the value they are being asked to correct.
+		return 0, fmt.Errorf("notion.max_query_pages (or NOTION_MAX_QUERY_PAGES) must be a positive integer, got %q", raw)
 	}
 	return pages, nil
 }

@@ -721,6 +721,11 @@ func TestTrackerInitRejectsUnusableMaxQueryPages(t *testing.T) {
 	if !strings.Contains(err.Error(), "notion.max_query_pages") {
 		t.Fatalf("error should name the config key, got: %v", err)
 	}
+	// The bad value came from the environment here, so naming only the config key
+	// points the operator at a lever they did not pull.
+	if !strings.Contains(err.Error(), "NOTION_MAX_QUERY_PAGES") {
+		t.Fatalf("error should name the env var the value came from, got: %v", err)
+	}
 }
 
 // An unset bound must leave the client exactly where it was before this option
