@@ -39,12 +39,14 @@ Bond types:
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
 
-  With --ref, B is nested inside A rather than ordered against it, so a
+  With --ref, the spawned proto arm is nested inside the molecule operand
+  rather than ordered against it - whichever side of the bond that is - so a
   sequential --ref arm carries no ordering: it is ready as soon as it is
   spawned. Ordering a nested arm against its own container is unsatisfiable
-  in both directions (the arm waits for A to close; A cannot close while it
-  holds an open arm). --ref is refused with --type conditional, which has no
-  safe degradation - omit --ref to bond a conditional arm as a sibling.
+  in both directions (the arm waits for the molecule to close; the molecule
+  cannot close while it holds an open arm). --ref is refused with --type
+  conditional, which has no safe degradation - omit --ref to bond a
+  conditional arm as a sibling.
 
 Phase control:
   By default, spawned protos follow the target's phase:
@@ -470,11 +472,18 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 // Both gatherMolBondInput (which also covers --dry-run and the proxied route)
 // and buildAttachCloneOpts consult this, so a caller that skips flag
 // validation cannot construct the arm either.
+//
+// The message has to read correctly for every operand shape, not just the
+// nesting ones. gatherMolBondInput runs before operands are resolved, so this
+// also refuses mol+mol and proto+proto - shapes that never receive a childRef
+// at all, where --ref is inert and nothing nests. It is therefore phrased as
+// what --ref does where it applies rather than as a claim about the bond in
+// front of the user. Keep it that way if you reword it.
 func refuseConditionalRefArm(bondType, childRef string) error {
 	if childRef == "" || bondType != types.BondTypeConditional {
 		return nil
 	}
-	return fmt.Errorf("--ref cannot be combined with --type conditional: a nested arm cannot be ordered against the molecule that contains it, and a conditional edge has no safe degradation - dropping it would run the arm unconditionally. Omit --ref to bond a conditional arm as a sibling, or use --type sequential or --type parallel with --ref")
+	return fmt.Errorf("--ref cannot be combined with --type conditional: where --ref nests an arm, a conditional edge onto the arm's own container cannot be satisfied, and dropping that edge would run the arm unconditionally instead of only on failure. Omit --ref to bond a conditional arm as a sibling, or use --type sequential or --type parallel with --ref")
 }
 
 func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (CloneOptions, error) {
@@ -528,10 +537,12 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 		//
 		// The arm therefore carries NO ordering relative to mol - it is ready
 		// as soon as it is spawned. That is a real loss of the "B runs after A
-		// completes" promise, documented at the two places that make it (this
-		// command's long help and docs/cli-reference/mol.md), and it is the
-		// deliberate trade: a nested arm's only satisfiable relationship to its
-		// container is containment.
+		// completes" promise, documented in the place that makes it: this
+		// command's long help. docs/cli-reference/mol.md is generated from the
+		// release named in docs/cli-docs.pin, so it will carry the same text
+		// once that pin advances past this change - do not hand-write it there.
+		// The loss is the deliberate trade: a nested arm's only satisfiable
+		// relationship to its container is containment.
 		//
 		// Only DepBlocks is dropped. DepConditionalBlocks never arrives here -
 		// refuseConditionalRefArm above rejects it - and keeping the check

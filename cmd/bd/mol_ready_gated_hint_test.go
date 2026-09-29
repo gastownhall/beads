@@ -77,6 +77,51 @@ func TestGatedReadyHintUsesReadyStepID(t *testing.T) {
 	}
 }
 
+// With more than one molecule listed, the header names which listed entry the
+// example came from, so it cannot disagree with the ID printed beneath it. The
+// first listed molecule is not necessarily the one that has a ready step.
+func TestGatedReadyHintHeaderNamesTheEntryItPrinted(t *testing.T) {
+	gated := func(id, step string) *GatedMolecule {
+		mol := &GatedMolecule{MoleculeID: id, MoleculeTitle: "Gated molecule"}
+		if step != "" {
+			mol.ReadyStep = &types.Issue{ID: step, Title: "Resume work"}
+		}
+		return mol
+	}
+
+	tests := []struct {
+		name      string
+		molecules []*GatedMolecule
+		wantEntry string
+		wantStep  string
+	}{
+		{
+			name:      "first listed molecule has the ready step",
+			molecules: []*GatedMolecule{gated("test-mol1", "test-step1"), gated("test-mol2", "test-step2")},
+			wantEntry: "#1 above",
+			wantStep:  "test-step1",
+		},
+		{
+			name:      "example comes from a later molecule",
+			molecules: []*GatedMolecule{gated("test-mol1", ""), gated("test-mol2", "test-step2")},
+			wantEntry: "#2 above",
+			wantStep:  "test-step2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := renderGatedHint(t, tt.molecules)
+			if !strings.Contains(out, tt.wantEntry) {
+				t.Errorf("hint header does not name listing entry %q:\n%s", tt.wantEntry, out)
+			}
+			if got := hintCommandLine(t, out); !strings.Contains(got, tt.wantStep) {
+				t.Errorf("dispatch hint = %q, want it to name ready step %s", got, tt.wantStep)
+			}
+		})
+	}
+}
+
 func TestGatedReadyHintWithoutReadyStep(t *testing.T) {
 	out := renderGatedHint(t, []*GatedMolecule{{
 		MoleculeID:    "test-mol1",
