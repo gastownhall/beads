@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database found". Point `BEADS_DIR` at the `.beads` directory itself.
   ([#6938](https://github.com/gastownhall/beads/pull/6938))
 
+- **A proxied workspace's proxy retires when its Dolt backend exits
+  cleanly.** The proxy noticed its `dolt sql-server` child exiting only when
+  the exit status was non-zero. A backend that shut down gracefully (for
+  example on SIGTERM) left the proxy up and adoptable in front of a dead store:
+  with `--proxied-server-idle-timeout 0` it never went away, `bd dolt status`
+  called it running, and every command failed until `bd dolt stop`. The proxy
+  now retires on any backend exit, as it already did on a crash, so the next bd
+  command (including `bd ping`) starts a fresh proxy and backend. `bd dolt
+  status` no longer reports a proxy whose managed backend is gone as running:
+  the text says "not serving" and the JSON reports `running: false` (with
+  `proxy_pid` still set), including for a stranded proxy started by an older
+  bd. ([#6937](https://github.com/gastownhall/beads/pull/6937))
+
 - **`bd sql` no longer drops the rows of CTE queries or CALL result sets**
   ([#6932](https://github.com/gastownhall/beads/pull/6932)). In proxied-server
   mode, `WITH name(cols) AS (...) SELECT ...` and `WITH RECURSIVE ...` queries
@@ -417,6 +430,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the existing message.
 
 ### Changed
+
+- **`bd prime` describes the memory split instead of prohibiting `MEMORY.md`**
+  ([#6111](https://github.com/gastownhall/beads/pull/6111), refs
+  [#5169](https://github.com/gastownhall/beads/issues/5169)). The guidance
+  line used to read `Do NOT use MEMORY.md files — they fragment across
+  accounts`. That warning predates harnesses that ship a first-party,
+  machine-local memory whose index file is also named `MEMORY.md`, so in a
+  workspace running both, prime told the agent every session not to use a file
+  the harness was actively maintaining. The line now says what each store is
+  for: durable **project** facts go in `bd remember`, because per-tool memory
+  files fragment across accounts; per-operator preferences stay in the
+  harness's own memory. Output text only, no behaviour change. The same
+  sentence is updated in its sibling renderings — the MCP/minimal context, the
+  generated AGENTS.md sections for the minimal and Codex harness templates,
+  and the README snippet — so `bd init` and copy-paste do not re-introduce the
+  prohibition.
 
 - **`bd purge` keeps closed beads a live bead depends on.** A closed bead
   that a not-done bead depends on through `parent-child`, `tracks` or
