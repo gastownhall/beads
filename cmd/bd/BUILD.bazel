@@ -506,6 +506,7 @@ go_test(
         "bootstrap_backend_guard_test.go",
         "bootstrap_embedded_test.go",
         "bootstrap_guard_test.go",
+        "bootstrap_hydrate_empty_embedded_test.go",
         "bootstrap_noninteractive_test.go",
         "bootstrap_registered_backend_test.go",
         "bootstrap_test.go",
