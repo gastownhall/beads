@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -182,6 +183,218 @@ func TestStorePathAndNoDBPathAgreeOnWorkspaceRootEnvTarget(t *testing.T) {
 	}
 }
 
+// ladderRung is one workspace selector in the precedence list documented in
+// docs/reference/configuration.md, paired with the issue title that proves its
+// workspace was the one actually opened.
+type ladderRung struct {
+	beadsDir string
+	issue    string
+}
+
+// TestStorePathEnvDBPrecedenceLadder pins the ADJACENT rung boundaries of the
+// workspace-selection ladder the docs promote to a contract.
+//
+// The tests above pin exactly one adjacent pair — an explicit env target vs
+// ambient discovery. Every other boundary was unpinned, so the ladder could be
+// reordered without reddening anything: the BEADS_DB-over-BD_DB rung is encoded
+// solely by the order of the string literal []string{"BEADS_DB", "BD_DB"} in
+// cmd/bd/main.go, and nothing caught an ambient variable outranking an explicit
+// --db or -C on the store-requiring path.
+//
+// Each case also re-asserts the invariant the fix exists to protect: `bd where`
+// (no-DB path) and `bd list` (store-requiring path) must select the SAME
+// workspace, whichever rung wins.
+func TestStorePathEnvDBPrecedenceLadder(t *testing.T) {
+	bin := buildBDForInitTests(t)
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+
+	ambient := initStoreEnvDBWorkspace(t, bin, root, "ambient", "amb", "AMBIENT-ONLY-ISSUE")
+	alpha := initStoreEnvDBWorkspace(t, bin, root, "alpha", "alp", "ALPHA-ONLY-ISSUE")
+	beta := initStoreEnvDBWorkspace(t, bin, root, "beta", "bet", "BETA-ONLY-ISSUE")
+	alphaRung := ladderRung{beadsDir: filepath.Join(alpha, ".beads"), issue: "ALPHA-ONLY-ISSUE"}
+	betaRung := ladderRung{beadsDir: filepath.Join(beta, ".beads"), issue: "BETA-ONLY-ISSUE"}
+
+	for _, tc := range []struct {
+		name          string
+		boundary      string
+		args          []string
+		env           []string
+		winner, loser ladderRung
+	}{
+		{
+			name:     "FlagPathBeatsEnvDB",
+			boundary: "--db <path> over BEADS_DB",
+			args:     []string{"--db", alphaRung.beadsDir},
+			env:      []string{"BEADS_DB=" + betaRung.beadsDir},
+			winner:   alphaRung,
+			loser:    betaRung,
+		},
+		{
+			name:     "ChangeDirBeatsEnvDB",
+			boundary: "-C <dir> over BEADS_DB",
+			args:     []string{"-C", alpha},
+			env:      []string{"BEADS_DB=" + betaRung.beadsDir},
+			winner:   alphaRung,
+			loser:    betaRung,
+		},
+		{
+			name:     "BeadsDBBeatsBdDB",
+			boundary: "BEADS_DB over BD_DB",
+			env:      []string{"BEADS_DB=" + alphaRung.beadsDir, "BD_DB=" + betaRung.beadsDir},
+			winner:   alphaRung,
+			loser:    betaRung,
+		},
+		{
+			name:     "BeadsDBBeatsBeadsDir",
+			boundary: "BEADS_DB over BEADS_DIR",
+			env:      []string{"BEADS_DB=" + alphaRung.beadsDir, "BEADS_DIR=" + betaRung.beadsDir},
+			winner:   alphaRung,
+			loser:    betaRung,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := envForStoreEnvDBTest(home, tc.env...)
+			run := func(sub string) []byte {
+				t.Helper()
+				args := append(append([]string{}, tc.args...), sub)
+				cmd := exec.Command(bin, args...)
+				cmd.Dir = ambient
+				cmd.Env = env
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("bd %v (%s): %v\n%s", args, tc.boundary, err, out)
+				}
+				return out
+			}
+
+			// No-DB path.
+			whereOut := string(run("where"))
+			if !strings.Contains(whereOut, tc.winner.beadsDir) {
+				t.Fatalf("bd where did not select %s for %s\n%s", tc.winner.beadsDir, tc.boundary, whereOut)
+			}
+			if strings.Contains(whereOut, tc.loser.beadsDir) {
+				t.Fatalf("bd where selected the lower rung %s for %s\n%s", tc.loser.beadsDir, tc.boundary, whereOut)
+			}
+
+			// Store-requiring path must agree.
+			listOut := string(run("list"))
+			if !strings.Contains(listOut, tc.winner.issue) {
+				t.Fatalf("bd list did not read %s for %s\n%s", tc.winner.beadsDir, tc.boundary, listOut)
+			}
+			if strings.Contains(listOut, tc.loser.issue) {
+				t.Fatalf("bd list read the lower rung %s for %s — the store path disagrees with bd where\n%s",
+					tc.loser.beadsDir, tc.boundary, listOut)
+			}
+			if strings.Contains(listOut, "AMBIENT-ONLY-ISSUE") {
+				t.Fatalf("bd list fell through to ambient discovery for %s\n%s", tc.boundary, listOut)
+			}
+		})
+	}
+}
+
+// TestStorePathRejectsUnresolvableEnvDBTarget pins that a set-but-unresolvable
+// BEADS_DB/BD_DB fails loudly on the store-requiring path instead of
+// fabricating a database, and pins the no-DB path's documented answer for the
+// same input.
+//
+// resolveCommandBeadsDir's last resort is filepath.Dir(dbPath), which never
+// returns empty for a non-empty input, so before this guard a stale or typo'd
+// env target bootstrapped a brand-new empty embedded database at the typo's
+// PARENT directory, answered "No issues found." and exited 0 — a false all-clear
+// for any script asking whether there are open issues, plus an embeddeddolt
+// directory and gate lock written outside any real workspace.
+//
+// The on-disk assertion is the load-bearing half: an error message alone would
+// not prove the store was never created.
+func TestStorePathRejectsUnresolvableEnvDBTarget(t *testing.T) {
+	bin := buildBDForInitTests(t)
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+
+	ambient := initStoreEnvDBWorkspace(t, bin, root, "ambient", "amb", "AMBIENT-ONLY-ISSUE")
+
+	entries := func(dir string) string {
+		t.Helper()
+		found, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read %s: %v", dir, err)
+		}
+		names := []string{}
+		for _, entry := range found {
+			names = append(names, entry.Name())
+		}
+		return strings.Join(names, ",")
+	}
+
+	for _, envVar := range []string{"BEADS_DB", "BD_DB"} {
+		t.Run(envVar, func(t *testing.T) {
+			parent := filepath.Join(root, "typo-"+envVar)
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				t.Fatalf("mkdir %s: %v", parent, err)
+			}
+			missing := filepath.Join(parent, "does-not-exist")
+			before := entries(parent)
+
+			list := exec.Command(bin, "list")
+			list.Dir = ambient
+			list.Env = envForStoreEnvDBTest(home, envVar+"="+missing)
+			out, err := list.CombinedOutput()
+
+			if err == nil {
+				t.Fatalf("bd list exited 0 with %s=%q naming a nonexistent path; "+
+					"an unresolvable explicit target must fail loudly\n%s", envVar, missing, out)
+			}
+			if strings.Contains(string(out), "No issues found.") {
+				t.Fatalf("bd list answered from a fabricated database for %s=%q\n%s", envVar, missing, out)
+			}
+			if strings.Contains(string(out), "AMBIENT-ONLY-ISSUE") {
+				t.Fatalf("bd list silently fell through to the ambient workspace for %s=%q\n%s",
+					envVar, missing, out)
+			}
+			for _, want := range []string{envVar, missing} {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("bd list's failure does not name %q, so the operator cannot tell which "+
+						"selector is wrong\n%s", want, out)
+				}
+			}
+			if after := entries(parent); after != before {
+				t.Fatalf("bd list bootstrapped a database beside %s=%q: %s contained %q before and %q after",
+					envVar, missing, parent, before, after)
+			}
+
+			// The no-DB path does not check the target, and
+			// docs/reference/configuration.md says so: `bd where` exits 0 and
+			// prints the missing path's parent directory. Pinned so that making
+			// either path validate, or stop validating, has to update the docs
+			// too. The ceiling stops the upward walk at root, so a .beads above
+			// the test's temp directory cannot answer instead of the parent.
+			where := exec.Command(bin, "where")
+			where.Dir = ambient
+			where.Env = envForStoreEnvDBTest(home, envVar+"="+missing, "BEADS_CEILING_DIRECTORIES="+root)
+			whereOut, err := where.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bd where failed for %s=%q, but the docs say the no-DB path does not check the target: %v\n%s",
+					envVar, missing, err, whereOut)
+			}
+			if !slices.Contains(strings.Split(strings.TrimSpace(string(whereOut)), "\n"), parent) {
+				t.Fatalf("bd where did not print %s=%q's parent directory %q as documented\n%s",
+					envVar, missing, parent, whereOut)
+			}
+			if after := entries(parent); after != before {
+				t.Fatalf("bd where created files beside %s=%q: %s contained %q before and %q after",
+					envVar, missing, parent, before, after)
+			}
+		})
+	}
+}
+
 // TestStorePathEnvDBTargetRoutesProxiedServerWorkspace covers the behaviour
 // change the fix above introduces for workspaces that have no local database
 // file.
@@ -226,10 +439,35 @@ func TestStorePathEnvDBTargetRoutesProxiedServerWorkspace(t *testing.T) {
 
 	for _, envVar := range []string{"BEADS_DB", "BD_DB"} {
 		t.Run(envVar, func(t *testing.T) {
+			env := envForStoreEnvDBTest(filepath.Join(root, "home"), envVar+"="+proxiedBeadsDir)
+
 			list := exec.Command(bin, "list")
 			list.Dir = ambient
-			list.Env = envForStoreEnvDBTest(filepath.Join(root, "home"), envVar+"="+proxiedBeadsDir)
-			out, _ := list.CombinedOutput()
+			list.Env = env
+			out, err := list.CombinedOutput()
+
+			// A proxied workspace with no issues prints nothing that names it, so
+			// the checks below are all negative. Two positive assertions keep them
+			// from greening on a total failure: the command must actually succeed,
+			// and the same env must resolve the proxied workspace on the no-DB
+			// path. Without these, a proxy or backend that failed to start for an
+			// unrelated reason leaves `out` empty and every check below passes.
+			if err != nil {
+				t.Fatalf("%s pointed at a proxied-server workspace, but bd list failed: %v\n%s",
+					envVar, err, out)
+			}
+			where := exec.Command(bin, "where")
+			where.Dir = ambient
+			where.Env = env
+			whereOut, whereErr := where.CombinedOutput()
+			if whereErr != nil {
+				t.Fatalf("bd where: %v\n%s", whereErr, whereOut)
+			}
+			if !strings.Contains(string(whereOut), proxiedBeadsDir) {
+				t.Fatalf("%s=%q did not resolve to the proxied workspace on the no-DB path, so the "+
+					"assertions below prove nothing about which workspace bd list opened\n%s",
+					envVar, proxiedBeadsDir, whereOut)
+			}
 
 			if strings.Contains(string(out), "AMBIENT-ONLY-ISSUE") {
 				t.Fatalf("%s pointed at a proxied-server workspace, but bd list read the AMBIENT "+

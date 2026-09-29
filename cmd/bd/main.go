@@ -956,6 +956,15 @@ func applyChangeDirSelection() error {
 		changeDirEnvSnapshot[key] = envSnapshotValue{value: value, ok: ok}
 	}
 	_ = os.Setenv("BEADS_DIR", beadsDir)
+	// be-git2o (GH#6255): -C selects a workspace by setting BEADS_DIR, which
+	// ranks BELOW BEADS_DB/BD_DB on both the no-DB path (selectedNoDBBeadsDir)
+	// and the store-requiring one. Leaving those two set would let a variable
+	// exported once in a shell outrank the most explicit per-invocation
+	// selector the CLI has, silently and at exit 0. The snapshot above already
+	// captures all three keys, so restoreChangeDirSelection puts them back.
+	for _, key := range []string{"BEADS_DB", "BD_DB"} {
+		_ = os.Unsetenv(key)
+	}
 	return nil
 }
 
@@ -1371,10 +1380,29 @@ var rootCmd = &cobra.Command{
 		// so its BEADS_DB branch is never reached (and it has no BD_DB branch).
 		if dbPath == "" {
 			for _, key := range []string{"BEADS_DB", "BD_DB"} {
-				if envTarget := os.Getenv(key); envTarget != "" {
-					dbPath = utils.CanonicalizePath(envTarget)
-					break
+				envTarget := os.Getenv(key)
+				if envTarget == "" {
+					continue
 				}
+				canonical := utils.CanonicalizePath(envTarget)
+				// A set-but-unresolvable target fails loudly instead of falling
+				// through to a lower rung or to discovery. resolveCommandBeadsDir's
+				// last resort is filepath.Dir(dbPath), so a stale or typo'd value
+				// would otherwise bootstrap a brand-new empty database at the
+				// typo's PARENT directory and answer "No issues found." at exit 0,
+				// writing to a store outside any real workspace. That bootstrap
+				// fallback is for init/bootstrap, which return above via
+				// skipsStoreInit and never reach this block.
+				if _, statErr := os.Stat(canonical); statErr != nil {
+					if os.IsNotExist(statErr) {
+						return HandleErrorRespectJSON(
+							"%s=%q does not exist: point it at an existing .beads directory or database file, or unset it",
+							key, envTarget)
+					}
+					return HandleErrorRespectJSON("%s=%q: %v", key, envTarget, statErr)
+				}
+				dbPath = canonical
+				break
 			}
 		}
 
@@ -1422,7 +1450,8 @@ var rootCmd = &cobra.Command{
 
 		// Initialize database path
 		if dbPath == "" {
-			// Use public API to find database (same logic as extensions)
+			// Use the public API to find the database. Its search order is the
+			// library's, not the CLI precedence resolved above (see its doc comment).
 			if foundDB := beads.FindDatabasePath(); foundDB != "" {
 				dbPath = foundDB
 			} else {

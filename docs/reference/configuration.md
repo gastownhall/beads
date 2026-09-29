@@ -506,19 +506,47 @@ Selected commonly-used variables:
 | `BEADS_DOLT_SERVER_MODE`, `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_DATA_DIR`, `BEADS_DOLT_PORT`, ... | Embedded/server Dolt overrides |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist |
 
-**Workspace-selection precedence.** When more than one of these names a
-workspace, the first that resolves wins, on both the no-DB commands (`bd
-where`) and the store-requiring ones (`bd list`, `create`, `update`):
+**Workspace-selection precedence.** This is the order the `bd` CLI uses. When
+more than one selector is set, the highest one on this list wins, and the order
+is the same on the no-DB commands (`bd where`, `bd context`) and on the
+store-requiring ones (`bd list`, `create`, `update`). A `BEADS_DB`, `BD_DB` or
+`BEADS_DIR` naming a path that does not exist is covered after the list.
 
-1. `--db` (explicit flag)
-2. `BEADS_DB`
-3. `BD_DB`
-4. `BEADS_DIR`
-5. directory discovery (`.beads/` in the current directory or an ancestor)
+1. `--db <path>` (explicit flag)
+2. `-C <dir>` (clears `BEADS_DB`/`BD_DB` for that invocation and selects `<dir>`)
+3. `BEADS_DB`
+4. `BD_DB`
+5. `BEADS_DIR`
+6. the `db` key in `config.yaml` (consulted only when the flag and all three
+   variables above are unset)
+7. directory discovery (`.beads/` in the current directory or an ancestor),
+   bounded by `BEADS_CEILING_DIRECTORIES`
 
 `BEADS_DIR` ranking below `BEADS_DB`/`BD_DB` matters when both are exported in
 one shell: a stale `BEADS_DB` silently overrides a `BEADS_DIR` you set
-deliberately. Unset the one you do not mean rather than relying on order.
+deliberately. Unset the one you do not mean rather than relying on order. `-C`
+is the exception — it is implemented as `BEADS_DIR`, so it clears both DB
+variables for the duration of the command and cannot be outranked by them.
+
+On the store-requiring commands, a `BEADS_DB`/`BD_DB` that is set but names a
+path that does not exist is an error: `bd` reports the variable and the missing
+path and exits non-zero instead of falling back to a lower rung or creating an
+empty database beside it. `bd where` and `bd context` do not check the path.
+`bd where` exits 0 and prints the `.beads` directory of the workspace enclosing
+the path or, when there is none, the path's parent directory, even if that does
+not exist — so it cannot tell you the variable is wrong; `bd list` can. A
+`BEADS_DIR` that names a directory that does not exist, or a `.beads` directory
+that holds no initialized workspace, is an error on both kinds of command: `bd`
+exits non-zero instead of falling back to directory discovery.
+
+`--db` also accepts a bare database *name* rather than a path, but only in
+proxied-server mode, where it is equivalent to `--database`. That form selects
+a database **inside** the workspace the list above resolves, so it is not a
+workspace selector and does not outrank the environment variables.
+
+Library embedders are not covered by this list: `beads.FindDatabasePath()` has
+its own documented order (`BEADS_DIR`, then `BEADS_DB`, then discovery, with no
+`BD_DB`), which this change deliberately leaves alone.
 
 Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.
 
