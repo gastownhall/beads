@@ -63,7 +63,9 @@ Supported fields:
   mol_type          Molecule type (swarm, patrol, work)
 
 Date values:
-  Relative durations: 7d (7 days ago), 24h (24 hours ago), 2w (2 weeks ago)
+  Relative durations: 30min (30 minutes ago), 24h (24 hours ago),
+                      7d (7 days ago), 2w (2 weeks ago),
+                      6m (6 months ago), 1y (1 year ago)
   Absolute dates: 2025-01-15, 2025-01-15T10:00:00Z
   Natural language: tomorrow, "next monday", "in 3 days"
 
@@ -151,6 +153,11 @@ func gatherQueryInput(cmd *cobra.Command, args []string) (queryInput, error) {
 
 	in := queryInput{expression: strings.Join(args, " ")}
 	in.limit, _ = cmd.Flags().GetInt("limit")
+	if !cmd.Flags().Changed("limit") {
+		// bd list's policy for an unflagged limit: piped stdout is unlimited,
+		// agent mode is compact, a terminal gets the default (GH#6229).
+		in.limit = unflaggedLimit(in.limit)
+	}
 	in.longFormat, _ = cmd.Flags().GetBool("long")
 	in.parseOnly, _ = cmd.Flags().GetBool("parse-only")
 	in.offset, _ = cmd.Flags().GetInt("offset")
@@ -290,7 +297,7 @@ func init() {
 	queryCmd.Flags().BoolP("all", "a", false, "Include closed issues (default: exclude closed)")
 	queryCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	queryCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
-	queryCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
+	queryCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
 	queryCmd.Flags().Bool("parse-only", false, "Only parse the query and show the AST (for debugging)")
 
 	rootCmd.AddCommand(queryCmd)

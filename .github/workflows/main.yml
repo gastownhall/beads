@@ -181,7 +181,7 @@ jobs:
         # is available; the goal here is to catch compile-time contamination,
         # not run the full suite.
         run: |
-          go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
+          go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)' ./cmd/bd
 
   # Fast check to ensure all version files are in sync
   check-version-consistency:
@@ -445,17 +445,32 @@ jobs:
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       # No BD_LINT_NEW_FROM_MERGE_BASE here: the push lane sweeps the whole
-      # tree, including the GOOS=windows cross-lint. pr.yml scopes the same
-      # wrapper to the PR's own diff.
+      # tree, including the GOOS=windows and GOOS=darwin cross-lints. pr.yml
+      # scopes the same wrapper to the PR's own diff.
       - name: Run PR lint wrapper
         run: make ci-pr-lint
 
   # Cross-platform test matrix (Linux/macOS only - Windows uses smoke tests)
+  #
+  # Both legs run every package in one `./...` invocation, so go test's DEFAULT
+  # 10m per-package deadline applied — and cmd/bd outgrew it. scripts/test.sh
+  # already documents the floor for local runs: cmd/bd is the slowest package at
+  # ~18min wall, which is why TEST_TIMEOUT defaults to 25m there. CI was still on
+  # the 10m default and rode the edge: on 2026-09-01 main run 33497003321 failed
+  # twice with `panic: test timed out after 10m0s` in cmd/bd AND, in the same
+  # coverage pass, internal/storage/uow — different tests only 1-12s in flight
+  # each attempt (a package-wide crawl on the 2-core coverage-instrumented
+  # runner, not a hang), while a rerun of the identical tree passed. Match
+  # scripts/test.sh's 25m per-package deadline and keep it inside one finite job
+  # budget, the same shape the storage/uow and conformance jobs below use: the go
+  # deadline fires first and prints goroutine stacks, so a REAL hang is still
+  # diagnosable rather than being cut off by a bare job kill.
   test:
     name: Test (${{ matrix.os }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     needs: build-artifacts
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -542,6 +557,13 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -v -tags gms_pure_go ./cmd/bd
 
+      # Both lanes below pass -timeout=30m explicitly. ./cmd/bd has outgrown
+      # `go test`'s 10m per-package default (see scripts/ci/pr-core.sh and
+      # #6091), and when it trips the alarm the panic names whichever test was
+      # in flight, so it reads like a hang rather than the package running out
+      # of clock. The flag lives on the invocation, not in matrix.test-flags,
+      # so editing the matrix cannot silently drop it. 30m matches every other
+      # -race lane here for this same code.
       - name: Test (with coverage + JUnit XML)
         if: matrix.coverage
         env:
@@ -551,14 +573,14 @@ jobs:
           gotestsum \
             --junitfile junit.xml \
             --format testdox \
-            -- -tags gms_pure_go -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
+            -- -tags gms_pure_go -race -short -timeout=30m -coverprofile=coverage.out -skip '^TestEmbedded' ./...
 
       - name: Test
         if: ${{ !matrix.coverage }}
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
           GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./...
+        run: go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./...
 
       - name: Upload coverage to Codecov
         if: matrix.coverage && !cancelled()
@@ -854,7 +876,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: build-artifacts
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -894,6 +916,13 @@ jobs:
         run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test proxied-server cmd shard
+        # Timeout ordering, same as pr-risk.yml's twin: the test binary's own
+        # -test.timeout=15m (proxied-test-shard.sh) fires first and dumps
+        # goroutines, this 16m step timeout only backstops a wedged binary, and
+        # the 30m job budget absorbs the download/install/pull steps. Without
+        # the step timeout, slow setup alone can exhaust the job budget and kill
+        # a healthy test run with nothing to diagnose.
+        timeout-minutes: 16
         env:
           BEADS_TEST_PROXIED_SERVER: "1"
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
@@ -1192,11 +1221,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3
+      - uses: DeterminateSystems/determinate-nix-action@527f17dd63d2d60d3e5552934bc84b9a33a14d11 # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |
           nix run .#default -- --help > help.txt
+      # Every flake check for the runner's own system (today: hook-timeout-
+      # backends, checks.nix). `nix flake check` rather than a spelled-out
+      # `.#checks.x86_64-linux.<name>`: no hardcoded system, and a check added
+      # to checks.nix is run without a workflow edit.
+      - name: Run the flake checks
+        run: |
+          nix flake check -L
       - name: Verify help text
         if: steps.nix_help.outcome == 'success'
         run: |

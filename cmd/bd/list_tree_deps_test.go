@@ -36,7 +36,7 @@ func TestOrderSiblingsByDeps_DependencyBeatsPriority(t *testing.T) {
 	b := &types.Issue{ID: "pa-b", Priority: 0}
 	deps := map[string][]*types.Dependency{"pa-b": {schedDep("pa-b", "pa-a")}}
 
-	got := idsOf(orderSiblingsByDeps([]*types.Issue{b, a}, deps))
+	got := idsOf(orderSiblingsByDeps([]*types.Issue{b, a}, deps, compareIssuesByPriority))
 	if indexOf(got, "pa-a") > indexOf(got, "pa-b") {
 		t.Fatalf("expected pa-a before pa-b (dependency order), got %v", got)
 	}
@@ -51,7 +51,7 @@ func TestOrderSiblingsByDeps_ChainIsTopological(t *testing.T) {
 		"pa-c": {schedDep("pa-c", "pa-b")},
 		"pa-b": {schedDep("pa-b", "pa-a")},
 	}
-	got := idsOf(orderSiblingsByDeps([]*types.Issue{c, b, a}, deps))
+	got := idsOf(orderSiblingsByDeps([]*types.Issue{c, b, a}, deps, compareIssuesByPriority))
 	if indexOf(got, "pa-a") > indexOf(got, "pa-b") || indexOf(got, "pa-b") > indexOf(got, "pa-c") {
 		t.Fatalf("expected topological order a,b,c, got %v", got)
 	}
@@ -65,7 +65,7 @@ func TestOrderSiblingsByDeps_CycleFallsBackWithoutDropping(t *testing.T) {
 		"pa-a": {schedDep("pa-a", "pa-b")},
 		"pa-b": {schedDep("pa-b", "pa-a")},
 	}
-	got := idsOf(orderSiblingsByDeps([]*types.Issue{b, a}, deps))
+	got := idsOf(orderSiblingsByDeps([]*types.Issue{b, a}, deps, compareIssuesByPriority))
 	if len(got) != 2 || indexOf(got, "pa-a") < 0 || indexOf(got, "pa-b") < 0 {
 		t.Fatalf("cycle must preserve all nodes, got %v", got)
 	}
@@ -76,7 +76,7 @@ func TestOrderSiblingsByDeps_OutOfGroupEdgeIgnored(t *testing.T) {
 	a := &types.Issue{ID: "pa-a", Priority: 2}
 	b := &types.Issue{ID: "pa-b", Priority: 1}
 	deps := map[string][]*types.Dependency{"pa-a": {schedDep("pa-a", "pa-external")}}
-	got := idsOf(orderSiblingsByDeps([]*types.Issue{a, b}, deps))
+	got := idsOf(orderSiblingsByDeps([]*types.Issue{a, b}, deps, compareIssuesByPriority))
 	// Falls back to priority: b (P1) before a (P2).
 	if indexOf(got, "pa-b") > indexOf(got, "pa-a") {
 		t.Fatalf("expected priority order b,a for out-of-group edge, got %v", got)

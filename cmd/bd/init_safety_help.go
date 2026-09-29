@@ -56,8 +56,10 @@ ADOPTING A REMOTE
 
 DESTROY-TOKEN (non-interactive only)
 
-  When running with no TTY (CI, agents, piped input), --discard-remote
-  requires an explicit --destroy-token value. The token format is:
+  When running with no TTY (CI, agents, piped input), a destructive
+  re-init requires an explicit --destroy-token value. That covers both
+  --discard-remote and --reinit-local over existing issues. The token
+  format is:
 
       DESTROY-<issue-prefix>
 
@@ -75,13 +77,32 @@ EXIT CODES
   10    refused: remote has Dolt history and you selected local history
         without --discard-remote
   11    refused: existing local data and you declined the destroy confirm
-  12    refused: --discard-remote passed without a valid --destroy-token
-        (non-interactive mode)
+        (interactive mode only)
+  12    refused: destructive re-init (--discard-remote, or --reinit-local
+        over existing issues) without a valid --destroy-token
+        (non-interactive mode); also returned when the interactive
+        --discard-remote typed-token confirmation is declined
 
 RECOVERY
 
   If you hit a refusal, see docs/recovery/init-safety.md for step-by-step recovery
   playbooks for each exit code.
+
+RE-CLONE GOTCHAS
+
+  Setting a damaged or superseded database directory aside by hand, or
+  relying on a fresh clone right away? Two gotchas from live recovery:
+
+  Crash-loop: a set-aside store left INSIDE data_dir makes the sql-server
+  treat it as a database and crash-loop with "root hash doesn't exist:
+  <hash>". Move it OUTSIDE data_dir instead.
+
+  Missing tables: a fresh clone lacks clone-local tables (leases, wisps,
+  events, ...) until you run "bd migrate schema" (no --force). You'll see
+  "table not found: leases" until then; "Schema already at v<N>" after
+  running it is expected, not an error.
+
+  See docs/recovery/init-safety.md#re-clone-gotchas for full detail.
 `,
 	Run: func(cmd *cobra.Command, _ []string) {
 		evt := metrics.NewCommandEvent("init-safety")

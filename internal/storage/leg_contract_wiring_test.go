@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // conformancePackage is the import path whose Run entrypoints each leg wires.
@@ -36,18 +38,18 @@ const importerOneAccessorWaiverReason = "Importer has one accessor (uow.Importer
 // brings its waivers the same way; see unwiredContractEntrypoints.
 func init() {
 	registerContractLegWaivers("dolt", map[string]string{
-		"RunImporterRejectsAStaleRowAndNamesIt":          importerOneAccessorWaiverReason,
-		"RunImporterReportsTheAbsentTargetItDroppedOnce": importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCrossPlaneEdgeItDropped":   importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCycleEdgeItDropped":        importerOneAccessorWaiverReason,
-		"RunBootstrapperRecordsExactlyOneHistoryEntry":   bootstrapSplitWaiverReason,
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
 	})
 	registerContractLegWaivers("embeddeddolt", map[string]string{
-		"RunImporterRejectsAStaleRowAndNamesIt":          importerOneAccessorWaiverReason,
-		"RunImporterReportsTheAbsentTargetItDroppedOnce": importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCrossPlaneEdgeItDropped":   importerOneAccessorWaiverReason,
-		"RunImporterReportsTheCycleEdgeItDropped":        importerOneAccessorWaiverReason,
-		"RunBootstrapperRecordsExactlyOneHistoryEntry":   bootstrapSplitWaiverReason,
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
 	})
 	registerContractLegWaivers("uow", map[string]string{
 		"RunBootstrapperRecordsNoHistoryEntryOfItsOwn":                   bootstrapSplitWaiverReason,
@@ -264,6 +266,9 @@ func inspectLegWiring(t *testing.T, dir string, entrypoints []string, waived map
 // repositoryRoot locates the module root from this file's own path.
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

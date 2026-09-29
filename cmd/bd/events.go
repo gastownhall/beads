@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/storage"
@@ -103,10 +104,12 @@ Record contract (stable for external consumers):
   issue_id  string  the mutated issue's id
   actor     string  the acting identity that performed the mutation, as resolved
                     for the audit-events table (on a comment row: the comment's
-                    author); empty (omitted) when the mutation path has no
-                    actor — derived maintenance, deletes (other than a rename's
-                    synthetic delete), and rows older than the column. Never
-                    user attribution when empty.
+                    author). A delete — and the dep_remove rows a cascading
+                    delete produces — carries the identity that REQUESTED it.
+                    Empty (omitted) only when the path genuinely has no actor:
+                    derived maintenance, system cleanup with no request behind
+                    it, and rows older than the column. Never user attribution
+                    when empty.
   issue     object  full issue state AFTER the mutation; null on delete
   dep       object  {"kind","target","metadata"} for dep_add / dep_remove; omitted otherwise
   comment   object  {"id","author","text","created_at","source"} for comment; omitted otherwise
@@ -246,7 +249,32 @@ func reportEventsTruncated(err error, streaming bool) error {
 		fmt.Sprintf("resume with --since %d to continue from the oldest retained record (accepting the gap), or re-import from scratch", trunc.Floor-1))
 }
 
+// noticeEventsJournalDisabled warns, on stderr, that this workspace is not
+// recording — so an empty or stale read is not mistaken for "caught up".
+//
+// It exists because zero rows is INDISTINGUISHABLE from a journal that has
+// nothing new: a consumer polling a workspace that never enabled the journal
+// sees a successful, empty read forever and concludes it is up to date. The
+// HTTP API refuses that read outright (EventsJournalDisabled, 409); the CLI
+// cannot, because exporting the ledger a now-disabled workspace recorded while
+// it WAS enabled is legitimate. So it serves the rows and says what it is
+// serving.
+//
+// stderr, not stdout, and not the JSON envelope: stdout is a JSONL stream a
+// line reader consumes, and a notice about the reader's own configuration is
+// not a record. Exit status is unchanged.
+func noticeEventsJournalDisabled(beadsDir string) {
+	if eventsjournal.EnabledFor(beadsDir) {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"note: the events journal is disabled for this workspace (enable with 'bd config set %s true'); "+
+			"any records shown were written while it was enabled, and new mutations are not being recorded\n",
+		eventsjournal.ConfigKey)
+}
+
 func runEventsTail(ctx context.Context, since int64, limit int, follow bool) error {
+	noticeEventsJournalDisabled(beads.FindBeadsDir())
 	enc := json.NewEncoder(os.Stdout)
 	emit := func(from int64) (int64, error) {
 		rows, err := readJournal(ctx, from, limit)

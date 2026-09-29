@@ -197,8 +197,9 @@ change here is a breaking wire change). Same required fields as list
 items, plus:
 - `description` (string)
 - `acceptance_criteria` (string)
-- `revision` (number): guarded-write optimistic-concurrency token; always
-  present, including a legacy `0`
+- `revision` (string): guarded-write optimistic-concurrency token, an opaque
+  decimal string compared by equality and echoed back verbatim; always present,
+  including a legacy `"0"`
 - `dependencies` (object[]): Full dependency records
 - `comments` (object[]): Comment thread — present only with `--include-comments`;
   the default response returns `comment_count` only (count-only, be-ijck6q)

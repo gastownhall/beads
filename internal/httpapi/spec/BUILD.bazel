@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "spec",
+    srcs = ["embed.go"],
+    embedsrcs = ["openapi.v0.yaml"],
+    importpath = "github.com/steveyegge/beads/internal/httpapi/spec",
+    visibility = ["//:__subpackages__"],
+)

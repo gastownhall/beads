@@ -1,6 +1,6 @@
 ---
 title: Graph Links in Beads
-description: "Non-blocking links between issues: replies-to threads, relates-to, duplicates, and supersedes chains"
+description: "Non-blocking links between issues: replies-to threads, relates-to, duplicates, and supersedes (replacement) links"
 ---
 
 Beads supports several types of links between issues to create a knowledge graph. These links enable rich querying and traversal beyond simple blocking dependencies.
@@ -114,9 +114,9 @@ bd show bd-bug2
 - Original (canonical) issue remains open
 - `duplicate_of` field stores the canonical ID
 
-### supersedes - Version Chains
+### supersedes - Replacement Links
 
-Marks an issue as superseded by a newer version. The old issue is automatically closed.
+Marks an issue as superseded by a different (replacement) issue. The old issue is automatically closed. This is a replacement link, not a version relation: the new issue takes the old one's place.
 
 **Created by:**
 - `bd supersede <old-id> --with <new-id>`
@@ -142,7 +142,7 @@ bd create --title "Design Doc v2" --type task
 bd supersede bd-doc1 --with bd-doc2
 # Result: bd-doc1 closed with superseded_by: bd-doc2
 
-# View shows the chain
+# View shows the replacement
 bd show bd-doc1
 # Status: closed
 # Superseded by: bd-doc2
@@ -247,14 +247,14 @@ bd duplicate bd-bug42 --of bd-bug17
 bd duplicate bd-bug58 --of bd-bug17
 ```
 
-### Version History
+### Replacement History
 
 Track document evolution:
 
 ```bash
 bd supersede bd-rfc1 --with bd-rfc2
 bd supersede bd-rfc2 --with bd-rfc3
-# bd-rfc3 is now the current version
+# bd-rfc3 is now the live issue
 ```
 
 ### Message Threading
@@ -272,7 +272,7 @@ Build conversation chains (via orchestrator mail):
 1. **Use relates-to sparingly** - Too many links become noise
 2. **Prefer specific link types** - `duplicates` is clearer than generic relates-to
 3. **Keep threads shallow** - Deep reply chains are hard to follow
-4. **Document supersedes chains** - Note why version changed
+4. **Document replacements** - Note why the issue was replaced
 5. **Query before creating duplicates** - `bd search` first
 
 ## See Also

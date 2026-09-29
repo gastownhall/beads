@@ -52,27 +52,10 @@ func runCompactProxiedServer(ctx context.Context) error {
 
 	cutoff := time.Now().AddDate(0, 0, -compactDoltDays)
 
-	var oldCommits int
-	var recentHashes []string
-	for _, entry := range logEntries {
-		if entry.Date.Before(cutoff) {
-			oldCommits++
-		} else {
-			recentHashes = append(recentHashes, entry.Hash)
-		}
-	}
-	initialHash := logEntries[totalCommits-1].Hash
-	boundaryHash := ""
-	for _, entry := range logEntries {
-		if entry.Date.Before(cutoff) {
-			boundaryHash = entry.Hash
-			break
-		}
-	}
+	plan := planCompaction(logEntries, cutoff)
+	oldCommits, recentHashes := plan.oldCommits, plan.recentHashes
+	initialHash, boundaryHash := plan.initialHash, plan.boundaryHash
 
-	for i, j := 0, len(recentHashes)-1; i < j; i, j = i+1, j-1 {
-		recentHashes[i], recentHashes[j] = recentHashes[j], recentHashes[i]
-	}
 	recentCommits := len(recentHashes)
 
 	if compactDoltDryRun {
@@ -143,7 +126,13 @@ func runCompactProxiedServer(ctx context.Context) error {
 		if tags, perr = versioncontrolops.ListTags(ctx, conn); perr != nil {
 			WarnError("listing tags before GC: %v", perr)
 		}
-		if perr := versioncontrolops.DoltGC(ctx, conn); perr != nil {
+		// Full pass: the squash orphans a commit chain that any earlier GC
+		// already promoted to the old generation, which a default pass never
+		// revisits.
+		if !jsonOutput {
+			fmt.Println("  Running full Dolt GC (all generations; can take minutes on large stores)...")
+		}
+		if perr := versioncontrolops.DoltGCFull(ctx, conn); perr != nil {
 			WarnError("dolt gc after compact failed: %v", perr)
 		}
 		return nil
@@ -167,6 +156,7 @@ func runCompactProxiedServer(ctx context.Context) error {
 			"recent_kept":        recentCommits,
 			"remote_refs_pruned": pruned,
 			"tags_anchoring":     tags,
+			"gc_mode":            gcModeFull,
 			"elapsed_ms":         elapsed.Milliseconds(),
 		})
 	}

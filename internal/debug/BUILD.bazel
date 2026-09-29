@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "debug",
+    srcs = ["debug.go"],
+    importpath = "github.com/steveyegge/beads/internal/debug",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "debug_test",
+    srcs = ["debug_test.go"],
+    embed = [":debug"],
+)

@@ -524,7 +524,7 @@ func ReadConfigPrefix(ctx context.Context, tx DBTX) (string, error) {
 		underscoreYamlPrefix := strings.TrimSpace(config.GetString("issue_prefix"))
 		debug.Logf("Debug: missing config.issue_prefix in database (err=%v, db value=%q, yaml issue-prefix=%q, yaml issue_prefix=%q)\n",
 			err, configPrefix, yamlPrefix, underscoreYamlPrefix)
-		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote; if using config.yaml, use key 'issue-prefix', not 'issue_prefix')", storage.ErrNotInitialized)
+		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote; this check reads the database's config table, so adding 'issue-prefix' to config.yaml does not satisfy it)", storage.ErrNotInitialized)
 	} else if err != nil {
 		return "", fmt.Errorf("failed to get config: %w", err)
 	}

@@ -65,6 +65,16 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	if strings.EqualFold(in.formatStr, "json") {
 		jsonOutput = true
 		in.formatStr = ""
+	} else if in.formatStr != "" && cmd.Flags().Changed("format") && !commandJSONFlagChanged(cmd) {
+		// A --format the caller typed outranks a json default from config or
+		// the environment (GH#6278). The root pre-run promotes `json: true`
+		// into jsonOutput unless the ROOT --format changed, but this command's
+		// own --format shadows the root one, so that check never sees it and
+		// the JSON branch would replace the requested graph or template. An
+		// explicit --json still wins (the !commandJSONFlagChanged conjunct
+		// above is what preserves it); note no flag's help text states that
+		// precedence, so this comment is its only record.
+		jsonOutput = false
 	}
 	in.jsonOutput = jsonOutput
 
@@ -91,6 +101,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.NoLabels, _ = cmd.Flags().GetBool("no-labels")
 
 	in.Brief, _ = cmd.Flags().GetBool("brief")
+	in.IncludeComments, _ = cmd.Flags().GetBool("include-comments")
 	in.SkipLabels, _ = cmd.Flags().GetBool("skip-labels")
 	if in.SkipLabels {
 		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels)
@@ -134,6 +145,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.IncludeTemplates, _ = cmd.Flags().GetBool("include-templates")
 	in.IncludeGates, _ = cmd.Flags().GetBool("include-gates")
 	in.IncludeInfra, _ = cmd.Flags().GetBool("include-infra")
+	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
@@ -158,6 +170,28 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 			return in, HandleError("invalid wisp-type %q (must be %s)", s, types.ValidWispTypeNames())
 		}
 		in.WispType = &wt
+
+		// wisp_type is a PREDICATE, not a plane selector (see
+		// issueops.ListRequest.WispType): it narrows whatever the rest of the
+		// request admitted. On a default listing that is the durable rows,
+		// which carry no classification — so this request cannot match a row
+		// for ANY input, and would report an empty listing rather than the
+		// unread plane that actually holds the answer.
+		//
+		// The request stays LAWFUL at the API layer, where composing to empty
+		// is the pinned contract. Refusing it belongs HERE, at the CLI, where
+		// the only thing a human can have meant is the combination that
+		// answers with rows.
+		//
+		// An explicit --type is left alone: an infra type routes to the plane
+		// by itself, so the request may be satisfiable and this cannot tell
+		// without the workspace's infra vocabulary, which this layer does not
+		// load.
+		if !in.IncludeEphemeral && !in.IncludeInfra && in.IssueType == "" {
+			return in, HandleErrorWithHint(
+				fmt.Sprintf("--wisp-type %s cannot match anything here: it filters the wisp_type column, and this listing admits only durable rows, which never carry one", s),
+				"add --include-ephemeral to admit the ephemeral plane (or --include-infra, which admits it as part of a wider bundle)")
+		}
 	}
 
 	in.DeferredFlag, _ = cmd.Flags().GetBool("deferred")
@@ -225,6 +259,13 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.prettyFormat = (prettyFormat || treeFormat) && !in.jsonOutput && in.formatStr == ""
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	if in.watchMode {
+		// --watch re-renders the pretty listing on every tick, so a --format
+		// template would be dropped without a word (GH#6277). Refused here,
+		// ahead of the route split, so the direct and proxied routes answer
+		// the same way.
+		if in.formatStr != "" {
+			return in, HandleError("--format cannot be combined with --watch; --watch always renders the pretty listing")
+		}
 		in.prettyFormat = true
 	}
 	in.noPager, _ = cmd.Flags().GetBool("no-pager")
@@ -308,10 +349,8 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		in.effectiveLimit = 0
 	case listLimitConfigured:
 		in.effectiveLimit = limit
-	case !ui.IsTerminal():
-		in.effectiveLimit = 0 // Piped stdout should not truncate (GH#4094)
-	case ui.IsAgentMode():
-		in.effectiveLimit = 20
+	default:
+		in.effectiveLimit = unflaggedLimit(limit)
 	}
 	// The request carries the limit the caller receives. Which row limit that
 	// implies for the query - a sort SQL cannot express fetches everything and
@@ -365,4 +404,29 @@ func parseListTimeFlag(cmd *cobra.Command, name string) (*time.Time, error) {
 		return nil, HandleError("parsing --%s: %v", name, err)
 	}
 	return &t, nil
+}
+
+// agentModeLimit is the page size an unflagged listing gets in agent mode on a
+// terminal: ultra-compact output for an LLM context window.
+const agentModeLimit = 20
+
+// unflaggedLimit is the limit a listing command uses when the caller named
+// none: the part of the policy `bd list` and `bd query` share, so the two
+// cannot drift (GH#6229). Each command resolves its own earlier branches first
+// (an explicit --limit, `bd list`'s --all and list.limit) and hands its own
+// default here as fallback.
+func unflaggedLimit(fallback int) int {
+	return resolveUnflaggedLimit(fallback, ui.IsTerminal(), ui.IsAgentMode())
+}
+
+// resolveUnflaggedLimit is unflaggedLimit with the environment passed in, so
+// the terminal and agent-mode branches are testable from a piped `go test`.
+func resolveUnflaggedLimit(fallback int, stdoutIsTerminal, agentMode bool) int {
+	switch {
+	case !stdoutIsTerminal:
+		return 0 // Piped stdout should not truncate (GH#4094)
+	case agentMode:
+		return agentModeLimit
+	}
+	return fallback
 }

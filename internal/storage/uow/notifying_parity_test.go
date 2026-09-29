@@ -159,6 +159,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"PreviewDeleteWisp":            reads,
 			"SearchIssueIDs":               reads,
 			"SearchIssues":                 reads,
+			"SearchWispsPlane":             reads,
 			"SearchIssuesWithCounts":       reads,
 			"DeleteIssue":                  deletes,
 			"DeleteIssues":                 deletes,
@@ -189,24 +190,25 @@ func TestRecordingDependencyUseCaseCoversItsSurface(t *testing.T) {
 			// — an ancestry walk and a reachability walk — so there is nothing
 			// for the recorder to notify about; the writes those gates guard are
 			// recorded by AddDependencies, which is declared below.
-			"ValidateBlockingHierarchy": reads,
-			"CycleThroughEdges":         reads,
-			"DetectCycleReport":         reads,
-			"DetectCycles":              reads,
-			"GetBlockingInfo":           reads,
-			"GetDependencyTree":         reads,
-			"GetForIssueIDs":            reads,
-			"GetIssueDependencyRecords": reads,
-			"GetWispDependencyRecords":  reads,
-			"IsBlocked":                 reads,
-			"IsWispBlocked":             reads,
-			"IterWispWithIssueMetadata": reads,
-			"IterWithIssueMetadata":     reads,
-			"ListByIssueIDs":            reads,
-			"ListByWispIDs":             reads,
-			"ListWispWithIssueMetadata": reads,
-			"ListWithIssueMetadata":     reads,
-			"WalkDependencyTree":        reads,
+			"ValidateBlockingHierarchy":            reads,
+			"CycleThroughEdges":                    reads,
+			"DetectCycleReport":                    reads,
+			"DetectCycles":                         reads,
+			"GetBlockingInfo":                      reads,
+			"GetDependencyTree":                    reads,
+			"GetExternalBlockingDependencyRecords": reads,
+			"GetForIssueIDs":                       reads,
+			"GetIssueDependencyRecords":            reads,
+			"GetWispDependencyRecords":             reads,
+			"IsBlocked":                            reads,
+			"IsWispBlocked":                        reads,
+			"IterWispWithIssueMetadata":            reads,
+			"IterWithIssueMetadata":                reads,
+			"ListByIssueIDs":                       reads,
+			"ListByWispIDs":                        reads,
+			"ListWispWithIssueMetadata":            reads,
+			"ListWithIssueMetadata":                reads,
+			"WalkDependencyTree":                   reads,
 		})
 }
 
@@ -255,11 +257,22 @@ func TestNotifyingProviderAnswersTheWholeProviderSurface(t *testing.T) {
 	if len(surface) < 25 {
 		t.Fatalf("parsed only %d methods off doltSQLProvider — the scan is broken, not the provider", len(surface))
 	}
+	// initSchemaAttempt is the single-attempt body initSchema's backoff loop
+	// calls, and verifyTeamServerSchema and attachPreviewDatabase are the two open
+	// paths it fans out to (dolt_sql_provider.go). Like initSchema above them, each
+	// is an unexported startup helper reached only as p.<method> on the concrete
+	// provider — never through a UnitOfWorkProvider type assertion — so the wrapper
+	// has no capability to answer and no bead write to fire a hook for.
+	initBranch := "an unexported branch of initSchema's startup path, reached only on the concrete " +
+		"provider, not a capability any caller can reach through the wrapper"
 	assertPartition(t, "UnitOfWorkProvider", surface, reflect.TypeOf((*notifyingProvider)(nil)), map[string]string{
 		"BeginTx": "TxProvider hands out a bare transaction with no unit of work around it, so " +
 			"there is nothing to buffer and nothing to drain: the wrapper deliberately does not " +
 			"offer it, and only this package's own NewUOW asks a provider for one",
-		"initSchema": "unexported provider setup, not a capability any caller can reach",
+		"initSchema":             "unexported provider setup, not a capability any caller can reach",
+		"initSchemaAttempt":      initBranch,
+		"verifyTeamServerSchema": initBranch,
+		"attachPreviewDatabase":  initBranch,
 	})
 }
 
@@ -282,11 +295,13 @@ func TestNotifyingProviderBuildsRolesOnItself(t *testing.T) {
 		"RunNonTx":      true,
 		"SetPoolLimits": true,
 		"Unwrap":        true,
-		// Events-journal capability plumbing: activation binds on the inner
-		// provider's transactions, and a retention pass writes no bead. Neither
-		// builds a role, so neither can build one "on itself".
-		"SetEventsJournalEnabled": true,
-		"RunEventsMaintenanceTx":  true,
+		// Events-journal and versioned-history capability plumbing: activation
+		// for both binds on the inner provider's transactions, and a retention
+		// pass writes no bead. None of these build a role, so none of them can
+		// build one "on itself".
+		"SetEventsJournalEnabled":    true,
+		"RunEventsMaintenanceTx":     true,
+		"SetVersionedHistoryEnabled": true,
 	}
 
 	var checked int

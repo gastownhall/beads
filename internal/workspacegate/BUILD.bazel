@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "workspacegate",
+    srcs = ["gate.go"],
+    importpath = "github.com/steveyegge/beads/internal/workspacegate",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/lockfile"],
+)
+
+go_test(
+    name = "workspacegate_test",
+    srcs = ["gate_test.go"],
+    embed = [":workspacegate"],
+    deps = ["//internal/testutil/bazeltest"],
+)

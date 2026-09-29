@@ -2,7 +2,6 @@ package scripts_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -155,10 +154,7 @@ type installDoltRun struct {
 func runInstallDolt(t *testing.T, curlFailures int, reportedVersion string) installDoltRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test install-dolt.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()
