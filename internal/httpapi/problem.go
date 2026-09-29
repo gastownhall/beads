@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -1132,8 +1133,14 @@ func (r Result) WithDeclaredLater(declaredLater bool) Result {
 //
 // It is the REQUEST's value rather than a read, which is why there is no
 // `actual_version` beside it here — see PreconditionFailed.
+//
+// The parameter stays int64 because every caller holds the PARSED guard by the
+// time it refuses; the member is a decimal string on the wire, so the echo goes
+// back out through types.RevisionToken and a client comparing it to what it sent
+// gets its own spelling back.
 func (r Result) WithExpectedVersion(expected int64) Result {
-	r.Problem.ExpectedVersion = &expected
+	token := types.RevisionToken(expected)
+	r.Problem.ExpectedVersion = &token
 	return r
 }
 

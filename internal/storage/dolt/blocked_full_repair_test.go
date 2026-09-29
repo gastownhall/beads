@@ -1,10 +1,9 @@
 package dolt
 
-// Differential coverage for the full is_blocked repair (bd-t9ypt): the
-// full-repair SQL must agree with the scoped per-write templates on EVERY
-// leg of the should-be-blocked disjunction — issue blockers, wisp blockers,
-// issue parents, wisp parents, and the waits-for gate in all its metadata
-// modes (default all-children, any-children, also_blocks,
+// Coverage for the full is_blocked repair (bd-t9ypt) across EVERY leg of the
+// should-be-blocked disjunction — issue blockers, wisp blockers, issue
+// parents, wisp parents, and the waits-for gate in all its metadata modes
+// (default all-children, any-children, also_blocks,
 // also_blocks-over-any-children) — on both the issues table and the wisps
 // table.
 //
@@ -15,6 +14,18 @@ package dolt
 // tests in blocked_consistency_test.go pin legs 1 and 3 (issue blocker,
 // issue parent) with exact corrected-row counts; this test pins the
 // remaining legs, which would otherwise have no full-repair coverage.
+//
+// What the differential half proves narrowed in gastownhall/beads#6291: both
+// sides — the ground-truth producer (batched templates) and the system under
+// test (full repair) — now render from the one shouldBeBlockedIDsUnionSQL
+// builder, so write-path-vs-full-repair agreement no longer cross-checks two
+// independently written SQL forms. It validates scope-splicing (the batched
+// legs' `AND d.issue_id IN (batch)`) and the waits-for DISTINCT barrier, which
+// the two sides do not share. Per-leg semantics are instead pinned by the
+// absolute fixture expectations in the "Sanity-pin the interesting
+// expectations" block below — hardcoded ids covering all five legs and both
+// tables, on the write path. Those pins are what makes a shared-builder leg
+// bug fail here: do not drop them as redundant with the differential compare.
 
 import (
 	"context"

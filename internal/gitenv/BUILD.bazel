@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gitenv",
+    srcs = ["routing.go"],
+    importpath = "github.com/steveyegge/beads/internal/gitenv",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/execenv"],
+)
+
+go_test(
+    name = "gitenv_test",
+    srcs = ["routing_test.go"],
+    embed = [":gitenv"],
+)

@@ -21,17 +21,26 @@ echo ""
 
 MISMATCH=0
 
-check_version() {
+# Base (prerelease-stripped) form. The Windows PE numeric fields must be purely
+# numeric, so they carry this rather than $CANONICAL.
+BASE_VERSION="${CANONICAL%%-*}"
+
+check_expected() {
     local _file=$1
     local version=$2
-    local description=$3
+    local expected=$3
+    local description=$4
 
-    if [ "$version" != "$CANONICAL" ]; then
-        echo -e "${RED}❌ $description: $version (expected $CANONICAL)${NC}"
+    if [ "$version" != "$expected" ]; then
+        echo -e "${RED}❌ $description: ${version:-missing} (expected $expected)${NC}"
         MISMATCH=1
     else
         echo -e "${GREEN}✓ $description: $version${NC}"
     fi
+}
+
+check_version() {
+    check_expected "$1" "$2" "$CANONICAL" "$3"
 }
 
 # Check all version files
@@ -50,6 +59,15 @@ check_version "plugins/beads/.claude-plugin/plugin.json" \
 check_version "plugins/beads/.codex-plugin/plugin.json" \
     "$(jq -r '.version' plugins/beads/.codex-plugin/plugin.json 2>/dev/null)" \
     "Codex plugin.json"
+
+# update-versions.sh bumps this one too, but it was never gated here — so a
+# drifted copilot manifest (the same drift class that carried stale .githooks
+# markers through v1.2.0) would silently no-op the bump's old->new sed, pass
+# this script, pass the pre-push hook and CI, and ship advertising the previous
+# version.
+check_version "plugins/beads/.copilot-plugin/plugin.json" \
+    "$(jq -r '.version' plugins/beads/.copilot-plugin/plugin.json 2>/dev/null)" \
+    "Copilot plugin.json"
 
 check_version ".claude-plugin/marketplace.json" \
     "$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json 2>/dev/null)" \
@@ -107,17 +125,58 @@ for hook in .githooks/*; do
     done
 done
 
-echo ""
+# Windows PE resource metadata. gen-winres.sh re-derives winres.json's numeric
+# fields from version.go at build time, so those self-heal — but
+# manifest.xml's <assemblyIdentity> version is embedded verbatim with no
+# backstop, and update-versions.sh rewrites both with a sed anchored on the OLD
+# value, so a drifted file is a silent no-op. Gate them.
+#
+# The numeric fields (file_version/product_version, and the manifest's
+# four-part version) must be purely numeric, so they carry the base version:
+# for 1.1.0-rc.1 they read 1.1.0 while FileVersion/ProductVersion read the full
+# prerelease string.
+WINRES_JSON="cmd/bd/winres/winres.json"
+for field in file_version product_version; do
+    check_expected "$WINRES_JSON" \
+        "$(jq -r ".RT_VERSION.\"#1\".\"0000\".fixed.$field" "$WINRES_JSON" 2>/dev/null)" \
+        "$BASE_VERSION" "winres.json $field"
+done
+for field in FileVersion ProductVersion; do
+    check_expected "$WINRES_JSON" \
+        "$(jq -r ".RT_VERSION.\"#1\".\"0000\".info.\"0409\".$field" "$WINRES_JSON" 2>/dev/null)" \
+        "$CANONICAL" "winres.json $field"
+done
 
+# Anchor on line start: the XML declaration on line 1 also carries a
+# version="1.0" attribute.
+check_expected "cmd/bd/winres/manifest.xml" \
+    "$(grep -oE '^[[:space:]]*version="[0-9][^"]*"' cmd/bd/winres/manifest.xml 2>/dev/null | head -1 | sed -E 's/.*"(.*)"/\1/')" \
+    "$BASE_VERSION.0" "manifest.xml assemblyIdentity version"
 
 echo ""
 
 if [ $MISMATCH -eq 1 ]; then
     echo -e "${RED}❌ Version mismatch detected!${NC}"
     echo ""
-    echo "Run: scripts/update-versions.sh $CANONICAL"
-    echo "Or manually update the mismatched files."
+    echo "Note: re-running 'scripts/update-versions.sh $CANONICAL' will NOT fix"
+    echo "most of these. It derives the OLD version from cmd/bd/version.go, which"
+    echo "already reads $CANONICAL, so its old->new substitutions rewrite"
+    echo "$CANONICAL -> $CANONICAL and no-op on a file that drifted. Only the"
+    echo ".githooks markers (rewritten wholesale) and uv.lock (regenerated) heal"
+    echo "on a re-run."
+    echo ""
+    echo "Fix whichever applies:"
+    echo "  • cmd/bd/version.go itself is wrong (you meant another version):"
+    echo "      scripts/update-versions.sh <intended-version>"
+    echo "  • one gated file drifted: edit that file to $CANONICAL and re-run"
+    echo "    this script."
+    echo "  • several drifted: set cmd/bd/version.go back to the previous"
+    echo "    version, then scripts/update-versions.sh $CANONICAL to replay the"
+    echo "    whole bump."
     exit 1
 else
-    echo -e "${GREEN}✓ Version files and released-docs policy pass for: $CANONICAL${NC}"
+    echo -e "${GREEN}✓ Version files in sync at: $CANONICAL${NC}"
+    echo "  (Version files only — this script does not check docs. The docs"
+    echo "   release line and docs/cli-docs.pin are manual release steps; see"
+    echo "   RELEASING.md.)"
 fi

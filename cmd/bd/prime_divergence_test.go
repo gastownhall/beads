@@ -99,3 +99,102 @@ func TestPrimeDivergenceReminder_EmptyDirArgUsesCwd(t *testing.T) {
 		t.Fatalf("expected empty for cwd without files, got %q", got)
 	}
 }
+
+// The remaining tests cover the workspace the reminder is resolved against
+// under -C (#5509): primeWorkspaceDir is the -C directory itself, not the
+// parent of the beads dir that -C resolved to.
+
+func TestPrimeDivergenceWorkspaceDir_ChangeDirUsesTarget(t *testing.T) {
+	t.Cleanup(func() {
+		changeDir = ""
+	})
+	// Only the cwd carries divergent agent files; the -C target has none.
+	cwd := primeTestWorkspace(t, map[string]string{
+		".beads/metadata.json": primeTestMetadata,
+		"AGENTS.md":            "# Agents\n" + markerBlock,
+		"CLAUDE.md":            "# Claude\n" + markerBlock,
+	})
+	target := primeTestWorkspace(t, map[string]string{".beads/metadata.json": primeTestMetadata})
+	t.Chdir(cwd)
+
+	changeDir = target
+	if got := primeDivergenceReminder(primeWorkspaceDir()); got != "" {
+		t.Fatalf("with -C, reminder against target must be empty, got %q", got)
+	}
+	changeDir = ""
+	if got := primeDivergenceReminder(primeWorkspaceDir()); got == "" {
+		t.Fatal("control: without -C the cwd fixture must emit a divergence note")
+	}
+}
+
+// CASE A: the -C target is a redirect clone. The reminder must be resolved
+// against the clone (where the agent files live), not against the parent of
+// the external store that -C resolved BEADS_DIR to.
+func TestPrimeDivergenceWorkspaceDir_RedirectUsesChangeDir(t *testing.T) {
+	t.Cleanup(func() {
+		changeDir = ""
+	})
+	external := primeTestWorkspace(t, map[string]string{".beads/metadata.json": primeTestMetadata})
+	externalBeads := filepath.Join(external, ".beads")
+	target := primeTestWorkspace(t, map[string]string{
+		".beads/redirect": externalBeads + "\n",
+		"AGENTS.md":       "# Agents\n" + markerBlock,
+		"CLAUDE.md":       "# Claude\n" + markerBlock,
+	})
+
+	resolvedBeads, err := resolveChangeDirBeadsDir(target)
+	if err != nil {
+		t.Fatalf("resolveChangeDirBeadsDir: %v", err)
+	}
+	if filepath.Clean(resolvedBeads) != filepath.Clean(externalBeads) {
+		t.Fatalf("resolved beads = %q, want external %q", resolvedBeads, externalBeads)
+	}
+
+	changeDir = target
+	ws := primeWorkspaceDir()
+	if ws != target {
+		t.Fatalf("CASE A: primeWorkspaceDir = %q, want -C target %q (not parent of redirected beads %q)", ws, target, filepath.Dir(resolvedBeads))
+	}
+	if got := primeDivergenceReminder(ws); got == "" {
+		t.Fatal("CASE A: reminder against -C target must emit divergence note")
+	}
+	if got := primeDivergenceReminder(filepath.Dir(resolvedBeads)); got != "" {
+		t.Fatalf("control: parent-of-resolved-beads must not emit note, got %q", got)
+	}
+}
+
+// CASE B: the -C target is a subdirectory of the workspace. -C resolves
+// BEADS_DIR by walking up to the root's .beads, but the reminder still reads
+// the -C directory itself, as `cd sub && bd prime` would.
+func TestPrimeDivergenceWorkspaceDir_SubdirUsesChangeDir(t *testing.T) {
+	t.Cleanup(func() {
+		changeDir = ""
+	})
+	wsRoot := primeTestWorkspace(t, map[string]string{
+		".beads/metadata.json": primeTestMetadata,
+		"AGENTS.md":            "# Agents\n" + markerBlock,
+		"CLAUDE.md":            "# Claude\n" + markerBlock,
+		"sub/.keep":            "",
+	})
+	sub := filepath.Join(wsRoot, "sub")
+
+	resolvedBeads, err := resolveChangeDirBeadsDir(sub)
+	if err != nil {
+		t.Fatalf("resolveChangeDirBeadsDir: %v", err)
+	}
+	if filepath.Clean(resolvedBeads) != filepath.Join(wsRoot, ".beads") {
+		t.Fatalf("resolved beads = %q, want root %q", resolvedBeads, filepath.Join(wsRoot, ".beads"))
+	}
+
+	changeDir = sub
+	ws := primeWorkspaceDir()
+	if ws != sub {
+		t.Fatalf("CASE B: primeWorkspaceDir = %q, want -C subdir %q (not parent-of-beads %q)", ws, sub, filepath.Dir(resolvedBeads))
+	}
+	if got := primeDivergenceReminder(ws); got != "" {
+		t.Fatalf("CASE B: reminder against -C subdir must be empty, got %q", got)
+	}
+	if got := primeDivergenceReminder(filepath.Dir(resolvedBeads)); got == "" {
+		t.Fatal("control: parent-of-beads-dir must emit note (proves CASE B distinguishes the wrong derivation)")
+	}
+}

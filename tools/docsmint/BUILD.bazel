@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "docsmint_lib",
+    srcs = [
+        "docsmint.go",
+        "legacy.go",
+        "main.go",
+    ],
+    importpath = "github.com/steveyegge/beads/tools/docsmint",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "docsmint",
+    embed = [":docsmint_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "docsmint_test",
+    srcs = [
+        "docsmint_test.go",
+        "legacy_test.go",
+    ],
+    embed = [":docsmint_lib"],
+)

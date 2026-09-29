@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "query",
+    srcs = [
+        "evaluator.go",
+        "lexer.go",
+        "parser.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/query",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/timeparsing",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "query_test",
+    srcs = ["query_test.go"],
+    embed = [":query"],
+    deps = [
+        "//internal/storage",
+        "//internal/timeparsing",
+        "//internal/types",
+    ],
+)

@@ -636,7 +636,7 @@ func (s *DoltStore) prepareCLIRouteForPeerGitProtocol(ctx context.Context, peer 
 			if !doltutil.IsGitProtocolURL(r.URL) {
 				return false, nil
 			}
-			if err := s.ensureMatchingCLIRemote(peer, r.URL); err != nil {
+			if err := s.ensureMatchingCLIRemote(peer, r.URL, r.Ref); err != nil {
 				return false, fmt.Errorf("peer remote %q uses git protocol and requires CLI routing: %w", peer, err)
 			}
 			return true, nil

@@ -411,6 +411,12 @@ type Storage interface {
 	// Work queries
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error)
+	// GetReadyWorkWithCountsAndTotal is GetReadyWorkWithCounts plus the size
+	// of the whole ready set the page was cut from — the same number
+	// ReadyWorkCounter.CountReadyWork(filter) answers — resolved in the same
+	// read transaction and statements as the page. It is what lets
+	// `bd ready --limit N` print "Showing N of M" without a second pass.
+	GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error)
 	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 
@@ -691,6 +697,19 @@ type GarbageCollector interface {
 	DoltGC(ctx context.Context) error
 }
 
+// FullGarbageCollector provides a full Dolt garbage collection, which collects
+// the old generation as well as the new one.
+//
+// Dolt GC is generational: each pass promotes the chunks reachable at that
+// moment into the old generation, and DoltGC only visits the new generation.
+// After a history rewrite (Flatten, Compact) the orphaned commit chain usually
+// lives in the old generation, so DoltGC reclaims nothing and callers must use
+// DoltGCFull. Prefer DoltGC for periodic hygiene, where a full pass costs
+// minutes on large stores for no extra reclaim.
+type FullGarbageCollector interface {
+	DoltGCFull(ctx context.Context) error
+}
+
 // Flattener squashes all Dolt commit history into a single commit.
 // Callers should type-assert to this interface for history compaction.
 type Flattener interface {
@@ -818,6 +837,30 @@ type EventsJournalAccessor interface {
 // config, and a consumer holding the read role has no business changing it.
 type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
+}
+
+// VersionedHistoryConfigurer controls dual-write issue-version history
+// activation on ONE storage instance. Implementations must never use
+// process-global state, for the same reason as EventsJournalConfigurer:
+// a process can hold several stores at once, and enabling history on one must
+// not turn it on for any other. Callers type-assert; a store that does not
+// implement it simply cannot record version history.
+//
+// SINGLE WRITER ONLY until the version_id primary-key swap lands.
+// issue_versions is keyed PRIMARY KEY (issue_id, revision), and revision is
+// a local ordinal (MAX(revision)+1 inside the writing transaction), so two
+// disconnected writers that each mint the same ordinal for the same issue
+// collide on merge — and TryAutoResolveMergeConflicts
+// (versioncontrolops/mergesettle.go) fails the pull for a table it does not
+// know. Enabling versioned history is therefore safe only with a SINGLE
+// writer per store until migration 0068 steps 1-3 (UUID version_id primary
+// key, ordinal demoted to an index) land; those steps follow as their own
+// PR. "Single writer" means one writer at a time per store, not merely one
+// clone: MAX(revision)+1 is not a safe allocator for two concurrent
+// transactions in one store either (gastownhall/beads#6379, item 4). See
+// issueops/version_history.go for why the ordinal is never an address.
+type VersionedHistoryConfigurer interface {
+	SetVersionedHistoryEnabled(enabled bool)
 }
 
 // LifecycleManager provides lifecycle inspection beyond Close().

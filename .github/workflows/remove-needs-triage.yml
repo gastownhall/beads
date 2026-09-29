@@ -1,0 +1,61 @@
+name: Remove needs-triage when triaged
+
+on:
+  issues:
+    types: [labeled]
+  pull_request_target:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  # pull_request_target is safe here because this job never checks out or runs
+  # pull request code; it only removes labels from the issue/PR metadata.
+  remove-triage-label:
+    # Olivia owns label, comment, and inbox removal as one recoverable transaction.
+    if: github.event.sender.login != 'gascityinc-sarah[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Remove needs-triage when a non-status label is added
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const added = context.payload.label.name;
+            if (added.startsWith('status/')) return;
+
+            const number = context.issue?.number || context.payload.pull_request?.number;
+            const target = 'status/needs-triage';
+
+            const current = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+            });
+
+            if (!current.data.some(l => l.name === target)) return;
+
+            // The check above narrows a race but cannot close it: adding
+            // several non-status labels at once fires one `labeled` event
+            // (and one job) each, and they run concurrently. Every run sees
+            // the label present here, then all race to remove it. The winner
+            // gets 204; the losers get 404 "Label does not exist". Treat an
+            // already-absent label as success so a benign lost race does not
+            // paint a red X on the PR's checks.
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                name: target,
+              });
+              console.log(`Removed '${target}' from #${number} (triaged with '${added}')`);
+            } catch (err) {
+              if (err.status === 404) {
+                console.log(`'${target}' already absent from #${number} (concurrent removal); nothing to do`);
+                return;
+              }
+              throw err;
+            }

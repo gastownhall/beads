@@ -1,0 +1,36 @@
+-- Ignored migration 0026: clone-local marker that forces one dependency-id
+-- re-key pass with the duplicate-edge merge (gastownhall/beads#5268).
+--
+-- rekeyDependencyIDs (internal/storage/schema/dep_id_backfill.go) converges the
+-- per-clone-random dependency ids that migration 0043's DEFAULT (UUID()) minted,
+-- the data half of the #4259 fix. Until 1.3.0 it rewrote ids one row at a time
+-- with no awareness of the ids already in the table, so a database holding the
+-- same logical edge in two typed target columns -- legal, because depid keys on
+-- (issue_id, resolved target) while uk_dep_issue_target / uk_dep_wisp_target /
+-- uk_dep_external_target are per-column -- aborted mid-table with "duplicate
+-- primary key given". The numbered migrations and their cursor rows commit
+-- per-step, before the re-key tail runs, so the abort left the main cursor
+-- durably at latest with only part of the table re-keyed: migrationWorkNeeded
+-- then reported no work and the re-key never ran again.
+--
+-- While this version is still pending, migrationWorkNeeded returns true, so
+-- every existing clone runs exactly one more MigrateUp pass and the fixed
+-- (merge-aware) re-key heals it, including the clones that a pre-1.3.0 binary
+-- left half-re-keyed at the latest main version. The pass is cheap on a
+-- converged database: the re-key scan finds nothing to change and writes
+-- nothing, which is why this marker needs none of the shipped-main-version
+-- gating the aux-row-id passes carry (ignored 0009 / 0018) -- the dependency
+-- re-key already ran on every migration pass before this change.
+--
+-- Recording the marker AFTER the re-key step is the other half of the fix:
+-- ignoredSource.migrate runs later in MigrateUp than rekeyDependencyIDs, so a
+-- re-key that fails for any reason leaves this version unrecorded and the pass
+-- is retried on the next open instead of a database claiming it migrated.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local by
+-- construction: every clone performs its own convergence pass, which is safe
+-- precisely because the derivation and the duplicate-merge rule are both
+-- deterministic functions of table content.
+--
+-- The marker itself changes nothing.
+SELECT 1;

@@ -6,9 +6,11 @@ on:
     tags:
       - 'v*'
 
-  # On PR to main: test only the last 5 releases for fast feedback
+  # On PR to main or a release branch: test only the last 5 releases for fast
+  # feedback. Release-targeted PRs are exactly the ones where cross-version
+  # upgrade breakage is most expensive to discover at tag time.
   pull_request:
-    branches: [ main ]
+    branches: [ main, 'release/**' ]
 
   # Allow manual trigger with custom version count
   workflow_dispatch:

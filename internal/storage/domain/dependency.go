@@ -152,7 +152,10 @@ type DependencySQLRepository interface {
 	GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string, opts DepListOpts) (bool, []string, error)
 
-	DeleteAllForIDs(ctx context.Context, ids []string, opts DepInsertOpts) (int, error)
+	// DeleteAllForIDs takes actor for the same reason Delete above does: the
+	// edges it drops are journaled as dep_remove rows, and a cascade removal
+	// belongs to the identity whose delete caused it.
+	DeleteAllForIDs(ctx context.Context, ids []string, opts DepInsertOpts, actor string) (int, error)
 	CountAllForIDs(ctx context.Context, ids []string, opts DepCountsOpts) (int, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 	// DetectCycleReport answers the same walk in the shape issueops.CycleDetector

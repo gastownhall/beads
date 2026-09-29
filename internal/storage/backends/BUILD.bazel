@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "backends",
+    srcs = ["backends.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/backends",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/backendnames",
+    ],
+)
+
+go_test(
+    name = "backends_test",
+    srcs = [
+        "backends_test.go",
+        "classification_deregister_test.go",
+        "classification_test.go",
+    ],
+    deps = [
+        ":backends",
+        "//internal/configfile",
+        "//internal/storage",
+    ],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---
