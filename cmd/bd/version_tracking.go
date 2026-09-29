@@ -200,35 +200,35 @@ func maybeShowUpgradeNotification() {
 // IMPORTANT: This must be called BEFORE opening the database to avoid opening DB twice.
 //
 // beadsDir is the path to the .beads directory.
-func autoMigrateOnVersionBump(beadsDir string) {
+func autoMigrateOnVersionBump(beadsDir string) bool {
 	// Only migrate if version upgrade was detected
 	if !versionUpgradeDetected {
-		return
+		return true
 	}
 
 	// Validate beadsDir
 	if beadsDir == "" {
 		debug.Logf("auto-migrate: skipping migration, no beads directory")
-		return
+		return true
 	}
 
 	// Load config to determine the correct database path for this backend
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		debug.Logf("auto-migrate: failed to load config: %v", err)
-		return
+		return false
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
 	if cfg.GetBackend() != configfile.BackendDolt {
 		debug.Logf("auto-migrate: skipping Dolt migration for backend %q", cfg.GetBackend())
-		return
+		return true
 	}
 
 	if cfg.IsDoltProxiedServerMode() {
 		debug.Logf("auto-migrate: skipping embedded migration, proxied-server handled after UOW provider init")
-		return
+		return true
 	}
 
 	// Check if database exists at the backend-appropriate path
@@ -236,7 +236,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// No database - nothing to migrate
 		debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)
-		return
+		return true
 	}
 
 	recoverPreV56IfNeeded(previousVersion, dbPath)
@@ -263,7 +263,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		_ = roStore.Close()
 		if probeErr == nil && recorded == Version {
 			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
-			return
+			return true
 		}
 	}
 
@@ -271,8 +271,8 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if err != nil {
 		// Failed to open database - skip migration
 		debug.Logf("auto-migrate: failed to open database: %v", err)
-		noticeSharedMigrateRefusal(err)
-		return
+		noticeAutoMigrateRefusal(err)
+		return autoMigrateFailureConsumesVersion(err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -289,12 +289,12 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	reconciler, err := store.VersionReconciler()
 	if err != nil {
 		debug.Logf("auto-migrate: version markers unavailable: %v", err)
-		return
+		return false
 	}
 	result, err := reconciler.ReconcileVersion(ctx, issueops.VersionReconcileRequest{CLIVersion: Version})
 	if err != nil {
 		debug.Logf("auto-migrate: failed to reconcile database version: %v", err)
-		return
+		return false
 	}
 
 	switch {
@@ -304,6 +304,30 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		debug.Logf("auto-migrate: successfully migrated database from %s to version %s", result.Previous, result.Current)
 	default:
 		debug.Logf("auto-migrate: database already at version %s", Version)
+	}
+	return true
+}
+
+// autoMigrateFailureConsumesVersion reports whether a failed automatic
+// migration deliberately consumes the one-shot .local_version signal. The
+// remote-migration consent gate is an intentional deferral: repeating it on
+// every read would only repeat the same notice until the operator chooses a
+// migration path. Every other failure remains retryable on the next command.
+func autoMigrateFailureConsumesVersion(err error) bool {
+	var gateErr *schema.RemoteMigrateGateError
+	return errors.As(err, &gateErr)
+}
+
+// finishBdVersionTracking advances .local_version only after version-bump
+// reconciliation succeeded or was deliberately deferred. trackBdVersionPreview
+// has already populated the notification globals without consuming the marker.
+func finishBdVersionTracking(beadsDir string, consume bool) {
+	if !consume || beadsDir == "" {
+		return
+	}
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+	if readLocalVersion(localVersionPath) != Version {
+		_ = writeLocalVersion(localVersionPath, Version)
 	}
 }
 
@@ -340,11 +364,12 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 	}
 }
 
-// noticeSharedMigrateRefusal turns the one failure autoMigrateOnVersionBump
-// must not swallow into a one-line stderr notice.
+// noticeAutoMigrateRefusal turns migration refusals that a read command would
+// otherwise obscure into a one-line stderr notice.
 //
-// Every other failure here is genuinely best-effort — the command's own store
-// open will report anything that matters. A gate refusal is different: it is
+// A dirty-table refusal and the remote-migration consent gate are different
+// from ordinary best-effort failures: a read command's own store open may not
+// explain either one. The gate refusal is
 // the whole point of the version bump (there ARE pending migrations), it will
 // not be reported by a read command's own open (read-only opens never touch
 // the schema), and it is the moment gastownhall/beads#5920 used to silently
@@ -357,7 +382,18 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 // decisions, and the remote-backed ones are not unlocked by the migrate verb
 // at all (a clone whose remote is already migrated must adopt, not migrate),
 // so the line is chosen per decision rather than printed unconditionally.
-func noticeSharedMigrateRefusal(err error) {
+func noticeAutoMigrateRefusal(err error) {
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		if jsonOutput {
+			return
+		}
+		fmt.Fprintf(os.Stderr,
+			"bd upgraded to %s, but schema migration was not applied: %v.\n",
+			displayVersion(Version), dirtyErr)
+		return
+	}
+
 	var gateErr *schema.RemoteMigrateGateError
 	if !errors.As(err, &gateErr) {
 		return

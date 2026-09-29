@@ -594,14 +594,13 @@ func runDiagnostics(path string) doctorResult {
 		// can accidentally touch the caller's current repo .beads state.
 		origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
 		_ = os.Setenv("BEADS_DIR", beadsDir)
-		trackBdVersion()
+		trackBdVersionPreview()
+		finishBdVersionTracking(beadsDir, autoMigrateOnVersionBump(beadsDir))
 		if hadBeadsDir {
 			_ = os.Setenv("BEADS_DIR", origBeadsDir)
 		} else {
 			_ = os.Unsetenv("BEADS_DIR")
 		}
-
-		autoMigrateOnVersionBump(beadsDir)
 	}
 
 	// Check 1b: Dolt format compatibility (GH#2137)
