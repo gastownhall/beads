@@ -933,6 +933,7 @@ go_test(
         "prime_divergence_test.go",
         "prime_embedded_test.go",
         "prime_gemini_hook_test.go",
+        "prime_git_remote_test.go",
         "prime_memory_caps_test.go",
         "prime_proxied_integration_test.go",
         "prime_shared_server_test.go",
