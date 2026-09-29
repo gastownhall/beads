@@ -42,6 +42,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[b9s web](https://github.com/vanderheijden86/b9s)** - The b9s terminal UI (see Terminal UIs) in your browser, with full feature parity: tree, kanban board, search and editing, all updating live. Responsive from a phone screen to a wide desktop board with drag-and-drop. Live demo at [demo.b9s.osen.co](https://demo.b9s.osen.co). Built by [@vanderheijden86](https://github.com/vanderheijden86). (Go)
 
+- **[beadside](https://github.com/thatmike1/beadside)** - Local web reader and inbox between you and your agents. A dense index groups beads into lanes by your own labels, with a waiting-on-you section first, and the selected bead stays open beside it with its description, notes and comment thread rendered as Markdown. Notes you write land as comments under your own author id and can flag the bead so the next agent session reads them first. Live updates follow `bd events tail --follow` when the events journal is on, with polling as the fallback. Full-text search over ids, titles, descriptions, notes and comments, also available to agents as `beadside search --json`. Uses the `bd` CLI for every read and write. Built by [@thatmike1](https://github.com/thatmike1). (TypeScript/React)
+
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and server management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
