@@ -77,3 +77,21 @@ func TestRestoreDatabaseStatsDirectorySource(t *testing.T) {
 		t.Fatalf("RestoreDatabase error %q does not report a missing backup source", err)
 	}
 }
+
+// A file:// URL names a local directory, so a missing one is refused before a
+// connection opens, like a plain directory. Passed through, DOLT_BACKUP would
+// create it and, under --force, drop the database before failing.
+func TestRestoreDatabaseStatsFileURLSource(t *testing.T) {
+	source := "file://" + t.TempDir() + "/missing"
+	store := &DoltStore{database: "beads"}
+	err := store.restoreDatabase(t.Context(), source, true, func(time.Duration) (*sql.DB, error) {
+		t.Fatal("RestoreDatabase opened a connection for a file:// URL naming a missing directory")
+		return nil, nil
+	})
+	if err == nil {
+		t.Fatal("RestoreDatabase returned nil for a file:// URL naming a missing directory")
+	}
+	if !strings.Contains(err.Error(), "backup source does not exist") {
+		t.Fatalf("RestoreDatabase error %q does not report a missing backup source", err)
+	}
+}

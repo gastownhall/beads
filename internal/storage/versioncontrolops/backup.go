@@ -2,7 +2,9 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,11 +45,11 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", redactBackupURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", RedactBackupURL(url), err)
 		}
 	} else {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", redactBackupURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", RedactBackupURL(url), err)
 		}
 	}
 	return nil
@@ -102,28 +104,39 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 	return nil
 }
 
-// redactBackupURL strips the parts of a backup URL that can carry credentials
-// before BackupRestore quotes it in an error: userinfo (aws://key:secret@...)
-// and the query and fragment (s3 URLs carry signed parameters there). Scheme,
-// host and path stay. Plain string operations rather than url.Parse, which
-// rejects Dolt's bracketed aws://[dynamo_table:bucket]/db form (see
-// IsBackupURL). Only the wrapper's copy of the URL is redacted; the wrapped
-// Dolt error text is not rewritten.
-func redactBackupURL(source string) string {
+// RedactBackupURL strips the parts of a backup URL that can carry credentials
+// before it is quoted in an error or echoed back to the operator: userinfo
+// (aws://key:secret@...) and the query and fragment (s3 URLs carry signed
+// parameters there). Scheme, host and path stay. Plain string operations
+// rather than url.Parse, which rejects Dolt's bracketed
+// aws://[dynamo_table:bucket]/db form (see IsBackupURL). Only this copy of the
+// URL is redacted; a wrapped Dolt error text is not rewritten.
+//
+// Exported because the source is echoed outside this package too — the CLI's
+// restore gate and its proxied failure messages quote it — and a second copy
+// of this logic is exactly how one arm of a redaction ends up lagging another.
+//
+// The userinfo boundary is found FIRST, on the raw remainder, because a secret
+// is arbitrary bytes: AWS secret access keys are base64, so "/" and "+" are
+// ordinary characters in one, and "?" or "#" reach it through a hand-written
+// password. Cutting on those separators before looking for "@" let any of them
+// inside the secret defeat the redaction: "/" returned the URL untouched, and
+// "?"/"#" were worse than a no-op — they emitted the access key plus a prefix
+// of the secret while dropping the host and path the operator needs. Taking
+// the LAST "@" on the uncut remainder over-strips when a query parameter
+// carries one (an endpoint= value, say), which costs debug detail and nothing
+// else. A redactor has to fail in that direction.
+func RedactBackupURL(source string) string {
 	sep := strings.Index(source, "://")
 	if sep < 0 {
 		return source
 	}
 	rest := source[sep+len("://"):]
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
 	if cut := strings.IndexAny(rest, "?#"); cut >= 0 {
 		rest = rest[:cut]
-	}
-	authority := rest
-	if slash := strings.Index(rest, "/"); slash >= 0 {
-		authority = rest[:slash]
-	}
-	if at := strings.LastIndex(authority, "@"); at >= 0 {
-		rest = rest[at+1:]
 	}
 	return source[:sep+len("://")] + rest
 }
@@ -134,11 +147,17 @@ func redactBackupURL(source string) string {
 // filepath.Abs would happily turn "https://doltremoteapi.dolthub.com/u/r" into
 // "file:///cwd/https:/doltremoteapi.dolthub.com/u/r" — a syntactically valid
 // URL naming a local directory that does not exist, which DOLT_BACKUP would
-// then fail on, or worse create. No caller can reach that today (`bd backup
-// restore` os.Stats its argument first, so a URL never gets here), but every
-// caller is a restore path and restore-from-a-remote is an open capability
-// question — see backupRemoteSchemeTracking in cmd/bd/capability_registry.go.
-// Whoever closes it should get an error here, not a mangled path.
+// then fail on, or worse create. Restore no longer reaches here with a URL:
+// ResolveBackupSource is the single entry point for a restore source on both
+// the direct and the proxied route, and it passes a recognized backup URL
+// through untouched, calling this only for the directory arm. What still calls
+// it directly is the backup (write) direction — BackupToDir, which
+// BackupDatabase in both stores and the proxied auto-backup go through — which
+// is directory-only by design and stats its argument first. So does the
+// directory arm above it here. The guard therefore stays as a backstop rather
+// than a live path: no caller can hand it a scheme today, and if one ever
+// does, being told which scheme is a better failure than a mangled
+// file:///cwd/S3:/... path.
 func DirToFileURL(dir string) (string, error) {
 	if scheme, _, found := strings.Cut(dir, "://"); found {
 		return "", fmt.Errorf("%q is a %s URL, not a directory: this path takes a local directory to turn into a file:// URL", dir, scheme)
@@ -179,22 +198,110 @@ func IsBackupURL(raw string) bool {
 }
 
 // ResolveBackupSource turns a restore source into the URL passed to
-// DOLT_BACKUP('restore', ...). Recognized backup URLs pass through unchanged
-// and are never stat'ed; anything else must be an existing local directory
-// and is converted with DirToFileURL. The error strings are load-bearing:
-// the resolver and store tests assert them.
+// DOLT_BACKUP('restore', ...). Recognized backup URLs pass through unchanged;
+// anything else must be an existing local directory and is converted with
+// DirToFileURL. The error strings are load-bearing: the resolver and store
+// tests assert them.
+//
+// A remote URL is never stat'ed, since there is nothing local to stat. A
+// file:// URL is the exception: it names a local directory, so that directory
+// is checked like any other before the URL is passed through. DOLT_BACKUP does
+// not fail on a missing file:// source. It creates the directory, opens it as
+// an empty backup and, under --force, drops the live database before the
+// restore fails, so this check is all that stands between a typo and that.
+// It only stands there if it checks the directory Dolt will open, so a file://
+// path Dolt reads differently is refused rather than stat'ed; see fileURLDir.
 func ResolveBackupSource(source string) (string, error) {
 	if IsBackupURL(source) {
+		if rest, isFile := strings.CutPrefix(source, "file://"); isFile {
+			dir, err := fileURLDir(source, rest)
+			if err != nil {
+				return "", err
+			}
+			if err := statBackupDir(source, dir); err != nil {
+				return "", err
+			}
+		}
 		return source, nil
 	}
-	info, err := os.Stat(source)
-	if err != nil {
-		return "", fmt.Errorf("backup source does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("backup source is not a directory: %s", source)
+	if err := statBackupDir(source, source); err != nil {
+		return "", err
 	}
 	return DirToFileURL(source)
+}
+
+// fileURLDir returns the directory DOLT_BACKUP will open for a file:// source,
+// rest being everything after "file://", or refuses a path Dolt reads
+// differently from a stat. Dolt parses the URL, cleans the path and makes it
+// absolute against its own data directory, so:
+//
+//   - a relative path names a directory under the Dolt data directory, not
+//     under the working directory a stat here resolves it against;
+//   - %XX escapes are decoded, on more than one layer, and the path ends at
+//     the first ? or #, so the directory Dolt opens has a different name;
+//   - a \ is read as /, on every OS. On Windows both are the separator, but
+//     elsewhere \ is an ordinary file-name byte, so the stat finds a\b where
+//     Dolt opens a/b.
+//
+// In each case the stat passes on one directory while Dolt creates another,
+// which is exactly the loss the stat is there to prevent.
+//
+// One reading is left to the stat rather than refused: Dolt takes a leading
+// /C:/ or /C$/ for a Windows drive on every OS. Outside Windows the stat then
+// looks for a C: or C$ directory at the filesystem root, which takes root to
+// create, so in practice the source is refused as missing.
+func fileURLDir(source, rest string) (string, error) {
+	if !filepath.IsAbs(rest) {
+		return "", fmt.Errorf("backup source is not an absolute file:// path: %s: "+
+			"Dolt resolves a relative file:// path against its data directory, not the current directory; "+
+			"pass the directory itself to restore from a relative path", RedactBackupURL(source))
+	}
+	if strings.ContainsAny(rest, "%?#") {
+		return "", fmt.Errorf("backup source is not a plain file:// path: %s: "+
+			"Dolt decodes %%-escapes and ends the path at ? or #, so it would restore from a different directory than the one named",
+			RedactBackupURL(source))
+	}
+	if filepath.Separator != '\\' && strings.Contains(rest, `\`) {
+		return "", fmt.Errorf("backup source is not a plain file:// path: %s: "+
+			`Dolt reads \ as /, so it would restore from a different directory than the one named`,
+			RedactBackupURL(source))
+	}
+	// Dolt cleans the path lexically before opening it; a stat of the raw
+	// a/link/../b would follow link where Dolt does not.
+	return filepath.Clean(rest), nil
+}
+
+// statBackupDir checks that dir, the local directory a restore source names,
+// exists and is a directory. dir is the source itself or the path of a file://
+// URL; the errors quote the source as the operator gave it, redacted.
+func statBackupDir(source, dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		// %w on the *fs.PathError would print its own copy of the source, and
+		// this is the arm a credentialed URL falls through to: IsBackupURL is
+		// case-sensitive on purpose, so S3://key:secret@bucket/db — or the
+		// az:// of #6227 — is stat'ed as a path and quoted right here. Wrap
+		// the stat reason instead of the PathError so errors.Is(err,
+		// fs.ErrNotExist) still answers for callers while the path that
+		// reaches the operator is redacted.
+		return fmt.Errorf("backup source does not exist: %s: %w", RedactBackupURL(source), statReason(err))
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup source is not a directory: %s", RedactBackupURL(source))
+	}
+	return nil
+}
+
+// statReason returns the reason inside an *fs.PathError, dropping the
+// operation and the path it quotes. The path here is the restore source, which
+// can carry credentials; the reason ("no such file or directory") cannot, and
+// keeping it wrapped preserves errors.Is against fs.ErrNotExist.
+func statReason(err error) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err
+	}
+	return err
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt
