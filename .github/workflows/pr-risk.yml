@@ -452,7 +452,7 @@ jobs:
           echo "Help text first line is correct"
 
   ci-gate:
-    name: CI Gate / Required
+    name: PR Risk Gate / Required
     runs-on: ubuntu-latest
     needs:
       - detect-ci-tier

@@ -140,11 +140,42 @@ sh_test(
     srcs = ["//tools/bazel:go_test_variant.sh"],
     args = ["$(rootpath :db_test)"],
     data = [":db_test"],
-    env = {"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"},
+    # Pinned to the container backend (the docker lane is the A/B control);
+    # rule env beats --test_env, so =local on the command line cannot flip it.
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "container",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
     tags = [
         "no-remote-exec",
         "requires-docker",
     ],
+)
+
+# db_test as pr.yml's "Test (storage domain + uow)" job runs it, on the
+# dolt-server lane: TestDomainDB's server is a `dolt sql-server` the test
+# process starts itself (the local backend of internal/testutil) instead of a
+# testcontainers container. GOMAXPROCS=4 is the job's runner shape (the
+# executor may have far more cores). db_docker_test is the A/B control.
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
+sh_test(
+    name = "db_dolt_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :db_test)"],
+    data = [":db_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    tags = ["dolt-server"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

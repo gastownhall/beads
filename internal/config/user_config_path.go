@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 const userConfigYamlDisplayFallback = "~/.config/bd/config.yaml"
@@ -27,6 +28,20 @@ func currentUserConfigYamlCandidates() userConfigYamlCandidates {
 	return buildUserConfigYamlCandidates(homeDir, homeErr, nativeConfigDir, nativeErr)
 }
 
+// nativeUserConfigValidationSource names the source of a relative directory
+// returned without a resolver error. On Unix, os.UserConfigDir already rejects
+// relative XDG_CONFIG_HOME values itself; only HOME can reach our validation.
+func nativeUserConfigValidationSource() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "APPDATA"
+	case "plan9":
+		return "home"
+	default:
+		return "HOME"
+	}
+}
+
 func buildUserConfigYamlCandidates(homeDir string, homeErr error, nativeConfigDir string, nativeErr error) userConfigYamlCandidates {
 	var candidates userConfigYamlCandidates
 
@@ -37,7 +52,13 @@ func buildUserConfigYamlCandidates(homeDir string, homeErr error, nativeConfigDi
 		candidates.documented = filepath.Clean(filepath.Join(home, ".config", "bd", "config.yaml"))
 	}
 
-	if nativeDir, err := cleanAbsoluteUserDirectory("native user config directory", nativeConfigDir, nativeErr); err != nil {
+	nativeLabel := "native user config directory"
+	if nativeErr == nil {
+		nativeLabel += " (" + nativeUserConfigValidationSource() + ")"
+	}
+	// Resolver errors already identify their source; retain that diagnostic
+	// without inferring it from a later read of the process environment.
+	if nativeDir, err := cleanAbsoluteUserDirectory(nativeLabel, nativeConfigDir, nativeErr); err != nil {
 		candidates.nativeErr = err
 	} else {
 		candidates.native = filepath.Clean(filepath.Join(nativeDir, "bd", "config.yaml"))

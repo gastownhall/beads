@@ -414,6 +414,7 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: recompute is_blocked: %w", err)
 	}
+	issueops.NoteDependencyRemovalBlockedRecheck(r.runner, issueID, dependsOnID, affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent — a structural removal is as real to a

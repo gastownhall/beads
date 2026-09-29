@@ -30,6 +30,19 @@ Two checks always run, a third when `go test -json` output is supplied:
    test but run under Bazel) are reported, not failed: a failing test already
    fails its own lane.
 
+Job mode (--job, with --go-test-json): the go test JSON is the whole expected
+set instead of `go list ./...`. Use it to prove that a Bazel selection (one or
+more --bep runs, e.g. --config=ci plus --config=docker) replaces one specific
+CI job: every top-level test the job's command ran must have run under Bazel,
+Bazel must run no other test in those packages (TestEmbedded* included: job
+mode has no implicit ^TestEmbedded skip, so it can check the embedded tier), and no test the job passed may
+be skipped under Bazel. A test seen in several targets (a go_test and its
+go_test_variant.sh sh_test) keeps its best status here, since each variant is
+a different way of running it and the job needs one run that does what it
+does; the default mode keeps the worst. A failure in any target still fails a
+job comparison (listed per target), and so does a missing test.xml of any
+target in the job's packages, variant or not.
+
 Divergences listed in the allowlist (tools/bazel/equivalence_allowlist.txt)
 are expected; anything else fails. The allowlist format is one entry per line:
 
@@ -58,6 +71,9 @@ GO_LIST_ARGS = ["list", "-e", "-race", "-tags", "gms_pure_go", "-json", "./..."]
 SKIP_RE = re.compile(r"^TestEmbedded")
 TEST_FUNC_RE = re.compile(r"^func\s+(Test\w*)\s*\(\s*\w+\s+\*testing\.T\s*\)", re.M)
 STATUS_RANK = {"skipped": 0, "passed": 1, "failed": 2}
+# Job mode: the variant that actually ran a test wins (a failure still fails
+# the Bazel run that produced it).
+BEST_RANK = {"failed": 0, "skipped": 1, "passed": 2}
 GO_TEST_STATUS = {"pass": "passed", "fail": "failed", "skip": "skipped"}
 ALLOW_KINDS = ("run", "skip")
 DEFAULT_ALLOWLIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "equivalence_allowlist.txt")
@@ -142,10 +158,16 @@ def query_go_test_pkgs(root, bazel):
     return {label_pkg(l) for l in out.split()}
 
 
+# go_test_variant.sh variants are sh_tests that run a go_test binary, which
+# writes the same test.xml.
+TEST_KINDS = ("go_test rule", "sh_test rule")
+
+
 def read_bep(path):
-    """Return ({label: shard_count} for tested go_test targets, set of go_test
-    labels configured, this invocation's testlogs dir or None)."""
-    go_tests, shards = set(), {}
+    """Return ({label: shard_count} for tested go_test targets and sh_test
+    variants, set of go_test labels configured, this invocation's testlogs dir
+    or None)."""
+    go_tests, tests, shards = set(), set(), {}
     exec_root, testlogs_rel = None, None
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -160,12 +182,15 @@ def read_bep(path):
                     if link.get("path", "").endswith("testlogs") and link.get("target"):
                         testlogs_rel = link["target"]
             elif "targetConfigured" in eid:
-                if ev.get("configured", {}).get("targetKind") == "go_test rule":
+                kind = ev.get("configured", {}).get("targetKind")
+                if kind in TEST_KINDS:
+                    tests.add(eid["targetConfigured"]["label"])
+                if kind == "go_test rule":
                     go_tests.add(eid["targetConfigured"]["label"])
             elif "testResult" in eid:
                 tr = eid["testResult"]
                 shards[tr["label"]] = max(shards.get(tr["label"], 0), int(tr.get("shard", 1) or 1))
-    tested = {l: n for l, n in shards.items() if l in go_tests}
+    tested = {l: n for l, n in shards.items() if l in tests}
     testlogs = None
     if exec_root and testlogs_rel:
         # The symlink target is relative to the output base, two levels above
@@ -183,14 +208,24 @@ def testlog_xmls(testlogs, label, shard_count):
     return [os.path.join(base, f"shard_{i}_of_{shard_count}", "test.xml") for i in range(1, shard_count + 1)]
 
 
-def bazel_observed(tested, testlogs):
-    """Return ({pkg: {test: status}}, [problems])."""
-    observed, problems = {}, []
+def bazel_observed(tested, testlogs, go_tests, best=False, observed=None, failures=None, no_xml=None):
+    """Return ({pkg: {test: status}}, [problems]), merged into observed.
+
+    Job mode (best) also collects (pkg, "Test (label)") for every failed test
+    in failures and (pkg, label) for every missing test.xml in no_xml."""
+    observed, problems = ({} if observed is None else observed), []
     for label, n in sorted(tested.items()):
         pkg = label_pkg(label)
         per = observed.setdefault(pkg, {})
         for xml_path in testlog_xmls(testlogs, label, n):
             if not os.path.exists(xml_path):
+                if best and no_xml is not None:
+                    # Bazel writes a test.xml for every test, so a variant's
+                    # is missing only if it was never downloaded.
+                    no_xml.append((pkg, f"{label}: {os.path.relpath(xml_path, testlogs)}"))
+                    continue
+                if label not in go_tests:
+                    continue  # an sh_test that is not a variant may write none
                 problems.append(f"{label}: {xml_path} missing (was test.xml downloaded? run with --config=ci)")
                 continue
             try:
@@ -211,10 +246,14 @@ def bazel_observed(tested, testlogs):
                     status = "skipped"
                 else:
                     status = "passed"
-                # A test seen in several targets keeps its worst status.
-                if name not in per or STATUS_RANK[status] > STATUS_RANK[per[name]]:
+                if status == "failed" and failures is not None:
+                    failures.append((pkg, f"{name} ({label})"))
+                # A test seen in several targets keeps its worst status (best in
+                # job mode).
+                rank = BEST_RANK if best else STATUS_RANK
+                if name not in per or rank[status] > rank[per[name]]:
                     per[name] = status
-            if count == 0 and os.path.getsize(xml_path) < 64:
+            if count == 0 and label in go_tests and os.path.getsize(xml_path) < 64:
                 # An empty <testsuites/> means the binary ran no tests at all
                 # (or GO_TEST_WRAP_TESTV was off). The test-name diff reports
                 # which tests are missing; note it here for the log.
@@ -253,7 +292,10 @@ def allowed(entries, pkg, test, kind="run"):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bep", required=True, help="--build_event_json_file of the bazel test run")
+    ap.add_argument(
+        "--bep", required=True, action="append",
+        help="--build_event_json_file of a bazel test run (repeatable: results are merged)",
+    )
     ap.add_argument("--root", default=os.getcwd(), help="workspace root (default: cwd)")
     ap.add_argument("--testlogs", default=None, help="default: from the BEP, else <root>/bazel-testlogs")
     ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST)
@@ -266,18 +308,40 @@ def main(argv=None):
     ap.add_argument("--no-query", action="store_true", help="skip the bazel query package-set check")
     ap.add_argument("--details", action="store_true", help="list every divergence (nightly)")
     ap.add_argument("--summary", default=None, help="append Markdown here (default: $GITHUB_STEP_SUMMARY)")
+    ap.add_argument(
+        "--job", action="store_true",
+        help="compare with --go-test-json as one CI job's complete test set (see Job mode above)",
+    )
     args = ap.parse_args(argv)
+    if args.job and not args.go_test_json:
+        ap.error("--job needs --go-test-json")
 
     root = os.path.abspath(args.root)
     entries, allow_errors = load_allowlist(args.allowlist)
 
     expected, dirs = go_expected(root, args.go_list_json)
-    tested, configured, bep_testlogs = read_bep(args.bep)
-    # Prefer the BEP's own testlogs dir: the bazel-testlogs symlink follows
-    # whatever bazel command ran last, possibly in another output base.
-    testlogs = args.testlogs or bep_testlogs or os.path.join(root, "bazel-testlogs")
-    observed, problems = bazel_observed(tested, testlogs)
-    target_pkgs = None if args.no_query else query_go_test_pkgs(root, args.bazel)
+    observed, problems, configured, tested = {}, [], set(), {}
+    failures, no_xml = [], []
+    for bep in args.bep:
+        bep_tested, bep_configured, bep_testlogs = read_bep(bep)
+        configured |= bep_configured
+        tested.update(bep_tested)
+        # Prefer the BEP's own testlogs dir: the bazel-testlogs symlink follows
+        # whatever bazel command ran last, possibly in another output base.
+        testlogs = args.testlogs or bep_testlogs or os.path.join(root, "bazel-testlogs")
+        _, bep_problems = bazel_observed(
+            bep_tested, testlogs, bep_configured, args.job, observed,
+            failures if args.job else None, no_xml if args.job else None)
+        problems += bep_problems
+    target_pkgs = None if (args.no_query or args.job) else query_go_test_pkgs(root, args.bazel)
+    go_status = go_test_statuses(args.go_test_json, dirs) if args.go_test_json else None
+    if args.job:
+        # The job's own results are the expected set; other packages Bazel
+        # ran are out of scope.
+        expected = {pkg: set(ts) for pkg, ts in go_status.items()}
+        observed = {pkg: seen for pkg, seen in observed.items() if pkg in expected}
+        failures = sorted(set(f for f in failures if f[0] in expected))
+        no_xml = sorted(set(m for m in no_xml if m[0] in expected))
 
     no_target, missing, extra, allowlisted = [], [], [], []
     if target_pkgs is not None:
@@ -289,13 +353,14 @@ def main(argv=None):
             (allowlisted if allowed(entries, pkg, t) else missing).append((pkg, t))
     for pkg, seen in sorted(observed.items()):
         for t in sorted(set(seen) - expected.get(pkg, set())):
-            if SKIP_RE.search(t):
+            # The --config=ci lane skips ^TestEmbedded; a job comparison has
+            # no implicit skip (the embedded tier's jobs run exactly those).
+            if not args.job and SKIP_RE.search(t):
                 continue
             (allowlisted if allowed(entries, pkg, t) else extra).append((pkg, t))
 
     # Skip parity: passed under go test, skipped under Bazel.
     skip_div, skip_allowed, parity_notes = [], [], []
-    go_status = go_test_statuses(args.go_test_json, dirs) if args.go_test_json else None
     if go_status is not None:
         for pkg, seen in sorted(observed.items()):
             gs = go_status.get(pkg, {})
@@ -312,14 +377,16 @@ def main(argv=None):
     # Dedupe allowlisted pairs (a package-level entry also covers its tests).
     allowlisted = sorted(set(allowlisted))
     # Skip entries can only be exercised when go test statuses are known.
-    unused = [e for e in entries if not e["used"] and (e["kind"] == "run" or go_status is not None)]
+    # (The allowlist describes the --config=ci lane; a job comparison uses only
+    # the entries that apply.)
+    unused = [] if args.job else [e for e in entries if not e["used"] and (e["kind"] == "run" or go_status is not None)]
 
     statuses = {"passed": 0, "skipped": 0, "failed": 0}
     for seen in observed.values():
         for s in seen.values():
             statuses[s] += 1
     n_expected = sum(len(v) for v in expected.values())
-    ok = not (no_target or missing or extra or skip_div or allow_errors)
+    ok = not (no_target or missing or extra or skip_div or failures or no_xml or allow_errors)
 
     limit = None if args.details else 40
 
@@ -332,7 +399,8 @@ def main(argv=None):
         return out
 
     lines = [
-        f"go test:  {len(expected)} packages with tests, {n_expected} top-level tests (excluding ^TestEmbedded)",
+        f"go test:  {len(expected)} packages with tests, {n_expected} top-level tests"
+        + ("" if args.job else " (excluding ^TestEmbedded)"),
         f"bazel:    {len(configured)} go_test targets configured, {len(tested)} tested; "
         f"{sum(len(v) for v in observed.values())} top-level tests seen "
         f"({statuses['passed']} passed, {statuses['skipped']} skipped, {statuses['failed']} failed)",
@@ -353,6 +421,8 @@ def main(argv=None):
         ("tests go test runs that Bazel did not", missing),
         ("tests Bazel ran that go test would not", extra),
         ("tests go test passed that Bazel skipped", skip_div),
+        ("tests that failed in a Bazel target", failures),
+        ("Bazel targets without test.xml", no_xml),
     ):
         if pairs:
             lines += listing(title, pairs)

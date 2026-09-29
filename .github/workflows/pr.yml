@@ -486,6 +486,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            expected_goos: linux
+          - os: macos-latest
+            expected_goos: darwin
+          - os: windows-latest
+            expected_goos: windows
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -506,6 +513,12 @@ jobs:
       - name: Exercise the real Bash process boundary
         shell: bash
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
+
+      - name: Check native user config diagnostics
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: bash scripts/ci/test-user-config-diagnostic.sh '${{ matrix.expected_goos }}'
 
       - name: Exercise test.sh prebuilt binary path
         shell: bash
@@ -877,6 +890,15 @@ jobs:
           sha256sum -c SHA256SUMS
           chmod +x bd-linux-gms-pure
 
+      # The only lane with both the image and the pinned dolt CLI: compares
+      # the container and the local test server backend against the one
+      # checked-in fingerprint, so an image bump cannot drift the container
+      # side unnoticed. REQUIRE makes the container half fail, not skip.
+      - name: Test Dolt server fingerprint (container + local)
+        env:
+          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
+        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
+
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
@@ -1207,14 +1229,63 @@ jobs:
           $proofRoot = Join-Path $env:RUNNER_TEMP ("make install proof " + [guid]::NewGuid().ToString('N'))
           $fixtureRepo = Join-Path $proofRoot 'fixture repo'
           $buildDir = Join-Path $fixtureRepo 'build output'
+          $fakeGoDir = Join-Path $proofRoot 'fake go bin'
           $installRoot = Join-Path $proofRoot 'install sandbox'
           $installProfile = Join-Path $installRoot 'profile with spaces'
-          New-Item -ItemType Directory -Force -Path $buildDir, $installProfile | Out-Null
+          New-Item -ItemType Directory -Force -Path $buildDir, $fakeGoDir, $installProfile | Out-Null
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'Makefile') -Destination $fixtureRepo
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'go.mod') -Destination $fixtureRepo
 
           $sentinel = Join-Path $buildDir 'bd.exe'
-          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel'
+          $fakeGo = Join-Path $fakeGoDir 'go'
+          $fakeGoScript = @'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          [[ "${1-}" == build ]] || exit 91
+          shift
+          output=
+          while (($#)); do
+              case "$1" in
+                  -o)
+                      [[ $# -ge 2 ]] || exit 92
+                      output=$2
+                      shift 2
+                      ;;
+                  *) shift ;;
+              esac
+          done
+          [[ "$(cygpath -aw "$output")" == "$(cygpath -aw "$BEADS_FAKE_GO_EXPECTED_OUTPUT")" ]] || {
+              printf 'fake go received output %q, expected %q\n' "$output" "$BEADS_FAKE_GO_EXPECTED_OUTPUT" >&2
+              exit 93
+          }
+          printf native-build-sentinel > "$(cygpath -u "$output")"
+          '@
+          if (-not $fakeGoScript.StartsWith('#!', [StringComparison]::Ordinal)) {
+            throw 'Fake Go shebang must start at byte zero after YAML extraction'
+          }
+          [IO.File]::WriteAllText(
+            $fakeGo,
+            ($fakeGoScript -replace "`r`n", "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+          $priorPath = $env:PATH
+          Push-Location $fixtureRepo
+          try {
+            $env:BEADS_FAKE_GO_EXPECTED_OUTPUT = $sentinel
+            $env:PATH = "$fakeGoDir;$priorPath"
+            & $make --no-print-directory "BUILD_DIR=$buildDir" GIT_BUILD=build-proof CC=proof build
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make build failed for a spaced BUILD_DIR'
+            }
+          } finally {
+            $env:PATH = $priorPath
+            Remove-Item -LiteralPath Env:BEADS_FAKE_GO_EXPECTED_OUTPUT
+            Pop-Location
+          }
+          if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
+            throw "Native Make did not build bd.exe at the exact spaced destination '$sentinel'"
+          }
           $sentinelHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
 
           & $git -C $fixtureRepo init --quiet
@@ -1363,6 +1434,31 @@ jobs:
             throw 'Cygwin Make shell smoke failed'
           }
 
+  # The Bazel lane (bazel.yml), gated alongside the legacy jobs it mirrors
+  # (PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
+  # contract corpus, and pr-risk.yml's embedded-Dolt, proxied-server and
+  # server-Dolt storage tiers), all of which stay required. bazel.yml has no pull_request/merge_group trigger of its own:
+  # this call is its only PR run. It gets the four RBE secrets and nothing
+  # else; its rbe job decides remote, local (forks, Dependabot: no
+  # remote-only lanes) or skip, and exports that for ci-gate. Its
+  # bazel-integration lane is off here (main.yml's integration jobs, its
+  # legacy counterpart, run only on push to main; bazel.yml runs it there).
+  # Its bd artifact is renamed so it cannot collide with build-artifacts'
+  # upload.
+  bazel:
+    name: Bazel
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bazel.yml
+    secrets:
+      RBE_WEST_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
+      RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
+      RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
+      RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
+    with:
+      build-artifact-name: bazel-ci-build-artifacts
+      integration: "off"
+
   ci-gate:
     name: CI Gate / Required
     runs-on: ubuntu-latest
@@ -1389,6 +1485,7 @@ jobs:
       - fmt-check
       - lint
       - windows-make-shell
+      - bazel
     if: ${{ always() }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1419,6 +1516,13 @@ jobs:
             FMT_CHECK
             LINT
             WINDOWS_MAKE_SHELL
+            BAZEL
+            BAZEL_TEST
+            BAZEL_PURE
+            BAZEL_EMBEDDED
+            BAZEL_DOLTSERVER
+            BAZEL_PROXIED
+            BAZEL_SERVER_STORAGE
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
@@ -1441,10 +1545,32 @@ jobs:
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
           WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
+          # bazel.yml's lanes report their job.status as outputs; a lane that
+          # did not report (skipped, or lost before its last step) reads as
+          # skipped, which passes only in the modes bazel-gate.sh allows.
+          BAZEL_TEST: ${{ needs.bazel.outputs.bazel-test || 'skipped' }}
+          BAZEL_PURE: ${{ needs.bazel.outputs.bazel-pure || 'skipped' }}
+          BAZEL_EMBEDDED: ${{ needs.bazel.outputs.bazel-embedded || 'skipped' }}
+          BAZEL_DOLTSERVER: ${{ needs.bazel.outputs.bazel-doltserver || 'skipped' }}
+          BAZEL_PROXIED: ${{ needs.bazel.outputs.bazel-proxied || 'skipped' }}
+          BAZEL_SERVER_STORAGE: ${{ needs.bazel.outputs.bazel-server-storage || 'skipped' }}
+          # Inputs of bazel-gate.sh, which sets BAZEL (the call's aggregate,
+          # red on a missing or inconsistent mode) and the expected skips
+          # from bazel.yml's own rbe job decision.
+          BAZEL_CALL: ${{ needs.bazel.result }}
+          BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
+          BAZEL_RBE_ENABLED: ${{ needs.bazel.outputs.rbe-enabled }}
         run: |
           skipped_ok=""
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             skipped_ok="CHECK_NO_BEADS_CHANGES"
           fi
+          # Bazel lanes skipped by design in the call's execution mode (all
+          # of them in mode skip, the remote-only embedded, proxied and
+          # server-storage tiers in mode local), and the aggregate unless the
+          # mode is missing or invalid.
+          skipped_ok="$skipped_ok $(bash .github/scripts/bazel-gate.sh skips)"
+          BAZEL="$(bash .github/scripts/bazel-gate.sh aggregate)"
+          export BAZEL
           export CI_GATE_SKIPPED_OK="$skipped_ok"
           bash .github/scripts/ci-gate.sh

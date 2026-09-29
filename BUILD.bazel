@@ -2,7 +2,11 @@ load("@gazelle//:def.bzl", "gazelle")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 # gazelle:prefix github.com/steveyegge/beads
-# gazelle:build_tags gms_pure_go
+# gazelle drops files whose build constraints name a tag it does not know.
+# integration is listed so the `//go:build integration` test files (and
+# //internal/testutil/integration) are in srcs and deps; rules_go filters them
+# out of every build except --config=integration (.bazelrc), which sets the tag.
+# gazelle:build_tags gms_pure_go,integration
 # integrations/ holds no Go; it stays visible to Bazel (not in .bazelignore)
 # only so //test/docsync can declare the markdown its link checks resolve.
 # gazelle:exclude integrations
@@ -63,6 +67,31 @@ filegroup(
     name = "workflow_files",
     srcs = glob([".github/**"]),
     visibility = ["//scripts:__pkg__"],
+)
+
+# PR Risk's manifest-sharded tiers' shard scripts and their committed
+# manifests (embedded-Dolt cmd and storage, proxied-server cmd, server-Dolt
+# storage). The variants (//cmd/bd:bd_embedded_test, //cmd/bd:bd_proxied_test,
+# //internal/storage/embeddeddolt:embeddeddolt_embedded_test,
+# //internal/storage/dolt:dolt_server_full_test) run them through
+# tools/bazel/go_test_manifest_shard.sh, so each Bazel shard runs exactly the
+# tests of the CI job with the same shard number.
+exports_files(
+    [
+        ".github/scripts/embedded-cmd-test-shards.txt",
+        ".github/scripts/embedded-storage-test-shard.sh",
+        ".github/scripts/embedded-storage-test-shards.txt",
+        ".github/scripts/embedded-test-shard.sh",
+        ".github/scripts/proxied-cmd-test-shards.txt",
+        ".github/scripts/proxied-test-shard.sh",
+        ".github/scripts/server-storage-test-shard.sh",
+        ".github/scripts/server-storage-test-shards.txt",
+    ],
+    visibility = [
+        "//cmd/bd:__pkg__",
+        "//internal/storage/dolt:__pkg__",
+        "//internal/storage/embeddeddolt:__pkg__",
+    ],
 )
 
 # //scripts:scripts_test runs scripts/test.sh, which sources the canonical

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -2100,14 +2101,11 @@ func warnJSONLWithoutDoltRemote(reason string) {
 
 // filterEnv returns a copy of env with entries matching the given key removed.
 func filterEnv(env []string, key string) []string {
-	prefix := key + "="
-	out := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, prefix) {
-			out = append(out, e)
-		}
-	}
-	return out
+	return filterEnvForOS(env, key, hookEnvGOOS)
+}
+
+func filterEnvForOS(env []string, key, goos string) []string {
+	return execenv.WithoutForOS(env, goos, key)
 }
 
 // runPostMergeHook runs chained hooks after merge, then runs the legacy

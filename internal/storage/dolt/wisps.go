@@ -194,12 +194,14 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit update wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit update wisp", tx)
 }
 
 // updateWispChecked updates a wisp with the optional atomic preconditions of
@@ -221,6 +223,8 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if opts.ExpectedVersion != nil {
 		if err := issueops.CheckVersionInTx(ctx, tx, id, *opts.ExpectedVersion); err != nil {
@@ -234,7 +238,7 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit update wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit update wisp", tx)
 }
 
 // closeWisp closes a wisp in the wisps table.
@@ -249,12 +253,14 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
 		return err
 	}
 
-	return s.commitSQLTx(ctx, "commit close wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit close wisp", tx)
 }
 
 // closeWispChecked closes a wisp with the is_blocked guard, mirroring closeWisp
@@ -282,13 +288,15 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
 	if err != nil {
 		return storage.CloseIssueResult{}, err
 	}
 
-	if err := s.commitSQLTx(ctx, "commit close wisp", tx); err != nil {
+	if err := s.commitSQLTxAndRecheck(ctx, "commit close wisp", tx); err != nil {
 		return storage.CloseIssueResult{}, err
 	}
 	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}, nil
@@ -304,6 +312,8 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, []string{id})
 	if aerr != nil {
@@ -347,8 +357,9 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
 	}
+	issueops.NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
 
-	return s.commitSQLTx(ctx, "commit delete wisp", tx)
+	return s.commitSQLTxAndRecheck(ctx, "commit delete wisp", tx)
 }
 
 // deleteWispBatch permanently removes multiple wisps using one transaction per
@@ -397,6 +408,8 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, ids)
 	if aerr != nil {
@@ -448,8 +461,9 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
 	}
+	issueops.NoteDeleteBlockedRecheck(tx, ids, "", affectedIssues, affectedWisps)
 
-	if err := s.commitSQLTx(ctx, "commit batch wisp delete", tx); err != nil {
+	if err := s.commitSQLTxAndRecheck(ctx, "commit batch wisp delete", tx); err != nil {
 		return 0, err
 	}
 

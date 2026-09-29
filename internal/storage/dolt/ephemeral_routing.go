@@ -348,7 +348,8 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 // The hazard remains LIVE everywhere the in-tx ordering survives — a larger
 // surface than this helper's callers: wisp promote/demote (this file),
 // legacy reopen (issues.go), RunInIssueLifecycleTransaction
-// (transaction.go), AND the same DOLT_ADD/DOLT_COMMIT-inside-tx pattern
+// (transaction.go), the role deleter and sweeper (deleter.go, sweeper.go),
+// AND the same DOLT_ADD/DOLT_COMMIT-inside-tx pattern
 // inlined directly in the legacy DoltStore write methods in issues.go and
 // slots.go (UpdateIssue, UpdateIssueChecked, ClaimIssue, ClaimReadyIssue,
 // UnclaimIssue, UnclaimIssueIfAssignee, ReclaimExpiredLeases, CloseIssue*,
@@ -361,15 +362,17 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 // The STAGED SET is the hazard's other axis, and it widened. When versioned
 // history is active, withVersionedHistoryTables adds issue_versions and
 // store_epoch to whatever fixed list a caller passed (every caller here
-// already stages issues), so those two tables are now exposed to the lost
-// update above on every in-tx plane named in the paragraph above. The
-// exposure is not equivalent to the one issues already had: a reverted issues
-// row is rewritten by the next mutation of that bead, while issue_versions
-// and store_epoch are append-only, so a row reverted to its BEGIN-time value
-// is never rewritten -- it is gone, leaving a hole in the history no later
-// write fills. Migrating these planes to the post-tx ordering closes this
-// along with the rest of the hazard; it is written down here so the
-// activation phase inherits a known hazard rather than discovering it.
+// already stages issues), and the role deleter and sweeper call it on their
+// own fixed list for the same durability reason, so those two tables are now
+// exposed to the lost update above on every in-tx plane named in the paragraph
+// above. The exposure is not equivalent to the one issues already had: a
+// reverted issues row is rewritten by the next mutation of that bead, while
+// issue_versions and store_epoch are append-only, so a row reverted to its
+// BEGIN-time value is never rewritten -- it is gone, leaving a hole in the
+// history no later write fills. Migrating these planes to the post-tx
+// ordering closes this along with the rest of the hazard; it is written down
+// here so the activation phase inherits a known hazard rather than
+// discovering it.
 func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables []string, commitMsg string) error {
 	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
 	// for a later explicit commit point (bd dolt commit / CommitPending)

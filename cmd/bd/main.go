@@ -1466,6 +1466,11 @@ var rootCmd = &cobra.Command{
 					// (GH#bd-0qel)
 					targetBeadsDir := beads.FindBeadsDir()
 					if targetBeadsDir == "" {
+						// An explicit BEADS_DIR is authoritative even
+						// before it holds project files.
+						targetBeadsDir = beads.ExplicitBeadsDir()
+					}
+					if targetBeadsDir == "" {
 						targetBeadsDir = ".beads"
 					}
 					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
@@ -2077,6 +2082,15 @@ var rootCmd = &cobra.Command{
 			if shouldAutoPruneEventsJournal(cmd) {
 				maybeAutoPruneEventsJournal(rootCtx, beads.FindBeadsDir())
 			}
+			// Auto-backup, through the provider this command opened. Same
+			// gate as the direct arm's maintenance net below (strict
+			// --readonly, `bd serve` and a migration freeze all skip it),
+			// plus previews: a --dry-run must not register a backup remote
+			// or write backup state. proxiedAutoBackupBackend decides the
+			// topology, so this stays inert off managed-local.
+			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
+				runPostRunAutoBackup(rootCtx)
+			}
 			if uowProvider != nil {
 				_ = uowProvider.Close(rootCtx)
 				uowProvider = nil
@@ -2223,37 +2237,78 @@ var rootCmd = &cobra.Command{
 			_ = traceFile.Close() // Best effort cleanup
 		}
 
-		// Heap profiling: --mem-profile flag or BEADS_MEM_PROFILE env var.
-		// Runs a GC first by default; BEADS_MEM_PROFILE_NOGC=1 skips it to capture peak.
-		heapDest := memProfilePath
-		if heapDest == "" {
-			heapDest = os.Getenv("BEADS_MEM_PROFILE")
-		}
-		if heapDest != "" {
-			if os.Getenv("BEADS_MEM_PROFILE_NOGC") == "" {
-				runtime.GC()
-			}
-			if f, err := os.Create(heapDest); err == nil { // #nosec G304 -- user-supplied profiling path
-				_ = pprof.WriteHeapProfile(f)
-				_ = f.Close()
-			}
-		}
-		// Optional one-line MemStats summary: BEADS_MEM_STATS=/path/to/stats.txt
-		if statsDest := os.Getenv("BEADS_MEM_STATS"); statsDest != "" {
-			var ms runtime.MemStats
-			runtime.ReadMemStats(&ms)
-			if f, err := os.Create(statsDest); err == nil { // #nosec G304 -- user-supplied profiling path
-				fmt.Fprintf(f, "HeapAlloc=%d HeapSys=%d HeapInuse=%d HeapObjects=%d\n",
-					ms.HeapAlloc, ms.HeapSys, ms.HeapInuse, ms.HeapObjects)
-				_ = f.Close()
-			}
-		}
+		// Heap profiling / MemStats summary: --mem-profile flag or
+		// BEADS_MEM_PROFILE / BEADS_MEM_STATS env vars. See writeMemDiagnostics.
+		writeMemDiagnostics(memProfilePath)
 
 		// The signal context is canceled and cleared by the deferred hook
 		// registered at the top of this function, so that it also covers the
 		// early error returns above.
 		return nil
 	},
+}
+
+// flusherDiagnosticsSuffix separates the detached send-metrics child's memory
+// diagnostics from the parent command's. See memDiagnosticsDest.
+const flusherDiagnosticsSuffix = ".send-metrics"
+
+// memDiagnosticsDest returns the destination writeMemDiagnostics should write
+// dest to, suffixed when this process is the detached flusher child.
+//
+// MaybeSpawnFlusher hands the child the parent's environment minus the endpoint
+// (flusherChildEnv in internal/metrics/spawn.go), so BEADS_MEM_PROFILE and
+// BEADS_MEM_STATS arrive holding the same absolute paths the parent resolved.
+// The spawn happens on main()'s post-ExecuteC tail, i.e. after
+// PersistentPostRunE already wrote them, so an unsuffixed child would silently
+// replace the profile of the command the user actually asked about with a
+// profile of the trivial flusher -- no error, no size anomaly. Error exits are
+// worse: CheckReadonly and the pre-run gates call CloseAndFlush while
+// PersistentPostRunE never runs, leaving the child's file as the only one.
+//
+// BD_IS_FLUSHER=1 is set only by flusherChildEnv, so a human running
+// `bd send-metrics` directly still gets the plain path. The suffix is applied
+// to the resolved destination, after the flag/env fallback, so both knobs and
+// both sources follow one rule.
+func memDiagnosticsDest(dest string) string {
+	if dest == "" || os.Getenv(metrics.EnvIsFlusher) != "1" {
+		return dest
+	}
+	return dest + flusherDiagnosticsSuffix
+}
+
+// writeMemDiagnostics honors the heap-profile and MemStats diagnostic knobs
+// (--mem-profile / BEADS_MEM_PROFILE / BEADS_MEM_PROFILE_NOGC / BEADS_MEM_STATS).
+// memProfileFlag is the --mem-profile flag value, which wins over
+// BEADS_MEM_PROFILE. Both call sites pass memProfilePath: --mem-profile is
+// registered on rootCmd.PersistentFlags(), so every subcommand inherits it,
+// including the hidden send-metrics one -- which calls this directly because its
+// Run exits before Cobra ever reaches PersistentPostRunE below.
+func writeMemDiagnostics(memProfileFlag string) {
+	// Runs a GC first by default; BEADS_MEM_PROFILE_NOGC=1 skips it to capture peak.
+	heapDest := memProfileFlag
+	if heapDest == "" {
+		heapDest = os.Getenv("BEADS_MEM_PROFILE")
+	}
+	heapDest = memDiagnosticsDest(heapDest)
+	if heapDest != "" {
+		if os.Getenv("BEADS_MEM_PROFILE_NOGC") == "" {
+			runtime.GC()
+		}
+		if f, err := os.Create(heapDest); err == nil { // #nosec G304 -- user-supplied profiling path
+			_ = pprof.WriteHeapProfile(f)
+			_ = f.Close()
+		}
+	}
+	// Optional one-line MemStats summary: BEADS_MEM_STATS=/path/to/stats.txt
+	if statsDest := memDiagnosticsDest(os.Getenv("BEADS_MEM_STATS")); statsDest != "" {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		if f, err := os.Create(statsDest); err == nil { // #nosec G304 -- user-supplied profiling path
+			fmt.Fprintf(f, "HeapAlloc=%d HeapSys=%d HeapInuse=%d HeapObjects=%d\n",
+				ms.HeapAlloc, ms.HeapSys, ms.HeapInuse, ms.HeapObjects)
+			_ = f.Close()
+		}
+	}
 }
 
 func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {

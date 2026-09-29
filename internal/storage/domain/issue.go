@@ -89,7 +89,10 @@ type IssueSQLRepository interface {
 	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
-	RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error
+	// RecomputeIsBlockedAfterDelete recomputes the blocked state of the
+	// dependents a delete of deletedIDs affected, and records them for the
+	// post-commit recheck the unit of work runs (gastownhall/beads#6716).
+	RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error
 	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
 	CloseChecked(ctx context.Context, id string, params CloseRowParams, actor string, force bool) (CloseRowResult, error)
 	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)

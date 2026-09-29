@@ -675,8 +675,69 @@ var allowedBazelTestTags = map[string]string{
 	"no-remote-exec":  "must run on the Bazel client's host, never on a remote worker",
 	"no-remote-cache": "result depends on the host, so it is neither read from nor uploaded to the remote cache",
 	"requires-docker": "needs a docker daemon; excluded from --config=prcore/ci, run by --config=docker",
-	"embedded":        "embedded-Dolt tier variant; its own config",
-	"manual":          "repro/bench harness; never part of //...",
+	// No no-remote-exec: the target starts its own dolt sql-server from the
+	// pinned dolt in its runfiles, so it runs on any worker, and a server that
+	// cannot start fails it rather than skipping, so its cached result holds.
+	"dolt-server": "starts hermetic dolt sql-servers (or completes the lane's job without -short); excluded from --config=prcore/ci, run by --config=doltserver",
+	// The same rules as dolt-server (hermetic servers, remote, fail-closed:
+	// checkDoltServerRules), for the tiers bazel.yml runs only with remote
+	// execution and, for the server storage tier, under the integration
+	// lane's build flags.
+	"dolt-server-proxied":     "proxied-server cmd/bd tier: starts hermetic dolt sql-servers; excluded from --config=prcore/ci, run by --config=doltserver-proxied",
+	"dolt-server-integration": "server-Dolt storage tier: starts hermetic dolt sql-servers and needs the integration build tag; excluded from --config=prcore/ci, run by --config=doltserver-integration",
+	"embedded":                "embedded-Dolt tier variant; excluded from --config=prcore/ci, run by --config=embedded",
+	"manual":                  "never part of //...: a repro/bench harness, or a build input only another target needs; excluded from --config=prcore/ci",
+	// For a go_test whose every test file is `//go:build integration`: in any
+	// other configuration rules_go drops those files and the target runs
+	// zero tests, which check_testcases.py rejects and equivalence.py can
+	// only note. gazelle keeps the hand-written tags attribute.
+	"integration-only": "holds tests only under the integration build tag; excluded from --config=prcore/ci, run by --config=integration",
+}
+
+// bazelPRCoreExcludedTags are the tags whose targets never run in the PR-core
+// lane (--config=prcore/ci): each belongs to another lane or to none. Every
+// taxonomy entry that says "excluded from --config=prcore/ci" is listed here
+// and vice versa (TestBazelPRCoreExcludedTagsMatchTaxonomy), so a new lane
+// tag lands here, and through bazelIntegrationExcludedTags in the
+// integration lane's filter too.
+var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-server-proxied", "dolt-server-integration", "embedded", "manual", "integration-only"}
+
+// bazelIntegrationRunsTags are the PR-core-excluded tags --config=integration
+// runs: the integration lane is main.yml's integration jobs, whose
+// BEADS_TEST_SKIP=dolt skips every container- or server-backed test, so every
+// other lane's variant stays out of it.
+var bazelIntegrationRunsTags = map[string]bool{"integration-only": true}
+
+// bazelIntegrationExcludedTags is bazelPRCoreExcludedTags less the tags the
+// integration lane runs.
+func bazelIntegrationExcludedTags() []string {
+	var tags []string
+	for _, tag := range bazelPRCoreExcludedTags {
+		if !bazelIntegrationRunsTags[tag] {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+func TestBazelPRCoreExcludedTagsMatchTaxonomy(t *testing.T) {
+	listed := map[string]bool{}
+	for _, tag := range bazelPRCoreExcludedTags {
+		listed[tag] = true
+		if _, ok := allowedBazelTestTags[tag]; !ok {
+			t.Errorf("bazelPRCoreExcludedTags: %q is not in allowedBazelTestTags", tag)
+		}
+	}
+	for tag, why := range allowedBazelTestTags {
+		if says := strings.Contains(why, "excluded from --config=prcore/ci"); says != listed[tag] {
+			t.Errorf("tag %q: taxonomy says excluded from prcore/ci = %v, bazelPRCoreExcludedTags = %v", tag, says, listed[tag])
+		}
+	}
+	for tag := range bazelIntegrationRunsTags {
+		if !listed[tag] {
+			t.Errorf("bazelIntegrationRunsTags: %q is not in bazelPRCoreExcludedTags", tag)
+		}
+	}
 }
 
 // bazelTagsRequiring maps tags whose targets depend on the host to the tags
@@ -807,13 +868,12 @@ func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 	}
 }
 
-// checkBazelrcPrcoreTagFilter requires --config=prcore to exclude the tags
-// that never run in the PR-core lane. Every --test_tag_filters set by prcore or
-// by a config that expands it (test:ci) is checked, since a later one would
-// override the first.
-func checkBazelrcPrcoreTagFilter(bazelrc string) error {
-	type option struct{ config, flag string }
-	var opts []option
+// bazelrcOption is one flag set by a `command:config` line of .bazelrc; a
+// flag and its separate value are joined as flag=value.
+type bazelrcOption struct{ config, flag string }
+
+func parseBazelrcOptions(bazelrc string) []bazelrcOption {
+	var opts []bazelrcOption
 	for _, line := range strings.Split(bazelrc, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
@@ -825,15 +885,21 @@ func checkBazelrcPrcoreTagFilter(bazelrc string) error {
 		}
 		for i := 1; i < len(fields); i++ {
 			flag := fields[i]
-			if (flag == "--config" || flag == "--test_tag_filters") && i+1 < len(fields) {
+			if (flag == "--config" || flag == "--test_tag_filters" || flag == "--test_arg") && i+1 < len(fields) {
 				i++
 				flag += "=" + fields[i]
 			}
-			opts = append(opts, option{config, flag})
+			opts = append(opts, bazelrcOption{config, flag})
 		}
 	}
+	return opts
+}
 
-	lane := map[string]bool{"prcore": true}
+// bazelrcLaneOptions returns the options of config and of every config that
+// expands it (test:ci --config=prcore), in file order: a later filter line in
+// any of them overrides an earlier one.
+func bazelrcLaneOptions(opts []bazelrcOption, config string) []bazelrcOption {
+	lane := map[string]bool{config: true}
 	for grew := true; grew; {
 		grew = false
 		for _, o := range opts {
@@ -843,25 +909,69 @@ func checkBazelrcPrcoreTagFilter(bazelrc string) error {
 			}
 		}
 	}
-
-	prcoreFilter := false
+	var out []bazelrcOption
 	for _, o := range opts {
-		if !lane[o.config] || !strings.HasPrefix(o.flag, "--test_tag_filters=") {
+		if lane[o.config] {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// checkBazelrcLaneTagFilter requires --config=<config> to set
+// --test_tag_filters and every --test_tag_filters set by it or by a config
+// that expands it to exclude each of the tags: since the last one wins, each
+// must.
+func checkBazelrcLaneTagFilter(bazelrc, config string, exclude []string) error {
+	own := false
+	for _, o := range bazelrcLaneOptions(parseBazelrcOptions(bazelrc), config) {
+		if !strings.HasPrefix(o.flag, "--test_tag_filters=") {
 			continue
 		}
-		prcoreFilter = prcoreFilter || o.config == "prcore"
+		own = own || o.config == config
 		filters := map[string]bool{}
 		for _, f := range strings.Split(strings.TrimPrefix(o.flag, "--test_tag_filters="), ",") {
 			filters[f] = true
 		}
-		for _, tag := range []string{"requires-docker", "embedded", "manual"} {
+		for _, tag := range exclude {
 			if !filters["-"+tag] {
 				return errors.New(o.config + " --test_tag_filters does not exclude " + tag)
 			}
 		}
 	}
-	if !prcoreFilter {
-		return errors.New(".bazelrc has no test:prcore --test_tag_filters line")
+	if !own {
+		return errors.New(".bazelrc has no test:" + config + " --test_tag_filters line")
+	}
+	return nil
+}
+
+// checkBazelrcPrcoreTagFilter requires --config=prcore (and test:ci, which
+// expands it) to exclude the tags that never run in the PR-core lane.
+func checkBazelrcPrcoreTagFilter(bazelrc string) error {
+	return checkBazelrcLaneTagFilter(bazelrc, "prcore", bazelPRCoreExcludedTags)
+}
+
+// checkBazelrcIntegrationLane requires --config=integration to exclude every
+// other lane's tags and to pass the tests no -test.short, -test.skip or
+// -test.run (nor --test_filter): main.yml's integration jobs run every test.
+func checkBazelrcIntegrationLane(bazelrc string) error {
+	if err := checkBazelrcLaneTagFilter(bazelrc, "integration", bazelIntegrationExcludedTags()); err != nil {
+		return err
+	}
+	for _, o := range bazelrcLaneOptions(parseBazelrcOptions(bazelrc), "integration") {
+		arg, isArg := strings.CutPrefix(o.flag, "--test_arg=")
+		if strings.HasPrefix(o.flag, "--test_filter") {
+			return errors.New(o.config + " sets " + o.flag + "; the integration jobs select every test")
+		}
+		if !isArg {
+			continue
+		}
+		arg = strings.TrimLeft(arg, "-")
+		for _, bad := range []string{"test.short", "test.skip", "test.run"} {
+			if arg == bad || strings.HasPrefix(arg, bad+"=") {
+				return errors.New(o.config + " passes " + o.flag + "; the integration jobs run no -short/-skip/-run")
+			}
+		}
 	}
 	return nil
 }
@@ -871,8 +981,9 @@ func TestBazelrcPrcoreExcludesNonPRTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, rc := range map[string]string{
-		"missing":   "test:ci --keep_going\n",
-		"no docker": "test:prcore --test_tag_filters=-embedded,-manual\n",
+		"missing":        "test:ci --keep_going\n",
+		"no docker":      "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n",
+		"no dolt-server": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n",
 		"ci override": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
 			"test:ci --config=prcore\ntest:ci --test_tag_filters=requires-docker\n",
 		"second prcore line": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
@@ -881,6 +992,167 @@ func TestBazelrcPrcoreExcludesNonPRTags(t *testing.T) {
 			"test:ci --config=prcore\nbuild:nightly --config ci --test_tag_filters=\n",
 	} {
 		if err := checkBazelrcPrcoreTagFilter(rc); err == nil {
+			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)
+		}
+	}
+}
+
+// TestBazelrcPrcoreRequiresExcludePermission keeps test:prcore in step with
+// pr.yml's PR Core step (TestPRCoreRequiresExcludeReadPermissionCoverage):
+// without the variable, TestAddExcludePatternsRefusesReadErrors skips on a
+// root executor instead of failing.
+func TestBazelrcPrcoreRequiresExcludePermission(t *testing.T) {
+	const want = "test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1"
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		if strings.TrimSpace(line) == want {
+			return
+		}
+	}
+	t.Fatalf(".bazelrc lacks %q", want)
+}
+
+// TestBazelrcPrcoreMatchesPRCoreParallel keeps test:prcore's -test.parallel
+// equal to pr-core.sh's -parallel default: without it Go uses GOMAXPROCS, the
+// executor's core count, and runs far more tests at once than PR Core does.
+func TestBazelrcPrcoreMatchesPRCoreParallel(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	m := regexp.MustCompile(`(?m)^GO_TEST_PARALLEL="\$\{GO_TEST_PARALLEL:-(\d+)\}"$`).FindStringSubmatch(readPolicyFile(t, root, "scripts/ci/pr-core.sh"))
+	if m == nil {
+		t.Fatal("scripts/ci/pr-core.sh has no GO_TEST_PARALLEL default")
+	}
+	want := "test:prcore --test_arg=-test.parallel=" + m[1]
+	for _, line := range strings.Split(readPolicyFile(t, root, ".bazelrc"), "\n") {
+		if strings.TrimSpace(line) == want {
+			return
+		}
+	}
+	t.Fatalf(".bazelrc lacks %q (pr-core.sh runs go test -parallel %s)", want, m[1])
+}
+
+// Docker-lane results depend on host state no action key sees (daemon, dolt
+// image, network), so they must always execute, like the container jobs'
+// -count=1; and no remote-exec run may upload a locally executed result to
+// the shared cache.
+func TestBazelrcDockerLaneNeverCached(t *testing.T) {
+	lines := map[string]bool{}
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		lines[strings.TrimSpace(line)] = true
+	}
+	for _, want := range []string{
+		"test:docker --nocache_test_results",
+		"build:remote-exec --noremote_upload_local_results",
+	} {
+		if !lines[want] {
+			t.Errorf(".bazelrc lacks %q", want)
+		}
+	}
+}
+
+// --- integration lane ----------------------------------------------------------
+
+// tagSet parses a comma-separated Go build tag list.
+func tagSet(list string) map[string]bool {
+	set := map[string]bool{}
+	for _, tag := range strings.Split(list, ",") {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			set[tag] = true
+		}
+	}
+	return set
+}
+
+func sameTagSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for tag := range a {
+		if !b[tag] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestBazelIntegrationLaneMatchesMainWorkflow keeps --config=integration in
+// step with main.yml's "Main Linux integration" jobs: the same build tags,
+// race, BEADS_TEST_SKIP=dolt, and none of the variants those jobs do not run.
+// It also requires gazelle to see the same tags (root BUILD.bazel
+// `gazelle:build_tags`): gazelle drops a file whose build constraint names a
+// tag it does not know, so without it no BUILD file would list the integration
+// test files and the lane would silently run the plain package tests instead.
+// With it, a file gaining `//go:build integration` lands in its package's srcs
+// through `make bazel-sync`, whose staleness bazel.yml already fails on.
+func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	mainYML := readPolicyFile(t, root, ".github/workflows/main.yml")
+	jobTags := regexp.MustCompile(`-race -tags=(\S+) -timeout=30m`).FindAllStringSubmatch(mainYML, -1)
+	if len(jobTags) != 2 {
+		t.Fatalf("main.yml: want the two integration jobs' `go test -race -tags=... -timeout=30m`, found %d", len(jobTags))
+	}
+	want := tagSet(jobTags[0][1])
+	if !want["integration"] || !sameTagSet(want, tagSet(jobTags[1][1])) {
+		t.Fatalf("main.yml integration jobs' tags differ or lack integration: %q, %q", jobTags[0][1], jobTags[1][1])
+	}
+	if strings.Count(mainYML, "env BEADS_TEST_SKIP=dolt gotestsum") < 2 {
+		t.Fatal("main.yml integration jobs no longer run with BEADS_TEST_SKIP=dolt; update test:integration")
+	}
+
+	bazelrc := readPolicyFile(t, root, ".bazelrc")
+	lines := map[string]bool{}
+	var laneTags map[string]bool
+	for _, line := range strings.Split(bazelrc, "\n") {
+		line = strings.TrimSpace(line)
+		lines[line] = true
+		if v, ok := strings.CutPrefix(line, "build:integration --@rules_go//go/config:tags="); ok {
+			laneTags = tagSet(v)
+		}
+	}
+	if !sameTagSet(laneTags, want) {
+		t.Errorf(".bazelrc build:integration tags = %v, want main.yml's %v", laneTags, want)
+	}
+	if err := checkBazelrcIntegrationLane(bazelrc); err != nil {
+		t.Error(err)
+	}
+	for _, need := range []string{
+		"test:integration --@rules_go//go/config:race",
+		"test:integration --test_env=BEADS_TEST_SKIP=dolt",
+	} {
+		if !lines[need] {
+			t.Errorf(".bazelrc lacks %q", need)
+		}
+	}
+
+	m := regexp.MustCompile(`(?m)^# gazelle:build_tags (\S+)$`).FindStringSubmatch(readPolicyFile(t, root, "BUILD.bazel"))
+	if m == nil {
+		t.Fatal("BUILD.bazel has no `# gazelle:build_tags` directive")
+	}
+	gazelleTags := tagSet(m[1])
+	for tag := range want {
+		if !gazelleTags[tag] {
+			t.Errorf("BUILD.bazel `gazelle:build_tags %s` lacks %q: gazelle would leave that lane's files out of every BUILD file", m[1], tag)
+		}
+	}
+}
+
+func TestBazelrcIntegrationLaneFixtures(t *testing.T) {
+	exclude := bazelIntegrationExcludedTags()
+	good := "test:integration --test_tag_filters=-" + strings.Join(exclude, ",-") + "\n" +
+		"test:integration --test_arg=-test.parallel=4\ntest:integration --test_arg=-test.timeout=19m\n"
+	if err := checkBazelrcIntegrationLane(good); err != nil {
+		t.Errorf("good fixture rejected: %v", err)
+	}
+	for name, rc := range map[string]string{
+		"missing":          "test:integration --keep_going\n",
+		"one missing":      "test:integration --test_tag_filters=-" + strings.Join(exclude[1:], ",-") + "\n",
+		"later override":   good + "test:integration --test_tag_filters=-manual\n",
+		"expanding config": good + "test:nightly --config=integration\ntest:nightly --test_tag_filters=\n",
+		"short":            good + "test:integration --test_arg=-test.short\n",
+		"short spaced":     good + "test:integration --test_arg -test.short\n",
+		"skip":             good + "test:integration --test_arg=-test.skip=TestX\n",
+		"run":              good + "test:integration --test_arg=--test.run=TestX\n",
+		"test_filter":      good + "test:integration --test_filter=TestX\n",
+	} {
+		if err := checkBazelrcIntegrationLane(rc); err == nil {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)
 		}
 	}
