@@ -155,6 +155,7 @@ func TestRenderProxiedDoltStatus(t *testing.T) {
 		defer restoreJSONOutput(t)()
 		jsonOutput = false
 		stranded := running
+		stranded.Running = false
 		stranded.BackendRunning, stranded.BackendPID, stranded.BackendPort = false, 0, 0
 		out := captureStdout(t, func() error { renderProxiedDoltStatus(stranded); return nil })
 		if strings.Contains(out, "Dolt server: running") {
@@ -199,6 +200,24 @@ func TestRenderProxiedDoltStatus(t *testing.T) {
 			t.Errorf("round-trip mismatch:\ngot  %+v\nwant %+v", got, running)
 		}
 	})
+}
+
+func TestProxiedStatusServing(t *testing.T) {
+	for _, tc := range []struct {
+		name                                  string
+		proxyRunning, managed, backendRunning bool
+		want                                  bool
+	}{
+		{"managed pair live", true, true, true, true},
+		{"proxy over dead managed backend", true, true, false, false},
+		{"external backend", true, false, false, true},
+		{"proxy down", false, true, true, false},
+		{"nothing running", false, true, false, false},
+	} {
+		if got := proxiedStatusServing(tc.proxyRunning, tc.managed, tc.backendRunning); got != tc.want {
+			t.Errorf("%s: proxiedStatusServing(%v, %v, %v) = %v, want %v", tc.name, tc.proxyRunning, tc.managed, tc.backendRunning, got, tc.want)
+		}
+	}
 }
 
 func restoreJSONOutput(t *testing.T) func() {

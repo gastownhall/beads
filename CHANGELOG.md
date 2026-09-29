@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   called it running, and every command failed until `bd dolt stop`. The proxy
   now retires on any backend exit, as it already did on a crash, so the next bd
   command (including `bd ping`) starts a fresh proxy and backend. `bd dolt
-  status` no longer reports a proxy whose managed backend is gone as running.
+  status` no longer reports a proxy whose managed backend is gone as running:
+  the text says "not serving" and the JSON reports `running: false` (with
+  `proxy_pid` still set), including for a stranded proxy started by an older
+  bd. ([#6937](https://github.com/gastownhall/beads/pull/6937))
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
