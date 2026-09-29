@@ -1210,35 +1210,51 @@ func EnsureRunning(beadsDir string) (int, error) {
 // servers (e.g. test teardown) should use this variant.
 func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err error) {
 	serverDir := resolveServerDir(beadsDir)
-	lockF, lockErr := acquireLifecycleLock(serverDir)
-	if lockErr != nil {
-		return 0, false, lockErr
-	}
-	defer releaseLifecycleLock(lockF)
 
 	// Inform when an orchestrator is also running on this machine
 	if IsSharedServerMode() && os.Getenv("GT_ROOT") != "" {
 		fmt.Fprintf(os.Stderr, "Info: Orchestrator detected (GT_ROOT set). Shared server uses port %d to avoid conflict.\n", DefaultSharedServerPort)
 	}
 
+	// Steady-state fast path, deliberately lock-free. This is every bd
+	// command's store-open path, and it mutates no lifecycle state. Taking the
+	// exclusive lifecycle flock here would queue every bd command on the
+	// machine behind a single wedged holder, with no timeout and nothing
+	// printed. Racing a concurrent start is safe: the slow path below
+	// re-checks under the lock and startLocked re-checks again, so the worst
+	// case for a stale "not running" read is one wasted acquire.
 	state, err := IsRunning(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
 	if state.Running {
-		if verified, verr := verifyRemotesAPIState(DefaultConfig(serverDir), state); verr != nil {
-			// BEADS_DOLT_REMOTESAPI_PORT predates this listener wiring as a
-			// federation-check knob, so a running server that has not been
-			// restarted since the setting appeared is an expected state, not a
-			// broken install. Keep the auto-start fast path serving SQL and
-			// surface the gap as a warning; the explicit lifecycle paths
-			// (Start, adoption) still fail hard with the stop/start remedy.
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", verr)
-		} else {
-			state = verified
+		return adoptRunningServer(serverDir, state), false, nil
+	}
+
+	lockF, lockErr := acquireLifecycleLock(serverDir)
+	if lockErr != nil {
+		return 0, false, lockErr
+	}
+	locked := true
+	defer func() {
+		if locked {
+			releaseLifecycleLock(lockF)
 		}
-		_ = EnsurePortFile(serverDir, state.Port)
-		return state.Port, false, nil
+	}()
+
+	// Re-check under the lock: another bd process may have started the server
+	// while we were waiting to acquire.
+	state, err = IsRunning(serverDir)
+	if err != nil {
+		return 0, false, err
+	}
+	if state.Running {
+		// Release before adopting. adoptRunningServer dials the remotesapi
+		// listener, and a per-waiter 500ms probe inside the exclusive region
+		// is precisely the serialization the fast path above exists to avoid.
+		releaseLifecycleLock(lockF)
+		locked = false
+		return adoptRunningServer(serverDir, state), false, nil
 	}
 
 	// If the server mode is External (explicit port in metadata.json,
@@ -1507,16 +1523,51 @@ func buildDoltServerArgsWithConfig(configPath string, debug bool, profDir string
 	return args
 }
 
+// acquireLifecycleLock takes the exclusive lifecycle flock for beadsDir.
+//
+// The wait is unbounded, so it follows the two-step pattern the pre-unification
+// Start used: try once without blocking, and only if another bd process holds
+// the lock say so on stderr before blocking. A silent indefinite hang is the
+// one failure mode an untimed flock must not have.
 func acquireLifecycleLock(beadsDir string) (*os.File, error) {
 	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("creating lifecycle lock: %w", err)
 	}
+	err = lockfile.FlockExclusiveNonBlocking(lockF)
+	if err == nil {
+		return lockF, nil
+	}
+	if !lockfile.IsLocked(err) {
+		_ = lockF.Close()
+		return nil, fmt.Errorf("acquiring lifecycle lock: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "Info: waiting for dolt lifecycle lock held by another bd process...")
 	if err := lockfile.FlockExclusiveBlocking(lockF); err != nil {
 		_ = lockF.Close()
 		return nil, fmt.Errorf("acquiring lifecycle lock: %w", err)
 	}
 	return lockF, nil
+}
+
+// adoptRunningServer does the already-running bookkeeping for
+// EnsureRunningDetailed and returns the port to serve on. It is called with no
+// lifecycle lock held: verifyRemotesAPIState dials the remotesapi listener,
+// which must not happen inside the exclusive region.
+func adoptRunningServer(serverDir string, state *State) int {
+	if verified, verr := verifyRemotesAPIState(DefaultConfig(serverDir), state); verr != nil {
+		// BEADS_DOLT_REMOTESAPI_PORT predates this listener wiring as a
+		// federation-check knob, so a running server that has not been
+		// restarted since the setting appeared is an expected state, not a
+		// broken install. Keep the auto-start fast path serving SQL and
+		// surface the gap as a warning; the explicit lifecycle paths
+		// (Start, adoption) still fail hard with the stop/start remedy.
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", verr)
+	} else {
+		state = verified
+	}
+	_ = EnsurePortFile(serverDir, state.Port)
+	return state.Port
 }
 
 func releaseLifecycleLock(lockF *os.File) {

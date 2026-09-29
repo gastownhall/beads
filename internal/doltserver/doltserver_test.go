@@ -1413,7 +1413,9 @@ func TestRecoverPreV56DoltDir(t *testing.T) {
 		if _, statErr := os.Stat(sentinel); !os.IsNotExist(statErr) {
 			t.Error("expected old .dolt/ contents to be removed during recovery")
 		}
-		t.Skipf("recovery partially completed (dolt init may have failed): %v", err)
+		// Same two causes as TestEnsureDoltInit_WritesMarker's skip: dolt
+		// absent, or no dolt identity under the redirected HOME.
+		t.Skipf("recovery partially completed (dolt not installed, or no dolt identity in HOME=%q): %v", os.Getenv("HOME"), err)
 	}
 	if !recovered {
 		t.Error("expected recovery to be performed")
@@ -1464,8 +1466,10 @@ func TestEnsureDoltInit_WritesMarker(t *testing.T) {
 	// ensureDoltInit should create .dolt/ and write the marker
 	err := ensureDoltInit(doltDir)
 	if err != nil {
-		// dolt might not be installed in test env; skip marker check
-		t.Skipf("dolt init failed (dolt may not be installed): %v", err)
+		// dolt is absent, or the environment has no dolt identity for it to
+		// author the init commit with. TestMain configures one inside the
+		// isolated HOME; see configureDoltIdentity in testmain_test.go.
+		t.Skipf("dolt init failed (dolt not installed, or no dolt identity in HOME=%q): %v", os.Getenv("HOME"), err)
 	}
 
 	markerPath := filepath.Join(doltDir, bdDoltMarker)
