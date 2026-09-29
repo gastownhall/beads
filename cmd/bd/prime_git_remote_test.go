@@ -11,15 +11,19 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 )
 
-// GH#4927: git remote probe must not depend on BEADS_DIR / RepoContext.
+// GH#4927: prime's git probes must not depend on BEADS_DIR / RepoContext.
 //
 // buildRepoContext (internal/beads/context.go) can fail when FindBeadsDir()
 // returns "" (context.go:107, e.g. BEADS_DIR doesn't exist). The pre-fix bug
 // collapsed that GetRepoContext() error into "no git remote" / "ephemeral
 // branch". This test poisons BEADS_DIR with a nonexistent path and verifies
 // (a) that GetRepoContext() actually fails via FindBeadsDir()=="", and (b)
-// that gitCWDHasRemote/primeHasGitRemote are unaffected by it.
-func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
+// that both probes the fix repairs -- primeHasGitRemote and isEphemeralBranch
+// -- are unaffected by it.
+//
+// The probe assertions below use t.Error rather than t.Fatal so a regression
+// in one probe does not mask the state of the others.
+func TestPrimeGitProbes_IndependentOfBeadsDir(t *testing.T) {
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -32,7 +36,10 @@ func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
 	run("git", "init", "-q")
 	run("git", "config", "user.name", "fixture")
 	run("git", "config", "user.email", "fixture@example.com")
+	run("git", "config", "commit.gpgsign", "false")
 
+	// gitDirHasRemote is the test-only oracle described in prime.go; these two
+	// assertions check that the fixture itself is built correctly, not the fix.
 	if gitDirHasRemote(dir) {
 		t.Fatal("expected no remote after init")
 	}
@@ -41,6 +48,12 @@ func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
 	if !gitDirHasRemote(dir) {
 		t.Fatal("expected remote after git remote add origin")
 	}
+
+	// A committed branch that has a remote but no upstream -- the state in
+	// which the branch genuinely is ephemeral. The fixed branch name avoids
+	// depending on init.defaultBranch.
+	run("git", "commit", "-q", "--allow-empty", "-m", "fixture")
+	run("git", "checkout", "-q", "-B", "fixture-branch")
 
 	t.Cleanup(func() {
 		beads.ResetCaches()
@@ -69,10 +82,29 @@ func TestGitDirHasRemote_IndependentOfBeadsDir(t *testing.T) {
 	}
 
 	if !gitCWDHasRemote() {
-		t.Fatal("gitCWDHasRemote should see origin even with a nonexistent BEADS_DIR set")
+		t.Error("gitCWDHasRemote should see origin even with a nonexistent BEADS_DIR set")
 	}
-	// And primeHasGitRemote uses the same path
+
+	// The two probes the fix actually repairs. Both route through primeGitCmd,
+	// so both regress if its GetRepoContext() fallback is removed.
 	if !primeHasGitRemote() {
-		t.Fatal("primeHasGitRemote should see origin even with a nonexistent BEADS_DIR set")
+		t.Error("primeHasGitRemote should see origin even with a nonexistent BEADS_DIR set")
+	}
+
+	// isEphemeralBranch, both polarities under the same poisoned BEADS_DIR.
+	// The branch has no upstream yet, so "ephemeral" is the correct answer
+	// here; this control is what proves the assertion below is reading git
+	// rather than returning a constant.
+	if !isEphemeralBranch() {
+		t.Error("isEphemeralBranch should report ephemeral while the branch has no upstream")
+	}
+
+	// Configure a real upstream -- entirely local, the remote is never
+	// contacted -- and the same probe must flip. Pre-fix it stayed true here,
+	// because the GetRepoContext() failure was itself reported as "ephemeral".
+	run("git", "update-ref", "refs/remotes/origin/fixture-branch", "HEAD")
+	run("git", "branch", "--set-upstream-to=origin/fixture-branch", "fixture-branch")
+	if isEphemeralBranch() {
+		t.Error("isEphemeralBranch should see the configured upstream even with a nonexistent BEADS_DIR set")
 	}
 }

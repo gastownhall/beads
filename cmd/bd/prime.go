@@ -286,6 +286,11 @@ func primeWorkspaceDir() string {
 //
 // NOTE: the probes built here are not prime-only — see primeHasGitRemote for
 // the auto-backup consumer that inherits this directory choice.
+//
+// NOTE: since GH#4927 every return path pairs with a nil error — the
+// GetRepoContext() failure falls back to a cwd probe instead of propagating —
+// so the err != nil arms at both call sites are unreachable today. The error
+// result is retained for future callers that can genuinely fail.
 func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	if ws := primeWorkspaceDir(); ws != "" {
 		cmd := exec.CommandContext(ctx, "git", args...)
@@ -422,10 +427,12 @@ var primeHasGitRemote = func() bool {
 }
 
 // gitCWDHasRemote reports whether the process CWD git repo has any remote.
-// Delegates to gitDirHasRemote so the production path and the test-driven
-// path share one implementation (no BEADS_DIR coupling). It is the
+// Delegates to gitDirHasRemote (no BEADS_DIR coupling). It is the
 // BEADS_DIR-independent primitive the GH#4927 regression test drives directly,
 // alongside primeHasGitRemote.
+//
+// This pair is a test-only oracle with no production callers: the production
+// probes build their own command in primeGitCmd.
 func gitCWDHasRemote() bool {
 	return gitDirHasRemote("")
 }
