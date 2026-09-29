@@ -7,11 +7,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestNormalizeIssueTimestampsConvertsOptionalTimestampsToUTC covers the
-// proxied-server insert path's share of #5765: normalizeIssueTimestamps must
-// convert an offset-bearing closed_at (and its sibling optional timestamps) to
-// UTC, matching the embedded PrepareIssueForInsert path, so the stored instant
-// is not shifted by the host's UTC offset on JSONL import.
+// TestNormalizeIssueTimestampsConvertsOptionalTimestampsToUTC is a unit-level pin
+// on this route's half of the #5765 wiring. This route is already offset-safe on
+// its own: domain/db runs on go-sql-driver, whose DSN Loc defaults to time.UTC and
+// which converts bound time.Time values into that location on both the interpolate
+// and prepared/binary paths, and no production DSN sets loc=. The embedded route is
+// the one that actually discards offsets, formatting in the value's own zone via
+// vitess BuildBindVariable. normalizeIssueTimestamps is therefore defense-in-depth
+// for parity with the embedded PrepareIssueForInsert path, and this test pins that
+// wiring rather than a live shift on this route.
 func TestNormalizeIssueTimestampsConvertsOptionalTimestampsToUTC(t *testing.T) {
 	est := time.FixedZone("EST", -5*60*60)
 	// 2026-03-07T22:06:41-05:00 == 2026-03-08T03:06:41Z (the reporter's imp-200).
