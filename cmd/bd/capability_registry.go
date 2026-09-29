@@ -324,12 +324,13 @@ var proxyCapabilityRegistry = []capabilityRow{
 	refusedPath("repo sync", "proxy.repo.unsupported", ProxyReasonDesign, ""),
 
 	// --- dolt version-control verbs -----------------------------------------
-	// CALL DOLT_PUSH/DOLT_PULL/DOLT_COMMIT are SQL procedures and the generic
-	// repository that wraps them is already written; these need a use case and
-	// a route, not proxy work. `dolt remote remove` is already routed, which is
-	// the precedent.
-	refusedPath("dolt commit", "proxy.dolt_commit.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
-		withHistory(HistoryDirectOnly),
+	// CALL DOLT_PUSH/DOLT_PULL are SQL procedures and the generic repository
+	// that wraps them is already written; these need a use case and a route,
+	// not proxy work. `dolt remote remove` is already routed, which is the
+	// precedent — and `dolt commit` has now followed it: GH#4995 supplied the
+	// use case (it is the flush point dolt.auto-commit=batch/off defers to) and
+	// runDoltCommitProxiedServer supplied the route, so its row moved to the
+	// routed-history block below.
 	refusedPath("dolt push", "proxy.dolt_push.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
 		withHistory(HistoryDirectOnly),
 	refusedPath("dolt pull", "proxy.dolt_pull.unsupported", ProxyReasonUnimplemented, trackVersionCtl).
@@ -441,10 +442,14 @@ var proxyCapabilityRegistry = []capabilityRow{
 	{Path: "duplicates", ArgSet: "--auto-merge --dry-run", Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}},
 
 	// --- routed history -----------------------------------------------------
-	// The two paths that already have a proxied route, recorded so the class is
+	// The paths that already have a proxied route, recorded so the class is
 	// asserted rather than remembered.
 	permitted("history").withHistory(HistoryProxySupported),
 	permitted("dolt remote remove").withHistory(HistoryProxySupported),
+	// `dolt commit` is routed by runDoltCommitProxiedServer. It is also the
+	// flush point dolt.auto-commit=batch/off defers to (GH#4995), so refusing it
+	// at the front door would leave those modes with no way to flush.
+	permitted("dolt commit").withHistory(HistoryProxySupported),
 
 	// --- untyped refusals inside RunE ---------------------------------------
 	// The gate permits these paths and the command refuses itself with a bare

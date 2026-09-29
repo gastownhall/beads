@@ -422,12 +422,13 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 		//
 		// The 30s default cannot work here. The only client this proxy will
 		// ever have is bd serve, whose pool releases its last connection after
-		// ConnMaxIdleTime (5m) of no requests; a finite-idle proxy then sees
-		// zero clients and exits, taking with it the OS-assigned port the
-		// provider's DSN pinned at construction. Nothing re-resolves that
-		// endpoint — GetCreateDatabaseProxyServerEndpoint runs once, above — so
-		// serve would go on answering /healthz with no database left to answer
-		// anything else from, unrecoverable without a restart.
+		// ConnMaxIdleTime (20s, servePoolLimits) of no requests; a finite-idle
+		// proxy then sees zero clients and exits, taking with it the
+		// OS-assigned port the provider's DSN pinned at construction. Nothing
+		// re-resolves that endpoint — GetCreateDatabaseProxyServerEndpoint runs
+		// once, above — so serve would go on answering /healthz with no
+		// database left to answer anything else from, unrecoverable without a
+		// restart.
 		//
 		// The tradeoff is a child that outlives serve, and it is deliberate: a
 		// never-idle proxy is already a supported configuration

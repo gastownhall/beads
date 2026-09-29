@@ -128,12 +128,22 @@ func TestGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	t.Run("shell options preserve argv and status", testHookProcessShellOptions)
 	t.Run("POSIX sh preserves argv and status", testHookProcessPOSIXShell)
 	t.Run("reserved statuses are backend scoped", testHookProcessReservedStatuses)
-	t.Run("real GNU timeout expires a responsive child", testHookProcessRealTimeoutExpiry)
+	t.Run("real coreutils timeout expires a responsive child", testHookProcessRealTimeoutExpiry)
 	t.Run("real Perl alarm expires a responsive child", testHookProcessRealPerlExpiry)
 	t.Run("Windows checkout rejects System32 timeout", testHookProcessWindowsSystemTimeoutCheckout)
 }
 
 func testHookProcessBackendSelection(t *testing.T) {
+	// Derive the uutils helper from the GNU stub so the two differ only in the
+	// banner, but fail loudly if that banner ever moves: strings.Replace returns
+	// its input unchanged when the pattern is absent, which would silently turn
+	// the uutils case into a second copy of the GNU one.
+	const hookProcessGNUTimeoutBanner = "(GNU coreutils) 9.99"
+	uutilsTimeoutStub := strings.Replace(hookProcessGNUTimeoutStub, hookProcessGNUTimeoutBanner, "(uutils coreutils) 0.10.0", 1)
+	if uutilsTimeoutStub == hookProcessGNUTimeoutStub {
+		t.Fatalf("uutils fixture is a copy of the GNU stub: %q not found in hookProcessGNUTimeoutStub", hookProcessGNUTimeoutBanner)
+	}
+
 	tests := []struct {
 		name        string
 		fixtures    []hookProcessFixture
@@ -147,6 +157,14 @@ func testHookProcessBackendSelection(t *testing.T) {
 				{name: "gtimeout", body: hookProcessGNUGtimeoutStub},
 			},
 			wantHelper: "helper=gtimeout",
+		},
+		{
+			name: "uutils coreutils timeout is selected like GNU",
+			fixtures: []hookProcessFixture{
+				{name: "timeout", body: uutilsTimeoutStub},
+				{name: "gtimeout", body: hookProcessGNUGtimeoutStub},
+			},
+			wantHelper: "helper=timeout",
 		},
 		{
 			name: "nonzero GNU-looking probe yields to gtimeout",
@@ -322,7 +340,7 @@ func testHookProcessReservedStatuses(t *testing.T) {
 }
 
 func testHookProcessRealTimeoutExpiry(t *testing.T) {
-	helperName, helperDir := findHookProcessGNUTimeout(t)
+	helperName, helperDir := findHookProcessCoreutilsTimeout(t)
 	timeout := "1"
 	result := runGeneratedHookProcess(t, hookProcessCase{
 		bdBody:   hookProcessLongRunningBDStub,
@@ -513,13 +531,18 @@ shift
 	return hookProcessResult{output: string(output), exitCode: exitCode, elapsed: elapsed}
 }
 
-func findHookProcessGNUTimeout(t *testing.T) (string, string) {
+// findHookProcessCoreutilsTimeout mirrors the generated shim's identity
+// allowlist (cmd/bd/hooks.go generateHookSection). Keep the `case` here in step
+// with the one the generator emits: this is the second copy of that contract,
+// and a narrower copy silently skips the only test that drives a real timeout
+// binary on exactly the hosts the wider allowlist exists for.
+func findHookProcessCoreutilsTimeout(t *testing.T) (string, string) {
 	t.Helper()
 	probe := `for _bd_test_candidate in timeout gtimeout; do
   if command -v "$_bd_test_candidate" >/dev/null 2>&1 &&
      _bd_test_version="$("$_bd_test_candidate" --version 2>/dev/null)"; then
     case "$_bd_test_version" in
-      "timeout (GNU coreutils) "*)
+      "timeout (GNU coreutils) "*|"timeout (uutils coreutils) "*)
         _bd_test_path=$(command -v "$_bd_test_candidate")
         printf '%s\n%s\n' "$_bd_test_candidate" "${_bd_test_path%/*}"
         exit 0
@@ -533,11 +556,11 @@ exit 1
 	cmd.Env = hookProcessEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Skipf("compatible GNU timeout is unavailable: %s", strings.TrimSpace(string(output)))
+		t.Skipf("no compatible coreutils timeout is available: %s", strings.TrimSpace(string(output)))
 	}
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
-		t.Fatalf("unexpected GNU timeout probe output: %q", string(output))
+		t.Fatalf("unexpected coreutils timeout probe output: %q", string(output))
 	}
 	return lines[0], lines[1]
 }

@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+go_library(
+    name = "conformance",
+    srcs = [
+        "http.go",
+        "run.go",
+        "store.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/tracker/conformance",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "conformance_test",
+    srcs = ["conformance_test.go"],
+    embed = [":conformance"],
+    deps = [
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
+
+# conformance_test without -short, as pr.yml's "Test (storage domain + uow)" job runs
+# its package (--config=ci passes -test.short). It needs no Dolt server; it is
+# in the dolt-server lane so that lane alone runs every package of the job.
+# GOMAXPROCS=4 is the job's runner shape. It still pins the local backend and
+# fails closed like the lane's other targets: a Dolt-server test added to this
+# package later must fail here, not skip into a cached green, while the job
+# runs it.
+#
+# Tags:
+#   dolt-server: part of the dolt-server lane (--config=doltserver), which
+#     runs the whole job without -short; excluded from --config=prcore/ci.
+sh_test(
+    name = "conformance_noshort_test",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :conformance_test)"],
+    data = [":conformance_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    tags = ["dolt-server"],
+)

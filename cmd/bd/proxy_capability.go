@@ -167,13 +167,16 @@ var (
 	// is threading it through the UOW reader the way `list` already does, so
 	// the refusal itself is the gap.
 	maxRowsRefusal = refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode", ProxyReasonUnimplemented, trackLongTail)
-	// `list --watch` is routed, so watching is possible over the provider;
-	// nothing else has been wired to it.
+	// The mode-wide default for a --watch that has not been wired to the
+	// provider. Both commands that register the flag (`list`, `show`) poll the
+	// provider and are honored per-command below, so this refuses only a
+	// future --watch until someone routes it.
 	watchRefusal = refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode", ProxyReasonUnimplemented, trackLongTail)
 	// --repo routes to another workspace, bypassing the proxied root entirely,
-	// which is why it is design rather than a gap. `bd list` honors a repo
-	// override and refuses it at runtime, so its row specializes this rule
-	// instead of claiming the flag is absent.
+	// which is why it is design rather than a gap. `bd create` is the only
+	// command that registers the flag, so it is the only command this rule can
+	// actually refuse; every other row for it must be notApplicable(), which is
+	// what TestProxyCapabilityRowsNameFlagsTheCommandRegisters enforces.
 	repoRefusal = refused("proxy.repo.unsupported", "--repo is not supported with --proxied-server", ProxyReasonDesign, "")
 )
 
@@ -210,9 +213,16 @@ var proxyCapabilityMatrix = map[ProxyMode]map[ProxyCapability]proxyCapabilityRul
 // "ready", and the row records that the command has no --max-rows flag to
 // refuse. TestProxyCapabilityPolicyKeysResolveInRealCommandTree keeps the pin
 // honest by failing if the path it names stops existing.
+//
+// A row must describe a flag the command actually registers. `list`'s
+// ProxyCapRepo is notApplicable() for that reason and not as a hedge: listCmd
+// has no --repo flag (create.go:940 registers the only one), so `bd list --repo`
+// dies in cobra as an unknown flag and a refusal row here would be policy no
+// command line can reach. TestProxyCapabilityRowsNameFlagsTheCommandRegisters
+// enforces both directions of that rule.
 var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]proxyCapabilityRule{
-	"show":            {ProxyModeProxied: {ProxyCapWatch: watchRefusal}},
-	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: repoRefusal}},
+	"show":            {ProxyModeProxied: {ProxyCapWatch: honored()}},
+	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: notApplicable()}},
 	"dep tree":        {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
 	"mol ready":       {ProxyModeProxied: {ProxyCapMaxRows: notApplicable()}},
@@ -340,12 +350,7 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 	if path == "create" && cmd.Flags().Changed("repo") {
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
 	}
-	if path == "show" {
-		if watch, _ := cmd.Flags().GetBool("watch"); watch {
-			return HandleProxyCapabilityError(AssertProxyCommandCapability(path, ProxyModeProxied, ProxyCapWatch))
-		}
-	}
-	if path == "ready" {
+	if path == "ready" && !readyGatedArm(cmd) {
 		// --claim is NOT exempt. The proxied ready role cannot enforce a row
 		// cap on either arm, and ready.go refuses a positive cap on both (see
 		// its comment above rejectMaxRowsUnderProxiedServer) — so exempting
@@ -353,6 +358,12 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 		// same refusal to an untyped one raised after the provider opened.
 		// A malformed or negative value is still rejected here, before any
 		// provider work, which is what the claim path gained.
+		//
+		// --gated IS exempt, and the guard sits on the branch rather than
+		// inside it so the arm skips the resolver too: the direct route never
+		// resolves a cap before dispatching --gated, so resolving one here
+		// would make a malformed or negative value fail on the proxied route
+		// alone. See readyGatedArm for why the arm takes no cap at all.
 		maxRows, err := resolveMaxRowsQuiet(cmd)
 		if err != nil {
 			return err

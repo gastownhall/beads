@@ -226,6 +226,9 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	if !strings.Contains(section, `"timeout (GNU coreutils) "*`) {
 		t.Error("section missing GNU coreutils identity check")
 	}
+	if !strings.Contains(section, `"timeout (uutils coreutils) "*`) {
+		t.Error("section missing uutils coreutils identity check")
+	}
 	if !strings.Contains(section, `"$_bd_timeout_command" -- "$_bd_timeout"`) {
 		t.Error("section missing GNU timeout argv separator")
 	}
@@ -265,22 +268,48 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 			}
 
 			tracked := string(content)
-			begin := strings.Index(tracked, hookSectionBeginLine())
-			if begin < 0 {
-				t.Fatalf("tracked hook missing %q", hookSectionBeginLine())
-			}
-			endMarker := hookSectionEndLine() + "\n"
-			relativeEnd := strings.Index(tracked[begin:], endMarker)
-			if relativeEnd < 0 {
-				t.Fatalf("tracked hook missing %q", hookSectionEndLine())
-			}
-			end := begin + relativeEnd + len(endMarker)
-
-			if got, want := tracked[begin:end], generateHookSection(hookName); got != want {
-				t.Fatalf("tracked managed section drifted from generator\nwant:\n%s\ngot:\n%s", want, got)
-			}
 			if strings.Count(tracked, hookSectionBeginPrefix) != 1 || strings.Count(tracked, hookSectionEndPrefix) != 1 {
 				t.Fatal("tracked hook must contain exactly one managed section")
+			}
+			// Locate the section by marker PREFIX, not by the versioned marker
+			// line. Tracked hooks drift for two reasons — generator content and
+			// the release version stamp — and a prefix scan makes the second one
+			// ordinary drift that the byte compare below reports and the regen
+			// arm repairs. Matching hookSectionBeginLine() here would instead
+			// fail with "missing marker" after a Version bump, before the regen
+			// arm is reachable. The versioned markers are still verified: they
+			// are part of `want`.
+			begin := strings.Index(tracked, hookSectionBeginPrefix)
+			if begin < 0 {
+				t.Fatalf("tracked hook missing %q", hookSectionBeginPrefix)
+			}
+			relativeEnd := strings.Index(tracked[begin:], hookSectionEndPrefix)
+			if relativeEnd < 0 {
+				t.Fatalf("tracked hook missing %q", hookSectionEndPrefix)
+			}
+			end := begin + relativeEnd
+			newline := strings.IndexByte(tracked[end:], '\n')
+			if newline < 0 {
+				t.Fatalf("tracked hook %q line is not newline-terminated", hookSectionEndPrefix)
+			}
+			end += newline + 1
+			got, want := tracked[begin:end], generateHookSection(hookName)
+			// A dedicated variable, not the package's shared BD_UPDATE_GOLDEN:
+			// this arm rewrites tracked SOURCE files, so an unscoped
+			// `BD_UPDATE_GOLDEN=1 go test ./cmd/bd/` must not silently convert
+			// real hook drift into a working-tree mutation that reports PASS.
+			if os.Getenv("BD_UPDATE_HOOKS_GOLDEN") == "1" {
+				if got == want {
+					return
+				}
+				if err := os.WriteFile(path, []byte(tracked[:begin]+want+tracked[end:]), 0o755); err != nil {
+					t.Fatalf("write tracked hook: %v", err)
+				}
+				t.Logf("regenerated managed section in %s", path)
+				return
+			}
+			if got != want {
+				t.Fatalf("tracked managed section drifted from generator (regenerate with `make githooks-regen`)\nwant:\n%s\ngot:\n%s", want, got)
 			}
 		})
 	}

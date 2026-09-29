@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,13 +102,20 @@ func TestNewTokenFileAuthRefusesAnUnusableFile(t *testing.T) {
 	fat := filepath.Join(dir, "fat")
 	writeTokenFile(t, fat, strings.Repeat("a", maxTokenFileBytes+1))
 
-	for _, tc := range []struct{ name, path, want string }{
-		{"missing", filepath.Join(dir, "nope"), "no such file"},
-		{"empty", empty, "no tokens"},
-		{"blank lines only", blank, "no tokens"},
-		{"oversized", fat, "larger than"},
-		{"unnamed", "", "no token file"},
-		{"directory", dir, ""},
+	// wantIs is set where the refusal has a stable sentinel. The OS's own
+	// wording for a missing file is platform-specific ("no such file or
+	// directory" on Unix, "The system cannot find the file specified." on
+	// Windows), so that case matches on errors.Is rather than on text.
+	for _, tc := range []struct {
+		name, path, want string
+		wantIs           error
+	}{
+		{"missing", filepath.Join(dir, "nope"), "", fs.ErrNotExist},
+		{"empty", empty, "no tokens", nil},
+		{"blank lines only", blank, "no tokens", nil},
+		{"oversized", fat, "larger than", nil},
+		{"unnamed", "", "no token file", nil},
+		{"directory", dir, "", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewTokenFileAuth(tc.path)
@@ -115,6 +124,9 @@ func TestNewTokenFileAuthRefusesAnUnusableFile(t *testing.T) {
 			}
 			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q does not explain the refusal (want %q in it)", err, tc.want)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("error %q is not %v", err, tc.wantIs)
 			}
 			if !strings.Contains(err.Error(), "token") && !strings.Contains(err.Error(), tc.path) {
 				t.Errorf("error %q names neither the token file nor its path", err)

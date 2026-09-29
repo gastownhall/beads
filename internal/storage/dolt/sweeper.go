@@ -73,7 +73,14 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 		if result.Swept == 0 {
 			return nil
 		}
-		for _, table := range sweptTables {
+		// Through the same funnel the deleter uses. A sweep mints nothing today
+		// — SweepInTx deletes through DeleteIssuesInTx, which rewrites no
+		// neighbor, so there is no surviving row to version — but it shares
+		// this table list and the minting-scoped withWriteTx with the deleter,
+		// and a staging list that carries the version tables on one and not the
+		// other is the asymmetry the wisp-arm scope comment refused: inert
+		// today, and silently wrong the day a sweep gains a surviving-row write.
+		for _, table := range s.store.withVersionedHistoryTables(sweptTables) {
 			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		msg := fmt.Sprintf("bd: sweep %d %s bead(s)", result.Swept, req.Tier)

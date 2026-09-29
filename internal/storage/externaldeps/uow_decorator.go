@@ -133,6 +133,23 @@ func (p *uowProvider) SetEventsJournalEnabled(enabled bool) {
 	}
 }
 
+// SetVersionedHistoryEnabled forwards dual-write issue-version activation
+// inward, for the same reason SetEventsJournalEnabled does.
+//
+// This wrapper is the OUTERMOST provider on both real chains — cmd/bd/main.go
+// and cmd/bd/serve.go each build wireExternalDependencyUOWProvider(...) around
+// everything else — and activation in this family works by type-asserting the
+// outermost provider value for the configurer interface. Without this method
+// the assertion fails on exactly the chains that matter, so activation would
+// silently enable nothing on uow-backed processes while the direct-store plane
+// turned on: split-brain, with no error and no log. The inner provider's own
+// forwarder cannot be reached from those call sites.
+func (p *uowProvider) SetVersionedHistoryEnabled(enabled bool) {
+	if configurer, ok := p.UnitOfWorkProvider.(storage.VersionedHistoryConfigurer); ok {
+		configurer.SetVersionedHistoryEnabled(enabled)
+	}
+}
+
 func (p *uowProvider) RunEventsMaintenanceTx(ctx context.Context, fn func(context.Context, issueops.DBTX) error) error {
 	runner, ok := p.UnitOfWorkProvider.(issueops.EventsMaintenanceRunner)
 	if !ok {
@@ -142,39 +159,40 @@ func (p *uowProvider) RunEventsMaintenanceTx(ctx context.Context, fn func(contex
 }
 
 var (
-	_ uow.PoolTuner                    = (*uowProvider)(nil)
-	_ storage.EventsJournalConfigurer  = (*uowProvider)(nil)
-	_ issueops.EventsMaintenanceRunner = (*uowProvider)(nil)
-	_ uow.IssueLifecycleSource         = (*uowProvider)(nil)
-	_ uow.IssueReaderSource            = (*uowProvider)(nil)
-	_ uow.IssueClaimerSource           = (*uowProvider)(nil)
-	_ uow.RelationsSource              = (*uowProvider)(nil)
-	_ uow.EdgeReaderSource             = (*uowProvider)(nil)
-	_ uow.BlockingAnnotatorSource      = (*uowProvider)(nil)
-	_ uow.TreeWalkerSource             = (*uowProvider)(nil)
-	_ uow.GraphCounterSource           = (*uowProvider)(nil)
-	_ uow.CounterSource                = (*uowProvider)(nil)
-	_ uow.ReadyCounterSource           = (*uowProvider)(nil)
-	_ uow.ReadyClaimerSource           = (*uowProvider)(nil)
-	_ uow.QuerierSource                = (*uowProvider)(nil)
-	_ uow.StatsReporterSource          = (*uowProvider)(nil)
-	_ uow.CycleDetectorSource          = (*uowProvider)(nil)
-	_ uow.CommenterSource              = (*uowProvider)(nil)
-	_ uow.BatchCloserSource            = (*uowProvider)(nil)
-	_ uow.BatchCreatorSource           = (*uowProvider)(nil)
-	_ uow.DependencyEditorSource       = (*uowProvider)(nil)
-	_ uow.BatchApplierSource           = (*uowProvider)(nil)
-	_ uow.DeleterSource                = (*uowProvider)(nil)
-	_ uow.SweeperSource                = (*uowProvider)(nil)
-	_ uow.ImporterSource               = (*uowProvider)(nil)
-	_ uow.BootstrapperSource           = (*uowProvider)(nil)
-	_ uow.InitVerifierSource           = (*uowProvider)(nil)
-	_ uow.WorkspaceConfigSource        = (*uowProvider)(nil)
-	_ uow.VersionReconcilerSource      = (*uowProvider)(nil)
-	_ uow.MetadataCASSource            = (*uowProvider)(nil)
-	_ uow.ReleaserSource               = (*uowProvider)(nil)
-	_ uow.MemoriesSource               = (*uowProvider)(nil)
-	_ uow.EventsJournalCursorSource    = (*uowProvider)(nil)
+	_ uow.PoolTuner                      = (*uowProvider)(nil)
+	_ storage.EventsJournalConfigurer    = (*uowProvider)(nil)
+	_ storage.VersionedHistoryConfigurer = (*uowProvider)(nil)
+	_ issueops.EventsMaintenanceRunner   = (*uowProvider)(nil)
+	_ uow.IssueLifecycleSource           = (*uowProvider)(nil)
+	_ uow.IssueReaderSource              = (*uowProvider)(nil)
+	_ uow.IssueClaimerSource             = (*uowProvider)(nil)
+	_ uow.RelationsSource                = (*uowProvider)(nil)
+	_ uow.EdgeReaderSource               = (*uowProvider)(nil)
+	_ uow.BlockingAnnotatorSource        = (*uowProvider)(nil)
+	_ uow.TreeWalkerSource               = (*uowProvider)(nil)
+	_ uow.GraphCounterSource             = (*uowProvider)(nil)
+	_ uow.CounterSource                  = (*uowProvider)(nil)
+	_ uow.ReadyCounterSource             = (*uowProvider)(nil)
+	_ uow.ReadyClaimerSource             = (*uowProvider)(nil)
+	_ uow.QuerierSource                  = (*uowProvider)(nil)
+	_ uow.StatsReporterSource            = (*uowProvider)(nil)
+	_ uow.CycleDetectorSource            = (*uowProvider)(nil)
+	_ uow.CommenterSource                = (*uowProvider)(nil)
+	_ uow.BatchCloserSource              = (*uowProvider)(nil)
+	_ uow.BatchCreatorSource             = (*uowProvider)(nil)
+	_ uow.DependencyEditorSource         = (*uowProvider)(nil)
+	_ uow.BatchApplierSource             = (*uowProvider)(nil)
+	_ uow.DeleterSource                  = (*uowProvider)(nil)
+	_ uow.SweeperSource                  = (*uowProvider)(nil)
+	_ uow.ImporterSource                 = (*uowProvider)(nil)
+	_ uow.BootstrapperSource             = (*uowProvider)(nil)
+	_ uow.InitVerifierSource             = (*uowProvider)(nil)
+	_ uow.WorkspaceConfigSource          = (*uowProvider)(nil)
+	_ uow.VersionReconcilerSource        = (*uowProvider)(nil)
+	_ uow.MetadataCASSource              = (*uowProvider)(nil)
+	_ uow.ReleaserSource                 = (*uowProvider)(nil)
+	_ uow.MemoriesSource                 = (*uowProvider)(nil)
+	_ uow.EventsJournalCursorSource      = (*uowProvider)(nil)
 )
 
 type unitOfWork struct {

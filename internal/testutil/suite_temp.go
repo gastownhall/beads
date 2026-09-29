@@ -7,7 +7,7 @@ import (
 )
 
 // PinSuiteTempRoot creates a suite-owned temp directory and points
-// GOTMPDIR, TMPDIR, TMP, and TEMP at it so testing.T.TempDir (Go 1.24+
+// GOTMPDIR, TMPDIR, TMP, and TEMP at it so testing.T.TempDir (Go 1.26+
 // uses GOTMPDIR) and os.MkdirTemp land under a root
 // SweepSuiteTestServers can reap.
 //

@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestEffectiveRootStorePolicy(t *testing.T) {
@@ -325,8 +326,12 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 		t.Fatalf("create isolated XDG home: %v", err)
 	}
 	// The canary must execute the current worktree source, never a caller-provided
-	// prebuilt binary that may predate this candidate.
-	t.Setenv("BEADS_TEST_BD_BINARY", "")
+	// prebuilt binary that may predate this candidate. Under Bazel the injected
+	// binary (//cmd/bd:bd_for_tests) is built from this source tree, and there is
+	// no toolchain to build another one.
+	if !bazeltest.IsBazel() {
+		t.Setenv("BEADS_TEST_BD_BINARY", "")
+	}
 	bd := buildBDForTest(t)
 	cmd := exec.Command(bd, "config", "validate", "--readonly")
 	cmd.Dir = repoDir

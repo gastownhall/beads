@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "agents",
+    srcs = [
+        "agents.go",
+        "render.go",
+    ],
+    embedsrcs = [
+        "defaults/agents.md.tmpl",
+        "defaults/beads-section-codex.md",
+        "defaults/beads-section-minimal.md",
+        "defaults/beads-section.md",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/templates/agents",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "agents_test",
+    srcs = [
+        "agents_test.go",
+        "render_test.go",
+    ],
+    embed = [":agents"],
+)

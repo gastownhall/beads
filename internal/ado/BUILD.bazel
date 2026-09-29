@@ -1,0 +1,51 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ado",
+    srcs = [
+        "bootstrap.go",
+        "client.go",
+        "fieldmapper.go",
+        "links.go",
+        "mapping.go",
+        "reconcile.go",
+        "richtext.go",
+        "statetransition.go",
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/ado",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+        "@com_github_johanneskaufmann_html_to_markdown_v2//:html-to-markdown",
+        "@com_github_microcosm_cc_bluemonday//:bluemonday",
+        "@com_github_yuin_goldmark//:goldmark",
+        "@com_github_yuin_goldmark//renderer/html",
+    ],
+)
+
+go_test(
+    name = "ado_test",
+    srcs = [
+        "bootstrap_test.go",
+        "client_test.go",
+        "links_test.go",
+        "mapping_test.go",
+        "reconcile_test.go",
+        "richtext_test.go",
+        "statetransition_test.go",
+        "tracker_test.go",
+        "types_test.go",
+    ],
+    embed = [":ado"],
+    deps = [
+        "//internal/config",
+        "//internal/storage",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)

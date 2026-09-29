@@ -198,9 +198,14 @@ func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message s
 }
 
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
+	return s.AddRemoteWithRef(ctx, name, url, "")
+}
+
+// AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
+// see storage.RemoteStore.
+func (s *EmbeddedDoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
-		return err
+		return versioncontrolops.AddRemote(ctx, db, name, url, ref)
 	})
 }
 
@@ -749,39 +754,8 @@ func (s *EmbeddedDoltStore) BackupRemove(ctx context.Context, name string) error
 // the database to it. The dir must exist locally. This preserves full Dolt
 // commit history.
 func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup destination does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup destination is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
-	if err != nil {
-		return err
-	}
-	backupName := "backup_export"
-
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		// Register as a backup remote (idempotent — remove first if exists).
-		_ = versioncontrolops.BackupRemove(ctx, db, backupName)
-		if err := versioncontrolops.BackupAdd(ctx, db, backupName, backupURL); err != nil {
-			// Another backup (e.g. "default" registered by `bd backup init`) may
-			// already point to this URL. In that case, sync using the existing
-			// remote name rather than failing.
-			if conflict := versioncontrolops.ExtractAddressConflictName(err); conflict != "" {
-				if syncErr := versioncontrolops.BackupSync(ctx, db, conflict); syncErr != nil {
-					return fmt.Errorf("sync to backup: %w", syncErr)
-				}
-				return nil
-			}
-			return fmt.Errorf("register backup remote: %w", err)
-		}
-		if err := versioncontrolops.BackupSync(ctx, db, backupName); err != nil {
-			return fmt.Errorf("sync to backup: %w", err)
-		}
-		return nil
+		return versioncontrolops.BackupToDir(ctx, db, db, dir)
 	})
 }
 

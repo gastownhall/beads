@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "metrics",
+    srcs = [
+        "flusher.go",
+        "machineid.go",
+        "metrics.go",
+        "prune.go",
+        "spawn.go",
+        "userconfig.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/metrics",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/execenv",
+        "@com_github_dolthub_eventkit//:eventkit",
+        "@com_github_dolthub_eventkit//transport/ga4",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "metrics_test",
+    srcs = [
+        "machineid_test.go",
+        "metrics_test.go",
+        "prune_test.go",
+        "spawn_reap_test.go",
+        "spawn_test.go",
+        "spawn_throttle_test.go",
+        "userconfig_test.go",
+    ],
+    embed = [":metrics"],
+    deps = [
+        "//internal/testutil/bazeltest",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)

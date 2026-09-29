@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "conformance",
+    srcs = ["profiles.go"],
+    importpath = "github.com/steveyegge/beads/test/conformance",
+    visibility = ["//visibility:public"],
+)
