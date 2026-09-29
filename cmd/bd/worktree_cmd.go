@@ -148,6 +148,49 @@ func repairWorktreeBeadsPermissions(worktreePath string) {
 	}
 }
 
+// worktreeCommandDirectory returns the directory whose Git context the
+// worktree command must use. The global -C flag selects a workspace without
+// changing the process CWD, so worktree commands cannot rely on os.Getwd or
+// cwd-bound repository discovery.
+func worktreeCommandDirectory() (string, error) {
+	dir := strings.TrimSpace(changeDir)
+	if dir == "" {
+		return os.Getwd()
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve -C directory: %w", err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+func worktreeCommandRepoRoot(ctx context.Context) (string, error) {
+	dir, err := worktreeCommandDirectory()
+	if err != nil {
+		return "", err
+	}
+	output, err := gitCmdInDir(ctx, dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", fmt.Errorf("not in a git repository")
+	}
+	root := filepath.Clean(strings.TrimSpace(string(output)))
+	if root == "." || root == "" {
+		return "", fmt.Errorf("not in a git repository")
+	}
+	return root, nil
+}
+
+func resolveWorktreeCommandPath(name string) (string, error) {
+	if filepath.IsAbs(name) {
+		return filepath.Clean(name), nil
+	}
+	dir, err := worktreeCommandDirectory()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(filepath.Join(dir, name))
+}
+
 func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	CheckReadonly("worktree create")
 
@@ -163,7 +206,7 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	// Determine worktree path
-	worktreePath, err := filepath.Abs(name)
+	worktreePath, err := resolveWorktreeCommandPath(name)
 	if err != nil {
 		return fmt.Errorf("failed to resolve path: %w", err)
 	}
@@ -173,16 +216,22 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("path already exists: %s", worktreePath)
 	}
 
-	// Get repository context (validates .beads exists and resolves paths)
-	rc, err := beads.GetRepoContext()
+	// Get repository context for the selected workspace (validates .beads and
+	// resolves paths without falling back to the caller's process CWD).
+	commandDir, err := worktreeCommandDirectory()
+	if err != nil {
+		return err
+	}
+	_, err = beads.GetRepoContextForWorkspace(commandDir)
 	if err != nil {
 		return fmt.Errorf("%s; %s: %w", activeWorkspaceNotFoundError(), diagHint(), err)
 	}
 
-	// Worktree operations use CWD repo (where user is working), not BEADS_DIR repo
-	repoRoot := rc.CWDRepoRoot
-	if repoRoot == "" {
-		return fmt.Errorf("not in a git repository")
+	// Worktree operations use the selected command directory. With -C this is
+	// the target repository; otherwise it is the process CWD.
+	repoRoot, err := worktreeCommandRepoRoot(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Determine branch name
@@ -250,22 +299,23 @@ func runWorktreeList(cmd *cobra.Command, args []string) error {
 
 	ctx := context.Background()
 
-	// Get repository context
-	rc, err := beads.GetRepoContext()
+	// Resolve Git from the selected command directory before asking for beads
+	// enrichment. This keeps `bd -C repo worktree list` equivalent to running
+	// the command after `cd repo`.
+	repoRoot, err := worktreeCommandRepoRoot(ctx)
 	if err != nil {
-		// Allow listing worktrees even without .beads (but no beads state info)
-		// Fall back to git.GetRepoRoot() for this case
-		repoRoot := git.GetRepoRoot()
-		if repoRoot == "" {
-			return fmt.Errorf("not in a git repository")
-		}
-		return listWorktreesWithoutBeads(ctx, repoRoot)
+		return err
 	}
 
-	// Worktree operations use CWD repo (where user is working)
-	repoRoot := rc.CWDRepoRoot
-	if repoRoot == "" {
-		return fmt.Errorf("not in a git repository")
+	// Get repository context for the selected workspace.
+	commandDir, err := worktreeCommandDirectory()
+	if err != nil {
+		return err
+	}
+	rc, err := beads.GetRepoContextForWorkspace(commandDir)
+	if err != nil {
+		// Allow listing worktrees even without .beads (but no beads state info)
+		return listWorktreesWithoutBeads(ctx, repoRoot)
 	}
 
 	// List worktrees using secure git command
@@ -1252,7 +1302,7 @@ func prepareWorktreeRemoval(
 	if err != nil {
 		return nil, err
 	}
-	currentDirectory, err := os.Getwd()
+	currentDirectory, err := worktreeCommandDirectory()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve current directory: %w", err)
 	}
