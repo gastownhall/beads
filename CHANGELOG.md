@@ -188,6 +188,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--format` now wins over the config default; an explicit `--json` still wins
   over `--format`.
 
+- **Markdown bodies now honor the terminal's actual background instead of
+  always rendering dark**
+  ([#5776](https://github.com/gastownhall/beads/pull/5776)).
+  `glamour.WithEnvironmentConfig()` defaults to `styles.DarkStyle` whenever
+  `GLAMOUR_STYLE` is unset, with no regard for the terminal's real
+  background — unlike `internal/ui`'s own adaptive colors, which probe it
+  via `lipgloss.HasDarkBackground`. That left every markdown body's colors
+  wrong on a light-background terminal even though the section header
+  wrapping it adapted correctly. The fix lands at the shared renderer, so it
+  covers every markdown body `bd` prints — DESCRIPTION, DESIGN, NOTES,
+  ACCEPTANCE CRITERIA, and comment bodies, direct and proxied alike — not
+  just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
+  still takes priority over the detected background.
+
 ### Added
 
 - **`bd purge` covers an orchestrator's wisp retention sweep.** Three changes
@@ -726,22 +740,6 @@ which dumps the entire release history.)
   survives filtering the first ten. No `--theme` flag: beads has no theme
   concept, themes are labels here, and `--label theme:x` is the native way to
   say it.
-
-### Fixed
-
-- **Markdown bodies now honor the terminal's actual background instead of
-  always rendering dark**
-  ([#5776](https://github.com/gastownhall/beads/pull/5776)).
-  `glamour.WithEnvironmentConfig()` defaults to `styles.DarkStyle` whenever
-  `GLAMOUR_STYLE` is unset, with no regard for the terminal's real
-  background — unlike `internal/ui`'s own adaptive colors, which probe it
-  via `lipgloss.HasDarkBackground`. That left every markdown body's colors
-  wrong on a light-background terminal even though the section header
-  wrapping it adapted correctly. The fix lands at the shared renderer, so it
-  covers every markdown body `bd` prints — DESCRIPTION, DESIGN, NOTES,
-  ACCEPTANCE CRITERIA, and comment bodies, direct and proxied alike — not
-  just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
-  still takes priority over the detected background.
 
 - **New `*.gate.lock` files appear next to and inside `.beads`** ([#5046](https://github.com/gastownhall/beads/pull/5046),
   [#5093](https://github.com/gastownhall/beads/pull/5093)). A two-level

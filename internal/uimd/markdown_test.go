@@ -492,3 +492,50 @@ func TestGlamourStylePath(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderMarkdownUsesTheDetectedBackgroundStyle pins the call site, not just
+// the helper. TestGlamourStylePath above proves glamourStylePath returns a
+// different style per background, but nothing proved RenderMarkdown actually
+// hands that path to the renderer — so dropping the WithStylePath option would
+// revert the entire user-visible fix with a green suite. Rendering one sample
+// under each background and requiring the emitted output to differ reds exactly
+// that regression.
+func TestRenderMarkdownUsesTheDetectedBackgroundStyle(t *testing.T) {
+	withMarkdownEnv(t, map[string]string{
+		"NO_COLOR":        "",
+		"TERM":            "xterm-256color",
+		"CLICOLOR_FORCE":  "1",
+		"FORCE_HYPERLINK": "",
+		"BD_AGENT_MODE":   "",
+		"CLAUDE_CODE":     "",
+	})
+
+	// withMarkdownEnv does not manage GLAMOUR_STYLE, and an explicit value
+	// short-circuits glamourStylePath before the background is ever consulted.
+	origStyle, hadOrigStyle := os.LookupEnv("GLAMOUR_STYLE")
+	os.Unsetenv("GLAMOUR_STYLE")
+	t.Cleanup(func() {
+		if hadOrigStyle {
+			os.Setenv("GLAMOUR_STYLE", origStyle)
+		} else {
+			os.Unsetenv("GLAMOUR_STYLE")
+		}
+	})
+
+	const sample = "# Heading\n\nSome **bold** text and `code`.\n"
+
+	restoreDark := ui.SetDarkBackgroundForTest(true)
+	dark := RenderMarkdown(sample)
+	restoreDark()
+
+	restoreLight := ui.SetDarkBackgroundForTest(false)
+	light := RenderMarkdown(sample)
+	restoreLight()
+
+	if !strings.Contains(dark, "\x1b[") || !strings.Contains(light, "\x1b[") {
+		t.Fatalf("expected ANSI SGR styling in both renders, got dark=%q light=%q", dark, light)
+	}
+	if dark == light {
+		t.Fatalf("expected the dark and light renders to differ, got identical output %q", dark)
+	}
+}
