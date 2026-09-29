@@ -515,16 +515,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show.** `Total Issues` counts the database; `bd list` shows a filtered view of
   it, and the two disagreed silently — an operator reconciling a total against
   a listing found rows they could not account for. A new line names the
-  breakdown and the flag that reveals each part: `Not shown by bd list: 2 gates
-  (--include-gates), 1 template (--include-templates)`, omitted entirely when
-  there is nothing to disclose. `gate_issues` and `template_issues` join the
-  `--json` payload and the OpenAPI `Statistics` schema, additively; they are
-  broken out of `TotalIssues` rather than removed from it, so the buckets still
-  do not sum to the total in either direction. `bd status --assigned` gets the
-  same breakdown, which it needs for the same reason against `bd list
-  --assignee`. Not yet covered: durable rows carrying a configured infra type
-  (GH#6439), which need the workspace's `types.infra` set that the portable
-  count has no seam to read.
+  breakdown and the flags that reveal each part: `Not shown by bd list: 2 gates
+  (--include-gates --all), 1 template (--include-templates --all)`, omitted
+  entirely when there is nothing to disclose. The counts describe the database,
+  every status included, which is why the remedy names `--all` beside the type
+  flag: the default listing hides closed rows independently of what a row is,
+  so a closed gate is counted here and the type flag alone would not show it.
+  `gate_issues` and `template_issues` join the `--json` payload and the OpenAPI
+  `Statistics` schema, additively; they are broken out of `TotalIssues` rather
+  than removed from it, so the buckets still do not sum to the total in either
+  direction. `bd status --assigned` gets the same breakdown, which it needs for
+  the same reason against `bd list --assignee`. Not yet covered: durable rows
+  carrying a configured infra type (GH#6439), which need the workspace's
+  `types.infra` set that the portable count has no seam to read.
 
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`

@@ -1915,6 +1915,14 @@ type Statistics struct {
 	// on account of what they are. They are already part of TotalIssues, which
 	// counts the database rather than the listing; they are broken out so the
 	// two commands can be reconciled instead of silently disagreeing.
+	//
+	// THE POPULATION IS EVERY STATUS, exactly TotalIssues': a CLOSED gate is
+	// counted in GateIssues, and the two overlap the status buckets the way
+	// PinnedIssues does rather than partitioning them. They are not scoped to
+	// the rows a default listing shows. That is why `bd status` prints --all
+	// beside the type flag - the listing's status exclusion is independent of
+	// its type exclusions, so the type flag alone would not reveal every row
+	// counted here (cmd/bd/status.go).
 	GateIssues     int `json:"gate_issues"`
 	TemplateIssues int `json:"template_issues"`
 }

@@ -125,6 +125,20 @@ func openStatsReporter() (issueops.StatsReporter, error) {
 // not show, so the totals above can be reconciled against a listing instead of
 // looking like a phantom.
 //
+// THE REMEDY IT PRINTS NAMES TWO FLAGS, not one, because the default listing
+// applies its TYPE and its STATUS suppressions independently. These counts
+// come from the same scan as TotalIssues and are status-blind with it: a
+// CLOSED gate is in GateIssues. `bd list --include-gates` would still not show
+// that row, because the default ExcludeStatus of closed and pinned
+// (internal/workapi/list.go) is lifted only by --all - which "replaces the
+// status exclusions only" and lifts no type exclusion of its own, pinned as
+// that phrase in backend/conformance/reader_contract.go. So the type flag on
+// its own is a remedy that reproduces the number only in a workspace whose
+// gates and protos all happen to still be open, and gates are closed as the
+// work they guard completes. Naming both flags is what makes the printed
+// remedy actually reconcile; a hint that does not is the same silent
+// disagreement this line exists to remove, one level down.
+//
 // It names two of the three type-based suppressions a default listing applies.
 // The third - the infra types, which applyTypeSuppressions
 // (internal/workapi/list.go) adds to ExcludeTypes independently of the wisp
@@ -143,10 +157,10 @@ func openStatsReporter() (issueops.StatsReporter, error) {
 func suppressedTypeSummary(stats *types.Statistics) string {
 	var parts []string
 	if stats.GateIssues > 0 {
-		parts = append(parts, fmt.Sprintf("%s (--include-gates)", pluralCount(stats.GateIssues, "gate", "gates")))
+		parts = append(parts, fmt.Sprintf("%s (--include-gates --all)", pluralCount(stats.GateIssues, "gate", "gates")))
 	}
 	if stats.TemplateIssues > 0 {
-		parts = append(parts, fmt.Sprintf("%s (--include-templates)", pluralCount(stats.TemplateIssues, "template", "templates")))
+		parts = append(parts, fmt.Sprintf("%s (--include-templates --all)", pluralCount(stats.TemplateIssues, "template", "templates")))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -154,6 +168,16 @@ func suppressedTypeSummary(stats *types.Statistics) string {
 // pluralCount renders a count with the right one of two spellings. Both forms
 // are passed in rather than derived by appending "s", so a caller with an
 // irregular plural is not silently mis-served.
+//
+// It is not a fourth spelling of the three helpers already in package main:
+// pluralIssue, pluralize and plural all DERIVE the "s" and so cannot render a
+// caller-chosen pair. The tree's one two-form helper, pluralWord in
+// internal/storage/issueops/lease.go, is unexported in a storage package, and
+// exporting it so a CLI string could reach it would add exported surface to a
+// storage role for a cosmetic. That file's own doc comment records the same
+// trade from the other side - it carries whole words because the issueops
+// plural() covers only the "s" case - so one two-form helper per package is
+// the established shape here.
 func pluralCount(n int, singular, plural string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, singular)

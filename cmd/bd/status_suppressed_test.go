@@ -23,22 +23,22 @@ func TestSuppressedTypeSummary(t *testing.T) {
 		{
 			name:  "one gate",
 			stats: &types.Statistics{TotalIssues: 2, GateIssues: 1},
-			want:  "1 gate (--include-gates)",
+			want:  "1 gate (--include-gates --all)",
 		},
 		{
 			name:  "gates are pluralized",
 			stats: &types.Statistics{TotalIssues: 4, GateIssues: 3},
-			want:  "3 gates (--include-gates)",
+			want:  "3 gates (--include-gates --all)",
 		},
 		{
 			name:  "gates and templates",
 			stats: &types.Statistics{TotalIssues: 5, GateIssues: 1, TemplateIssues: 2},
-			want:  "1 gate (--include-gates), 2 templates (--include-templates)",
+			want:  "1 gate (--include-gates --all), 2 templates (--include-templates --all)",
 		},
 		{
 			name:  "templates only",
 			stats: &types.Statistics{TotalIssues: 5, TemplateIssues: 1},
-			want:  "1 template (--include-templates)",
+			want:  "1 template (--include-templates --all)",
 		},
 	}
 
@@ -52,11 +52,26 @@ func TestSuppressedTypeSummary(t *testing.T) {
 }
 
 // The disclosure exists so the operator can account for a total that no listing
-// reproduces; it must name the flag that reveals the rows.
-func TestSuppressedTypeSummaryNamesTheRevealingFlag(t *testing.T) {
-	got := suppressedTypeSummary(&types.Statistics{TotalIssues: 2, GateIssues: 1})
-	if !strings.Contains(got, "--include-gates") {
-		t.Errorf("suppressedTypeSummary() = %q, want it to name --include-gates", got)
+// reproduces; it must name the flags that reveal the rows. Plural, and asserted
+// here rather than left to the table above, because the two suppressions are
+// independent: these counts span every status, while --include-gates lifts only
+// the TYPE exclusion. A Contains check on the type flag alone passes on the
+// incomplete hint, which would reproduce the number only in a workspace whose
+// gates and protos all happen to still be open.
+func TestSuppressedTypeSummaryNamesTheRevealingFlags(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		stats *types.Statistics
+		want  string
+	}{
+		{"gates", &types.Statistics{TotalIssues: 2, GateIssues: 1}, "--include-gates --all"},
+		{"templates", &types.Statistics{TotalIssues: 2, TemplateIssues: 1}, "--include-templates --all"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := suppressedTypeSummary(tt.stats); !strings.Contains(got, tt.want) {
+				t.Errorf("suppressedTypeSummary() = %q, want it to name %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -118,7 +133,7 @@ func TestRenderStatusEmitsTheSuppressedRowsLine(t *testing.T) {
 	if !strings.Contains(out, "Not shown by bd list:") {
 		t.Fatalf("renderStatus did not emit the disclosure line:\n%s", out)
 	}
-	for _, want := range []string{"2 gates (--include-gates)", "1 template (--include-templates)"} {
+	for _, want := range []string{"2 gates (--include-gates --all)", "1 template (--include-templates --all)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("renderStatus output missing %q:\n%s", want, out)
 		}

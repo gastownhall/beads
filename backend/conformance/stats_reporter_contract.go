@@ -120,6 +120,15 @@ func RunStatsReporterExcludesTheWispTier(t *testing.T, ctx context.Context, fixt
 // Both counts overlap the status buckets rather than forming their own, in the
 // same way PinnedIssues does; the deltas below assert that by counting the
 // gate and proto rows in Total and Open as well.
+//
+// THE POPULATION IS EVERY STATUS, which the closed pair below is here to
+// decide. Open seeds alone cannot: a backend counting these over all statuses
+// and one counting them only over the rows a default listing shows report
+// identical numbers on every open row, so the contract would leave the
+// question to each implementation. A closed gate and a closed proto separate
+// the two readings, and this file is where that belongs - it is the axis
+// `bd status`'s printed remedy turns on, and all three backends answer it here
+// at once.
 func RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses(t *testing.T, ctx context.Context, fixture StatsReporterFixture) {
 	t.Helper()
 	before := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
@@ -136,9 +145,23 @@ func RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses(t *testing.T, c
 	proto.IsTemplate = true
 	seedStatsReporterIssue(t, ctx, fixture, proto)
 
+	// The status axis. These two are suppressed by the default listing TWICE
+	// over - once for what they are, once for being closed - and they are
+	// counted here all the same, because the two counts describe the database
+	// the way TotalIssues does and not the rows a listing shows. A backend
+	// that scoped either count to the listing's default population passes
+	// every seed above and fails on exactly these.
+	closedGate := statsReporterSeed(fixture, "suppressed-closed-gate", types.StatusClosed)
+	closedGate.IssueType = types.TypeGate
+	seedStatsReporterIssue(t, ctx, fixture, closedGate)
+
+	closedProto := statsReporterSeed(fixture, "suppressed-closed-proto", types.StatusClosed)
+	closedProto.IsTemplate = true
+	seedStatsReporterIssue(t, ctx, fixture, closedProto)
+
 	after := statsReporterSummary(t, ctx, fixture, publicops.StatsRequest{})
 	assertStatsReporterDelta(t, before, after, statsReporterCounts{
-		total: 3, open: 3, gates: 1, templates: 1,
+		total: 5, open: 3, closed: 2, gates: 2, templates: 2,
 	})
 }
 
