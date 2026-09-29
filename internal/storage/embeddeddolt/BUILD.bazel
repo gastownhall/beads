@@ -97,6 +97,7 @@ go_test(
     timeout = "long",
     srcs = [
         "active_database_size_test.go",
+        "adaptive_id_length_test.go",
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
