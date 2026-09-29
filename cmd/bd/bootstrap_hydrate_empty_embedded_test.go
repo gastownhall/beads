@@ -42,6 +42,35 @@ func TestEmbeddedBootstrapHydratesEmptyPrimeSkeleton(t *testing.T) {
 	}
 }
 
+// TestEmbeddedBootstrapKeepsUnprovenSiblingDatabase pins the guard on the one
+// destructive act in the #5915 fix. embeddeddolt/ is a Dolt multi-database
+// directory and the emptiness proof covers only the configured database, so
+// when the skeleton shares that directory with any other database, bootstrap
+// must refuse rather than remove the directory wholesale, and both must survive.
+func TestEmbeddedBootstrapKeepsUnprovenSiblingDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	cloneDir, dataDir, dbName := primeSkeletonForTest(t, bd)
+	sibling := filepath.Join(dataDir, "otherdb")
+	if err := os.MkdirAll(sibling, 0o750); err != nil {
+		t.Fatalf("create sibling database directory: %v", err)
+	}
+
+	out, err := bdBootstrapAllowError(t, bd, cloneDir, "--yes")
+	if err == nil || !strings.Contains(out, "refusing to remove embedded skeleton") || !strings.Contains(out, "otherdb") {
+		t.Fatalf("bootstrap did not refuse a skeleton sharing embeddeddolt/ with an unproven database (err=%v); output:\n%s", err, out)
+	}
+	for _, dir := range []string{filepath.Join(dataDir, dbName), sibling} {
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			t.Fatalf("refused bootstrap still removed %s (err=%v); output:\n%s", dir, statErr, out)
+		}
+	}
+}
+
 // TestEmbeddedDBIsEmpty covers the emptiness probe that gates #5915 hydration.
 // The deliberate contract: return true ONLY for a readable, UNIDENTIFIED
 // embedded database that provably holds no user work (the pre-hydration `bd
