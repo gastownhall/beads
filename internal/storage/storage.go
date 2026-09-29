@@ -971,7 +971,9 @@ type BackupStore interface {
 	// RestoreDatabase restores the database from a Dolt backup at source, which
 	// is either a local backup directory or a backup URL that DOLT_BACKUP accepts
 	// (versioncontrolops.IsBackupURL). Implementations must not require the source
-	// to exist on the local filesystem when it is a URL.
+	// to exist on the local filesystem when it is a remote URL; a file:// URL must
+	// name an existing local directory by absolute path
+	// (versioncontrolops.ResolveBackupSource).
 	// When force is true, the existing database is dropped before restoring.
 	RestoreDatabase(ctx context.Context, source string, force bool) error
 }

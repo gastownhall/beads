@@ -231,11 +231,14 @@ func backupRefusal(path string) capabilityRow {
 // for `dolt push` on these same topologies. Whether a per-client backup remote
 // on a shared server is ever acceptable is the open part; the plumbing is not.
 //
-// Note also that the DoltHub story is already half-built in DIRECT mode:
-// `bd backup init https://…` and `bd backup sync` work, but
-// `bd backup restore https://…` does not, because validateBackupRestoreDir
-// os.Stats its argument and rejects anything that is not an existing directory
-// on every topology. Pre-existing, not something this slice changed.
+// Note that the DoltHub story is now whole in DIRECT mode: `bd backup init
+// https://…`, `bd backup sync` and `bd backup restore https://…` all work.
+// Restore was the half that did not, because validateBackupRestoreDir os.Stat'ed
+// its argument and rejected anything that was not an existing directory on
+// every topology; it now exempts the schemes versioncontrolops.IsBackupURL
+// recognizes and lets ResolveBackupSource be the single stat point. That says
+// nothing about the refusal above it, which is about WHERE the remote is
+// registered, not about which schemes bd can name.
 const backupRemoteSchemeTracking = "open question, not a verdict: remote-scheme (DoltHub/aws/gs) backup on a server " +
 	"bd does not own — revisit with S4, which settles the same server-env credential question for dolt push"
 
