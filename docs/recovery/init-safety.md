@@ -299,12 +299,15 @@ because it authorizes the one thing this guard exists to prevent.
   tests for *this project's* database directory under the resolved Dolt data
   dir, not for the data dir itself, which in shared mode is the machine-global
   `~/.beads/shared-server/dolt` that is created on demand.
-- Proxied-server mode does not reach *this* guard: `bd init --proxied-server`
-  dispatches at `cmd/bd/init.go:619`, before `initAllowRecreateMissing` is
-  assigned at `:767`. It does still reach the older `checkExistingBeadsData`
-  guard (`cmd/bd/init_proxied_server.go:89`) — but because the flag is never
-  assigned on that path, **`--recreate-missing` is inert under
-  `--proxied-server`**. That is pre-existing behaviour, not introduced here.
+- Proxied-server mode does not reach the `--reinit-local`/`--force` guard —
+  the `--proxied-server` dispatch in `runInit` (`cmd/bd/init.go`) returns
+  before it. It does reach the plain-init guard, because
+  `runInitProxiedServer` calls `checkExistingBeadsData`, so
+  **`--recreate-missing` works under `--proxied-server` too**: the flag is
+  assigned beside its flag read, upstream of every dispatch in `runInit`.
+  Keep it there. It was previously assigned next to the guard it gates, which
+  is downstream of the proxied dispatch, and the flag was therefore inert on
+  that one route while the refusal still told the operator to pass it.
 - `bd bootstrap` has its own separate mode-blind create path.
 
 ---

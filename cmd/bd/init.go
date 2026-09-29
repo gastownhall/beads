@@ -374,6 +374,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
 		discardRemote, _ := cmd.Flags().GetBool("discard-remote")
 		recreateMissing, _ := cmd.Flags().GetBool("recreate-missing")
+		// Assigned here, beside the flag read, and deliberately NOT beside the
+		// guard it gates: runInit dispatches to runInitProxiedServer and
+		// returns well before that point, while runInitProxiedServer calls
+		// checkExistingBeadsData, which reads this global. Assigning it later
+		// left --recreate-missing inert on the --proxied-server route, so the
+		// refusal told the operator to pass the flag they had just passed. Keep
+		// every route that can reach the guard downstream of this line.
+		initAllowRecreateMissing = recreateMissing
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		roleFlag, _ := cmd.Flags().GetString("role")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
@@ -800,7 +808,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
 		// engdocs/adr/0002-init-safety-invariants.md).
-		initAllowRecreateMissing = recreateMissing
 		if reinitLocal {
 			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
 			// checkExistingBeadsData entirely, and the typed confirmation below
@@ -2611,7 +2618,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				if result.Reachable && !result.Exists && result.Err == nil {
 					// Server is up but DB doesn't exist.
 					if existingProject && !initAllowRecreateMissing {
-						return initGuardMissingServerDBMessage(dbName, host, port, prefix)
+						return initGuardMissingServerDBMessage(dbName, host, port, prefix, true)
 					}
 					// Fresh clone (GH#2433) or explicit --recreate-missing opt-in —
 					// there's no local database to protect. Allow init to proceed so
@@ -2631,9 +2638,18 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				if result.Reachable && result.Exists {
 					// Server up and DB exists — fall through to "already initialized" error.
 				} else {
-					// Server unreachable or error during check.
+					// Either the server was unreachable or errored during the
+					// check, OR the block above adjudicated a reachable server
+					// that positively confirmed the database is gone and fell
+					// through without returning (no project_id, local Dolt data
+					// directory present). Do not give this branch
+					// unreachability-specific text, telemetry or error wrapping
+					// without first re-reading that fall-through: on that path
+					// the server answered authoritatively, and the two guards
+					// below are correct for both cases only because their
+					// conditions do not mention reachability.
 					if existingProject && !initAllowRecreateMissing {
-						return initGuardMissingServerDBMessage(dbName, host, port, prefix)
+						return initGuardMissingServerDBMessage(dbName, host, port, prefix, true)
 					}
 					// Fresh clone with committed metadata.json but no local dolt/
 					// directory, or explicit --recreate-missing opt-in — allow init
@@ -3108,7 +3124,10 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 		// reinit path's business, not this guard's.
 		return nil
 	}
-	return initGuardMissingServerDBMessage(dbName, host, port, prefix)
+	// Unlike the plain-init guard, this one is reachable with an empty
+	// project_id — the pre-GH#2372 cell permitted just above only when nothing
+	// local exists. Tell the message which evidence it actually has.
+	return initGuardMissingServerDBMessage(dbName, host, port, prefix, cfg.ProjectID != "")
 }
 
 // guardMissingServerDatabase resolves the init target the same way

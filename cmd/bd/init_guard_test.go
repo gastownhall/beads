@@ -531,16 +531,26 @@ func TestInitGuard_ExistingProjectMissingServerDB_Refuses(t *testing.T) {
 	if !strings.Contains(err.Error(), "bd backup restore") {
 		t.Errorf("message must name a recovery path, got:\n%s", err)
 	}
+	// Positive half of the evidence pin; the negative half is in
+	// TestInitGuard_ReinitLocal_NoProjectID_DataDirPresent_StillBlocks. This
+	// cell HAS a project_id, so citing metadata.json is accurate here and the
+	// operator should be told exactly which artifact proves prior init.
+	if !strings.Contains(err.Error(), "metadata.json has a project_id") {
+		t.Errorf("with a project_id present the refusal should cite that evidence, got:\n%s", err)
+	}
 }
 
 // be-ab3b: TestInitGuard_ExistingProjectMissingServerDB_Refuses above proves
 // initAllowRecreateMissing is REQUIRED (refuses without it); this proves it is
 // SUFFICIENT (permits init to proceed with it), covering both guard sites the
-// flag gates — init.go:2566 (server reachable, database confirmed missing) and
-// init.go:2578 (server unreachable, or errored, while checking). Without this,
-// a wiring bug could silently strand the documented --recreate-missing
-// recovery path (asymmetric risk: fails safe by blocking a legitimate
-// recreate, but untested is untested).
+// flag gates inside checkExistingBeadsDataAt — "server reachable, database
+// confirmed missing" and "server unreachable, or errored, while checking".
+// Cited by branch rather than by line: this campaign keeps editing the
+// enclosing function, so line numbers here go stale by construction.
+//
+// Without this, a wiring bug could silently strand the documented
+// --recreate-missing recovery path (asymmetric risk: fails safe by blocking a
+// legitimate recreate, but untested is untested).
 func TestInitGuard_ExistingProjectMissingServerDB_RecreateMissingAllows(t *testing.T) {
 	oldAllow := initAllowRecreateMissing
 	initAllowRecreateMissing = true
@@ -1199,6 +1209,17 @@ func TestInitGuard_ReinitLocal_NoProjectID_DataDirPresent_StillBlocks(t *testing
 	}
 	if !strings.Contains(err.Error(), "not found on server") {
 		t.Errorf("expected the missing-database refusal, got:\n%v", err)
+	}
+	// Negative half of the evidence pin (twin of the assertion in
+	// TestInitGuard_ExistingProjectMissingServerDB_Refuses): this cell is
+	// reached precisely BECAUSE metadata.json carries no project_id — only the
+	// local Dolt storage proves prior use. A refusal that cites project_id
+	// evidence here sends an operator auditing metadata.json mid-recovery
+	// looking for something that was never there. Asserting the absence of the
+	// false claim rather than the presence of particular prose, so rewording
+	// the message cannot make this stale.
+	if strings.Contains(err.Error(), "metadata.json has a project_id") {
+		t.Errorf("refusal must not assert project_id evidence in the no-project_id cell, got:\n%s", err)
 	}
 }
 
