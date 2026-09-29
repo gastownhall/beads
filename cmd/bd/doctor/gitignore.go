@@ -75,6 +75,9 @@ dolt-pprof/
 # Corrupt backup directories (created by bd doctor --fix recovery)
 *.corrupt.backup/
 
+# Quarantine files (rejected source lines from an import salvage, local-only)
+*.rejected.jsonl
+
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
@@ -140,6 +143,7 @@ var requiredPatterns = []string{
 	"proxied_server_client_info.json",
 	".local_version",
 	"backup/",
+	"*.rejected.jsonl",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.

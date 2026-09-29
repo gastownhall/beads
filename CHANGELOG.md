@@ -292,6 +292,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--format` now wins over the config default; an explicit `--json` still wins
   over `--format`.
 
+- **`bd import` reports which record was invalid, and `--skip-invalid` imports
+  the rest of the file around it** (#4492, #5202). A single record the writer
+  would refuse (for example `"status":"verify"` without that custom status
+  configured) used to abort the whole import inside the transaction: nothing
+  imported, no line number, no hint. The importer now validates records
+  up front — on the classic *and* proxied-server routes — and fails with the
+  first offending record's source line and reason. Two new flags:
+  `--skip-invalid` imports the valid records and reports the skipped ones
+  (opt-in, so scripts relying on a nonzero exit still get one by default), and
+  `--rejects <file>` quarantines the skipped records verbatim for repair and
+  re-import. `--json` gains `invalid_skipped`, `invalid_records`, and
+  `rejects_written_to`. Whole-database restore paths (`bd bootstrap`,
+  `bd init --from-jsonl`, upgrade auto-import) keep failing loudly on corrupt
+  lines but no longer let one writer-refused row discard the rest of the file.
+  A dry run no longer writes (or removes) the `--rejects` file. The strict
+  default now also runs on a dry run, so `bd import --dry-run
+  file-with-one-bad-status.jsonl` exits nonzero where it previously printed a
+  plan and exited 0 — a dry run predicts the real run, and validation never
+  ran on the old path. The `--rejects` path is truncated (not unlinked) when a
+  clean run has nothing to quarantine, so a user-named file is never silently
+  deleted; `.beads/*.rejected.jsonl` is gitignored.
+
 ### Added
 
 - **Auto-backup runs on a managed-local proxied-server workspace.** The

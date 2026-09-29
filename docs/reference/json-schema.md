@@ -223,6 +223,12 @@ Returns a summary object when `--json` is active:
 - `stale_skipped_ids` (string[]): Rows older than the local issue, skipped
 - `skipped_dependencies` (string[]): Dependency edges whose target id was absent
 - `dry_run` (boolean): Whether `--dry-run` was active
+  - `invalid_skipped` (number, optional): Records skipped because they failed
+    pre-validation; present only with `--skip-invalid`
+  - `invalid_records` (object[], optional): The skipped records, each with
+    `line`, `id`, `kind` and `reason`; present only with `--skip-invalid`
+  - `rejects_written_to` (string, optional): Path the skipped records were
+    quarantined to; present only when a quarantine file was written
 
 ### bd export --json
 
