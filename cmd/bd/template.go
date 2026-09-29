@@ -42,20 +42,43 @@ type TemplateSubgraph struct {
 	Phase        string                    // Recommended phase: "liquid" (pour) or "vapor" (wisp)
 	Pour         bool                      // If true, steps should be materialized as sub-issues (from formula pour=true)
 
-	// ConditionVars names the variables referenced by step conditions in the
-	// formula this subgraph was cooked from.
+	// FormulaVarRefs names the variables referenced by the formula this
+	// subgraph was cooked from that may leave no trace in the subgraph itself,
+	// because they are consumed or erased BEFORE the cook:
 	//
-	// Conditions are consumed by formula.FilterStepsByCondition BEFORE the
-	// cook, and the step it drops takes its condition with it - so by the time
-	// a subgraph exists, a var that decided which steps are in it leaves no
-	// trace in any issue field and no entry in VarDefs (nothing requires a
-	// condition var to be declared in [vars]). Recording the names here keeps
-	// them consumable: a var that changes which steps get poured must not be
+	//   - a step condition is consumed by formula.FilterStepsByCondition and is
+	//     never copied to an issue field, and nothing requires a condition var
+	//     to be declared in [vars], so it would appear in neither the issues
+	//     nor VarDefs;
+	//   - the substitutable text of a step the filter DROPPED disappears along
+	//     with the step;
+	//   - a {name} placeholder in a standalone expansion formula's template is
+	//     replaced by its --var value while formula.MaterializeExpansion builds
+	//     the steps, so the name is gone before the cook sees them.
+	//
+	// All three are recorded ahead of the filter so the set of variables a
+	// proto can consume stays a property of the formula rather than of one
+	// pour's --var values: a var that changes which steps get poured, or that
+	// is referenced only inside a step the user just switched off, must not be
 	// reported as one the proto cannot consume.
 	//
 	// Empty for a persisted proto loaded from the database, which has no
 	// formula behind it - its conditions were already resolved at cook time.
-	ConditionVars []string
+	FormulaVarRefs []string
+
+	// DeclaredVarsKnown reports whether VarDefs is the formula's complete
+	// declared-variable set. Only the cook can know that, so only the cook
+	// sets it (cookFormulaToSubgraphWithVars); a subgraph built any other way
+	// - loadTemplateSubgraph for a persisted or --attach proto, or a test
+	// fixture - leaves it false.
+	//
+	// It is NOT the same question as `VarDefs != nil`: a cooked formula that
+	// declares no [vars] at all also has a nil VarDefs, and that proto really
+	// does take no variables. Persistence, by contrast, drops the declarations
+	// entirely, so a var the formula declared but never wrote into a
+	// substituted field becomes indistinguishable from a typo - which is why
+	// checkUnknownVars stands down rather than guessing when this is false.
+	DeclaredVarsKnown bool
 }
 
 // InstantiateResult holds the result of template instantiation
@@ -355,12 +378,61 @@ func isHandlebarsKeyword(name string) bool {
 	}
 }
 
-// extractAllVariables finds all variables across the entire subgraph
+// extractAllVariables finds all variables across the entire subgraph.
+//
+// This reads the five prose fields only. It feeds required/missing-variable
+// reporting and `bd mol show`, whose contract is the variables a human is
+// expected to supply; extractConsumableVariables is the wider set used to
+// decide whether a supplied variable is usable at all.
 func extractAllVariables(subgraph *TemplateSubgraph) []string {
 	allText := ""
 	for _, issue := range subgraph.Issues {
 		allText += issue.Title + " " + issue.Description + " "
 		allText += issue.Design + " " + issue.AcceptanceCriteria + " " + issue.Notes + " "
+	}
+	return extractVariables(allText)
+}
+
+// substitutedIssueFields returns every string on a proto issue that
+// cloneSubgraphInto substitutes variables into when the proto is poured.
+//
+// KEEP IN SYNC with cloneSubgraphInto's newIssue literal: it is the write side
+// of this read. Any field that gains a substituteVariables call there has to be
+// added here in the same commit, or knownVarsAcross under-approximates what a
+// pour consumes and checkUnknownVars refuses a --var the clone would have used.
+// Conversely, a field the clone copies verbatim (Assignee, Labels) must stay
+// out - naming it would advertise a substitution that never happens.
+func substitutedIssueFields(issue *types.Issue) []string {
+	if issue == nil {
+		return nil
+	}
+	fields := []string{
+		issue.Title,
+		issue.Description,
+		issue.Design,
+		issue.AcceptanceCriteria,
+		issue.Notes,
+		issue.AwaitID,
+	}
+	if repo := gateRepoSelector(issue.Metadata, issue.AwaitType); repo != "" {
+		fields = append(fields, repo)
+	}
+	return fields
+}
+
+// extractConsumableVariables finds every variable name the subgraph's issues
+// can consume at clone time - the substitutable prose plus the gate fields
+// (AwaitID, and metadata.repo on a gh:* gate) that carry their own handlebars
+// and are substituted alongside it.
+func extractConsumableVariables(subgraph *TemplateSubgraph) []string {
+	if subgraph == nil {
+		return nil
+	}
+	allText := ""
+	for _, issue := range subgraph.Issues {
+		for _, field := range substitutedIssueFields(issue) {
+			allText += field + " "
+		}
 	}
 	return extractVariables(allText)
 }
@@ -453,29 +525,18 @@ func substituteVariables(text string, vars map[string]string) string {
 // reshuffle nested object keys and HTML-escape strings that were never
 // touched.
 func substituteMetadataRepo(metadata json.RawMessage, awaitType string, vars map[string]string) json.RawMessage {
-	if len(metadata) == 0 || !isGitHubGateType(awaitType) {
-		return metadata
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(metadata, &raw); err != nil {
-		return metadata
-	}
-
-	repoRaw, hasRepo := raw["repo"]
-	if !hasRepo {
-		return metadata
-	}
-
-	var repoStr string
-	if err := json.Unmarshal(repoRaw, &repoStr); err != nil {
-		// Non-string (e.g. null) repo value: leave untouched for
-		// githubRepoFromIssue to reject at check time.
+	repoStr := gateRepoSelector(metadata, awaitType)
+	if repoStr == "" {
 		return metadata
 	}
 
 	substituted := substituteVariables(repoStr, vars)
 	if substituted == repoStr {
+		return metadata
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(metadata, &raw); err != nil {
 		return metadata
 	}
 
@@ -490,6 +551,41 @@ func substituteMetadataRepo(metadata json.RawMessage, awaitType string, vars map
 		return metadata
 	}
 	return out
+}
+
+// gateRepoSelector returns the raw, still-unsubstituted metadata.repo selector
+// on a gh:* gate issue, or "" when there is none to substitute.
+//
+// This is substituteMetadataRepo's read side, factored out so the two cannot
+// disagree about which issues carry a var-bearing repo selector: the same
+// predicate that decides whether a pour SUBSTITUTES metadata.repo decides
+// whether checkUnknownVars counts the names inside it as consumable.
+//
+// "" is returned for every shape substituteMetadataRepo leaves untouched: a
+// non-gh gate type (where `repo` is ordinary metadata, not a repo selector),
+// absent or unparseable metadata, no top-level "repo" key, and a non-string
+// value such as null - which is left for githubRepoFromIssue to reject at check
+// time. An empty selector is likewise nothing to substitute.
+func gateRepoSelector(metadata json.RawMessage, awaitType string) string {
+	if len(metadata) == 0 || !isGitHubGateType(awaitType) {
+		return ""
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(metadata, &raw); err != nil {
+		return ""
+	}
+
+	repoRaw, hasRepo := raw["repo"]
+	if !hasRepo {
+		return ""
+	}
+
+	var repoStr string
+	if err := json.Unmarshal(repoRaw, &repoStr); err != nil {
+		return ""
+	}
+	return repoStr
 }
 
 // marshalNoHTMLEscape is json.Marshal without HTML-escaping '<', '>', and
@@ -699,6 +795,9 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 			issueAssignee = opts.Assignee
 		}
 
+		// Every substituteVariables call below is a field a --var can reach,
+		// so substitutedIssueFields must name it too - that read side is what
+		// checkUnknownVars uses to decide a supplied name is usable.
 		newIssue := &types.Issue{
 			// ID will be set below based on bonding options
 			Title:              substituteVariables(oldIssue.Title, opts.Vars),

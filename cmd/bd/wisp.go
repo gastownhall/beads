@@ -270,10 +270,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		if hint := firstMissingVar(subgraph, vars); hint != "" {
-			return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", hint))
-		}
-		return HandleError("%v", err)
+		return handleVarErrorWithHint(err, firstMissingVar(subgraph, vars))
 	}
 
 	if dryRun {

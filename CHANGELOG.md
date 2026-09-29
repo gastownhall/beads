@@ -557,17 +557,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored, which turned a typo in an optional var into a conditional step that
   quietly never appeared, or a defaulted var that quietly kept its default -
   with a successful exit and no output to suggest otherwise. A name is accepted
-  if any proto being poured declares it, references it as a `{{handlebar}}`, or
-  references it from a step `condition`; the last of those matters because
-  conditions are consumed before the cook, so a var that decides which steps
-  get poured leaves no trace in the cooked subgraph. Anything left over cannot
-  affect the pour, so it is reported: `unknown variables: has_spke (available:
-  has_spike, story)`. A var belonging to an `--attach` proto still passes, as
-  do a proto's documentation handlebars. Out of scope for now: `bd mol bond
-  --var` and `bd mol seed --var` go through `formula.ValidateProvidedVars`,
-  which only iterates declared vars, so they still drop an unknown name
-  silently. Also fixed alongside: the missing-var hint printed `--var =<value>`
-  when there was no missing var to name.
+  if any proto being poured declares it, references it as a `{{handlebar}}` in
+  any field the pour substitutes - the prose fields plus a gate's `await_id` and
+  a `gh:*` gate's `metadata.repo` selector - references it from a step
+  `condition` or from a step that `condition` removed, or uses it as a
+  `{name}` placeholder that a standalone `type = "expansion"` formula
+  substitutes as it builds its steps from `[[template]]`. The last
+  three matter because the condition filter and the `[[template]]` expansion
+  both run before the cook, and nothing in the cooked subgraph records
+  the names they consume or drop; collecting them ahead of the filter
+  also keeps a name's validity a property of the formula rather than of
+  another var's value. Anything left over cannot affect the pour, so it
+  is reported: `unknown variables: has_spke (available: has_spike, story)`. A
+  var belonging to an `--attach` proto still passes, as do a proto's
+  documentation handlebars. The refusal applies only where the declared-var set
+  is fully known, which means a proto cooked from a formula: a proto loaded from
+  the database (`bd cook --persist` output, and every `--attach` proto) no
+  longer has its `[vars]` declarations, so a declared-but-unreferenced name is
+  indistinguishable from a typo and nothing is refused for that pour rather than
+  risk breaking one that works. Out of scope for now: `bd mol bond --var` and
+  `bd mol seed --var` go through `formula.ValidateProvidedVars`, which only
+  iterates declared vars, so they still drop an unknown name silently. Also
+  fixed alongside: the missing-var hint printed `--var =<value>` when there was
+  no missing var to name.
 
 - **A formula with a `waits_for` gate and no spawner to wait for is now
   rejected, and an invalid formula is no longer reported as not found.** A gate

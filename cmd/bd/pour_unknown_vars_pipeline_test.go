@@ -8,7 +8,9 @@ import (
 )
 
 // has_spike appears ONLY in a step condition: it is not declared in [vars] and
-// no issue field references it.
+// no issue field references it. spike_area appears ONLY in the text of the step
+// that same condition can remove, so it is undeclared too and survives into the
+// cooked subgraph only while has_spike is truthy.
 const conditionVarFormula = `formula = "condvar-pour"
 version = 1
 type = "workflow"
@@ -23,19 +25,19 @@ type = "task"
 
 [[steps]]
 id = "spike"
-title = "Spike first"
+title = "Spike {{spike_area}} first"
 type = "task"
 condition = "{{has_spike}}"
 `
 
-// writeCondVarFormula puts the formula where the cook pipeline will find it.
-func writeCondVarFormula(t *testing.T) string {
+// writePipelineFormula puts a formula where the cook pipeline will find it.
+func writePipelineFormula(t *testing.T, name, body string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "formulas")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir formulas dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "condvar-pour.formula.toml"), []byte(conditionVarFormula), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 	return dir
@@ -56,7 +58,7 @@ func writeCondVarFormula(t *testing.T) string {
 // fix, that was the case a plausible-looking fix one call later would have
 // missed.
 func TestCookedSubgraphAcceptsAVarUsedOnlyByAStepCondition(t *testing.T) {
-	searchPaths := []string{writeCondVarFormula(t)}
+	searchPaths := []string{writePipelineFormula(t, "condvar-pour", conditionVarFormula)}
 
 	for _, spike := range []string{"true", "false"} {
 		t.Run("has_spike_"+spike, func(t *testing.T) {
@@ -82,6 +84,33 @@ func TestCookedSubgraphAcceptsAVarUsedOnlyByAStepCondition(t *testing.T) {
 		})
 	}
 
+	// A var referenced only inside the step the condition removes must not lose
+	// its validity when that step goes: otherwise `--var has_spike=false --var
+	// spike_area=parser` fails while `has_spike=true` succeeds, and whether a
+	// name is accepted depends on another name's VALUE. The falsey case is the
+	// one that regresses if collection ever moves after the filter.
+	for _, spike := range []string{"true", "false"} {
+		t.Run("dropped_step_text_var_has_spike_"+spike, func(t *testing.T) {
+			vars := map[string]string{"story": "s1", "has_spike": spike, "spike_area": "parser"}
+
+			subgraph, err := resolveAndCookFormulaWithVars("condvar-pour", searchPaths, vars)
+			if err != nil {
+				t.Fatalf("cook: %v", err)
+			}
+			if spike == "false" {
+				for _, issue := range subgraph.Issues {
+					if strings.Contains(issue.Title, "spike_area") {
+						t.Fatalf("the conditional step survived, so this case is not testing the dropped-step path: %q", issue.Title)
+					}
+				}
+			}
+
+			if err := checkPourVars(subgraph, nil, applyVariableDefaults(vars, subgraph)); err != nil {
+				t.Errorf("pour rejected a var referenced only by a step it dropped (has_spike=%s): %v", spike, err)
+			}
+		})
+	}
+
 	// The condition var widens the known set; it does not disable the check.
 	t.Run("typo_in_the_condition_var_is_still_rejected", func(t *testing.T) {
 		vars := map[string]string{"story": "s1", "has_spke": "true"}
@@ -102,6 +131,135 @@ func TestCookedSubgraphAcceptsAVarUsedOnlyByAStepCondition(t *testing.T) {
 		// carrying condition vars into the known set.
 		if !strings.Contains(err.Error(), "has_spike") {
 			t.Errorf("error does not offer the condition var among the available names: %v", err)
+		}
+	})
+}
+
+// run_id and gate_repo appear ONLY in the gate of a step that deploy can
+// remove, and neither is declared in [vars]. createGateIssue turns that gate
+// into its own issue - await_id mirrored into its title and AwaitID, and a
+// gh:* gate's repo selector into metadata.repo - which goes with the step.
+const gateVarFormula = `formula = "gatevar-pour"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+
+[[steps]]
+id = "await-ci"
+title = "Wait for CI"
+type = "task"
+condition = "{{deploy}}"
+
+[steps.gate]
+type = "gh:run"
+await_id = "{{run_id}}"
+repo = "{{gate_repo}}"
+`
+
+// A var referenced only by the GATE of a step the condition filter drops stays
+// consumable, for the same reason dropped step text does: otherwise whether
+// run_id is accepted would depend on deploy's value. cook reads a step's gate
+// fields ahead of the filter along with its text, and the falsey case is the
+// one that regresses if it ever stops - the gate issue is gone, so nothing
+// else in the subgraph names either var.
+func TestCookedSubgraphAcceptsAVarUsedOnlyByADroppedStepsGate(t *testing.T) {
+	searchPaths := []string{writePipelineFormula(t, "gatevar-pour", gateVarFormula)}
+
+	for _, deploy := range []string{"true", "false"} {
+		t.Run("deploy_"+deploy, func(t *testing.T) {
+			vars := map[string]string{"deploy": deploy, "run_id": "ci.yml", "gate_repo": "octo/app"}
+
+			subgraph, err := resolveAndCookFormulaWithVars("gatevar-pour", searchPaths, vars)
+			if err != nil {
+				t.Fatalf("cook: %v", err)
+			}
+			// The premise, both ways: the gate issue exists exactly while
+			// its step does.
+			gates := 0
+			for _, issue := range subgraph.Issues {
+				if issue.AwaitType != "" {
+					gates++
+				}
+			}
+			if want := map[string]int{"true": 1, "false": 0}[deploy]; gates != want {
+				t.Fatalf("deploy=%s cooked %d gate issues, want %d, so this case is not testing the dropped-gate path", deploy, gates, want)
+			}
+
+			if err := checkPourVars(subgraph, nil, applyVariableDefaults(vars, subgraph)); err != nil {
+				t.Errorf("pour rejected a var referenced only by a step's gate (deploy=%s): %v", deploy, err)
+			}
+		})
+	}
+}
+
+// A standalone expansion formula has no [[steps]]: formula.MaterializeExpansion
+// builds them from its [[template]] before the cook, substituting --var values
+// into the template's single-brace {name} placeholders as it goes. component
+// is not declared in [vars], so once it has been substituted nothing in the
+// cooked subgraph - no issue field, not VarDefs - names it any more.
+const expansionVarFormula = `formula = "expansion-pour"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "{target}.build"
+title = "Build {component}"
+type = "task"
+`
+
+// A var that a standalone expansion formula's template consumes is accepted,
+// even though consuming it is what erased every trace of it: like a step
+// condition, the placeholder is used up before the cook, so cook has to record
+// the name ahead of time. That widens the known set without disabling the
+// check - a typo is still refused, and offered the real name.
+func TestCookedSubgraphAcceptsAVarAStandaloneExpansionTemplateConsumes(t *testing.T) {
+	searchPaths := []string{writePipelineFormula(t, "expansion-pour", expansionVarFormula)}
+
+	t.Run("template_placeholder_var", func(t *testing.T) {
+		vars := map[string]string{"component": "api"}
+
+		subgraph, err := resolveAndCookFormulaWithVars("expansion-pour", searchPaths, vars)
+		if err != nil {
+			t.Fatalf("cook: %v", err)
+		}
+		// The premise: the template really did consume the var before the
+		// cook, so the subgraph no longer mentions it.
+		consumed := false
+		for _, issue := range subgraph.Issues {
+			if issue.Title == "Build api" {
+				consumed = true
+			}
+		}
+		if !consumed {
+			t.Fatal("the template did not substitute component, so this case is not testing a consumed var")
+		}
+
+		if err := checkPourVars(subgraph, nil, applyVariableDefaults(vars, subgraph)); err != nil {
+			t.Errorf("pour rejected a var the expansion template consumed: %v", err)
+		}
+	})
+
+	t.Run("typo_is_still_rejected", func(t *testing.T) {
+		vars := map[string]string{"componnet": "api"}
+
+		subgraph, err := resolveAndCookFormulaWithVars("expansion-pour", searchPaths, vars)
+		if err != nil {
+			t.Fatalf("cook: %v", err)
+		}
+
+		err = checkPourVars(subgraph, nil, applyVariableDefaults(vars, subgraph))
+		if err == nil {
+			t.Fatal("pour accepted a typo'd var name")
+		}
+		if !strings.Contains(err.Error(), "componnet") {
+			t.Errorf("error does not name the unusable var: %v", err)
+		}
+		if !strings.Contains(err.Error(), "available: component") {
+			t.Errorf("error does not offer the template's placeholder among the available names: %v", err)
 		}
 	})
 }
