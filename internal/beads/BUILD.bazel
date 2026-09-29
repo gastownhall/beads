@@ -32,6 +32,7 @@ go_test(
         "beads_test.go",
         "context_test.go",
         "cwd_priority_test.go",
+        "explicit_beads_dir_test.go",
         "fingerprint_test.go",
         "routing_integration_test.go",
         "sqlite_database_path_test.go",

@@ -892,11 +892,26 @@ func hasBeadsDatabase(beadsDir string) bool {
 	return false
 }
 
+// ExplicitBeadsDir returns the .beads directory named by the BEADS_DIR
+// environment variable, canonicalized and with any redirect followed, or ""
+// when BEADS_DIR is unset. Unlike FindBeadsDir it does not require the
+// directory to exist or to hold project files, so commands that create a
+// workspace can target the caller's explicit choice instead of CWD.
+func ExplicitBeadsDir() string {
+	beadsDir := os.Getenv("BEADS_DIR")
+	if beadsDir == "" {
+		return ""
+	}
+	return FollowRedirect(canonicalizeBeadsDirPath(beadsDir))
+}
+
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
 //
 // Resolution order:
-//  1. BEADS_DIR environment variable (highest priority)
+//  1. BEADS_DIR environment variable (highest priority). An explicit
+//     BEADS_DIR is authoritative: when it does not (yet) hold project files,
+//     FindBeadsDir returns "" instead of discovering some other workspace.
 //  2. Walk up from CWD toward repo root boundary, checking each directory
 //     for .beads/ with valid project files. For worktrees, stops at the
 //     worktree root; for non-worktrees, stops at the git root.
@@ -911,18 +926,20 @@ func hasBeadsDatabase(beadsDir string) bool {
 // contents are used as the actual .beads directory path.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-		absBeadsDir := canonicalizeBeadsDirPath(beadsDir)
-
-		// Follow redirect if present
-		absBeadsDir = FollowRedirect(absBeadsDir)
-
+	if absBeadsDir := ExplicitBeadsDir(); absBeadsDir != "" {
 		if info, err := os.Stat(absBeadsDir); err == nil && info.IsDir() {
 			// Validate directory contains actual project files
 			if hasBeadsProjectFiles(absBeadsDir) {
 				return absBeadsDir
 			}
 		}
+
+		// The caller named this directory explicitly. Walking up from CWD
+		// here would bind an unrelated ancestor workspace (and PersistentPreRun
+		// would then rewrite BEADS_DIR to it), so `bd init` and every other
+		// command would act on the wrong store. Report "not found" instead,
+		// matching FindDatabasePath.
+		return ""
 	}
 
 	// 2. Walk up from CWD toward the repo root, checking each directory for .beads/.

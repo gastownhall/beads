@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An explicit `BEADS_DIR` is authoritative during workspace discovery.**
+  When `BEADS_DIR` named a directory without project files yet (missing,
+  empty, or not initialized), discovery ignored it and walked up from the
+  current directory instead, then rebound `BEADS_DIR` to whatever ancestor
+  workspace it found. `bd init` refused with "already initialized" because of
+  the parent workspace, and data commands such as `bd create` and `bd list`
+  read and wrote the parent's store. Discovery now reports no workspace for
+  such a `BEADS_DIR`, so `bd init` initializes the named directory and other
+  commands fail with "no beads database found". `bd import`/`bd setup` and
+  `bd bootstrap` target the named directory when they create a workspace.
+  Behaviour with `BEADS_DIR` unset is unchanged.
+
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
   from the yaml-only key list that holds the other tracker secrets, so

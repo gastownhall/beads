@@ -790,6 +790,7 @@ go_test(
         "init_cancel_e2e_test.go",
         "init_commit_test.go",
         "init_embedded_test.go",
+        "init_explicit_beads_dir_embedded_test.go",
         "init_gateway_test.go",
         "init_git_bootstrap_routing_test.go",
         "init_guard_test.go",
