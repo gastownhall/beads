@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -1137,15 +1138,42 @@ func TestFilterIssueGates(t *testing.T) {
 	})
 
 	t.Run("limit_caps_results", func(t *testing.T) {
+		// Sorted by ID first ("g-closed" < "g-open" < "g-open2"), then capped.
 		got := filterIssueGates(deps, true, 1)
-		if len(got) != 1 || got[0].ID != "g-open" {
-			t.Fatalf("expected limit=1 -> [g-open], got %v", gateIDs(got))
+		if len(got) != 1 || got[0].ID != "g-closed" {
+			t.Fatalf("expected limit=1 -> [g-closed], got %v", gateIDs(got))
+		}
+	})
+
+	t.Run("sorted_by_id_regardless_of_input_order", func(t *testing.T) {
+		// Same dependency set, presented in a different (map-iteration-like)
+		// order, must still come back sorted by ID.
+		shuffled := []*types.Issue{deps[4], deps[1], deps[0]} // g-open2, g-closed, g-open
+		got := filterIssueGates(shuffled, true, 0)
+		want := []string{"g-closed", "g-open", "g-open2"}
+		if ids := gateIDs(got); !reflect.DeepEqual(ids, want) {
+			t.Fatalf("expected deterministic order %v, got %v", want, ids)
 		}
 	})
 
 	t.Run("empty_deps", func(t *testing.T) {
-		if got := filterIssueGates(nil, true, 0); len(got) != 0 {
+		got := filterIssueGates(nil, true, 0)
+		if len(got) != 0 {
 			t.Fatalf("expected no gates, got %v", gateIDs(got))
+		}
+		if got == nil {
+			t.Fatalf("expected non-nil empty slice, got nil")
+		}
+	})
+
+	t.Run("empty_result_marshals_to_json_empty_array_not_null", func(t *testing.T) {
+		got := filterIssueGates(nil, true, 0)
+		b, err := json.Marshal(got)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if string(b) != "[]" {
+			t.Fatalf("expected JSON [], got %s", b)
 		}
 	})
 }
