@@ -632,6 +632,17 @@ func (r *issueSQLRepositoryImpl) Exists(ctx context.Context, id string, opts dom
 	return true, nil
 }
 
+// CountForPrefix counts the IDs an adaptive-length mint for prefix has to leave
+// room for.
+//
+// issues and wisps share one ID space: a promoted wisp keeps its
+// <prefix>-wisp-* ID in issues, and a demoted issue keeps its ID in wisps. So the
+// count is the target table's own count plus the other table's count of the
+// prefix's exact namespace, the rows shaped <prefix>-<hash> with no further "-"
+// or ".". A longer sub-prefix such as <prefix>-wisp-* is a different namespace,
+// which a <prefix>-<hash> ID can never equal, so live <prefix>-wisp-* wisps must
+// not lengthen <prefix>'s own IDs. The target table keeps its existing prefix-%
+// rule, which also counts sub-prefixed rows, so no prefix's IDs get shorter.
 func (r *issueSQLRepositoryImpl) CountForPrefix(ctx context.Context, prefix string, opts domain.IssueTableOpts) (int, error) {
 	if prefix == "" {
 		return 0, errors.New("db: CountForPrefix: prefix must not be empty")
@@ -648,7 +659,21 @@ func (r *issueSQLRepositoryImpl) CountForPrefix(ctx context.Context, prefix stri
 	if err != nil {
 		return 0, fmt.Errorf("db: CountForPrefix %s: %w", prefix, err)
 	}
-	return count, nil
+
+	siblingTable := pickIssueTable(!opts.UseWispsTable)
+	var siblingCount int
+	//nolint:gosec // G201: table is one of two hardcoded constants
+	err = r.runner.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COUNT(*)
+		FROM %s
+		WHERE id LIKE CONCAT(?, '-%%')
+		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
+		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '-') = 0
+	`, siblingTable), prefix, prefix, prefix).Scan(&siblingCount)
+	if err != nil {
+		return 0, fmt.Errorf("db: CountForPrefix %s: sibling plane: %w", prefix, err)
+	}
+	return count + siblingCount, nil
 }
 
 func (r *issueSQLRepositoryImpl) NextCounterID(ctx context.Context, prefix string) (int, error) {
