@@ -406,8 +406,8 @@ version floor, so an older dolt can still be used at your own risk. To
 resolve it, install the pinned dolt version — see
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
 — and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
-Install that specific version rather than `latest`: 2.3.x is a newer release
-that satisfies this warning but carries a
+Install that specific version rather than `latest`: 2.2.1 through 2.3.1
+satisfy this warning but carry a
 [separate data-operation defect](/architecture/dolt#which-dolt-version-to-install).
 
 The advisory repeats at most once per day, not on every command: the probe
@@ -691,9 +691,9 @@ below.
 `bd flatten` and the Dolt-history compaction in `bd admin compact` finish by
 hard-resetting `main` onto a temporary branch; the merge-settle path behind
 `bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On Dolt 2.3.x a few percent of freshly created databases come up with
-`CALL DOLT_RESET('--hard')` broken for the life of the server process, so on
-an affected database those commands stop with:
+merge. On Dolt 2.2.1 through 2.3.1 some freshly created databases come up
+with `CALL DOLT_RESET('--hard')` broken for the life of the server process, so
+on an affected database those commands stop with:
 
 ```
 Error 1105 (HY000): context canceled
@@ -705,7 +705,7 @@ problem only shows up when something needs a hard reset. Confirm with the
 check in
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install),
 which also covers the fix: restarting `dolt sql-server` clears it for now,
-and installing the pinned Dolt version keeps it clear.
+and installing Dolt 2.2.0 or 2.3.4 or newer keeps it clear.
 
 This applies to server and proxied-server mode, which use the standalone
 `dolt` CLI. Embedded mode links its own Dolt engine at the version pinned in
