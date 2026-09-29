@@ -22,6 +22,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[b9s](https://github.com/vanderheijden86/b9s)** - Keyboard-driven terminal UI for Beads, modelled on k9s: issue tree, a list of the latest changes, and a kanban board with epic swimlanes, all updating live as you and your agents work. The same app runs in a desktop or phone browser with full feature parity (see Web UIs). Live demo at [demo.b9s.osen.co](https://demo.b9s.osen.co). Built by [@vanderheijden86](https://github.com/vanderheijden86). (Go)
 
+- **[btui](https://github.com/AndreasDellrud/beads-tui)** - Read-only terminal browser with active, ready, and closed views, filtering, keyboard and mouse navigation, and issue details with comments and dependency relationships. Launches Codex or Claude Code sessions for selected work, with optional [Herdr](https://herdr.dev) worktree integration. Reads through the installed `bd --readonly` CLI. Built by [@AndreasDellrud](https://github.com/AndreasDellrud). (Rust/Ratatui)
+
 ## Web UIs
 
 - **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
