@@ -583,6 +583,7 @@ go_test(
         "context_identity_test.go",
         "context_proxied_integration_test.go",
         "context_test.go",
+        "context_text_test.go",
         "contributor_embedded_test.go",
         "contributor_routing_e2e_test.go",
         "cook_qnt_test.go",
