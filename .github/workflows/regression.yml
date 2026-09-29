@@ -77,7 +77,7 @@ jobs:
     needs: detect-regression-need
     if: needs.detect-regression-need.outputs.run_regression == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - name: Show regression trigger reason
         run: echo "${{ needs.detect-regression-need.outputs.reason }}"
@@ -117,5 +117,17 @@ jobs:
           path: ~/.cache/beads-regression
           key: regression-baseline-${{ hashFiles('tests/regression/BASELINE_VERSION') }}
 
+      # Passing-side wall time already overlapped the go deadline below, so
+      # ordinary GitHub-runner speed variance -- not a real hang -- was
+      # tripping this step. Measured over the 100 most recent Regression
+      # Tests runs (2026-09-03/04, ~29.5h): p50 593s (~10m), max passing
+      # 1189s (~19.8m) against the prior 1200s (20m) cap, and 5 runs in that
+      # window hit the identical `panic: test timed out after 20m0s` with
+      # zero `--- FAIL` lines -- a budget defect, not a regression. Match
+      # main.yml's Test job fix for the same failure mode: raise the go
+      # deadline to cover the observed slowdown and keep it inside a larger
+      # finite job budget (see timeout-minutes above), so the go deadline
+      # fires first and prints goroutine stacks -- a REAL hang stays
+      # diagnosable instead of being cut off by a bare job kill.
       - name: Run regression tests
-        run: go test -tags=regression,gms_pure_go -timeout=20m -v ./tests/regression/...
+        run: go test -tags=regression,gms_pure_go -timeout=40m -v ./tests/regression/...

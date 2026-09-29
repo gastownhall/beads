@@ -1466,6 +1466,11 @@ var rootCmd = &cobra.Command{
 					// (GH#bd-0qel)
 					targetBeadsDir := beads.FindBeadsDir()
 					if targetBeadsDir == "" {
+						// An explicit BEADS_DIR is authoritative even
+						// before it holds project files.
+						targetBeadsDir = beads.ExplicitBeadsDir()
+					}
+					if targetBeadsDir == "" {
 						targetBeadsDir = ".beads"
 					}
 					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))

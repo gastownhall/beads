@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -14,12 +16,19 @@ import (
 // seedSiblingBlockers creates rb-a and rb-b, both blocking rb-c.
 func seedSiblingBlockers(t *testing.T, ctx context.Context, store *DoltStore) {
 	t.Helper()
-	for _, id := range []string{"rb-a", "rb-b", "rb-c"} {
+	seedSiblingBlockersAs(t, ctx, store, "rb-a", "rb-b", "rb-c")
+}
+
+// seedSiblingBlockersAs is seedSiblingBlockers for a named triple, so one store
+// can carry more than one independent fixture.
+func seedSiblingBlockersAs(t *testing.T, ctx context.Context, store *DoltStore, blockerA, blockerB, dependent string) {
+	t.Helper()
+	for _, id := range []string{blockerA, blockerB, dependent} {
 		createPerm(t, ctx, store, id)
 	}
-	addDependency(t, ctx, store, "rb-c", "rb-a", types.DepBlocks)
-	addDependency(t, ctx, store, "rb-c", "rb-b", types.DepBlocks)
-	assertIsBlocked(t, ctx, store, "issues", "rb-c", true)
+	addDependency(t, ctx, store, dependent, blockerA, types.DepBlocks)
+	addDependency(t, ctx, store, dependent, blockerB, types.DepBlocks)
+	assertIsBlocked(t, ctx, store, "issues", dependent, true)
 }
 
 // beginRacingWrite opens a transaction on its own pooled connection, pins its
@@ -28,6 +37,13 @@ func seedSiblingBlockers(t *testing.T, ctx context.Context, store *DoltStore) {
 // paths do. It returns the dependents the write recorded for the post-commit
 // recheck and a commit step that lands the write and frees the connection.
 func beginRacingWrite(t *testing.T, ctx context.Context, store *DoltStore, name string, write func(tx *sql.Tx) error) (pending issueops.BlockedRecheck, commit func()) {
+	t.Helper()
+	return beginRacingWriteOn(t, ctx, store, name, []string{"rb-a", "rb-b"}, write)
+}
+
+// beginRacingWriteOn is beginRacingWrite for a named fixture: blockers are the
+// ids whose open state pins the snapshot.
+func beginRacingWriteOn(t *testing.T, ctx context.Context, store *DoltStore, name string, blockers []string, write func(tx *sql.Tx) error) (pending issueops.BlockedRecheck, commit func()) {
 	t.Helper()
 	conn, err := store.db.Conn(ctx)
 	if err != nil {
@@ -39,13 +55,20 @@ func beginRacingWrite(t *testing.T, ctx context.Context, store *DoltStore, name 
 	}
 	clearScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearScope()
+	placeholders := make([]string, 0, len(blockers))
+	args := make([]any, 0, len(blockers))
+	for _, id := range blockers {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
 	var open int
 	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM issues WHERE id IN ('rb-a', 'rb-b') AND status <> 'closed'").Scan(&open); err != nil {
+		"SELECT COUNT(*) FROM issues WHERE id IN ("+strings.Join(placeholders, ", ")+") AND status <> 'closed'",
+		args...).Scan(&open); err != nil {
 		t.Fatalf("pin snapshot for %s: %v", name, err)
 	}
-	if open != 2 {
-		t.Fatalf("snapshot for %s sees %d open blockers, want 2", name, open)
+	if open != len(blockers) {
+		t.Fatalf("snapshot for %s sees %d open blockers, want %d", name, open, len(blockers))
 	}
 	if err := write(tx); err != nil {
 		t.Fatalf("%s in tx: %v", name, err)
@@ -141,6 +164,85 @@ func TestCloseRecheckBlocked_PublicClosePaths(t *testing.T) {
 	}
 	if !pending.Empty() {
 		t.Fatalf("close of an issue with no dependents recorded %+v to recheck, want nothing", pending)
+	}
+}
+
+// TestCloseRecheckBlocked_RunnerTailRechecksACommittedWrite pins the wiring
+// this feature IS: a write that commits on a store write runner gets its
+// recorded dependents rechecked by that runner, with no help from the test.
+//
+// Every other test in this file reaches the recheck another way — it calls
+// recheckBlockedAfterCommit itself, or takes the pending set out of the
+// transaction before the runner can — so all of them stay green when both
+// runner tails are deleted, and the tier #6716 was reported on had no
+// regression pin on its own deliverable.
+//
+// Each arm makes the in-transaction recompute provably blind rather than
+// hoping for an interleaving: a racing close is held open so the runner's
+// transaction cannot see it, the arm reads the dependent's flag inside that
+// transaction to record what its own recompute concluded, and the racing close
+// is landed from inside the runner's body — before the runner commits, after
+// its snapshot was taken. Only a recheck on a fresh snapshot can settle the
+// dependent from there. withRetryTx and withWriteTx carry separate tail calls,
+// so each gets its own arm and its own fixture.
+func TestCloseRecheckBlocked_RunnerTailRechecksACommittedWrite(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, arm := range []struct {
+		runner    string
+		run       func(context.Context, func(*sql.Tx) error) error
+		racing    string // closed by the transaction the runner cannot see
+		committed string // closed through the runner
+		dependent string
+	}{
+		{"withRetryTx", store.withRetryTx, "rt-a", "rt-b", "rt-c"},
+		{"withWriteTx", store.withWriteTx, "wt-a", "wt-b", "wt-c"},
+	} {
+		t.Run(arm.runner, func(t *testing.T) {
+			seedSiblingBlockersAs(t, ctx, store, arm.racing, arm.committed, arm.dependent)
+			_, landRacingClose := beginRacingWriteOn(t, ctx, store, "close of "+arm.racing,
+				[]string{arm.racing, arm.committed}, func(tx *sql.Tx) error {
+					_, err := issueops.CloseIssueInTx(ctx, tx, arm.racing, "done", "tester", "")
+					return err
+				})
+
+			var landed sync.Once
+			var blockedInTx int
+			if err := arm.run(ctx, func(tx *sql.Tx) error {
+				if _, err := issueops.CloseIssueInTx(ctx, tx, arm.committed, "done", "tester", ""); err != nil {
+					return err
+				}
+				// What this transaction's own recompute concluded, read before
+				// the racing close lands so it cannot be anything else.
+				if err := tx.QueryRowContext(ctx,
+					"SELECT is_blocked FROM issues WHERE id = ?", arm.dependent).Scan(&blockedInTx); err != nil {
+					return err
+				}
+				// Land the racing close inside the window: this transaction
+				// began before it, so its snapshot cannot include it, and the
+				// dependent is stale the moment this transaction commits.
+				// sync.Once because withRetryTx may re-run this body.
+				landed.Do(landRacingClose)
+				return nil
+			}); err != nil {
+				t.Fatalf("%s: a committed close returned %v, want nil", arm.runner, err)
+			}
+			if blockedInTx == 0 {
+				t.Fatalf("%s: %s was already unblocked inside the write's own transaction, so this arm measures nothing about the tail — the runner retried and re-ran the body on a snapshot that already included the racing close", arm.runner, arm.dependent)
+			}
+
+			// Nothing here called recheckBlockedAfterCommit or touched the
+			// pending set: the runner's tail is the only thing that can have
+			// settled the dependent and published the correction.
+			assertIsBlocked(t, ctx, store, "issues", arm.dependent, false)
+			requireCleanTables(ctx, t, store, "issues")
+			if !doltHasCommitMessage(ctx, t, store, "bd: recheck blocked after close of "+arm.committed) {
+				t.Fatalf("%s: the recheck corrected %s but minted no Dolt commit for it", arm.runner, arm.dependent)
+			}
+		})
 	}
 }
 

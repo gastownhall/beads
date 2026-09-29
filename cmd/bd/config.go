@@ -1264,7 +1264,11 @@ func validateStorageClassConfig(key, value string) error {
 	if canonical := issueType.Normalize(); canonical != issueType {
 		return fmt.Errorf("invalid key %q: %q is an alias of %q, and create-time lookup uses the canonical type; set storage-class.%s instead", key, suffix, canonical, canonical)
 	}
-	if !issueType.IsValidWithCustom(loadEmbeddedCustomTypes()) {
+	customTypes, err := resolveWorkspaceCustomTypes(rootCtx)
+	if err != nil {
+		return err
+	}
+	if !issueType.IsValidWithCustom(customTypes) {
 		return fmt.Errorf("invalid key %q: unknown issue type %q (use a built-in type, or add it to types.custom first)", key, suffix)
 	}
 	if _, err := types.ParseStorageClass(value); err != nil {

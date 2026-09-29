@@ -34,7 +34,10 @@ test:prcore --test_env=BEADS_TEST_SKIP=dolt
 # As in pr.yml's PR Core step: a root or non-POSIX executor fails
 # TestAddExcludePatternsRefusesReadErrors instead of skipping it.
 test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
-test:prcore --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual
+# Every tag that belongs to another lane (scripts/bazel_policy_test.go
+# bazelPRCoreExcludedTags). integration-only targets run zero tests outside
+# --config=integration.
+test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual,-integration-only
 
 test:ci --config=prcore
 test:ci --keep_going --test_summary=terse
@@ -119,6 +122,99 @@ test:doltserver --test_arg=-test.parallel=4
 # test:docker; remote workers are not limited by it.
 test:doltserver --local_test_jobs=4
 test:doltserver --remote_download_regex=.*/test\.(log|xml)$
+
+# Proxied-server tier: PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs, as
+# //cmd/bd:bd_proxied_test (dolt-server-proxied tag). Kept out of
+# --config=doltserver because bazel.yml runs that lane locally too (forks,
+# rbe=off), where 15 shards of ~10 minutes, each with a dolt sql-server busy
+# on ~4 cores, do not fit; bazel.yml runs this one only with remote
+# execution, in a job of its own (bazel-proxied). The build is
+# --config=doltserver's: race, like PR Risk's /tmp/bd-cmd-test (main.yml's
+# twin job runs build-artifacts' non-race bd-cmd-test, so this is the
+# stricter of the two); the subprocess bd is the non-race bd_for_tests, like
+# the jobs'. Each shard runs its job's
+# shard script, whose -test.timeout=15m is past "long": the target is
+# eternal, which rbe-west caps at 1200s.
+test:doltserver-proxied --@rules_go//go/config:race
+test:doltserver-proxied --test_tag_filters=dolt-server-proxied
+test:doltserver-proxied --build_tests_only
+test:doltserver-proxied --keep_going
+test:doltserver-proxied --test_summary=terse
+test:doltserver-proxied --test_timeout=-1,-1,-1,1200
+test:doltserver-proxied --test_env=GO_TEST_WRAP_TESTV=1
+# The jobs pass no -parallel: GOMAXPROCS (the target's 4, a runner's vCPUs).
+test:doltserver-proxied --test_arg=-test.parallel=4
+test:doltserver-proxied --local_test_jobs=4
+test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
+
+# Server-Dolt storage tier: PR Risk's "Test (Server Dolt Conformance)" and
+# "Test (Server Dolt Full Suite N/16)" jobs, as
+# //internal/storage/dolt:dolt_server_{conformance,full}_test
+# (dolt-server-integration tag): the integration-tagged internal/storage/dolt
+# tests, non-race like the jobs' binary, against a local dolt sql-server.
+# The build flags are exactly --config=integration's (the tags, and race for
+# everything the variants do not turn off), so the two lanes share every
+# compile: the variants' race-off binary lands in the configuration
+# --config=integration already builds the non-race //cmd/bd:bd_for_tests in.
+# A per-target gotags transition would instead compile the whole graph a
+# third time. No BEADS_TEST_SKIP, no -short; the full suite's
+# BEADS_TEST_ENV_RUN_DOLT=1 is target env. Remote only in bazel.yml, in a
+# job of its own (bazel-server-storage) that shares bazel-integration's
+# compiles through the remote cache.
+build:doltserver-integration --@rules_go//go/config:tags=gms_pure_go,integration
+test:doltserver-integration --@rules_go//go/config:race
+test:doltserver-integration --test_tag_filters=dolt-server-integration
+test:doltserver-integration --build_tests_only
+test:doltserver-integration --keep_going
+test:doltserver-integration --test_summary=terse
+test:doltserver-integration --test_timeout=-1,-1,-1,1200
+test:doltserver-integration --test_env=GO_TEST_WRAP_TESTV=1
+# The jobs pass no -parallel: GOMAXPROCS (the targets' 4, a runner's vCPUs).
+test:doltserver-integration --test_arg=-test.parallel=4
+test:doltserver-integration --local_test_jobs=4
+test:doltserver-integration --remote_download_regex=.*/test\.(log|xml)$
+
+# Integration lane: main.yml's "Main Linux integration packages (N/6)" and
+# "Main Linux integration cmd/bd (N/8)" jobs (and nightly.yml's Full Test
+# Suite, which runs the same `go test` over ./... in one job): every package
+# built with -tags=integration,gms_pure_go, race, no -short, no -skip,
+# BEADS_TEST_SKIP=dolt. The tag is set for the whole build, as `go test -tags`
+# does, not per target: gazelle generates srcs/deps with integration files
+# included (root BUILD.bazel `gazelle:build_tags`), rules_go drops them from
+# every other configuration, and //internal/testutil/integration (integration
+# files only) compiles to its real contents only here. A per-target `gotags`
+# would not save the compile either: it transitions the whole dep graph.
+build:integration --@rules_go//go/config:tags=gms_pure_go,integration
+test:integration --@rules_go//go/config:race
+test:integration --test_env=BEADS_TEST_SKIP=dolt
+# The variants the PR-core lane leaves out stay out, except integration-only
+# (targets with tests only under the tag): the jobs' BEADS_TEST_SKIP=dolt
+# keeps every container- or server-backed test skipped, which is what the
+# untagged base targets already do. scripts/bazel_policy_test.go derives the
+# required exclusions from the PR-core list, so a new lane tag lands here too.
+test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual
+test:integration --build_tests_only
+test:integration --keep_going
+test:integration --test_summary=terse
+# The jobs pass no -p/-parallel: GOMAXPROCS on a 4-vCPU ubuntu-latest runner.
+test:integration --test_arg=-test.parallel=4
+# The jobs give each package binary -timeout=30m. rbe-west rejects an action
+# timeout over 1200s, so every size gets 1200s, and Go's own -test.timeout (19m,
+# after the 1200s rules_go derives from TEST_TIMEOUT: the last flag wins) fires
+# first and dumps every goroutine to test.log, which Bazel's kill does not.
+test:integration --test_timeout=1200
+test:integration --test_arg=-test.timeout=19m
+# The runner is not root, so TestAddExcludePatternsRefusesReadErrors runs
+# there; make a root executor fail it rather than skip (as test:prcore does).
+test:integration --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
+# -test.v in test.xml, as in test:ci, for tools/bazel/equivalence.py.
+test:integration --test_env=GO_TEST_WRAP_TESTV=1
+# ci and integration build into the same output directory (the tags flag
+# does not change it), so they share bazel-testlogs: a lane's test.xml is
+# overwritten by the other lane's next run of the same target. Run
+# equivalence.py / check_testcases.py right after each lane's own
+# `bazel test`, before the other lane runs (or give the lanes separate jobs).
+test:integration --remote_download_regex=.*/test\.xml$
 
 # Pure-Go lane: pr.yml's "Check pure-Go and js/wasm boundaries
 # (CGO_ENABLED=0)" job. CGO is off for every Go target (rules_go drops

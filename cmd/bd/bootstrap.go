@@ -190,7 +190,9 @@ Examples:
 			if isGitRepo() && !isBareGitRepo() {
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 					if gitOriginHasDoltDataRef() {
-						if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
+						if explicitDir := beads.ExplicitBeadsDir(); explicitDir != "" {
+							beadsDir = explicitDir
+						} else if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
 							beadsDir = fallbackDir
 						} else {
 							cwd, err := os.Getwd()

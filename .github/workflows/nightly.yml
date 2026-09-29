@@ -96,14 +96,19 @@ jobs:
           retention-days: 7
 
   # Bazel lane with the full go test equivalence listing and the skip-parity
-  # check (advisory, like the PR run). Remote execution when the repo secrets
-  # are present.
+  # check (reported here; PRs gate on it through pr.yml). Remote execution
+  # when the repo secrets are present; bazel.yml gets those four and nothing
+  # else.
   bazel:
     name: Bazel equivalence (full detail)
     needs: bazel-go-test-json
     if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.suite == 'bazel') }}
     uses: ./.github/workflows/bazel.yml
-    secrets: inherit
+    secrets:
+      RBE_WEST_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
+      RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
+      RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
+      RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
     with:
       details: true
       go-test-json-artifact: bazel-equivalence-go-test-json
