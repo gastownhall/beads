@@ -573,11 +573,10 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 	// comment in list.go for why this can't false-negative a real
 	// violation. Covered directly (bump values, not exit behavior) by
 	// TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe
-	// below, since printTruncationHint's text is gated on
-	// ui.IsStderrTerminal() and unconditionally suppressed for this
-	// subprocess harness's piped stderr (see list_embedded_test.go's
-	// limit_truncation_hint subtest) — these end-to-end subtests can only
-	// assert the absence of the false cap error and the delivered count.
+	// below. Since GH#5102 the notice also reaches this harness's piped
+	// stderr (see list_embedded_test.go's limit_truncation_hint subtest);
+	// these end-to-end subtests still only assert the absence of the false
+	// cap error and the delivered count.
 	t.Run("LimitEqualsCap_TruncatesNotErrors", func(t *testing.T) {
 		out, code := bdRunRaw(t, bd, dir, nil, "list",
 			"--limit", "5", "--max-rows", "5")
@@ -705,12 +704,8 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 // user's --limit (be-x42v.4 round-3 follow-up).
 //
 // The end-to-end LimitEqualsCap_TruncatesNotErrors subprocess test in
-// TestEmbeddedMaxRowsList can only assert the *absence* of the false cap
-// error and the trimmed row count — it can't observe the truncation
-// *notice* text, which printTruncationHint gates on ui.IsStderrTerminal()
-// and is unconditionally suppressed for a subprocess's piped stderr (see
-// list_embedded_test.go's limit_truncation_hint subtest, which documents
-// the same TTY constraint). This unit test instead asserts the underlying
+// TestEmbeddedMaxRowsList asserts the absence of the false cap error and
+// the trimmed row count. This unit test instead asserts the underlying
 // signal directly: with Limit==MaxRows, both must bump by one so the query
 // still over-fetches by one row (restoring len(results) > effectiveLimit
 // detection) while EnforceMaxRowsCap doesn't trip on that extra row.
