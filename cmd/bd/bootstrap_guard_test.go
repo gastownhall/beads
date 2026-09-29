@@ -793,3 +793,76 @@ func TestDetectBootstrapAction_ServerGenuinelyAbsent_FallsThrough(t *testing.T) 
 		t.Errorf("action=%q, want %q — no backup/jsonl available, fresh init expected", plan.Action, "init")
 	}
 }
+
+// TestBootstrapHasHydratableRemote_GitForgeSyncRemote is the detection-level
+// regression for the #5915 hydration gate. `bd init` persists the git origin as
+// sync.remote, so in the canonical team setup the gate is handed a git-forge URL.
+// It used to answer `!isGitCodeRepoURL(syncRemote)` — false for every forge URL —
+// so the empty-skeleton hydration never ran in exactly the configuration bd init
+// writes, and bootstrap still printed "Database already exists — Nothing to do".
+// The gate now mirrors detectBootstrapAction: route through doltRemoteURL, probe
+// refs/dolt/data, and fail closed when the probe cannot answer.
+func TestBootstrapHasHydratableRemote_GitForgeSyncRemote(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		hasData  bool
+		probeErr error
+		want     bool
+	}{
+		{"forge remote carrying refs/dolt/data is hydratable", true, nil, true},
+		{"forge remote without dolt data is not hydratable", false, nil, false},
+		// A probe that cannot answer is UNKNOWN, not "no data" — the same
+		// fail-closed convention detectBootstrapAction uses, so a network blip
+		// can never talk the gate into hydrating from an unverified remote.
+		{"probe error is UNKNOWN, not empty", true, errors.New("ls-remote: dial tcp: i/o timeout"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const remote = "https://github.com/org/repo.git"
+			newForgeSyncRemoteWorkspace(t, remote)
+
+			var gotURL string
+			stubProbeGitRemoteDoltData(t, func(url string) (bool, error) {
+				gotURL = url
+				return tc.hasData, tc.probeErr
+			})
+
+			if got := bootstrapHasHydratableRemote(); got != tc.want {
+				t.Fatalf("bootstrapHasHydratableRemote() = %v, want %v", got, tc.want)
+			}
+			// The doc comment claims this mirrors detection; detection probes
+			// doltRemoteURL(syncRemote), so pin that the gate probes the same
+			// routed URL rather than the raw one.
+			if want := doltRemoteURL(remote); gotURL != want {
+				t.Errorf("probed %q, want the routed form %q", gotURL, want)
+			}
+		})
+	}
+}
+
+// TestBootstrapHasHydratableRemote_EveryForgeFormIsProbed pins that no forge
+// shape bd itself writes is answered by URL classification alone. Reusing
+// forgeSyncRemoteForms keeps this in step with the #5743/#5663 routing table: if
+// a new form is added there, this test covers it automatically.
+func TestBootstrapHasHydratableRemote_EveryForgeFormIsProbed(t *testing.T) {
+	for _, form := range forgeSyncRemoteForms {
+		t.Run(form.name, func(t *testing.T) {
+			newForgeSyncRemoteWorkspace(t, form.remote)
+
+			probed := false
+			stubProbeGitRemoteDoltData(t, func(url string) (bool, error) {
+				probed = true
+				if url != form.wantClone {
+					t.Errorf("probed %q, want the routed form %q", url, form.wantClone)
+				}
+				return true, nil
+			})
+
+			if !bootstrapHasHydratableRemote() {
+				t.Fatal("a forge sync.remote carrying dolt data must be hydratable")
+			}
+			if !probed {
+				t.Fatal("the gate answered without probing — it classified the URL instead of mirroring detection")
+			}
+		})
+	}
+}

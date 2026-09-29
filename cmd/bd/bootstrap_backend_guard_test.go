@@ -245,6 +245,74 @@ func TestBootstrapDoesNotConvertExistingSQLiteWorkspace(t *testing.T) {
 	}
 }
 
+// TestUnprovenSiblingDatabases pins the guard that keeps the #5915 skeleton
+// removal from destroying a database it never proved empty. embeddeddolt/ is a
+// Dolt multi-database directory but embeddedDBIsEmpty only proves dbName, so
+// cloneViaEmbedded refuses when any other database directory is present.
+//
+// Tagless on purpose: the helper is pure os.ReadDir plus string work, so this is
+// real coverage in the CGO_ENABLED=0 lanes, where every bootstrap_*_embedded and
+// bootstrap_guard test is compiled out.
+func TestUnprovenSiblingDatabases(t *testing.T) {
+	const dbName = "beads"
+
+	for _, tc := range []struct {
+		name    string
+		entries []string // "d:<name>" directory, "f:<name>" file
+		want    []string
+	}{
+		// The shape every workspace bd produces: one database directory. Must
+		// stay empty or the guard would block the fix it is protecting.
+		{"only the proven database", []string{"d:beads"}, nil},
+		{"dolt bookkeeping is allowed", []string{"d:beads", "d:.doltcfg", "d:.dolt"}, nil},
+		{"a sibling database is reported", []string{"d:beads", "d:bd_metrics_repo_2424946071"}, []string{"bd_metrics_repo_2424946071"}},
+		// Only a directory can be a Dolt database.
+		{"stray files are ignored", []string{"d:beads", "f:README", "f:.DS_Store"}, nil},
+		{"several siblings come back sorted", []string{"d:beads", "d:zeta", "d:alpha"}, []string{"alpha", "zeta"}},
+		// The database bd expects can be absent entirely (a name divergence);
+		// everything present is then unproven.
+		{"proven database absent", []string{"d:other"}, []string{"other"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := filepath.Join(t.TempDir(), "embeddeddolt")
+			if err := os.MkdirAll(dataDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			for _, spec := range tc.entries {
+				kind, name := spec[:1], spec[2:]
+				path := filepath.Join(dataDir, name)
+				if kind == "d" {
+					if err := os.MkdirAll(path, 0o750); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
+				if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := unprovenSiblingDatabases(dataDir, dbName)
+			if err != nil {
+				t.Fatalf("unprovenSiblingDatabases: %v", err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("unprovenSiblingDatabases(%v) = %v, want %v", tc.entries, got, tc.want)
+			}
+		})
+	}
+
+	// An unreadable directory must surface as an error, never as "no siblings" —
+	// that is the same fail-closed rule embeddedDBIsEmpty uses, and treating it
+	// as empty would re-open the destructive path this guard closes.
+	t.Run("missing directory is an error, not an empty answer", func(t *testing.T) {
+		got, err := unprovenSiblingDatabases(filepath.Join(t.TempDir(), "absent"), dbName)
+		if err == nil {
+			t.Fatalf("want an error for a missing dataDir, got %v", got)
+		}
+	})
+}
+
 func bootstrapBackendGuardEnv(home, beadsDir string) []string {
 	env := make([]string, 0, len(os.Environ())+7)
 	for _, entry := range os.Environ() {

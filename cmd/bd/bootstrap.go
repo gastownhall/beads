@@ -499,9 +499,17 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 		// instead of reporting "nothing to do" and stranding the workspace. Both
 		// markers must hold; the emptiness probe opens the embedded engine, so it
 		// is gated behind the (cheaper) remote check — a `git ls-remote` (10s
-		// timeout) that sync detection below probes again, but which stays off the
-		// hot path of an already-hydrated workspace (that returns above). A
-		// legitimately empty `bd init` DB with no hydratable remote — and any DB
+		// timeout) that sync detection below probes again.
+		//
+		// This gate is NOT off the hot path: an already-hydrated workspace is
+		// exactly the Action=="none" case that reaches here (the `!= "none"`
+		// check above does not return for it), so every `bd bootstrap` over a
+		// healthy workspace — including --dry-run and --json — pays the remote
+		// check, and pays the emptiness probe too whenever a hydratable remote
+		// answers. The probe exits at the first marker query, but its ctx allows
+		// 30s and embeddeddolt.OpenSQL's backoff has no max elapsed time, so a
+		// database another process holds open can cost that full 30s.
+		// A legitimately empty `bd init` DB with no hydratable remote — and any DB
 		// we cannot prove empty — stays authoritative. As with the "none" fallback
 		// above, the plan is held aside rather than merged into plan so its
 		// HasExisting/Blocked/Reason cannot leak into the probe branches below; it
@@ -874,6 +882,16 @@ func probeBootstrapServerDB(beadsDir string, cfg *configfile.Config, isSharedSer
 //     custom_statuses, federation_peers, routes) is empty. None of these carry
 //     seeded defaults, so a fresh skeleton has them all at zero.
 //
+// Known divergence: this proof is NAME-SCOPED (it opens dbName, and every query
+// runs against that database), while the existing-database detection that routes
+// here is name-AGNOSTIC — it only stats the embeddeddolt directory. So a
+// workspace whose on-disk database name is not the configured one (a name
+// rejected by embedded mode, or a stray BEADS_DOLT_SERVER_DATABASE overriding it
+// per internal/configfile/configfile.go:560-568) can never be proven empty, and
+// the #5915 hydration silently does not fire. That fails closed — no data is
+// destroyed — but it is an invisible non-fix rather than a safe one, which is why
+// it is recorded here instead of papered over.
+//
 // Any failure to open the engine or read a probed table/marker returns false, so
 // the caller treats the directory as an authoritative existing database and
 // leaves it untouched. This deliberate error==false rule fails closed and keeps
@@ -932,15 +950,68 @@ func embeddedDBIsEmpty(dataDir, dbName string) bool {
 	return true
 }
 
+// unprovenSiblingDatabases returns the entries in dataDir that an emptiness
+// proof scoped to dbName says nothing about — i.e. anything that could be a
+// second Dolt database living in the same multi-database directory.
+//
+// Dolt keeps its own bookkeeping in dot-prefixed entries (.doltcfg, .dolt), and
+// those are never user databases, so the allowlist is dbName plus any dotfile.
+// That is deliberately a superset of the "dbName and .doltcfg" pair the review
+// named: refusing on a future dot-prefixed Dolt internal would break hydration
+// on a workspace that is in fact safe. Files are ignored too — only a directory
+// can be a database.
+//
+// dbName needs no normalization here: embedded mode rejects any database name
+// that is not a bare identifier (internal/storage/embeddeddolt/open.go:78-84,
+// hyphens explicitly refused), so a dbName that reached this point matches its
+// directory byte for byte. Entries come back sorted by os.ReadDir.
+func unprovenSiblingDatabases(dataDir, dbName string) ([]string, error) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	var extra []string
+	for _, e := range entries {
+		name := e.Name()
+		if name == dbName || strings.HasPrefix(name, ".") || !e.IsDir() {
+			continue
+		}
+		extra = append(extra, name)
+	}
+	return extra, nil
+}
+
 // bootstrapHasHydratableRemote reports whether a Dolt remote with data is
-// available to clone from — a configured sync.remote that is a real Dolt remote
-// (not a git code-repository URL), or a git origin carrying refs/dolt/data. It
-// mirrors the sync-detection logic in detectBootstrapAction and is used to gate
-// the #5915 empty-skeleton hydration so the (engine-opening) emptiness probe
-// only runs when hydration is actually possible.
+// available to clone from — a configured sync.remote (a dolt-native remote, or a
+// git code-repository URL that actually carries refs/dolt/data), or a git origin
+// carrying refs/dolt/data. It answers the same clone/no-clone question as the
+// sync-detection logic in detectBootstrapAction and is used to gate the #5915
+// empty-skeleton hydration so the (engine-opening) emptiness probe only runs when
+// hydration is possible.
+//
+// The forge arm is the one that must not short-circuit: `bd init` persists the
+// git origin as sync.remote, so the canonical team setup (fresh clone whose
+// committed config.yaml carries a github.com/gitlab.com/... remote) reaches here
+// with a code-repo URL. Treating that as "not hydratable" left #5915 unfixed in
+// exactly the configuration bd init writes. Probe it the way detection does —
+// route through doltRemoteURL, then fail closed on a probe error, because an
+// unverifiable remote is UNKNOWN rather than empty.
+//
+// Only the probe is shared, not the disposition. On a probe error, or a forge
+// repo with no Dolt data yet, planConfiguredSyncRemote prints a note and keeps
+// looking, so localFileRecoveryPlan still gets its turn; here both collapse to
+// false and the caller keeps the existing-DB "nothing to do" plan without a
+// word. A transient probe failure over an empty skeleton therefore still
+// reports "nothing to do" silently, exactly as base did. The git-origin arm has
+// no such gap: gitOriginSyncPlan collapses through the same
+// gitOriginHasDoltDataRef.
 func bootstrapHasHydratableRemote() bool {
 	if syncRemote := resolveSyncRemote(); syncRemote != "" {
-		return !isGitCodeRepoURL(syncRemote)
+		if isGitCodeRepoURL(syncRemote) {
+			hasData, err := probeGitRemoteDoltData(doltRemoteURL(syncRemote))
+			return err == nil && hasData
+		}
+		return true
 	}
 	if isGitRepo() && !isBareGitRepo() {
 		if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
@@ -1580,7 +1651,35 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 	// A directory we cannot prove is empty (it holds issues, or cannot be
 	// opened/read) is left untouched so real data is never destroyed; the clone
 	// then surfaces the existing-database error exactly as before.
+	//
+	// Two deliberate limits on that removal:
+	//
+	//   - embeddeddolt/ is a Dolt MULTI-database directory, but the emptiness
+	//     proof covers only dbName. Removing the directory wholesale would also
+	//     destroy any sibling database, which the proof says nothing about. No
+	//     in-tree path creates a second database here today, so rather than
+	//     narrow the removal (DOLT_CLONE wants the directory itself free) we
+	//     refuse when one is present: strictly more conservative, and identical
+	//     on every workspace bd actually produces. Detection does not consult
+	//     this check, so for such a workspace --dry-run and --json publish a
+	//     clone plan that this refusal then aborts with a non-zero exit, where
+	//     base reported "nothing to do".
+	//   - The proof and the removal are not atomic. A concurrent `bd` process can
+	//     open the skeleton and commit work inside the window between the last
+	//     marker query and RemoveAll, and that work is then lost. The window is
+	//     narrow and only reachable on a workspace that is by definition empty,
+	//     so it is accepted rather than closed with a rename-and-restore dance;
+	//     the announcement below is what makes it diagnosable after the fact.
 	if info, err := os.Stat(dataDir); err == nil && info.IsDir() && embeddedDBIsEmpty(dataDir, dbName) {
+		if extra, err := unprovenSiblingDatabases(dataDir, dbName); err != nil {
+			return fmt.Errorf("inspect embedded skeleton before clone: %w", err)
+		} else if len(extra) > 0 {
+			return fmt.Errorf("refusing to remove embedded skeleton %s: it also holds %s, which this bootstrap did not prove empty",
+				dataDir, strings.Join(extra, ", "))
+		}
+		// The one destructive act in this change: say so before doing it, so a
+		// mistaken emptiness verdict leaves a trace for post-incident forensics.
+		fmt.Fprintf(os.Stderr, "note: removing empty pre-hydration skeleton at %s before clone\n", dataDir)
 		if err := os.RemoveAll(dataDir); err != nil {
 			return fmt.Errorf("remove empty embedded skeleton before clone: %w", err)
 		}
