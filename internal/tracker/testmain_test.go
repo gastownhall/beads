@@ -41,11 +41,9 @@ func testMainInner(m *testing.M) int {
 	// AD-01 (be-c5p): allow tracker tests to connect to the test container.
 	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
-			fmt.Fprintf(os.Stderr, "FATAL: %v, but %s=1: this lane must not skip the Dolt tests\n", err, testutil.EnvRequireDoltContainer)
+		if testutil.DoltUnavailableForTestMain(err) {
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
 		defer testutil.TerminateDoltContainer()
 		testServerPort = testutil.DoltContainerPortInt()

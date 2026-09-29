@@ -1,0 +1,81 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "integration",
+    srcs = [
+        "corruption.go",
+        "diagnostics.go",
+        "harness.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/testutil/integration",
+    visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:aix": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/testutil/bazeltest",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# The package is integration-only (every file is `//go:build integration`),
+# so this target holds tests only under --config=integration. There
+# TestBuildErrorIsMaskedByChmod runs SubprocessRunner's `go test -c` for a
+# missing package; the pinned SDK's go (plus pkg/tool, which `go test` needs
+# for vet) and the module's go.mod/go.sum stand in for the toolchain and
+# checkout `go test` has. integration-only: outside that config the target
+# is empty, so the tag keeps it out of --config=prcore/ci (gazelle keeps it).
+go_test(
+    name = "integration_test",
+    srcs = ["harness_test.go"],
+    data = [
+        "//:go.mod",
+        "//:go.sum",
+        "@go_sdk//:bin/go",
+        "@go_sdk//:tools",
+    ],
+    embed = [":integration"],
+    env = {"BEADS_TEST_GO_BINARY": "$(rlocationpath @go_sdk//:bin/go)"},
+    tags = ["integration-only"],
+)

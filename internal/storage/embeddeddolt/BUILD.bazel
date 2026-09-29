@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "embeddeddolt",
@@ -242,6 +243,95 @@ go_test(
         "@com_github_google_uuid//:uuid",
         "@org_golang_x_sync//errgroup",
     ],
+)
+
+# embeddeddolt_test as PR Risk's "Test (Embedded Dolt Storage N/5)" jobs run
+# it: shard k runs .github/scripts/embedded-storage-test-shard.sh k 5 (every
+# top-level test but TestConformance, assigned by the committed manifest)
+# with BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
+# BEADS_TEST_EMBEDDED_TEST_BINARY at this binary, which the concurrency test
+# re-executes. shard_count must stay equal to the manifest's shard total.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "embeddeddolt_embedded_test",
+    size = "large",
+    # The script gives the binary the job's -test.timeout=15m per shard; it
+    # fires (with a goroutine dump) well before Bazel's 1200s action limit
+    # (eternal under --config=embedded). The job itself also stops at 15m.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
+    args = [
+        "$(rootpath //:.github/scripts/embedded-storage-test-shard.sh)",
+        "BEADS_TEST_EMBEDDED_TEST_BINARY",
+        "$(rootpath :embeddeddolt_test)",
+    ],
+    data = [
+        ":embeddeddolt_test",
+        ":go_srcs",
+        "//:.github/scripts/embedded-storage-test-shard.sh",
+        "//:.github/scripts/embedded-storage-test-shards.txt",
+    ],
+    env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
+    shard_count = 5,
+    tags = ["embedded"],
+)
+
+# PR Risk's "Test (Embedded Dolt Conformance - core)" job: conformance.RunAll
+# except its Audit group, with the job's binary flags but -test.timeout.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "embeddeddolt_conformance_core_test",
+    size = "large",
+    # Deviation from the job's -test.timeout=30m: Bazel ends the action at
+    # 1200s (eternal under --config=embedded), and rules_go's wrapper ignores
+    # that SIGTERM, so a hang would end as a bare TIMEOUT. 19m lets Go's own
+    # timeout fire first and dump every goroutine to test.log.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :embeddeddolt_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+        "-test.run=^TestConformance$$",
+        "-test.skip=^TestConformance$$/^Audit$$",
+    ],
+    data = [":embeddeddolt_test"],
+    env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
+    tags = ["embedded"],
+)
+
+# PR Risk's "Test (Embedded Dolt Conformance - audit)" job: the Audit group of
+# conformance.RunAll alone, with the same -test.timeout deviation as core.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "embeddeddolt_conformance_audit_test",
+    size = "large",
+    # Deviation from the job's -test.timeout=30m: Bazel ends the action at
+    # 1200s (eternal under --config=embedded), and rules_go's wrapper ignores
+    # that SIGTERM, so a hang would end as a bare TIMEOUT. 19m lets Go's own
+    # timeout fire first and dump every goroutine to test.log.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :embeddeddolt_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+        "-test.run=^TestConformance$$/^Audit$$",
+    ],
+    data = [":embeddeddolt_test"],
+    env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
+    tags = ["embedded"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

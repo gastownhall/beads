@@ -92,9 +92,12 @@ sh_test(
         ":protocol_race_off",
         "//cmd/bd:bd_for_tests",
     ],
+    # Pinned to the container backend (the docker lane is the A/B control);
+    # rule env beats --test_env, so =local on the command line cannot flip it.
     env = {
         "BEADS_PROTOCOL_REQUIRE_DOLT": "1",
         "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "container",
     },
     # ~10 min unsharded without -race in pr.yml.
     shard_count = 8,
@@ -102,4 +105,37 @@ sh_test(
         "no-remote-exec",
         "requires-docker",
     ],
+)
+
+# protocol_test as pr.yml's "Contract corpus" job runs it (non-race, like the
+# job; see protocol_race_off), on the dolt-server lane: TestMain's server is a
+# local `dolt sql-server` child of the test process, and
+# BEADS_PROTOCOL_REQUIRE_DOLT=1 turns a server that cannot start into a
+# failure, so the golden and double-run determinism tests cannot skip. It
+# repeats protocol_test's `env`. protocol_docker_test is the A/B control.
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
+sh_test(
+    name = "protocol_dolt_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :protocol_race_off)"],
+    data = [
+        ":protocol_race_off",
+        "//cmd/bd:bd_for_tests",
+    ],
+    env = {
+        "BEADS_PROTOCOL_REQUIRE_DOLT": "1",
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 8,
+    tags = ["dolt-server"],
 )

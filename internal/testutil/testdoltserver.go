@@ -24,6 +24,7 @@ import (
 // doltServer represents a running test Dolt container instance.
 type doltServer struct {
 	container *dolt.DoltContainer
+	local     *localDoltServer // set instead of container by the local backend
 }
 
 // serverStartTimeout is the max time to wait for the test Dolt server to accept connections.
@@ -55,7 +56,11 @@ const (
 	doltWrongVersion                      // image exists but wrong tag
 	doltSkipped                           // explicit opt-out via BEADS_TEST_SKIP
 	doltReady                             // ready to start containers
+	doltNoLocalCLI                        // local backend: pinned dolt CLI missing or wrong version, or a bad backend name
 )
+
+// doltLocalCLIErr explains doltNoLocalCLI.
+var doltLocalCLIErr error
 
 func (d doltReadiness) String() string {
 	switch d {
@@ -69,6 +74,8 @@ func (d doltReadiness) String() string {
 		return "Dolt tests skipped (BEADS_TEST_SKIP=dolt)"
 	case doltReady:
 		return "Dolt ready"
+	case doltNoLocalCLI:
+		return fmt.Sprintf("local Dolt test server backend unavailable: %v", doltLocalCLIErr)
 	default:
 		return fmt.Sprintf("unknown dolt readiness state: %d", int(d))
 	}
@@ -98,13 +105,6 @@ func hasTestSkip(service string) bool {
 	return false
 }
 
-// EnvRequireDoltContainer, set to "1", turns a missing Dolt test container into
-// a test failure instead of a skip in RequireDoltContainer and
-// StartIsolatedDoltContainer(Handle). Lanes that exist to run the container
-// suites (Bazel's requires-docker variants) set it so they cannot pass green
-// having run nothing.
-const EnvRequireDoltContainer = "BEADS_TEST_REQUIRE_DOLT_CONTAINER"
-
 func skipOrFailDoltUnavailable(t *testing.T, state doltReadiness) {
 	t.Helper()
 	if os.Getenv(EnvRequireDoltContainer) == "1" {
@@ -121,6 +121,20 @@ func checkDolt() doltReadiness {
 		// Explicit skip checked first to avoid ~1s docker info cost.
 		if hasTestSkip("dolt") {
 			doltCached = doltSkipped
+			return
+		}
+		if err := doltBackendErr(); err != nil {
+			doltLocalCLIErr = err
+			doltCached = doltNoLocalCLI
+			return
+		}
+		if useLocalDoltServer() {
+			if _, err := resolveLocalDoltBinary(); err != nil {
+				doltLocalCLIErr = err
+				doltCached = doltNoLocalCLI
+				return
+			}
+			doltCached = doltReady
 			return
 		}
 		if !isDockerAvailable() {
@@ -154,6 +168,15 @@ func isDoltRepoImageCached() bool {
 
 // startDoltContainer starts the singleton Dolt container.
 func startDoltContainer() error {
+	if useLocalDoltServer() {
+		s, err := startLocalDoltServer()
+		if err != nil {
+			return fmt.Errorf("starting local Dolt server: %w", err)
+		}
+		doltTestPort = strconv.Itoa(s.Port())
+		doltSingletonSrv = &doltServer{local: s}
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
 
@@ -253,6 +276,10 @@ func terminateSharedContainer() {
 // holds doltServerMu. It does not consume doltTerminateOnce, so a later
 // replacement can still be removed by TerminateDoltContainer.
 func stopSharedContainerLocked() {
+	if doltSingletonSrv != nil && doltSingletonSrv.local != nil {
+		doltSingletonSrv.local.terminate()
+		doltSingletonSrv.local = nil
+	}
 	if doltSingletonSrv != nil && doltSingletonSrv.container != nil {
 		_ = testcontainers.TerminateContainer(doltSingletonSrv.container)
 		doltSingletonSrv.container = nil
@@ -313,11 +340,15 @@ type IsolatedDoltContainer struct {
 	// Port is the mapped host port of the container's Dolt server.
 	Port string
 
-	ctr *dolt.DoltContainer
+	ctr   *dolt.DoltContainer
+	local *localDoltServer // local backend instead of ctr
 }
 
 // Stop pauses the container while retaining its data volume.
 func (c *IsolatedDoltContainer) Stop(ctx context.Context) error {
+	if c != nil && c.local != nil {
+		return c.local.stop()
+	}
 	if c == nil || c.ctr == nil {
 		return fmt.Errorf("no Dolt container running")
 	}
@@ -326,6 +357,9 @@ func (c *IsolatedDoltContainer) Stop(ctx context.Context) error {
 
 // Start resumes a container previously stopped with Stop.
 func (c *IsolatedDoltContainer) Start(ctx context.Context) error {
+	if c != nil && c.local != nil {
+		return c.local.restart()
+	}
 	if c == nil || c.ctr == nil {
 		return fmt.Errorf("no Dolt container running")
 	}
@@ -335,6 +369,9 @@ func (c *IsolatedDoltContainer) Start(ctx context.Context) error {
 // CurrentPort returns the container's currently mapped SQL port. Container
 // runtimes may assign a new host port after Stop/Start.
 func (c *IsolatedDoltContainer) CurrentPort(ctx context.Context) (string, error) {
+	if c != nil && c.local != nil {
+		return strconv.Itoa(c.local.Port()), nil
+	}
 	if c == nil || c.ctr == nil {
 		return "", fmt.Errorf("no Dolt container running")
 	}
@@ -346,8 +383,14 @@ func (c *IsolatedDoltContainer) CurrentPort(ctx context.Context) (string, error)
 }
 
 // Exec runs cmd inside the container and returns its exit code and combined
-// output, demultiplexed (see containerExec).
+// output, demultiplexed (see containerExec). Its working directory is the
+// server's data directory (the image's WORKDIR, /var/lib/dolt); with the local
+// backend cmd runs on the host in the local server's data directory, so
+// commands must address the data through relative paths.
 func (c *IsolatedDoltContainer) Exec(ctx context.Context, cmd []string) (int, string, error) {
+	if c != nil && c.local != nil {
+		return c.local.execInDataDir(ctx, cmd)
+	}
 	if c == nil || c.ctr == nil {
 		return 0, "", fmt.Errorf("no Dolt container running")
 	}
@@ -367,6 +410,28 @@ func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
 		skipOrFailDoltUnavailable(t, state)
 	}
 
+	if useLocalDoltServer() {
+		return startIsolatedLocalDoltServer(t)
+	}
+	return startIsolatedDoltContainer(t)
+}
+
+// startIsolatedLocalDoltServer is StartIsolatedDoltContainerHandle for the
+// local backend, without the readiness gate.
+func startIsolatedLocalDoltServer(t *testing.T) *IsolatedDoltContainer {
+	t.Helper()
+	s, err := startLocalDoltServer()
+	if err != nil {
+		t.Fatalf("starting local Dolt server: %v", err)
+	}
+	t.Cleanup(s.terminate)
+	return &IsolatedDoltContainer{Port: strconv.Itoa(s.Port()), local: s}
+}
+
+// startIsolatedDoltContainer is StartIsolatedDoltContainerHandle for the
+// container backend, without the readiness gate.
+func startIsolatedDoltContainer(t *testing.T) *IsolatedDoltContainer {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
 	ctr, err := dolt.Run(ctx, DoltDockerImage,
@@ -469,6 +534,10 @@ func TerminateDoltContainer() {
 // DoltContainerCrashed returns true if the shared container has exited unexpectedly.
 // Returns false if no container was started.
 func DoltContainerCrashed() bool {
+	if doltSingletonSrv != nil && doltSingletonSrv.local != nil {
+		gone, _ := doltSingletonSrv.local.exited()
+		return gone
+	}
 	if doltSingletonSrv == nil || doltSingletonSrv.container == nil {
 		return false
 	}
@@ -482,6 +551,12 @@ func DoltContainerCrashed() bool {
 // DoltContainerCrashError returns an error if the shared container has exited
 // unexpectedly, nil otherwise.
 func DoltContainerCrashError() error {
+	if doltSingletonSrv != nil && doltSingletonSrv.local != nil {
+		if gone, err := doltSingletonSrv.local.exited(); gone {
+			return fmt.Errorf("local Dolt server exited (%v); log: %s", err, doltSingletonSrv.local.logSince(0))
+		}
+		return nil
+	}
 	if doltSingletonSrv == nil || doltSingletonSrv.container == nil {
 		return nil
 	}

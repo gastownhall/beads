@@ -1,6 +1,6 @@
 # CI Cleanup Plan
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-09-03
 
 Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
 `.buildflags`, `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`, package test
@@ -167,8 +167,11 @@ easy to identify and rerun. It includes:
   downloads, a five-minute timeout, and the `gms_pure_go` build tag.
 - A second non-CGO Windows cross-lint pass when the native target does not
   already cover that build tuple.
+- A third non-CGO darwin (arm64) cross-lint pass under the same rule. Both
+  cross-lints are compile-only passes on the Linux runner; they add no macOS or
+  Windows runner and do not change the platform column above.
 
-Both passes are SCOPED BY LANE. On a PR the wrapper takes
+All three passes are SCOPED BY LANE. On a PR the wrapper takes
 `BD_LINT_NEW_FROM_MERGE_BASE` and reports only the findings that PR introduces,
 matching the `only-new-issues` setting on the sibling `lint` job; on a push to
 `main`, and for anyone running `make ci-pr-lint` by hand, it is unset and the

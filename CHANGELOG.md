@@ -96,8 +96,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach the database another way still need the `bd doctor` /
   `bd recompute-blocked` repair they needed before: `bd batch` (on both its
   plain and its proxied transaction), `bd cook`, `bd mol squash`,
-  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
-  updates, deletes and demote-to-wisp.
+  `bd mol burn`, `bd duplicates --merge`, the wisp writes — closes, updates,
+  deletes and demote-to-wisp — and every write served through the
+  proxied-server (uow/domain-db) route, which under `--proxied-server` is the
+  ordinary single verbs as well: `bd close`, `bd update`, `bd delete` and
+  `bd dep remove`.
 
 
 - **`bd list --watch --format` is refused instead of silently dropping the
@@ -272,6 +275,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attributing the OFF to a missing git remote, which was never the reason on a
   server topology. Wiring an auto-backup hook through the new routes is left to
   a later slice.
+
+- **`bd` says when it resolved a partial ID instead of matching one exactly.**
+  ([#6302](https://github.com/gastownhall/beads/pull/6302)) ID resolution tries an exact match first and only then falls back to
+  leading-prefix abbreviation (`a3f8` -> `a3f8e9`). Ambiguity was already a hard
+  error naming every candidate, but a *sole* abbreviation match was returned
+  silently, so a caller could act on an issue it had not named without any
+  signal. bd now writes a one-line note to stderr identifying both the input and
+  what it resolved to. The case that motivates it: a hierarchical child is a
+  valid leading-prefix match for its own parent's ID, so after a parent is
+  renamed or deleted the vacated ID quietly resolves to the child. Note this
+  covers **every** leading-prefix abbreviation, not only that shape, so the
+  ordinary documented `a3f8` -> `bd-a3f8e9` path now emits a line too, once per
+  resolved argument. That breadth is deliberate: a `.`-boundary rule would fix
+  parent/child but leave `bd-x.1` -> `bd-x.11` just as silent. stdout and
+  `--json` are unchanged; silence it with `--quiet` or
+  `BD_NO_PARTIAL_ID_NOTICE=1`.
 
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can

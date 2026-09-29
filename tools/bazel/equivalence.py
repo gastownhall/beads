@@ -34,7 +34,8 @@ Job mode (--job, with --go-test-json): the go test JSON is the whole expected
 set instead of `go list ./...`. Use it to prove that a Bazel selection (one or
 more --bep runs, e.g. --config=ci plus --config=docker) replaces one specific
 CI job: every top-level test the job's command ran must have run under Bazel,
-Bazel must run no other test in those packages, and no test the job passed may
+Bazel must run no other test in those packages (TestEmbedded* included: job
+mode has no implicit ^TestEmbedded skip, so it can check the embedded tier), and no test the job passed may
 be skipped under Bazel. A test seen in several targets (a go_test and its
 go_test_variant.sh sh_test) keeps its best status here, since each variant is
 a different way of running it and the job needs one run that does what it
@@ -352,7 +353,9 @@ def main(argv=None):
             (allowlisted if allowed(entries, pkg, t) else missing).append((pkg, t))
     for pkg, seen in sorted(observed.items()):
         for t in sorted(set(seen) - expected.get(pkg, set())):
-            if SKIP_RE.search(t):
+            # The --config=ci lane skips ^TestEmbedded; a job comparison has
+            # no implicit skip (the embedded tier's jobs run exactly those).
+            if not args.job and SKIP_RE.search(t):
                 continue
             (allowlisted if allowed(entries, pkg, t) else extra).append((pkg, t))
 
@@ -396,7 +399,8 @@ def main(argv=None):
         return out
 
     lines = [
-        f"go test:  {len(expected)} packages with tests, {n_expected} top-level tests (excluding ^TestEmbedded)",
+        f"go test:  {len(expected)} packages with tests, {n_expected} top-level tests"
+        + ("" if args.job else " (excluding ^TestEmbedded)"),
         f"bazel:    {len(configured)} go_test targets configured, {len(tested)} tested; "
         f"{sum(len(v) for v in observed.values())} top-level tests seen "
         f"({statuses['passed']} passed, {statuses['skipped']} skipped, {statuses['failed']} failed)",
