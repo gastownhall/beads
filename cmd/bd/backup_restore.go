@@ -55,10 +55,8 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			}
 		}
 
-		if !versioncontrolops.IsBackupURL(dir) {
-			if err := validateBackupRestoreDir(dir); err != nil {
-				return err
-			}
+		if err := validateBackupRestoreDir(dir); err != nil {
+			return err
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
