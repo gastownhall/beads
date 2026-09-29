@@ -959,6 +959,7 @@ go_test(
         "ready_input_test.go",
         "ready_max_rows_proxied_test.go",
         "ready_max_rows_test.go",
+        "ready_parent_epics_test.go",
         "ready_proxied_integration_test.go",
         "ready_role_request_test.go",
         "ready_test.go",
