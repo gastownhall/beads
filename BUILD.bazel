@@ -24,6 +24,13 @@ exports_files(
     visibility = ["//scripts/gitattributespolicy:__pkg__"],
 )
 
+# //scripts:scripts_test keeps pr.yml's release-target cross-compilation matrix
+# in lockstep with the release targets .goreleaser.yml declares.
+exports_files(
+    [".goreleaser.yml"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
 # primitive fixtures.
 filegroup(

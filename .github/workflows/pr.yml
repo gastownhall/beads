@@ -253,6 +253,22 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)' ./cmd/bd
 
+  # Compile every shipped release target on every PR, so a platform-gating
+  # mistake is caught here instead of at tag time (#5662).
+  #
+  # Coverage boundary, recorded so the green is not over-read: every leg below
+  # builds CGO_ENABLED=0, but .goreleaser.yml builds bd-linux-amd64,
+  # bd-linux-arm64 and bd-windows-amd64 with CGO_ENABLED=1, and the darwin pair
+  # is built natively at CGO_ENABLED=1 by release.yml's goreleaser-macos job.
+  # Five of these eight legs are therefore a weaker proxy than the binary they
+  # stand for: the cgo half of the tree (beads_cgo.go ->
+  # internal/storage/embeddeddolt) is never compiled here, so a break confined
+  # to it still passes this check. Only android/arm64, windows/arm64 and
+  # freebsd/amd64 replicate their release configuration exactly.
+  #
+  # The build scope is deliberately ./... and not the ./cmd/bd that every
+  # .goreleaser.yml build id declares as main:. Compiling the whole tree per
+  # platform is intentional extra coverage, not an oversight.
   check-release-target-cross-compilation:
     name: Check release target cross-compilation (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
@@ -280,10 +296,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Build complete release target tree
         env:

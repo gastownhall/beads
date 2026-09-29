@@ -66,6 +66,106 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+// TestPRCIGateRequiresReleaseTargetCrossCompilation pins the cross-compilation
+// check into the gate. Wiring a job into ci-gate takes three separate edits --
+// needs:, the CI_GATE_REQUIRED token list, and the CHECK_* env mapping -- and
+// the gate silently ignores a token that is missing any one of them. Every
+// other load-bearing check in this file is pinned by name for that reason.
+func TestPRCIGateRequiresReleaseTargetCrossCompilation(t *testing.T) {
+	const (
+		jobName = "check-release-target-cross-compilation"
+		token   = "CHECK_RELEASE_TARGET_CROSS_COMPILATION"
+	)
+
+	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+
+	if !contains(gate.Needs, jobName) {
+		t.Errorf("ci-gate needs %q: %v", jobName, gate.Needs)
+	}
+	if got, want := gateEnv[token], "${{ needs."+jobName+".result }}"; got != want {
+		t.Errorf("ci-gate env %s = %q, want %q", token, got, want)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), token) {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", token)
+	}
+}
+
+// TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser keeps the pr.yml
+// cross-compilation matrix and the set of shipped release targets in lockstep.
+// The matrix is a hand-enumerated mirror of .goreleaser.yml, so without a guard
+// a newly added release target -- the way freebsd/amd64 once was -- is silently
+// uncovered while a green "release target cross-compilation" check still
+// stands. That is worse than having no check at all, because the check's
+// existence implies the coverage it has quietly lost.
+func TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser(t *testing.T) {
+	const jobName = "check-release-target-cross-compilation"
+
+	// darwin/amd64 and darwin/arm64 are shipped release targets that are
+	// deliberately absent from .goreleaser.yml's builds: release.yml's
+	// goreleaser-macos job builds them natively at CGO_ENABLED=1 for embedded
+	// Dolt support, as .goreleaser.yml's own comment records.
+	want := map[string]string{
+		"darwin/amd64": "release.yml goreleaser-macos",
+		"darwin/arm64": "release.yml goreleaser-macos",
+	}
+	for _, build := range readGoreleaserBuilds(t) {
+		for _, goos := range build.GOOS {
+			for _, goarch := range build.GOARCH {
+				want[goos+"/"+goarch] = ".goreleaser.yml " + build.ID
+			}
+		}
+	}
+
+	got := make(map[string]bool)
+	for _, leg := range readCIWorkflow(t, "pr.yml").job(t, jobName).Strategy.Matrix.Include {
+		goos, _ := leg.Extra["goos"].(string)
+		goarch, _ := leg.Extra["goarch"].(string)
+		if goos == "" || goarch == "" {
+			t.Fatalf("%s matrix leg %v has no goos/goarch", jobName, leg.Extra)
+		}
+		got[goos+"/"+goarch] = true
+	}
+
+	for target, source := range want {
+		if !got[target] {
+			t.Errorf("release target %s (%s) is not covered by the %s matrix", target, source, jobName)
+		}
+	}
+	for target := range got {
+		if _, ok := want[target]; !ok {
+			t.Errorf("%s matrix builds %s, which is not a shipped release target", jobName, target)
+		}
+	}
+}
+
+type goreleaserBuild struct {
+	ID     string   `yaml:"id"`
+	GOOS   []string `yaml:"goos"`
+	GOARCH []string `yaml:"goarch"`
+}
+
+func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
+	t.Helper()
+
+	path := filepath.Join(sourceRepoRoot(t), ".goreleaser.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var config struct {
+		Builds []goreleaserBuild `yaml:"builds"`
+	}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	if len(config.Builds) == 0 {
+		t.Fatalf("%s declares no builds", path)
+	}
+	return config.Builds
+}
+
 func TestPRCoreRequiresExcludeReadPermissionCoverage(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-core-wrapper")
@@ -604,7 +704,10 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
-	for _, jobName := range []string{"check-doc-freshness-platforms", "pr-preflight-platforms", "build-examples"} {
+	for _, jobName := range []string{
+		"check-doc-freshness-platforms", "pr-preflight-platforms", "build-examples",
+		"check-release-target-cross-compilation",
+	} {
 		assertGoCacheInventory(t, workflows["pr.yml"].job(t, jobName), []goCacheStep{restoreModuleCache()})
 	}
 	assertGoCacheInventory(t, workflows["pr-risk.yml"].job(t, "build-embedded"), []goCacheStep{
@@ -617,6 +720,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		"pr.yml": {
 			"build-artifacts": true, "pr-core-wrapper": true, "test-macos": true, "worktree-remove-windows": true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "build-examples": true,
+			"check-release-target-cross-compilation": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
 	})

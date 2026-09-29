@@ -36,6 +36,7 @@ go_test(
     ],
     data = [
         ":scripts_files",
+        "//:.goreleaser.yml",
         "//:bazel_policy_files",
         "//:test_sh_files",
         "//:workflow_files",
