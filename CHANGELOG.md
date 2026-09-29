@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-<<<<<<< HEAD
 - **A proxied workspace's proxy retires when its Dolt backend exits
   cleanly.** The proxy noticed its `dolt sql-server` child exiting only when
   the exit status was non-zero. A backend that shut down gracefully (for
@@ -23,8 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `proxy_pid` still set), including for a stranded proxy started by an older
   bd. ([#6937](https://github.com/gastownhall/beads/pull/6937))
 
-||||||| 9cb22b790c
-=======
 - **`bd sql` no longer drops the rows of CTE queries or CALL result sets**
   ([#6932](https://github.com/gastownhall/beads/pull/6932)). In proxied-server
   mode, `WITH name(cols) AS (...) SELECT ...` and `WITH RECURSIVE ...` queries
@@ -43,7 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   statements it cannot parse (for example `PRAGMA`) instead of treating them
   as reads.
 
->>>>>>> origin/main
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
   from the yaml-only key list that holds the other tracker secrets, so
