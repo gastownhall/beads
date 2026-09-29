@@ -37,7 +37,7 @@ test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
 # Every tag that belongs to another lane (scripts/bazel_policy_test.go
 # bazelPRCoreExcludedTags). integration-only targets run zero tests outside
 # --config=integration.
-test:prcore --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual,-integration-only
+test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual,-integration-only
 
 test:ci --config=prcore
 test:ci --keep_going --test_summary=terse
@@ -123,6 +123,57 @@ test:doltserver --test_arg=-test.parallel=4
 test:doltserver --local_test_jobs=4
 test:doltserver --remote_download_regex=.*/test\.(log|xml)$
 
+# Proxied-server tier: PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs, as
+# //cmd/bd:bd_proxied_test (dolt-server-proxied tag). Kept out of
+# --config=doltserver because bazel.yml runs that lane locally too (forks,
+# rbe=off), where 15 shards of ~10 minutes, each with a dolt sql-server busy
+# on ~4 cores, do not fit; bazel.yml runs this one only with remote
+# execution, in a job of its own (bazel-proxied). The build is
+# --config=doltserver's: race, like PR Risk's /tmp/bd-cmd-test (main.yml's
+# twin job runs build-artifacts' non-race bd-cmd-test, so this is the
+# stricter of the two); the subprocess bd is the non-race bd_for_tests, like
+# the jobs'. Each shard runs its job's
+# shard script, whose -test.timeout=15m is past "long": the target is
+# eternal, which rbe-west caps at 1200s.
+test:doltserver-proxied --@rules_go//go/config:race
+test:doltserver-proxied --test_tag_filters=dolt-server-proxied
+test:doltserver-proxied --build_tests_only
+test:doltserver-proxied --keep_going
+test:doltserver-proxied --test_summary=terse
+test:doltserver-proxied --test_timeout=-1,-1,-1,1200
+test:doltserver-proxied --test_env=GO_TEST_WRAP_TESTV=1
+# The jobs pass no -parallel: GOMAXPROCS (the target's 4, a runner's vCPUs).
+test:doltserver-proxied --test_arg=-test.parallel=4
+test:doltserver-proxied --local_test_jobs=4
+test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
+
+# Server-Dolt storage tier: PR Risk's "Test (Server Dolt Conformance)" and
+# "Test (Server Dolt Full Suite N/16)" jobs, as
+# //internal/storage/dolt:dolt_server_{conformance,full}_test
+# (dolt-server-integration tag): the integration-tagged internal/storage/dolt
+# tests, non-race like the jobs' binary, against a local dolt sql-server.
+# The build flags are exactly --config=integration's (the tags, and race for
+# everything the variants do not turn off), so the two lanes share every
+# compile: the variants' race-off binary lands in the configuration
+# --config=integration already builds the non-race //cmd/bd:bd_for_tests in.
+# A per-target gotags transition would instead compile the whole graph a
+# third time. No BEADS_TEST_SKIP, no -short; the full suite's
+# BEADS_TEST_ENV_RUN_DOLT=1 is target env. Remote only in bazel.yml, in a
+# job of its own (bazel-server-storage) that shares bazel-integration's
+# compiles through the remote cache.
+build:doltserver-integration --@rules_go//go/config:tags=gms_pure_go,integration
+test:doltserver-integration --@rules_go//go/config:race
+test:doltserver-integration --test_tag_filters=dolt-server-integration
+test:doltserver-integration --build_tests_only
+test:doltserver-integration --keep_going
+test:doltserver-integration --test_summary=terse
+test:doltserver-integration --test_timeout=-1,-1,-1,1200
+test:doltserver-integration --test_env=GO_TEST_WRAP_TESTV=1
+# The jobs pass no -parallel: GOMAXPROCS (the targets' 4, a runner's vCPUs).
+test:doltserver-integration --test_arg=-test.parallel=4
+test:doltserver-integration --local_test_jobs=4
+test:doltserver-integration --remote_download_regex=.*/test\.(log|xml)$
+
 # Integration lane: main.yml's "Main Linux integration packages (N/6)" and
 # "Main Linux integration cmd/bd (N/8)" jobs (and nightly.yml's Full Test
 # Suite, which runs the same `go test` over ./... in one job): every package
@@ -141,7 +192,7 @@ test:integration --test_env=BEADS_TEST_SKIP=dolt
 # keeps every container- or server-backed test skipped, which is what the
 # untagged base targets already do. scripts/bazel_policy_test.go derives the
 # required exclusions from the PR-core list, so a new lane tag lands here too.
-test:integration --test_tag_filters=-requires-docker,-dolt-server,-embedded,-manual
+test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual
 test:integration --build_tests_only
 test:integration --keep_going
 test:integration --test_summary=terse

@@ -133,10 +133,32 @@ func goBinary() (string, error) {
 	return bazeltest.RunfileEnv(GoBinaryEnv)
 }
 
+// PrebuiltTestBinaryEnv names a variable that hands SubprocessRunner an
+// already-built test binary of the package it would compile, instead of
+// running `go test -c`. Under Bazel no action has the module's source tree
+// and module cache that `go test -c` needs, but the test binary that is
+// running is that package's test binary, integration-tagged, so the target
+// passes it (resolved like any other runfile):
+//
+//	env = {"BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath <the go_test>)"},
+const PrebuiltTestBinaryEnv = "BEADS_TEST_SUBPROCESS_BINARY"
+
 // Build compiles the test binary (once). Returns the path to the binary.
+// With BEADS_TEST_SUBPROCESS_BINARY set it compiles nothing and returns that
+// binary.
 func (r *SubprocessRunner) Build(t *testing.T) string {
 	t.Helper()
 	r.once.Do(func() {
+		if os.Getenv(PrebuiltTestBinaryEnv) != "" {
+			bin, err := bazeltest.RunfileEnv(PrebuiltTestBinaryEnv)
+			if err != nil {
+				r.buildErr = fmt.Errorf("prebuilt test binary: %w", err)
+				return
+			}
+			t.Logf("SubprocessRunner: using prebuilt test binary %s (%s) for %s", bin, PrebuiltTestBinaryEnv, r.pkg)
+			r.testBin = bin
+			return
+		}
 		r.testBin = filepath.Join(t.TempDir(), "integration.test")
 		t.Logf("SubprocessRunner: building test binary: go test -tags %s -c -o %s %s", r.tags, r.testBin, r.pkg)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

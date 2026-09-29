@@ -767,7 +767,7 @@ artifacts, so `postinstall` URLs are populated before the package is published.
    where practical so branch-protection migration can be handled separately.
 10. Add stable aggregate required-check candidates after the split.
     Initial aggregate jobs exist on branch `ci/bd-am3.1-wrapper-commands` as
-    `PR / CI Gate / Required` and `PR Risk / CI Gate / Required`, backed by
+    `PR / CI Gate / Required` and `PR Risk / PR Risk Gate / Required`, backed by
     `.github/scripts/ci-gate.sh`.
 
 ## Deferred Decisions

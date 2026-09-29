@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs one Bazel shard of an existing go_test binary through a PR Risk shard
-# script (.github/scripts/embedded-test-shard.sh and
-# embedded-storage-test-shard.sh), so the Bazel target runs exactly the tests
+# script (.github/scripts/embedded-test-shard.sh,
+# embedded-storage-test-shard.sh, proxied-test-shard.sh,
+# server-storage-test-shard.sh), so the Bazel target runs exactly the tests
 # the CI job with the same shard number does: the same discovery, the same
 # committed manifest and hash fallback, the same binary flags. Like
 # go_test_variant.sh it reuses the go_test's binary instead of compiling the
@@ -14,7 +15,8 @@
 #     and where the script's source globs (cmd/bd/*_embedded_test.go, ...)
 #     resolve.
 #   <binary env var>: the variable the script reads the binary path from
-#     (BEADS_TEST_CMD_BINARY or BEADS_TEST_EMBEDDED_TEST_BINARY); set to an
+#     (BEADS_TEST_CMD_BINARY, BEADS_TEST_EMBEDDED_TEST_BINARY or
+#     BEADS_TEST_SERVER_TEST_BINARY); set to an
 #     absolute path, since tests re-exec it from their package directory.
 #   The remaining arguments (and any --test_arg) follow the script's own
 #   binary flags.

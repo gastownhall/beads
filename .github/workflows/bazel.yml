@@ -1,8 +1,9 @@
 # Bazel side-by-side lane (advisory). Runs `bazel test //... --config=ci`, the
 # PR Core-parity selection (race, -short, dolt skip, -requires-docker), on the
 # same commit as pr.yml's go test lanes, plus one job per mirrored CI job
-# (pure-Go/js-wasm, docker lane, pr-risk.yml's embedded-Dolt tier, main.yml's
-# integration jobs). It is NOT
+# (pure-Go/js-wasm, the dolt-server lane, pr-risk.yml's embedded-Dolt,
+# proxied-server and server-Dolt storage tiers, main.yml's integration jobs).
+# It is NOT
 # in ci-gate's CI_GATE_REQUIRED; promotion needs the equivalence record
 # described in tools/bazel/equivalence.py and a human decision.
 #
@@ -17,8 +18,8 @@
 #   local: fork PRs, rbe=off dispatches, and same-repo runs without the
 #     secret (Dependabot PRs: same-repo, but no Actions secrets): local
 #     execution on ubuntu-latest, slower but the same results, for every job
-#     but the remote-only ones (bazel-embedded, bazel-integration), which
-#     are skipped.
+#     but the remote-only ones (bazel-embedded, bazel-integration,
+#     bazel-proxied, bazel-server-storage), which are skipped.
 #   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch).
 # workflow_dispatch with rbe=off simulates a fork run. The decision is also a
 # workflow_call output, so a caller's gate can tell an expected skip from a
@@ -672,6 +673,129 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bazel-${{ env.BAZEL_DOLT_LANE }}-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)", as
+  # --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the job's
+  # shard script in 15 Bazel shards, so shard k runs exactly job k's tests.
+  # Same build as --config=doltserver (race bd_test, non-race bd_for_tests),
+  # shared with bazel-doltserver through the remote cache. PR Risk builds
+  # its bd-cmd-test with -race, as here; main.yml's test-proxied-cmd twin
+  # uses build-artifacts' non-race bd-cmd-test, so this lane is the stricter
+  # of the two. A job of its own, not gated by any integration switch, so a
+  # caller's gate can decide on it separately.
+  bazel-proxied:
+    name: Bazel / proxied-server tier (advisory)
+    # Remote execution only, like bazel-embedded: 15 shards of ~5-10
+    # minutes, each with a dolt sql-server busy on ~4 cores, do not fit a
+    # GitHub-hosted runner.
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ needs.rbe.outputs.enabled == 'true' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+
+      # Remote: the longest shard takes ~5-8 minutes (each shard's Go
+      # timeout is its job's 15m, 1200s Bazel cap), plus a compile.
+      - name: bazel test //... --config=doltserver-proxied
+        id: test
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... --config=doltserver-proxied \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=doltserver-proxied: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # As in bazel-embedded.
+      - name: Every target and shard ran tests
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-proxied-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # pr-risk.yml's server-Dolt storage tier, "Test (Server Dolt Conformance)"
+  # and "Test (Server Dolt Full Suite N/16)", as --config=doltserver-integration:
+  # the conformance and 16-shard full-suite variants of
+  # //internal/storage/dolt over a non-race dolt_test build, each shard
+  # running the job's own shard script. --config=doltserver-integration has
+  # exactly --config=integration's build flags, so it compiles nothing
+  # bazel-integration does not (shared through the remote cache). A job of
+  # its own, not gated by any integration switch: this is a PR-time tier,
+  # unlike main.yml's integration jobs.
+  bazel-server-storage:
+    name: Bazel / server-Dolt storage tier (advisory)
+    # Remote execution only, like bazel-integration: locally the tagged race
+    # build of //... alone is most of the timeout.
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ needs.rbe.outputs.enabled == 'true' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+
+      # Remote: the longest shard takes ~2-3 minutes (the storage suite's Go
+      # timeout is 15m per shard, 1200s Bazel cap), plus a compile.
+      - name: bazel test //... --config=doltserver-integration
+        id: test
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... --config=doltserver-integration \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=doltserver-integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # As in bazel-embedded.
+      - name: Every target and shard ran tests
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-server-storage-testlogs
           path: |
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml

@@ -41,7 +41,7 @@ Current PR-related workflow names:
 - `.github/workflows/pr-risk.yml`: `PR Risk`
   Runs on `pull_request` and `merge_group`. Contains embedded Dolt risk
   detection, embedded build/test shards, the Nix flake smoke check, and the
-  risk aggregate gate `PR Risk / CI Gate / Required`.
+  risk aggregate gate `PR Risk / PR Risk Gate / Required`.
 - `.github/workflows/main.yml`: `Main`
   Runs on pushes to `main`. Contains the main branch health checks, package
   gates, platform smoke/short coverage, embedded Dolt coverage, and promoted
@@ -76,7 +76,7 @@ rollout uses one aggregate per required workflow. An external status aggregator
 would only be needed if maintainers still want exactly one required check.
 
 - Baseline aggregate candidate: `PR / CI Gate / Required`
-- Risk aggregate candidate: `PR Risk / CI Gate / Required`
+- Risk aggregate candidate: `PR Risk / PR Risk Gate / Required`
 - Source: GitHub Actions
 - Required on: pull requests and merge queue groups targeting `main`
 
