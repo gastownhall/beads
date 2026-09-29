@@ -569,14 +569,6 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           GOCACHE: ${{ runner.temp }}/go-cache/race
-          # This unfiltered ./... sweep runs internal/storage/dolt,
-          # internal/molecules, internal/tracker, and cmd/bd as concurrent
-          # package test binaries, each starting its own Dolt testcontainer.
-          # testcontainers-go shares one Ryuk reaper per host; a failed
-          # handshake in one process can reap a sibling's live container
-          # mid-suite (be-2on). The runner is destroyed after the job, so the
-          # reaper buys nothing here and only costs this race.
-          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
           gotestsum \
             --junitfile junit.xml \
@@ -705,7 +697,8 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           BEADS_FIX_REQUIRE_DOLT: "1"
-          # Same shared-Ryuk-reaper race as the step above (be-2on).
+          # Pinned for consistency with the step above: this single-package
+          # step has no sibling test binary to race for the reaper (be-2on).
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
 

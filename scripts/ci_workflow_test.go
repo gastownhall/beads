@@ -443,13 +443,37 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 }
 
 // TestDoltTestcontainerStepsDisableRyuk pins TESTCONTAINERS_RYUK_DISABLED on
-// every CI step that starts a real Dolt testcontainer from a package
-// TestMain. testcontainers-go shares one Ryuk reaper per host; when a step
-// runs multiple such packages as concurrent test binaries (plain "go test"
-// parallelizes across packages), they race to attach to that shared reaper,
-// and a failed handshake from one process reaps a sibling's live container
-// mid-suite (be-2on). A GitHub Actions runner is destroyed after the job, so
-// the reaper buys nothing there and only costs this race.
+// the four steps enumerated in the table below — the two Dolt-backed steps of
+// the test-domain-uow job, in pr.yml and main.yml. It is an allow-list of
+// literal (workflow, job, step) triples, so it catches an un-pinning
+// regression on those four steps only; it does not detect the class, and a
+// newly added container-starting step passes it unpinned.
+//
+// Why the pin: testcontainers-go shares one Ryuk reaper per host; when a step
+// runs several container-starting packages as concurrent test binaries (plain
+// "go test" parallelizes across packages), they race to attach to that shared
+// reaper, and a failed handshake from one process reaps a sibling's live
+// container mid-suite (be-2on). A GitHub Actions runner is destroyed after the
+// job, so the reaper buys nothing there and only costs this race.
+//
+// The scope is the job, not a per-step predicate: "Test domain + uow +
+// tracker" runs three container-starting package trees in one invocation and
+// is the step the race is concrete on, while "Test doctor/fix" runs the single
+// ./cmd/bd/doctor/fix/ package and is pinned for consistency inside the same
+// job rather than because it has an in-step sibling.
+//
+// Left unpinned, deliberately. A step can only start a Dolt container if its
+// job pre-caches the image via scripts/ci/pull-dolt-image.sh: checkDolt in
+// internal/testutil gates on `docker image inspect` and never auto-pulls. The
+// other jobs that do pull it are pr.yml/contract-corpus,
+// main.yml/test-proxied-cmd, pr-risk.yml/test-proxied-cmd,
+// pr-risk.yml/test-server-storage and -full, regression.yml/regression, and
+// bazel.yml's --config=docker lane. They are out of scope for this change, not
+// immune: no reap has been attributed to them, and the docker lane would
+// additionally need --test_env=TESTCONTAINERS_RYUK_DISABLED=true because bazel
+// does not forward ambient environment into tests. Extending the pin — and
+// teaching this guard to scan for the class, the way assertGoCacheWriter below
+// walks every job and step — is follow-up work on be-2on.
 //
 // Steps that run under BEADS_TEST_SKIP=dolt (pr-core.sh's hermetic wrapper,
 // the sharded main-linux-integration-* jobs) never start a container at all
@@ -467,13 +491,6 @@ func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
 		{"pr.yml", "test-domain-uow", "Test doctor/fix (Dolt-backed, hard-require container)"},
 		{"main.yml", "test-domain-uow", "Test domain + uow + tracker"},
 		{"main.yml", "test-domain-uow", "Test doctor/fix (Dolt-backed, hard-require container)"},
-		// internal/storage/dolt, internal/molecules, internal/tracker, and
-		// cmd/bd all have TestMains that start a Dolt testcontainer
-		// unconditionally. This step's "./..." sweep runs them as concurrent
-		// package binaries on ubuntu-latest with no BEADS_TEST_SKIP=dolt
-		// guard, unlike pr-core.sh and the sharded main-linux-integration-*
-		// jobs.
-		{"main.yml", "test", "Test (with coverage + JUnit XML)"},
 	}
 
 	for _, tc := range steps {
