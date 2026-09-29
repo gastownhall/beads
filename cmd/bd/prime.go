@@ -976,7 +976,7 @@ git status                  # Check changed files
 - **Default**: Use beads for ALL task tracking (` + "`bd create`" + `, ` + "`bd ready`" + `, ` + "`bd close`" + `)
 - **Prohibited**: Do NOT use TodoWrite, TaskCreate, or markdown files for task tracking
 - **Workflow**: Create beads issue BEFORE writing code, mark in_progress when starting
-- **Memory**: Use ` + "`bd remember \"insight\"`" + ` for durable **project** facts — keep them here rather than in per-tool memory files, which fragment across accounts and are often capped. Per-operator preferences and agent-specific corrections belong in your harness's own memory; they aren't project knowledge and beads doesn't store them. Search with ` + "`bd memories <keyword>`" + `.
+- **Memory**: Use ` + "`bd remember \"insight\"`" + ` for durable **project** facts — keep them here rather than in per-tool memory files, which fragment across accounts and are often capped. Per-operator preferences and agent-specific corrections belong in your harness's own memory; they aren't project knowledge, so keep them out of beads. Search with ` + "`bd memories <keyword>`" + `.
 - Persistence you don't need beats lost context
 - ` + profileRule + `
 - ` + gitWorkflowRule + `
