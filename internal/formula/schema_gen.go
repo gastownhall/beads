@@ -706,7 +706,7 @@ Either Needs or DependsOn can be used; they are merged during cooking.`,
 				Doc: `WaitsFor specifies a fanout gate type for this step.
 Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).
 When set, the cooked issue gets a "gate:<value>" label.
-Requires needs (or depends_on): the gate waits on the children of the
+Requires needs: the gate waits on the children of the
 step it names, so with nothing to name there is nothing to wait for and
 the cooked gate would carry the label but no dependency edge at all.`,
 			},
