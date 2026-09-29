@@ -33,6 +33,15 @@ func captureRouteLog(t *testing.T, fn func()) string {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stderr = w
+	// Also restore from Cleanup, not just inline below: if a future fn panics
+	// or reaches t.Fatalf (runtime.Goexit), the inline restore never runs and
+	// os.Stderr stays pointed at a pipe nobody drains, silently swallowing
+	// every later test's output in this package.
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+		_ = w.Close()
+		_ = r.Close()
+	})
 
 	fn()
 

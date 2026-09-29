@@ -4431,11 +4431,16 @@ func (s *DoltStore) PushRemote(ctx context.Context, remote string, force bool) e
 // CLI subprocess or in-process SQL -- so the route taken is discoverable
 // without reading source (be-9i0yq.2 item 2). op is "push" or "pull".
 //
-// This fires on every push and every pull, so it goes to the gated debug sink
-// rather than log.Printf: the latter is unconditional stderr with a timestamp
-// prefix and would put a line in front of every user on every operation,
-// including under --quiet. The three remaining log.Printf calls in this file
-// are warnings on exceptional paths, which is a different contract. Under
+// Scope: main-remote transports only. The federation peer plane in
+// federation.go (pushRefToPeer, pullFromPeer, Fetch) makes the same
+// CLI-vs-SQL decision and is not instrumented, so silence here does not mean
+// no peer transfer happened.
+//
+// This fires on every push and every pull on that plane, so it goes to the
+// gated debug sink rather than log.Printf: the latter is unconditional stderr
+// with a timestamp prefix and would put a line in front of every user on every
+// operation, including under --quiet. The remaining log.Printf calls in this
+// file are warnings on exceptional paths, which is a different contract. Under
 // BD_DEBUG or -v the line is exactly as discoverable as before.
 func logRouteDecision(op, remote string, cli bool) {
 	route := "SQL"
