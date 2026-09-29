@@ -172,6 +172,7 @@ go_test(
         "search_goside_sort_test.go",
         "search_lite_merge_test.go",
         "search_missing_table_test.go",
+        "search_summary_merge_test.go",
         "search_test.go",
         "tree_walk_test.go",
         "update_closed_fields_test.go",
