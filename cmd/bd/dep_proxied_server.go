@@ -160,6 +160,23 @@ func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) strin
 }
 
 func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerID, blockedID string) error {
+	// `bd dep <blocker> --blocks <blocked>` is the fifth dep add surface: this
+	// command's own help calls it "equivalent to: bd dep add <blocked-id>
+	// <blocker-id>", and it lands here before any of the dep add helpers run.
+	// The target endpoint is the blocker (it becomes DependsOnID below), and
+	// the source is the blocked issue — the operands are inverted relative to
+	// dep add, so the suggested command comes out in the order the help
+	// documents. Without this the alias stays mode-dependently correct: the
+	// direct twin hard-errors on resolveIDWithRouting, while this path builds
+	// the edge from raw args and stores the be-gmdx5 external ref.
+	if strings.HasPrefix(blockerID, "external:") {
+		if err := validateExternalRef(blockerID); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+	} else if err := refuseMalformedDepTarget(blockedID, blockerID); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
 	if isDisallowedHierarchicalDependency(blockedID, blockerID, types.DepBlocks) {
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
 	}
@@ -219,10 +236,15 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		if err := validateExternalRef(dependsOnArg); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		toID = dependsOnArg
-	} else {
-		toID = dependsOnArg
+	} else if err := refuseMalformedDepTarget(fromID, dependsOnArg); err != nil {
+		// This path resolves no IDs, so the colon-shape refusal is the only
+		// part of the direct route's target decision it can run — and it has to
+		// run it, or the same `bd dep add` invocation is refused in direct mode
+		// and silently stores the be-gmdx5 bogus external ref here (nothing in
+		// ExecuteAddDependencies validates target shape).
+		return HandleErrorRespectJSON("%v", err)
 	}
+	toID = dependsOnArg
 
 	dt := canonicalDependencyType(types.DependencyType(depType))
 	if isDisallowedHierarchicalDependency(fromID, toID, dt) {
@@ -284,6 +306,8 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 			if err := validateExternalRef(edge.DependsOnID); err != nil {
 				return HandleErrorRespectJSON("line %d: %v", edge.Line, err)
 			}
+		} else if err := refuseMalformedDepTarget(edge.IssueID, edge.DependsOnID); err != nil {
+			return HandleErrorRespectJSON("line %d: %v", edge.Line, err)
 		}
 		depEdges = append(depEdges, issueops.DependencyEdge{
 			IssueID:     edge.IssueID,

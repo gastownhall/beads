@@ -22,6 +22,7 @@ a unit test: use the real boundary when the defect could live there.
 | Affected-package confidence | `./scripts/test.sh ./path/to/package/...` | After the focused test passes; include directly affected neighbors when their contract changed. |
 | Final Go baseline | `make test` | Once after focused work on Go code is green. It applies the normal local build flags, coverage, and local skip handling. |
 | Named CI wrapper | `make ci-pr-core`, `make ci-pr-policy`, or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
+| Hook shims against real timeout implementations | `nix flake check -L` (or `nix build .#checks.<system>.hook-timeout-backends -L`) | After changing the hook generator in `cmd/bd/hooks.go` (then `make githooks-regen`) or anything under `.githooks/`. Runs the tracked managed sections against GNU coreutils, uutils, busybox and toybox `timeout` — the multicalls also installed as `gtimeout` alone — with and without Perl, under dash, bash and busybox ash. About one deadline of wall time; needs no Go build. |
 
 Do not replace the focused loop with repeated full-suite runs. Run the final
 `make test` once the affected Go tests are green. For docs-only changes, use
@@ -80,9 +81,50 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+Tests that need a Dolt SQL server get one from `internal/testutil`
+(`EnsureDoltContainerForTestMain`, `RequireDoltContainer`,
+`StartIsolatedDoltContainer[Handle]`, `NewContainerProvider`). Two backends
+sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
+
+- `container`: the `dolthub/dolt-sql-server` image through testcontainers
+  (needs docker and the pulled image). The default under plain `go test`.
+- `local`: a `dolt sql-server` started by the test process from the pinned
+  dolt CLI (`BEADS_TEST_DOLT_BINARY`, else `dolt` on `PATH`; it must be the
+  image's version). No docker. Used only when explicitly selected, under
+  `go test` and `bazel test` alike (a Bazel target's `env`, or
+  `--test_env=BEADS_TEST_DOLT_SERVER=local`); unset means `container`, which
+  in a Bazel action without docker keeps the usual skip.
+
+`BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
+failure (per test and in every `TestMain`) instead of a skip; lanes that
+exist to run the Dolt suites set it.
+
+Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
+suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
+on the `local` backend (the `dolt-server` targets); they need no docker and
+execute remotely with `--config=remote-exec`. `--config=docker` runs the same
+suites on the `container` backend (host docker) as the A/B control.
+PR Risk's heavier server tiers have configs of their own, run by bazel.yml
+only with remote execution, each in a job of its own (`bazel-proxied`,
+`bazel-server-storage`): `--config=doltserver-proxied` is the
+proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
+`//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
+server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
+Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
+builds with the integration tag like `--config=integration`. Each shard
+runs its CI job's shard script, so Bazel shard k runs the tests of job k+1.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.
+
+In `cmd/bd`, fresh-workspace command fixtures should call
+`isolateBeadsDirForTest(t)` before setup or dispatch. It clears inherited
+`BEADS_DIR` and restores that variable exactly at cleanup, even after raw
+command-dispatch mutations. The `TestMain` reset only isolates startup.
+These fixtures must not use `t.Parallel()`. Tests intentionally selecting a
+workspace should use `t.Setenv("BEADS_DIR", ...)`; `initConfigForTest` and
+`ensureCleanGlobalState` preserve that selection.
 
 For manual CLI experiments, run both initialization and subsequent commands
 from a disposable working directory:

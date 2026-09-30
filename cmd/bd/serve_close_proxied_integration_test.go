@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -376,12 +375,12 @@ func TestProxiedServerServeClose(t *testing.T) {
 		}
 		second := revisionOf(t, raw)
 		if second == first {
-			t.Fatalf("revision = %d after a second write; a write that does not move the token makes every guard vacuous", second)
+			t.Fatalf("revision = %q after a second write; a write that does not move the token makes every guard vacuous", second)
 		}
 
 		// The stale close. Nothing is written, and the 409 names the member.
 		status, problem := sp.closeIssue(t, issue.ID,
-			`{"actor":"http-agent","reason":"never","expected_version":`+strconv.FormatInt(first, 10)+`}`)
+			`{"actor":"http-agent","reason":"never","expected_version":`+revisionGuard(first)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("stale close: status = %d, want 409: %v", status, problem)
 		}
@@ -396,7 +395,7 @@ func TestProxiedServerServeClose(t *testing.T) {
 		// about whether this is still the row the caller read, which force says
 		// nothing about.
 		status, problem = sp.closeIssue(t, issue.ID,
-			`{"actor":"http-agent","force":true,"expected_version":`+strconv.FormatInt(first, 10)+`}`)
+			`{"actor":"http-agent","force":true,"expected_version":`+revisionGuard(first)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("forced stale close: status = %d, want 409 — force bypasses policy, never a precondition: %v", status, problem)
 		}
@@ -406,13 +405,13 @@ func TestProxiedServerServeClose(t *testing.T) {
 
 		// The fresh guard lands, and answers with the token the close minted.
 		status, raw = sp.closeIssueRaw(t, issue.ID,
-			`{"actor":"http-agent","reason":"shipped","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+			`{"actor":"http-agent","reason":"shipped","expected_version":`+revisionGuard(second)+`}`)
 		if status != http.StatusOK {
 			t.Fatalf("guarded close: status = %d, want 200: %s", status, raw)
 		}
 		closed := revisionOf(t, raw)
 		if closed == second {
-			t.Errorf("revision = %d after a close that wrote; the token did not move", closed)
+			t.Errorf("revision = %q after a close that wrote; the token did not move", closed)
 		}
 		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "closed" {
 			t.Fatalf("the guarded close did not land: status %q", shown.Status)
@@ -424,7 +423,7 @@ func TestProxiedServerServeClose(t *testing.T) {
 		// itself has already invalidated — which is what lets a client read
 		// `already_closed` as "and nothing has happened here since".
 		status, problem = sp.closeIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(second)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("guarded re-close with a pre-close token: status = %d, want 409: %v", status, problem)
 		}
@@ -440,13 +439,13 @@ func TestProxiedServerServeClose(t *testing.T) {
 		}
 		afterReplay := revisionOf(t, raw)
 		if afterReplay != closed {
-			t.Errorf("revision = %d after an idempotent re-close, want the unchanged %d: a replay that writes nothing must not move the token",
+			t.Errorf("revision = %q after an idempotent re-close, want the unchanged %q: a replay that writes nothing must not move the token",
 				afterReplay, closed)
 		}
 
 		// The reopen's own guard, on the mirror. Stale first.
 		status, problem = sp.reopenIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(second)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("stale reopen: status = %d, want 409: %v", status, problem)
 		}
@@ -460,12 +459,12 @@ func TestProxiedServerServeClose(t *testing.T) {
 		// And the loop closes: the token the last successful write answered
 		// with is the one that lands.
 		status, raw = sp.reopenIssueRaw(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(afterReplay, 10)+`}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(afterReplay)+`}`)
 		if status != http.StatusOK {
 			t.Fatalf("guarded reopen: status = %d, want 200: %s", status, raw)
 		}
 		if reopened := revisionOf(t, raw); reopened == afterReplay {
-			t.Errorf("revision = %d after a reopen that wrote; the token did not move", reopened)
+			t.Errorf("revision = %q after a reopen that wrote; the token did not move", reopened)
 		}
 		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "open" || shown.CloseReason != "" {
 			t.Errorf("the guarded reopen did not land: status %q reason %q", shown.Status, shown.CloseReason)

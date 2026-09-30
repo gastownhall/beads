@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "storecounter",
+    srcs = ["counter.go"],
+    importpath = "github.com/steveyegge/beads/internal/workapi/storecounter",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+    ],
+)

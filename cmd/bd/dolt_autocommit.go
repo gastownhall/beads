@@ -91,6 +91,35 @@ func issueOpsContext(ctx context.Context) (context.Context, error) {
 	return issueops.WithDeferredVersionCommit(ctx), nil
 }
 
+// explicitCommitPointContext clears the dolt.auto-commit deferral for a proxied
+// dual whose direct-route twin is an explicit commit point.
+//
+// The direct route encodes two commit classes, and it encodes them by which
+// wrapper a verb picks: writes whose Dolt commit is auto-commit policy go
+// through transactHonoringAutoCommit or issueOpsContext above, while the
+// explicit commit points go through transact and mint a Dolt commit carrying
+// the caller's message whatever the policy says. The proxied route has no such
+// choice to make per verb — it applies the policy ONCE, to rootCtx in the root
+// pre-run (GH#4995) — so the second class has to opt back out here, or
+// doltServerTx.Commit blanks the message it was given: a proxied
+// `bd batch -m "release batch"` under dolt.auto-commit=batch would persist the
+// rows, discard the message and mint nothing, while the identical command and
+// config on the direct route commits it.
+//
+// Scope is the intersection of two in-tree lists: the transact() call sites,
+// and the paths the proxied front door permits (proxyPermittedPaths in
+// capability_registry.go). That is batch, mol bond/pour/squash, mol wisp create
+// and the WISP half of mol burn; cook and migrate issues also call transact but
+// are refused in proxied mode, so they have no dual to exempt.
+//
+// Membership is per commit site, not per command: mol burn's persistent half
+// reaches deleteBatch -> issueOpsContext on the direct route, which is the
+// policy-honoring class, so runMolBurnProxiedServer exempts only the wisp
+// transaction. TestProxiedDualsExemptTheirExplicitCommitPoints pins both arms.
+func explicitCommitPointContext(ctx context.Context) context.Context {
+	return issueops.WithImmediateVersionCommit(ctx)
+}
+
 type doltAutoCommitParams struct {
 	// Command is the top-level bd command name (e.g., "create", "update").
 	Command string

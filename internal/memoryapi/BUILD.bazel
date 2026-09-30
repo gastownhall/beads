@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "memoryapi",
+    srcs = ["memoryapi.go"],
+    importpath = "github.com/steveyegge/beads/internal/memoryapi",
+    visibility = ["//:__subpackages__"],
+    deps = ["//memoryops"],
+)
+
+go_test(
+    name = "memoryapi_test",
+    srcs = ["memoryapi_test.go"],
+    embed = [":memoryapi"],
+    deps = ["//memoryops"],
+)

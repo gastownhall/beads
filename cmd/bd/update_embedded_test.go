@@ -259,6 +259,7 @@ func TestEmbeddedUpdate(t *testing.T) {
 			"--await-id", "run-123",
 			"--due", "2099-01-15",
 			"--set-metadata", "team=platform",
+			"--set-metadata", "score=99",
 			"--unset-metadata", "remove",
 			"--no-history",
 		)
@@ -309,6 +310,11 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 		if metadata["team"] != "platform" {
 			t.Errorf("metadata team = %v, want platform", metadata["team"])
+		}
+		// --set-metadata infers scalar types (the v1.2.2 contract): 99 lands as a
+		// JSON number, not the string "99".
+		if metadata["score"] != float64(99) {
+			t.Errorf("metadata score = %#v, want the JSON number 99", metadata["score"])
 		}
 		if _, ok := metadata["remove"]; ok {
 			t.Errorf("metadata still contains removed key: %v", metadata)

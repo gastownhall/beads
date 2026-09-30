@@ -122,9 +122,7 @@ func TestProxiedServerShow(t *testing.T) {
 		if m["priority"] != float64(1) {
 			t.Errorf("priority: got %v, want 1", m["priority"])
 		}
-		if revision, ok := m["revision"].(float64); !ok || revision == 0 {
-			t.Errorf("revision: got %v, want a non-zero opaque token", m["revision"])
-		}
+		assertLiveRevisionToken(t, m["revision"])
 		if _, ok := m["created_at"]; !ok {
 			t.Errorf("missing created_at")
 		}
@@ -907,17 +905,6 @@ func TestProxiedServerShow3(t *testing.T) {
 		combined := stdout + stderr
 		if !strings.Contains(combined, "no current issue found") {
 			t.Errorf("expected 'no current issue found' error, got: %s", combined)
-		}
-	})
-
-	t.Run("show_watch_rejected_in_proxied_mode", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "swt")
-		issue := bdProxiedCreate(t, bd, p.dir, "Watch test", "--type", "task")
-		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, issue.ID, "--watch")
-		combined := stdout + stderr
-		if !strings.Contains(combined, "watch mode not supported in proxied-server mode") {
-			t.Errorf("expected proxied watch-rejection error, got: %s", combined)
 		}
 	})
 

@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "journalscan",
+    srcs = ["journalscan.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/journalscan",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "journalscan_test",
+    srcs = ["journalscan_test.go"],
+    embed = [":journalscan"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

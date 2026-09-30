@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/workapi"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -131,8 +133,55 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		// between this implementation and its store-backed sibling, and it is
 		// an argument to the shared function rather than a second copy of it.
 		items, hasMore := workapi.FinishPageAt(page.Items, req.SortBy, req.Reverse, req.Offset, workapi.PageLimit(req), page.HasMore)
+		// The same shared hydration step the store-backed sibling runs, through
+		// the same function and after the same trim. This seam's detail source
+		// is the one that needs the wisp plane told to it, and the plane it is
+		// told is the TABLE THE ROW IS IN, resolved here in the page's own
+		// transaction — never the row's flags, which a durable row can carry
+		// wrongly (see workapi.CommentPlanes).
+		newComments := func() workapi.CommentStreamer { return workapi.NewUOWDetailSource(uw) }
+		planes := func(ctx context.Context, ids []string) (map[string]bool, error) {
+			return wispPlanesByResidence(ctx, uw, ids)
+		}
+		if err := workapi.HydrateListComments(ctx, newComments, planes, items, req.IncludeComments, !req.SkipCounts); err != nil {
+			return publicops.IssuePage{}, err
+		}
 		return publicops.IssuePage{Items: items, HasMore: hasMore}, nil
 	})
+}
+
+// wispPlanesByResidence reports which of ids live in the WISPS TABLE, which is
+// what decides where their comments are.
+//
+// It is the page-sized form of the question workapi.GetIssueOrWisp answers one
+// id at a time behind Reader.Get and behind commenter.AddComment: residence,
+// not the row's Ephemeral/NoHistory flags, which `bd import` can leave pointing
+// at the other plane (workapi.CommentPlanes says how, and what the listing
+// answered before this resolved by table). GetWispsByIDs is the use-case call
+// edgeReader.ReadEdges already makes to answer the same question, so this adds
+// a caller rather than a mechanism, and one query serves the whole page.
+//
+// A MISSING WISPS TABLE MEANS NO WISPS, not a failed listing: the table is in
+// the optional set every wisp query treats that way
+// (sqlbuild.OptionalWispTable), the counts query that produced this page merged
+// wisps under the same tolerance, and the store-backed seam's own router
+// answers "durable" for it (DoltStore.wispExists). Erroring here would make
+// `bd list --include-comments` the one read that cannot run on such a database.
+func wispPlanesByResidence(ctx context.Context, uw UnitOfWork, ids []string) (map[string]bool, error) {
+	wisps, err := uw.IssueUseCase().GetWispsByIDs(ctx, ids)
+	if err != nil {
+		if name, ok := dberrors.MissingTableName(err); ok && sqlbuild.OptionalWispTable(name) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	planes := make(map[string]bool, len(wisps))
+	for _, wisp := range wisps {
+		if wisp != nil {
+			planes[wisp.ID] = true
+		}
+	}
+	return planes, nil
 }
 
 func (r *issueReader) Get(ctx context.Context, req publicops.GetRequest) (*publicops.IssueDetails, error) {

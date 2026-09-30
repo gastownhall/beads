@@ -29,13 +29,13 @@ import (
 // by calling the role. See issueops.SweepRequest.
 func ValidateSweepRequest(in issueops.SweepRequest) error {
 	switch in.Tier {
-	case issueops.SweepEphemeral, issueops.SweepDurable:
+	case issueops.SweepEphemeral, issueops.SweepDurable, issueops.SweepWispsPlane:
 	case "":
-		return fmt.Errorf("%w: sweep requires a tier (%q or %q), and has no default",
-			issueops.ErrValidation, issueops.SweepEphemeral, issueops.SweepDurable)
+		return fmt.Errorf("%w: sweep requires a tier (%q, %q or %q), and has no default",
+			issueops.ErrValidation, issueops.SweepEphemeral, issueops.SweepDurable, issueops.SweepWispsPlane)
 	default:
-		return fmt.Errorf("%w: %q is not a sweep tier; use %q or %q",
-			issueops.ErrValidation, in.Tier, issueops.SweepEphemeral, issueops.SweepDurable)
+		return fmt.Errorf("%w: %q is not a sweep tier; use %q, %q or %q",
+			issueops.ErrValidation, in.Tier, issueops.SweepEphemeral, issueops.SweepDurable, issueops.SweepWispsPlane)
 	}
 	if in.IDPattern != "" {
 		// filepath.Match reports a malformed pattern on any subject, so one
@@ -47,12 +47,30 @@ func ValidateSweepRequest(in issueops.SweepRequest) error {
 				issueops.ErrValidation, in.IDPattern, err)
 		}
 	}
-	if in.Tier == issueops.SweepDurable && in.ClosedBefore == nil && in.IDPattern == "" {
-		return fmt.Errorf("%w: a durable sweep requires a closed-before cutoff or an id pattern; "+
+	if in.Limit < 0 {
+		return fmt.Errorf("%w: sweep limit %d is negative; use 0 for no limit", issueops.ErrValidation, in.Limit)
+	}
+	if sweepRequiresFilter(in.Tier) && in.ClosedBefore == nil && in.IDPattern == "" {
+		return fmt.Errorf("%w: a %s sweep requires a closed-before cutoff or an id pattern; "+
 			"pass the pattern \"*\" to sweep every closed issue deliberately",
-			issueops.ErrValidation)
+			issueops.ErrValidation, in.Tier)
 	}
 	return nil
+}
+
+// sweepRequiresFilter reports whether a tier reaches durable-tier rows and so
+// carries the require-a-filter gate. The wisps plane does: it holds no-history
+// beads (issueops.SweepWispsPlane).
+func sweepRequiresFilter(tier issueops.SweepTier) bool {
+	return tier == issueops.SweepDurable || tier == issueops.SweepWispsPlane
+}
+
+// SweepSearchesWispsPlaneOnly reports whether a request's candidates come from
+// the wisps table alone (issueops.SweepWispsPlane) rather than from a tier
+// query merged across both planes. Every Sweeper implementation branches on
+// this one answer, so the plane a tier reads is decided in one place.
+func SweepSearchesWispsPlaneOnly(in issueops.SweepRequest) bool {
+	return in.Tier == issueops.SweepWispsPlane
 }
 
 // BuildSweepCandidateFilter turns a sweep request into the storage-level
@@ -66,8 +84,21 @@ func ValidateSweepRequest(in issueops.SweepRequest) error {
 //
 // Call ValidateSweepRequest first; this builder assumes a validated request
 // and does not re-refuse one.
+//
+// For SweepWispsPlane the filter carries NO tier constraint: the plane is the
+// selection, and the implementation applies it by searching the wisps table
+// alone (SweepSearchesWispsPlaneOnly). Every closed row there is a candidate,
+// whatever its ephemeral, no_history or wisp_type values.
 func BuildSweepCandidateFilter(in issueops.SweepRequest) types.IssueFilter {
 	closed := types.StatusClosed
+	if SweepSearchesWispsPlaneOnly(in) {
+		filter := types.IssueFilter{Status: &closed}
+		if in.ClosedBefore != nil {
+			cutoff := *in.ClosedBefore
+			filter.ClosedBefore = &cutoff
+		}
+		return filter
+	}
 	ephemeral := in.Tier == issueops.SweepEphemeral
 	// EphemeralTier, not Ephemeral: the tier owns typed wisps whether or not
 	// their minting set the ephemeral flag (older creators set wisp_type but
@@ -270,4 +301,92 @@ func PartitionSweepReferenced(candidates []*types.Issue, referenced map[string]b
 		kept = append(kept, issue)
 	}
 	return kept, referencedCount, sample
+}
+
+// BuildSweepLiveDependentScanFilter selects which of a candidate set's
+// dependents are LIVE for issueops.SweepRequest.ProtectLiveDependents: the
+// named sources, restricted to the not-done statuses. It is the same status
+// vocabulary the reference scan asks, so "live" means one thing in a sweep.
+func BuildSweepLiveDependentScanFilter(dependentIDs []string, custom []types.CustomStatus) types.IssueFilter {
+	return types.IssueFilter{IDs: dependentIDs, Statuses: NotDoneStatusesForSweep(custom)}
+}
+
+// SweepLiveDependentSources returns the ids of the rows that depend on a
+// candidate through a protecting edge (issueops.SweepLiveDependentEdgeTypes),
+// given the edges pointing at the candidates keyed by target. The result is
+// sorted and de-duplicated, so the follow-up status read is deterministic.
+func SweepLiveDependentSources(incoming map[string][]*types.Dependency) []string {
+	seen := make(map[string]bool)
+	for _, deps := range incoming {
+		for _, dep := range deps {
+			if dep != nil && isSweepProtectingEdge(dep.Type) {
+				seen[dep.IssueID] = true
+			}
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// SweepLiveDependentTargets returns the candidates a live row depends on: the
+// targets of protecting edges whose source is in live.
+func SweepLiveDependentTargets(incoming map[string][]*types.Dependency, live map[string]bool) map[string]bool {
+	protected := make(map[string]bool)
+	for target, deps := range incoming {
+		for _, dep := range deps {
+			if dep != nil && isSweepProtectingEdge(dep.Type) && live[dep.IssueID] {
+				protected[target] = true
+				break
+			}
+		}
+	}
+	return protected
+}
+
+func isSweepProtectingEdge(t types.DependencyType) bool {
+	for _, protecting := range issueops.SweepLiveDependentEdgeTypes {
+		if t == protecting {
+			return true
+		}
+	}
+	return false
+}
+
+// PartitionSweepLiveDependents splits candidates into the ones no live row
+// depends on and a count of the ones some live row does, preserving candidate
+// order.
+func PartitionSweepLiveDependents(candidates []*types.Issue, protected map[string]bool) (kept []*types.Issue, protectedCount int) {
+	kept = make([]*types.Issue, 0, len(candidates))
+	for _, issue := range candidates {
+		if protected[issue.ID] {
+			protectedCount++
+			continue
+		}
+		kept = append(kept, issue)
+	}
+	return kept, protectedCount
+}
+
+// LimitSweepCandidates applies issueops.SweepRequest.Limit to the candidates
+// that survived every protection: the oldest-closed first (closed_at
+// ascending, then id, so two runs over one snapshot pick the same rows), at
+// most limit of them. It returns the kept rows and how many were left behind.
+// A non-positive limit keeps everything. The input slice is not reordered.
+func LimitSweepCandidates(candidates []*types.Issue, limit int) (kept []*types.Issue, remaining int) {
+	if limit <= 0 || len(candidates) <= limit {
+		return candidates, 0
+	}
+	ordered := append([]*types.Issue(nil), candidates...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.ClosedAt != nil && b.ClosedAt != nil && !a.ClosedAt.Equal(*b.ClosedAt) {
+			return a.ClosedAt.Before(*b.ClosedAt)
+		}
+		return a.ID < b.ID
+	})
+	return ordered[:limit], len(ordered) - limit
 }

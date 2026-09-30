@@ -64,4 +64,10 @@
 // matches by identity. If a validation refusal ever appears here it aliases
 // beadserrors.ErrValidation rather than minting a twin, for the reasons
 // memoryops/errors.go gives.
+//
+// # Stability
+//
+// EXPERIMENTAL. This package is not yet covered by the project's compatibility
+// promise and may change in a minor release. A consumer replaying the feed
+// should pin an exact beads version.
 package journalops

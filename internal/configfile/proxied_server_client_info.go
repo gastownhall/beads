@@ -8,14 +8,19 @@ import (
 	"time"
 )
 
-const ProxiedServerClientInfoFileName = "proxied_server_client_info.json"
+const (
+	ProxiedServerClientInfoFileName = "proxied_server_client_info.json"
+	// DefaultProxyIdleTimeout is the effective proxy lifetime persisted when
+	// callers leave the internal zero-valued "use the default" sentinel.
+	DefaultProxyIdleTimeout = 30 * time.Second
+)
 
 type ProxiedServerClientInfo struct {
 	RootPath    string              `json:"root_path,omitempty"`
 	ConfigPath  string              `json:"config_path,omitempty"`
 	LogPath     string              `json:"log_path,omitempty"`
 	Port        int                 `json:"port,omitempty"`
-	IdleTimeout time.Duration       `json:"idle_timeout,omitempty"`
+	IdleTimeout time.Duration       `json:"idle_timeout"`
 	External    *ExternalDoltConfig `json:"external,omitempty"`
 }
 
@@ -43,13 +48,49 @@ func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo)
 	if info == nil {
 		info = &ProxiedServerClientInfo{}
 	}
+	// Zero is the internal "use the default" sentinel. Persist the effective
+	// value so sidecar consumers do not need bd's source code to interpret an
+	// absent key. Update the caller's plan too: migration resume compares the
+	// in-memory plan with the sidecar after this write.
+	if info.IdleTimeout == 0 {
+		info.IdleTimeout = DefaultProxyIdleTimeout
+	}
 	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling %s: %w", ProxiedServerClientInfoFileName, err)
 	}
 	path := ProxiedServerClientInfoPath(beadsDir)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(beadsDir, ".proxied-server-client-info-*.tmp")
+	if err != nil {
 		return fmt.Errorf("writing %s: %w", ProxiedServerClientInfoFileName, err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", ProxiedServerClientInfoFileName, err)
+	}
+	if err = os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("writing %s: %w", ProxiedServerClientInfoFileName, err)
+	}
+	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
+	if err != nil {
+		return fmt.Errorf("syncing %s directory: %w", ProxiedServerClientInfoFileName, err)
+	}
+	if err = d.Sync(); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("syncing %s directory: %w", ProxiedServerClientInfoFileName, err)
+	}
+	if err = d.Close(); err != nil {
+		return fmt.Errorf("closing %s directory: %w", ProxiedServerClientInfoFileName, err)
 	}
 	return nil
 }

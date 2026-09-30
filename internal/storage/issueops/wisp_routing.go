@@ -38,7 +38,7 @@ func wispsTableEmptyOrMissingInTx(ctx context.Context, tx DBTX) (bool, error) {
 }
 
 //nolint:gosec // table is selected by callers from fixed optional wisp tables.
-func optionalTableExistsInTx(ctx context.Context, tx *sql.Tx, table string) (bool, error) {
+func optionalTableExistsInTx(ctx context.Context, tx DBTX, table string) (bool, error) {
 	var probe int
 	err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", table)).Scan(&probe)
 	switch {

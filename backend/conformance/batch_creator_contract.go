@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -536,6 +537,46 @@ func RunBatchCreatorDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Cont
 	}
 	if !reflect.DeepEqual(request, snapshot) {
 		t.Errorf("CreateBatch mutated the caller's request:\n got %+v\nwant %+v", *request.Items[0].Issue, *snapshot.Items[0].Issue)
+	}
+}
+
+// RunBatchCreatorEchoesSubSecondTimestamps is the batch half of
+// RunLifecycleCreateEchoesSubSecondTimestamps: every entry of a batch result
+// carries the timestamps its write sent, at full precision, not the whole
+// seconds the DATETIME(0) columns answer a re-read with.
+//
+// PER ITEM, because both bodies build the result one snapshot at a time and a
+// fix applied to the first item only would still pass a check on result[0].
+func RunBatchCreatorEchoesSubSecondTimestamps(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	first := time.Date(2019, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	second := time.Date(2020, 4, 5, 6, 7, 8, 246813579, time.UTC)
+	request := publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(&types.Issue{Title: "nano first", Priority: 2, IssueType: types.TypeTask, CreatedAt: first, UpdatedAt: first}),
+			batchCreatorItem(&types.Issue{Title: "nano second", Priority: 2, IssueType: types.TypeTask, CreatedAt: second, UpdatedAt: second}),
+		},
+	}
+	want := []time.Time{first, second}
+	result, err := fixture.BatchCreator.CreateBatch(ctx, request)
+	if err != nil {
+		t.Fatalf("CreateBatch with sub-second timestamps: %v", err)
+	}
+	if len(result.Issues) != len(want) {
+		t.Fatalf("CreateBatch returned %d issues for %d items", len(result.Issues), len(want))
+	}
+	for i, issue := range result.Issues {
+		if issue == nil {
+			t.Fatalf("CreateBatch result issue %d is nil", i)
+		}
+		if !issue.CreatedAt.Equal(want[i]) {
+			t.Errorf("result issue %d created_at = %v, want %v exactly — a batch echo rounded to the second cannot order same-second creates",
+				i, issue.CreatedAt.UTC(), want[i])
+		}
+		if !issue.UpdatedAt.Equal(want[i]) {
+			t.Errorf("result issue %d updated_at = %v, want %v exactly", i, issue.UpdatedAt.UTC(), want[i])
+		}
 	}
 }
 

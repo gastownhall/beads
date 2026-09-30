@@ -199,7 +199,7 @@ func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
-		err := CheckRemoteMigrateGateWithRemoteCheck(context.Background(), db, func() bool { return true })
+		err := checkRemoteMigrateGate(context.Background(), db, "", func() bool { return true }, nil, false)
 		var gateErr *RemoteMigrateGateError
 		if !errors.As(err, &gateErr) {
 			t.Fatalf("expected *RemoteMigrateGateError when the disk fallback reports a remote, got %v", err)
@@ -218,7 +218,7 @@ func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
-		if err := CheckRemoteMigrateGateWithRemoteCheck(context.Background(), db, func() bool { return false }); err != nil {
+		if err := checkRemoteMigrateGate(context.Background(), db, "", func() bool { return false }, nil, false); err != nil {
 			t.Fatalf("no remote anywhere should be allowed, got %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -236,10 +236,10 @@ func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
 		called := false
-		err := CheckRemoteMigrateGateWithRemoteCheck(context.Background(), db, func() bool {
+		err := checkRemoteMigrateGate(context.Background(), db, "", func() bool {
 			called = true
 			return false
-		})
+		}, nil, false)
 		if !IsRemoteMigrateGateError(err) {
 			t.Fatalf("expected gate error when dolt_remotes already shows a remote, got %v", err)
 		}
@@ -260,10 +260,10 @@ func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
 		expectGateCurrentVersion(mock, latest) // PendingVersions -> none
 
 		called := false
-		err := CheckRemoteMigrateGateWithRemoteCheck(context.Background(), db, func() bool {
+		err := checkRemoteMigrateGate(context.Background(), db, "", func() bool {
 			called = true
 			return true
-		})
+		}, nil, false)
 		if err != nil {
 			t.Fatalf("at-latest DB should be allowed, got %v", err)
 		}

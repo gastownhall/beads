@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -719,9 +720,10 @@ var operationCodes = map[string][]Code{
 	// malformed values, repeated single-valued parameters and a `group_by`
 	// outside the closed set. countGroupOf stops that last case at the edge.
 	// The role has exactly one reachable refusal: BuildCountFilter rejects an
-	// invalid metadata key. failReadErr classifies it through invalidFilterParam
-	// as a 400 on `metadata_field`. An unrecognized status or type is not a
-	// refusal; the role promises it matches nothing and answers 0.
+	// invalid metadata key, from `metadata_field` or `has_metadata_key`.
+	// failReadErr classifies it through invalidFilterParam as a 400 naming the
+	// parameter it came from. An unrecognized status or type is not a refusal;
+	// the role promises it matches nothing and answers 0.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an
@@ -1132,8 +1134,14 @@ func (r Result) WithDeclaredLater(declaredLater bool) Result {
 //
 // It is the REQUEST's value rather than a read, which is why there is no
 // `actual_version` beside it here — see PreconditionFailed.
+//
+// The parameter stays int64 because every caller holds the PARSED guard by the
+// time it refuses; the member is a decimal string on the wire, so the echo goes
+// back out through types.RevisionToken and a client comparing it to what it sent
+// gets its own spelling back.
 func (r Result) WithExpectedVersion(expected int64) Result {
-	r.Problem.ExpectedVersion = &expected
+	token := types.RevisionToken(expected)
+	r.Problem.ExpectedVersion = &token
 	return r
 }
 
