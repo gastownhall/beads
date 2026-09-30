@@ -107,6 +107,22 @@ func TestPushFieldDiff(t *testing.T) {
 		}
 	})
 
+	// The two comparators must agree on label identity: whenever PushFieldsEqual
+	// reports a difference, the preview has to be able to name it. A case-only
+	// difference is the case where a normalizing diff would print "would update"
+	// with an empty field list -- a verdict asserting a change it cannot name.
+	t.Run("case-only label difference is named, matching PushFieldsEqual", func(t *testing.T) {
+		local, remote := base()
+		local.Labels = []string{"Bug"}
+		remote.Labels = []Label{{Name: "type::task"}, {Name: "priority::medium"}, {Name: "bug"}}
+		if PushFieldsEqual(local, remote, DefaultMappingConfig()) {
+			t.Fatal("PushFieldsEqual must report a case-only label difference")
+		}
+		if diff := PushFieldDiff(local, remote, DefaultMappingConfig()); len(diff) == 0 {
+			t.Error("PushFieldDiff() = empty, want the case-only label difference named")
+		}
+	})
+
 	t.Run("label addition counted without removal names", func(t *testing.T) {
 		local, remote := base()
 		remote.Labels = []Label{{Name: "type::task"}, {Name: "priority::medium"}}

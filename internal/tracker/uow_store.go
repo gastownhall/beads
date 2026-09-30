@@ -139,9 +139,14 @@ func (s *uowStore) GetDependenciesWithMetadata(ctx context.Context, id string) (
 	})
 }
 
+// CreateIssue passes the issue's comment thread through CreateIssueParams:
+// the domain create persists comments only from params.Comments, so without
+// it a pull that creates a commented issue in proxied mode would drop the
+// thread the direct store persists, and pullCommentsPending could never
+// recover it here. Labels are still not passed through (bd-p0n1).
 func (s *uowStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
 	return uow.RunTx(ctx, s.provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
-		_, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: issue}, actor)
+		_, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: issue, Comments: issue.Comments}, actor)
 		return "bd: tracker create", err
 	})
 }

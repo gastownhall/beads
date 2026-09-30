@@ -14,12 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issues with live threads, and push dry-run reported a phantom `Would update`
   for every freshly imported issue because it consulted only the stored push
   hash instead of comparing content. Pull now hydrates each commented issue's
-  thread (one extra API call, skipped when the count is zero; failures warn
-  and retry next sync) and merges it idempotently on content identity, and
+  thread (one extra API call, skipped when the count is zero; a failed fetch
+  warns, and an incremental sync retries it only once the issue changes
+  again) and merges it idempotently on content identity, and
   dry-run fetches the remote and compares content like a real run — matching
   issues preview as skips, and genuine updates name the changed fields,
   including removed labels. Thread hydration runs on pull fetches only, so
   push, conflict detection, and conflict reimport issue no extra comment GETs.
+  Pull does not merge new comments into an issue it skips as locally modified
+  since the last sync, and an incremental sync picks them up only once the
+  issue changes again.
 
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
   canonical spelling of a Go module version — and the string a build stamped

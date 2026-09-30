@@ -282,11 +282,14 @@ func PushContentHash(local *types.Issue, config *MappingConfig) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// labelSetsEqual reports whether a and b contain the same labels, ignoring
-// order (GitHub does not preserve label order across a round-trip).
 // PushFieldDiff names the fields a push would change, using the same field
-// semantics as PushFieldsEqual. Label entries disclose the removed names:
-// GitHub replaces the full label set, so removals are destructive.
+// semantics as PushFieldsEqual -- including its exact-match label identity, so
+// for distinct label names a label difference PushFieldsEqual reports is one
+// this function can name. labelSetsEqual also counts duplicates, which this
+// set-based diff cannot name: a local type::task label repeating the generated
+// one makes PushFieldsEqual report a change while the diff stays empty. Label
+// entries disclose the removed names: GitHub replaces the full label set, so
+// removals are destructive.
 func PushFieldDiff(local *types.Issue, remote *Issue, config *MappingConfig) []string {
 	if local == nil || remote == nil {
 		return nil
@@ -308,24 +311,28 @@ func PushFieldDiff(local *types.Issue, remote *Issue, config *MappingConfig) []s
 		diff = append(diff, "state")
 	}
 
+	// Label identity is compared exactly, matching labelSetsEqual (and so
+	// PushFieldsEqual/PushContentHash). Normalizing case here instead would let
+	// a case-only difference report "would update" with an empty diff list --
+	// a preview asserting a change it cannot name.
 	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
 	desired := make(map[string]bool, len(desiredLabels))
 	for _, l := range desiredLabels {
-		desired[strings.ToLower(l)] = true
+		desired[l] = true
 	}
 	remoteLabels := remote.LabelNames()
 	remoteSet := make(map[string]bool, len(remoteLabels))
 	for _, l := range remoteLabels {
-		remoteSet[strings.ToLower(l)] = true
+		remoteSet[l] = true
 	}
 	var added, removed []string
 	for _, l := range desiredLabels {
-		if !remoteSet[strings.ToLower(l)] {
+		if !remoteSet[l] {
 			added = append(added, l)
 		}
 	}
 	for _, l := range remoteLabels {
-		if !desired[strings.ToLower(l)] {
+		if !desired[l] {
 			removed = append(removed, l)
 		}
 	}
@@ -340,6 +347,8 @@ func PushFieldDiff(local *types.Issue, remote *Issue, config *MappingConfig) []s
 	return diff
 }
 
+// labelSetsEqual reports whether a and b contain the same labels, ignoring
+// order (GitHub does not preserve label order across a round-trip).
 func labelSetsEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
