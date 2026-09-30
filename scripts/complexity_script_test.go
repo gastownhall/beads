@@ -140,6 +140,7 @@ func runComplexityScriptWithThreshold(t *testing.T, repo, tool, baseline, mode, 
 	cmd := exec.Command("bash", filepath.Join(repo, "scripts/ci/complexity.sh"), mode)
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
+		"TMPDIR="+shellPathUnderEnv(t, cmd.Path, t.TempDir(), os.Environ()),
 		"COMPLEXITY_TOOL="+tool,
 		"COMPLEXITY_BASELINE="+baseline,
 		"COMPLEXITY_THRESHOLD="+threshold,
@@ -152,7 +153,9 @@ func runComplexityDiff(t *testing.T, repo, tool string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("bash", filepath.Join(repo, "scripts/ci/complexity.sh"), "diff")
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+tool, "COMPLEXITY_BASE_REF=HEAD", "COMPLEXITY_THRESHOLD=30")
+	cmd.Env = append(os.Environ(),
+		"TMPDIR="+shellPathUnderEnv(t, cmd.Path, t.TempDir(), os.Environ()),
+		"COMPLEXITY_TOOL="+tool, "COMPLEXITY_BASE_REF=HEAD", "COMPLEXITY_THRESHOLD=30")
 	data, err := cmd.CombinedOutput()
 	return string(data), err
 }

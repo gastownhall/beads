@@ -302,6 +302,18 @@ func shellPath(t *testing.T, path string) string {
 func shellPathUnderEnv(t *testing.T, bash, path string, env []string) string {
 	t.Helper()
 	clean := filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		absolute, err := filepath.Abs(clean)
+		if err != nil {
+			t.Fatal(err)
+		}
+		volume := filepath.VolumeName(absolute)
+		if len(volume) == 2 && volume[1] == ':' {
+			// pwd can return /tmp, whose MSYS mapping can change between children.
+			// This namespace keeps stored PATH entries independent of those mounts.
+			return "/proc/cygdrive/" + strings.ToLower(volume[:1]) + filepath.ToSlash(absolute[len(volume):])
+		}
+	}
 	dir := clean
 	base := ""
 	if info, err := os.Stat(clean); err == nil && !info.IsDir() {
@@ -323,6 +335,62 @@ func shellPathUnderEnv(t *testing.T, bash, path string, env []string) string {
 		return converted + "/" + filepath.ToSlash(base)
 	}
 	return converted
+}
+
+func TestShellPathUnderEnvKeepsDrivePathsAcrossTempRoots(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MSYS drive paths are Windows-specific")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if volume := filepath.VolumeName(root); len(volume) != 2 || volume[1] != ':' {
+		t.Skip("ordinary drive paths are required for this MSYS namespace regression")
+	}
+	bin := filepath.Join(root, "fixture bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(bin, "fixture-echo"), "#!/bin/sh\nprintf 'fixture\\n'\ncat -- \"$1\" \"$2\"\n")
+	first := filepath.Join(root, "first sentinel")
+	second := filepath.Join(root, "second sentinel")
+	for path, content := range map[string]string{first: "first\n", second: "second\n"} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 2 {
+		t.Run(fmt.Sprintf("temp-root-%d", i), func(t *testing.T) {
+			temp, err := filepath.Abs(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			temp = filepath.ToSlash(temp)
+			env := append(shellPathEnv(), "TMP="+temp, "TEMP="+temp, "TMPDIR="+temp)
+			paths := []string{
+				shellPathUnderEnv(t, bash, bin, env),
+				shellPathUnderEnv(t, bash, first, env),
+				shellPathUnderEnv(t, bash, second, env),
+			}
+			for _, path := range paths {
+				if !strings.HasPrefix(path, "/proc/cygdrive/") || strings.Contains(path, ":") {
+					t.Fatalf("stored drive path depends on a mutable mount or PATH delimiter: %q", path)
+				}
+			}
+			cmd := exec.Command(bash, "--noprofile", "--norc", "-c", `PATH="$1:/usr/bin:/bin"; export PATH; fixture-echo "$2" "$3"`, "fixture-path-check", paths[0], paths[1], paths[2])
+			cmd.Dir = root
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			if err != nil || string(out) != "fixture\nfirst\nsecond\n" {
+				t.Fatalf("execute fixture across temp roots: %v\n%s", err, out)
+			}
+		})
+	}
 }
 
 // shellPathEnv keeps minimal-environment path conversion independent of
