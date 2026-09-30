@@ -4,6 +4,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,9 +15,60 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPurgeControlFilesWithHeldLocks(t *testing.T) {
+	root := t.TempDir()
+	var held []*util.Lock
+	t.Cleanup(func() {
+		for _, lock := range held {
+			lock.Unlock()
+		}
+	})
+	for _, name := range []string{LockFileName, server.LockFileName} {
+		lock, err := util.TryLockForRemoval(filepath.Join(root, name))
+		require.NoError(t, err)
+		held = append(held, lock)
+	}
+	logPath := filepath.Join(root, LogFileName)
+	require.NoError(t, os.WriteFile(logPath, []byte("retire"), 0600))
+	require.Empty(t, PurgeControlFiles(root, held...))
+	assert.NoFileExists(t, logPath)
+	if runtime.GOOS == "windows" {
+		for _, lock := range held {
+			other, err := util.TryLock(lock.File().Name())
+			if other != nil {
+				other.Unlock()
+			}
+			require.Error(t, err, "purge must retain exclusion until Unlock")
+		}
+	}
+	for _, lock := range held {
+		lock.Unlock()
+	}
+	held = nil
+	for _, name := range []string{LockFileName, server.LockFileName} {
+		assert.NoFileExists(t, filepath.Join(root, name))
+	}
+}
+
+func TestPurgeControlFilesReportsRemovalError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, LogFileName)
+	require.NoError(t, os.Mkdir(path, 0700))
+	child := filepath.Join(path, "retain")
+	require.NoError(t, os.WriteFile(child, []byte("retain"), 0600))
+	errs := PurgeControlFiles(root)
+	require.Len(t, errs, 1)
+	var pathErr *os.PathError
+	require.ErrorAs(t, errs[0], &pathErr)
+	assert.Equal(t, path, pathErr.Path)
+	assert.FileExists(t, child)
+}
 
 func newControlServer(t *testing.T) (*controlServer, string, identity.IdentReply) {
 	t.Helper()

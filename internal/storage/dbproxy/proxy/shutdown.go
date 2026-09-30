@@ -139,10 +139,22 @@ func ControlFilePaths(rootDir string) []string {
 	return paths
 }
 
-func PurgeControlFiles(rootDir string) []error {
+// PurgeControlFiles retires matching held locks without releasing their leases.
+// Supplied locks must use the exact paths returned by ControlFilePaths.
+func PurgeControlFiles(rootDir string, heldLocks ...*util.Lock) []error {
+	held := make(map[string]*util.Lock, len(heldLocks))
+	for _, lock := range heldLocks {
+		held[lock.File().Name()] = lock
+	}
 	var errs []error
 	for _, path := range ControlFilePaths(rootDir) {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		var err error
+		if lock := held[path]; lock != nil {
+			err = lock.RemoveWhileHeld()
+		} else {
+			err = os.Remove(path)
+		}
+		if err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}
 	}

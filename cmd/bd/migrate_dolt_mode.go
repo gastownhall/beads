@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -164,9 +165,12 @@ func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 	if err != nil {
 		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}
-	if err = d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+	// Windows cannot sync a directory handle opened by os.Open.
+	if runtime.GOOS != "windows" {
+		if err = d.Sync(); err != nil {
+			_ = d.Close()
+			return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+		}
 	}
 	if err = d.Close(); err != nil {
 		return fmt.Errorf("closing %s directory: %w", migrateJournalFileName, err)
@@ -182,9 +186,12 @@ func removeMigrateJournal(beadsDir string) error {
 	if err != nil {
 		return fmt.Errorf("opening migration directory: %w", err)
 	}
-	if err = d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("syncing migration directory: %w", err)
+	// Windows cannot sync a directory handle opened by os.Open.
+	if runtime.GOOS != "windows" {
+		if err = d.Sync(); err != nil {
+			_ = d.Close()
+			return fmt.Errorf("syncing migration directory: %w", err)
+		}
 	}
 	if err = d.Close(); err != nil {
 		return fmt.Errorf("closing migration directory: %w", err)
@@ -1130,13 +1137,14 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		}
 	}
 
-	proxyLock, err := util.TryLock(filepath.Join(rootDir, proxy.LockFileName))
+	// Retirement removes these control files while their lifecycle leases remain held.
+	proxyLock, err := util.TryLockForRemoval(filepath.Join(rootDir, proxy.LockFileName))
 	if err != nil {
 		return migrateLockErr("proxy", err)
 	}
 	defer proxyLock.Unlock()
 
-	childLock, err := util.TryLock(filepath.Join(rootDir, server.LockFileName))
+	childLock, err := util.TryLockForRemoval(filepath.Join(rootDir, server.LockFileName))
 	if err != nil {
 		return migrateLockErr("proxied dolt sql-server", err)
 	}
@@ -1182,7 +1190,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if err := os.Remove(configfile.ProxiedServerClientInfoPath(beadsDir)); err != nil && !os.IsNotExist(err) {
 			return HandleError("failed to remove %s: %v", configfile.ProxiedServerClientInfoFileName, err)
 		}
-		if errs := proxy.PurgeControlFiles(rootDir); len(errs) > 0 {
+		if errs := proxy.PurgeControlFiles(rootDir, proxyLock, childLock); len(errs) > 0 {
 			return HandleError("failed to retire proxy controls: %v", errs[0])
 		}
 		if errs := removeMigrateAssets(logAssets); len(errs) > 0 {
