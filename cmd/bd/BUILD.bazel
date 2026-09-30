@@ -1164,6 +1164,7 @@ go_test(
         "workspace_gate_test.go",
         "workspace_identity_test.go",
         "worktree_cmd_test.go",
+        "worktree_gitignore_eol_test.go",
         "worktree_permissions_test.go",
         "worktree_remove_cmd_test.go",
         "worktree_remove_git_test.go",

@@ -217,6 +217,30 @@ func TestPRWorkflowExercisesWindowsEnvironmentHelpers(t *testing.T) {
 	}
 }
 
+func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "test-windows-liveness")
+	step := job.step(t, "Run native Windows global Prime override")
+	if job.If != "" || job.ContinueOnError || step.If != "" ||
+		(step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Fatal("native Windows global Prime override must be unconditional and required")
+	}
+	if step.Shell != "bash" || step.Env["CGO_ENABLED"] != "1" {
+		t.Fatal("native Windows global Prime override requires Bash and CGO")
+	}
+	if !strings.Contains(step.Run, "./scripts/test.sh") ||
+		!strings.Contains(step.Run, "^TestPrimeBinaryPortfolio$/^TestPrime_HookJSON_GlobalPrimeOverride$") {
+		t.Fatal("native Windows gate must execute the global Prime override fixture")
+	}
+	gate := workflow.job(t, "ci-gate")
+	env := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "test-windows-liveness") ||
+		env["TEST_WINDOWS_LIVENESS"] != "${{ needs.test-windows-liveness.result }}" ||
+		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), "TEST_WINDOWS_LIVENESS") {
+		t.Fatal("CI gate must require the native Windows result")
+	}
+}
+
 func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-cmd-bd-puregeo-tests")
@@ -4158,4 +4182,29 @@ func yamlScalar(node *yaml.Node, key string) string {
 		}
 	}
 	return ""
+}
+
+// Release builds sign and attest what they build, so they must not restore
+// any Actions cache: setup-go's default cache is keyed predictably and falls
+// back to the default branch's module and build caches, which are not
+// re-verified (a poisoned build cache compiles straight into the binaries).
+func TestReleaseWorkflowRestoresNoCache(t *testing.T) {
+	workflow := readCIWorkflow(t, "release.yml")
+	setupGo := 0
+	for jobName, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Uses, "actions/cache") || strings.Contains(step.Uses, "/cache@") {
+				t.Errorf("release.yml job %q step %q uses %s; release builds must not restore caches", jobName, step.Name, step.Uses)
+			}
+			if strings.HasPrefix(step.Uses, "actions/setup-go@") {
+				setupGo++
+				if step.With["cache"] != "false" {
+					t.Errorf("release.yml job %q step %q: setup-go must set cache: false (got %q)", jobName, step.Name, step.With["cache"])
+				}
+			}
+		}
+	}
+	if setupGo == 0 {
+		t.Fatal("release.yml has no setup-go step; update this test")
+	}
 }
