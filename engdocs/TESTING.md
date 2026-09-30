@@ -97,7 +97,12 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
-exist to run the Dolt suites set it.
+exist to run the Dolt suites set it. Without it, a backend that cannot run
+here (no docker, image not pulled) or was skipped with `BEADS_TEST_SKIP=dolt`
+still skips. A server that fails to start after the environment reported it
+ready (say, a container runtime whose reaper times out) does not: it fails
+the package's `TestMain` (`testutil.ErrDoltServerStart`) rather than letting
+the package report `ok` having run none of its Dolt tests.
 
 Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
 suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
