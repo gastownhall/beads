@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/validation"
@@ -305,15 +304,6 @@ func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) []string {
 	return hintFields
 }
 
-func loadEmbeddedCustomTypes() []string {
-	if store != nil {
-		if ct, err := store.GetCustomTypes(rootCtx); err == nil && len(ct) > 0 {
-			return ct
-		}
-	}
-	return config.GetCustomTypesFromYAML()
-}
-
 // loadEmbeddedCustomStatuses reads custom statuses from the store only — no
 // YAML fallback, matching single-issue create and loadListFilterConfig
 // (custom types fall back to YAML; custom statuses deliberately do not).
@@ -348,9 +338,13 @@ func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions)
 		return HandleErrorRespectJSON("parsing graph plan: %v", err)
 	}
 
+	customTypes, err := resolveWorkspaceCustomTypes(rootCtx)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
 	dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixes()
 	cfg := graphPlanConfig{
-		customTypes:     loadEmbeddedCustomTypes(),
+		customTypes:     customTypes,
 		customStatuses:  loadEmbeddedCustomStatuses(),
 		dbPrefix:        dbPrefix,
 		allowedPrefixes: allowedPrefixes,

@@ -908,17 +908,6 @@ func TestProxiedServerShow3(t *testing.T) {
 		}
 	})
 
-	t.Run("show_watch_rejected_in_proxied_mode", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "swt")
-		issue := bdProxiedCreate(t, bd, p.dir, "Watch test", "--type", "task")
-		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, issue.ID, "--watch")
-		combined := stdout + stderr
-		if !strings.Contains(combined, "watch mode not supported in proxied-server mode") {
-			t.Errorf("expected proxied watch-rejection error, got: %s", combined)
-		}
-	})
-
 	t.Run("show_wisp_comments_default_count_only", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "swcc")

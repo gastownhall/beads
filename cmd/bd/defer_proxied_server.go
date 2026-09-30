@@ -17,6 +17,12 @@ import (
 type deferProxiedResult struct {
 	issues []*types.Issue
 	errs   []string
+
+	// wasDeferred tracks, in lockstep with issues, whether each undeferred
+	// issue was actually status=deferred (status flips to open) versus just
+	// carrying a stray defer_until on some other status (status untouched,
+	// only the timestamp cleared — ga-bq3w5). Unused by runDeferProxiedServer.
+	wasDeferred []bool
 }
 
 func proxiedUpdateByID(ctx context.Context, uw uow.UnitOfWork, id string, isWisp bool, updates map[string]any) error {
@@ -125,14 +131,21 @@ func runUndeferProxiedServer(ctx context.Context, args []string) error {
 				continue
 			}
 			fullID := issue.ID
-			if issue.Status != types.StatusDeferred {
+
+			// Gate on defer_until, not status alone (ga-bq3w5) — mirrors the
+			// embedded-backend fix in undefer.go. See that file's comment for
+			// the full rationale.
+			wasDeferred := issue.Status == types.StatusDeferred
+			if !wasDeferred && issue.DeferUntil == nil {
 				r.errs = append(r.errs, fmt.Sprintf("%s is not deferred (status: %s)", fullID, string(issue.Status)))
 				continue
 			}
 
 			updates := map[string]interface{}{
-				"status":      string(types.StatusOpen),
 				"defer_until": nil,
+			}
+			if wasDeferred {
+				updates["status"] = string(types.StatusOpen)
 			}
 			if uerr := proxiedUpdateByID(ctx, uw, fullID, isWisp, updates); uerr != nil {
 				r.errs = append(r.errs, fmt.Sprintf("Error undeferring %s: %v", fullID, uerr))
@@ -140,6 +153,7 @@ func runUndeferProxiedServer(ctx context.Context, args []string) error {
 			}
 			if updated := proxiedGetByID(ctx, uw, fullID, isWisp); updated != nil {
 				r.issues = append(r.issues, updated)
+				r.wasDeferred = append(r.wasDeferred, wasDeferred)
 			}
 		}
 		if len(r.issues) == 0 {
@@ -162,8 +176,12 @@ func runUndeferProxiedServer(ctx context.Context, args []string) error {
 			}
 		}
 	} else {
-		for _, iss := range res.issues {
-			fmt.Printf("%s Undeferred %s (now open)\n", ui.RenderPass("*"), iss.ID)
+		for i, iss := range res.issues {
+			if i < len(res.wasDeferred) && res.wasDeferred[i] {
+				fmt.Printf("%s Undeferred %s (now open)\n", ui.RenderPass("*"), iss.ID)
+			} else {
+				fmt.Printf("%s Cleared stale defer_until on %s (status unchanged: %s)\n", ui.RenderPass("*"), iss.ID, string(iss.Status))
+			}
 		}
 	}
 

@@ -728,26 +728,47 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
-		st := getStore()
-		if st == nil {
-			return HandleError("no store available")
-		}
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
 			msg = fmt.Sprintf("bd: dolt commit (auto-commit) by %s", getActor())
 		}
-		// CommitAll, not Commit: this command's contract is "any uncommitted
-		// changes in the working set", including changes made externally and
-		// the config table — which server-mode Commit excludes (GH#2455), so
-		// out-of-band config dirt used to survive this command forever. Its
-		// committed bool also replaces the HEAD-before/HEAD-after comparison
-		// this command used to detect tolerated no-ops with, which cost two
-		// extra HEAD reads and raced against concurrent writers.
-		committed, err := st.CommitAll(ctx, msg)
+
+		var (
+			committed bool
+			err       error
+		)
+		if usesProxiedServer() {
+			// Proxied mode never opens a store — the root pre-run returns
+			// before newDoltStore — so getStore() is nil here and the UOW
+			// provider is the only handle on the server. This is the flush
+			// point dolt.auto-commit=batch/off defers to on that route
+			// (GH#4995). The message is built above so both routes name the
+			// same default.
+			committed, err = runDoltCommitProxiedServer(ctx, msg)
+		} else {
+			st := getStore()
+			if st == nil {
+				return HandleError("no store available")
+			}
+			// CommitAll, not Commit: this command's contract is "any uncommitted
+			// changes in the working set", including changes made externally and
+			// the config table — which server-mode Commit excludes (GH#2455), so
+			// out-of-band config dirt used to survive this command forever. Its
+			// committed bool also replaces the HEAD-before/HEAD-after comparison
+			// this command used to detect tolerated no-ops with, which cost two
+			// extra HEAD reads and raced against concurrent writers.
+			committed, err = st.CommitAll(ctx, msg)
+		}
 		if err != nil {
-			if isDoltNothingToCommit(err) {
+			switch {
+			case isDoltNothingToCommit(err):
 				committed = false
-			} else {
+			case isReportedExit(err):
+				// The proxied route reports provider failures itself, through
+				// HandleErrorRespectJSON, so the JSON envelope is already on
+				// stdout; re-wrapping would print a second, plain Error line.
+				return err
+			default:
 				return HandleError("%v", err)
 			}
 		}
@@ -2354,6 +2375,13 @@ func extractSSHHost(url string) string {
 // Bare dial+close (no doltserver.ProbeSQLServer): SSH, not MySQL — there is
 // no handshake greeting to drain here.
 func testSSHConnectivity(host string) bool {
+	// #nosec G704 -- host is extractSSHHost(r.URL) over the remotes this repo's
+	// own store returns, i.e. operator-configured local state, not request data.
+	// The probe dials and immediately closes: nothing is sent and no response is
+	// read, so there is no forgeable request. gosec only reaches this call after
+	// this PR routed config discovery through env-derived paths; its taint
+	// analysis is not field-sensitive, so one env-derived path marks the whole
+	// store value tainted and every URL read back off it inherits that.
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), 5*time.Second)
 	if err != nil {
 		return false
@@ -2392,6 +2420,9 @@ func httpURLToTCPAddr(url string) string {
 // is no handshake greeting to drain here.
 func testHTTPConnectivity(url string) bool {
 	addr := httpURLToTCPAddr(url)
+	// #nosec G704 -- same probe shape and same taint path as testSSHConnectivity
+	// above: url is a remote URL from this repo's own store, and the dial is
+	// closed without sending or reading anything.
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return false

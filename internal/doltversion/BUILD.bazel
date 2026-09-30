@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "doltversion",
+    srcs = [
+        "cache.go",
+        "errors.go",
+        "policy.go",
+        "probe.go",
+        "resolve.go",
+        "version.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/doltversion",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "doltversion_test",
+    srcs = [
+        "cache_test.go",
+        "policy_test.go",
+        "probe_test.go",
+        "resolve_test.go",
+        "stubs_test.go",
+        "version_test.go",
+    ],
+    embed = [":doltversion"],
+)

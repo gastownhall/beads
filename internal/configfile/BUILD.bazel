@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "configfile",
+    srcs = [
+        "backend_messages.go",
+        "central_config.go",
+        "configfile.go",
+        "credentials.go",
+        "credentials_unix.go",
+        "credentials_windows.go",
+        "external_dolt_config.go",
+        "proxied_server_client_info.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/configfile",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/storage/backendnames",
+    ],
+)
+
+go_test(
+    name = "configfile_test",
+    srcs = [
+        "backend_messages_test.go",
+        "central_config_test.go",
+        "configfile_test.go",
+        "credentials_test.go",
+        "external_dolt_config_test.go",
+    ],
+    embed = [":configfile"],
+    deps = ["//internal/config"],
+)

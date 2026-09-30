@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -190,11 +191,12 @@ var (
 func buildBDBinary(t *testing.T) string {
 	t.Helper()
 	bdBinaryOnce.Do(func() {
-		if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
-			if _, err := os.Stat(prebuilt); err != nil {
-				bdBinaryErr = fmt.Errorf("BEADS_TEST_BD_BINARY=%q not found: %w", prebuilt, err)
-				return
-			}
+		prebuilt, err := bazeltest.PrebuiltBD()
+		if err != nil {
+			bdBinaryErr = err
+			return
+		}
+		if prebuilt != "" {
 			bdBinary = prebuilt
 			return
 		}

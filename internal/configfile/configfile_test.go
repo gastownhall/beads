@@ -1115,6 +1115,7 @@ func TestEnvVarOverrides(t *testing.T) {
 
 	t.Run("invalid port env var falls through to config", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_SERVER_PORT", "not-a-number")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		cfg := &Config{DoltServerPort: 3308}
 		if got := cfg.GetDoltServerPort(); got != 3308 {
 			t.Errorf("GetDoltServerPort() = %d, want 3308", got)
@@ -1122,6 +1123,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_PORT fallback when SERVER_PORT not set", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 		t.Setenv("BEADS_DOLT_PORT", "3307")
 		cfg := &Config{}
 		if got := cfg.GetDoltServerPort(); got != 3307 {
@@ -1155,6 +1157,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("database default", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 		cfg := &Config{}
 		if got := cfg.GetDoltDatabase(); got != DefaultDoltDatabase {
 			t.Errorf("GetDoltDatabase() = %q, want %q", got, DefaultDoltDatabase)
@@ -1162,6 +1165,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("database config value", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 		cfg := &Config{DoltDatabase: "mydb"}
 		if got := cfg.GetDoltDatabase(); got != "mydb" {
 			t.Errorf("GetDoltDatabase() = %q, want mydb", got)

@@ -7,6 +7,11 @@
 #   (b) appears in a file that sources .buildflags beforehand, nor
 #   (c) is an exempt third-party tool install (go install X@version).
 #
+# Bazel invocations (`bazel build|test|run|...`) are not `go` invocations:
+# their Go build tags come from the committed .bazelrc, not GOFLAGS. When any
+# scanned file invokes Bazel, the script instead requires .bazelrc to set
+# `--@rules_go//go/config:tags=...gms_pure_go` for build (and so test/run).
+#
 # This is the source-time companion to scripts/verify-cgo.sh (which is a
 # runtime check on release binaries). See engdocs/ICU-POLICY.md.
 
@@ -31,6 +36,8 @@ mapfile -t candidates < <(
 opt_out_regex='^(scripts/test-cgo\.sh|scripts/test-icu-path\.sh|scripts/check-build-tags\.sh|examples/)'
 
 fail=0
+bazel_users=()
+bazel_invocation_regex='(^|[^[:alnum:]_/.-])(bazel|bazelisk|\$\(BAZEL\)|\$\{?BAZEL\}?)[[:space:]]+(build|test|run|coverage|query|cquery|aquery|mod)($|[[:space:]])'
 for f in "${candidates[@]}"; do
     [[ -f "$f" ]] || continue
     [[ "$f" =~ $opt_out_regex ]] && continue
@@ -38,6 +45,11 @@ for f in "${candidates[@]}"; do
     # Per-file opt-out marker for files that legitimately test the ICU path.
     if head -n 5 "$f" | grep -q '^# build-tags: allow-bare'; then
         continue
+    fi
+
+    # Record files that drive Bazel; .bazelrc must then carry the tag.
+    if grep -Eq "$bazel_invocation_regex" "$f" 2>/dev/null; then
+        bazel_users+=("$f")
     fi
 
     # Does the file source .buildflags before any `go` invocation?
@@ -76,6 +88,34 @@ for f in "${candidates[@]}"; do
         fi
         if [[ "$stripped" =~ (log_[a-z_]+|echo|printf)[[:space:]]+[\"\'] ]]; then
             continue
+        fi
+
+        # Bazel invocations are governed by .bazelrc (checked below), even
+        # when their arguments mention a go verb (e.g. `bazel run @rules_go//go -- test`).
+        # Only the Bazel command itself is exempt: split the line into shell
+        # command segments (on &&, ||, ;, |, $( and backticks) and drop the
+        # segments that invoke Bazel, so `bazel build x && go test ./...`
+        # still has its `go test` checked. Make variable references like
+        # $(BAZEL) are rewritten to ${BAZEL} first so they are not split.
+        # Lines without a Bazel invocation are checked unchanged.
+        # Pure bash (no sed): BSD sed does not expand \n in replacements.
+        segmented="$stripped"
+        while [[ "$segmented" =~ \$\(([A-Za-z_][A-Za-z0-9_]*)\) ]]; do
+            segmented="${segmented/"${BASH_REMATCH[0]}"/\$\{${BASH_REMATCH[1]}\}}"
+        done
+        nl=$'\n'
+        segmented="${segmented//&&/$nl}"
+        segmented="${segmented//||/$nl}"
+        segmented="${segmented//;/$nl}"
+        segmented="${segmented//|/$nl}"
+        segmented="${segmented//\$\(/$nl}"
+        segmented="${segmented//\`/$nl}"
+        if [[ "$segmented" =~ $bazel_invocation_regex ]]; then
+            stripped=""
+            while IFS= read -r segment; do
+                [[ "$segment" =~ $bazel_invocation_regex ]] && continue
+                stripped+="$segment"$'\n'
+            done <<< "$segmented"
         fi
 
         verb=""
@@ -125,6 +165,22 @@ for f in "${candidates[@]}"; do
     done < <(grep -n -E '\bgo[[:space:]]+(build|test|run|generate|install)\b' "$f" 2>/dev/null || true)
 done
 
+# Bazel: every `bazel` invocation reads the committed .bazelrc, so the tag
+# must be set there once. Accept `build` or `common` (test/run inherit build).
+bazelrc_tag_regex='^[[:space:]]*(build|common)[[:space:]]+(.*[[:space:]])?--@(@)?rules_go//go/config:tags=([^[:space:]]*,)?gms_pure_go(,[^[:space:]]*)?([[:space:]]|$)'
+if [[ ${#bazel_users[@]} -gt 0 || -f .bazelrc ]]; then
+    if [[ ! -f .bazelrc ]]; then
+        printf 'error: %s invoke(s) Bazel but .bazelrc is missing\n' "${bazel_users[*]}" >&2
+        fail=1
+    elif ! grep -Eq "$bazelrc_tag_regex" .bazelrc; then
+        printf 'error: .bazelrc does not set --@rules_go//go/config:tags=gms_pure_go for build\n' >&2
+        if [[ ${#bazel_users[@]} -gt 0 ]]; then
+            printf '       Bazel is invoked from: %s\n' "${bazel_users[*]}" >&2
+        fi
+        fail=1
+    fi
+fi
+
 if [[ "$fail" -ne 0 ]]; then
     cat >&2 <<'EOF'
 
@@ -138,6 +194,9 @@ Fix by EITHER:
   2. Pass -tags=gms_pure_go (or -tags=other,gms_pure_go) explicitly.
   3. Add a '# build-tags: allow-bare' marker in the top 5 lines of the
      file if it intentionally exercises the ICU path.
+
+Bazel invocations take their tags from .bazelrc, which must contain:
+  build --@rules_go//go/config:tags=gms_pure_go
 EOF
     exit 1
 fi

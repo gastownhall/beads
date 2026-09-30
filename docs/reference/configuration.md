@@ -88,9 +88,11 @@ The full namespaces routed to YAML are:
 
 Plus these individual keys:
 
-`no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`.
+`no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
+
+`bd config unset` on one of these secret keys clears the `config.yaml` entry and also deletes any copy an older bd stored in the database, reporting which of them it removed. Keys reached YAML routing at different points in bd's history, so a workspace configured before the move can still hold the value in a table that `bd dolt push` replicates. The database half is best effort: the command never creates a database to look in, so it is skipped where reaching the row would mean provisioning one — but not for a server-mode or proxied workspace whose database is real and simply not on local disk; a database that refuses the delete is reported as a row that is still stored. Deleting it locally does not unpublish it — rotate a secret that has already been pushed.
 
 ## Tool-Level Settings (config.yaml)
 
@@ -106,7 +108,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
 | `prime.max-memory-chars` | `--max-memory-chars` | `BD_PRIME_MAX_MEMORY_CHARS` | `0` | Max total bytes of memory entries injected by `bd prime`, at whole-memory boundaries (0 = unlimited) |
-| `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | Create a Dolt history commit after each successful write (see [below](#auto-commit-sql-commits-vs-dolt-commits)) |
+| `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | `off\|on\|batch`: `on` creates a Dolt history commit after each successful write; `batch`/`off` defer it to `bd dolt commit` (see [below](#auto-commit-sql-commits-vs-dolt-commits)) |
 | `dolt.auto-push` | — | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (opt-in; see [below](#auto-push)) |
 | `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
@@ -195,6 +197,26 @@ Or in `config.yaml`:
 dolt:
   auto-commit: off
 ```
+
+`batch` and `off` defer the Dolt history commit instead of skipping the write: the change is
+still durable in the working set, and `bd dolt commit` records the accumulated batch as a single
+Dolt commit. This applies on every storage mode — embedded, direct SQL-server, and
+proxied-server. In proxied-server mode the deferral covers the writes the CLI makes on that
+route, including workspace config and version metadata, and `bd dolt commit` is the only flush
+point there: the SIGTERM/SIGHUP flush of a live batch-mode process needs an open store, which
+proxied mode never has (it does run in embedded and direct SQL-server modes).
+
+Two kinds of write stay outside the deferral, in every mode:
+
+- **Explicit commit points** — `bd batch` (whose commit message defaults to a synthesized one
+  when `-m` is absent, so every batch commits), `bd mol bond`, `bd mol pour`, `bd mol squash`,
+  `bd mol wisp create`, and the wisp half of `bd mol burn` — commit what they wrote, with the
+  message they were given: the commit is that command's contract rather than auto-commit
+  policy. Burning a *persistent* molecule is an ordinary delete, so it honors the policy and
+  defers with everything else.
+- **Writes made by a `bd serve` process**, whose HTTP API requests carry their own context
+  instead of the CLI's, so a daemon keeps committing per write even while the CLI on the same
+  database defers.
 
 ### Auto-backup
 
@@ -395,7 +417,7 @@ federation:
 
 ## Integration Configuration
 
-Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `ado.pat`) are YAML-routed and better supplied as environment variables. Every tracker records `<tracker>.last_sync` automatically after a sync, enabling incremental syncs.
+Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `ado.pat`, `notion.token`) are YAML-routed and better supplied as environment variables. Every tracker records `<tracker>.last_sync` automatically after a sync, enabling incremental syncs.
 
 ### Jira
 
@@ -477,6 +499,7 @@ Selected commonly-used variables:
 | `BD_DEBUG` | Enable debug logging |
 | `BD_MIGRATION_FREEZE_FILE` | Check this exact path for the freeze marker instead of walking ancestor directories; authoritative when set (see [Migration Freeze](#migration-freeze)) |
 | `BEADS_DIR` | Force the active beads workspace directory |
+| `BEADS_CEILING_DIRECTORIES` | Directories (separated like `PATH`) that `.beads` and `config.yaml` discovery never looks at or above, like git's `GIT_CEILING_DIRECTORIES`; the starting directory is always examined. For sandboxes such as `bazel test` that must not reach the user's own `~/.beads` |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
 | `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |

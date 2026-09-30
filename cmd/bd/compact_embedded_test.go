@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdCompact runs "bd compact" with the given args and returns stdout.
@@ -188,5 +193,64 @@ func TestEmbeddedCompactConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+// TestEmbeddedCompactMisdatedChild reproduces #6516: two commits editing the
+// same row where the child is dated before its parent. Compact must replay the
+// preserved commits in graph order (dolt_log.commit_order), not date order,
+// or the cherry-pick of the child conflicts.
+func TestEmbeddedCompactMisdatedChild(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "md")
+	issue := bdCreate(t, bd, dir, "Misdated bead", "--type", "task")
+	bdCreate(t, bd, dir, "Filler bead", "--type", "task")
+
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	conn, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	// Both commits are dated in the future so --days 0 preserves them; the
+	// child (edit B) is dated 20 minutes before its parent (edit A).
+	now := time.Now()
+	edits := []struct {
+		title string
+		date  time.Time
+	}{
+		{"edit A", now.Add(40 * time.Minute)},
+		{"edit B", now.Add(20 * time.Minute)},
+	}
+	for _, e := range edits {
+		if _, err := conn.ExecContext(t.Context(), "UPDATE issues SET title = ? WHERE id = ?", e.title, issue.ID); err != nil {
+			t.Fatalf("update title %q: %v", e.title, err)
+		}
+		if _, err := conn.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', ?, '--date', ?)",
+			"repro: "+e.title, e.date.Format(time.RFC3339)); err != nil {
+			t.Fatalf("dolt commit %q: %v", e.title, err)
+		}
+	}
+	conn.Close()
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+
+	bdCompact(t, bd, dir, "--force", "--days", "0")
+
+	if got := bdShow(t, bd, dir, issue.ID).Title; got != "edit B" {
+		t.Errorf("title after compact = %q, want %q", got, "edit B")
 	}
 }

@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "uimd",
+    srcs = ["markdown.go"],
+    importpath = "github.com/steveyegge/beads/internal/uimd",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/ui",
+        "@com_github_charmbracelet_x_ansi//:ansi",
+        "@land_charm_glamour_v2//:glamour",
+        "@land_charm_glamour_v2//styles",
+        "@org_golang_x_term//:term",
+    ],
+)
+
+go_test(
+    name = "uimd_test",
+    srcs = ["markdown_test.go"],
+    embed = [":uimd"],
+)
