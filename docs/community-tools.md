@@ -32,6 +32,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Maggie](https://github.com/mulgadc/maggie)** - Single Go binary with the SPA embedded, serving dashboard, table, board and dependency graph views. Text, id glob, priority, type, assignee, label and status filters compose in one filter bar. Uses the `bd` CLI for every read and write, keeping no store of its own. Runs from a container that bundles `bd` and `dolt`, against either a local `.beads/` directory or a shared Dolt SQL server. Built by [@mulgadc](https://github.com/mulgadc). (Go/React)
 
+- **[beadside](https://github.com/thatmike1/beadside)** - Local web reader and inbox between you and your agents. A dense index groups beads into lanes by your own labels, with a waiting-on-you section first, and the selected bead stays open beside it with its description, notes and comment thread rendered as Markdown. Notes you write land as comments under your own author id and can flag the bead so the next agent session reads them first. Live updates follow `bd events tail --follow` when the events journal is on, with polling as the fallback. Full-text search over ids, titles, descriptions, notes and comments, also available to agents as `beadside search --json`. Uses the `bd` CLI for every read and write. Built by [@thatmike1](https://github.com/thatmike1). (TypeScript/React)
+
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and server management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
