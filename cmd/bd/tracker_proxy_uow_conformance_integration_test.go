@@ -82,9 +82,9 @@ func TestManagedLocalProxiedTrackerUOWConformance(t *testing.T) {
 // It deliberately seeds NO labels. Store.CreateIssue is not label-faithful
 // across the two backends: the direct store persists issue.Labels through
 // PersistLabels, while the UOW store creates through
-// domain.CreateIssueParams{Issue: issue} with Labels unset and the domain
-// create writes labels only from params.Labels — so a seeded label would
-// survive on the direct leg and vanish on the proxied one. Running the two
+// domain.CreateIssueParams with Labels unset and the domain create writes
+// labels only from params.Labels — so a seeded label would survive on the
+// direct leg and vanish on the proxied one. Running the two
 // legs on divergent state would let this suite report parity it never
 // checked. Create-path parity is tracked in bd-p0n1; once the UOW store
 // passes labels through, the seed can carry them again.

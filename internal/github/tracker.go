@@ -162,8 +162,13 @@ func (t *Tracker) fetchIssueByNumber(ctx context.Context, identifier string) (*I
 
 // hydrateComments fetches an issue's comment thread when the list response
 // reported a nonzero comment count. Failures leave the issue importable
-// without its thread and surface as a TrackerIssue warning for retry on a
-// later sync.
+// without its thread and surface as a TrackerIssue warning.
+//
+// Recovery is not automatic on the next sync: an incremental pull filters on
+// FetchOptions.Since, and a failed fetch does not bump the remote issue's
+// updated_at, so the thread is retried when the issue itself next changes or
+// on a pull that runs without an incremental cursor -- not merely because the
+// previous attempt failed.
 func (t *Tracker) hydrateComments(ctx context.Context, gh *Issue) error {
 	if gh.Comments <= 0 {
 		return nil

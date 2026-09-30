@@ -110,9 +110,9 @@ func Run(t *testing.T, build func(*testing.T, *Fixture) Setup) {
 		}
 		// Labels are certified on the UPDATE path only. Create-path label
 		// parity is a known blind spot: tracker's UOW store creates through
-		// domain.CreateIssueParams{Issue: issue} with Labels unset, and the
-		// domain create writes labels only from params.Labels, so a proxied
-		// create drops every label a direct create persists (bd-p0n1).
+		// domain.CreateIssueParams with Labels unset, and the domain create
+		// writes labels only from params.Labels, so a proxied create drops
+		// every label a direct create persists (bd-p0n1).
 		// Adopters must therefore not seed labels through Store.CreateIssue —
 		// doing so puts the two legs on divergent state and makes this suite
 		// certify a parity it never checked.

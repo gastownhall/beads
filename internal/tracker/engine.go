@@ -495,7 +495,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			// modified since last sync. Conflict detection (Phase 2) will
 			// handle these per the configured resolution strategy.
 			// Without this guard, pull silently overwrites local changes
-			// before conflict detection can compare timestamps.
+			// before conflict detection can compare timestamps. The skip
+			// defers the pulled comment thread too (conflict reimport
+			// fetches no comments), so an incremental pull imports it only
+			// once the remote issue changes again.
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
 				stats.Skipped++
 				continue
@@ -618,6 +621,11 @@ func (e *Engine) pullCommentsPending(ctx context.Context, existing *types.Issue,
 	}
 	comments, err := reader.GetIssueComments(ctx, existing.ID)
 	if err != nil {
+		// Report pending so the remote thread is still merged (the import
+		// dedups, so re-applying is idempotent and cannot drop a comment).
+		// The error would otherwise be discarded by the boolean, leaving a
+		// persistent read failure invisible while it re-applies every pull.
+		e.warn("Cannot read local comment thread for %s: %v", existing.ID, err)
 		return true
 	}
 	have := make(map[string]struct{}, len(comments))
@@ -1224,7 +1232,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				} else {
 					suffix := ""
 					if detail != "" {
-						suffix = fmt.Sprintf(" [%s]", detail)
+						// detail embeds remote label names, so it is sanitized
+						// like the title it is printed beside.
+						suffix = fmt.Sprintf(" [%s]", ui.SanitizeForTerminal(detail))
 					}
 					e.msg("[dry-run] Would update in %s%s: %s", e.Tracker.DisplayName(), suffix, ui.SanitizeForTerminal(issue.Title))
 					stats.Updated++
