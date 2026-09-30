@@ -78,6 +78,14 @@ func TestProxiedRestoreFailureMessage(t *testing.T) {
 			wantContains:   []string{"restored from aws://bucket/beads"},
 			wantMissing:    []string{"AKIAEXAMPLE", "wJalrXUtnFEMI", "K7MDENG"},
 		},
+		{
+			name:           "malformed credentialed source fails closed after reconcile",
+			dir:            "aws:/AKIAEXAMPLE:hunter2pass@bucket/beads",
+			afterReconcile: true,
+			err:            errors.New("open provider: schema is behind"),
+			wantContains:   []string{"restored from aws:[redacted]"},
+			wantMissing:    []string{"AKIAEXAMPLE", "hunter2pass"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := tc.dir

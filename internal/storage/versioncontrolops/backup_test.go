@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -316,6 +317,57 @@ func TestResolveBackupSourceRedactsTheSourceItQuotes(t *testing.T) {
 	}
 }
 
+func TestResolveBackupSourceRedactsNotDirectorySource(t *testing.T) {
+	t.Chdir(t.TempDir())
+	const source = "S3://AKIAEXAMPLE:hunter2pass@bucket/db"
+	if err := os.MkdirAll(filepath.Dir(source), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ResolveBackupSource(source)
+	if err == nil || !strings.Contains(err.Error(), "backup source is not a directory: S3://bucket/db") {
+		t.Fatalf("ResolveBackupSource(%q) = %v, want a redacted not-directory refusal", source, err)
+	}
+	for _, secret := range []string{"AKIAEXAMPLE", "hunter2pass"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("ResolveBackupSource(%q) error %q echoes %q", source, err, secret)
+		}
+	}
+}
+
+func TestResolveBackupSourceRedactsUnsafeFileURLRefusals(t *testing.T) {
+	tests := []struct {
+		name, source, want string
+	}{
+		{
+			name:   "relative path",
+			source: "file://AKIAEXAMPLE:hunter2pass@relative-backup",
+			want:   "file://relative-backup",
+		},
+		{
+			name:   "encoded or delimited path",
+			source: "file:///tmp/backup%41?token=hunter2pass",
+			want:   "file:///tmp/backup%41",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveBackupSource(tt.source)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ResolveBackupSource(%q) = %v, want refusal containing %q", tt.source, err, tt.want)
+			}
+			for _, secret := range []string{"AKIAEXAMPLE", "hunter2pass"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("ResolveBackupSource(%q) error %q echoes %q", tt.source, err, secret)
+				}
+			}
+		})
+	}
+}
+
 func TestRedactBackupURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -328,7 +380,10 @@ func TestRedactBackupURL(t *testing.T) {
 		{name: "user and query", source: "s3://user@bucket/db?x=1", want: "s3://bucket/db"},
 		{name: "bracketed aws", source: "aws://[dynamo-table:bucket]/db", want: "aws://[dynamo-table:bucket]/db"},
 		{name: "file URL", source: "file:///var/backups/x", want: "file:///var/backups/x"},
+		{name: "at sign in file path", source: "file:///srv/backups@2024/db", want: "file:///srv/backups@2024/db"},
+		{name: "userinfo in file authority", source: "file://key:secret@host/backups/x", want: "file://host/backups/x"},
 		{name: "plain path", source: "/var/backups/x", want: "/var/backups/x"},
+		{name: "malformed URL with userinfo", source: "aws:/k:s@b/db", want: "aws:[redacted]"},
 		{name: "clean URL", source: "s3://bucket/db", want: "s3://bucket/db"},
 
 		// One row per separator class, with the separator INSIDE the secret.
@@ -385,10 +440,12 @@ func TestRedactBackupURLLeaksNoSecret(t *testing.T) {
 // failingConn fails every statement so BackupRestore's error wrapper can be
 // inspected.
 type failingConn struct {
-	err error
+	err   error
+	calls int
 }
 
 func (c *failingConn) ExecContext(context.Context, string, ...any) (sql.Result, error) {
+	c.calls++
 	return nil, c.err
 }
 
@@ -397,6 +454,29 @@ func (c *failingConn) QueryContext(context.Context, string, ...any) (*sql.Rows, 
 }
 
 func (c *failingConn) QueryRowContext(context.Context, string, ...any) *sql.Row {
+	return nil
+}
+
+type echoingConn struct {
+	calls int
+	cause error
+}
+
+func (c *echoingConn) ExecContext(_ context.Context, _ string, args ...any) (sql.Result, error) {
+	c.calls++
+	for _, arg := range args {
+		if raw, ok := arg.(string); ok && strings.Contains(raw, "://") {
+			return nil, fmt.Errorf("dolt rejected backup URL %q: %w", raw, c.cause)
+		}
+	}
+	return nil, c.cause
+}
+
+func (c *echoingConn) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	return nil, errStubConn
+}
+
+func (c *echoingConn) QueryRowContext(context.Context, string, ...any) *sql.Row {
 	return nil
 }
 
@@ -426,5 +506,79 @@ func TestBackupRestoreRedactsURLInError(t *testing.T) {
 				t.Fatalf("BackupRestore error %q leaks the credential", err)
 			}
 		})
+	}
+}
+
+func TestBackupRestoreRejectsInvalidCredentialedURLsBeforeDolt(t *testing.T) {
+	tests := []string{
+		"aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/db",
+		"https://user:hunter2pass@[bad/db",
+		"aws://user:pass%zz@bucket/db",
+	}
+	for _, source := range tests {
+		t.Run(source, func(t *testing.T) {
+			conn := &failingConn{err: errors.New("Dolt must not be called")}
+			err := BackupRestore(context.Background(), conn, source, "beads", true)
+			if err == nil {
+				t.Fatal("BackupRestore returned nil for an invalid URL")
+			}
+			if conn.calls != 0 {
+				t.Fatalf("BackupRestore called Dolt %d time(s) for invalid URL %q", conn.calls, source)
+			}
+			for _, secret := range []string{"AKIAEXAMPLE", "wJalrXUtnFEMI", "K7MDENG", "hunter2pass", "pass%zz"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("BackupRestore(%q) error %q echoes %q", source, err, secret)
+				}
+			}
+			var parseErr *url.Error
+			if !errors.As(err, &parseErr) {
+				t.Errorf("BackupRestore(%q) error no longer preserves *url.Error: %v", source, err)
+			}
+		})
+	}
+}
+
+func TestBackupRestoreScrubsEchoedURLAndPreservesCause(t *testing.T) {
+	const source = "aws://AKIAEXAMPLE:hunter2pass@bucket/db"
+	sentinel := errors.New("typed Dolt failure")
+	for _, force := range []bool{false, true} {
+		conn := &echoingConn{cause: sentinel}
+		err := BackupRestore(context.Background(), conn, source, "beads", force)
+		if err == nil {
+			t.Fatal("BackupRestore returned nil for a failing statement")
+		}
+		if conn.calls != 1 {
+			t.Fatalf("BackupRestore called Dolt %d times, want 1", conn.calls)
+		}
+		if !strings.Contains(err.Error(), "restore from backup aws://bucket/db") {
+			t.Errorf("BackupRestore error %q dropped the redacted URL", err)
+		}
+		for _, secret := range []string{"AKIAEXAMPLE", "hunter2pass"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("BackupRestore error %q echoes %q", err, secret)
+			}
+		}
+		if !errors.Is(err, sentinel) {
+			t.Errorf("BackupRestore error %q no longer preserves errors.Is", err)
+		}
+	}
+}
+
+func TestBackupAddScrubsEchoedURLAndPreservesCause(t *testing.T) {
+	const source = "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/db"
+	sentinel := errors.New("typed Dolt failure")
+	conn := &failingConn{err: fmt.Errorf("parse %q: invalid port %q after host: %w",
+		source, ":wJalrXUtnFEMI", sentinel)}
+	err := BackupAdd(context.Background(), conn, "default", source)
+	if err == nil {
+		t.Fatal("BackupAdd returned nil for a failing statement")
+	}
+	for _, secret := range []string{"AKIAEXAMPLE", "wJalrXUtnFEMI", "K7MDENG"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("BackupAdd error %q echoes %q", err, secret)
+		}
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("BackupAdd error %q no longer preserves errors.Is", err)
 	}
 }

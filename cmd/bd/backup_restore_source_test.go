@@ -75,6 +75,22 @@ func TestValidateBackupRestoreDirStillRefusesMissingDirectories(t *testing.T) {
 			t.Errorf("validateBackupRestoreDir(%q) = %v, which echoes %q", credentialed, err, secret)
 		}
 	}
+
+	// A malformed scheme is not exempted either. Redaction must fail closed
+	// even though it has no :// delimiter for the normal URL path.
+	const malformed = "aws:/AKIAEXAMPLE:hunter2pass@bucket/beads"
+	err = validateBackupRestoreDir(malformed)
+	if err == nil {
+		t.Fatalf("validateBackupRestoreDir(%q) = nil, want a refusal", malformed)
+	}
+	if !strings.Contains(err.Error(), "aws:[redacted]") {
+		t.Errorf("validateBackupRestoreDir(%q) = %v, want fail-closed redaction", malformed, err)
+	}
+	for _, secret := range []string{"AKIAEXAMPLE", "hunter2pass"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("validateBackupRestoreDir(%q) = %v, which echoes %q", malformed, err, secret)
+		}
+	}
 }
 
 // TestRunBackupRestoreProxiedResolvesThroughResolveBackupSource pins the call
