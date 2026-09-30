@@ -6084,7 +6084,7 @@
  },
  {
   "name": "dep_cycles_detected_via_no_cycle_check",
-  "purpose": "Bypass per-edge cycle check with --no-cycle-check to plant a 2-node blocks cycle, then dep cycles reports it.",
+  "purpose": "Show that --no-cycle-check does not bypass the per-edge cycle check on a single-edge add: the edge that would close a 2-node blocks cycle is still rejected, and dep cycles reports none.",
   "prefix": "dep",
   "steps": [
    [
@@ -6133,7 +6133,7 @@
     "--json"
    ]
   ],
-  "pins": "Both adds succeed (single-edge add path honors --no-cycle-check); dep cycles --json returns a non-empty array of cycles containing {dep-1,dep-2}. Cycle member ordering compared as multiset.",
+  "pins": "First add succeeds; second errors 'adding dependency would create a cycle'; exit 1 (on a single-edge add --no-cycle-check skips only the post-add cycle warning, not the per-edge check); dep cycles --json returns [].",
   "deterministic": true
  },
  {

@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "idgen",
+    srcs = ["hash.go"],
+    importpath = "github.com/steveyegge/beads/internal/idgen",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "idgen_test",
+    srcs = ["hash_test.go"],
+    embed = [":idgen"],
+)

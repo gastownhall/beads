@@ -8,145 +8,182 @@
 # splitting, or reweighting TestProxiedServer* functions. Newly-added
 # tests not listed here hash-distribute via proxied-test-shard.sh.
 #
-# `bd serve`'s two suites are listed at the shard the hash fallback was
-# already giving them, so this records the assignment without reshuffling
-# the other 100. TestProxiedServerServeReadParity is the CLI/HTTP read parity
-# oracle — the behavioural half of the anti-drift claim — so it being IN this
-# lane, and this lane being required by PR Risk's CI gate, is the thing that
-# makes that claim enforced on PRs rather than asserted in a doc comment.
+# This file is generated: notes added here are erased by the next
+# regeneration. Add them to the generator instead. Known blind spots
+# of the cost proxy (it counts inits, not the work done per init):
 #
-# TestProxiedServerListSortRetiresTheWalk is listed the same way, at the shard
-# `cksum` was already giving it. It is the most expensive entry in the file —
-# it seeds 1400 rows and walks the listing three ways — and it is here for the
-# same reason as the parity oracle: it is the measurement behind the claim that
-# `sort=priority` retires the client-side walk, so it has to run on PRs.
+#   TestProxiedServerListSortRetiresTheWalk is the most expensive
+#   entry and one of the cheapest-looking: off a single init it seeds
+#   1400 rows and walks the listing three ways. It is the measurement
+#   behind the claim that sort=priority retires the client-side walk,
+#   so it has to run on PRs.
+#
+#   TestProxiedServerServeReadParity is the CLI/HTTP read parity
+#   oracle, the behavioural half of the anti-drift claim. It being in
+#   this lane, and this lane being required by the PR Risk CI gate,
+#   is what makes that claim enforced on PRs rather than asserted in
+#   a doc comment.
 
-15 1 TestProxiedServerCount
-15 1 TestProxiedServerDelete
-15 1 TestProxiedServerDoltRemoteRemove
-15 1 TestProxiedServerExport
-15 1 TestProxiedServerGateLifecycle
+15 1 TestProxiedServerBlocked
+15 1 TestProxiedServerCompactDolt
+15 1 TestProxiedServerCreate
+15 1 TestProxiedServerDep2
+15 1 TestProxiedServerDepConcurrent
 15 1 TestProxiedServerListSortRetiresTheWalk
-15 1 TestProxiedServerMolCurrent
-15 1 TestProxiedServerPathHelpers
-15 1 TestProxiedServerTodo
-15 1 TestProxiedServerUpdateConcurrentAppendNotes
+15 1 TestProxiedServerMolLastActivity
+15 1 TestProxiedServerReopenConcurrent
+15 1 TestProxiedServerServeReadParity
+15 1 TestProxiedServerUpdateConcurrentClaim
 
-15 2 TestProxiedServerCountIncludeInfra
-15 2 TestProxiedServerMolBurn
-15 2 TestProxiedServerPing
-15 2 TestProxiedServerUpdate
-15 2 TestProxiedServerUpdateConcurrentClaim
+15 2 TestProxiedServerCompactHistory
+15 2 TestProxiedServerCreate2
+15 2 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
+15 2 TestProxiedServerFindDuplicates
+15 2 TestProxiedServerListWatchCountsTheOffsetIntoMaxRows
+15 2 TestProxiedServerReady2
+15 2 TestProxiedServerSQL
+15 2 TestProxiedServerServeReadRevision
+15 2 TestProxiedServerUpdateConcurrentMetadata
 15 2 TestProxiedServerUpdateIfGuards
-15 2 TestProxiedServerWispGC
 
-15 3 TestProxiedServerBlocked
-15 3 TestProxiedServerChildren
-15 3 TestProxiedServerDeferUndefer
-15 3 TestProxiedServerMolSquash
-15 3 TestProxiedServerPour
-15 3 TestProxiedServerPriority
-15 3 TestProxiedServerUpdate2
-15 3 TestProxiedServerUpdateConcurrentMetadata
+15 3 TestProxiedServerCascadeParity
+15 3 TestProxiedServerDoltLifecycle
+15 3 TestProxiedServerMolBurn
+15 3 TestProxiedServerMolStale
+15 3 TestProxiedServerMoleculeFrontDoorDirectServerProxyParity
+15 3 TestProxiedServerSQLDatabaseFlag
+15 3 TestProxiedServerServeRelatedIssues
+15 3 TestProxiedServerTag
+15 3 TestProxiedServerUpdate
+15 3 TestProxiedServerWispCreateRejectsEnumViolatingVar
 
-15 4 TestProxiedServerCascadeParity
-15 4 TestProxiedServerClose2
-15 4 TestProxiedServerDeleteConcurrent
-15 4 TestProxiedServerDuplicates
-15 4 TestProxiedServerMolBond
-15 4 TestProxiedServerQuery
-15 4 TestProxiedServerUnclaimIfAssigneeParity
-15 4 TestProxiedServerWispCreate
+15 4 TestProxiedServerCreateInfraTypeRoutesToWisps
+15 4 TestProxiedServerEdit
+15 4 TestProxiedServerMoleculeFrontDoorWriteParity
+15 4 TestProxiedServerPour
+15 4 TestProxiedServerReassignFence
+15 4 TestProxiedServerServeAddComment
+15 4 TestProxiedServerServeRelease
+15 4 TestProxiedServerUpdate2
+15 4 TestProxiedServerUpdateHooks
 
-15 5 TestProxiedServerCreate2
-15 5 TestProxiedServerDepConcurrent
-15 5 TestProxiedServerFindDuplicates
+15 5 TestProxiedServerClose
+15 5 TestProxiedServerConfigConcurrent
+15 5 TestProxiedServerExport
+15 5 TestProxiedServerGateLifecycle
 15 5 TestProxiedServerMolReadyGated
-15 5 TestProxiedServerReadyClaimConcurrent
-15 5 TestProxiedServerWispList
+15 5 TestProxiedServerMultiStatementSQL
+15 5 TestProxiedServerServeAddDependencies
+15 5 TestProxiedServerServeRemoveDependency
+15 5 TestProxiedServerWispCreate
 
-15 6 TestProxiedServerAssign
-15 6 TestProxiedServerCleanDatabases
-15 6 TestProxiedServerEdit
+15 6 TestProxiedServerClose2
+15 6 TestProxiedServerContext
+15 6 TestProxiedServerExternalCreate
 15 6 TestProxiedServerLink
-15 6 TestProxiedServerPrime
-15 6 TestProxiedServerReady2
-15 6 TestProxiedServerReadyConcurrent
-15 6 TestProxiedServerState
+15 6 TestProxiedServerNote
+15 6 TestProxiedServerRelate
+15 6 TestProxiedServerServeBatchClose
+15 6 TestProxiedServerServeSettingsWrites
+15 6 TestProxiedServerWispList
 
-15 7 TestProxiedServerClose
-15 7 TestProxiedServerCloseConcurrent
-15 7 TestProxiedServerExternalCreate
-15 7 TestProxiedServerHeartbeat
-15 7 TestProxiedServerMolStale
-15 7 TestProxiedServerReadyWisp
-15 7 TestProxiedServerReclaim
-15 7 TestProxiedServerRelate
+15 7 TestProxiedServerAssign
+15 7 TestProxiedServerBackupRefusedOnExternalTopology
+15 7 TestProxiedServerCount
+15 7 TestProxiedServerGC
+15 7 TestProxiedServerList
+15 7 TestProxiedServerOrphans
+15 7 TestProxiedServerReady
+15 7 TestProxiedServerServeClaim
+15 7 TestProxiedServerServeUpdate
+15 7 TestProxiedServerState
 
-15 8 TestProxiedServerCreate
-15 8 TestProxiedServerGC
-15 8 TestProxiedServerGateCheck
-15 8 TestProxiedServerMolLastActivity
-15 8 TestProxiedServerPromote
-15 8 TestProxiedServerQuick
-15 8 TestProxiedServerReopenConcurrent
-15 8 TestProxiedServerServeClaim
-15 8 TestProxiedServerServeReadParity
+15 8 TestProxiedServerBatchParity
+15 8 TestProxiedServerCountIncludeInfra
+15 8 TestProxiedServerDoltRemoteRemove
+15 8 TestProxiedServerGateCreateInheritsRepoMetadata
+15 8 TestProxiedServerLabel
+15 8 TestProxiedServerMolBond
+15 8 TestProxiedServerPathHelpers
+15 8 TestProxiedServerRecomputeBlocked
+15 8 TestProxiedServerServeClaimNext
+15 8 TestProxiedServerSetState
 
-15 9 TestProxiedServerBatchParity
-15 9 TestProxiedServerDep2
-15 9 TestProxiedServerGraph
-15 9 TestProxiedServerMolProgress
+15 9 TestProxiedServerChildren
+15 9 TestProxiedServerComment
+15 9 TestProxiedServerDeferAutoWake
+15 9 TestProxiedServerGateFrontDoorDirectServerProxyParity
+15 9 TestProxiedServerMemory
+15 9 TestProxiedServerPing
 15 9 TestProxiedServerPrune
-15 9 TestProxiedServerSQL
-15 9 TestProxiedServerStatus
+15 9 TestProxiedServerReopen
+15 9 TestProxiedServerServeClose
+15 9 TestProxiedServerStale
 
-15 10 TestProxiedServerCompactDolt
-15 10 TestProxiedServerConfigSetMany
-15 10 TestProxiedServerHistory
-15 10 TestProxiedServerLabel
-15 10 TestProxiedServerList
-15 10 TestProxiedServerSQLDatabaseFlag
-15 10 TestProxiedServerSwarm
+15 10 TestProxiedServerCleanDatabases
+15 10 TestProxiedServerDeferUndefer
+15 10 TestProxiedServerDuplicates
+15 10 TestProxiedServerGraph
+15 10 TestProxiedServerPourRejectsEnumViolatingVar
+15 10 TestProxiedServerSearch
+15 10 TestProxiedServerServeCount
+15 10 TestProxiedServerShow
+15 10 TestProxiedServerStatuses
 15 10 TestProxiedServerUpdateWisp
 
-15 11 TestProxiedServerCompactHistory
-15 11 TestProxiedServerDeleteWisp
-15 11 TestProxiedServerEpic
-15 11 TestProxiedServerHuman
-15 11 TestProxiedServerInfo
-15 11 TestProxiedServerMolDistill
-15 11 TestProxiedServerReady
-15 11 TestProxiedServerSetState
+15 11 TestProxiedServerDelete
+15 11 TestProxiedServerDep
+15 11 TestProxiedServerGateCheck
+15 11 TestProxiedServerGateList
+15 11 TestProxiedServerHeartbeat
+15 11 TestProxiedServerMolProgress
+15 11 TestProxiedServerPriority
+15 11 TestProxiedServerPromote
+15 11 TestProxiedServerServeCreate
+15 11 TestProxiedServerSwarm
 
-15 12 TestProxiedServerDep
-15 12 TestProxiedServerLint
-15 12 TestProxiedServerServeLifecycle
-15 12 TestProxiedServerServeModeGate
-15 12 TestProxiedServerShow3
-15 12 TestProxiedServerStale
-15 12 TestProxiedServerTag
+15 12 TestProxiedServerDeleteBlockedJSONSingleDoc
+15 12 TestProxiedServerHistory
+15 12 TestProxiedServerKV
+15 12 TestProxiedServerMolShow
+15 12 TestProxiedServerQuery
+15 12 TestProxiedServerQuick
+15 12 TestProxiedServerServeDelete
+15 12 TestProxiedServerShow2
+15 12 TestProxiedServerTypes
+15 12 TestProxiedServerUpdateClosePolicy
 
-15 13 TestProxiedServerConfig
-15 13 TestProxiedServerConfigConcurrent
-15 13 TestProxiedServerGateList
-15 13 TestProxiedServerMemory
-15 13 TestProxiedServerMultiStatementSQL
-15 13 TestProxiedServerReopen
-15 13 TestProxiedServerStatuses
+15 13 TestProxiedServerDeleteConcurrent
+15 13 TestProxiedServerInfo
+15 13 TestProxiedServerMolSquash
+15 13 TestProxiedServerReadyClaimConcurrent
+15 13 TestProxiedServerReadyWisp
+15 13 TestProxiedServerServeEdgeCounts
+15 13 TestProxiedServerShow3
+15 13 TestProxiedServerStatus
+15 13 TestProxiedServerUnclaim
+15 13 TestProxiedServerWispGC
 
-15 14 TestProxiedServerComment
-15 14 TestProxiedServerContext
-15 14 TestProxiedServerKV
-15 14 TestProxiedServerNote
-15 14 TestProxiedServerSearch
-15 14 TestProxiedServerShow
-15 14 TestProxiedServerTypes
+15 14 TestProxiedServerCleanDatabasesPurgeDropped
+15 14 TestProxiedServerConfig
+15 14 TestProxiedServerConfigSetMany
+15 14 TestProxiedServerDeleteForceOrphans
+15 14 TestProxiedServerImport
+15 14 TestProxiedServerInitIfMissing
+15 14 TestProxiedServerMolDistill
+15 14 TestProxiedServerPrime
+15 14 TestProxiedServerReadyConcurrent
+15 14 TestProxiedServerServeLifecycle
+15 14 TestProxiedServerUnclaimIfAssigneeParity
 
-15 15 TestProxiedServerMolShow
-15 15 TestProxiedServerOrphans
-15 15 TestProxiedServerRecomputeBlocked
-15 15 TestProxiedServerShow2
-15 15 TestProxiedServerUnclaim
+15 15 TestProxiedServerCloseConcurrent
+15 15 TestProxiedServerDeleteWisp
+15 15 TestProxiedServerEpic
+15 15 TestProxiedServerHuman
+15 15 TestProxiedServerLint
+15 15 TestProxiedServerMolCurrent
+15 15 TestProxiedServerReclaim
+15 15 TestProxiedServerServeModeGate
+15 15 TestProxiedServerTodo
 15 15 TestProxiedServerUpdate3
-15 15 TestProxiedServerUpdateHooks
+15 15 TestProxiedServerUpdateConcurrentAppendNotes

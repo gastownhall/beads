@@ -1,0 +1,49 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "utils",
+    srcs = [
+        "id_parser.go",
+        "issue_id.go",
+        "path.go",
+        "path_case_darwin.go",
+        "path_case_other.go",
+        "strings.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/utils",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/debug",
+        "//internal/types",
+    ] + select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "utils_test",
+    srcs = [
+        "id_parser_prefix_test.go",
+        "id_parser_sentinel_test.go",
+        "id_parser_test.go",
+        "id_parser_unit_test.go",
+        "issue_446_test.go",
+        "issue_id_test.go",
+        "path_case_test.go",
+        "path_test.go",
+        "strings_test.go",
+        "testmain_test.go",
+    ],
+    embed = [":utils"],
+    deps = [
+        "//internal/storage/dolt",
+        "//internal/testutil",
+        "//internal/types",
+    ],
+)

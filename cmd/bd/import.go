@@ -356,6 +356,42 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 		return renderImportDryRun(result, len(memories), source, dedupHits)
 	}
 
+	// ONE value for both prefix writers on this path — the seed just below and
+	// the post-import sync at the bottom. Resolved once so they cannot disagree
+	// on trimming or on validation; see importSyncPrefix.
+	syncPrefix := importSyncPrefix()
+
+	// Seed issue_prefix from config.yaml before the config table has one, so
+	// NewBatchContext's ReadConfigPrefix (below, via importIssuesCore) does
+	// not reject an externally-provisioned database that config.yaml already
+	// names a prefix for.
+	//
+	// It runs BEFORE the memory writes below, deliberately: CommitWithConfig
+	// is DOLT_COMMIT -Am, so it stages everything dirty at that instant.
+	// Seeding first is what keeps the prefix the only thing this commit can
+	// carry — otherwise this run's kv.memory.* rows land in a commit named for
+	// the prefix seed, and stay permanently committed when the import below
+	// then fails, instead of being left in the working set for the operator to
+	// discard.
+	//
+	// The commit lands HERE, before an import that may fail, which means a
+	// failed `bd import` can leave the seeded prefix behind. Accepted: the
+	// value is config.yaml's own and is the converged one either way, so the
+	// residue is the state the next successful import would reach. Deferring
+	// it to the post-import CommitWithConfig below is NOT an alternative —
+	// that block only fires when dbPrefix != syncPrefix, which a seed makes
+	// false, so the row would stay uncommitted (store.Commit excludes config,
+	// GH#2455) and a dirty internal config key then blocks the next pull.
+	if len(issues) > 0 && syncPrefix != "" {
+		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix == "" {
+			if setErr := store.SetConfig(ctx, "issue_prefix", syncPrefix); setErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to seed issue_prefix from config.yaml: %v\n", setErr)
+			} else if commitErr := store.CommitWithConfig(ctx, "bd import: seed issue_prefix from config.yaml"); commitErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to commit seeded issue_prefix: %v\n", commitErr)
+			}
+		}
+	}
+
 	// Import memories
 	for _, mem := range memories {
 		storageKey := kvPrefix + memoryPrefix + mem.Key
@@ -396,16 +432,51 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 	// for this intentional config update after the issues commit completes.
 	// config.yaml is authoritative here and existing issue IDs are intentionally
 	// left unchanged: this deliberately bypasses the `bd config set issue_prefix`
-	// guard for the import/migration flow and is not a rename.
-	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
-		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != yamlPrefix {
-			if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
+	// guard for the import/migration flow and is not a rename. Reconciles
+	// against the SAME resolved value the seed used, so a padded config.yaml
+	// prefix cannot make this test true forever and overwrite the trimmed
+	// value the seed stored on every import.
+	if syncPrefix != "" {
+		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != syncPrefix {
+			if setErr := store.SetConfig(ctx, "issue_prefix", syncPrefix); setErr == nil {
 				_ = store.CommitWithConfig(ctx, "bd import: sync issue_prefix from config.yaml")
 			}
 		}
 	}
 
 	return renderImportOutcome(result, source, dedupHits)
+}
+
+// importSyncPrefix resolves the ONE config.yaml issue_prefix value EVERY
+// import writer uses: the classic path's seed (before the batch needs it) and
+// its post-import sync (after the batch lands), and the SyncIssuePrefix the
+// proxied path hands ImportBatch (import_proxied_server.go), which seeds and
+// syncs inside its one transaction. "" means "reconcile nothing", which is
+// what --global, an absent value, and an invalid value all resolve to.
+//
+// Resolving once is what keeps those writers honest: the seed stored the
+// TRIMMED value while the sync used to compare the raw one, so a padded
+// `issue-prefix: " bd"` made them disagree and the sync overwrote the seed's
+// value; and the sync used to skip validatePrefix entirely, so a prefix the
+// seed refused still reached the database through it.
+func importSyncPrefix() string {
+	// --global: config.yaml is a per-project file, and the shared global
+	// store's own prefix must win (selectCreateIDPrefix), not whatever project
+	// happened to import into it.
+	if globalFlag {
+		return ""
+	}
+	yamlPrefix := strings.TrimSpace(config.GetString("issue-prefix"))
+	if yamlPrefix == "" {
+		return ""
+	}
+	if err := validatePrefix(yamlPrefix); err != nil {
+		// Naming both effects: an invalid value disables the sync as well as
+		// the seed, and base did sync an invalid prefix through.
+		fmt.Fprintf(os.Stderr, "warning: ignoring invalid issue-prefix %q from config.yaml (not seeding or syncing issue_prefix): %v\n", yamlPrefix, err)
+		return ""
+	}
+	return yamlPrefix
 }
 
 // applyImportDryRunClassification folds a dry-run classification into the

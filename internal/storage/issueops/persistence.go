@@ -13,8 +13,20 @@ type PersistenceMoveResult struct {
 	ChangedTables map[string]bool
 }
 
-// MoveIssuePersistenceInTx moves a complete issue aggregate to the requested persistence mode.
+// MoveIssuePersistenceInTx moves a complete issue aggregate to the requested
+// persistence mode. A move that lands (or normalizes) the row on the issues
+// plane mints a version row once the target row and its auxiliary copies
+// exist; a move whose target is the wisp plane mints nothing (wisps are never
+// versioned).
 func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode, actor string) (PersistenceMoveResult, error) {
+	return moveIssuePersistenceInTx(ctx, tx, current, mode, actor, true)
+}
+
+// moveIssuePersistenceInTx is the body of MoveIssuePersistenceInTx.
+// mintVersion controls whether the move mints its own version row: the
+// exported entry point always does, while ExecuteUpdate applies the
+// persistence patch last and mints once for the whole guarded update.
+func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode, actor string, mintVersion bool) (PersistenceMoveResult, error) {
 	if tx == nil || current == nil || current.ID == "" {
 		return PersistenceMoveResult{}, fmt.Errorf("move issue persistence: issue and transaction are required")
 	}
@@ -57,6 +69,13 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 		// an update. The no-change early return above emits nothing.
 		if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
 			return PersistenceMoveResult{}, err
+		}
+		// Versioned only on the issues plane; a wisp-plane normalize keeps
+		// the wisp exclusion.
+		if mintVersion && !targetWisp {
+			if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
+				return PersistenceMoveResult{}, err
+			}
 		}
 		return result, nil
 	}
@@ -124,9 +143,16 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	result.ChangedTables[persistenceIssueTable(targetWisp)] = true
 	// The bead keeps its ID across a plane move; only where it is stored
 	// changes. Journal one update carrying the moved snapshot, after derived
-	// blocked-state maintenance has settled.
+	// blocked-state maintenance has settled. A move INTO the issues plane
+	// then mints the row's first version there, after its auxiliary copies
+	// and retargeted edges exist; a move into the wisp plane mints nothing.
 	if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
 		return PersistenceMoveResult{}, err
+	}
+	if mintVersion && !targetWisp {
+		if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
+			return PersistenceMoveResult{}, err
+		}
 	}
 	return result, nil
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/subosito/gotenv"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
@@ -789,7 +790,8 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return beadsDir
 	}
 
-	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+	bound := ceiling.For(filepath.Dir(dbPath))
+	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		candidate := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
@@ -890,7 +892,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables Dolt auto-push")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
 	rootCmd.PersistentFlags().BoolVar(&globalFlag, "global", false, "Use the global shared-server database (beads_global)")
-	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP). Applies to embedded and direct SQL-server modes; proxied-server routes are unaffected. Default: on. Override via config key dolt.auto-commit")
+	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP, except in proxied-server mode, where bd dolt commit is the only flush point). In proxied-server mode the deferral covers the writes the CLI makes on that route, including config and version metadata; explicit commit points (bd batch, bd mol bond/pour/squash, bd mol wisp create, and the wisp half of bd mol burn) still commit, and a bd serve process on the same database is unaffected. Default: on. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().BoolVar(&cpuProfileEnabled, "cpu-profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().StringVar(&memProfilePath, "mem-profile", "", "Write heap profile to FILE on exit (also respects BEADS_MEM_PROFILE)")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
@@ -1009,6 +1011,9 @@ var rootCmd = &cobra.Command{
 		_ = cmd.Help() // Help() always returns nil for cobra commands
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) (retErr error) {
+		if err := clearWorktreeGitRoutingEnv(cmd); err != nil {
+			return err
+		}
 		applyNoColorFlag()
 
 		// Initialize CommandContext to hold runtime state (replaces scattered globals)
@@ -1100,7 +1105,13 @@ var rootCmd = &cobra.Command{
 				jsonOutput = true
 			}
 		}
-		// If flag wasn't explicitly set, use viper value
+		// If flag wasn't explicitly set, use viper value.
+		//
+		// SHADOWING HAZARD (GH#6278): this reads the ROOT persistent --format
+		// only, so a subcommand that registers its own local --format shadows
+		// it here and still gets `json: true` promoted over the format it was
+		// asked for. `bd list` compensates in gatherListInput; any new local
+		// --format registration needs the same treatment or this fires again.
 		if !commandJSONFlagChanged(cmd) && !cmd.Root().PersistentFlags().Changed("format") {
 			jsonOutput = config.GetBool("json")
 		} else {
@@ -1454,6 +1465,11 @@ var rootCmd = &cobra.Command{
 					// would create a local database instead of using the redirect target.
 					// (GH#bd-0qel)
 					targetBeadsDir := beads.FindBeadsDir()
+					if targetBeadsDir == "" {
+						// An explicit BEADS_DIR is authoritative even
+						// before it holds project files.
+						targetBeadsDir = beads.ExplicitBeadsDir()
+					}
 					if targetBeadsDir == "" {
 						targetBeadsDir = ".beads"
 					}
@@ -1821,6 +1837,16 @@ var rootCmd = &cobra.Command{
 			}
 			uowProvider = wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(p, uowSinks))
 
+			// Honor dolt.auto-commit for proxied writes the same way
+			// issueOpsContext already does for the direct/SQL-server routes
+			// (bd-4wamg): batch/off defer the Dolt version commit rather than
+			// minting one per write (GH#4995). uow.issueOperations reads this
+			// off the context for every Create/Update/Close/Reopen it runs.
+			rootCtx, err = issueOpsContext(rootCtx)
+			if err != nil {
+				return HandleError("failed to resolve dolt auto-commit policy: %v", err)
+			}
+
 			if !previewMode {
 				reconcileVersionProxiedServer(rootCtx)
 			}
@@ -1843,6 +1869,63 @@ var rootCmd = &cobra.Command{
 		}
 
 		doltCfg.Path = doltPath
+
+		// Validate workspace identity for write commands (GH#2438, GH#2372)
+		// BEFORE the real store opens below. Skip for read-only commands
+		// since they can't corrupt data. Skip for --global: the global
+		// database uses a sentinel project ID that won't match any
+		// project's metadata.json.
+		//
+		// This has to run before the store opens, not after: opening it is
+		// what lets a pending schema migration auto-apply (the smart gate,
+		// #4516), and checking identity only after that open means a
+		// mismatch is caught after the migration already landed as a real,
+		// permanent commit — the refusal arrives too late to prevent it
+		// (be-0gfcs). newPreviewStoreFromConfig gives a non-mutating,
+		// behind-schema-tolerant peek at the same database: enough to read
+		// _project_id without running (or needing) the migration this check
+		// must complete ahead of.
+		//
+		// Dispatches on previewErr, not on idStore's own nilness: even the
+		// success case can't trust idStore to signal failure on its own.
+		// openNonMutatingStoreFromConfig's dolt-server-mode branch returns
+		// dolt.NewFromConfigWithOptions's result straight through, and on a
+		// failed connection that is a nil *dolt.DoltStore boxed into a
+		// non-nil storage.DoltStorage interface — the classic Go typed-nil
+		// trap, where `idStore != nil` reads true even though the store
+		// behind it is not there. Calling Close() (or anything else) on
+		// that reference panics (confirmed live:
+		// TestPersistentPreRunHonorsSkipStoreAnnotation's control case, a
+		// command with no skip-store annotation run against an absent
+		// server-mode database). Checking previewErr first sidesteps the
+		// trap entirely, matching the ordinary (value, err) contract every
+		// other caller of this pair already trusts.
+		//
+		// A failed peek still has to be told apart from a legitimate first
+		// run: isBootstrapPreviewErr recognizes "no local database yet" (a
+		// wrapped os.ErrNotExist from the embedded store's own data-dir
+		// check), and only that case is skipped silently — the bootstrap
+		// tolerance this check has always had. Any other previewErr
+		// (unreachable server-mode endpoint, unloadable config, a
+		// registered backend refusing the read-only open, ...) used to be
+		// swallowed the same way, which let a preview failure wave the
+		// real, mutating open through unexamined — the one thing this check
+		// exists to prevent (be-3bt2e). Those cases now refuse instead.
+		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
+			idStore, previewErr := newPreviewStoreFromConfig(rootCtx, beadsDir)
+			switch {
+			case previewErr == nil:
+				checkErr := validateWorkspaceIdentity(rootCtx, idStore, beadsDir)
+				_ = idStore.Close()
+				if checkErr != nil {
+					return checkErr
+				}
+			case isBootstrapPreviewErr(previewErr):
+				debug.Logf("workspace identity check: skipping, no local database yet (%v)\n", previewErr)
+			default:
+				return refuseUnverifiablePreviewOpen(previewErr)
+			}
+		}
 
 		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
 		// directory — including noms/LOCK files. These are Dolt-internal files.
@@ -1891,15 +1974,10 @@ var rootCmd = &cobra.Command{
 			maybeAutoImportJSONL(rootCtx, store, beadsDir)
 		}
 
-		// Validate workspace identity for write commands (GH#2438, GH#2372)
-		// Skip for read-only commands since they can't corrupt data.
-		// Skip for --global: the global database uses a sentinel project ID
-		// that won't match any project's metadata.json.
-		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			if err := validateWorkspaceIdentity(rootCtx, beadsDir); err != nil {
-				return err
-			}
-		}
+		// Workspace identity is validated earlier now, before the store below
+		// was allowed to open and auto-apply a pending schema migration as a
+		// side effect (be-0gfcs) — see the check right before
+		// newRegisteredBackendStore/newDoltStore.
 
 		// Initialize hook runner using the .beads directory resolved above via
 		// resolveCommandBeadsDir. Do not use filepath.Dir(dbPath): for a
@@ -2003,6 +2081,15 @@ var rootCmd = &cobra.Command{
 			// out at the other trigger site below.
 			if shouldAutoPruneEventsJournal(cmd) {
 				maybeAutoPruneEventsJournal(rootCtx, beads.FindBeadsDir())
+			}
+			// Auto-backup, through the provider this command opened. Same
+			// gate as the direct arm's maintenance net below (strict
+			// --readonly, `bd serve` and a migration freeze all skip it),
+			// plus previews: a --dry-run must not register a backup remote
+			// or write backup state. proxiedAutoBackupBackend decides the
+			// topology, so this stays inert off managed-local.
+			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
+				runPostRunAutoBackup(rootCtx)
 			}
 			if uowProvider != nil {
 				_ = uowProvider.Close(rootCtx)
@@ -2150,37 +2237,78 @@ var rootCmd = &cobra.Command{
 			_ = traceFile.Close() // Best effort cleanup
 		}
 
-		// Heap profiling: --mem-profile flag or BEADS_MEM_PROFILE env var.
-		// Runs a GC first by default; BEADS_MEM_PROFILE_NOGC=1 skips it to capture peak.
-		heapDest := memProfilePath
-		if heapDest == "" {
-			heapDest = os.Getenv("BEADS_MEM_PROFILE")
-		}
-		if heapDest != "" {
-			if os.Getenv("BEADS_MEM_PROFILE_NOGC") == "" {
-				runtime.GC()
-			}
-			if f, err := os.Create(heapDest); err == nil { // #nosec G304 -- user-supplied profiling path
-				_ = pprof.WriteHeapProfile(f)
-				_ = f.Close()
-			}
-		}
-		// Optional one-line MemStats summary: BEADS_MEM_STATS=/path/to/stats.txt
-		if statsDest := os.Getenv("BEADS_MEM_STATS"); statsDest != "" {
-			var ms runtime.MemStats
-			runtime.ReadMemStats(&ms)
-			if f, err := os.Create(statsDest); err == nil { // #nosec G304 -- user-supplied profiling path
-				fmt.Fprintf(f, "HeapAlloc=%d HeapSys=%d HeapInuse=%d HeapObjects=%d\n",
-					ms.HeapAlloc, ms.HeapSys, ms.HeapInuse, ms.HeapObjects)
-				_ = f.Close()
-			}
-		}
+		// Heap profiling / MemStats summary: --mem-profile flag or
+		// BEADS_MEM_PROFILE / BEADS_MEM_STATS env vars. See writeMemDiagnostics.
+		writeMemDiagnostics(memProfilePath)
 
 		// The signal context is canceled and cleared by the deferred hook
 		// registered at the top of this function, so that it also covers the
 		// early error returns above.
 		return nil
 	},
+}
+
+// flusherDiagnosticsSuffix separates the detached send-metrics child's memory
+// diagnostics from the parent command's. See memDiagnosticsDest.
+const flusherDiagnosticsSuffix = ".send-metrics"
+
+// memDiagnosticsDest returns the destination writeMemDiagnostics should write
+// dest to, suffixed when this process is the detached flusher child.
+//
+// MaybeSpawnFlusher hands the child the parent's environment minus the endpoint
+// (flusherChildEnv in internal/metrics/spawn.go), so BEADS_MEM_PROFILE and
+// BEADS_MEM_STATS arrive holding the same absolute paths the parent resolved.
+// The spawn happens on main()'s post-ExecuteC tail, i.e. after
+// PersistentPostRunE already wrote them, so an unsuffixed child would silently
+// replace the profile of the command the user actually asked about with a
+// profile of the trivial flusher -- no error, no size anomaly. Error exits are
+// worse: CheckReadonly and the pre-run gates call CloseAndFlush while
+// PersistentPostRunE never runs, leaving the child's file as the only one.
+//
+// BD_IS_FLUSHER=1 is set only by flusherChildEnv, so a human running
+// `bd send-metrics` directly still gets the plain path. The suffix is applied
+// to the resolved destination, after the flag/env fallback, so both knobs and
+// both sources follow one rule.
+func memDiagnosticsDest(dest string) string {
+	if dest == "" || os.Getenv(metrics.EnvIsFlusher) != "1" {
+		return dest
+	}
+	return dest + flusherDiagnosticsSuffix
+}
+
+// writeMemDiagnostics honors the heap-profile and MemStats diagnostic knobs
+// (--mem-profile / BEADS_MEM_PROFILE / BEADS_MEM_PROFILE_NOGC / BEADS_MEM_STATS).
+// memProfileFlag is the --mem-profile flag value, which wins over
+// BEADS_MEM_PROFILE. Both call sites pass memProfilePath: --mem-profile is
+// registered on rootCmd.PersistentFlags(), so every subcommand inherits it,
+// including the hidden send-metrics one -- which calls this directly because its
+// Run exits before Cobra ever reaches PersistentPostRunE below.
+func writeMemDiagnostics(memProfileFlag string) {
+	// Runs a GC first by default; BEADS_MEM_PROFILE_NOGC=1 skips it to capture peak.
+	heapDest := memProfileFlag
+	if heapDest == "" {
+		heapDest = os.Getenv("BEADS_MEM_PROFILE")
+	}
+	heapDest = memDiagnosticsDest(heapDest)
+	if heapDest != "" {
+		if os.Getenv("BEADS_MEM_PROFILE_NOGC") == "" {
+			runtime.GC()
+		}
+		if f, err := os.Create(heapDest); err == nil { // #nosec G304 -- user-supplied profiling path
+			_ = pprof.WriteHeapProfile(f)
+			_ = f.Close()
+		}
+	}
+	// Optional one-line MemStats summary: BEADS_MEM_STATS=/path/to/stats.txt
+	if statsDest := memDiagnosticsDest(os.Getenv("BEADS_MEM_STATS")); statsDest != "" {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		if f, err := os.Create(statsDest); err == nil { // #nosec G304 -- user-supplied profiling path
+			fmt.Fprintf(f, "HeapAlloc=%d HeapSys=%d HeapInuse=%d HeapObjects=%d\n",
+				ms.HeapAlloc, ms.HeapSys, ms.HeapInuse, ms.HeapObjects)
+			_ = f.Close()
+		}
+	}
 }
 
 func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
@@ -2330,16 +2458,80 @@ func flushBatchCommitOnShutdown() {
 	fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
 }
 
+// isBootstrapPreviewErr reports whether err is the identity check's preview
+// open failing because no local database exists yet — a legitimate first
+// run, not a workspace problem. It must stay narrow: any other previewErr
+// (unreachable server, bad config, ...) has to refuse rather than silently
+// wave the real, mutating open through (be-3bt2e).
+func isBootstrapPreviewErr(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// refuseUnverifiablePreviewOpen renders the identity gate's refusal when the
+// preview open failed for a reason other than first-run bootstrap.
+//
+// The preview IS a real store open, so it can hit the same typed open errors the
+// real one does, and those must be rendered exactly as the real-open arm renders
+// them. Moving the gate earlier is not license to downgrade
+// SchemaSkewError.UserMessage()'s actionable rebuild block into a generic
+// wrapper, nor to drop the JSON body that every `--json` consumer depends on.
+//
+// Only ONE class actually arrives here typed today — schema skew: the preview
+// runs CheckForwardDrift (embeddeddolt openReadOnly, dolt store open), which is
+// how the recurring stale-binary class #4135/#4137 surfaces at the preview
+// first. The other two calls below are defensive-for-symmetry with the real-open
+// arm, and cannot fire from a preview as the code stands:
+//   - handleFreshCloneError matches a post-migration failure string that a
+//     non-mutating preview never produces. Note for whoever makes it reachable:
+//     it ignores jsonOutput (main_errors.go), so it would break the `--json`
+//     guarantee this arm otherwise keeps.
+//   - CheckRemoteMigrateGate* runs only from mutating opens, never from
+//     openReadOnly, so RemoteMigrateGateError cannot originate in the preview.
+//
+// projectIdentityMismatchError is deliberately NOT in that list: it is a plain
+// fmt.Errorf block with no typed wrapper, so it falls to the generic arm below
+// and picks up its prefix. That matches base, where the mismatch block reached
+// the operator inside the real arm's "failed to open database: %v" wrapper.
+//
+// Extracted from the gate's default arm so both halves are directly testable
+// without standing up a forward-drifted workspace; the wire itself is pinned on
+// the embedded tier by
+// TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace.
+func refuseUnverifiablePreviewOpen(previewErr error) error {
+	if handleFreshCloneError(previewErr) {
+		return SilentExit()
+	}
+	if renderTypedOpenError(previewErr) {
+		return SilentExit()
+	}
+	// What remains is preview-specific: an unreachable endpoint, unloadable
+	// config, a registered backend refusing the read-only open. Respect --json
+	// so a machine caller still receives a structured error. The override hint
+	// lives only on this arm, and states what it actually does: on the typed
+	// arms above it cannot help, because the real open fails on the identical
+	// condition.
+	return HandleErrorRespectJSON(
+		"could not verify workspace identity before opening the database: %v "+
+			"(BEADS_SKIP_IDENTITY_CHECK=1 skips this pre-open check; it does not fix an error the real open would hit too)",
+		previewErr)
+}
+
 // validateWorkspaceIdentity checks that the project identity from metadata.json
-// matches the database's stored project_id. A mismatch indicates configuration
-// drift — the CLI may be pointing at the wrong database (GH#2438, GH#2372).
+// matches s's stored project_id. A mismatch indicates configuration drift —
+// the CLI may be pointing at the wrong database (GH#2438, GH#2372).
 //
 // This check only runs for write commands because:
 // 1. Read commands are safe even against wrong databases (no data mutation)
-// 2. The check requires an open store connection
+// 2. The check requires a store connection
 // 3. New databases won't have _project_id yet (bootstrap case)
-func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
-	if store == nil {
+//
+// s is passed explicitly rather than read off the package-level store: the
+// caller runs this against a throwaway, non-mutating store opened BEFORE the
+// real command store, specifically so a mismatch is caught before that real
+// open lets a pending schema migration auto-apply (be-0gfcs) — see the call
+// site in the root command's PersistentPreRunE.
+func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beadsDir string) error {
+	if s == nil {
 		return nil // No store connection, nothing to validate
 	}
 
@@ -2354,7 +2546,7 @@ func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
 	}
 
 	// Get project_id from database
-	dbProjectID, err := store.GetMetadata(ctx, "_project_id")
+	dbProjectID, err := s.GetMetadata(ctx, "_project_id")
 	if err != nil || dbProjectID == "" {
 		return nil // No project_id in DB (new or pre-identity database)
 	}

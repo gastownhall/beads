@@ -50,7 +50,8 @@ func runPrimeBinary(t *testing.T, binPath, workDir string, args ...string) (stdo
 // .beads/ directory so FindBeadsDir succeeds.
 func initBeadsWorkspace(t *testing.T, binPath, workDir string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 2m, not 30s: a -race bd under a loaded CI host has taken >30s for one init.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, "init", "--prefix", "test")
 	cmd.Dir = workDir

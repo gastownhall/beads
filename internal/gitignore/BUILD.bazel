@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gitignore",
+    srcs = ["append.go"],
+    importpath = "github.com/steveyegge/beads/internal/gitignore",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "gitignore_test",
+    srcs = ["append_test.go"],
+    embed = [":gitignore"],
+)

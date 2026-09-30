@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "format",
+    srcs = ["format.go"],
+    importpath = "github.com/steveyegge/beads/format",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/types",
+        "//internal/ui",
+    ],
+)
+
+go_test(
+    name = "format_test",
+    srcs = ["format_test.go"],
+    embed = [":format"],
+    deps = ["//internal/types"],
+)

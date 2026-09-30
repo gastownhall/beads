@@ -728,26 +728,47 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
-		st := getStore()
-		if st == nil {
-			return HandleError("no store available")
-		}
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
 			msg = fmt.Sprintf("bd: dolt commit (auto-commit) by %s", getActor())
 		}
-		// CommitAll, not Commit: this command's contract is "any uncommitted
-		// changes in the working set", including changes made externally and
-		// the config table — which server-mode Commit excludes (GH#2455), so
-		// out-of-band config dirt used to survive this command forever. Its
-		// committed bool also replaces the HEAD-before/HEAD-after comparison
-		// this command used to detect tolerated no-ops with, which cost two
-		// extra HEAD reads and raced against concurrent writers.
-		committed, err := st.CommitAll(ctx, msg)
+
+		var (
+			committed bool
+			err       error
+		)
+		if usesProxiedServer() {
+			// Proxied mode never opens a store — the root pre-run returns
+			// before newDoltStore — so getStore() is nil here and the UOW
+			// provider is the only handle on the server. This is the flush
+			// point dolt.auto-commit=batch/off defers to on that route
+			// (GH#4995). The message is built above so both routes name the
+			// same default.
+			committed, err = runDoltCommitProxiedServer(ctx, msg)
+		} else {
+			st := getStore()
+			if st == nil {
+				return HandleError("no store available")
+			}
+			// CommitAll, not Commit: this command's contract is "any uncommitted
+			// changes in the working set", including changes made externally and
+			// the config table — which server-mode Commit excludes (GH#2455), so
+			// out-of-band config dirt used to survive this command forever. Its
+			// committed bool also replaces the HEAD-before/HEAD-after comparison
+			// this command used to detect tolerated no-ops with, which cost two
+			// extra HEAD reads and raced against concurrent writers.
+			committed, err = st.CommitAll(ctx, msg)
+		}
 		if err != nil {
-			if isDoltNothingToCommit(err) {
+			switch {
+			case isDoltNothingToCommit(err):
 				committed = false
-			} else {
+			case isReportedExit(err):
+				// The proxied route reports provider failures itself, through
+				// HandleErrorRespectJSON, so the JSON envelope is already on
+				// stdout; re-wrapping would print a second, plain Error line.
+				return err
+			default:
 				return HandleError("%v", err)
 			}
 		}
@@ -1897,15 +1918,35 @@ func selectedDoltBeadsDir() string {
 // source as the remote-migrate gate) so remotes match `bd dolt remote list`
 // (GH#4619).
 //
-// Only the candidate path(s) for the active mode (embedded vs. server) are
-// probed; a repo in one mode must not surface stale remotes persisted under
-// the other mode's data directory. Within the mode-appropriate candidates,
-// the first repo_state.json found on disk is authoritative: an empty
+// The physical root is resolved through the same mode-aware path selection
+// used by store opening; a repo in one mode must not surface stale remotes
+// persisted under another mode's data directory. Within that root, the active
+// database directory is checked before the root-level cold-start layout. The
+// first repo_state.json found on disk is authoritative: an empty
 // remotes list there means "no remotes", not "keep looking" — this stops
 // an authoritative-but-empty active database from falling through to a
 // stale candidate. A corrupt or unreadable repo_state.json is surfaced as a
 // warning rather than silently rendered as "(none)".
-func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDataDir string, embedded bool) []storage.RemoteInfo {
+//
+// Two known limits of that delegation, both narrower than the stale-mode leak
+// it removes:
+//
+//   - show/open parity does NOT hold for a workspace with no metadata.json.
+//     ResolvePhysicalRoots' discovery fallback picks the mode from what is on
+//     disk (embeddeddolt/, else dolt/), while the CLI open path additionally
+//     promotes a nil config to server mode via the
+//     `cfg == nil && configfile.DefaultConfig().IsDoltServerMode()` rescue in
+//     main.go (BEADS_DOLT_SERVER_MODE=1 / config.yaml dolt.mode). So a
+//     workspace with no metadata.json, that env set, and a leftover
+//     embeddeddolt/ tree reports the embedded root's remotes under a
+//     server-mode header. Mirroring the rescue inside the resolver is the real
+//     fix but changes every ResolvePhysicalRoots caller, so it is a follow-up
+//     rather than part of this command's fix.
+//   - a remote-host server workspace has no local root to read, so this
+//     returns nil and `bd dolt show` renders "(none)". Read that as "not
+//     locally knowable" rather than "no remotes configured"; `bd dolt remote
+//     list` against the server is the authoritative answer.
+func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config) []storage.RemoteInfo {
 	ctx := context.Background()
 	if st := getStore(); st != nil {
 		if remotes, err := st.ListRemotes(ctx); err == nil && len(remotes) > 0 {
@@ -1916,20 +1957,25 @@ func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDat
 	if cfg != nil {
 		dbName = cfg.GetDoltDatabase()
 	}
-	var candidates []string
-	if embedded {
-		if embeddedDataDir != "" {
-			candidates = append(candidates, embeddedDataDir)
-			if dbName != "" {
-				candidates = append(candidates, filepath.Join(embeddedDataDir, dbName))
-			}
-		}
-	} else if beadsDir != "" {
-		candidates = append(candidates, filepath.Join(beadsDir, "dolt"))
-		if dbName != "" {
-			candidates = append(candidates, filepath.Join(beadsDir, "dolt", dbName))
-		}
+	physical, err := doltserver.ResolvePhysicalRoots(beadsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", ui.RenderWarn(fmt.Sprintf("could not resolve Dolt data directory: %v", err)))
+		return nil
 	}
+	if physical.RemoteBackend || len(physical.Roots) == 0 {
+		return nil
+	}
+
+	// Every ResolvePhysicalRoots branch appends exactly one root today; Roots
+	// is a slice because other callers (beads.OpenGated) union several.
+	// Revisit this if the resolver ever does that here, or the extra
+	// candidates would vanish without a trace.
+	root := physical.Roots[0]
+	var candidates []string
+	if dbName != "" {
+		candidates = append(candidates, filepath.Join(root, dbName))
+	}
+	candidates = append(candidates, root)
 	for _, dir := range candidates {
 		if dir == "" {
 			continue
@@ -2040,7 +2086,7 @@ func showDoltConfig(testConnection bool) error {
 	}
 
 	fmt.Println("\nRemotes:")
-	remotes := resolveDoltShowRemotes(beadsDir, cfg, embeddedDataDir, embedded)
+	remotes := resolveDoltShowRemotes(beadsDir, cfg)
 	if len(remotes) == 0 {
 		fmt.Println("  (none)")
 	} else {
@@ -2329,6 +2375,13 @@ func extractSSHHost(url string) string {
 // Bare dial+close (no doltserver.ProbeSQLServer): SSH, not MySQL — there is
 // no handshake greeting to drain here.
 func testSSHConnectivity(host string) bool {
+	// #nosec G704 -- host is extractSSHHost(r.URL) over the remotes this repo's
+	// own store returns, i.e. operator-configured local state, not request data.
+	// The probe dials and immediately closes: nothing is sent and no response is
+	// read, so there is no forgeable request. gosec only reaches this call after
+	// this PR routed config discovery through env-derived paths; its taint
+	// analysis is not field-sensitive, so one env-derived path marks the whole
+	// store value tainted and every URL read back off it inherits that.
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), 5*time.Second)
 	if err != nil {
 		return false
@@ -2367,6 +2420,9 @@ func httpURLToTCPAddr(url string) string {
 // is no handshake greeting to drain here.
 func testHTTPConnectivity(url string) bool {
 	addr := httpURLToTCPAddr(url)
+	// #nosec G704 -- same probe shape and same taint path as testSSHConnectivity
+	// above: url is a remote URL from this repo's own store, and the dial is
+	// closed without sending or reading anything.
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return false

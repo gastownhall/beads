@@ -174,7 +174,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		if jsonOutput {
-			results, err := activeStore.GetReadyWorkWithCounts(ctx, filter)
+			// The page and the size of the whole ready set come back from ONE
+			// read transaction: the total rides the page's own ID query, so a
+			// capped listing no longer pays for a second counting pass (and a
+			// second defer-wake sweep) just to print "Showing N of M". Against
+			// a remote SQL server each of that pass's statements was a
+			// sequential round trip. The total is the same number the
+			// ReadyCounter role answers (storage.DoltStorage documents the
+			// identity), taken over the listing's own filter.
+			results, total, err := activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
 			if err != nil {
 				if capErr := handleMaxRowsError(err); capErr != nil {
 					return capErr
@@ -183,15 +191,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			totalReady := len(results)
 			truncated := false
-			if filter.Limit > 0 && len(results) == filter.Limit {
-				// The page is full, so there may be more ready work. The
-				// ReadyCounter role promises its answer equals
-				// len(Reader.Ready(Limit=0).Items), which is what makes this
-				// total describe the page above it.
-				if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(results) {
-					totalReady = n
-					truncated = true
-				}
+			if filter.Limit > 0 && len(results) == filter.Limit && total > len(results) {
+				totalReady = total
+				truncated = true
 			}
 			if results == nil {
 				results = []*types.IssueWithCounts{}
@@ -224,9 +226,10 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		totalReady := len(issues)
 		truncated := false
 		if filter.Limit > 0 && len(issues) == filter.Limit {
-			// The same question the --json branch asks, through the same role,
-			// so the "Showing X of N" a human reads and the total a script
-			// parses are one number.
+			// The same question the --json branch answers in-band, asked here
+			// of the ReadyCounter role, whose answer is the same identity, so
+			// the "Showing X of N" a human reads and the total a script parses
+			// are one number.
 			if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(issues) {
 				totalReady = n
 				truncated = true
@@ -402,10 +405,13 @@ var blockedCmd = &cobra.Command{
 // readyTotal sizes the whole ready set for the request `bd ready` just listed
 // a page of, through the store's own ReadyCounter accessor.
 //
-// BOTH OUTPUT MODES CALL IT and only when the page came back full, which is
+// THE TEXT OUTPUT CALLS IT, and only when the page came back full, which is
 // the one situation where the answer can differ from what is already on
-// screen. The role has no --max-rows field to honor and needs none: the cap
-// bounds a page this machine materializes, and a count materializes no rows.
+// screen. The --json listing does not: it takes its total in-band from
+// GetReadyWorkWithCountsAndTotal, in the page's own transaction.
+//
+// The role has no --max-rows field to honor and needs none: the cap bounds a
+// page this machine materializes, and a count materializes no rows.
 //
 // A failed count is not a failed command — the page is already correct; all
 // that is lost is the "of N" beside it.

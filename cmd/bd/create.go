@@ -257,22 +257,11 @@ var createCmd = &cobra.Command{
 		var metadata json.RawMessage
 		if cmd.Flags().Changed("metadata") {
 			metadataValue, _ := cmd.Flags().GetString("metadata")
-			var metadataJSON string
-			if strings.HasPrefix(metadataValue, "@") {
-				filePath := metadataValue[1:]
-				// #nosec G304 -- user explicitly provides file path via @file.json syntax
-				data, err := os.ReadFile(filePath)
-				if err != nil {
-					return HandleError("failed to read metadata file %s: %v", filePath, err)
-				}
-				metadataJSON = string(data)
-			} else {
-				metadataJSON = metadataValue
+			parsed, err := readMetadataFlag(metadataValue)
+			if err != nil {
+				return HandleError("%v", err)
 			}
-			if !json.Valid([]byte(metadataJSON)) {
-				return HandleError("invalid JSON in --metadata: must be valid JSON")
-			}
-			metadata = json.RawMessage(metadataJSON)
+			metadata = parsed
 		}
 
 		validateTemplate, _ := cmd.Flags().GetBool("validate")
@@ -418,7 +407,7 @@ var createCmd = &cobra.Command{
 				var err error
 				targetStore, err = newDoltStoreFromConfig(rootCtx, targetBeadsDirPath)
 				if err != nil {
-					return HandleError("failed to open target store: %v", err)
+					return handleCreateTargetStoreError(err, targetBeadsDirPath, "failed to open target store: %v")
 				}
 			}
 
@@ -446,7 +435,11 @@ var createCmd = &cobra.Command{
 			var err error
 			parentLookupStore, err = openDryRunTargetStore(rootCtx, repoPath)
 			if err != nil {
-				return HandleError("%v", err)
+				targetPath := repoPath
+				if !remotecache.IsRemoteURL(repoPath) {
+					targetPath = filepath.Join(routing.ExpandPath(repoPath), ".beads")
+				}
+				return handleCreateTargetStoreError(err, targetPath, "%v")
 			}
 			defer func() { _ = parentLookupStore.Close() }()
 		}
@@ -961,9 +954,25 @@ func init() {
 	//   --defer=tomorrow    Hidden until tomorrow
 	createCmd.Flags().String("due", "", "Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
 	createCmd.Flags().String("defer", "", "Defer until date (issue hidden from bd ready until then). Same formats as --due")
-	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
+	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON object, or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
+}
+
+// handleCreateTargetStoreError preserves the existing text path for ordinary
+// store failures while rendering capability refusals as typed JSON when asked.
+func handleCreateTargetStoreError(err error, targetPath, fallbackFormat string) error {
+	var capErr *ProxyCapabilityError
+	if !errors.As(err, &capErr) {
+		return HandleError(fallbackFormat, err)
+	}
+
+	withContext := *capErr
+	withContext.Message = fmt.Sprintf("failed to open create target %q: %s", targetPath, capErr.Message)
+	if capErr.Code == "proxy.store.unrouted" {
+		withContext.Message = fmt.Sprintf("create target %q is a proxied-server workspace; bd cannot open it as a direct store", targetPath)
+	}
+	return HandleProxyCapabilityError(&withContext)
 }
 
 // formatTimeForRPC converts a *time.Time to RFC3339 string for RPC calls.

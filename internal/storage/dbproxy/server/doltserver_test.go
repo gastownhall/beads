@@ -341,9 +341,18 @@ func TestDoltServer_StartStop_UnixSocket(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	rootDir := t.TempDir()
 
-	sock := filepath.Join(t.TempDir(), "s.sock")
+	// Not t.TempDir(): it nests the test's name, which alone takes the socket
+	// path past the limit below under any TMPDIR longer than /tmp's (the Bazel
+	// test wrapper's per-process one, macOS's /var/folders/...), and the test
+	// would silently skip there.
+	sockDir, err := os.MkdirTemp("", "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "s.sock")
 	// Linux sun_path is 108 bytes including the NUL terminator; macOS is 104.
-	// Skip on systems where t.TempDir() pushes us past the limit rather than
+	// Skip on systems where TMPDIR pushes us past the limit rather than
 	// surface a confusing bind() error.
 	if len(sock) >= 104 {
 		t.Skipf("socket path too long (%d bytes): %s", len(sock), sock)

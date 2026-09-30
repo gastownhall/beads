@@ -101,6 +101,8 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 	// none.
 	textRequest := in.ListRequest
 	textRequest.SkipCounts = true
+	// And no comment hydration, for the reason the direct route drops it.
+	textRequest.IncludeComments = false
 	page, err := rd.List(ctx, textRequest)
 	if err != nil {
 		return err
@@ -110,10 +112,7 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {
-	if in.formatStr != "" {
-		return errors.New("--format under --proxied-server --watch is not supported")
-	}
-
+	// --format with --watch is refused in gatherListInput, on both routes.
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
 		return err
@@ -165,7 +164,7 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 	if err != nil {
 		return fmt.Errorf("initial query: %w", err)
 	}
-	displayPrettyListWithDeps(issues, true, deps, hasMore, in.ReadyFlag, in.Status)
+	displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 	printTruncationHint(hasMore, in.effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -192,7 +191,7 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayPrettyListWithDeps(issues, true, deps, hasMore, in.ReadyFlag, in.Status)
+				displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 				printTruncationHint(hasMore, in.effectiveLimit)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
@@ -248,7 +247,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status)
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
