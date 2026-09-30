@@ -596,6 +596,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`POST /v0/beads/issues:batchApply` accepts up to 1000 items, up from 100.**
+  `issueops.MaxApplyBatchItems` moves from 100 to 1000; the request body cap
+  rises from 4 MiB to 16 MiB (`maxApplyBatchBodyBytes`); and the whole plan
+  still applies in exactly ONE transaction — the cap raise never chunks a
+  request. A request over 100 items now runs under a separate, EXTENDED
+  whole-run budget instead of the ordinary 60s request deadline: a new
+  `bd serve --large-apply-ceiling` flag sets it (5 minutes by default), applied
+  flat regardless of item count, never scaled down. A request at or under 100
+  items is completely unaffected and keeps exactly the 60s deadline it has
+  always had. A request over 100 items also serializes against every other
+  such request through a dedicated one-wide semaphore, so at most one
+  oversized write transaction is in flight at a time; the wait for that
+  semaphore is itself bounded, so a burst of oversized requests is shed with
+  `503` rather than queuing indefinitely and starving ordinary traffic. An
+  ordinary (<=100-item) request is never made to wait on it. Graceful shutdown
+  waits out an in-flight large apply up to its own deadline, but refuses any
+  large apply still queued for the semaphore once shutdown begins, rather than
+  extending the drain further. `bd serve`'s orchestrator stop grace must be at
+  least `--large-apply-ceiling`, or an external `SIGKILL` can still cut off an
+  in-flight large apply the drain would otherwise have waited out; see
+  `engdocs/SERVE_RUNBOOK.md`. A new `issues.batchApplyLarge` capability token
+  on `GET /v0/beads/context` lets a client learn whether a given server
+  accepts the raised envelope before sending a plan over the old 100-item
+  bound. Measured wall-clock for the whole-transaction apply (embedded Dolt,
+  build+commit only) backs the 5-minute default: a 356-item plan (the design
+  doc's primary measured shape) commits in ~12.6s (23.8x headroom under the
+  ceiling), and a 1000-item plan (the new cap) commits in ~57.5s (5.2x
+  headroom).
+
 - **A long-running schema migration now says so instead of going quiet**
   ([#5997](https://github.com/gastownhall/beads/pull/5997)). Migrations are
   allowed to take a long time by design — migration 0047's full-table

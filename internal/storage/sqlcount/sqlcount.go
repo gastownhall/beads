@@ -3,10 +3,9 @@
 // against a real driver, and optionally inject artificial per-statement
 // latency to approximate a database that is not co-located with the caller.
 //
-// It exists for the large-batch-apply measurement work
-// (S5b-3-LARGE-BATCH-DESIGN.md, slice B0): issueops.ApplyBatchInTx takes a
-// concrete *sql.Tx, not an interface, so the only seam available to count its
-// real round trips is the database/sql/driver boundary itself. Wrapping the
+// It exists for the large-batch-apply measurement work: issueops.ApplyBatchInTx
+// takes a concrete *sql.Tx, not an interface, so the only seam available to
+// count its real round trips is the database/sql/driver boundary itself. Wrapping the
 // driver.Connector a backend already builds — mysql.NewConnector for the Dolt
 // server backend, doltembed.NewConnector for the embedded backend — is the
 // one construction point both backends share, so one wrapper measures both

@@ -80,6 +80,7 @@ go_library(
 go_test(
     name = "uow_test",
     srcs = [
+        "batch_applier_retry_budget_test.go",
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",

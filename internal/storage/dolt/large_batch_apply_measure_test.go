@@ -1,8 +1,7 @@
 package dolt
 
-// B0 (S5b-3-LARGE-BATCH-DESIGN.md): measure the ACTUAL number of SQL
-// statements issueops.ApplyBatchInTx issues on the Dolt server (TCP)
-// backend, for the design's three measured plan shapes. See
+// Measure the ACTUAL number of SQL statements issueops.ApplyBatchInTx issues
+// on the Dolt server (TCP) backend, for three measured plan shapes. See
 // internal/storage/embeddeddolt/large_batch_apply_measure_test.go for the
 // embedded backend equivalent, and internal/storage/batchfixtures for the
 // shared, backend-agnostic plan construction.
@@ -109,8 +108,7 @@ var largeBatchApplyDoltShapes = []struct {
 
 // TestLargeBatchApplyStatementCounts_Dolt pins the ACTUAL number of SQL
 // statements issueops.ApplyBatchInTx issues on the Dolt server (TCP)
-// backend, for each of the design's three measured shapes
-// (S5b-3-LARGE-BATCH-DESIGN.md, slice B0). Sibling regression baseline to
+// backend, for each of three measured shapes. Sibling regression baseline to
 // TestLargeBatchApplyStatementCounts_Embedded in the embeddeddolt package —
 // see that test's doc comment for why counts are pinned with a small
 // tolerance rather than exactly, and why a drift beyond it should be

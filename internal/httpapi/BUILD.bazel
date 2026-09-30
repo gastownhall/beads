@@ -81,6 +81,7 @@ go_test(
         "events_test.go",
         "events_watch_test.go",
         "get_issue_test.go",
+        "large_batch_apply_test.go",
         "list_comments_omitted_test.go",
         "list_sort_test.go",
         "memories_test.go",

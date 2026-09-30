@@ -2,9 +2,8 @@
 
 package embeddeddolt_test
 
-// B0 (S5b-3-LARGE-BATCH-DESIGN.md): measure the ACTUAL number of SQL
-// statements issueops.ApplyBatchInTx issues on the embedded Dolt backend,
-// for the design's three measured plan shapes. See
+// B0: measure the ACTUAL number of SQL statements issueops.ApplyBatchInTx
+// issues on the embedded Dolt backend, for three measured plan shapes. See
 // internal/storage/dolt/large_batch_apply_measure_test.go for the Dolt
 // server (TCP) backend equivalent, and internal/storage/batchfixtures for
 // the shared, backend-agnostic plan construction.
@@ -169,8 +168,8 @@ var largeBatchApplyShapes = []struct {
 
 // TestLargeBatchApplyStatementCounts_Embedded pins the ACTUAL number of SQL
 // statements issueops.ApplyBatchInTx issues on the embedded backend, for
-// each of the design's three measured shapes (S5b-3-LARGE-BATCH-DESIGN.md,
-// slice B0). It is a REGRESSION BASELINE for B2 (a later, lighter fast
+// each of three measured shapes (slice B0). It is a REGRESSION BASELINE for
+// B2 (a later, lighter fast
 // path): B2 must lower these numbers, and this test is what proves it did.
 //
 // The exact counts are backend- and Dolt-version-sensitive by nature — they
@@ -223,6 +222,76 @@ func TestLargeBatchApplyStatementCounts_Embedded(t *testing.T) {
 				t.Errorf("embedded %s: Total() = %d, want pinned %d +/- %d (see large_batch_apply_measure_test.go)",
 					tc.name, got.Total(), want, statementCountTolerance)
 			}
+		})
+	}
+}
+
+// wallClockShapes is the coordinator's item-8 ask: real wall-clock numbers at
+// 356 items (the design doc's primary measured shape) and 1000 items (the
+// hard cap, issueops.MaxApplyBatchItems) — not just statement counts — so the
+// server's --large-apply-ceiling default (5 minutes) is backed by an actual
+// measurement at the top of the envelope, not only extrapolated from smaller
+// shapes.
+var wallClockShapes = []struct {
+	name  string
+	db    string
+	build func(rootID string) issueops.ApplyBatchRequest
+}{
+	{name: "356", db: "wc356", build: func(rootID string) issueops.ApplyBatchRequest {
+		return batchfixtures.Shape356("tester", rootID)
+	}},
+	{name: "1000", db: "wc1000", build: func(rootID string) issueops.ApplyBatchRequest {
+		return batchfixtures.Shape1000("tester", rootID)
+	}},
+}
+
+// TestLargeBatchApplyWallClock_Embedded measures (and simply logs, rather
+// than asserting a bound on) how long issueops.ApplyBatchInTx actually takes
+// on the embedded backend at 356 and 1000 items. It is deliberately NOT a
+// pass/fail regression gate — wall-clock time is host- and CI-runner-
+// sensitive in a way statement counts are not — but the numbers it logs are
+// the real-data justification for defaultLargeApplyCeiling
+// (internal/httpapi/server.go, 5 minutes): both measured shapes must
+// complete in a small fraction of that budget for the ceiling to be
+// generous headroom rather than a number picked out of thin air.
+func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+
+	for _, tc := range wallClockShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
+			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
+
+			root := &types.Issue{Title: "root", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			if err := fixture.store.CreateIssue(ctx, root, "tester"); err != nil {
+				t.Fatalf("create root issue: %v", err)
+			}
+
+			plan := tc.build(root.ID)
+			db, cleanup, err := openCountedConn(ctx, fixture.dataDir, fixture.database, &sqlcount.Counts{})
+			if err != nil {
+				t.Fatalf("openCountedConn: %v", err)
+			}
+			defer cleanup()
+
+			uncapped := batchfixtures.UncappedPlan(plan)
+			start := time.Now()
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("BeginTx: %v", err)
+			}
+			if _, _, err := storageissueops.ApplyBatchInTx(ctx, tx, uncapped); err != nil {
+				_ = tx.Rollback()
+				t.Fatalf("ApplyBatchInTx: %v", err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+			elapsed := time.Since(start)
+
+			t.Logf("embedded wall-clock: %s items (%d actual) = %s (defaultLargeApplyCeiling headroom: %.1fx)",
+				tc.name, len(plan.Items), elapsed, (5*time.Minute).Seconds()/elapsed.Seconds())
 		})
 	}
 }

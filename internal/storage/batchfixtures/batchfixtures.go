@@ -1,5 +1,5 @@
 // Package batchfixtures builds issueops.ApplyBatchRequest values shaped like
-// the plans S5b-3-LARGE-BATCH-DESIGN.md measures: the mol-normalized
+// the plans measured for the large-batch-apply work: the mol-normalized
 // issue/PR work plan (and its 2x variant) and a "classic" hand-authored
 // plan. It does no I/O — every fixture here is pure data construction — so a
 // benchmark or test in any backend package can import it without risking an
@@ -23,8 +23,7 @@ func createKey(prefix string, n int) string {
 
 // molCounts is the sub-item composition mol-normalized-issue-pr-work-v1
 // measures at 1x: 102 creates, 136 blocks edges, 102 tracks-to-root edges,
-// 16 assign updates == 356 items total. See S5b-3-LARGE-BATCH-DESIGN.md
-// "Measured sizes".
+// 16 assign updates == 356 items total.
 type molCounts struct {
 	creates     int
 	blocksEdges int
@@ -41,6 +40,13 @@ var mol1x = molCounts{creates: 102, blocksEdges: 136, tracksEdges: 102, assignIt
 // edge/create ratio identical between the two measured shapes, which is what
 // makes them comparable points on the same curve.
 var mol2x = molCounts{creates: 204, blocksEdges: 272, tracksEdges: 204, assignItems: 32}
+
+// molCap is mol1x's sub-category ratio scaled up to land exactly on
+// issueops.MaxApplyBatchItems (1000): the top of the large-apply envelope the
+// server's --large-apply-ceiling default (5 minutes) is sized against, so a
+// wall-clock measurement at this shape is a measurement AT the cap, not an
+// extrapolation from a smaller one.
+var molCap = molCounts{creates: 286, blocksEdges: 382, tracksEdges: 286, assignItems: 46}
 
 // buildMolShape builds a mol-normalized-issue-pr-work-v1-shaped request: a
 // flat batch of work-item creates (each carrying metadata), a blocks chain
@@ -149,6 +155,15 @@ func Shape356(actor, rootID string) issueops.ApplyBatchRequest {
 // store.
 func Shape712(actor, rootID string) issueops.ApplyBatchRequest {
 	return buildMolShape(actor, "mol2x", mol2x, rootID)
+}
+
+// Shape1000 builds a plan at exactly issueops.MaxApplyBatchItems (286
+// creates, 668 edges [382 blocks + 286 tracks], 46 assign updates), for 1000
+// items total: the top of the large-apply envelope, for measuring wall-clock
+// time at the cap rather than only at the design doc's 356/712 sample
+// points. rootID must already exist in the target store.
+func Shape1000(actor, rootID string) issueops.ApplyBatchRequest {
+	return buildMolShape(actor, "molcap", molCap, rootID)
 }
 
 // ShapeClassic40 builds a 40-item "classic" (non-mol) plan: 10 creates, 20

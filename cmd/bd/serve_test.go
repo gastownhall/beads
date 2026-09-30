@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 
@@ -511,14 +512,17 @@ func withServeFlags(t *testing.T) {
 	addr, nonLoopback := serveAddr, serveAllowNonLoopback
 	token, insecure := serveAuthTokenFile, serveInsecureNoAuth
 	hosts := serveAllowedHosts
+	largeApplyCeiling := serveLargeApplyCeiling
 	t.Cleanup(func() {
 		serveAddr, serveAllowNonLoopback = addr, nonLoopback
 		serveAuthTokenFile, serveInsecureNoAuth = token, insecure
 		serveAllowedHosts = hosts
+		serveLargeApplyCeiling = largeApplyCeiling
 	})
 	serveAddr, serveAllowNonLoopback = "127.0.0.1:0", false
 	serveAuthTokenFile, serveInsecureNoAuth = "", false
 	serveAllowedHosts = nil
+	serveLargeApplyCeiling = 5 * time.Minute
 }
 
 func serveTokenFile(t *testing.T) string {
@@ -584,6 +588,20 @@ func TestServeConfigRefusesAnUnservablePosture(t *testing.T) {
 			apply:   func(*testing.T) { serveAllowedHosts = []string{"bd.beads.svc:8080"} },
 			wantErr: "--allowed-host",
 		},
+		{
+			name:    "a zero large-apply ceiling",
+			apply:   func(*testing.T) { serveLargeApplyCeiling = 0 },
+			wantErr: "--large-apply-ceiling",
+		},
+		{
+			name:    "a negative large-apply ceiling",
+			apply:   func(*testing.T) { serveLargeApplyCeiling = -time.Second },
+			wantErr: "--large-apply-ceiling",
+		},
+		{
+			name:  "a non-default large-apply ceiling",
+			apply: func(*testing.T) { serveLargeApplyCeiling = 90 * time.Second },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearServeEnv(t)
@@ -647,6 +665,7 @@ func TestServeConfigCarriesTheOperatorsChoicesThrough(t *testing.T) {
 	withServeFlags(t)
 	serveAuthTokenFile = serveTokenFile(t)
 	serveAllowedHosts = []string{"bd-proj.beads.svc.cluster.local", "bd-proj.beads.svc"}
+	serveLargeApplyCeiling = 90 * time.Second
 
 	cfg, err := resolveServeConfig()
 	if err != nil {
@@ -660,6 +679,15 @@ func TestServeConfigCarriesTheOperatorsChoicesThrough(t *testing.T) {
 	}
 	if cfg.InsecureNoAuth {
 		t.Error("InsecureNoAuth is set without the flag")
+	}
+	if cfg.LargeApplyCeiling != serveLargeApplyCeiling {
+		t.Errorf("LargeApplyCeiling = %s, want %s (--large-apply-ceiling did not reach the server config)", cfg.LargeApplyCeiling, serveLargeApplyCeiling)
+	}
+
+	var httpCfg httpapi.Config
+	cfg.applyTo(&httpCfg)
+	if httpCfg.LargeApplyCeiling != serveLargeApplyCeiling {
+		t.Errorf("serveOptions.applyTo did not carry LargeApplyCeiling through: got %s, want %s", httpCfg.LargeApplyCeiling, serveLargeApplyCeiling)
 	}
 }
 
