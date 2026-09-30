@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -166,13 +165,18 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 	// Deterministic id keyed on (issue_id, target), the same derivation as the
 	// embedded/issueops path, so server-mode (use-case) dependency creation stays
 	// merge-safe across clones and works once the DEFAULT (UUID()) is dropped (#4259).
+	// created_at comes from the same issueops chokepoint the embedded single-edge
+	// and batch/import writers use, so a supplied CreatedAt survives this plane
+	// too: bd mol port and the legacy-SQLite reader hand real historical stamps to
+	// both plumbings, and re-stamping them "now" here would make the same copy
+	// preserve audit history through one writer and rewrite it through the other.
 	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from pickDepTargetColumn
 	if _, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, table, targetCol),
 		depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, string(dep.Type),
-		time.Now().UTC(), actor, metadata, dep.ThreadID,
+		issueops.DependencyCreatedAt(dep), actor, metadata, dep.ThreadID,
 	); err != nil {
 		if missing := r.classifyMissingEndpoint(ctx, dep, opts.UseWispsTable, targetCol, err); missing != nil {
 			return missing

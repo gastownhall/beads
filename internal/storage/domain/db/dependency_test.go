@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -15,6 +16,8 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("RejectsEmptyIDs", s.depInsertEmptyIDs)
 		s.Run("SameTypeIsIdempotentMetadataRefresh", s.depInsertIdempotentSameType)
 		s.Run("UsesDeterministicID", s.depInsertUsesDeterministicID)
+		s.Run("PreservesImportedCreatedAt", s.depInsertPreservesImportedCreatedAt)
+		s.Run("DefaultsZeroCreatedAtToNow", s.depInsertDefaultsZeroCreatedAt)
 		s.Run("ParentChildTouchesCoordinationOnlyForNewEdge", s.depInsertParentChildTouchesCoordinationOnlyForNewEdge)
 		s.Run("DifferentTypeIsRejected", s.depInsertConflictingType)
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
@@ -96,6 +99,52 @@ func (s *testSuite) depInsertUsesDeterministicID() {
 		"SELECT id FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
 		"bd-dep-det-a", "bd-dep-det-b").Scan(&gotID))
 	s.Equal(depid.New("bd-dep-det-a", "bd-dep-det-b"), gotID)
+}
+
+// depInsertPreservesImportedCreatedAt covers the audit-history half of the same
+// server-mode (use-case) insert path. The embedded/issueops writers preserve a
+// supplied dep.CreatedAt, and the conformance suite's
+// testAuditReadyWorkDepCreatedAtParity only reaches them: dolt and embeddeddolt
+// both route AddDependency to issueops.AddDependencyInTx, so this repository is
+// the one single-edge writer no conformance arm can witness. bd mol port and
+// internal/migration/legacysqlite hand real historical stamps to both plumbings,
+// so re-stamping "now" here would make one copy operation preserve history
+// through one writer and rewrite it through the other.
+func (s *testSuite) depInsertPreservesImportedCreatedAt() {
+	s.seedIssueRow("bd-dep-cat-a")
+	s.seedIssueRow("bd-dep-cat-b")
+	// Sub-second parts on purpose: created_at is DATETIME with no fractional
+	// precision, so the bound value must already be truncated rather than left for
+	// the server to round.
+	imported := time.Date(2023, time.May, 15, 10, 20, 30, 987_654_321, time.UTC)
+	dep := newDep("bd-dep-cat-a", "bd-dep-cat-b", types.DepBlocks)
+	dep.CreatedAt = imported
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(), dep, "tester", domain.DepInsertOpts{}))
+
+	var got time.Time
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT created_at FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		"bd-dep-cat-a", "bd-dep-cat-b").Scan(&got))
+	s.Equal(imported.Truncate(time.Second), got.UTC(),
+		"imported dependency created_at must survive the use-case insert path")
+}
+
+// depInsertDefaultsZeroCreatedAt is the other half: an edge created live (no
+// supplied stamp) still gets "now", so preserving imported values does not leave
+// ordinary dep adds with a zero timestamp.
+func (s *testSuite) depInsertDefaultsZeroCreatedAt() {
+	s.seedIssueRow("bd-dep-cnow-a")
+	s.seedIssueRow("bd-dep-cnow-b")
+	before := time.Now().UTC().Truncate(time.Second)
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-dep-cnow-a", "bd-dep-cnow-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	var got time.Time
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT created_at FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		"bd-dep-cnow-a", "bd-dep-cnow-b").Scan(&got))
+	s.False(got.IsZero(), "live dependency created_at must not be the zero time")
+	s.False(got.UTC().Before(before), "created_at = %s, want at or after %s", got.UTC(), before)
 }
 
 func (s *testSuite) depInsertParentChildTouchesCoordinationOnlyForNewEdge() {

@@ -561,6 +561,13 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	} else {
 		issue.UpdatedAt = issue.UpdatedAt.UTC()
 	}
+	normalizeTimePtrToUTC(issue.StartedAt)
+	normalizeTimePtrToUTC(issue.ClosedAt)
+	normalizeTimePtrToUTC(issue.LeaseExpiresAt)
+	normalizeTimePtrToUTC(issue.HeartbeatAt)
+	normalizeTimePtrToUTC(issue.DueAt)
+	normalizeTimePtrToUTC(issue.DeferUntil)
+	normalizeTimePtrToUTC(issue.CompactedAt)
 
 	// Ensure closed issues have a closed_at timestamp.
 	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
@@ -579,6 +586,18 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 		issue.ContentHash = issue.ComputeContentHash()
 	}
 	return nil
+}
+
+// normalizeTimePtrToUTC rewrites a set optional timestamp in UTC. There is no
+// zero-value guard because none is needed and none is implied: time.Time{}.UTC()
+// is the zero time (setLoc(utcLoc) stores a nil loc, which the zero value
+// already has), so the zero case is already a no-op. Deliberately unlike
+// DependencyCreatedAt, where IsZero() is load-bearing because it selects the
+// zero-to-now default.
+func normalizeTimePtrToUTC(value *time.Time) {
+	if value != nil {
+		*value = value.UTC()
+	}
 }
 
 // ValidateIssueIDPrefix validates that the issue ID matches the configured prefix
@@ -818,8 +837,23 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 				return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
 			}
 			createdAt = stamped
+		} else {
+			createdAt = createdAt.UTC()
 		}
 		createdAtText := FormatAuxTime(createdAt)
+		// Re-read the stamp back out of the text that is actually stored, the
+		// same way domain/db.CommentSQLRepository.InsertRecord does. createdAt
+		// also reaches the caller as result.persistedComments[].CreatedAt, which
+		// is marshaled into the durable bd_events_journal.comment_json; without
+		// this the event stream keeps sub-second parts the second-granular
+		// comments.created_at column cannot hold, which is exactly the
+		// divergence backend/conformance/commenter_contract.go rejects as not
+		// cursor-safe.
+		parsedCreatedAt, err := ParseAuxTime(createdAtText)
+		if err != nil {
+			return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
+		}
+		createdAt = parsedCreatedAt
 		if comment.ID == "" {
 			// No incoming id (fresh comment): content-derived id, collapsing
 			// onto an identical existing row exactly like the import dedup.
@@ -850,7 +884,7 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 			continue
 		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, commentTable), comment.ID, issue.ID, comment.Author, comment.Text, createdAtText)
@@ -948,10 +982,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				return result, fmt.Errorf("invalid dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
 
-			createdAt := dep.CreatedAt
-			if createdAt.IsZero() {
-				createdAt = time.Now().UTC()
-			}
+			createdAt := DependencyCreatedAt(dep)
 			// Deterministic id from (issue_id, target) keeps bulk-imported edges
 			// merge-safe across clones — two clones importing the same JSONL get the
 			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
@@ -1005,6 +1036,27 @@ func dependencyCreatedBy(dep *types.Dependency, actor string) string {
 		return dep.CreatedBy
 	}
 	return actor
+}
+
+// DependencyCreatedAt is the single source of a dependency edge's audit stamp
+// for every write path: the batch/import path (PersistDependencies...), the
+// embedded single-edge path (AddDependencyInTx), and the use-case/server-mode
+// path (domain/db.DependencySQLRepository.Insert). A supplied instant is
+// preserved in UTC so an import keeps the edge's real history; only a zero
+// value defaults to now. Exported so the use-case plane binds the same
+// semantics instead of re-stamping imported edges.
+//
+// The result is truncated to the second because dependencies.created_at is
+// DATETIME with no fractional-seconds precision (schema/migrations/
+// 0002_create_dependencies.up.sql), so truncating here makes the persisted
+// instant code-determined rather than leaving a sub-second input to the
+// server's fractional-second rounding. This matches the aux-row writers, which
+// bind through FormatAuxTime, whose layout carries no fractional part.
+func DependencyCreatedAt(dep *types.Dependency) time.Time {
+	if dep == nil || dep.CreatedAt.IsZero() {
+		return time.Now().UTC().Truncate(time.Second)
+	}
+	return dep.CreatedAt.UTC().Truncate(time.Second)
 }
 
 func recordSkippedDependency(opts storage.BatchCreateOptions, dep *types.Dependency, reason string) {
