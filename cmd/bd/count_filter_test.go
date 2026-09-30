@@ -65,10 +65,12 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		"no-assignee":       "true",
 		"no-labels":         "true",
 		"metadata-field":    "team=platform",
+		"has-metadata-key":  "audit_ref",
 		"priority":          "1",
 		"priority-min":      "0",
 		"priority-max":      "4",
 		"include-infra":     "true",
+		"include-ephemeral": "true",
 	} {
 		if err := flags.Flags().Set(flag, value); err != nil {
 			t.Fatalf("set --%s=%s: %v", flag, value, err)
@@ -95,30 +97,32 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 	}
 	priority, min, max := 1, 0, 4
 	want := issueops.CountRequest{
-		Status:         "closed",
-		IssueType:      "bug",
-		Assignee:       "alice",
-		Priority:       &priority,
-		PriorityMin:    &min,
-		PriorityMax:    &max,
-		Labels:         []string{"alpha", "beta"},
-		LabelsAny:      []string{"gamma"},
-		TitleSearch:    "needle",
-		IDFilter:       "bd-1,bd-2",
-		TitleContains:  "tc",
-		DescContains:   "dc",
-		NotesContains:  "nc",
-		CreatedAfter:   day(1),
-		CreatedBefore:  day(2),
-		UpdatedAfter:   day(3),
-		UpdatedBefore:  day(4),
-		ClosedAfter:    day(5),
-		ClosedBefore:   day(6),
-		EmptyDesc:      true,
-		NoAssignee:     true,
-		NoLabels:       true,
-		MetadataFields: map[string]string{"team": "platform"},
-		IncludeInfra:   true,
+		Status:           "closed",
+		IssueType:        "bug",
+		Assignee:         "alice",
+		Priority:         &priority,
+		PriorityMin:      &min,
+		PriorityMax:      &max,
+		Labels:           []string{"alpha", "beta"},
+		LabelsAny:        []string{"gamma"},
+		TitleSearch:      "needle",
+		IDFilter:         "bd-1,bd-2",
+		TitleContains:    "tc",
+		DescContains:     "dc",
+		NotesContains:    "nc",
+		CreatedAfter:     day(1),
+		CreatedBefore:    day(2),
+		UpdatedAfter:     day(3),
+		UpdatedBefore:    day(4),
+		ClosedAfter:      day(5),
+		ClosedBefore:     day(6),
+		EmptyDesc:        true,
+		NoAssignee:       true,
+		NoLabels:         true,
+		MetadataFields:   map[string]string{"team": "platform"},
+		HasMetadataKey:   "audit_ref",
+		IncludeInfra:     true,
+		IncludeEphemeral: true,
 	}
 	if !reflect.DeepEqual(request, want) {
 		t.Errorf("parseCountRequest built\n %#v\nwant\n %#v", request, want)
@@ -136,6 +140,16 @@ func TestParseCountRequestRejectsInvalidMetadataField(t *testing.T) {
 				t.Fatalf("parseCountRequest accepted --metadata-field %q", value)
 			}
 		})
+	}
+}
+
+func TestParseCountRequestRejectsInvalidHasMetadataKey(t *testing.T) {
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("has-metadata-key", "1bad"); err != nil {
+		t.Fatalf("set --has-metadata-key: %v", err)
+	}
+	if _, _, err := parseCountRequest(flags); err == nil {
+		t.Fatal("parseCountRequest accepted --has-metadata-key 1bad")
 	}
 }
 

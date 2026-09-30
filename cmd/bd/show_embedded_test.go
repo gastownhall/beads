@@ -3,13 +3,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -148,6 +151,28 @@ func TestEmbeddedShow(t *testing.T) {
 		bdShowFail2(t, bd, dir, "ts-nonexistent999")
 	})
 
+	// A watch on an id that does not exist used to print "Issue not found"
+	// and exit 0 on this route, watching nothing. It now exits 1 like plain
+	// `bd show <missing>`, and like the proxied route.
+	t.Run("show_watch_nonexistent_id_exits_1", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bd, "show", "ts-nonexistent999", "--watch")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("bd show --watch on a missing id kept watching:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("bd show --watch on a missing id: err=%v, want exit 1\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "ts-nonexistent999") {
+			t.Errorf("output does not name the missing id:\n%s", out)
+		}
+	})
+
 	t.Run("show_no_args", func(t *testing.T) {
 		bdShowFail2(t, bd, dir)
 	})
@@ -227,6 +252,26 @@ func TestEmbeddedShow(t *testing.T) {
 		comments, _ := m["comments"].([]interface{})
 		if len(comments) == 0 {
 			t.Error("expected comments in JSON output with --include-comments")
+		}
+	})
+
+	// GH#5565: the direct/embedded twin of the proxied
+	// show_wisp_comments_default_count_only. A wisp's comments live in
+	// wisp_comments; the default count-only view must count them there.
+	t.Run("show_json_wisp_comment_count", func(t *testing.T) {
+		wisp := bdCreate(t, bd, dir, "Wisp w/comments", "--type", "task", "--ephemeral")
+		for i := 0; i < 2; i++ {
+			if out, err := bdRunWithFlockRetry(t, bd, dir, "comments", "add", wisp.ID, fmt.Sprintf("wisp comment %d", i)); err != nil {
+				t.Fatalf("bd comments add failed: %v\n%s", err, out)
+			}
+		}
+
+		m := bdShowDetails(t, bd, dir, wisp.ID)
+		if got, _ := m["comment_count"].(float64); got != 2 {
+			t.Errorf("comment_count: got %v, want 2", m["comment_count"])
+		}
+		if _, ok := m["comments"]; ok {
+			t.Errorf("comments slice should be absent by default")
 		}
 	})
 

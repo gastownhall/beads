@@ -40,6 +40,21 @@ func bdLabelJSONOutput(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// bdLabelEditJSON runs "bd label <op> ... --json" and returns its result rows.
+func bdLabelEditJSON(t *testing.T, bd, dir, op string, args ...string) []map[string]interface{} {
+	t.Helper()
+	s := strings.TrimSpace(bdLabelJSONOutput(t, bd, dir, append(append([]string{op}, args...), "--json")...))
+	start := strings.Index(s, "[")
+	if start < 0 {
+		t.Fatalf("no JSON array in label %s output: %s", op, s)
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal([]byte(s[start:]), &rows); err != nil {
+		t.Fatalf("parse label %s JSON: %v\nstdout: %s", op, err, s)
+	}
+	return rows
+}
+
 // bdLabelFail runs "bd label" expecting failure.
 func bdLabelFail(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -245,6 +260,114 @@ func TestEmbeddedLabel(t *testing.T) {
 		}
 	})
 
+	// ===== No-op edits (GH#5988) =====
+	//
+	// A label edit that leaves the set as it was used to print the same
+	// "✓ Removed"/"✓ Added" line and JSON status as a real one. It still exits
+	// 0 (bdLabel fails the test otherwise), but it now says so.
+
+	t.Run("label_remove_absent_reports_noop", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Remove absent", "--type", "task", "--label", "present")
+		out := bdLabel(t, bd, dir, "remove", issue.ID, "never-applied")
+		if strings.Contains(out, "Removed") {
+			t.Errorf("remove of an absent label claimed a removal: %s", out)
+		}
+		if want := "Label 'never-applied' was not on " + issue.ID; !strings.Contains(out, want) {
+			t.Errorf("expected %q in output: %s", want, out)
+		}
+		rows := bdLabelEditJSON(t, bd, dir, "remove", issue.ID, "never-applied")
+		if len(rows) != 1 || rows[0]["status"] != "unchanged" || rows[0]["label"] != "never-applied" || rows[0]["issue_id"] != issue.ID {
+			t.Errorf("remove of an absent label JSON = %v, want one unchanged row", rows)
+		}
+	})
+
+	t.Run("label_add_present_reports_noop", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Add present", "--type", "task", "--label", "present")
+		out := bdLabel(t, bd, dir, "add", issue.ID, "present")
+		if strings.Contains(out, "Added") {
+			t.Errorf("add of a present label claimed an addition: %s", out)
+		}
+		if want := issue.ID + " already has label 'present'"; !strings.Contains(out, want) {
+			t.Errorf("expected %q in output: %s", want, out)
+		}
+		rows := bdLabelEditJSON(t, bd, dir, "add", issue.ID, "present")
+		if len(rows) != 1 || rows[0]["status"] != "unchanged" || rows[0]["label"] != "present" || rows[0]["issue_id"] != issue.ID {
+			t.Errorf("add of a present label JSON = %v, want one unchanged row", rows)
+		}
+	})
+
+	t.Run("label_edit_real_change_still_reported", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Real edit", "--type", "task")
+		if rows := bdLabelEditJSON(t, bd, dir, "add", issue.ID, "real"); len(rows) != 1 || rows[0]["status"] != "added" {
+			t.Errorf("real add JSON = %v, want one added row", rows)
+		}
+		if rows := bdLabelEditJSON(t, bd, dir, "remove", issue.ID, "real"); len(rows) != 1 || rows[0]["status"] != "removed" {
+			t.Errorf("real remove JSON = %v, want one removed row", rows)
+		}
+		if out := bdLabel(t, bd, dir, "add", issue.ID, "real"); !strings.Contains(out, "Added label 'real' to "+issue.ID) {
+			t.Errorf("real add text = %s", out)
+		}
+		if out := bdLabel(t, bd, dir, "remove", issue.ID, "real"); !strings.Contains(out, "Removed label 'real' from "+issue.ID) {
+			t.Errorf("real remove text = %s", out)
+		}
+	})
+
+	t.Run("label_edit_mixed_reports_each_label", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Mixed edit", "--type", "task", "--label", "have")
+		out := bdLabel(t, bd, dir, "add", issue.ID, "have,fresh")
+		if !strings.Contains(out, "Added label 'fresh' to "+issue.ID) || !strings.Contains(out, issue.ID+" already has label 'have'") {
+			t.Errorf("mixed add text = %s", out)
+		}
+		rows := bdLabelEditJSON(t, bd, dir, "remove", issue.ID, "have,ghost")
+		got := map[interface{}]interface{}{}
+		for _, r := range rows {
+			got[r["label"]] = r["status"]
+		}
+		if len(rows) != 2 || got["have"] != "removed" || got["ghost"] != "unchanged" {
+			t.Errorf("mixed remove JSON = %v, want have=removed ghost=unchanged", rows)
+		}
+	})
+
+	// One label, two issues, only one of which has it: the divergence is
+	// BETWEEN the issues, so this pins the per-issue derivation the way
+	// label_edit_mixed_reports_each_label pins the per-label one. The outcome
+	// is built inside the id loop from that id's own UpdateResult, and a
+	// refactor that hoisted it out — or reused the last result for every id —
+	// would print one identical line per issue again, which is what the
+	// pre-GH#5988 code did. Every other subtest here edits a single issue and
+	// so would pass such a refactor.
+	t.Run("label_edit_divergent_multi_issue", func(t *testing.T) {
+		fresh := bdCreate(t, bd, dir, "Divergent JSON fresh", "--type", "task")
+		holder := bdCreate(t, bd, dir, "Divergent JSON holder", "--type", "task", "--label", "shared")
+		rows := bdLabelEditJSON(t, bd, dir, "add", fresh.ID, holder.ID, "shared")
+		got := map[interface{}]interface{}{}
+		for _, r := range rows {
+			if r["label"] != "shared" {
+				t.Errorf("unexpected label in row %v", r)
+			}
+			got[r["issue_id"]] = r["status"]
+		}
+		if len(rows) != 2 || got[fresh.ID] != "added" || got[holder.ID] != "unchanged" {
+			t.Errorf("divergent multi-issue add JSON = %v, want %s=added %s=unchanged",
+				rows, fresh.ID, holder.ID)
+		}
+
+		// Same shape in the text report: one line per issue, each naming its
+		// own id, and the no-op issue must not be claimed as an edit.
+		freshText := bdCreate(t, bd, dir, "Divergent text fresh", "--type", "task")
+		holderText := bdCreate(t, bd, dir, "Divergent text holder", "--type", "task", "--label", "shared")
+		out := bdLabel(t, bd, dir, "add", freshText.ID, holderText.ID, "shared")
+		if want := "Added label 'shared' to " + freshText.ID; !strings.Contains(out, want) {
+			t.Errorf("expected %q in output: %s", want, out)
+		}
+		if want := holderText.ID + " already has label 'shared'"; !strings.Contains(out, want) {
+			t.Errorf("expected %q in output: %s", want, out)
+		}
+		if claim := "Added label 'shared' to " + holderText.ID; strings.Contains(out, claim) {
+			t.Errorf("add claimed an edit on the issue that already had the label: %s", out)
+		}
+	})
+
 	// ===== Label List =====
 
 	t.Run("label_list", func(t *testing.T) {
@@ -348,6 +471,71 @@ func TestEmbeddedLabel(t *testing.T) {
 		if !strings.Contains(out, "No children") {
 			t.Logf("propagate with no children: %s", out)
 		}
+	})
+
+	// ===== Label Rename =====
+
+	t.Run("label_rename_basic", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Rename basic", "--type", "task", "--label", "backend")
+		out := bdLabel(t, bd, dir, "rename", "backend", "server")
+		if !strings.Contains(out, "Renamed") {
+			t.Errorf("expected 'Renamed' in output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		if len(labels) != 1 || labels[0] != "server" {
+			t.Errorf("expected labels [server], got %v", labels)
+		}
+	})
+
+	t.Run("label_rename_merge", func(t *testing.T) {
+		onlyOld := bdCreate(t, bd, dir, "Rename merge only-old", "--type", "task", "--label", "wip-r")
+		both := bdCreate(t, bd, dir, "Rename merge both", "--type", "task",
+			"--label", "wip-r", "--label", "in-progress-r")
+
+		out := bdLabel(t, bd, dir, "rename", "wip-r", "in-progress-r")
+		if !strings.Contains(out, "Renamed") {
+			t.Errorf("expected 'Renamed' in output: %s", out)
+		}
+
+		labels := bdLabelListJSON(t, bd, dir, onlyOld.ID)
+		if len(labels) != 1 || labels[0] != "in-progress-r" {
+			t.Errorf("only-old: expected [in-progress-r], got %v", labels)
+		}
+		labels = bdLabelListJSON(t, bd, dir, both.ID)
+		if len(labels) != 1 || labels[0] != "in-progress-r" {
+			t.Errorf("both: expected exactly [in-progress-r] (no duplicate), got %v", labels)
+		}
+	})
+
+	t.Run("label_rename_dry_run_writes_nothing", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Rename dry run", "--type", "task", "--label", "dry-old")
+		out := bdLabel(t, bd, dir, "rename", "dry-old", "dry-new", "--dry-run")
+		if !strings.Contains(out, "Would rename") {
+			t.Errorf("expected 'Would rename' in dry-run output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		if len(labels) != 1 || labels[0] != "dry-old" {
+			t.Errorf("dry-run must not write: expected [dry-old] unchanged, got %v", labels)
+		}
+	})
+
+	t.Run("label_rename_zero_carrier_is_honest_noop", func(t *testing.T) {
+		out := bdLabel(t, bd, dir, "rename", "no-such-label-anywhere", "irrelevant")
+		if !strings.Contains(out, "No issues found") {
+			t.Errorf("expected 'No issues found' for a zero-carrier rename: %s", out)
+		}
+	})
+
+	t.Run("label_rename_identical_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "rename", "same-label", "same-label")
+	})
+
+	t.Run("label_rename_empty_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "rename", "", "new-name")
+	})
+
+	t.Run("label_rename_reserved_provides_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "rename", "plain-label", "provides:auth")
 	})
 
 	// ===== Error Cases =====

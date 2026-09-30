@@ -259,3 +259,94 @@ func TestReplaceDependencyTargetRekeysCascadedRows(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+// TestDependencyMetadataEqualComparesValuesNotBytes pins the change-free
+// re-add gate's comparison rule. The gate decides between "nothing happened"
+// and "a real mutation of the source issue" by comparing metadata the CALLER
+// supplied against metadata read back out of a native JSON column, and a
+// native JSON column is free to re-canonicalize what it persists — Dolt's
+// inserts a space after ':', sorts object keys, and narrows a bare integral
+// float to an int. A byte compare therefore reports a change on values that
+// never changed. Each same-value row here is a spelling difference a byte
+// compare fails and a JCS (RFC 8785) compare survives (#6650).
+func TestDependencyMetadataEqualComparesValuesNotBytes(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{name: "IdenticalBytes", a: `{"gate":"any-children"}`, b: `{"gate":"any-children"}`, want: true},
+		{name: "EmptyObjects", a: `{}`, b: `{}`, want: true},
+		{name: "StorageInsertedSpacing", a: `{"gate":"any-children"}`, b: `{"gate": "any-children"}`, want: true},
+		{name: "StorageSortedKeys", a: `{"spawner_id":"src-1","gate":"any-children"}`, b: `{"gate":"any-children","spawner_id":"src-1"}`, want: true},
+		{name: "StorageNarrowedIntegralFloat", a: `{"weight":1.0}`, b: `{"weight":1}`, want: true},
+		{name: "DifferentValue", a: `{"note":"v1"}`, b: `{"note":"v2"}`, want: false},
+		{name: "DifferentKey", a: `{"gate":"any-children"}`, b: `{"mode":"any-children"}`, want: false},
+		{name: "EmptyVersusPopulated", a: `{}`, b: `{"gate":"any-children"}`, want: false},
+		// Neither side parses, so the rule falls back to the byte compare it
+		// replaced rather than calling two unparseable strings equal.
+		{name: "UnparseableFallsBackToBytesEqual", a: `not json`, b: `not json`, want: true},
+		{name: "UnparseableFallsBackToBytesUnequal", a: `not json`, b: `also not json`, want: false},
+		{name: "OneSideUnparseableFallsBackToBytes", a: `{"gate":"any-children"}`, b: `{"gate":`, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := DependencyMetadataEqual(tc.a, tc.b); got != tc.want {
+				t.Errorf("DependencyMetadataEqual(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+			// The rule is symmetric: which side came from the column and
+			// which from the caller must not change the answer.
+			if got := DependencyMetadataEqual(tc.b, tc.a); got != tc.want {
+				t.Errorf("DependencyMetadataEqual(%q, %q) = %v, want %v (asymmetric)", tc.b, tc.a, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAddDependencyInTxReadsNullStoredMetadataAsEmptyObject pins the widened
+// SELECT's handling of a SQL-NULL metadata column. dependencies.metadata is
+// nullable (`JSON DEFAULT (JSON_OBJECT())`, no NOT NULL), so a row written out
+// of band — bd sql, an external tool, hand SQL — can hold NULL. Before the
+// re-add gate read metadata at all this path scanned only `type` and was
+// idempotently happy; scanning NULL into a plain string would hard-fail it
+// with "converting NULL to string is unsupported", turning every subsequent
+// re-add of that edge into an error. NULL is the absent-metadata state, so it
+// reads as `{}` and the change-free re-add of a metadata-free edge stays the
+// no-op it was.
+func TestAddDependencyInTxReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM issues WHERE id = ?")).
+		WithArgs("dep-a").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata FROM dependencies")).
+		WithArgs("dep-a", "dep-b").
+		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata"}).AddRow(string(types.DepRelated), nil))
+
+	kind := DepTargetIssue
+	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-b", Type: types.DepRelated}
+	created, err := AddDependencyInTx(context.Background(), tx, dep, "writer", AddDependencyOpts{
+		SourceTable:      "issues",
+		TargetTable:      "issues",
+		WriteTable:       "dependencies",
+		SkipCycleCheck:   true,
+		TargetKind:       &kind,
+		PrecheckedTarget: &DepTargetPrecheck{IssueType: "task"},
+	})
+	if err != nil {
+		t.Fatalf("AddDependencyInTx(existing edge with NULL metadata) = %v, want nil: a change-free re-add is a no-op, not an error", err)
+	}
+	if created {
+		t.Error("AddDependencyInTx reported the edge as created; the edge already existed with the requested type")
+	}
+	// No UPDATE and no journal write are expected: scripting only the two
+	// reads means any write this path attempted would fail the run.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

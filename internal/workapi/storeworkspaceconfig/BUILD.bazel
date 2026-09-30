@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "storeworkspaceconfig",
+    srcs = ["workspaceconfig.go"],
+    importpath = "github.com/steveyegge/beads/internal/workapi/storeworkspaceconfig",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/workapi",
+        "//issueops",
+    ],
+)

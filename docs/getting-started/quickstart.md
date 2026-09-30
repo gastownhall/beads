@@ -269,11 +269,15 @@ See [`bd dolt`](/cli-reference/dolt) for CLI details. For remote configuration, 
 
 ## Optional: Notion sync
 
-If you keep project issues in Notion, save an integration token first:
+If you keep project issues in Notion, supply an integration token first:
 
 ```bash
+export NOTION_TOKEN=<your-token>
+# or, if .beads/config.yaml is not tracked by git:
 bd config set notion.token <your-token>
 ```
+
+`bd config set` never writes the token to the Dolt database, so `bd dolt push` does not send it to a remote. It writes the token to `.beads/config.yaml` instead, and refuses when that file is tracked by git, as it is after `bd init` in a git repository.
 
 Then either create a new Beads database under a parent page or connect to an existing target:
 
@@ -283,7 +287,7 @@ bd notion init --parent <page-id>
 bd notion connect --url <notion-database-or-data-source-url>
 ```
 
-The same auth value can also come from `NOTION_TOKEN`. Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
+Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
 
 Check which auth source is active and whether the target schema is ready:
 

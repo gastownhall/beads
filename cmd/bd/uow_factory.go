@@ -171,11 +171,24 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride
 	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, assertWorkspaceIdentity, opts...)
 }
 
-// newProxiedServerUOWProviderAdopting skips that assertion. Only two callers
-// legitimately have no workspace identity to assert: `bd init --team-server`,
-// which ADOPTS the identity the shared database already carries (asserting the
-// locally-minted placeholder would reject every correct init), and server-wide
-// database maintenance, which is not scoped to one project's database.
+// newProxiedServerUOWProviderAdopting skips that assertion. Three callers
+// legitimately have no workspace identity to assert:
+//
+//   - `bd init --team-server`, which ADOPTS the identity the shared database
+//     already carries (asserting the locally-minted placeholder would reject
+//     every correct init);
+//   - server-wide database maintenance, which is not scoped to one project's
+//     database;
+//   - withQuiescedProxiedProvider (backup_proxied_server.go), the post-restore
+//     reopen. A restore is precisely the operation after which the workspace's
+//     recorded project id and the database's may legitimately differ, and it is
+//     the connection whose job is to reconcile them — asserting the pre-restore
+//     identity would refuse the one open that can fix the mismatch. The full
+//     reasoning is at that function's doc comment.
+//
+// Anything else reaching this constructor is bypassing an identity assertion
+// that exists to stop a workspace writing into another project's database. Add
+// a fourth entry here, with its reason, or use newProxiedServerUOWProvider.
 func newProxiedServerUOWProviderAdopting(ctx context.Context, beadsDir, databaseOverride string, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
 	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, adoptWorkspaceIdentity, opts...)
 }
@@ -409,12 +422,13 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 		//
 		// The 30s default cannot work here. The only client this proxy will
 		// ever have is bd serve, whose pool releases its last connection after
-		// ConnMaxIdleTime (5m) of no requests; a finite-idle proxy then sees
-		// zero clients and exits, taking with it the OS-assigned port the
-		// provider's DSN pinned at construction. Nothing re-resolves that
-		// endpoint — GetCreateDatabaseProxyServerEndpoint runs once, above — so
-		// serve would go on answering /healthz with no database left to answer
-		// anything else from, unrecoverable without a restart.
+		// ConnMaxIdleTime (20s, servePoolLimits) of no requests; a finite-idle
+		// proxy then sees zero clients and exits, taking with it the
+		// OS-assigned port the provider's DSN pinned at construction. Nothing
+		// re-resolves that endpoint — GetCreateDatabaseProxyServerEndpoint runs
+		// once, above — so serve would go on answering /healthz with no
+		// database left to answer anything else from, unrecoverable without a
+		// restart.
 		//
 		// The tradeoff is a child that outlives serve, and it is deliberate: a
 		// never-idle proxy is already a supported configuration

@@ -270,6 +270,16 @@ func fetchLatestGitHubRelease() (string, error) {
 	return version, nil
 }
 
+// stripVersionPrefix drops the canonical "v" a Go module version carries
+// ("v1.2.3", or the pseudo-version a build stamped from `go install
+// module@version` reports). bd writes its own main.Version into
+// .local_version, so a build stamped that way used to fail its own tracking
+// check, and read as major 0 in comparisons (GH#6152). Versions without the
+// prefix are unchanged.
+func stripVersionPrefix(version string) string {
+	return strings.TrimPrefix(strings.TrimSpace(version), "v")
+}
+
 // CompareVersions compares two semantic version strings, with semver-2.0
 // prerelease-suffix semantics: a version carrying a "-<prerelease>" suffix
 // sorts below the identical version without one ("1.3.1-rc.1" < "1.3.1"),
@@ -288,8 +298,8 @@ func fetchLatestGitHubRelease() (string, error) {
 // Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
 // Handles versions like "0.20.1", "1.2.3", "1.3.1-rc.1", etc.
 func CompareVersions(v1, v2 string) int {
-	core1, pre1 := splitPrereleaseSuffix(v1)
-	core2, pre2 := splitPrereleaseSuffix(v2)
+	core1, pre1 := splitPrereleaseSuffix(stripVersionPrefix(v1))
+	core2, pre2 := splitPrereleaseSuffix(stripVersionPrefix(v2))
 
 	if c := compareVersionCore(core1, core2); c != 0 {
 		return c
@@ -487,6 +497,7 @@ func IsBrewHeadVersion(version string) bool {
 
 // IsValidSemver checks if a version string is valid semver-like format (X.Y.Z)
 func IsValidSemver(version string) bool {
+	version = stripVersionPrefix(version)
 	if version == "" {
 		return false
 	}
@@ -517,7 +528,7 @@ func IsValidSemver(version string) bool {
 // ParseVersionParts parses version string into numeric parts
 // Returns [major, minor, patch, ...] or empty slice on error
 func ParseVersionParts(version string) []int {
-	parts := strings.Split(version, ".")
+	parts := strings.Split(stripVersionPrefix(version), ".")
 	result := make([]int, 0, len(parts))
 
 	for _, part := range parts {

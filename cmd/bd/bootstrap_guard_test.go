@@ -79,13 +79,7 @@ func TestIsGitCodeRepoURL(t *testing.T) {
 // Returns a cleanup function that resets config state.
 func setupSyncRemoteConfig(t *testing.T, beadsDir, remote string) func() {
 	t.Helper()
-	if err := os.WriteFile(
-		filepath.Join(beadsDir, "config.yaml"),
-		[]byte("sync.remote: "+remote+"\n"),
-		0o644,
-	); err != nil {
-		t.Fatalf("write config.yaml: %v", err)
-	}
+	seedSyncRemote(t, beadsDir, remote)
 	config.ResetForTesting()
 	t.Setenv("BEADS_DIR", beadsDir)
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")

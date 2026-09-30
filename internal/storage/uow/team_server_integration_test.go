@@ -39,11 +39,7 @@ func newTeamServerHarness(t *testing.T) *teamServerHarness {
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 
 	return &teamServerHarness{
 		port:         portInt,

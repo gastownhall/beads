@@ -1,0 +1,135 @@
+# Auto-fix stale Bazel BUILD files on PRs.
+#
+# bazel.yml's "BUILD files in sync" step runs `make bazel-sync` (gazelle,
+# tools/bazel/go_srcs.py, bazel mod tidy) and, when that leaves drift, fails
+# and uploads the BUILD.bazel / MODULE.bazel / MODULE.bazel.lock part of the
+# fix as the bazel-sync-patch artifact (scripts/ci/bazel-sync-patch.sh). This
+# workflow closes the loop, like docs-autofix.yml does for generated CLI docs:
+# when a PR run fails and left that artifact, it pushes the sync commit to the
+# PR branch (same-repo PRs) or leaves an idempotent comment with the apply
+# recipe (fork PRs). Drift elsewhere (third_party/patches, go.mod) is never
+# patched; the failing run lists it for a human.
+#
+# Trigger: only "PR" (pr.yml). bazel.yml has no pull_request trigger of its
+# own: PRs run it through pr.yml's `bazel` job (workflow_call), so its
+# bazel-sync-patch upload belongs to the PR run, and a failing sync step
+# fails that run. The "Bazel" workflow's own runs (push to main, dispatch)
+# are never pull_request events, so triggering on them would only ever be a
+# no-op. A PR run without the artifact (it failed for other reasons) is a
+# no-op too. bazel.yml builds the PR MERGE commit, so the patch also
+# carries any drift main has; only files in packages the PR itself changed
+# are pushed (see the script), so main's drift never lands on an unrelated PR.
+#
+# CONCURRENCY: job-level (a skipped run - success, or another event - never
+# takes part), and shared with docs-autofix.yml per head branch without
+# cancel-in-progress, so the two bots queue instead of racing on one branch
+# or cancelling a fix that is already running. The second one sees the moved
+# head and stops; with the PAT its push retriggers CI, which re-derives the
+# other fix. Both bots now fire on the same PR run's completion, so one runs
+# while the other waits. GitHub keeps one pending job per group: a later PR
+# run finishing inside that short window can displace a waiting job, whose
+# fix the next failing run re-derives.
+#
+# SECURITY MODEL: this runs with write permissions via workflow_run, so it
+# never checks out or executes PR code. It checks out the base default branch
+# for scripts, and treats the artifact strictly as data: only the two expected
+# regular files are extracted, every path in the patch must match an anchored
+# Bazel build-file allowlist (no hidden or `..` segments, nothing under
+# third_party/), mode/symlink/rename/binary hunks are refused, and
+# the patch is applied to an index in a bare clone (the PR tree never touches
+# the disk) and re-checked once staged (scripts/bazel-autofix-push.sh), so a
+# hostile patch can at most rewrite BUILD.bazel / MODULE.bazel /
+# MODULE.bazel.lock on its own PR branch. Pushes are leased to the run's head
+# SHA and skipped for heads that are protected or under a ruleset.
+#
+# TOKEN NOTE: pushes made with the default GITHUB_TOKEN do not retrigger PR
+# checks. This reuses the DOCS_AUTOFIX_TOKEN repo secret (fine-grained PAT or
+# GitHub App token with contents:write on this repo) rather than adding a
+# second one; without it the pushed fix still lands but checks need a manual
+# re-run. Fork PRs always get the apply-recipe comment - no token we hold can
+# push to a fork. workflow_run always runs this file from the default branch,
+# so edits take effect only after they merge.
+
+name: Bazel Autofix
+
+on:
+  workflow_run:
+    workflows: ["PR"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  autofix:
+    name: Apply Bazel BUILD sync to PR
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Shared with docs-autofix.yml; queue, never cancel (see header).
+    concurrency:
+      group: autofix-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    steps:
+      # Trusted side only: base repo default branch, never the PR head. The
+      # workflow token is not left in .git/config.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download BUILD sync patch (if any)
+        id: patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          artifact_ids="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "bazel-sync-patch") | .id')"
+          artifact_id="$(printf '%s\n' "$artifact_ids" | head -1)"
+          if [ -z "$artifact_id" ]; then
+            echo "No BUILD sync patch artifact on run ${RUN_ID}; it failed for other reasons."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          dir="${RUNNER_TEMP}/bazel-patch"
+          mkdir -p "$dir"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/bazel-patch.zip"
+          # Extract only the two expected names, and only as regular files.
+          unzip -o "${RUNNER_TEMP}/bazel-patch.zip" bazel-sync.patch bazel-sync-meta.txt -d "$dir" || true
+          ls -la "$dir"
+          for f in bazel-sync.patch bazel-sync-meta.txt; do
+            if [ -L "$dir/$f" ] || { [ -e "$dir/$f" ] && [ ! -f "$dir/$f" ]; }; then
+              echo "::error::artifact entry $f is not a regular file"
+              exit 1
+            fi
+          done
+          if [ ! -f "$dir/bazel-sync.patch" ]; then
+            echo "Artifact has no bazel-sync.patch; nothing to do."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push sync commit or leave apply recipe
+        if: steps.patch.outputs.found == 'true'
+        env:
+          BASE_REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PATCH_FILE: ${{ runner.temp }}/bazel-patch/bazel-sync.patch
+          META_FILE: ${{ runner.temp }}/bazel-patch/bazel-sync-meta.txt
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          # Split tokens: gh api calls (PR lookup, comments) always use the
+          # workflow token, which carries this job's pull-requests:write; the
+          # optional PAT is used ONLY for the git push, so it needs no more
+          # than contents:write.
+          GH_TOKEN: ${{ github.token }}
+          PUSH_TOKEN: ${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}
+          AUTOFIX_TOKEN_KIND: ${{ secrets.DOCS_AUTOFIX_TOKEN && 'pat' || 'default' }}
+        run: ./scripts/bazel-autofix-push.sh

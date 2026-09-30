@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -131,4 +133,247 @@ func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveHooksContext(t *testing.T) {
+	t.Setenv("LC_ALL", "C")
+	// Own both Git and Go home resolution; don't borrow user/global settings.
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	for _, entry := range os.Environ() {
+		key, value, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(strings.ToUpper(key), "GIT_") {
+			t.Cleanup(func() { _ = os.Setenv(key, value) })
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	cleanEnv := os.Environ()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, cleanEnv
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	mkdir := func(path string) string {
+		t.Helper()
+		if err := os.MkdirAll(path, 0750); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	canonical := func(path string) string {
+		t.Helper()
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NormalizePath(resolved)
+	}
+	root := canonical(t.TempDir())
+	selected, decoy := mkdir(filepath.Join(root, "selected repo")), mkdir(filepath.Join(root, "decoy repo"))
+	for _, repo := range []string{selected, decoy} {
+		git(repo, "init")
+		git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=", "commit", "--allow-empty", "-m", "seed")
+	}
+	linked := filepath.Join(root, "linked repo")
+	git(selected, "worktree", "add", "-b", "linked", linked)
+	nested := mkdir(filepath.Join(selected, "nested dir"))
+	nonrepo := mkdir(filepath.Join(root, "nonrepo"))
+	bare := mkdir(filepath.Join(root, "bare.git"))
+	git(bare, "init", "--bare")
+	t.Chdir(decoy)
+	ResetCaches()
+	t.Cleanup(ResetCaches)
+	check := func(t *testing.T, dir string, env []string, repo, hooks string) HooksContext {
+		t.Helper()
+		got, err := ResolveHooksContext(dir, env)
+		fresh, freshErr := GetGitHooksDirFrom(dir, env)
+		if freshErr != nil || fresh != hooks {
+			t.Errorf("fresh lazy hooks = %q, %v; want %q", fresh, freshErr, hooks)
+		}
+		want := HooksContext{HooksDir: hooks, CommonDir: filepath.Join(canonical(selected), ".git"), RepoRoot: canonical(repo), MainRepoRoot: canonical(selected)}
+		if err != nil || got != want {
+			t.Errorf("selected context = %+v, %v; want %+v", got, err, want)
+		}
+		return got
+	}
+	for _, tc := range []struct {
+		name, dir, repo, configured, want string
+		global                            bool
+	}{
+		{"ordinary", selected, selected, "", filepath.Join(canonical(selected), ".git", "hooks"), false},
+		{"nested", nested, selected, "", filepath.Join(canonical(selected), ".git", "hooks"), false},
+		{"linked", linked, linked, "", filepath.Join(canonical(selected), ".git", "hooks"), false},
+		{"relative", linked, linked, "custom/hooks", filepath.Join(canonical(linked), "custom", "hooks"), false},
+		{"absolute", nested, selected, filepath.Join(home, "absolute hooks"), filepath.Join(home, "absolute hooks"), false},
+		{"tilde", selected, selected, "~/tilde hooks", filepath.Join(home, "tilde hooks"), false},
+		{"global", selected, selected, filepath.Join(home, "global hooks"), filepath.Join(home, "global hooks"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.configured != "" {
+				scope := "--local"
+				if tc.global {
+					scope = "--global"
+				}
+				git(selected, "config", scope, "core.hooksPath", tc.configured)
+				defer git(selected, "config", scope, "--unset", "core.hooksPath")
+			}
+			check(t, tc.dir, cleanEnv, tc.repo, tc.want)
+			t.Chdir(tc.dir)
+			ResetCaches()
+			legacy, err := GetGitHooksDir()
+			if err != nil || legacy != tc.want {
+				t.Fatalf("legacy hooks = %q, %v; want %q", legacy, err, tc.want)
+			}
+		})
+	}
+	t.Run("relative_workdir", func(t *testing.T) {
+		relative, err := filepath.Rel(decoy, nested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, relative, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+	})
+	t.Run("routing_environment", func(t *testing.T) {
+		t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+		t.Setenv("GIT_WORK_TREE", decoy)
+		// Routing must carry every field, not just RepoRoot: an implementation
+		// that resolved the repository-level paths from workDir while taking the
+		// work tree from the routed environment would satisfy a RepoRoot-only
+		// assertion while reporting two different repositories in one context.
+		routed := HooksContext{
+			HooksDir:     filepath.Join(canonical(decoy), ".git", "hooks"),
+			CommonDir:    filepath.Join(canonical(decoy), ".git"),
+			RepoRoot:     canonical(decoy),
+			MainRepoRoot: canonical(decoy),
+		}
+		for _, env := range [][]string{nil, os.Environ()} {
+			got, err := ResolveHooksContext(selected, env)
+			if err != nil || got != routed {
+				t.Fatalf("supplied/inherited routing = %+v, %v; want %+v", got, err, routed)
+			}
+		}
+		check(t, selected, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+	})
+	t.Run("empty_environment", func(t *testing.T) {
+		localHooks, ambientHooks := filepath.Join(home, "local"), filepath.Join(home, "inline")
+		git(selected, "config", "core.hooksPath", localHooks)
+		defer git(selected, "config", "--unset", "core.hooksPath")
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+		t.Setenv("GIT_CONFIG_VALUE_0", ambientHooks)
+		check(t, selected, nil, selected, ambientHooks)
+		// The supplied-empty arm deliberately drops every fence this fixture set,
+		// GIT_CONFIG_NOSYSTEM included, because "a nonnil env is supplied
+		// unchanged, including an empty one" is part of the documented contract
+		// and this is its only assertion. Reading /etc/gitconfig cannot flip it:
+		// the assertion reads core.hooksPath, where the repository-local value
+		// set just above outranks system scope, and a system safe.directory
+		// requirement cannot reject a fixture repository this process created
+		// and owns. Keep the arm free of environment so it keeps covering that.
+		check(t, selected, []string{}, selected, localHooks)
+	})
+	t.Run("process_tilde_home", func(t *testing.T) {
+		git(selected, "config", "core.hooksPath", "~/process hooks")
+		defer git(selected, "config", "--unset", "core.hooksPath")
+		childEnv := append(append([]string{}, cleanEnv...), "HOME="+t.TempDir())
+		check(t, selected, childEnv, selected, filepath.Join(home, "process hooks"))
+	})
+	for _, cachedFailure := range []bool{false, true} {
+		name := "cached_success"
+		if cachedFailure {
+			name = "cached_failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			if cachedFailure {
+				t.Chdir(nonrepo)
+			}
+			ResetCaches()
+			_, err := getGitContext()
+			if (err != nil) != cachedFailure {
+				t.Fatalf("cache precondition: %v", err)
+			}
+			before := gitCtx
+			check(t, selected, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+			if gitCtx != before {
+				t.Fatal("explicit context changed legacy cache")
+			}
+		})
+	}
+	t.Run("legacy_absolute_after_cached_failure", func(t *testing.T) {
+		t.Chdir(nonrepo)
+		ResetCaches()
+		if _, err := getGitContext(); err == nil || !strings.HasPrefix(err.Error(), "not a git repository: ") {
+			t.Fatalf("legacy nonrepo error prefix must remain compatible: %v", err)
+		}
+		absolute := filepath.Join(home, "global outside repository")
+		git(selected, "config", "--global", "core.hooksPath", absolute)
+		defer git(selected, "config", "--global", "--unset", "core.hooksPath")
+		got, err := GetGitHooksDir()
+		if err != nil || got != absolute {
+			t.Fatalf("lazy absolute hooks = %q, %v; want %q", got, err, absolute)
+		}
+		for _, dir := range []string{nonrepo, bare} {
+			fresh, err := GetGitHooksDirFrom(dir, cleanEnv)
+			if err != nil || fresh != absolute {
+				t.Errorf("fresh absolute hooks from %q = %q, %v", dir, fresh, err)
+			}
+		}
+	})
+	for name, dir := range map[string]string{"empty_workdir": "", "nonrepo": nonrepo, "bare": bare} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ResolveHooksContext(dir, cleanEnv)
+			if err == nil || got != (HooksContext{}) {
+				t.Fatalf("invalid context = %+v, %v", got, err)
+			}
+			if name == "bare" && !strings.Contains(err.Error(), "work tree") {
+				t.Errorf("bare repository error must retain Git's work-tree diagnostic: %v", err)
+			}
+		})
+	}
+	t.Run("bare_worktree", func(t *testing.T) {
+		// A bare repository has no work tree and is rejected above, but a linked
+		// worktree *of* one resolves. MainRepoRoot is then the parent of the bare
+		// repository, which is not itself a repository: pin the value inherited
+		// from GetMainRepoRoot so the documented caveat cannot change silently
+		// under the consumers that anchor hook ownership at it.
+		container := mkdir(filepath.Join(root, "bare container"))
+		backing := filepath.Join(container, "backing.git")
+		git(container, "clone", "--bare", selected, backing)
+		bareLinked := filepath.Join(container, "bare worktree")
+		git(backing, "worktree", "add", "-b", "bare-linked", bareLinked)
+		got, err := ResolveHooksContext(bareLinked, cleanEnv)
+		want := HooksContext{
+			HooksDir:     filepath.Join(canonical(backing), "hooks"),
+			CommonDir:    canonical(backing),
+			RepoRoot:     canonical(bareLinked),
+			MainRepoRoot: canonical(container),
+		}
+		if err != nil || got != want {
+			t.Fatalf("bare-backed worktree context = %+v, %v; want %+v", got, err, want)
+		}
+		if _, err := os.Stat(filepath.Join(got.MainRepoRoot, ".git")); !os.IsNotExist(err) {
+			t.Errorf("MainRepoRoot %q is documented as a non-repository here; fixture no longer exercises the caveat (stat: %v)", got.MainRepoRoot, err)
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		link := filepath.Join(root, "selected alias")
+		if err := os.Symlink(selected, link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink capability unavailable: %v", err)
+			}
+			t.Fatal(err)
+		}
+		check(t, link, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
+	})
 }

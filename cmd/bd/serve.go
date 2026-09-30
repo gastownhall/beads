@@ -608,7 +608,7 @@ func serveDatabaseSource(beadsDir string) (serveDatabase, error) {
 // the server, which no client can discover before connecting. bd already
 // answers this question the same way one layer down, where a backend that
 // cannot guarantee mutation-free access is turned away rather than opened
-// anyway (backendSupportsStrictReadonly, cmd/bd/main.go).
+// anyway (the proxy.readonly.unsupported refusal in cmd/bd/main.go).
 //
 // The value is read from the global rather than a flag lookup because
 // `readonly` is also a config key, and PersistentPreRunE has already folded

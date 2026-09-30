@@ -50,9 +50,7 @@ func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readO
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, s, err) }()
 	if cfg.ProxiedServer {
-		// TODO: this should not be a store
-		// it should be a uow provider
-		return nil, fmt.Errorf("proxy server store should be uow provider")
+		return nil, errProxiedStoreUnrouted()
 	}
 	if !cfg.ServerMode {
 		return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
@@ -83,15 +81,9 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 		return backend.Open(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store should be uow provider")
-		// 	return newProxiedServerStore(ctx, &dolt.Config{
-		// 		BeadsDir:      beadsDir,
-		// 		Database:      cfg.GetDoltDatabase(),
-		// 		ProxiedServer: true,
-		// 	})
+		return nil, errProxiedStoreUnrouted()
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(beadsDir, cfg) {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
@@ -114,16 +106,9 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		return backend.OpenReadOnly(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store needs to be uow provider")
-		// return newProxiedServerStore(ctx, &dolt.Config{
-		// 	BeadsDir:      beadsDir,
-		// 	Database:      cfg.GetDoltDatabase(),
-		// 	ProxiedServer: true,
-		// 	ReadOnly:      true,
-		// })
+		return nil, errProxiedStoreUnrouted()
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(beadsDir, cfg) {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)

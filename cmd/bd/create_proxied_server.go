@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -21,16 +20,13 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-func resolveProxiedCustomTypes(dbTypes []string) []string {
-	if len(dbTypes) > 0 {
-		return dbTypes
-	}
-	return config.GetCustomTypesFromYAML()
-}
-
 func runCreateProxiedServer(cmd *cobra.Command, ctx context.Context, in createInput) error {
 	if in.repoOverrideSet {
-		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
+		// Defense in depth: validateProxyCapabilitiesBeforeProvider already
+		// refuses `create --repo` before this route is reachable. Typed anyway,
+		// so the day a command slips past the gate the refusal is still the
+		// same shape rather than silently degrading to prose.
+		return HandleProxyCapabilityError(AssertProxyCommandCapability("create", ProxyModeProxied, ProxyCapRepo))
 	}
 	switch {
 	case in.graphFile != "":
@@ -390,7 +386,7 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 // The returned useWisp is the plan-wide table routing decision.
 func validateProxiedGraphPlan(plan *GraphApplyPlan, in createInput, cctx domain.CreateContext, issueExists func(id string) (bool, error)) (useWisp bool, err error) {
 	cfg := graphPlanConfig{
-		customTypes: resolveProxiedCustomTypes(cctx.CustomTypes),
+		customTypes: cctx.CustomTypes,
 		// No YAML fallback for statuses — the server database is authoritative
 		// (that's where 'bd config set status.custom' writes) and statuses are
 		// store-only everywhere (single-issue create, list filters), unlike

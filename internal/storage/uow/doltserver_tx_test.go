@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -201,4 +202,86 @@ func TestDoltServerTxEphemeralCommitSkipsPendingCheck(t *testing.T) {
 	err = tx.Commit(context.Background(), "")
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDoltServerTxCommitDefersDoltCommitUnderDeferredContext pins GH#4995:
+// dolt.auto-commit=batch/off marks the context with WithDeferredVersionCommit.
+// doltServerTx.Commit must blank the commit message, bypassing DOLT_COMMIT
+// and the HasPendingChanges dolt_status check, and executing a plain COMMIT
+// to persist writes into the working set without advancing Dolt history.
+func TestDoltServerTxCommitDefersDoltCommitUnderDeferredContext(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deferred bool
+	}{
+		{name: "on (not deferred)", deferred: false},
+		{name: "batch or off (deferred)", deferred: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, mock := newMockTxProvider(t)
+			mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+			if tc.deferred {
+				// With deferred version commit (GH#4995), the non-empty message is blanked,
+				// skipping DOLT_COMMIT and executing plain COMMIT without status check.
+				mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+			} else {
+				expectPendingChanges(mock, 1)
+				mock.ExpectExec("DOLT_COMMIT").WithArgs("bd: real write").WillReturnResult(sqlmock.NewResult(0, 1))
+			}
+
+			tx, err := p.BeginTx(context.Background())
+			require.NoError(t, err)
+
+			ctx := context.Background()
+			if tc.deferred {
+				ctx = issueops.WithDeferredVersionCommit(ctx)
+			}
+
+			err = tx.Commit(ctx, "bd: real write")
+			require.NoError(t, err)
+			require.NoError(t, mock.ExpectationsWereMet())
+			assert.Equal(t, 1, p.db.Stats().OpenConnections, "session must cleanly return to pool")
+		})
+	}
+}
+
+// TestDoltServerTxCommitHonorsImmediateVersionCommit pins the other half of the
+// GH#4995 policy: the proxied route applies the deferral ONCE, to the root
+// context, so the explicit commit points — the duals whose direct-route twin
+// calls transact and mints a Dolt commit whatever dolt.auto-commit says — opt
+// back out with issueops.WithImmediateVersionCommit. The caller's message must
+// then survive all the way to DOLT_COMMIT; blanking it would persist the rows
+// and record nothing, which is what `bd batch -m` must never do.
+func TestDoltServerTxCommitHonorsImmediateVersionCommit(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectPendingChanges(mock, 1)
+	mock.ExpectExec("DOLT_COMMIT").WithArgs("bd: batch 3 ops by tester").WillReturnResult(sqlmock.NewResult(0, 1))
+
+	tx, err := p.BeginTx(context.Background())
+	require.NoError(t, err)
+
+	// Composed in the order the proxied CLI composes them: the route-wide
+	// deferral from the pre-run, then the exemption from the dual.
+	ctx := issueops.WithImmediateVersionCommit(issueops.WithDeferredVersionCommit(context.Background()))
+	require.NoError(t, tx.Commit(ctx, "bd: batch 3 ops by tester"))
+	require.NoError(t, mock.ExpectationsWereMet())
+	assert.Equal(t, 1, p.db.Stats().OpenConnections, "session must cleanly return to pool")
+}
+
+// TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit verifies that a complete
+// unit of work executed via RunTx under deferred version commit commits via plain
+// COMMIT and succeeds without advancing Dolt history (GH#4995).
+func TestDoltServerTxRunTxWithDeferredContextSkipsDoltCommit(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	ctx := issueops.WithDeferredVersionCommit(context.Background())
+	err := RunTx(ctx, p, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		return "bd: update GH#4995", nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+	assert.Equal(t, 1, p.db.Stats().OpenConnections)
 }

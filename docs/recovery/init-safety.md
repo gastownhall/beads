@@ -3,10 +3,11 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-09-08
+Last reviewed: 2026-09-27
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
-`cmd/bd/init_safety_test.go`, and `cmd/bd/dolt.go`.
+`cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
+`cmd/bd/dolt.go`.
 
 This document lives next to the ADRs and matches the structure of `bd`'s
 error messages: each named refusal in `bd init` and `bd dolt push`/`pull`
@@ -25,6 +26,7 @@ See also: `bd help init-safety`, and
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
+- [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
 ---
 
@@ -61,6 +63,10 @@ bd bootstrap
 
 This clones the remote's Dolt database into a fresh local `.beads/`.
 Your local state is ignored; the team's history becomes yours.
+
+If you set aside the old `.beads/dolt` instead of deleting it, or `bd list`
+fails right after this with `table not found: leases`, see
+[re-clone-gotchas](#re-clone-gotchas) below before you do anything else.
 
 ### 2. You want to diagnose what went wrong before deciding
 
@@ -279,12 +285,20 @@ bd import /tmp/beads-local.jsonl             # re-apply local-only work
 re-created, newer local edits are applied, and rows older than what the
 remote already has are skipped. Spot-check with `bd stats` afterwards.
 
+Doing this by hand (moving `.beads/dolt` aside instead of `rm -rf`, or
+skipping straight to `bd list`) can hit either of two live gotchas — see
+[re-clone-gotchas](#re-clone-gotchas) below.
+
 ### Prevention (upgrades across PK-reshaping migrations)
 
 - **Sync before upgrading**: `bd dolt push` + `bd dolt pull` on every clone
   while all clones still run the *old* version, then stop editing. Once the new
   binary is installed, `bd dolt push`/`bd dolt pull` are gated too, so this must
-  happen first.
+  happen first. The one exception is the *data-behind* stop — a clone level on
+  schema but missing commits the remote has — where `bd dolt pull` **is** the
+  remedy and is allowed through; the gate says so when it fires, and
+  [Clone behind the remote](/getting-started/upgrading#clone-behind-the-remote)
+  has the recipe. Plan for the rule, not the exception.
 - **One designated migrator**: upgrade one machine, let it migrate, then
   `bd dolt push`.
 - **Every other clone adopts, does not pull**: after the migrator pushes, each
@@ -293,3 +307,125 @@ remote already has are skipped. Spot-check with `bd stats` afterwards.
   migrations, so do not rely on it; the "sync before" step above is what
   preserves these clones' work, because `bd bootstrap` replaces the local
   database.
+
+---
+
+## re-clone-gotchas
+
+Two gotchas hit during a live manual re-clone recovery (issue ga-vrq5pu),
+each of which cost real time because the symptom looks nothing like the
+cause. Both
+apply any time you set aside or replace a Dolt database directory by hand —
+during the [pk-fork-refused](#pk-fork-refused) playbook above, the
+[init-force-refused](#init-force-refused) `bd bootstrap` path, or any other
+manual re-clone.
+
+### Gotcha 1 — a damaged/set-aside store must go OUTSIDE data_dir
+
+**Symptom**
+
+```
+root hash doesn't exist: <hash>
+```
+
+...printed repeatedly as the Dolt sql-server crash-loops under its
+supervisor/watchdog. Nothing in that message mentions a stray directory, so
+it does not look like "you left a directory lying around."
+
+**Why this happens**
+
+The sql-server treats *every* subdirectory of its `data_dir` (default
+`.beads/dolt/`, overridable via `BEADS_DOLT_DATA_DIR` or the `dolt_data_dir`
+field in `metadata.json`) as its own database and tries to load it. If you
+move a damaged or superseded database directory aside but leave it *inside*
+`data_dir` (for example, renaming `.beads/dolt/mydb` to
+`.beads/dolt/mydb.bak` instead of moving it out of `.beads/dolt/`
+entirely), the server tries to load the damaged copy too and dies on it —
+even though the healthy database sitting right next to it is fine.
+
+Check which mode you are in before you go looking for `data_dir`: in shared
+server mode (`BEADS_DOLT_SHARED_SERVER=1`, or the `dolt.shared-server` config
+key) it is `~/.beads/shared-server/dolt/` — or `$BEADS_SHARED_SERVER_DIR/dolt/`
+— and that takes precedence over both of the per-project knobs above. That is
+also where this gotcha bites hardest: one shared `data_dir` holds every
+project's database on the machine, so a single stray subdirectory crash-loops
+the server for all of them.
+
+**The fix**
+
+When you set a database directory aside by hand, move it *outside*
+`data_dir` — e.g. up to `/tmp/` or a sibling of `.beads/`, never to a
+sibling path still under `.beads/dolt/`.
+
+Do not wait for an automated repair to do it for you: no `bd doctor --fix`
+repair performs this move here. The two that come closest are:
+
+- The **corrupt-manifest repair** renames the damaged database's own
+  `.dolt/` directory *in place* — `<data_dir>/<db>/.dolt` →
+  `<data_dir>/<db>/.dolt.<ts>.corrupt.backup` — and reinitializes beside
+  it, so in the standard `<data_dir>/<db>/` layout the backup is nested
+  inside the database directory rather than becoming a new direct child of
+  `data_dir`. It also fires only once its scan can prove the store holds no
+  recoverable chunk data, so it will not touch the superseded-but-populated
+  copy this gotcha is about (`internal/doltserver/manifest_recovery.go`).
+- The rename that *does* move a whole `data_dir` to a timestamped sibling
+  (`data_dir` → `data_dir.<ts>.corrupt.backup`) belongs to a different
+  repair, the database-integrity recovery
+  (`cmd/bd/doctor/fix/database_integrity.go`) — and that one refuses
+  outright for a repo configured in Dolt server mode, so if the
+  crash-looping server is your configured backend it is unavailable too.
+
+Make the move by hand, and make sure it lands outside `data_dir`.
+
+### Gotcha 2 — a fresh clone needs `bd migrate schema`
+
+**Symptom**
+
+```
+table not found: leases
+```
+
+(or a similar "table not found" error for `wisps`, `events`,
+`local_metadata`, or another clone-local table). A supervisor or agent
+harness that expects to load session beads right after a fresh clone fails
+here.
+
+**Why this happens**
+
+A handful of tables — `leases`, `wisps`, `wisp_*`, `events`, `bd_events_*`,
+`local_metadata`, `ignored_schema_migrations`, `repo_mtimes` — are
+dolt-ignored, clone-local tables: they exist on a running database but are
+deliberately excluded from what `bd dolt push`/`pull`/clone transfers, so a
+fresh clone starts without them.
+
+A writable open normally re-materializes them on its own, whether it is
+embedded or reaches the database through a server or proxied sql-server: it
+runs the schema migration pass, which replays the clone-local ("ignored")
+series whenever that series' cursor table is behind — and the cursor table,
+`ignored_schema_migrations`, is itself clone-local, so a fresh clone always
+qualifies (`internal/storage/schema/schema.go`,
+`internal/storage/uow/dolt_sql_provider.go`). Reaching the error above
+therefore means the open that hit it was *not* one of those self-healing
+opens. The kinds that skip the pass, or only verify, include a deliberately
+non-mutating read-only or preview open, a team-server open (it checks the
+schema rather than migrating it), the preview-attach path, and any open whose
+open-time migration gate refused. Run the migration explicitly to close the
+gap.
+
+**The fix**
+
+```
+bd migrate schema
+```
+
+No `--force` needed. This replays the clone-local tables and prints:
+
+```
+✓ Schema already at v<N>
+```
+
+**That output is expected and reassuring, not an error** — it means the
+*versioned* schema was already current; the clone-local tables have now
+been (re)created regardless. Run this once after any fresh clone or
+`bd bootstrap`, before relying on `bd list` or any other command that reads
+session state.
