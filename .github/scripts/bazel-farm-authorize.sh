@@ -32,9 +32,15 @@
 # GITHUB_STEP_SUMMARY optional.
 
 set -euo pipefail
-# Byte semantics for the [A-Za-z0-9] / [0-9] classes and ${v,,}: in some
+# Byte semantics for the [A-Za-z0-9] / [0-9] classes and lower(): in some
 # UTF-8 locales they match or fold non-ASCII (e.g. the Kelvin sign to k).
 export LC_ALL=C
+
+# ASCII lowercase. Not ${v,,}: that is bash >= 4, and macOS ships bash 3.2.
+# shellcheck disable=SC2018,SC2019 # ASCII only, on purpose (logins, repo names)
+lower() {
+    printf '%s' "${1:-}" | tr 'A-Z' 'a-z'
+}
 
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is not set}"
 allowlist="${ALLOWLIST:?ALLOWLIST is not set}"
@@ -52,7 +58,7 @@ decide() {
 login() {
     local v="${1:-}"
     if [[ "$v" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$ ]]; then
-        printf '%s' "${v,,}"
+        lower "$v"
     fi
 }
 
@@ -94,7 +100,7 @@ elif ! [[ "${ACTION:-}" =~ ^(opened|synchronize)$ ]]; then
     decide "action is not opened or synchronize"
 elif [[ -z "${REPOSITORY:-}" || "${BASE_REPO:-}" != "$REPOSITORY" ]]; then
     decide "PR base repository is not this repository"
-elif [[ -z "${HEAD_REPO:-}" || "${HEAD_REPO,,}" == "${REPOSITORY,,}" ]]; then
+elif [[ -z "${HEAD_REPO:-}" || "$(lower "$HEAD_REPO")" == "$(lower "${REPOSITORY:-}")" ]]; then
     decide "PR head is not a fork (same-repo PRs use pr.yml's remote run)"
 elif ! is_id "${HEAD_OWNER_ID:-}" || [[ "${HEAD_OWNER_ID}" != "${PR_AUTHOR_ID:-}" ]]; then
     decide "PR head is not the author's own fork"
