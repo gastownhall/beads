@@ -83,7 +83,9 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 	// inits plus the test body's own work stopped reliably fitting inside
 	// this ctx's budget (be-8zggi round 2: reproduced 2/2 as context deadline
 	// exceeded creating the alpha store). Running the two chains concurrently
-	// instead of sequentially fixes that without touching the deadline.
+	// instead of sequentially shortens that critical path; the budget itself
+	// is widened separately, for host-contention headroom (see
+	// federationIsolationTimeout).
 	alphaDir := filepath.Join(baseDir, "town-alpha")
 	betaDir := filepath.Join(baseDir, "town-beta")
 	alphaDB := federationDBName(t, "alpha")
@@ -1619,9 +1621,6 @@ func TestFilteredPushStagingBranchCleanupOnError(t *testing.T) {
 	}
 }
 
-// setupFederationStore is the single-goroutine convenience wrapper around
-// newFederationStore for callers (e.g. pull_branch_tracking_integration_test.go)
-// that don't need concurrent town setup and can use t.Fatalf directly.
 // federationDBName gives a town a database name that is unique per run AND
 // still says which town it is. uniqueTestDBName alone is "testdb_<hex>", so
 // alpha and beta were indistinguishable in SHOW DATABASES and in any
@@ -1632,6 +1631,9 @@ func federationDBName(t *testing.T, town string) string {
 	return uniqueTestDBName(t) + "_" + town
 }
 
+// setupFederationStore is the single-goroutine convenience wrapper around
+// newFederationStore for callers (e.g. pull_branch_tracking_integration_test.go)
+// that don't need concurrent town setup and can use t.Fatalf directly.
 func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string) (*DoltStore, func()) {
 	t.Helper()
 	store, cleanup, err := newFederationStore(ctx, path, federationDBName(t, prefix), prefix)
