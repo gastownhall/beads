@@ -703,7 +703,8 @@ func (r *issueSQLRepositoryImpl) NextCounterID(ctx context.Context, prefix strin
 	// the incremented value, in either plane. Jump the counter past the
 	// highest numeric suffix either plane holds — one aggregate pass however
 	// far the counter lags, rather than a retry budget a long enough lag
-	// would still exhaust — mirroring issueops.NextCounterIDTx (e748b72ad0).
+	// would still exhaust. #6754 makes the same jump in
+	// issueops.NextCounterIDTx.
 	id := fmt.Sprintf("%s-%d", prefix, nextID)
 	taken, err := r.Exists(ctx, id, domain.IssueTableOpts{UseWispsTable: false})
 	if err != nil {
