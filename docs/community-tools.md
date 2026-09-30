@@ -61,6 +61,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beads-viewer](https://github.com/cuongntr/paseo-beads-viewer)** - Read-only Beads console for [Paseo](https://paseo.sh) workspaces: progress per parent issue, ready and waiting work, the critical dependency chain, a whole-project board, issue search and detail, and a composer attachment source for issues. Follows `bd` changes live through the events journal when it is turned on. Reads through `bv` and the `bd`/`br` CLI, never writes. Install with `paseo plugin install beads-viewer`. Built by [@cuongntr](https://github.com/cuongntr). (TypeScript/React Native)
 
+- **[Beads for Obsidian](https://github.com/Rome-1/obsidian-beads)** - Obsidian plugin with a tabbed Ready / In progress / Blocked / Closed pane, beads that open and save like notes, and live `beads` query blocks inside any note. With the 1.3 events journal on, it follows `bd events tail` and updates the moment a bead changes; it asks before turning the journal on, and otherwise polls. Reads and writes only through the `bd` CLI. Built by [@Rome-1](https://github.com/Rome-1). (TypeScript)
+
 ## Native Apps
 
 - **[Beads Task-Issue Tracker](https://github.com/w3dev33/beads-task-issue-tracker)** - Cross-platform desktop application (macOS, Windows, Linux) for browsing, creating, and managing Beads issues with a visual interface. Features multi-project support with favorites, image attachments, dashboard with statistics, advanced filtering, and dark/light theme. Built by [@w3dev33](https://github.com/w3dev33). (Tauri/Vue)
