@@ -276,6 +276,65 @@ dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data
 If you want auto-start behavior, remove `dolt_server_port` from
 `.beads/metadata.json`.
 
+### Commands fail while a Dolt server you manage is restarting
+
+**Symptom (server mode, external server):** commands against a shared or
+remote Dolt server fail with "Dolt server unreachable at HOST:PORT" during a
+scheduled restart or a brief network blip, and succeed again a few seconds
+later.
+
+**Cause:** by default `bd` probes the server once and fails fast. That is the
+right behavior for an interactive command against a server that is genuinely
+down, but it makes a restart window look like an outage.
+
+**Fix:** give the open a bounded retry budget.
+
+```bash
+bd config set dolt.open-retry-budget 30s   # or a bare number of seconds
+```
+
+Within that budget `bd` re-probes the server on the usual backoff schedule and
+proceeds as soon as it answers. Notes:
+
+- Off by default; `0`, an empty value or an unparseable one all mean off.
+- Applies **only** to a server `bd` does not manage, and only when the workspace
+  resolves to server-backed storage. A localhost server `bd` auto-starts is
+  unaffected: it recovers by starting a server, which `bd` already does. An
+  embedded project never waits either, not even from a diagnostic that turns
+  auto-start off (`bd config drift`, `bd config apply`, `bd doctor`) -- the
+  workspace decides, not the command.
+- Diagnostics against a **server-backed** workspace therefore do wait, and the
+  budget is spent **per open, with no aggregate cap**. Costed out on the
+  command you are most likely to reach for during an outage: a default
+  `bd doctor` run on a single-repo workspace opens four stores that reach the
+  budget (the shared store its database checks use, two maintenance checks, and
+  the KV check); a multi-repo setup opens more. Measured against a dead port
+  with `open-retry-budget: 6s`, the run took **5.7 s** -- one wait, not four,
+  because the circuit breaker opens partway through the same command after five
+  consecutive failed connections and rejects the rest. With the breaker
+  disabled the same run took **20.3 s** -- measured, not a bound, since each
+  open gets its own full budget. With the key unset: 208 ms.
+- To disable the additional open-probe retry waits for one command without
+  editing the workspace configuration, override the key through the environment
+  for that invocation: `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms
+  against a dead port). Only the retry waits go: an open the circuit breaker
+  admits still makes its first probe with the 500 ms timeout, and any SQL-level
+  timeouts remain. The same variable set to a duration opts a single command
+  *into* a wait.
+- The wait is visible. Scheduling the first retry wait prints one line to stderr,
+  `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
+  (dolt.open-retry-budget)`, so a command that pauses is telling you why
+  instead of looking like a hang.
+- Bounds the retries, not the first probe, so it can only ever make `bd` more
+  patient than the default, never less.
+- Non-transient failures (an unknown host, for instance) still fail
+  immediately — the budget is for a server that is coming back, not for a
+  wrong address.
+
+If commands still fail after the budget expires, the server really is down:
+see [Configured server unreachable](#configured-server-unreachable-auto-start-disabled)
+above.
+
 ### Port conflicts with multiple projects
 
 **Symptom (server mode):** Commands in a second project fail or connect to the
