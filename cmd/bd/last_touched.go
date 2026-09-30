@@ -62,7 +62,11 @@ func GetLastTouchedID() string {
 // SetLastTouchedID saves the ID of the last touched issue.
 // Silently ignores errors (best-effort tracking).
 func SetLastTouchedID(issueID string) {
-	if issueID == "" {
+	// Strict readonly (--readonly, or readonly in config) promises not to
+	// mutate workspace-local state. Keep ordinary read commands writable here:
+	// `bd show` records last-touched by design even though its database store
+	// is opened read-only.
+	if issueID == "" || isReadonlyMode() {
 		return
 	}
 
@@ -86,6 +90,14 @@ func SetLastTouchedID(issueID string) {
 // ClearLastTouched removes the last touched file.
 // Silently ignores errors.
 func ClearLastTouched() {
+	// Same invariant as SetLastTouchedID: removing the marker is also a
+	// mutation of workspace-local state, so strict readonly must not do it.
+	// No production caller reaches here today, but guarding the sibling keeps
+	// the file's promise true if one is wired up later.
+	if isReadonlyMode() {
+		return
+	}
+
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		return

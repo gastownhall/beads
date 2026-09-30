@@ -67,7 +67,10 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	if len(in.MetadataFields) > 0 {
 		filter.MetadataFields = in.MetadataFields
 	}
-	if err := ValidateMetadataFilters(in.MetadataFields, ""); err != nil {
+	if in.HasMetadataKey != "" {
+		filter.HasMetadataKey = in.HasMetadataKey
+	}
+	if err := ValidateMetadataFilters(in.MetadataFields, in.HasMetadataKey); err != nil {
 		return types.IssueFilter{}, err
 	}
 
@@ -102,7 +105,7 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 
 	if in.IncludeInfra {
 		applyCountIncludeInfra(&filter, in.IssueType, cfg)
-	} else {
+	} else if !in.IncludeEphemeral {
 		filter.SkipWisps = true
 	}
 	return filter, nil

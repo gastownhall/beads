@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/storage/fs"
@@ -521,27 +519,21 @@ type runInitTailContext struct {
 	gitUC         domain.GitUseCase
 }
 
-func (t runInitTailContext) isRoleGitRepo(ctx context.Context, fallback bool) bool {
-	// Isolated tail contexts without a selected path retain their supplied use case.
-	if t.workDir == "" {
-		return fallback
-	}
-	// Dropping discovery ceilings can select a containing parent repository,
-	// matching the role adapter's existing scrubbed reads and writes.
-	probe := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	probe.Dir, probe.Env = t.workDir, gitenv.ScrubRouting(os.Environ())
-	return probe.Run() == nil
-}
-
 func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput, t runInitTailContext) error {
 	gitUC := t.gitUC
 	if t.workDir != "" {
 		// Only the selected tail uses this scope; earlier bootstrap keeps its provider.
+		// NewInitGitRepository runs `git rev-parse --git-dir` with Dir=workDir and
+		// scrubbed routing, so dropping discovery ceilings can select a containing
+		// parent repository, matching the role adapter's scrubbed reads and writes.
 		gitUC = domain.NewGitUseCase(t.workDir, domaingit.NewInitGitRepository(t.workDir))
 	}
+	// One probe answers both the role gate and the artifact gates: gitUC is the
+	// scrubbed selected-directory repository whenever workDir is set, and the
+	// supplied use case otherwise, so a separate role probe could only repeat it.
 	isRepo := gitUC.IsGitRepo(ctx)
 
-	if t.isRoleGitRepo(ctx, isRepo) {
+	if isRepo {
 		role := in.roleFlag
 		if role == "" {
 			role = "maintainer"
