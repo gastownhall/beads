@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -120,7 +121,7 @@ func TestRelinkSeveredCloneLocalFKs_AfterHardReset(t *testing.T) {
 		t.Fatalf("constraint rows: %v", err)
 	}
 	spec := map[string]bool{}
-	for _, fk := range CloneLocalFKs {
+	for _, fk := range schema.CloneLocalFKs {
 		spec[fk.Table+"."+fk.Constraint] = true
 		if !live[fk.Table+"."+fk.Constraint] {
 			t.Errorf("spec FK %s.%s not present on a freshly migrated store", fk.Table, fk.Constraint)
@@ -128,7 +129,7 @@ func TestRelinkSeveredCloneLocalFKs_AfterHardReset(t *testing.T) {
 	}
 	for key := range live {
 		if !spec[key] {
-			t.Errorf("clone-local FK %s exists in a fresh store but is missing from CloneLocalFKs — it would never be healed", key)
+			t.Errorf("clone-local FK %s exists in a fresh store but is missing from schema.CloneLocalFKs — it would never be healed", key)
 		}
 	}
 	if t.Failed() {
@@ -141,8 +142,8 @@ func TestRelinkSeveredCloneLocalFKs_AfterHardReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post-reset scan: %v", err)
 	}
-	if len(severed) != len(CloneLocalFKs) {
-		t.Fatalf("post-reset scan found %d severed FK(s) (%v), want all %d", len(severed), severed, len(CloneLocalFKs))
+	if len(severed) != len(schema.CloneLocalFKs) {
+		t.Fatalf("post-reset scan found %d severed FK(s) (%v), want all %d", len(severed), severed, len(schema.CloneLocalFKs))
 	}
 
 	// Enforcement is off: an orphan audit row goes straight in.

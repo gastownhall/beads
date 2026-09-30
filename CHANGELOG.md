@@ -233,6 +233,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already refused the combination. Both routes now fail with the same
   `--format cannot be combined with --watch` usage error.
 
+- **Hard resets no longer strip the foreign keys from clone-local tables**
+  (bd-7bpkd, ga-28co77). `CALL DOLT_RESET('--hard')` silently drops every
+  foreign key on every dolt_ignored table (`events` and the `wisp_*` aux
+  tables), and nothing but `bd doctor --fix` re-added them, so every
+  `bd flatten`, `bd compact`, merge-abort recovery and fresh-bootstrap heal
+  turned enforcement off for good and let orphan rows pile up. Every one of
+  those resets now goes through one helper that re-links, on the same
+  session, each clone-local FK the reset dropped, after deleting the orphan
+  rows of those previously present FKs: mostly rows the reset itself
+  orphaned, though older orphans of the same FKs go too (see below). A
+  foreign key that was already missing before the reset is left alone (its
+  orphans can number in the hundreds of thousands) and is named in a warning
+  that points at `bd doctor --fix`. If a re-link fails, the command errors,
+  says the reset succeeded, and names the constraint (if the FKs cannot even
+  be re-read after the reset, it says their state is unknown instead). An FK
+  whose own table, or referenced table, the reset itself removed (as when the
+  fresh-bootstrap heal discards an uncommitted table) went with that table:
+  it is reported as removed with its table, not as a failure, and the heal
+  re-runs its migrations as before. The FK spec and relink code moved from
+  the doctor to `internal/storage/schema`; `bd doctor` behaves as before.
+
+  Three things to know. The DELETE removes *every* orphan of an FK the reset
+  dropped; that is exactly "the rows the reset orphaned" only when the FK was
+  enforcing before it (bd writes cross-tier wisp dependencies under
+  `foreign_key_checks = 0`, so an older orphan can go too). Each dropped FK
+  costs an anti-join DELETE plus the `ADD CONSTRAINT` validation scan of its
+  table, on every reset. And nothing enforces the FK between that DELETE and
+  the `ADD CONSTRAINT`, so an orphan another session inserts in that window
+  makes the re-link fail: `bd compact`/`bd flatten` then report the
+  reset-succeeded error, with their temp branch still cleaned up.
+
 - **The smart migrate gate no longer auto-migrates a clone whose data is behind
   the remote, and `bd dolt pull` now works from that state**
   ([#6575](https://github.com/gastownhall/beads/issues/6575)). The gate's

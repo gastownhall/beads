@@ -301,6 +301,7 @@ func TestMigrateUpWithLockKeepsLockWithBootstrapHeal(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	expectDirtyGuardRefusal(t, mock)
 	expectFreshBootstrapIdentityMatch(mock)
+	expectCloneLocalFKProbe(mock, false, false)
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	expectOnePendingMigration(t, mock)

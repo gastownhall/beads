@@ -24,13 +24,15 @@ import (
 func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string, oldCommits int, recentHashes []string) (retErr error) {
 	branchCreated := false
 
-	// Best-effort cleanup: if any step fails after creating the temp branch,
-	// try to return to main and delete the temp branch so future compactions
-	// aren't blocked by a leftover branch.
+	// Cleanup: if any step fails after creating the temp branch, return to
+	// main and delete the temp branch so future compactions aren't blocked by
+	// a leftover branch. It survives a canceled ctx, and any cleanup failure
+	// is appended to the error (ga-28co77 review round 3).
 	defer func() {
 		if retErr != nil && branchCreated {
-			_, _ = conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')")
-			_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-D', 'compact-tmp')")
+			if err := cleanupTempBranch(ctx, conn, "compact-tmp"); err != nil {
+				retErr = fmt.Errorf("%w (%v)", retErr, err)
+			}
 		}
 	}()
 
@@ -72,8 +74,10 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	if err := execSQL("checkout main", "CALL DOLT_CHECKOUT('main')"); err != nil {
 		return err
 	}
-	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--hard', 'compact-tmp')"); err != nil {
-		return err
+	// bd-7bpkd / ga-28co77: the hard reset drops every clone-local FK; the
+	// helper re-links the ones it dropped, on this same session.
+	if err := resetHardPreservingCloneLocalFKs(ctx, conn, "compact-tmp"); err != nil {
+		return fmt.Errorf("compact step %q: %w", "reset main to compacted", err)
 	}
 	if err := execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'compact-tmp')"); err != nil {
 		return err

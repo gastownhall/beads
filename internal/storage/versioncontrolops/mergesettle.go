@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // memoryConfigKeyPrefix is the config-table key prefix under which `bd remember`
@@ -345,10 +346,35 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 // the merge ran. The most common reason --abort fails is a merge that
 // REFUSED TO START on a dirty working set; hard-resetting there would
 // destroy uncommitted data the merge never touched (bd-578h9.2).
-// Best-effort: the caller's error is what matters.
+// Best-effort: the caller's error is what matters, so nothing here changes
+// the returned error. The reset re-links the clone-local FKs it drops
+// (bd-7bpkd, ga-28co77), and every outcome other than success is reported on
+// stderr like this file's other recovery notices rather than lost:
+//   - the FK probe failed, so the helper did not reset: recovery still must
+//     happen, so fall back to the bare reset (and report if that fails too);
+//   - the reset SUCCEEDED but the FKs could not be re-linked (or verified);
+//   - the reset itself failed: recovery failed, and the working set may still
+//     hold the aborted merge's changes. It is not retried.
 func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
-		_, _ = db.ExecContext(ctx, "CALL DOLT_RESET('--hard')")
+	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); err == nil || !preMergeClean {
+		return
+	}
+	resetErr := resetHardPreservingCloneLocalFKs(ctx, db, "")
+	var relinkErr *schema.CloneLocalFKRelinkError
+	switch {
+	case resetErr == nil:
+	case errors.Is(resetErr, schema.ErrHardResetNotRun):
+		fmt.Fprintf(os.Stderr, "Warning: merge abort recovery: %v; falling back to a bare hard reset, "+
+			"which leaves any clone-local foreign key it drops severed until 'bd doctor --fix'\n", resetErr)
+		if _, err := db.ExecContext(ctx, "CALL DOLT_RESET('--hard')"); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: merge abort recovery failed: bare hard reset: %v; "+
+				"the working set may still hold the aborted merge's changes\n", err)
+		}
+	case errors.As(resetErr, &relinkErr):
+		fmt.Fprintf(os.Stderr, "Warning: merge abort recovery: %v\n", resetErr)
+	default:
+		fmt.Fprintf(os.Stderr, "Warning: merge abort recovery failed: hard reset: %v; "+
+			"the working set may still hold the aborted merge's changes\n", resetErr)
 	}
 }
 

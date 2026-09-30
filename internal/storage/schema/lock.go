@@ -336,10 +336,20 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// second reset in the caller's outer retry loop.
 		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
 			strings.Join(dirtyErr.Tables, ", "))
-		// Drained, not Exec'd: the very next thing this path does is re-run the
-		// whole MigrateUp pass on this same pinned connection, so an
-		// undrained proc result set here would poison every statement of it.
-		if resetErr := DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); resetErr != nil {
+		// The reset runs on this same pinned connection (the helper drains the
+		// CALL, so the MigrateUp pass that follows is not poisoned) and
+		// re-links the clone-local FKs it drops (bd-7bpkd, ga-28co77).
+		resetResult, resetErr := ResetHardPreservingCloneLocalFKs(ctx, conn, "")
+		if w := resetResult.Warning(); w != "" {
+			fmt.Fprintf(stderr, "Warning: %s\n", w)
+		}
+		var relinkErr *CloneLocalFKRelinkError
+		if errors.As(resetErr, &relinkErr) {
+			// The reset succeeded: the dirty working set is gone, so the
+			// DirtyTablesError no longer describes this store.
+			return applied, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr)
+		}
+		if resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = MigrateUp(ctx, conn)
