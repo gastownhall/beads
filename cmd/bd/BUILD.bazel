@@ -1055,6 +1055,7 @@ go_test(
         "show_details_json_test.go",
         "show_embedded_test.go",
         "show_format_metadata_test.go",
+        "show_format_test.go",
         "show_not_found_hint_test.go",
         "show_proxied_integration_test.go",
         "show_proxied_reader_test.go",

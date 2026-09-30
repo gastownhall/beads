@@ -44,8 +44,15 @@ func TestIsNonCompletingClose(t *testing.T) {
 		{"won’t fix", true}, // "won’t fix": U+2019 is a literal rune here, in the string AND this comment — if a smart-quote pass ever ASCII-folds one but not the other, the mismatch is the tell.
 		{"won't-fix", true},
 		{"won’t-fix", true}, // same tamper-evidence: literal U+2019 in both the case above and this comment.
+		// GH#5138 review: "not planned" carries the same per-keyword separator
+		// tolerance as the "wont fix" pair, so the hyphenated hand-typed
+		// spelling is classified identically.
+		{"not-planned", true},
+		{"notplanned", true},
 		// Hyphenated prose must not be swallowed by the hyphen tolerance —
-		// only the exact "wont[-]fix" keyword pair gets it.
+		// it reaches only inside a keyword, never across an intervening word,
+		// so this stays false with "not[- ]?planned" exactly as it did with
+		// the space-only spelling.
 		{"not-yet-planned", false},
 	}
 	for _, tc := range cases {

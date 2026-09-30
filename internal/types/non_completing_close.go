@@ -20,19 +20,24 @@ import (
 // closed because it was superseded/deprecated typically reads "obsoleted by
 // X", while "obsolete" alone is commonly just describing what was removed.
 //
-// Two separator variants are matched directly in the regex rather than via a
-// global text normalization pass (GH#5138 review): "wont[- ]?fix" and
-// "won['\x{2019}]t[- ]?fix" both accept a hyphen or space (or neither)
-// between "wont"/"won't" and "fix" — the two spellings must compose with the
-// separator independently, not just each in isolation, or a lone
-// "won't-fix" close still slips through as completing. The apostrophe class
-// "['\x{2019}]" accepts both the ASCII apostrophe and the U+2019 typographic
-// right single quote ("won't"/"won’t"). A blanket hyphen-to-space fold on the
-// whole string was deliberately avoided: it would risk turning unrelated
-// hyphenated prose into a false match (e.g. collapsing "not-yet-planned"
-// into something that reads like "not planned"). Scoping the hyphen
-// tolerance to just this one keyword pair sidesteps that entirely.
-var nonCompletingCloseRegexp = regexp.MustCompile(`(?i)\b(duplicate|dupe|wont[- ]?fix|won['\x{2019}]t[- ]?fix|superseded|obsoleted|not planned)\b`)
+// Separator tolerance is written into each multi-word keyword rather than
+// applied by a global text normalization pass (GH#5138 review):
+// "wont[- ]?fix", "won['\x{2019}]t[- ]?fix" and "not[- ]?planned" each accept
+// a hyphen or space (or neither) between their two words. The "wont" and
+// "won't" spellings must compose with the separator independently, not just
+// each in isolation, or a lone "won't-fix" close still slips through as
+// completing; "not-planned" is an equally natural hand-typed spelling and is
+// given the same tolerance rather than being the one keyword that demands a
+// space. The apostrophe class "['\x{2019}]" accepts both the ASCII apostrophe
+// and the U+2019 typographic right single quote ("won't"/"won’t").
+//
+// A blanket hyphen-to-space fold over the whole reason was deliberately
+// avoided: it would rewrite prose these keywords never cover, so the text
+// that matched would no longer be the text the operator typed. Per-keyword
+// tolerance keeps the reach exact — "not-yet-planned" does not match
+// "not[- ]?planned" under any spelling, because the intervening "yet" blocks
+// it either way, and that negative stays pinned in the test.
+var nonCompletingCloseRegexp = regexp.MustCompile(`(?i)\b(duplicate|dupe|wont[- ]?fix|won['\x{2019}]t[- ]?fix|superseded|obsoleted|not[- ]?planned)\b`)
 
 // IsNonCompletingClose reports whether closeReason is a redirection/abandon
 // (duplicate, wontfix, superseded, …) rather than finished work. Empty reason
