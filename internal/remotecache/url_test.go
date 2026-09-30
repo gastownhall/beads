@@ -379,6 +379,8 @@ func TestMatchesRemotePatternLegacyAndEdgeCases(t *testing.T) {
 		{"force-query candidate rejects queryless pattern", "s3://approved/db?", "s3://approved/db", false},
 		{"fragment with a question mark rejects against queryless pattern", "s3://approved/db#frag?endpoint=https://evil.example", "s3://approved/*", false},
 		{"fragment rejected in query-aware mode", "s3://approved/db?endpoint=https://ok.example#frag", "s3://approved/db?endpoint=https://ok.example", false},
+		{"fragment after a glob-matched value", "s3://approved/db?region=auto#frag", "s3://approved/db?region=*", false},
+		{"fragment before the query, glob location", "s3://approved/db#frag?region=auto", "s3://approved/*?region=*", false},
 		{"encoded question mark is path, not query", "s3://approved/db%3Fendpoint%3Dhttps%3A%2F%2Fevil.example", "s3://approved/*", true},
 		{"encoded slash is not normalised for the location", "s3://approved/db%2Fchild?endpoint=https://ok.example", "s3://approved/db/child?endpoint=https://ok.example", false},
 		{"scheme case is not normalised for the location", "S3://approved/db?endpoint=https://ok.example", "s3://approved/db?endpoint=https://ok.example", false},
