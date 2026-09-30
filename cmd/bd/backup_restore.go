@@ -140,7 +140,8 @@ func registerBackupRemote(ctx context.Context, bs storage.BackupStore, dir strin
 	// Remove + re-add to handle the case where a remote already exists.
 	_ = bs.BackupRemove(ctx, defaultDoltBackupName)
 	if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to register backup remote: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to register backup remote: %s\n",
+			versioncontrolops.RedactBackupURL(err.Error()))
 		return
 	}
 	if err := saveDoltBackupConfig(backupURL); err != nil {

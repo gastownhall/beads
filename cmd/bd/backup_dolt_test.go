@@ -27,9 +27,10 @@ func TestResolveDoltBackupURL(t *testing.T) {
 	// only fixes the s3:// stack. Do not add a green row for today's az://
 	// local-file fallback here.
 	tests := []struct {
-		name  string
-		input string
-		want  string
+		name      string
+		input     string
+		want      string
+		wantLocal bool
 		// wantRel asserts structure instead of an exact value: cwd can move under a parallel test.
 		wantRel bool
 	}{
@@ -69,6 +70,11 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			want:  "s3://bucket/path?endpoint=https://minio.example&region=auto&path-style=true",
 		},
 		{
+			name:      "unrecognized uppercase scheme is treated as a local path",
+			input:     "S3://bucket/path",
+			wantLocal: true,
+		},
+		{
 			name:  "absolute path gets file prefix",
 			input: absBackup,
 			want:  "file://" + absBackup,
@@ -84,6 +90,12 @@ func TestResolveDoltBackupURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := resolveDoltBackupURL(tt.input)
+			if tt.wantLocal {
+				if got == tt.input || !strings.HasPrefix(got, "file://") {
+					t.Errorf("resolveDoltBackupURL(%q) = %q, want conversion to a file URL", tt.input, got)
+				}
+				return
+			}
 			if tt.wantRel {
 				wantSuffix := string(filepath.Separator) + "my-backup"
 				if !strings.HasPrefix(got, "file://") ||
@@ -107,6 +119,38 @@ func TestResolveDoltBackupURL_HomeTilde(t *testing.T) {
 	want := "file://" + filepath.Join(home, "backups/beads")
 	if got != want {
 		t.Errorf("resolveDoltBackupURL(~/backups/beads) = %q, want %q", got, want)
+	}
+}
+
+func TestBackupInitRejectsUnrecognizedScheme(t *testing.T) {
+	oldStore := store
+	oldRootCtx := rootCtx
+	oldProxiedServerMode := proxiedServerMode
+	t.Cleanup(func() {
+		store = oldStore
+		rootCtx = oldRootCtx
+		proxiedServerMode = oldProxiedServerMode
+	})
+
+	_ = backupConfigTestDir(t)
+
+	fake := &backupRestoreRecordingStore{}
+	store = fake
+	rootCtx = context.Background()
+	proxiedServerMode = false
+
+	const source = "S3://bucket/path"
+	err := backupInitCmd.RunE(backupInitCmd, []string{source})
+	if err == nil {
+		t.Fatalf("backup init %q = nil, want an unsupported-scheme refusal", source)
+	}
+	for _, want := range []string{"unsupported backup URL scheme", `"S3"`, "case-sensitive"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("backup init %q error %q does not contain %q", source, err, want)
+		}
+	}
+	if fake.backupAddURL != "" {
+		t.Errorf("BackupAdd URL = %q, want no registration attempt", fake.backupAddURL)
 	}
 }
 
