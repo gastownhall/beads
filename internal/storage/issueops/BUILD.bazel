@@ -129,6 +129,7 @@ go_test(
         "blocked_recheck_test.go",
         "blocked_state_result_test.go",
         "blocked_state_template_test.go",
+        "claim_lease_transfer_test.go",
         "close_test.go",
         "config_helpers_test.go",
         "counts_missing_table_test.go",
