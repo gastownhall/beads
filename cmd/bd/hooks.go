@@ -1648,7 +1648,11 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 		if ok {
 			diagnostic = strings.TrimSpace(string(exit.Stderr))
 		}
-		failures = append(failures, fmt.Sprintf("read core.hooksPath: %v (output: %s)", err, diagnostic))
+		failure := fmt.Sprintf("read core.hooksPath: %v", err)
+		if diagnostic != "" {
+			failure += fmt.Sprintf(" (output: %s)", diagnostic)
+		}
+		failures = append(failures, failure)
 	}
 	// Exit 1 means the key is absent. Other read failures must remain visible.
 
