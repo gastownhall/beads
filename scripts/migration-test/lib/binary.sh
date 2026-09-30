@@ -2,6 +2,9 @@
 # Binary management — download old releases, build candidate.
 # Extracted from cross-version-smoke-test.sh for reuse.
 
+# shellcheck source=../../lib/smoke-candidate.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../lib/smoke-candidate.sh" || return $?
+
 CACHE_DIR="${HOME}/.cache/beads-regression"
 mkdir -p "$CACHE_DIR"
 
@@ -243,15 +246,3 @@ build_verified_v091_source_binary() (
     temporary=""
     printf '%s\n' "$binary"
 )
-
-build_candidate() {
-    if [ -n "${CANDIDATE_BIN:-}" ] && [ -x "${CANDIDATE_BIN}" ]; then
-        echo "$(cd "$(dirname "$CANDIDATE_BIN")" && pwd)/$(basename "$CANDIDATE_BIN")"
-        return
-    fi
-
-    local candidate="$CACHE_DIR/bd-candidate-$$"
-    echo -e "${YELLOW:-}Building candidate binary...${NC:-}" >&2
-    (cd "$PROJECT_ROOT" && go build -tags gms_pure_go -o "$candidate" ./cmd/bd) >&2
-    echo "$candidate"
-}
