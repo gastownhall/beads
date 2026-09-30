@@ -24,16 +24,19 @@ import (
 // helpers below are reused by both files.
 type chunkRecordingStore struct {
 	storage.DoltStorage
-	batches    [][]*types.Issue
-	calls      int
-	failOnCall int
+	batches [][]*types.Issue
+	// conflictSkip records opts.ConflictSkip per batch: true marks a
+	// dependency-pass transaction, false a phase-1 row chunk.
+	conflictSkip []bool
+	calls        int
+	failOnCall   int
 }
 
 func (f *chunkRecordingStore) GetIssuesByIDs(_ context.Context, _ []string) ([]*types.Issue, error) {
 	return nil, nil
 }
 
-func (f *chunkRecordingStore) CreateIssuesWithFullOptions(_ context.Context, issues []*types.Issue, _ string, _ storage.BatchCreateOptions) error {
+func (f *chunkRecordingStore) CreateIssuesWithFullOptions(_ context.Context, issues []*types.Issue, _ string, opts storage.BatchCreateOptions) error {
 	f.calls++
 	if f.failOnCall != 0 && f.calls == f.failOnCall {
 		return errors.New("simulated chunk failure")
@@ -45,6 +48,7 @@ func (f *chunkRecordingStore) CreateIssuesWithFullOptions(_ context.Context, iss
 		snapshot[i] = &cp
 	}
 	f.batches = append(f.batches, snapshot)
+	f.conflictSkip = append(f.conflictSkip, opts.ConflictSkip)
 	return nil
 }
 
@@ -334,5 +338,179 @@ func TestOrderImportIssuesForChunkingPlacesCycleBeforeDependent(t *testing.T) {
 	if pos["bd-chunk03"] > pos["bd-chunk01"] {
 		t.Fatalf("bd-chunk03 (blocker on a cycle) at %d must precede its dependent bd-chunk01 at %d so the edge rides inline",
 			pos["bd-chunk03"], pos["bd-chunk01"])
+	}
+}
+
+func crossBucketTestIssue(id string, wisp bool) *types.Issue {
+	issue := &types.Issue{ID: id, Title: id, UpdatedAt: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), Ephemeral: wisp}
+	issue.SetDefaults()
+	return issue
+}
+
+// assertEdgesCommitAfterTargets fails if any recorded batch carries an edge
+// that commits before its target row exists (target first written in a later
+// batch). A regular<->wisp edge whose target is a row of the same batch is
+// fine: the engine writes it (wy-a648lq), so the import no longer defers it.
+func assertEdgesCommitAfterTargets(t *testing.T, store *chunkRecordingStore) {
+	t.Helper()
+	firstBatchOf := map[string]int{}
+	for b, batch := range store.batches {
+		for _, issue := range batch {
+			if _, ok := firstBatchOf[issue.ID]; !ok {
+				firstBatchOf[issue.ID] = b
+			}
+		}
+	}
+	for b, batch := range store.batches {
+		for _, issue := range batch {
+			for _, dep := range issue.Dependencies {
+				tb, ok := firstBatchOf[dep.DependsOnID]
+				if !ok {
+					t.Fatalf("dependency target %s never written", dep.DependsOnID)
+				}
+				if tb > b {
+					t.Fatalf("batch %d: %s -> %s commits before its target exists (target first written in batch %d)", b, issue.ID, dep.DependsOnID, tb)
+				}
+			}
+		}
+	}
+}
+
+// depTargetsIn returns the dependency targets batch b carries for issue id.
+func depTargetsIn(store *chunkRecordingStore, b int, id string) []string {
+	var targets []string
+	for _, issue := range store.batches[b] {
+		if issue.ID != id {
+			continue
+		}
+		for _, dep := range issue.Dependencies {
+			targets = append(targets, dep.DependsOnID)
+		}
+	}
+	return targets
+}
+
+// A regular<->wisp edge whose endpoints are created in the same chunk rides
+// inline with its row, exactly like a same-plane edge: the engine writes an
+// in-batch cross-plane edge under SkipDependencyValidationErrors (wy-a648lq).
+// The import once deferred such an edge to a single-plane dependency pass to
+// dodge the engine's per-batch cross-bucket filter (wy-4276q8, which had lost
+// every such edge on export→import); wy-y52syc retired that deferral, so a
+// batch whose edges all point at same- or earlier-chunk rows needs no
+// dependency pass at all.
+func TestImportChunkedSameChunkCrossBucketEdgesRideInline(t *testing.T) {
+	setImportChunkSize(t, 4)
+	recordImportPauses(t)
+	setImportProgressBuffer(t)
+	// File order and blocking edges chosen so that Kahn's ordering (indegree-0
+	// rows in file order, dependents released behind them) yields
+	//   chunk 0: f1 f2 f3 f4   chunk 1: w1 r2 w3 r1   chunk 2: w2
+	// r1 -> w1 lands in the same chunk as its wisp target (rides inline);
+	// w3 -> f1 and w2 -> r2 point at earlier chunks (ride inline too).
+	issues := []*types.Issue{
+		crossBucketTestIssue("bd-f1", false),
+		crossBucketTestIssue("bd-f2", false),
+		crossBucketTestIssue("bd-f3", false),
+		crossBucketTestIssue("bd-f4", false),
+		crossBucketTestIssue("bd-w1", true),
+		crossBucketTestIssue("bd-r1", false),
+		crossBucketTestIssue("bd-w2", true),
+		crossBucketTestIssue("bd-r2", false),
+		crossBucketTestIssue("bd-w3", true),
+	}
+	issues[5].Dependencies = []*types.Dependency{{IssueID: "bd-r1", DependsOnID: "bd-w1", Type: types.DepBlocks}}
+	issues[6].Dependencies = []*types.Dependency{{IssueID: "bd-w2", DependsOnID: "bd-r2", Type: types.DepBlocks}}
+	issues[8].Dependencies = []*types.Dependency{{IssueID: "bd-w3", DependsOnID: "bd-f1", Type: types.DepBlocks}}
+
+	store := &chunkRecordingStore{}
+	result, err := importIssuesCore(context.Background(), "", store, issues, ImportOptions{SkipPrefixValidation: true})
+	if err != nil {
+		t.Fatalf("importIssuesCore: %v", err)
+	}
+	if store.calls != 3 {
+		t.Fatalf("calls = %d, want 3 row chunks and NO dependency pass", store.calls)
+	}
+	for b := 0; b < 3; b++ {
+		if store.conflictSkip[b] {
+			t.Fatalf("batch %d is a row chunk but was submitted with ConflictSkip", b)
+		}
+	}
+	assertEdgesCommitAfterTargets(t, store)
+
+	// The same-chunk cross-bucket edge rides inline with its row.
+	if got := depTargetsIn(store, 1, "bd-r1"); len(got) != 1 || got[0] != "bd-w1" {
+		t.Fatalf("bd-r1 inline deps = %v, want [bd-w1] (same-chunk wisp target rides inline)", got)
+	}
+	// Cross-bucket edges into earlier chunks ride inline with their rows.
+	if got := depTargetsIn(store, 1, "bd-w3"); len(got) != 1 || got[0] != "bd-f1" {
+		t.Fatalf("bd-w3 inline deps = %v, want [bd-f1]", got)
+	}
+	if got := depTargetsIn(store, 2, "bd-w2"); len(got) != 1 || got[0] != "bd-r2" {
+		t.Fatalf("bd-w2 inline deps = %v, want [bd-r2]", got)
+	}
+	if result.Created != 9 {
+		t.Fatalf("Created = %d, want 9", result.Created)
+	}
+	if len(result.SkippedDependencies) != 0 {
+		t.Fatalf("SkippedDependencies = %#v, want none", result.SkippedDependencies)
+	}
+	// The caller's slice keeps its dependencies for a retry.
+	for _, i := range []int{5, 6, 8} {
+		if len(issues[i].Dependencies) != 1 {
+			t.Fatalf("issue %s lost its dependency after import", issues[i].ID)
+		}
+	}
+}
+
+// A small import (at or below the chunk size) keeps its single transaction
+// even when it carries a regular<->wisp edge between two of its own rows: the
+// engine writes that edge under SkipDependencyValidationErrors (wy-a648lq),
+// so the chunked-path detour that once landed it in a dependency pass
+// (wy-4276q8) is retired (wy-y52syc).
+func TestImportIssuesCoreSmallBatchCrossBucketEdgeStaysInline(t *testing.T) {
+	setImportChunkSize(t, 4)
+	recordImportPauses(t)
+	setImportProgressBuffer(t)
+
+	wisp := crossBucketTestIssue("bd-w1", true)
+	regular := crossBucketTestIssue("bd-r1", false)
+	regular.Dependencies = []*types.Dependency{{IssueID: "bd-r1", DependsOnID: "bd-w1", Type: types.DepBlocks}}
+	issues := []*types.Issue{wisp, regular}
+
+	store := &chunkRecordingStore{}
+	result, err := importIssuesCore(context.Background(), "", store, issues, ImportOptions{SkipPrefixValidation: true})
+	if err != nil {
+		t.Fatalf("importIssuesCore: %v", err)
+	}
+	if store.calls != 1 || store.conflictSkip[0] {
+		t.Fatalf("calls = %d conflictSkip = %v, want one inline transaction for a small import with a cross-bucket edge", store.calls, store.conflictSkip)
+	}
+	if len(store.batches[0]) != 2 {
+		t.Fatalf("row chunk size = %d, want both rows", len(store.batches[0]))
+	}
+	assertEdgesCommitAfterTargets(t, store)
+	if got := depTargetsIn(store, 0, "bd-r1"); len(got) != 1 || got[0] != "bd-w1" {
+		t.Fatalf("inline deps for bd-r1 = %v, want [bd-w1]", got)
+	}
+	if result.Created != 2 {
+		t.Fatalf("Created = %d, want 2", result.Created)
+	}
+	if len(regular.Dependencies) != 1 {
+		t.Fatalf("caller's issue lost its dependency after import")
+	}
+
+	// Control: the same shape on one plane stays a single inline transaction.
+	a := crossBucketTestIssue("bd-r2", false)
+	b := crossBucketTestIssue("bd-r3", false)
+	b.Dependencies = []*types.Dependency{{IssueID: "bd-r3", DependsOnID: "bd-r2", Type: types.DepBlocks}}
+	single := &chunkRecordingStore{}
+	if _, err := importIssuesCore(context.Background(), "", single, []*types.Issue{a, b}, ImportOptions{SkipPrefixValidation: true}); err != nil {
+		t.Fatalf("importIssuesCore (same-plane control): %v", err)
+	}
+	if single.calls != 1 || single.conflictSkip[0] {
+		t.Fatalf("same-plane small import: calls = %d conflictSkip = %v, want one inline transaction", single.calls, single.conflictSkip)
+	}
+	if got := depTargetsIn(single, 0, "bd-r3"); len(got) != 1 || got[0] != "bd-r2" {
+		t.Fatalf("same-plane small import deps = %v, want inline [bd-r2]", got)
 	}
 }

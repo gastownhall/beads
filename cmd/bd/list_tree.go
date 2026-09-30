@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // buildIssueTree builds parent-child tree structure from issues
@@ -23,6 +25,12 @@ func buildIssueTree(issues []*types.Issue) (roots []*types.Issue, childrenMap ma
 // (blocks, waits-for, discovered-from, relates-to, ...) are workflow/graph
 // links and are not rendered as hierarchy.
 func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.Dependency) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
+	return buildIssueTreeWithDepsOrdered(issues, allDeps, compareIssuesByPriority)
+}
+
+// buildIssueTreeWithDepsOrdered builds the same hierarchy while preserving the
+// caller's requested order within each root and sibling group.
+func buildIssueTreeWithDepsOrdered(issues []*types.Issue, allDeps map[string][]*types.Dependency, compare func(a, b *types.Issue) int) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
 	issueMap := make(map[string]*types.Issue)
 	childrenMap = make(map[string][]*types.Issue)
 	isChild := make(map[string]bool)
@@ -89,14 +97,38 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 
 	// Sort roots for stable tree ordering (fixes unstable --tree output)
 	// Use same sorting logic as children for consistency
-	slices.SortFunc(roots, compareIssuesByPriority)
+	slices.SortFunc(roots, compare)
 
 	// Sort children within each parent for stable ordering in data structure
 	for parentID := range childrenMap {
-		slices.SortFunc(childrenMap[parentID], compareIssuesByPriority)
+		slices.SortFunc(childrenMap[parentID], compare)
 	}
 
 	return roots, childrenMap
+}
+
+func compareIssuesForTree(sortBy string, reverse bool) func(a, b *types.Issue) int {
+	if sortBy == "" {
+		if reverse {
+			return func(a, b *types.Issue) int {
+				if result := cmp.Compare(a.Priority, b.Priority); result != 0 {
+					return -result
+				}
+				return utils.NaturalCompareIDs(a.ID, b.ID)
+			}
+		}
+		return compareIssuesByPriority
+	}
+	return func(a, b *types.Issue) int {
+		result := workapi.CompareIssuesBy(a, b, sortBy)
+		if reverse {
+			result = -result
+		}
+		if result != 0 {
+			return result
+		}
+		return utils.NaturalCompareIDs(a.ID, b.ID)
+	}
 }
 
 // compareIssuesByPriority provides stable sorting for tree display
@@ -111,18 +143,46 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
+// treeCycleMarker is appended to a tree line whose issue is already an
+// ancestor on the current path. It mirrors the "(shown above)" arm of
+// bd dep tree but means something narrower: an ancestor of this very line,
+// not any node the walk happened to print earlier.
+//
+// It names the edge class rather than a command to run. childrenMap is built
+// from parent-child edges alone, so every cycle this marker can fire on is a
+// parent-child cycle — and no command reports that class today: bd dep cycles
+// and bd doctor both walk the blocking graph (DetectCycles uses
+// AppendBlockingGraphInTx deliberately; see issueops/cycles.go), which admits
+// blocks and conditional-blocks only. Sent there, the reader gets an
+// affirmative "No dependency cycles detected" for the very store that just
+// produced this line. Cite a command here only once one can see these edges.
+const treeCycleMarker = "(cycle: shown above; parent-child cycle in stored edges)"
+
 // printPrettyTree recursively prints the issue tree.
-// Children are ordered by dependency then priority when dr != nil (--deps), else
-// by priority (P0 first) for intuitive reading. When dr is set, each node's
+// Children use the requested list order. With --deps, dependency order takes
+// precedence and the requested order breaks ties. When dr is set, each node's
 // dependency edges are annotated just beneath it.
-func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender) {
+func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int) {
+	printPrettyTreePath(childrenMap, parentID, prefix, dr, compare, map[string]bool{parentID: true})
+}
+
+// printPrettyTreePath is printPrettyTree carrying the set of ancestors on the
+// current root-to-node path. childrenMap comes from stored edges, and a cycle
+// in it (parent-child rows imported without validation, or a build that nested
+// every dependency on an epic, as v1.2.2 did) must not recurse forever: the
+// walk allocates until the host swaps (GH#5887). A child already on the path
+// is printed once with a marker and not descended. The set is scoped to the
+// path, not the whole walk, so a node reachable through two parents still
+// renders under both; only a true ancestor counts as a cycle. Like the
+// "(shown above)" arm of bd dep tree, the marked line carries no --deps
+// annotations: they were printed with the node's first appearance.
+func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int, onPath map[string]bool) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
-		children = orderSiblingsByDeps(children, dr.allDeps)
+		children = orderSiblingsByDeps(children, dr.allDeps, compare)
 	} else {
-		// Sort children by priority using same comparison as roots for consistency
-		slices.SortFunc(children, compareIssuesByPriority)
+		slices.SortFunc(children, compare)
 	}
 
 	for i, child := range children {
@@ -131,6 +191,10 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 		if isLast {
 			connector = "└── "
 		}
+		if onPath[child.ID] {
+			fmt.Printf("%s%s%s %s\n", prefix, connector, formatPrettyIssue(child), ui.RenderMuted(treeCycleMarker))
+			continue
+		}
 		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssue(child))
 
 		extension := "│   "
@@ -138,7 +202,9 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr)
+		onPath[child.ID] = true
+		printPrettyTreePath(childrenMap, child.ID, prefix+extension, dr, compare, onPath)
+		delete(onPath, child.ID)
 	}
 }
 
@@ -147,26 +213,28 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 // There is no --ready arm behind this one: it is the plain tree, so the
 // summary keeps its status breakdown.
 func displayPrettyList(issues []*types.Issue, showHeader bool) {
-	displayPrettyListWithDeps(issues, showHeader, nil, false, false)
+	displayPrettyListWithDeps(issues, showHeader, nil, false, false, "")
 }
 
 // displayPrettyListWithDeps displays issues in tree format using dependency data.
-// readyFiltered must be threaded from the caller's --ready state rather than
-// defaulted here: the watch paths reach the summary through this wrapper, and a
-// hardcoded false silently restores the vacuous "(N open, 0 in progress)" that
-// listFooterLine exists to suppress.
-func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool) {
-	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered)
+// readyFiltered and statusSelector must be threaded from the caller's --ready
+// / --status state rather than defaulted here: the watch paths reach the
+// summary through this wrapper, and a hardcoded false silently restores the
+// vacuous "(N open, 0 in progress)" that listFooterLine exists to suppress.
+func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool, statusSelector string) {
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered, statusSelector, "", false)
 }
 
 // listFooterLine renders the one-line summary under a text listing.
 //
 // The status breakdown is only meaningful when the query could have returned
-// more than one status. Under --ready it cannot: BuildListFilter pins
-// filter.Status to open (internal/workapi/list.go), so every row is open by
-// construction and the breakdown degenerates to a tautology — "(N open, 0 in
-// progress)" is what it prints for ANY database, including one with a thousand
-// in-progress issues matching the same label.
+// more than one status. Under --ready the query is status-pinned: the default
+// (no --status, or --status all) is still open, so "(N open, 0 in progress)"
+// is a tautology for ANY database, including one with a thousand in-progress
+// issues matching the same label. An explicit --status is the intersection
+// (GH#5832), and the same tautology applies to whatever selector was asked
+// for — the footer must name that selector rather than reuse the default-open
+// sentence.
 //
 // Printed next to a real count that number reads as a finding rather than an
 // artifact of the flag: "0 in progress" answers the question "is anything in
@@ -175,13 +243,14 @@ func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps m
 // construction, say what was excluded instead of asserting a count for it. This
 // is the same principle as the truncation arm below, which refuses to label a
 // cut-off page "Total" (GH#5362): a count is only honest alongside its scope.
-func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool) string {
+func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool, statusSelector string) string {
 	if readyFiltered {
 		// No status breakdown: --ready makes it vacuous. Name the scope instead.
+		scope := readyFooterScope(statusSelector)
 		if truncated {
-			return fmt.Sprintf("Showing %d ready issues (open only — --ready excludes in_progress); more match (truncated by --limit). Use --limit 0 for all.", total)
+			return fmt.Sprintf("Showing %d ready issues (%s); more match (truncated by --limit). Use --limit 0 for all.", total, scope)
 		}
-		return fmt.Sprintf("Ready: %d issues with no active blockers (open only — --ready excludes in_progress)", total)
+		return fmt.Sprintf("Ready: %d issues with no active blockers (%s)", total, scope)
 	}
 	if truncated {
 		return fmt.Sprintf("Showing %d issues (%d open, %d in progress); more match (truncated by --limit). Use --limit 0 for all.",
@@ -190,14 +259,32 @@ func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool) 
 	return fmt.Sprintf("Total: %d issues (%d open, %d in progress)", total, open, inProgress)
 }
 
+// readyFooterScope names the status pin a --ready listing actually used.
+// Empty / "all" still take the open default; an explicit selector is the
+// intersection and must not reuse "excludes in_progress" (GH#5832).
+func readyFooterScope(statusSelector string) string {
+	var parts []string
+	for _, part := range strings.Split(statusSelector, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "all") {
+		return "open only — --ready excludes in_progress"
+	}
+	return strings.Join(parts, ",") + " only"
+}
+
 // displayPrettyListWithDepsMode displays issues in tree format. When depsMode is
 // "scheduling" or "all", the tree also annotates each node's dependency edges and
 // orders siblings by their scheduling dependencies (see orderSiblingsByDeps). An
 // empty depsMode is the plain parent-child tree. truncated means the page was cut
 // by --limit; the summary then says "Showing N" instead of "Total: N" (GH#5362).
-// readyFiltered means --ready was in force, which pins the query to open issues —
-// see listFooterLine for why the summary must say so.
-func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool) {
+// readyFiltered means --ready was in force; statusSelector is the --status value
+// so the summary names the pin that actually applied — see listFooterLine.
+// sortBy and reverse preserve the requested list order within the hierarchy.
+func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -212,7 +299,8 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 		return
 	}
 
-	roots, childrenMap := buildIssueTreeWithDeps(issues, allDeps)
+	compare := compareIssuesForTree(sortBy, reverse)
+	roots, childrenMap := buildIssueTreeWithDepsOrdered(issues, allDeps, compare)
 
 	var dr *depRender
 	if depsMode != "" {
@@ -221,13 +309,13 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 			inView[issue.ID] = issue
 		}
 		dr = &depRender{mode: depsMode, allDeps: allDeps, inView: inView}
-		roots = orderSiblingsByDeps(roots, allDeps)
+		roots = orderSiblingsByDeps(roots, allDeps, compare)
 	}
 
 	for _, issue := range roots {
 		fmt.Println(formatPrettyIssue(issue))
 		dr.annotationsFor(issue.ID, "")
-		printPrettyTree(childrenMap, issue.ID, "", dr)
+		printPrettyTree(childrenMap, issue.ID, "", dr, compare)
 	}
 
 	// Summary — counts describe the shown page; never label a truncated page "Total".
@@ -243,7 +331,7 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 			inProgressCount++
 		}
 	}
-	fmt.Println(listFooterLine(len(issues), openCount, inProgressCount, truncated, readyFiltered))
+	fmt.Println(listFooterLine(len(issues), openCount, inProgressCount, truncated, readyFiltered, statusSelector))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
 	fmt.Println("Priority: P0–P4 (label only; not a status icon)")

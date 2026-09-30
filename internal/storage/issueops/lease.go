@@ -777,7 +777,13 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		// Journal the lease reclaim as an update (assignee cleared, status
 		// reverted to open) so a replayer sees the claim released. Emitted past
 		// both re-checks, so only reverts that actually happened are recorded.
-		if err := RecordEventInTx(ctx, tx, EventUpdate, r.ID); err != nil {
+		if err := RecordEventInTx(ctx, tx, EventUpdate, r.ID, actor); err != nil {
+			return nil, err
+		}
+		// The revert rewrote assignee, status and started_at — durable state —
+		// so the reclaimed issue gets a version row beside its journal entry,
+		// past the same two re-checks.
+		if err := RecordVersionInTx(ctx, tx, r.ID, actor); err != nil {
 			return nil, err
 		}
 		// Logged HERE, past both re-checks, so the audit trail records reverts

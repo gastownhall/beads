@@ -128,6 +128,23 @@ func committedSchemaSnapshotQueries() map[string]string {
 	// intentionally excluded from the committed-schema parity oracle, which
 	// compares the main migration stream only. CLI substitutions that touch
 	// wisps still have focused coverage in internal/storage/schema tests.
+	//
+	// That exclusion has a real cost, paid once: migration 0065's
+	// wisp_comments.text widening drifted for six days and this oracle could
+	// not see it (ga-61ruw). Widening the filter is nonetheless not a filter
+	// tweak, because schema.AllMigrationsSQL() walks the MAIN series only and
+	// there is no ignored-series bundle to pair with it. Measured 2026-08-21
+	// by applying bundle-only and bundle-plus-ignored-series through dolt
+	// 2.3.1, the ignored plane owns at least: wisps.is_blocked (and
+	// idx_wisps_is_blocked, idx_wisps_defer_until), the dropped uuid()
+	// defaults on wisp_comments.id / wisp_dependencies.id / wisp_events.id,
+	// wisp_events.old_value+new_value as LONGTEXT, leases.granted_node, and
+	// ignored_schema_migrations itself. Every one of those would read as a
+	// spurious "only in runtime" line. Covering the ephemeral plane properly
+	// means giving the CLI side an ignored-series bundle, not deleting these
+	// predicates. Until then the masking-proof source-level guard in
+	// internal/storage/schema/cli_prepared_ddl.go is what covers the class
+	// that got past this oracle.
 	return map[string]string{
 		"tables": `
 SELECT CONCAT('table|', t.table_name, '|', t.table_type) AS line

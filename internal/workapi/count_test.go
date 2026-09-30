@@ -158,6 +158,35 @@ func TestBuildCountFilterNormalizesLabelsAndIDs(t *testing.T) {
 	}
 }
 
+func TestBuildCountFilterCarriesMetadataFields(t *testing.T) {
+	fields := map[string]string{"team": "platform", "env": "prod"}
+	got, err := BuildCountFilter(issueops.CountRequest{MetadataFields: fields}, ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	if !reflect.DeepEqual(got.MetadataFields, fields) {
+		t.Errorf("MetadataFields = %#v, want %#v", got.MetadataFields, fields)
+	}
+
+	if _, err := BuildCountFilter(issueops.CountRequest{MetadataFields: map[string]string{"bad$key": "value"}}, ListConfig{}); err == nil {
+		t.Fatal("BuildCountFilter accepted an invalid metadata key")
+	}
+}
+
+func TestBuildCountFilterCarriesHasMetadataKey(t *testing.T) {
+	got, err := BuildCountFilter(issueops.CountRequest{HasMetadataKey: "audit_ref"}, ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	if got.HasMetadataKey != "audit_ref" {
+		t.Errorf("HasMetadataKey = %q, want %q", got.HasMetadataKey, "audit_ref")
+	}
+
+	if _, err := BuildCountFilter(issueops.CountRequest{HasMetadataKey: "1bad"}, ListConfig{}); err == nil {
+		t.Fatal("BuildCountFilter accepted an invalid has-metadata key")
+	}
+}
+
 // TestBuildCountFilterTakesStatusAndTypeAsWritten pins the deliberate absence
 // of validation: an unrecognized status or type reaches the filter as written
 // and matches nothing, rather than failing. A scripted caller counting a

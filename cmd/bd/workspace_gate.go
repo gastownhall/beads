@@ -66,6 +66,17 @@ var workspaceGateHandle *workspacegate.MultiHandle
 // const, so tests can shorten it.
 var exclusiveGateWait = 5 * time.Second
 
+// exclusiveGateOnWait reports the first contended exclusive-gate attempt.
+// Kept as a variable so ordering tests can observe contention without sleeps.
+var exclusiveGateOnWait = func(holder string) {
+	if !quietFlag {
+		// %q: the holder string comes from another process's gate sidecar;
+		// quoting neutralizes terminal escape sequences a hostile or corrupt
+		// sidecar could smuggle into stderr.
+		fmt.Fprintf(os.Stderr, "waiting for other bd commands to finish (%q)...\n", holder) //nolint:gosec // G705: stderr, not a browser context; %q additionally neutralizes terminal escapes
+	}
+}
+
 // exclusiveGateOptions builds the acquisition options for an EXCLUSIVE
 // hold: bounded wait, holder-info reason, and a single stderr note when the
 // first attempt comes back busy so the wait does not look like a hang.
@@ -73,14 +84,7 @@ func exclusiveGateOptions(reason string) workspacegate.Options {
 	return workspacegate.Options{
 		Wait:   exclusiveGateWait,
 		Reason: reason,
-		OnWait: func(holder string) {
-			if !quietFlag {
-				// %q: the holder string comes from another process's gate
-				// sidecar; quoting neutralizes terminal escape sequences a
-				// hostile or corrupt sidecar could smuggle into stderr.
-				fmt.Fprintf(os.Stderr, "waiting for other bd commands to finish (%q)...\n", holder) //nolint:gosec // G705: stderr, not a browser context; %q additionally neutralizes terminal escapes
-			}
-		},
+		OnWait: exclusiveGateOnWait,
 	}
 }
 
@@ -290,4 +294,20 @@ func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string
 	}
 	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive,
 		exclusiveGateOptions(reason), gates...)
+}
+
+// acquireInitMutationGate holds init's complete exclusive gate set while its
+// destructive preflight runs. A refusal or preflight error releases the gates;
+// a successful caller owns the returned handle through replacement.
+func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string, preflight func() error) (*workspacegate.MultiHandle, error) {
+	h, err := acquireExclusiveWorkspaceGates(ctx, beadsDir, "bd init", physicalRoot)
+	if err != nil {
+		return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", err)
+	}
+	if preflight != nil {
+		if err := preflight(); err != nil {
+			return nil, errors.Join(err, h.Release())
+		}
+	}
+	return h, nil
 }

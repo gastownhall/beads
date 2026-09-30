@@ -64,6 +64,15 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 		PriorityMin:         in.PriorityMin,
 		PriorityMax:         in.PriorityMax,
 	}
+	if len(in.MetadataFields) > 0 {
+		filter.MetadataFields = in.MetadataFields
+	}
+	if in.HasMetadataKey != "" {
+		filter.HasMetadataKey = in.HasMetadataKey
+	}
+	if err := ValidateMetadataFilters(in.MetadataFields, in.HasMetadataKey); err != nil {
+		return types.IssueFilter{}, err
+	}
 
 	// Status and IssueType are taken as written. Neither is validated against
 	// the workspace vocabulary: issueops.CountRequest promises an unrecognized
@@ -96,7 +105,7 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 
 	if in.IncludeInfra {
 		applyCountIncludeInfra(&filter, in.IssueType, cfg)
-	} else {
+	} else if !in.IncludeEphemeral {
 		filter.SkipWisps = true
 	}
 	return filter, nil

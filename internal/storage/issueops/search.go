@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -29,6 +30,35 @@ func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.I
 // wasted (e.g., partial-ID resolution in internal/utils/id_parser.go).
 func SearchIssueIDsInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]string, error) {
 	return searchInTx(ctx, tx, query, filter, idProjection)
+}
+
+// SearchWispsPlaneInTx searches the wisps plane ALONE: every row stored in
+// the wisps table, whatever its ephemeral, no_history or wisp_type values, and
+// never the issues table.
+//
+// It is not SearchIssuesInTx with Ephemeral=true. That filter adds an
+// "ephemeral = 1" clause, which drops the no-history rows stored beside the
+// wisps, and it falls back to the issues table when the wisps plane is empty.
+// This answers "what is in the wisps table" — the unit
+// issueops.SweepWispsPlane selects by — and a database with no wisps table
+// answers with nothing.
+func SearchWispsPlaneInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	proj := issueProjection
+	if filter.Lite {
+		proj = issueLiteProjection
+	}
+	results, err := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
+	if err != nil {
+		if missingOptionalWispTable(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("search wisps plane: %w", err)
+	}
+	results = trimToSearchLimit(results, filter.Limit)
+	if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // searchProjection describes how to project, scan, and dedup search results.
@@ -155,6 +185,16 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 	return nil
 }
 
+// missingOptionalWispTable reports whether err is the absence of a wisp-plane
+// table a database may legitimately not have. A wisp search touches more than
+// that: its FROM clause carries sqlbuild.LeaseJoin and its hydration reads
+// wisp_labels, so a blanket table-not-exist check reports a broken database as
+// an empty wisp plane and silently drops live rows from the result.
+func missingOptionalWispTable(err error) bool {
+	name, ok := dberrors.MissingTableName(err)
+	return ok && sqlbuild.OptionalWispTable(name)
+}
+
 // searchInTx is the shared wisp-merge wrapper. Ephemeral routing, the
 // empty-wisps probe, the issues+wisps queries, and overlap detection live
 // here once. Both SearchIssuesInTx and SearchIssueIDsInTx use this body —
@@ -163,7 +203,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 	// Route ephemeral-only queries to wisps table.
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		results, err := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if err != nil && !isTableNotExistError(err) {
+		if err != nil && !missingOptionalWispTable(err) {
 			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(results) > 0 {
@@ -218,7 +258,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 			return results, nil
 		}
 		wispResults, wispErr := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if wispErr != nil && !isTableNotExistError(wispErr) {
+		if wispErr != nil && !missingOptionalWispTable(wispErr) {
 			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
 		}
 		if len(wispResults) > 0 {

@@ -1,0 +1,51 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "procid",
+    srcs = [
+        "procid.go",
+        "procid_darwin.go",
+        "procid_linux.go",
+        "procid_unsupported.go",
+        "procid_windows.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/procid",
+    visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "procid_test",
+    srcs = [
+        "procid_linux_test.go",
+        "procid_test.go",
+        "procid_windows_test.go",
+    ],
+    embed = [":procid"],
+    deps = select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)

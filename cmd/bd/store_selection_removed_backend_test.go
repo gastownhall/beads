@@ -378,6 +378,12 @@ func TestStoreFactoriesRemovedBackendsFailLoud(t *testing.T) {
 					if !strings.Contains(guidance, "export") || !strings.Contains(guidance, "dolt") {
 						t.Fatalf("error should provide safe migration guidance: %v", err)
 					}
+					// With no Dolt data on disk the configured database really is
+					// the only copy, so the export path is right and the D-8 heal
+					// must not be offered — that edit would open an empty store.
+					if strings.Contains(guidance, "to heal") {
+						t.Fatalf("error offered a metadata heal for a workspace with no Dolt data: %v", err)
+					}
 					for _, name := range []string{"embeddeddolt", "dolt", "beads.db"} {
 						path := filepath.Join(beadsDir, name)
 						if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
@@ -391,14 +397,15 @@ func TestStoreFactoriesRemovedBackendsFailLoud(t *testing.T) {
 }
 
 func TestRequireDoltBackend(t *testing.T) {
+	beadsDir := t.TempDir()
 	for _, cfg := range []*configfile.Config{nil, {}, {Backend: configfile.BackendDolt}} {
-		if err := requireDoltBackend(cfg); err != nil {
+		if err := requireDoltBackend(cfg, beadsDir); err != nil {
 			t.Fatalf("Dolt config %#v rejected: %v", cfg, err)
 		}
 	}
 
 	for _, backend := range []string{configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite} {
-		err := requireDoltBackend(&configfile.Config{Backend: backend})
+		err := requireDoltBackend(&configfile.Config{Backend: backend}, beadsDir)
 		if err == nil || !strings.Contains(err.Error(), "no longer supported") || !strings.Contains(err.Error(), "export") {
 			t.Fatalf("removed backend %q guard error = %v, want rollback and migration guidance", backend, err)
 		}

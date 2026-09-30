@@ -202,6 +202,13 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
+			// An error that already carries an exit code came from a handler
+			// that has already rendered it (the typed --repo refusal writes
+			// its JSON to stdout). Re-wrapping would print a second line,
+			// "Error: exit code 1", after the real message.
+			if _, rendered := exitCodeFromError(err); rendered {
+				return err
+			}
 			return HandleError("%v", err)
 		}
 		return nil
@@ -240,7 +247,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.watchMode {
-		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit); err != nil {
+		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit, in.Status); err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
@@ -289,6 +296,10 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	// for three aggregate joins on the most-run command in the tree.
 	textRequest := in.ListRequest
 	textRequest.SkipCounts = true
+	// No text rendering prints a comment body, so the per-row comment reads are
+	// not merely unused here, they are unpayable: SkipCounts above already
+	// zeroes the count this hydration would key on.
+	textRequest.IncludeComments = false
 	page, err := reader.List(ctx, textRequest)
 	if err != nil {
 		if capErr := handleMaxRowsError(err); capErr != nil {
@@ -315,7 +326,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
 			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
-			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag)
+			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 			printSkipLabelsFooter(in.SkipLabels)
 			return nil
 		}
@@ -324,7 +335,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
-		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag)
+		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
@@ -409,13 +420,13 @@ func init() {
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
-	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (default 50, use 0 for unlimited)")
+	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (an explicit --limit always wins, 0 meaning unlimited; otherwise --all is unlimited; otherwise a configured list.limit applies; otherwise unlimited when piped, else 20 in agent mode at a terminal, else 50)")
 	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
-	listCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
+	listCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
 
 	// Pattern matching
 	listCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
@@ -446,6 +457,16 @@ func init() {
 
 	// Projection toggle. Like --skip-labels it trades data for bytes, and
 	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
+	// Hydration toggle, the list twin of `bd show --include-comments`. Like
+	// --skip-labels and --brief it changes what is HYDRATED and never which
+	// rows match. It costs a query per row that has comments, which is why it
+	// is opt-in on the most-run command in the tree.
+	listCmd.Flags().Bool("include-comments", false,
+		"Populate each row's comments field with full comment bodies in JSON output "+
+			"(--json only; costs one query per row that has comments). Without it, a row "+
+			"with comments carries comments_omitted=true, so an absent comments field is "+
+			"never mistaken for having none. Text output is unaffected either way.")
+
 	listCmd.Flags().Bool("brief", false,
 		"Omit the free-form text (description, design, acceptance criteria, notes, "+
 			"payload, waiters) from each row. Filters that read those fields, such as "+
@@ -469,6 +490,14 @@ func init() {
 
 	// Infra type filtering: exclude agent/role/message by default
 	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/role/message) in output")
+
+	// Ephemeral plane: the wisps table is suppressed by default. This is the
+	// PLANE knob on its own — ListRequest.IncludeEphemeral — as distinct from
+	// --include-infra, which admits the plane AND lifts the infra-type
+	// exclusions above. Without it the plane is reachable from the CLI only
+	// through --include-infra's wider bundle, which leaves --wisp-type below
+	// with no narrow way to match anything.
+	listCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in output (normally hidden)")
 
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")

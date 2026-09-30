@@ -517,6 +517,29 @@ func TestDepTreeFormatFlag(t *testing.T) {
 	}
 }
 
+// TestDepTreeFormatMermaidCaseInsensitive pins that --format mermaid folds case
+// the same way the json format check does.
+func TestDepTreeFormatMermaidCaseInsensitive(t *testing.T) {
+	tests := []struct {
+		format string
+		want   bool
+	}{
+		{"mermaid", true},
+		{"Mermaid", true},
+		{"MERMAID", true},
+		{"", false},
+		{"json", false},
+		{"dot", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			if got := isMermaidTreeFormat(tt.format); got != tt.want {
+				t.Errorf("isMermaidTreeFormat(%q) = %v, want %v", tt.format, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetStatusEmoji(t *testing.T) {
 	tests := []struct {
 		status types.Status
@@ -933,6 +956,34 @@ func TestRenderTreeOutput(t *testing.T) {
 		if !strings.Contains(output, node.ID) {
 			t.Errorf("Expected node %s in output, got:\n%s", node.ID, output)
 		}
+	}
+}
+
+func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
+	tree := []*types.TreeNode{
+		{
+			Issue: types.Issue{ID: "BD-root", Title: "Root", Status: types.StatusOpen, Priority: 1},
+		},
+		{
+			Issue:          types.Issue{ID: "external:remote:payments", Title: "○ payments", Status: types.StatusOpen},
+			Depth:          1,
+			ParentID:       "BD-root",
+			EdgeFromParent: types.DepBlocks,
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	renderTree(tree, 50, "down")
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+	if !strings.Contains(output, "[BLOCKED]") || strings.Contains(output, "[READY]") {
+		t.Fatalf("external blocker should mark root blocked, got:\n%s", output)
 	}
 }
 

@@ -403,8 +403,12 @@ wrote, and dolt 1.52.1 fails at both serving and reading.
 
 This is a warning, not a hard failure — there is deliberately no hard
 version floor, so an older dolt can still be used at your own risk. To
-resolve it, install a current dolt (https://docs.dolthub.com/introduction/installation)
-and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
+resolve it, install the pinned dolt version — see
+[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+— and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
+Install that specific version rather than `latest`: 2.3.x is a newer release
+that satisfies this warning but carries a
+[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install).
 
 The advisory repeats at most once per day, not on every command: the probe
 result and the warning timestamp are cached (keyed by the binary's path,
@@ -418,6 +422,39 @@ proxied-server mode still starts, since an unparseable version means "we
 don't know", not "this is definitely broken". A genuinely missing or
 broken `dolt` binary (not found, not executable, or the probe itself
 fails/times out) is a hard error, not a warning.
+
+### Proxied-server mode: closing a bead gate fails with "no local store available"
+
+```
+gate condition not satisfied: bead gate "bd-a1b2": no local store available (use --force to override)
+```
+
+`bd close` on a bead gate refuses this way in proxied-server mode even when
+the awaited bead is closed. Proxied-server commands run against a shared
+`dolt sql-server` and never open a local store, so the close path has
+nothing to read the awaited bead's status from.
+
+`bd gate check` does evaluate bead gates in proxied-server mode, and closes
+the ones whose target has closed:
+
+```bash
+bd gate check --type=bead      # closes bead gates whose awaited bead is closed
+bd close <gate-id> --force     # or close without verifying the condition
+```
+
+Tracked in [#5861](https://github.com/gastownhall/beads/issues/5861).
+
+### Prefix routing: "proxy server store needs to be uow provider"
+
+A lookup routed through the orchestrator's `routes.jsonl` prefix routes
+fails with this error when the rig that owns the prefix is itself running in
+proxied-server mode — routed reads cannot open a proxied-server rig. In an
+all-proxied shared-server topology that applies to every routed target, so
+cross-rig bead gates and a plain `bd show <routed-id>` both dead-end here.
+
+Run the command from the owning rig's own workspace instead, where the ID
+resolves locally rather than through a route. Tracked in
+[#5861](https://github.com/gastownhall/beads/issues/5861).
 
 ## Sync Issues
 
@@ -498,16 +535,20 @@ export BEADS_HOOK_TIMEOUT=600  # 10 minutes (in seconds)
 
 The value must be a positive whole number of seconds. Invalid values and zero
 warn and fall back to 300 seconds. Beads accepts `timeout` or `gtimeout` only
-when a successful version probe identifies GNU coreutils; native Windows
-`timeout.exe` is not compatible. If neither GNU timeout nor Perl is available,
-the hook warns that it is running directly without a deadline.
+when a successful version probe identifies GNU coreutils or uutils coreutils;
+native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
+nor Perl is available, the hook warns that it is running directly without a
+deadline.
 
-GNU timeout sends `TERM`; on POSIX hosts, Perl's alarm applies to the direct
-`bd` process. Git for Windows Perl does not guarantee that alarm across
-`exec`, so GNU coreutils is preferred there. TERM-resistant work and
-descendant processes are not guaranteed to stop. After upgrading from a
-version with the name-only timeout check, run `bd hooks install` once to
-refresh existing canonical sections.
+The coreutils helper sends `TERM`; on POSIX hosts, Perl's alarm applies to the
+direct `bd` process. Git for Windows Perl does not guarantee that alarm across
+`exec`, so a coreutils `timeout` (GNU or uutils) is preferred there.
+TERM-resistant work and descendant processes are not guaranteed to stop.
+
+Already-installed hook sections are not refreshed automatically. After upgrading
+to a version that changed the timeout probe — the name-only check, or the uutils
+coreutils banner — run `bd hooks install` once to refresh existing canonical
+sections.
 
 ### Permission denied on git hooks
 
@@ -640,6 +681,35 @@ cd ~/project/component2 && bd init --prefix comp2
 # Run Dolt garbage collection to compact storage
 bd admin compact --dolt
 ```
+
+If this or `bd flatten` stops with `Error 1105 (HY000): context canceled`,
+see [Storage reclaim fails with "context canceled"](#storage-reclaim-fails-with-context-canceled)
+below.
+
+### Storage reclaim fails with "context canceled"
+
+`bd flatten` and the Dolt-history compaction in `bd admin compact` finish by
+hard-resetting `main` onto a temporary branch; the merge-settle path behind
+`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
+merge. On Dolt 2.3.x a few percent of freshly created databases come up with
+`CALL DOLT_RESET('--hard')` broken for the life of the server process, so on
+an affected database those commands stop with:
+
+```
+Error 1105 (HY000): context canceled
+```
+
+Nothing else looks wrong — ordinary queries, commits, soft resets,
+`CALL DOLT_CLEAN()` and `CALL DOLT_CHECKOUT('.')` all still work — so the
+problem only shows up when something needs a hard reset. Confirm with the
+check in
+[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install),
+which also covers the fix: restarting `dolt sql-server` clears it for now,
+and installing the pinned Dolt version keeps it clear.
+
+This applies to server and proxied-server mode, which use the standalone
+`dolt` CLI. Embedded mode links its own Dolt engine at the version pinned in
+`go.mod` and is not affected by which `dolt` CLI is on your PATH.
 
 ## Agent Issues
 

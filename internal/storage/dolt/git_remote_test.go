@@ -5,6 +5,7 @@ package dolt
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1644,7 +1646,7 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	require.False(t, store.isGitProtocolRemote(ctx, store.remote), "file:// is not git-protocol")
 	if !store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()) {
 		remotes, listErr := store.ListRemotes(ctx)
-		ensureErr := doltutil.EnsureCLIRemote(clientTestdbDir, store.remote, remoteURL)
+		ensureErr := doltutil.EnsureCLIRemote(clientTestdbDir, store.remote, remoteURL, "")
 		t.Fatalf("should route through CLI for credentials; serverMode=%v remotes=%v listErr=%v cliRemote=%q ensureErr=%v",
 			store.serverMode, remotes, listErr, doltutil.FindCLIRemote(clientTestdbDir, store.remote), ensureErr)
 	}
@@ -1660,4 +1662,269 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	// (external server can't see env vars set on bd client process)
 	err = store.Push(ctx)
 	require.NoError(t, err, "Push should succeed via CLI credential routing (SC-001)")
+}
+
+// TestPullReportsSuccessOnlyWhenTheMergeLanded is the regression test for
+// ga-ivaps: Pull() returning nil having merged nothing.
+//
+// A sync that lies is worse than a sync that fails. Pull() collapses three
+// different outcomes into the single value nil — "I merged the peer's commits",
+// "there was nothing to merge", and "I reported success but the branch you read
+// did not receive anything" — and no caller can tell them apart. The third is
+// silent divergence: bd sync reports success while the local database quietly
+// falls behind the remote.
+//
+// THE DIVERGENCE IS CONSTRUCTED, NOT WAITED FOR. The CI symptom is intermittent
+// and nobody has reproduced it on demand, so this test does not chase the race.
+// It builds the *observable end state* that any such pull leaves behind — the
+// remote-tracking ref for (remote, branch) advanced past the branch the store
+// reads — and pins that Pull() refuses to call it success. Whatever made the
+// transport miss (a route that no-ops, a merge landing on another branch, a CLI
+// subprocess operating on a database the SQL session does not serve), it ends
+// here, and this is the assertion that catches it.
+//
+// The store is moved onto a branch the CLI directory is not checked out to,
+// which makes `dolt pull <remote> <branch>` merge into the CLI directory's
+// branch and leave the store's own branch untouched. That is a real route
+// through pullTransport, not a stub.
+//
+// Two controls, both required:
+//
+//   - A pull with real work to do must succeed AND deliver the peer's row. A
+//     post-condition that rejected everything would satisfy the subject
+//     assertion while breaking every pull in the product.
+//   - A pull with genuinely nothing to merge must still succeed QUIETLY. This is
+//     the control that keeps the fix from turning every no-op pull into an
+//     error, which is the obvious wrong way to make a lying pull loud.
+func TestPullReportsSuccessOnlyWhenTheMergeLanded(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	seed := &types.Issue{
+		ID:        "pl-src-001",
+		Title:     "Source issue before push",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add pl-src-001"); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push failed: %v", err)
+	}
+
+	// Control 1: a pull with real work to do succeeds and delivers the row.
+	cloneDir := filepath.Join(setup.baseDir, "clone-pl")
+	doltClone(t, setup.remoteURL, cloneDir)
+	sourceInsertIssue(t, cloneDir, "pl-clone-001", "Clone issue")
+	sourceCommitAndPush(t, cloneDir, "Add pl-clone-001")
+
+	// The peer pushed from its own process; this store's sql-server last read
+	// the remote during store.Push() above and caches that view briefly.
+	waitOutGitRemoteReadCache()
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("control broken: a pull with real work to do failed: %v", err)
+	}
+	if got, err := store.GetIssue(ctx, "pl-clone-001"); err != nil || got == nil {
+		t.Fatalf("control broken: Pull reported success but the peer's pl-clone-001 is absent (err=%v)", err)
+	}
+
+	// Control 2: the repeated pull has nothing to merge. It must still succeed,
+	// and say nothing about it. Waiting the cache out again is what makes this
+	// a genuine no-op rather than a cached one: inside the TTL the fetch is
+	// skipped, so the pull would report "nothing to merge" without ever asking
+	// the remote, and the control would hold even if a real no-op pull errored.
+	waitOutGitRemoteReadCache()
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("control broken: a pull with genuinely nothing to merge must succeed quietly, got: %v", err)
+	}
+
+	// Subject: move the store onto a branch the CLI directory is not checked
+	// out to, so the pull's merge cannot land where the store reads.
+	if err := store.Branch(ctx, "feature"); err != nil {
+		t.Fatalf("Branch(feature) failed: %v", err)
+	}
+	if err := store.Checkout(ctx, "feature"); err != nil {
+		t.Fatalf("Checkout(feature) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("pushing the feature branch failed: %v", err)
+	}
+
+	runCmd(t, cloneDir, "dolt", "fetch", "origin")
+	runCmd(t, cloneDir, "dolt", "checkout", "feature")
+	sourceInsertIssue(t, cloneDir, "pl-clone-002", "Clone issue on feature")
+	// Pushed to origin/feature explicitly: the sourceCommitAndPush helper
+	// pushes origin main, which from a feature checkout would push an
+	// unchanged main and leave the peer's commit nowhere. A fixture that never
+	// publishes the row makes Pull correct to merge nothing, and the case would
+	// be asserting on its own bug instead of the product's.
+	runDoltSQL(t, cloneDir, "CALL DOLT_ADD('.'); CALL DOLT_COMMIT('-Am', 'Add pl-clone-002 on feature')")
+	runCmd(t, cloneDir, "dolt", "push", "origin", "feature")
+
+	// Same cache, and the subject needs it out of the way even more than the
+	// controls do: inside the TTL the pull's fetch is skipped, so
+	// remotes/origin/feature never moves, the post-condition sees a local
+	// branch that trivially contains it, and the divergence this case exists
+	// to build is never constructed.
+	waitOutGitRemoteReadCache()
+
+	pullErr := store.Pull(ctx)
+	landed, getErr := store.GetIssue(ctx, "pl-clone-002")
+	delivered := getErr == nil && landed != nil
+
+	switch {
+	case pullErr == nil && delivered:
+		// The merge landed on the branch the store reads, so this run built no
+		// divergence and has nothing to say about detecting one. Not a pass.
+		t.Skip("the pull delivered pl-clone-002 onto the store's branch: no divergence was constructed")
+	case pullErr == nil && !delivered:
+		t.Fatalf("Pull reported success (nil) but pl-clone-002 never arrived on %q, the branch this store "+
+			"reads: a pull that merged nothing must not report success", "feature")
+	case delivered:
+		t.Fatalf("Pull failed with %v even though pl-clone-002 did arrive: the post-condition rejected a "+
+			"pull that landed", pullErr)
+	}
+
+	// The refusal has to be THIS refusal. A transport that failed for an
+	// unrelated reason would also make pullErr non-nil and would otherwise let
+	// the case pass without the post-condition existing at all.
+	if msg := pullErr.Error(); !strings.Contains(msg, "merged nothing") || !strings.Contains(msg, "remotes/origin/feature") {
+		t.Fatalf("Pull failed, but not with the merged-nothing post-condition: %v", pullErr)
+	}
+	t.Logf("Pull correctly refused to call this success: %v", pullErr)
+}
+
+// TestPullVerifyUsesBranchQualifiedPreHead pins ga-ivaps Finding 1 (attempt 2):
+// verifyPullLanded's cheap fast path skips the containment check when the branch
+// head MOVED across the pull — a head that moved is proof the transport landed.
+// That inference is only sound when the pre-pull head was read from the SAME
+// branch the post-pull comparison reads (s.branch). Pull now captures it via
+// branchHash(s.branch); a regression to GetCurrentCommit (session HEAD) would,
+// on a pooled connection sitting on the database's default branch, hand back a
+// different branch's head, so a merge that never reached s.branch would look
+// like it had — the fast path would fire and wave a lying pull through.
+//
+// It exercises that fast path directly and DETERMINISTICALLY by calling
+// verifyPullLanded with the two candidate pre-pull heads rather than trying to
+// force a pooled connection onto the wrong branch (which an effectively
+// single-connection server-mode store makes unreachable in-process — the very
+// reason TestPullReportsSuccessOnlyWhenTheMergeLanded has to t.Skip). The
+// wrong-branch head (main's tip, what the bug reads) must skip the check; the
+// branch-qualified head (feature's tip, what the fix reads) must run it and
+// catch the divergence. This is the non-environment-dependent coverage the
+// attempt-2 scorecard asked for.
+func TestPullVerifyUsesBranchQualifiedPreHead(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// A committed, pushed main so branchHash(main) is a real, distinct hash to
+	// stand in for "the branch a stray pooled connection is parked on".
+	seed := &types.Issue{
+		ID:        "bq-main-001",
+		Title:     "Main seed",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("CreateIssue(main seed) failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add bq-main-001"); err != nil {
+		t.Fatalf("Commit(main seed) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push(main) failed: %v", err)
+	}
+
+	// The store operates on feature; publish it so a peer can clone and advance it.
+	if err := store.Branch(ctx, "feature"); err != nil {
+		t.Fatalf("Branch(feature) failed: %v", err)
+	}
+	if err := store.Checkout(ctx, "feature"); err != nil {
+		t.Fatalf("Checkout(feature) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("pushing the feature branch failed: %v", err)
+	}
+
+	// feature gets a LOCAL-ONLY commit — the reviewer's exact scenario. It moves
+	// feature's tip off both main and the pushed feature tip, and makes the
+	// divergence a genuine one: the peer's branch below shares only the pushed
+	// feature tip as an ancestor, so neither head is the other's. An --allow-empty
+	// commit is the minimal way to advance the tip: what this test needs from the
+	// commit is the new hash on feature, nothing in its tree. Going through
+	// CreateIssue would drag in the write path's cross-table ID-collision probe —
+	// unrelated to verifyPullLanded — and couple the fixture to that schema. The
+	// store session is on feature (Checkout set s.branch above), so DOLT_COMMIT
+	// lands here.
+	if _, err := store.db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('--allow-empty', '-m', 'feature local-only commit')"); err != nil {
+		t.Fatalf("local-only feature commit failed: %v", err)
+	}
+
+	// A peer advances origin/feature from its own process, diverging it from the
+	// local feature branch.
+	cloneDir := filepath.Join(setup.baseDir, "clone-bq")
+	doltClone(t, setup.remoteURL, cloneDir)
+	runCmd(t, cloneDir, "dolt", "fetch", "origin")
+	runCmd(t, cloneDir, "dolt", "checkout", "feature")
+	sourceInsertIssue(t, cloneDir, "bq-clone-001", "Clone issue on feature")
+	runDoltSQL(t, cloneDir, "CALL DOLT_ADD('.'); CALL DOLT_COMMIT('-Am', 'Add bq-clone-001 on feature')")
+	runCmd(t, cloneDir, "dolt", "push", "origin", "feature")
+
+	// The sql-server caches its last read of the remote, and the verify's own
+	// refresh fetch is served from that cache inside the TTL. Wait it out so the
+	// refresh actually sees the peer's commit and the divergence is real.
+	waitOutGitRemoteReadCache()
+
+	featureTip, err := store.branchHash(ctx, "feature")
+	if err != nil || featureTip == "" {
+		t.Fatalf("branchHash(feature) failed: hash=%q err=%v", featureTip, err)
+	}
+	mainTip, err := store.branchHash(ctx, "main")
+	if err != nil || mainTip == "" {
+		t.Fatalf("branchHash(main) failed: hash=%q err=%v", mainTip, err)
+	}
+	if featureTip == mainTip {
+		t.Fatalf("scenario broken: feature and main share tip %q, so a wrong-branch preHead would not differ from the branch-qualified one", featureTip)
+	}
+
+	// The bug's input: preHead read from the wrong branch (main). localHash is
+	// feature's tip, so localHash != preHead trips the fast path and the check is
+	// skipped — the lying pull is (wrongly) called a success. This is the fast
+	// path's load-bearing contract: it is only ever safe when preHead is s.branch.
+	if err := store.verifyPullLanded(ctx, "origin", mainTip); err != nil {
+		t.Fatalf("fast-path contract broken: a wrong-branch preHead must skip the check (return nil), got: %v", err)
+	}
+
+	// The fix's input: preHead read from s.branch (feature). localHash == preHead,
+	// so the fast path does not fire, the containment check runs, and it catches
+	// the divergence the merge left on the wrong branch.
+	got := store.verifyPullLanded(ctx, "origin", featureTip)
+	if got == nil {
+		t.Fatalf("branch-qualified preHead must run the containment check and catch the divergence, got nil")
+	}
+	if msg := got.Error(); !strings.Contains(msg, "merged nothing") || !strings.Contains(msg, "remotes/origin/feature") {
+		t.Fatalf("caught an error, but not the merged-nothing post-condition: %v", got)
+	}
+	// The divergence is genuine — sibling histories whose common ancestor is
+	// neither tip — so it must stay a HARD error, not the fast-forwardable
+	// retryable class bd sync would loop on.
+	if errors.Is(got, versioncontrolops.ErrPullBehindFastForwardable) {
+		t.Fatalf("a genuine divergence must not be classified fast-forwardable-retryable: %v", got)
+	}
+	t.Logf("branch-qualified preHead correctly caught the divergence: %v", got)
 }

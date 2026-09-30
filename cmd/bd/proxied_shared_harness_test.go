@@ -35,6 +35,9 @@ func sharedProxiedServerPort(t *testing.T) int {
 		sharedProxiedPort = port
 	})
 	if sharedProxiedErr != nil {
+		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
+			t.Fatalf("shared proxied-server unavailable: %v, but %s=1; this lane must not skip", sharedProxiedErr, testutil.EnvRequireDoltContainer)
+		}
 		t.Skipf("shared proxied-server unavailable: %v", sharedProxiedErr)
 	}
 	return sharedProxiedPort

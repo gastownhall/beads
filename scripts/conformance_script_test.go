@@ -87,10 +87,7 @@ type conformanceRun struct {
 func runConformanceScript(t *testing.T, failCall, failExit int) conformanceRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test conformance.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

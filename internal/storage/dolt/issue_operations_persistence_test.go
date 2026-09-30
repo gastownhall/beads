@@ -36,7 +36,7 @@ func TestMoveIssuePersistenceInTxMovesAggregateAndReportsTables(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		moved, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		moved, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestMoveIssuePersistenceInTxSameModeIsNoop(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		result, err := issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent)
+		result, err := issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent, "test-actor")
 		if err != nil {
 			return err
 		}
@@ -139,7 +139,7 @@ func TestMoveIssuePersistenceInTxTransitions(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, transition.to)
+				_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, transition.to, "test-actor")
 				return err
 			}); err != nil {
 				t.Fatal(err)
@@ -172,7 +172,7 @@ func TestMoveIssuePersistenceInTxRefusesUnversionedDemotion(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	})
 	if err == nil {
@@ -204,7 +204,7 @@ func TestMoveIssuePersistenceInTxDeletesLeaseOnDemotion(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestMoveIssuePersistenceInTxTargetCollisionRollsBackSource(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	})
 	if err == nil {
@@ -277,7 +277,7 @@ func TestMoveIssuePersistenceInTxLateCounterConflictRollsBack(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral)
+		_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "test-actor")
 		return err
 	})
 	if err == nil {
@@ -333,7 +333,7 @@ func TestMoveIssuePersistenceInTxRepairsFlagsInTheIssuesPlane(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		moved, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent)
+		moved, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent, "test-actor")
 		return err
 	}); err != nil {
 		t.Fatalf("repairing a durable row with the wisp flag set: %v", err)

@@ -205,8 +205,9 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	}
 
 	// Edges are journaled before the rows go, while their source snapshots can
-	// still be read.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, issueIDs); err != nil {
+	// still be read. The source-repo wipe surface (storage.DeleteIssuesBySourceRepo,
+	// behind `bd repo remove`) carries no actor, so these record none.
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, issueIDs, ""); err != nil {
 		return 0, fmt.Errorf("journal dependency removals for source-repo delete: %w", err)
 	}
 
@@ -222,9 +223,10 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 
 	// Journal each deleted issue in the same transaction. issueIDs is the exact
 	// set removed by the DELETE above (both were scoped to source_repo), so
-	// there are no phantom records here.
+	// there are no phantom records here. The source-repo bulk delete plumbing
+	// carries no actor, so the rows record none.
 	for _, id := range issueIDs {
-		if err := RecordDeleteInTx(ctx, tx, id); err != nil {
+		if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
 			return int(rowsAffected), err
 		}
 	}
@@ -232,6 +234,7 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return int(rowsAffected), fmt.Errorf("recompute is_blocked after source-repo delete: %w", err)
 	}
+	NoteDeleteBlockedRecheck(tx, issueIDs, "from "+sourceRepo, affectedIssues, affectedWisps)
 
 	return int(rowsAffected), nil
 }
@@ -256,22 +259,22 @@ func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 	} else if err := updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor); err != nil {
 		return err
 	}
-	return recordRenameInJournal(ctx, tx, oldID, newID, renameEdges)
+	return recordRenameInJournal(ctx, tx, oldID, newID, actor, renameEdges)
 }
 
 // recordRenameInJournal replays a rename as the operations a consumer can apply
 // without understanding identity changes: drop the old edges, delete the old
 // bead, create the new one, re-add the edges under the new id.
-func recordRenameInJournal(ctx context.Context, tx DBTX, oldID, newID string, edges []journalDependencyEdge) error {
+func recordRenameInJournal(ctx context.Context, tx DBTX, oldID, newID, actor string, edges []journalDependencyEdge) error {
 	for _, edge := range edges {
-		if err := RecordDepEventInTx(ctx, tx, EventDepRemove, edge.source, edge.kind, edge.target, edge.metadata); err != nil {
+		if err := RecordDepEventInTx(ctx, tx, EventDepRemove, edge.source, edge.kind, edge.target, edge.metadata, actor); err != nil {
 			return err
 		}
 	}
-	if err := RecordDeleteInTx(ctx, tx, oldID); err != nil {
+	if err := RecordDeleteInTx(ctx, tx, oldID, actor); err != nil {
 		return err
 	}
-	if err := RecordEventInTx(ctx, tx, EventCreate, newID); err != nil {
+	if err := RecordEventInTx(ctx, tx, EventCreate, newID, actor); err != nil {
 		return err
 	}
 	for _, edge := range edges {
@@ -282,7 +285,7 @@ func recordRenameInJournal(ctx context.Context, tx DBTX, oldID, newID string, ed
 		if target == oldID {
 			target = newID
 		}
-		if err := RecordDepEventInTx(ctx, tx, EventDepAdd, source, edge.kind, target, edge.metadata); err != nil {
+		if err := RecordDepEventInTx(ctx, tx, EventDepAdd, source, edge.kind, target, edge.metadata, actor); err != nil {
 			return err
 		}
 	}

@@ -152,7 +152,10 @@ type DependencySQLRepository interface {
 	GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string, opts DepListOpts) (bool, []string, error)
 
-	DeleteAllForIDs(ctx context.Context, ids []string, opts DepInsertOpts) (int, error)
+	// DeleteAllForIDs takes actor for the same reason Delete above does: the
+	// edges it drops are journaled as dep_remove rows, and a cascade removal
+	// belongs to the identity whose delete caused it.
+	DeleteAllForIDs(ctx context.Context, ids []string, opts DepInsertOpts, actor string) (int, error)
 	CountAllForIDs(ctx context.Context, ids []string, opts DepCountsOpts) (int, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 	// DetectCycleReport answers the same walk in the shape issueops.CycleDetector
@@ -174,6 +177,7 @@ type DependencySQLRepository interface {
 	CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error)
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 	GetWispDependencyRecordsForIDs(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
 
 	// WispSourceIDs returns the subset of ids that are currently wisps, in one
@@ -236,6 +240,7 @@ type DependencyUseCase interface {
 	// closes, or "" when none does. Each pair is (source, target).
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 
 	GetWispDependencyRecords(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
 
@@ -808,6 +813,14 @@ func (u *dependencyUseCaseImpl) GetIssueDependencyRecords(ctx context.Context, i
 	out, err := u.depRepo.GetDependencyRecordsForIssues(ctx, issueIDs)
 	if err != nil {
 		return nil, fmt.Errorf("GetIssueDependencyRecords: %w", err)
+	}
+	return out, nil
+}
+
+func (u *dependencyUseCaseImpl) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	out, err := u.depRepo.GetExternalBlockingDependencyRecords(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetExternalBlockingDependencyRecords: %w", err)
 	}
 	return out, nil
 }

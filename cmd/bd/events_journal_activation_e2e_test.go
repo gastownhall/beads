@@ -48,6 +48,13 @@ func TestServeActivatesTheEventsJournal(t *testing.T) {
 	if !hasEventOp(records, "create") {
 		t.Errorf("journal has no create record for the served mutation: %+v", records)
 	}
+	// The exported record attributes the mutation to the acting identity the
+	// request resolved — the same actor the audit-events table records.
+	for _, rec := range records {
+		if rec.Op == "create" && rec.Actor != "tester" {
+			t.Errorf("create record actor = %q, want %q", rec.Actor, "tester")
+		}
+	}
 }
 
 // TestRoutedCreateJournalsIntoTheTargetWorkspace covers the cross-workspace
@@ -102,8 +109,13 @@ func TestRoutedCreateJournalsIntoTheTargetWorkspace(t *testing.T) {
 	}
 
 	// The launching workspace never enabled the journal, so it records nothing
-	// — the target's setting must not leak back, in either direction.
-	if got := strings.TrimSpace(run(sourceDir, "events", "export")); got != "" {
+	// — the target's setting must not leak back, in either direction. Read
+	// STDOUT only: a disabled workspace also prints the "journal is disabled"
+	// notice, and that notice is on stderr precisely so it cannot be mistaken
+	// for a record.
+	sourceEnv := envWithout(bdEnv(sourceDir), "BD_EVENTS_JOURNAL")
+	stdout, _ := runBDOut(t, bd, sourceDir, sourceEnv, "events", "export")
+	if got := strings.TrimSpace(stdout); got != "" {
 		t.Errorf("the launching workspace journaled %q despite never enabling the journal", got)
 	}
 }

@@ -282,6 +282,22 @@ func TestEmbeddedDep(t *testing.T) {
 		if m["status"] != "removed" {
 			t.Errorf("expected status=removed, got %v", m["status"])
 		}
+		if m["removed"] != true {
+			t.Errorf("expected removed=true, got %v", m["removed"])
+		}
+	})
+
+	t.Run("remove_missing_edge_reports_noop", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "Missing edge A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "Missing edge B", "--type", "task")
+		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
+		if !strings.Contains(out, "No dependency found") || strings.Contains(out, "✓") {
+			t.Errorf("missing edge should report a no-op, got: %s", out)
+		}
+		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
+		if m["status"] != "not_found" || m["removed"] != false {
+			t.Errorf("missing edge JSON = %v, want status=not_found removed=false", m)
+		}
 	})
 
 	// ===== dep list =====

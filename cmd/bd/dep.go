@@ -107,6 +107,112 @@ func resolveIDForMutation(ctx context.Context, localStore storage.DoltStorage, i
 	return result.ResolvedID, s, func() { result.Close() }, nil
 }
 
+// refuseMalformedDepTarget refuses a dep add target that contains ":" but is
+// not an "external:" ref. This is the half of the target decision that needs no
+// ID resolution, so it is the half every dep add surface can share — including
+// the proxied-server paths, which deliberately resolve nothing and so cannot
+// call resolveUnresolvedDepTarget. A colon-free target is not this helper's
+// business and returns nil; the caller still owns the resolve/cross-prefix
+// decision. Refusing here rather than per-surface is what keeps `bd dep add`
+// from being mode-dependently correct (be-gmdx5 survived in proxied mode and on
+// --file until every site routed through this). The five sites are: the
+// positional and --file direct routes (both via resolveUnresolvedDepTarget),
+// their two proxied twins, and runDepBlocksProxiedServer — the `bd dep <a>
+// --blocks <b>` alias the dep help documents as equivalent to dep add, which
+// passes the blocker as the target and so inverts the operands.
+//
+// The refused shape is be-gmdx5 itself: a "type:id" positional arg (e.g.
+// "discovered-from:ga-x", the spec syntax `bd create --deps` accepts) was read
+// as a foreign-store ID, because ExtractPrefix stops at the first "-" and so
+// returns "discovered-". The type keyword was silently dropped (the edge
+// defaulted to blocks) and the whole string was stored as a bogus external ref.
+// No bd ID contains ":", and callers take the only legal ":" shape
+// ("external:") first, so anything reaching here is malformed regardless of
+// prefix.
+//
+// Two details in the message:
+//
+//   - The `bd create --deps` diagnosis is only asserted when the token before
+//     the ":" is a type --type would actually accept. Otherwise an unrelated
+//     colon-bearing typo ("https://example.com/x") is told a confidently wrong
+//     cause and handed "--type https", which the next validation rejects.
+//   - The suggested command respects direction. parseDepSpec reverses the
+//     endpoints for the literal "blocks:" spelling only (create_deps.go sets
+//     SwapDirection for rawType == DepBlocks), so `--deps blocks:B` on A stores
+//     "B depends on A" and the equivalent dep add has to name B first. The
+//     "depends-on"/"blocked-by" aliases are compared before
+//     canonicalDependencyType and do not swap, so they keep the natural order.
+//     Getting this backwards would hand the user a reversed bd ready/bd blocked
+//     gate (Type.AffectsReadyWork), not just a cosmetically odd command.
+func refuseMalformedDepTarget(sourceID, dependsOnArg string) error {
+	idx := strings.Index(dependsOnArg, ":")
+	if idx < 0 {
+		return nil
+	}
+
+	// Trim both halves the way parseDepSpec does (create_deps.go), or the
+	// diagnosis this branch exists to give degrades on exactly the specs
+	// `bd create --deps` accepts: "blocks : bd-2" parses there, but read
+	// verbatim here the type is "blocks " — neither types.DepBlocks (so the
+	// direction swap is never considered) nor well-known (so the suggestion is
+	// suppressed), and the user is handed the generic refusal instead of the
+	// translation. The refusal itself is correct either way; only the message
+	// is at stake, and it must name a command that actually runs.
+	depType, target := strings.TrimSpace(dependsOnArg[:idx]), strings.TrimSpace(dependsOnArg[idx+1:])
+	if depType == "" || target == "" ||
+		validateDependencyType(canonicalDependencyType(types.DependencyType(depType))) != nil {
+		return fmt.Errorf("invalid dependency target %q: not a bd ID and not a well-formed external:<project>:<capability> reference", dependsOnArg)
+	}
+
+	first, second := sourceID, target
+	if types.DependencyType(depType) == types.DepBlocks {
+		first, second = target, sourceID
+	}
+	return fmt.Errorf("invalid dependency target %q: that is `bd create --deps` <type>:<id> syntax, not a target ID; use: bd dep add %s %s --type %s",
+		dependsOnArg, first, second, depType)
+}
+
+// resolveUnresolvedDepTarget decides what to do when a dep add target could
+// not be resolved locally or via cross-store routing (resolveIDWithRouting's
+// error). Three outcomes, in order:
+//
+//  1. An "external:" ref is validated and passed through, as before.
+//  2. Anything else containing ":" is refused by name, by
+//     refuseMalformedDepTarget — see there for the be-gmdx5 mechanism and the
+//     message's direction/type rules.
+//  3. A bare, differently-prefixed target is passed through unchanged. This is
+//     NOT malformed: issueops.IsExternalDepTarget defines a target "whose id
+//     prefix names ANOTHER REPOSITORY" as belonging in depends_on_external
+//     alongside "external:" refs, and calls that the single rule every backend
+//     classifies by (db.pickDepTargetColumn restates it). It is the multi-rig
+//     "add now, route later" shape — a gt- bead depending on a bd- bead whose
+//     rig is not in routes.jsonl yet — and dep remove (the ExtractPrefix
+//     fallback further down this file) still addresses such an edge. Refusing
+//     it here would make dep add reject an edge the store holds and dep remove
+//     can still delete.
+//
+// A same-prefix target that resolves nowhere is still an error, unchanged.
+func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error) (string, error) {
+	if IsExternalRef(dependsOnArg) {
+		if err := validateExternalRef(dependsOnArg); err != nil {
+			return "", err
+		}
+		return dependsOnArg, nil
+	}
+
+	if err := refuseMalformedDepTarget(sourceID, dependsOnArg); err != nil {
+		return "", err
+	}
+
+	srcPrefix := types.ExtractPrefix(sourceID)
+	tgtPrefix := types.ExtractPrefix(dependsOnArg)
+	if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+		return dependsOnArg, nil
+	}
+
+	return "", fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
+}
+
 // isChildOf returns true if childID is a hierarchical child of parentID.
 // For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
 func isChildOf(childID, parentID string) bool {
@@ -275,12 +381,17 @@ External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
 
+With no -t/--type the edge is created as type=blocks, which excludes the
+dependent from bd ready. When stderr is an interactive terminal, an advisory
+note says so once per command; it is silent for scripted and agent callers
+(non-TTY stderr) and can be turned off with --quiet or BD_NO_DEP_TYPE_WARNING=1.
+
 Examples:
   bd dep add bd-42 bd-41                              # Positional args
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
   bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
   bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency
-  bd dep add bd-42 bd-41 --no-cycle-check             # Skip cycle check (bulk wiring)
+  bd dep add bd-42 bd-41 --no-cycle-check             # Skip the post-add cycle warning
   bd dep add --file deps.jsonl                        # Bulk JSONL: {"from":"bd-42","to":"bd-41"}`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		file, _ := cmd.Flags().GetString("file")
@@ -377,12 +488,9 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(fromID)
-				tgtPrefix := types.ExtractPrefix(dependsOnArg)
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = dependsOnArg
-				} else {
-					return HandleErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
+				toID, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
+				if err != nil {
+					return HandleErrorRespectJSON("%v", err)
 				}
 			} else {
 				defer toCleanup()
@@ -419,6 +527,9 @@ Examples:
 			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
+		explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
+		warnImplicitBlocksDefault(dt, explicit)
+
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"status":        "added",
@@ -434,6 +545,55 @@ Examples:
 	},
 }
 
+// warnImplicitBlocksDefault is the D1 guard: when a dep add edge is created
+// with the implicit type=blocks default it warns on stderr. A silent blocks
+// edge drops the dependent from bd ready, which is not what an operator
+// usually means when wiring a structural parent/child link. An explicit
+// choice never warns: -t (including an explicit -t blocks), and the
+// --blocked-by/--depends-on aliases, whose names already express the
+// blocking relationship. Non-blocks defaults do not warn either.
+//
+// The warning is advisory and fires on the documented-default majority path,
+// so it is scoped to an interactive operator: it is emitted only when stderr
+// is a TTY, and it honors the global --quiet flag and BD_NO_DEP_TYPE_WARNING.
+// Scripted and agent callers — whose stderr is a pipe or a log file — never
+// see it, so it cannot train them to ignore stderr.
+func warnImplicitBlocksDefault(dt types.DependencyType, explicit bool) {
+	if !shouldWarnImplicitBlocksDefault(dt, explicit, quietFlag, os.Getenv("BD_NO_DEP_TYPE_WARNING"), ui.IsStderrTerminal()) {
+		return
+	}
+	emitImplicitBlocksDefaultWarning()
+}
+
+// shouldWarnImplicitBlocksDefault is the testable predicate behind
+// warnImplicitBlocksDefault. It takes the quiet flag, the suppression env
+// value and the stderr TTY result as parameters so tests can cover every
+// combination without a real terminal — the same shape as
+// ui.shouldUseHyperlinks.
+func shouldWarnImplicitBlocksDefault(dt types.DependencyType, explicit, quiet bool, noWarnEnv string, stderrIsTerminal bool) bool {
+	if explicit || dt != types.DepBlocks {
+		return false
+	}
+	// --quiet is documented as "Suppress non-essential output (errors only)",
+	// and the other non-error stderr notices in this package (tips.go,
+	// metrics.go, routing_read.go) respect it the same way.
+	if quiet {
+		return false
+	}
+	// Explicit opt-out for operators who have internalized the default,
+	// following the BD_NO_EMOJI / BD_NO_COLOR precedent.
+	if noWarnEnv != "" {
+		return false
+	}
+	return stderrIsTerminal
+}
+
+// emitImplicitBlocksDefaultWarning writes the D1 warning. Split from the gate
+// so the message text can be asserted under a captured (non-TTY) stderr.
+func emitImplicitBlocksDefaultWarning() {
+	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage (silence with --quiet or BD_NO_DEP_TYPE_WARNING=1)\n") //nolint:gosec // G705: stderr, not a browser context
+}
+
 type bulkDepInput struct {
 	From        string `json:"from"`
 	To          string `json:"to"`
@@ -447,9 +607,13 @@ type bulkDepEdge struct {
 	IssueID     string
 	DependsOnID string
 	Type        types.DependencyType
-	Store       storage.DoltStorage
-	StoreKey    string
-	Cleanups    []func()
+	// Defaulted is true when the line carried no "type" and fell back to
+	// the command-line default (D1 guard: the implicit default is what the
+	// stderr warning targets; explicit per-line types are the user's choice).
+	Defaulted bool
+	Store     storage.DoltStorage
+	StoreKey  string
+	Cleanups  []func()
 }
 
 func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) error {
@@ -508,6 +672,15 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 
 	if !noCycleCheck {
 		warnIfCyclesExist(targetStore)
+	}
+
+	if !cmd.Flags().Changed("type") {
+		for _, edge := range resolved {
+			if edge.Defaulted && edge.Type == types.DepBlocks {
+				warnImplicitBlocksDefault(edge.Type, false)
+				break
+			}
+		}
 	}
 
 	if jsonOutput {
@@ -572,7 +745,8 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			to = strings.TrimSpace(in.DependsOnID)
 		}
 		depType := strings.TrimSpace(in.Type)
-		if depType == "" {
+		defaulted := depType == ""
+		if defaulted {
 			depType = defaultType
 		}
 
@@ -596,6 +770,7 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			IssueID:     from,
 			DependsOnID: to,
 			Type:        dt,
+			Defaulted:   defaulted,
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -636,12 +811,13 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 		} else {
 			toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, edge.DependsOnID)
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(current.IssueID)
-				tgtPrefix := types.ExtractPrefix(edge.DependsOnID)
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = edge.DependsOnID
-				} else {
-					errs = append(errs, fmt.Sprintf("line %d: resolving dependency ID %s: %v", edge.Line, edge.DependsOnID, err))
+				// Same decision as the single-edge add, through the same helper:
+				// --file used to carry its own copy of the cross-prefix ladder,
+				// which left the be-gmdx5 "type:id" shape accepted and stored
+				// here after the positional path started refusing it.
+				toID, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, err))
 					resolved = append(resolved, current)
 					continue
 				}
@@ -1085,10 +1261,6 @@ var depRemoveCmd = &cobra.Command{
 		// for a genuine removal, matching bd dep add's edge event and the
 		// proxied bd dep remove path.
 		//
-		// The role's Removed verdict is not printed, for the reason the proxied
-		// route gives: `bd dep remove` has always confirmed the same way whether
-		// or not an edge was there, and reporting the difference now would
-		// change what every existing script reads.
 		editor, err := fromStore.DependencyEditor()
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -1097,11 +1269,12 @@ var depRemoveCmd = &cobra.Command{
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		if _, err := editor.RemoveDependency(opsCtx, issueops.RemoveDependencyRequest{
+		result, err := editor.RemoveDependency(opsCtx, issueops.RemoveDependencyRequest{
 			Actor:       actor,
 			IssueID:     fullFromID,
 			DependsOnID: fullToID,
-		}); err != nil {
+		})
+		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -1113,11 +1286,21 @@ var depRemoveCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
+			status := "removed"
+			if !result.Removed {
+				status = "not_found"
+			}
 			return outputJSON(map[string]interface{}{
-				"status":        "removed",
+				"status":        status,
+				"removed":       result.Removed,
 				"issue_id":      fullFromID,
 				"depends_on_id": fullToID,
 			})
+		}
+		if !result.Removed {
+			fmt.Printf("No dependency found: %s → %s\n",
+				formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
+			return nil
 		}
 
 		fmt.Printf("%s Removed dependency: %s → %s\n",
@@ -1457,13 +1640,13 @@ func ParseExternalRef(ref string) (project, capability string) {
 func init() {
 	// dep command shorthand flag
 	depCmd.Flags().StringP("blocks", "b", "", "Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)")
-	depCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
+	depCmd.Flags().Bool("no-cycle-check", false, "Skip the post-add cycle warning (the per-edge cycle check still runs)")
 
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes); 'blocked-by' and 'depends-on' are accepted as aliases for 'blocks'")
 	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
 	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
 	depAddCmd.Flags().String("file", "", "Read dependency edges from JSONL file, or '-' for stdin")
-	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
+	depAddCmd.Flags().Bool("no-cycle-check", false, "On bulk --file adds, skip per-edge cycle checks and the post-add cycle warning (one final whole-graph check still runs before commit); on a single-edge add, skip only the post-add cycle warning")
 
 	// DEPRECATED NO-OP, and it always was one: nothing has ever read this flag,
 	// so a diamond has always been rendered under one parent only. The role's

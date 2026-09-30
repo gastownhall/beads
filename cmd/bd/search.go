@@ -366,7 +366,7 @@ func init() {
 	searchCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50)")
 	searchCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	searchCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")
-	searchCmd.Flags().BoolP("reverse", "r", false, "Reverse sort order")
+	searchCmd.Flags().BoolP("reverse", "r", false, "Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)")
 
 	// Date range flags
 	searchCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")

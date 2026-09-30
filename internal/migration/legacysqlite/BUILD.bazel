@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "legacysqlite",
+    srcs = [
+        "reader.go",
+        "reader_nocgo.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/migration/legacysqlite",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage/issueops",
+        "//internal/types",
+        "@com_github_mattn_go_sqlite3//:go-sqlite3",
+    ],
+)
+
+go_test(
+    name = "legacysqlite_test",
+    srcs = ["reader_test.go"],
+    embed = [":legacysqlite"],
+    deps = [
+        "//internal/storage/issueops",
+        "//internal/types",
+        "@com_github_mattn_go_sqlite3//:go-sqlite3",
+    ],
+)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -224,5 +225,46 @@ func TestEmbeddedShipConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+func TestEmbeddedExternalCapabilityReadyAfterShip(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	localDir, _, _ := bdInit(t, bd, "--prefix", "xl")
+	remoteDir, _, _ := bdInit(t, bd, "--prefix", "xr")
+
+	config := fmt.Sprintf("external_projects:\n  remote: %q\n", remoteDir)
+	if err := os.WriteFile(filepath.Join(localDir, ".beads", "config.local.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatalf("write external project config: %v", err)
+	}
+
+	dependent := bdCreate(t, bd, localDir, "Wait for payments capability", "--type", "task")
+	provider := bdCreate(t, bd, remoteDir, "Export payments capability", "--type", "task")
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %s failed: %v: %s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+
+	run(remoteDir, "label", "add", provider.ID, "export:payments")
+	run(remoteDir, "close", provider.ID)
+	run(localDir, "dep", "add", dependent.ID, "external:remote:payments")
+	if out := run(localDir, "ready", "--json", "--limit", "0"); strings.Contains(out, dependent.ID) {
+		t.Fatalf("dependent became ready before capability publication: %s", out)
+	}
+	bdShip(t, bd, remoteDir, "payments")
+	if out := run(localDir, "ready", "--json", "--limit", "0"); !strings.Contains(out, dependent.ID) {
+		t.Fatalf("dependent did not become ready after bd ship: %s", out)
 	}
 }

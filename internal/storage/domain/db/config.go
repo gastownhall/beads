@@ -126,22 +126,25 @@ func (r *configSQLRepositoryImpl) GetAllConfig(ctx context.Context) (map[string]
 	return out, nil
 }
 
+// GetCustomTypes resolves the workspace's custom issue types through
+// issueops.ComposeCustomTypes, the same rule the embedded and server-mode
+// stores use, so proxied `bd types` and proxied create/update validation
+// accept exactly the same set.
 func (r *configSQLRepositoryImpl) GetCustomTypes(ctx context.Context) ([]string, error) {
 	fromTable, err := r.readCustomTypesTable(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	fromDB := fromTable
-	if len(fromDB) == 0 {
-		fromConfig, err := r.readCustomTypesConfig(ctx)
+	var configValue string
+	if len(fromTable) == 0 {
+		configValue, err = r.GetConfig(ctx, "types.custom")
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("db: GetCustomTypes: %w", err)
 		}
-		fromDB = fromConfig
 	}
 
-	return unionWithYAMLCustomTypes(fromDB, config.GetCustomTypesFromYAML()), nil
+	return issueops.ComposeCustomTypes(fromTable, configValue, config.GetCustomTypesFromYAML()), nil
 }
 
 func (r *configSQLRepositoryImpl) readCustomTypesTable(ctx context.Context) ([]string, error) {
@@ -167,39 +170,6 @@ func (r *configSQLRepositoryImpl) readCustomTypesTable(ctx context.Context) ([]s
 		return nil, fmt.Errorf("db: GetCustomTypes: read custom_types: %w", err)
 	}
 	return out, nil
-}
-
-func (r *configSQLRepositoryImpl) readCustomTypesConfig(ctx context.Context) ([]string, error) {
-	value, err := r.GetConfig(ctx, "types.custom")
-	if err != nil {
-		return nil, fmt.Errorf("db: GetCustomTypes: %w", err)
-	}
-	return issueops.ParseTypesConfigValue(value), nil
-}
-
-func unionWithYAMLCustomTypes(dbTypes, yamlTypes []string) []string {
-	if len(dbTypes) == 0 && len(yamlTypes) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(dbTypes)+len(yamlTypes))
-	out := make([]string, 0, len(dbTypes)+len(yamlTypes))
-	for _, src := range [][]string{dbTypes, yamlTypes} {
-		for _, t := range src {
-			t = strings.TrimSpace(t)
-			if t == "" {
-				continue
-			}
-			if _, ok := seen[t]; ok {
-				continue
-			}
-			seen[t] = struct{}{}
-			out = append(out, t)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func (r *configSQLRepositoryImpl) GetAllowedPrefixes(ctx context.Context) (string, error) {
