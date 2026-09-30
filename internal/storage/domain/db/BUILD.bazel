@@ -87,6 +87,7 @@ go_test(
         "journal_doltignore_test.go",
         "journal_seq_test.go",
         "label_test.go",
+        "label_updated_at_test.go",
         "label_usecase_test.go",
         "normalize_update_value_test.go",
         "parity_direct_test.go",
