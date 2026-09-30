@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ const ExportBackupName = "backup_export"
 // BackupAdd registers a Dolt backup destination.
 func BackupAdd(ctx context.Context, db DBConn, name, url string) error {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('add', ?, ?)", name, url); err != nil {
-		return fmt.Errorf("add backup %s: %w", name, err)
+		return fmt.Errorf("add backup %s: %w", name, redactBackupError(err, url))
 	}
 	return nil
 }
@@ -43,16 +44,69 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 // the named database. When force is true, an existing database with the
 // same name is overwritten. Mirrors the CLI: dolt backup restore [--force] <url> <db_name>
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
+	if _, err := neturl.Parse(url); err != nil {
+		return fmt.Errorf("restore from backup %s: invalid backup URL: %w",
+			RedactBackupURL(url), &hiddenBackupError{err: err})
+	}
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", RedactBackupURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", RedactBackupURL(url), redactBackupError(err, url))
 		}
 	} else {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", url, dbName); err != nil {
-			return fmt.Errorf("restore from backup %s: %w", RedactBackupURL(url), err)
+			return fmt.Errorf("restore from backup %s: %w", RedactBackupURL(url), redactBackupError(err, url))
 		}
 	}
 	return nil
+}
+
+// backupErrorRedactor removes a backup URL from an underlying Dolt error while
+// keeping that error in the chain. Dolt parse and registration errors can echo
+// their URL argument byte-for-byte; wrapping them directly with %w would put
+// credentials back into an otherwise-redacted diagnostic. Unwrap preserves
+// errors.Is/errors.As without trusting the cause's Error string.
+type backupErrorRedactor struct {
+	err    error
+	source string
+}
+
+func (e *backupErrorRedactor) Error() string {
+	return strings.ReplaceAll(e.err.Error(), e.source, RedactBackupURL(e.source))
+}
+
+func (e *backupErrorRedactor) Unwrap() error {
+	return e.err
+}
+
+func redactBackupError(err error, source string) error {
+	if err == nil {
+		return nil
+	}
+	// A parser error can repeat a credential fragment outside the quoted raw
+	// URL (for example, as an "invalid port"). Exact URL replacement cannot
+	// sanitize that shape, so hide the rendered cause when the source itself is
+	// parse-invalid. BackupRestore rejects it before Dolt; BackupAdd retains
+	// Dolt's bracketed aws compatibility but still cannot leak a failing cause.
+	if _, parseErr := neturl.Parse(source); parseErr != nil && RedactBackupURL(source) != source {
+		return &hiddenBackupError{err: err}
+	}
+	return &backupErrorRedactor{err: err, source: source}
+}
+
+// hiddenBackupError keeps a rejected parser or Dolt error classifiable without
+// rendering its message. net/url can repeat only a credential fragment outside
+// the quoted raw URL (for example, as an "invalid port"), so replacing the URL
+// alone is not enough on this path.
+type hiddenBackupError struct {
+	err error
+}
+
+func (e *hiddenBackupError) Error() string {
+	return "backup error details redacted"
+}
+
+func (e *hiddenBackupError) Unwrap() error {
+	return e.err
 }
 
 // CurrentCommit returns the hash of the current HEAD commit.
@@ -107,10 +161,9 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 // RedactBackupURL strips the parts of a backup URL that can carry credentials
 // before it is quoted in an error or echoed back to the operator: userinfo
 // (aws://key:secret@...) and the query and fragment (s3 URLs carry signed
-// parameters there). Scheme, host and path stay. Plain string operations
-// rather than url.Parse, which rejects Dolt's bracketed
-// aws://[dynamo_table:bucket]/db form (see IsBackupURL). Only this copy of the
-// URL is redacted; a wrapped Dolt error text is not rewritten.
+// parameters there). Scheme, host and path stay. Plain string operations are
+// used because this function must also fail closed for strings url.Parse
+// rejects. Wrapped Dolt errors are scrubbed separately by redactBackupError.
 //
 // Exported because the source is echoed outside this package too — the CLI's
 // restore gate and its proxied failure messages quote it — and a second copy
@@ -125,20 +178,42 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 // of the secret while dropping the host and path the operator needs. Taking
 // the LAST "@" on the uncut remainder over-strips when a query parameter
 // carries one (an endpoint= value, say), which costs debug detail and nothing
-// else. A redactor has to fail in that direction.
+// else. A redactor has to fail in that direction. file:// is the exception:
+// an "@" in its absolute path is a filename byte, not userinfo, so only an
+// authority-level "@" is treated as credentials there.
 func RedactBackupURL(source string) string {
 	sep := strings.Index(source, "://")
 	if sep < 0 {
+		// A malformed scheme can still carry userinfo. Returning it unchanged is
+		// the unsafe failure mode: aws:/key:secret@bucket/db reaches both the
+		// resolver and CLI gate. Preserve only the scheme for diagnostics.
+		if colon := strings.IndexByte(source, ':'); colon > 0 &&
+			strings.LastIndex(source[colon+1:], "@") >= 0 &&
+			!strings.ContainsAny(source[:colon], `/\\`) {
+			return source[:colon+1] + "[redacted]"
+		}
 		return source
 	}
+	prefix := source[:sep+len("://")]
 	rest := source[sep+len("://"):]
-	if at := strings.LastIndex(rest, "@"); at >= 0 {
+	if source[:sep] == "file" {
+		// file:///absolute/path@2024 has no authority, while
+		// file://user:secret@host/path does. Search only the authority so the
+		// former stays byte-identical and the latter still fails closed.
+		authorityEnd := len(rest)
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			authorityEnd = slash
+		}
+		if at := strings.LastIndex(rest[:authorityEnd], "@"); at >= 0 {
+			rest = rest[at+1:]
+		}
+	} else if at := strings.LastIndex(rest, "@"); at >= 0 {
 		rest = rest[at+1:]
 	}
 	if cut := strings.IndexAny(rest, "?#"); cut >= 0 {
 		rest = rest[:cut]
 	}
-	return source[:sep+len("://")] + rest
+	return prefix + rest
 }
 
 // DirToFileURL resolves dir to an absolute path and returns a file:// URL.
@@ -208,9 +283,12 @@ func IsBackupURL(raw string) bool {
 // is checked like any other before the URL is passed through. DOLT_BACKUP does
 // not fail on a missing file:// source. It creates the directory, opens it as
 // an empty backup and, under --force, drops the live database before the
-// restore fails, so this check is all that stands between a typo and that.
-// It only stands there if it checks the directory Dolt will open, so a file://
-// path Dolt reads differently is refused rather than stat'ed; see fileURLDir.
+// restore fails. This check rejects a missing path, but it does not establish
+// that an existing directory contains a backup: an empty directory (or an
+// accessible empty remote prefix) can still reach the destructive drop under
+// --force. It only provides even that limited protection if it checks the
+// directory Dolt will open, so a file:// path Dolt reads differently is
+// refused rather than stat'ed; see fileURLDir.
 func ResolveBackupSource(source string) (string, error) {
 	if IsBackupURL(source) {
 		if rest, isFile := strings.CutPrefix(source, "file://"); isFile {
