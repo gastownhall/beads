@@ -29,6 +29,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("HashMintSkipsSiblingPlaneOccupant/IssuePastWispOccupant", s.useCaseMintHashSkipsWispOccupant)
 	s.Run("HashMintSkipsSiblingPlaneOccupant/WispPastIssueOccupant", s.useCaseMintWispHashSkipsIssueOccupant)
 	s.Run("MintedIDTakesCreateOnlyPath", s.useCaseMintedIDTakesCreateOnlyPath)
+	s.Run("MintedIDKeepsTypedFieldTooLong", s.useCaseMintedIDKeepsTypedFieldTooLong)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -418,6 +419,24 @@ func (s *testSuite) useCaseMintedIDTakesCreateOnlyPath() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.Equal(0, s.countIssueCreateMetadata(), "an explicit ID without CreateOnly must not take the CreateOnly path")
+}
+
+// useCaseMintedIDKeepsTypedFieldTooLong pins that routing a minted ID onto the
+// CreateOnly path does not trade the typed ErrFieldTooLong for the backend's
+// raw column-width error.
+func (s *testSuite) useCaseMintedIDKeepsTypedFieldTooLong() {
+	s.resetMintConfig("mftl", "")
+	uc := s.issueUseCase()
+
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{
+			Title:     "over-length assignee",
+			IssueType: types.TypeTask,
+			Priority:  2,
+			Assignee:  strings.Repeat("x", 300),
+		},
+	}, "tester")
+	s.Require().ErrorIs(err, types.ErrFieldTooLong)
 }
 
 func (s *testSuite) clearIssueCreateMetadata() {
