@@ -103,6 +103,8 @@ var ErrPrefixMismatch = errors.New("prefix mismatch")
 // or an open blocking gate). Bypass with CloseIssueOptions.Force.
 var ErrCloseBlocked = errors.New("cannot close blocked issue")
 
+var ErrClaimBlocked = errors.New("cannot claim blocked issue")
+
 // ErrCloseOpenChildren is returned when an unforced close finds open
 // parent-child dependents.
 var ErrCloseOpenChildren = errors.New("cannot close issue with open children")
