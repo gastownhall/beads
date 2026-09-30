@@ -175,6 +175,10 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		ConflictSkip:                   opts.ConflictSkip,
 		RejectStaleUpserts:             !opts.AllowStale,
 		SkipDependencyValidationErrors: true,
+		// Import is exempt from the mandatory-due invariant, explicitly: the
+		// rows it restores were authored elsewhere, and the backfill that gives
+		// legacy rows a due date is itself an import.
+		SkipDueRequired: true,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped := fmt.Sprintf("%s -> %s: %s", issueID, dependsOnID, reason)
 			if _, ok := skippedDependencySet[skipped]; ok {

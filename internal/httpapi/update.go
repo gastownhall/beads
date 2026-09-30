@@ -35,7 +35,7 @@ const (
 var (
 	updateRequestMembers = []string{
 		"actor", "expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", updatePatchMember,
+		"force_assignee_transfer", "force_close_policy", "due_clear_reason", updatePatchMember,
 	}
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
@@ -167,6 +167,10 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	dueClearReason, ok := s.optionalStringMember(w, r, members, "due_clear_reason")
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
 	// The role documents both combinations as invalid, and refusing them HERE
 	// keeps the 400 a statement about the request rather than a translated
 	// storage error — the `notes`/`append_notes` rule, applied to the two
@@ -197,8 +201,25 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		ExpectedAssignee:      expectedAssignee,
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
+		DueClearReason:        dueClearReason,
 		Provenance:            updateProvenance,
 	}, true
+}
+
+// optionalStringMember reads a string member that may be absent. Absent is
+// the empty string; present means a JSON string, so a null or any other type
+// is refused by name rather than read as empty.
+func (s *Server) optionalStringMember(w http.ResponseWriter, r *http.Request, members map[string]json.RawMessage, name string) (string, bool) {
+	raw, ok := members[name]
+	if !ok {
+		return "", true
+	}
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+		s.fail(w, r, InvalidArgument(name, ReasonInvalidValue, "`"+name+"` must be a string"))
+		return "", false
+	}
+	return *value, true
 }
 
 // updateExpectedStatus reads the status precondition, preserving the difference

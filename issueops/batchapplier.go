@@ -154,6 +154,8 @@ type UpdateItem struct {
 	// a Patch.Assignee is invalid.
 	ForceClosePolicy      bool
 	ForceAssigneeTransfer bool
+	// DueClearReason is UpdateRequest's, per item.
+	DueClearReason string
 }
 
 // CloseItem closes one existing issue, under CloseRequest's rules.

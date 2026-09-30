@@ -32,6 +32,13 @@ type BatchCreateOptions struct {
 	// SkipDependencyValidationErrors skips dependency validation failures that
 	// legacy imports tolerated, such as cycles or self-dependencies.
 	SkipDependencyValidationErrors bool
+	// SkipDueRequired exempts this batch from the mandatory-due invariant
+	// (config `due.required`, issueops.ValidateDueRequired). It is set by the
+	// import paths ONLY: an import restores rows that already exist somewhere
+	// else, and the backfill that gives legacy rows a due date is itself an
+	// import, so an import that refused due-less rows could never run. Every
+	// other create path leaves it false and answers to the invariant.
+	SkipDueRequired bool
 	// OnSkippedDependency records dependency edges skipped during batch create.
 	OnSkippedDependency func(issueID, dependsOnID, reason string)
 	// OnStaleRejected records issues whose row the RejectStaleUpserts guard
