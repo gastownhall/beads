@@ -1682,7 +1682,12 @@ const (
 	EventDependencyRemoved EventType = "dependency_removed"
 	EventLabelAdded        EventType = "label_added"
 	EventLabelRemoved      EventType = "label_removed"
-	EventCompacted         EventType = "compacted"
+	// EventLabelRenamed records a bulk `bd label rename` sweep landing on one
+	// issue or wisp. old_value/new_value hold the old and new label strings.
+	// Unlike EventLabelAdded/EventLabelRemoved, one rename produces exactly
+	// one of these per touched row, never a paired add+remove.
+	EventLabelRenamed EventType = "label_renamed"
+	EventCompacted    EventType = "compacted"
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"
@@ -1910,6 +1915,21 @@ type Statistics struct {
 	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
+
+	// GateIssues and TemplateIssues count rows the default `bd list` suppresses
+	// on account of what they are. They are already part of TotalIssues, which
+	// counts the database rather than the listing; they are broken out so the
+	// two commands can be reconciled instead of silently disagreeing.
+	//
+	// THE POPULATION IS EVERY STATUS, exactly TotalIssues': a CLOSED gate is
+	// counted in GateIssues, and the two overlap the status buckets the way
+	// PinnedIssues does rather than partitioning them. They are not scoped to
+	// the rows a default listing shows. That is why `bd status` prints --all
+	// beside the type flag - the listing's status exclusion is independent of
+	// its type exclusions, so the type flag alone would not reveal every row
+	// counted here (cmd/bd/status.go).
+	GateIssues     int `json:"gate_issues"`
+	TemplateIssues int `json:"template_issues"`
 }
 
 // IssueFilter is used to filter issue queries

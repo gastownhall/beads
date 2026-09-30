@@ -720,9 +720,10 @@ var operationCodes = map[string][]Code{
 	// malformed values, repeated single-valued parameters and a `group_by`
 	// outside the closed set. countGroupOf stops that last case at the edge.
 	// The role has exactly one reachable refusal: BuildCountFilter rejects an
-	// invalid metadata key. failReadErr classifies it through invalidFilterParam
-	// as a 400 on `metadata_field`. An unrecognized status or type is not a
-	// refusal; the role promises it matches nothing and answers 0.
+	// invalid metadata key, from `metadata_field` or `has_metadata_key`.
+	// failReadErr classifies it through invalidFilterParam as a 400 naming the
+	// parameter it came from. An unrecognized status or type is not a refusal;
+	// the role promises it matches nothing and answers 0.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an
@@ -841,10 +842,13 @@ var operationCodes = map[string][]Code{
 	// workspace-vocabulary issue_type or status, a metadata key the query layer
 	// could not spell, a field-length refusal that slipped the edge check —
 	// through failUpdate.
+	//
+	// not_claimable arrived with `claim`, beside the already_claimed it shares
+	// with the fence: a refused claim answers as claimIssue does.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed,
-		CodeDependencyCycle, CodeDependencyExists,
+		CodeNotClaimable, CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// No not_found. The role refuses an edge whose target names nothing, and
