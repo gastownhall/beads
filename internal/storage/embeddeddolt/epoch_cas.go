@@ -17,6 +17,12 @@ import (
 // (migration 0071). See internal/storage/dolt/epoch_cas.go's matching
 // header comment for why these are direct methods on *EmbeddedDoltStore
 // rather than a wrapper struct or root-storage-package types.
+//
+// The writers publish after their SQL transaction commits, and a failed Dolt
+// commit is returned (runTransactionWithMessage), so all three already meet the
+// ordering and BumpEpoch's failure rule the server leg is held to. A mint must
+// still stage store_epoch (storeops.EpochMintDirtyTables): its first use
+// inserts the singleton row.
 
 // CurrentEpoch reports storeID's current epoch generation.
 func (s *EmbeddedDoltStore) CurrentEpoch(ctx context.Context, storeID string) (int, error) {
@@ -49,6 +55,11 @@ func (s *EmbeddedDoltStore) BumpEpoch(ctx context.Context, storeID, reason strin
 }
 
 // MintUnderEpoch mints id's address under storeID's current epoch.
+//
+// Embedded transactions serialize (see recheckBlockedAfterCommit), so a mint
+// cannot overlap a BumpEpoch here the way it can on the server leg (see
+// TestMintOverlappingABumpCommitsAnAddressThatIsAlreadyGone in the dolt
+// package).
 func (s *EmbeddedDoltStore) MintUnderEpoch(ctx context.Context, storeID, id string) (string, error) {
 	var address string
 	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
@@ -57,7 +68,7 @@ func (s *EmbeddedDoltStore) MintUnderEpoch(ctx context.Context, storeID, id stri
 		if err != nil {
 			return nil, "", err
 		}
-		return storeops.ChangedTables{"epoch_minted_addresses": true},
+		return storeops.EpochMintDirtyTables(),
 			fmt.Sprintf("bd: mint %s under epoch for %s", id, storeID), nil
 	}); err != nil {
 		return "", err
@@ -102,7 +113,7 @@ func (s *EmbeddedDoltStore) CurrentAddressFor(ctx context.Context, storeID, oldA
 		if err != nil {
 			return nil, "", err
 		}
-		return storeops.ChangedTables{"epoch_minted_addresses": true},
+		return storeops.EpochMintDirtyTables(),
 			fmt.Sprintf("bd: current address for %s (%s)", oldAddress, storeID), nil
 	}); err != nil {
 		return "", err

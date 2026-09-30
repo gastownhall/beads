@@ -33,6 +33,14 @@ import (
 //
 // Method names match backend/conformance.EpochFixture's own field names
 // verbatim (CurrentVersion/CompareAndSetVersion's precedent).
+//
+// PUBLICATION ORDER. The three writers
+// commit their SQL transaction FIRST and stage and Dolt-commit afterwards,
+// never from inside the open transaction. doltAddAndCommitInTx builds the Dolt
+// commit from the transaction's BEGIN-time snapshot, so under concurrent
+// writers it writes every row changed in the meantime back to its old value,
+// and store_epoch and epoch_minted_addresses are append-only: a row lost that
+// way is never rewritten (the HAZARD block on that helper).
 
 // CurrentEpoch reports storeID's current epoch generation.
 func (s *DoltStore) CurrentEpoch(ctx context.Context, storeID string) (int, error) {
@@ -48,33 +56,51 @@ func (s *DoltStore) CurrentEpoch(ctx context.Context, storeID string) (int, erro
 }
 
 // BumpEpoch advances storeID's epoch generation by one for reason.
+//
+// A Dolt commit that fails after the SQL commit is RETURNED, where the mint
+// paths below log it and carry on: a bump is rare and
+// operator-driven, and its caller (the restore trigger) must not report a
+// restore complete while the bump is committed but unpublished. In that case
+// the bump HAS applied: the epoch returned is the new one, the row is durable
+// in the working set and rides the next Dolt commit, and the caller must not
+// bump again to retry.
 func (s *DoltStore) BumpEpoch(ctx context.Context, storeID, reason string) (int, error) {
 	var epoch int
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		epoch, err = storeops.BumpEpochInTx(ctx, tx, storeID, reason)
-		if err != nil {
-			return err
-		}
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"store_epoch"},
-			fmt.Sprintf("bd: bump epoch for %s (%s)", storeID, reason))
+		return err
 	}); err != nil {
 		return 0, err
+	}
+	if err := s.doltAddAndCommitPostTx(ctx, []string{"store_epoch"},
+		fmt.Sprintf("bd: bump epoch for %s (%s)", storeID, reason)); err != nil {
+		return epoch, fmt.Errorf("epoch bump for %s applied (epoch %d) but its Dolt commit failed: %w", storeID, epoch, err)
 	}
 	return epoch, nil
 }
 
 // MintUnderEpoch mints id's address under storeID's current epoch.
+//
+// It publishes like every issue mutation, through
+// runIssueOperationTxWithMessage: a Dolt commit that fails after the SQL commit
+// is logged, not returned. The mint is durable in the working set and rides the
+// next Dolt commit, and mints are frequent and automated, so failing one over a
+// missing history commit would only turn a harmless gap into caller errors.
+//
+// A mint whose transaction overlaps a BumpEpoch reads the epoch before the bump
+// and can commit an address the bump has already voided. That is left as it is;
+// TestMintOverlappingABumpCommitsAnAddressThatIsAlreadyGone records why.
 func (s *DoltStore) MintUnderEpoch(ctx context.Context, storeID, id string) (string, error) {
 	var address string
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
 		var err error
 		address, err = storeops.MintUnderEpochInTx(ctx, tx, storeID, id)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"epoch_minted_addresses"},
-			fmt.Sprintf("bd: mint %s under epoch for %s", id, storeID))
+		return storeops.EpochMintDirtyTables(),
+			fmt.Sprintf("bd: mint %s under epoch for %s", id, storeID), nil
 	}); err != nil {
 		return "", err
 	}
@@ -109,17 +135,18 @@ func (s *DoltStore) Resolve(ctx context.Context, storeID, address string) (store
 }
 
 // CurrentAddressFor re-mints oldAddress's underlying id under storeID's
-// current epoch.
+// current epoch. It mints, so it publishes, and handles a failed Dolt commit,
+// exactly as MintUnderEpoch does.
 func (s *DoltStore) CurrentAddressFor(ctx context.Context, storeID, oldAddress string) (string, error) {
 	var address string
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
 		var err error
 		address, err = storeops.CurrentAddressForInTx(ctx, tx, storeID, oldAddress)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"epoch_minted_addresses"},
-			fmt.Sprintf("bd: current address for %s (%s)", oldAddress, storeID))
+		return storeops.EpochMintDirtyTables(),
+			fmt.Sprintf("bd: current address for %s (%s)", oldAddress, storeID), nil
 	}); err != nil {
 		return "", err
 	}

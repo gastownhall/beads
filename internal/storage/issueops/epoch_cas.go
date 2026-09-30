@@ -117,19 +117,38 @@ func validateEpochAddressInputs(storeID, id string) error {
 // bee-ghosttrack review 5268699223, item B4): a write from what callers
 // reasonably expect to be a read is surprising at best, and a hard failure
 // against a genuinely read-only connection at worst.
+//
+// The seed follows version_history.go's seed of the same row (gastownhall/
+// beads#6664, bee-ghosttrack review 5360880888): read first, so the INSERT
+// happens once per store rather than once per mint; INSERT IGNORE, so a row
+// that turns up between the read and the write is not an error; and read the
+// row back, so the epoch reported is what the row holds even when the seed was
+// ignored, not the 1 it would have written.
 func ensureStoreEpochRow(ctx context.Context, tx DBTX) (int, error) {
 	var epoch int
 	err := tx.QueryRowContext(ctx, `SELECT epoch FROM store_epoch WHERE id = 1`).Scan(&epoch)
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO store_epoch (id, epoch) VALUES (1, 1)`); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO store_epoch (id, epoch) VALUES (1, 1)`); err != nil {
 			return 0, fmt.Errorf("initialize store_epoch: %w", err)
 		}
-		return 1, nil
+		err = tx.QueryRowContext(ctx, `SELECT epoch FROM store_epoch WHERE id = 1`).Scan(&epoch)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("read store_epoch: %w", err)
 	}
 	return epoch, nil
+}
+
+// EpochMintDirtyTables names the tables a mint (MintUnderEpochInTx, and
+// CurrentAddressForInTx, which mints) can leave modified, for the leg that
+// publishes them to Dolt history. store_epoch is in the set although a mint
+// never updates it: ensureStoreEpochRow INSERTs the singleton row on first use,
+// so a mint that published only epoch_minted_addresses would leave that row
+// modified and uncommitted, and the Dolt commit would hold minted rows without
+// the epoch row they depend on (gastownhall/beads#6664 Major 2, bee-ghosttrack
+// review 5360880888). Staging a table that turns out to be clean is free.
+func EpochMintDirtyTables() ChangedTables {
+	return ChangedTables{"epoch_minted_addresses": true, "store_epoch": true}
 }
 
 // readStoreEpochInTx reports the current epoch without writing:

@@ -22,8 +22,9 @@ import (
 // The first group runs on the sequence-capturing driver from
 // dolt_commit_ordering_test.go, so it needs no running Dolt server: the
 // ordering contract and the staged-table lists are properties of the SQL
-// this leg sends, not of Dolt. The last two tests reproduce bee-ghosttrack's
-// own probe against a real server (dolt_status after the first mint).
+// this leg sends, not of Dolt. The next two tests reproduce bee-ghosttrack's
+// own probe against a real server (dolt_status after the first mint), and the
+// last documents how a mint behaves beside a concurrent bump on that server.
 
 const epochPublishStoreID = "epoch-store"
 const epochPublishMintedID = "record-a"
