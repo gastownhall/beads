@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -18,6 +20,9 @@ import (
 // the exact shape `bd events tail`/`export` emit. Regenerate with
 // BD_UPDATE_GOLDEN=1 go test ./cmd/bd/ -run TestEventsJournalGolden.
 const goldenPath = "testdata/events_journal_records.jsonl"
+
+//go:embed testdata/events_journal_records.jsonl
+var journalGolden []byte
 
 // TestEventsJournalGolden pins the external record contract for the durable
 // events journal. It marshals REAL beads types.Issue, EventDep and EventComment
@@ -40,23 +45,33 @@ func TestEventsJournalGolden(t *testing.T) {
 	assertCommentSourcesAreEmittable(t, got)
 
 	if os.Getenv("BD_UPDATE_GOLDEN") == "1" {
-		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+		path := goldenUpdatePath(t, goldenPath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("mkdir testdata: %v", err)
 		}
-		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
 			t.Fatalf("write golden: %v", err)
 		}
 		t.Logf("updated golden %s", goldenPath)
 		return
 	}
 
-	want, err := os.ReadFile(goldenPath)
-	if err != nil {
-		t.Fatalf("read golden (regenerate with BD_UPDATE_GOLDEN=1): %v", err)
+	if !bytes.Equal(got, journalGolden) {
+		t.Errorf("journal record contract drifted from %s.\n--- got ---\n%s\n--- want ---\n%s\nregenerate with BD_UPDATE_GOLDEN=1 if intended", goldenPath, got, journalGolden)
 	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("journal record contract drifted from %s.\n--- got ---\n%s\n--- want ---\n%s\nregenerate with BD_UPDATE_GOLDEN=1 if intended", goldenPath, got, want)
+}
+
+// goldenUpdatePath resolves the fixture independently of the test process's
+// working directory. A trimmed binary carries an import path rather than an
+// absolute source path, so it deliberately refuses an update rather than
+// treating that import path as a relative destination and writing elsewhere.
+func goldenUpdatePath(t *testing.T, path string) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok || !filepath.IsAbs(file) {
+		t.Fatal("golden updates require an untrimmed test binary with an absolute source path")
 	}
+	return filepath.Join(filepath.Dir(file), path)
 }
 
 // TestEventsJournalGoldenIsDeterministic renders the fixture twice and requires

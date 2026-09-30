@@ -404,6 +404,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "//internal/storage/sqlbuild",
         "//internal/storage/sqlclass",
         "//internal/storage/uow",
         "//internal/storage/versioncontrolops",
@@ -1185,6 +1186,7 @@ go_test(
         "@go_sdk//:bin/gofmt",
     ],
     embed = [":bd_lib"],
+    embedsrcs = ["testdata/events_journal_records.jsonl"],
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",

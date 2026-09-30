@@ -333,6 +333,49 @@ func TestProxiedServerSearch(t *testing.T) {
 		}
 	})
 
+	// ===== All-Fields Search (GH#2883) =====
+
+	// The proxied path has its own copy of the --all-fields flag→filter wiring
+	// and its own --json branch (search_proxied_server.go), so it gets its own
+	// pins: terms that live only in a comment, only in a description, and only
+	// in a wisp's comment (the wisp leg reads wisp_comments, not comments).
+	commentIssue := bdProxiedCreate(t, bd, p.dir, "All-fields comment fixture", "--type", "task")
+	bdProxiedComment(t, bd, p.dir, commentIssue.ID, "Root cause: quorbex flimzil lookup on every init call")
+	descIssue := bdProxiedCreate(t, bd, p.dir, "All-fields description fixture", "--type", "task", "--description", "mentions the snorfle protocol here")
+	wispIssue := bdProxiedCreate(t, bd, p.dir, "All-fields wisp fixture", "--ephemeral")
+	bdProxiedComment(t, bd, p.dir, wispIssue.ID, "wisp note: vantrix gloam")
+
+	t.Run("all_fields_default_stays_blind_to_comments", func(t *testing.T) {
+		if got := bdProxiedSearchJSON(t, bd, p.dir, "quorbex flimzil"); len(got) != 0 {
+			t.Errorf("default search should not match comment text, got %d results", len(got))
+		}
+	})
+
+	for _, tc := range []struct {
+		name, query, wantID, matchedIn string
+	}{
+		{name: "all_fields_comment_match", query: "quorbex flimzil", wantID: commentIssue.ID, matchedIn: "comments"},
+		{name: "all_fields_description_match", query: "snorfle protocol", wantID: descIssue.ID, matchedIn: "description"},
+		{name: "all_fields_wisp_comment_match", query: "vantrix gloam", wantID: wispIssue.ID, matchedIn: "comments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := bdProxiedSearchJSON(t, bd, p.dir, tc.query, "--all-fields")
+			if len(results) != 1 || results[0]["id"] != tc.wantID {
+				t.Fatalf("--all-fields %q: expected only %s, got %v", tc.query, tc.wantID, searchResultIDs(results))
+			}
+			if results[0]["matched_in"] != tc.matchedIn {
+				t.Errorf("--all-fields %q: matched_in = %v, want %s", tc.query, results[0]["matched_in"], tc.matchedIn)
+			}
+		})
+	}
+
+	t.Run("all_fields_text_output_names_the_match", func(t *testing.T) {
+		out := bdProxiedSearch(t, bd, p.dir, "quorbex flimzil", "--all-fields")
+		if !strings.Contains(out, commentIssue.ID) || !strings.Contains(out, "(matched: comments)") {
+			t.Errorf("expected %s with (matched: comments) in text output, got:\n%s", commentIssue.ID, out)
+		}
+	})
+
 	t.Run("wisp_appears_in_search", func(t *testing.T) {
 		wp := newSharedProxiedProject(t, bd, "sw")
 		wisp := bdProxiedCreate(t, bd, wp.dir, "Wispy alpha search target", "--ephemeral")
