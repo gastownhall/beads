@@ -314,6 +314,9 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if !cfg.ServerTLS {
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
+	if !cfg.ServerAllowCleartextPassword {
+		cfg.ServerAllowCleartextPassword = fileCfg.GetDoltServerAllowCleartextPassword()
+	}
 
 	// config.yaml rung shared by the pool knobs below. It needs both reads:
 	// config.GetString reads a package-global viper populated only by

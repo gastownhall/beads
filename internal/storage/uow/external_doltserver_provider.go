@@ -67,7 +67,9 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, applyProviderOptions(opts))
+	// external.Validate() above already refused AllowCleartextPassword set
+	// without TLSRequired, so this can never carry the flag without TLS.
+	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, tlsConfigName, external.AllowCleartextPassword, teamServer, expectedProjectID, applyProviderOptions(opts))
 }
 
 func registerExternalTLSConfig(external configfile.ExternalDoltConfig) (string, error) {

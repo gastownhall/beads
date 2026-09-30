@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -616,6 +617,116 @@ func TestBuildServerDSN_WithoutSocket(t *testing.T) {
 	}
 	if parsed.Net != "tcp" {
 		t.Errorf("expected Net=tcp, got %q", parsed.Net)
+	}
+}
+
+// TestBuildServerDSN_AllowCleartextPasswordPassthrough verifies
+// cfg.ServerAllowCleartextPassword reaches the formatted DSN the same way
+// cfg.ServerTLS does.
+func TestBuildServerDSN_AllowCleartextPasswordPassthrough(t *testing.T) {
+	cfg := &Config{
+		ServerUser:                   "root",
+		ServerHost:                   "127.0.0.1",
+		ServerPort:                   3307,
+		Database:                     "testdb",
+		ServerTLS:                    true,
+		ServerAllowCleartextPassword: true,
+	}
+	applyConfigDefaults(cfg)
+
+	dsn := buildServerDSN(cfg, cfg.Database)
+
+	parsed, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("failed to parse DSN: %v\n  DSN: %s", err, dsn)
+	}
+	if !parsed.AllowCleartextPasswords {
+		t.Errorf("expected AllowCleartextPasswords=true in parsed DSN, got false\n  DSN: %s", dsn)
+	}
+}
+
+// TestBuildServerDSN_AllowCleartextPasswordOmittedByDefault verifies the
+// go-sql-driver/mysql default (false) when the config never sets it.
+func TestBuildServerDSN_AllowCleartextPasswordOmittedByDefault(t *testing.T) {
+	cfg := &Config{
+		ServerUser: "root",
+		ServerHost: "127.0.0.1",
+		ServerPort: 3307,
+		Database:   "testdb",
+	}
+	applyConfigDefaults(cfg)
+
+	dsn := buildServerDSN(cfg, cfg.Database)
+
+	parsed, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("failed to parse DSN: %v\n  DSN: %s", err, dsn)
+	}
+	if parsed.AllowCleartextPasswords {
+		t.Errorf("expected AllowCleartextPasswords=false by default, got true\n  DSN: %s", dsn)
+	}
+}
+
+// TestValidateServerAuthConfig_RefusesCleartextWithoutTLS covers the
+// TLS gate: ServerAllowCleartextPassword set without ServerTLS must be
+// refused rather than silently send a password in the clear.
+func TestValidateServerAuthConfig_RefusesCleartextWithoutTLS(t *testing.T) {
+	cfg := &Config{
+		ServerAllowCleartextPassword: true,
+		ServerTLS:                    false,
+	}
+	err := validateServerAuthConfig(cfg)
+	if err == nil {
+		t.Fatal("expected an error when AllowCleartextPassword is set without TLS, got nil")
+	}
+	for _, want := range []string{"dolt_server_allow_cleartext_password", "dolt_server_tls"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name %q so the operator knows both settings involved; got: %v", want, err)
+		}
+	}
+}
+
+// TestValidateServerAuthConfig_AllowsCleartextWithTLS covers the same gate's
+// other arm: the combination is fine once TLS is also on.
+func TestValidateServerAuthConfig_AllowsCleartextWithTLS(t *testing.T) {
+	cfg := &Config{
+		ServerAllowCleartextPassword: true,
+		ServerTLS:                    true,
+	}
+	if err := validateServerAuthConfig(cfg); err != nil {
+		t.Errorf("expected no error when TLS is also set, got: %v", err)
+	}
+}
+
+// TestValidateServerAuthConfig_NoOpWhenCleartextUnset covers the default
+// (and TLS-only) configurations: nothing to refuse when the cleartext flag
+// was never requested.
+func TestValidateServerAuthConfig_NoOpWhenCleartextUnset(t *testing.T) {
+	for _, tls := range []bool{false, true} {
+		cfg := &Config{ServerAllowCleartextPassword: false, ServerTLS: tls}
+		if err := validateServerAuthConfig(cfg); err != nil {
+			t.Errorf("expected no error when AllowCleartextPassword is unset (TLS=%v), got: %v", tls, err)
+		}
+	}
+}
+
+// TestNew_RefusesCleartextPasswordWithoutTLS proves New itself runs the
+// gate (not just validateServerAuthConfig in isolation), and fails before
+// dialing, so this needs no live server.
+func TestNew_RefusesCleartextPasswordWithoutTLS(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &Config{
+		Path:                         tmpDir,
+		Database:                     "testdb",
+		ServerAllowCleartextPassword: true,
+		ServerTLS:                    false,
+	}
+	_, err := New(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected New to refuse AllowCleartextPassword without TLS, got nil error")
+	}
+	if !strings.Contains(err.Error(), "dolt_server_allow_cleartext_password") {
+		t.Errorf("expected the TLS-gate error, got: %v", err)
 	}
 }
 

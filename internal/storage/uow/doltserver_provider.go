@@ -71,5 +71,9 @@ func NewDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, "", teamServer, expectedProjectID, applyProviderOptions(opts))
+	// No TLS, no auth-switching proxy in the picture: this is a database bd
+	// spawned and manages itself, reached over a loopback socket/port dolt
+	// server started under this same process (comment above: "proxy is
+	// loopback-only, no auth"). AllowCleartextPasswords is always false here.
+	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, "", false, teamServer, expectedProjectID, applyProviderOptions(opts))
 }

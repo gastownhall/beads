@@ -112,3 +112,54 @@ func TestServerDSN_TLSEnabledWhenRequested(t *testing.T) {
 		t.Errorf("DSN should not contain tls=false when TLS is enabled; got %q", dsn)
 	}
 }
+
+func TestServerDSN_AllowCleartextPasswordsOmittedByDefault(t *testing.T) {
+	dsn := ServerDSN{
+		Host: "dolt.example.com",
+		Port: 3307,
+		User: "root",
+		TLS:  true,
+	}.String()
+
+	// go-sql-driver/mysql only writes allowCleartextPasswords when true.
+	if strings.Contains(dsn, "allowCleartextPasswords") {
+		t.Errorf("DSN should not mention allowCleartextPasswords by default; got %q", dsn)
+	}
+}
+
+func TestServerDSN_AllowCleartextPasswordsEnabledWhenRequested(t *testing.T) {
+	dsn := ServerDSN{
+		Host:                    "dolt.example.com",
+		Port:                    3307,
+		User:                    "root",
+		TLS:                     true,
+		AllowCleartextPasswords: true,
+	}.String()
+
+	if !strings.Contains(dsn, "allowCleartextPasswords=true") {
+		t.Errorf("DSN should contain allowCleartextPasswords=true when requested; got %q", dsn)
+	}
+}
+
+func TestServerDSN_AllowCleartextPasswordsRequiresTLS(t *testing.T) {
+	// String() fails safe: a builder that requested cleartext auth without
+	// also setting TLS gets a DSN that omits allowCleartextPasswords, so a
+	// missed configfile.ValidateServerAuthConfig call degrades to the
+	// driver's own "requires clear text authentication" refusal instead of
+	// sending the password in the clear. The up-front refusal (naming both
+	// settings) is configfile.ValidateServerAuthConfig; this only covers
+	// String() itself.
+	dsn := ServerDSN{
+		Host:                    "dolt.example.com",
+		Port:                    3307,
+		User:                    "root",
+		AllowCleartextPasswords: true,
+	}.String()
+
+	if strings.Contains(dsn, "allowCleartextPasswords") {
+		t.Errorf("DSN should omit allowCleartextPasswords when TLS was not requested; got %q", dsn)
+	}
+	if !strings.Contains(dsn, "tls=false") {
+		t.Errorf("DSN should still contain tls=false when TLS was not requested; got %q", dsn)
+	}
+}
