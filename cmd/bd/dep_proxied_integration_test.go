@@ -423,6 +423,24 @@ func TestProxiedServerDep2(t *testing.T) {
 			if m["status"] != "removed" {
 				t.Errorf("expected status=removed, got %v", m["status"])
 			}
+			if m["removed"] != true {
+				t.Errorf("expected removed=true, got %v", m["removed"])
+			}
+		})
+
+		t.Run("missing_edge_reports_noop", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpr4")
+			a := bdProxiedCreate(t, bd, p.dir, "Missing edge A", "--type", "task")
+			b := bdProxiedCreate(t, bd, p.dir, "Missing edge B", "--type", "task")
+			out := bdProxiedDep(t, bd, p.dir, "remove", a.ID, b.ID)
+			if !strings.Contains(out, "No dependency found") || strings.Contains(out, "✓") {
+				t.Errorf("missing edge should report a no-op, got: %s", out)
+			}
+			m := bdProxiedDepJSON(t, bd, p.dir, "remove", a.ID, b.ID)
+			if m["status"] != "not_found" || m["removed"] != false {
+				t.Errorf("missing edge JSON = %v, want status=not_found removed=false", m)
+			}
 		})
 	})
 

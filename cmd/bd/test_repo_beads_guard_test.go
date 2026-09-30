@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -49,10 +50,16 @@ type testRunner interface {
 }
 
 func runTestsAndSweep(m testRunner) int {
+	stdout, stderr := os.Stdout, os.Stderr
 	code := m.Run()
-	doltserver.SweepOrphanedTestServers(testTempRoot)
-	return code
+	code = checkStdioAfterRun(code, stdout, stderr)
+	swept := doltserver.SweepSuiteTestServers(testTempRoot)
+	return doltserver.ApplyLeakPolicy("cmd/bd", code, swept)
 }
+
+// suiteRootPrefix is testMainInner's PinSuiteTempRoot pattern without its random
+// tail. It is what SweepDeadSuiteRoots globs for, so the two must not drift.
+const suiteRootPrefix = "beads-bd-tests-"
 
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
@@ -68,12 +75,26 @@ func testMainInner(m *testing.M) int {
 	// Many tests expect default config values; running from within this repo would
 	// cause config.Initialize() to walk up from CWD and load `.beads/config.yaml`,
 	// which may set non-default config values and makes tests assert the wrong behavior.
-	tmp, err := os.MkdirTemp("", "beads-bd-tests-*")
+	// Before claiming a root of our own, clear out the roots of EARLIER runs
+	// of this suite whose process is gone — a `go test -timeout` panic skips
+	// both the defer below and the post-Run sweep, so the servers those runs
+	// started outlive every cleanup this process installs, and nothing else
+	// ever looks at a dead run's tree again (wy-j2zc8q). Roots with no owner
+	// marker, and roots whose owner is still running, are left untouched.
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
+	tmp, err := testutil.PinSuiteTempRoot(suiteRootPrefix + "*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		return 1
 	}
 	defer func() { _ = forceRemoveAll(tmp) }()
+
+	// Claim the root for this process so the NEXT run can tell our debris
+	// from a concurrent run's live tree.
+	if err := doltserver.WriteSuiteOwnerMarker(tmp); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", tmp, err)
+	}
 
 	// Anchor package-level sync.Once builders (test binaries, isolated
 	// HOMEs) under this directory so the defer above sweeps them up too.
@@ -107,10 +128,18 @@ func testMainInner(m *testing.M) int {
 	// daemons like OrbStack (bd-84kos).
 	testutil.PinDockerHostFromContext()
 
-	_ = os.Setenv("HOME", tmp)
-	_ = os.Setenv("USERPROFILE", tmp) // Windows compatibility
-	_ = os.Setenv("APPDATA", filepath.Join(tmp, "AppData", "Roaming"))
-	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "xdg-config"))
+	// Keep HOME beside the fixture directories, not above them. Tests may
+	// create ~/.beads; putting it on their ancestry would make repository
+	// discovery pick up unrelated suite state before trying worktree fallback.
+	home := filepath.Join(tmp, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create test home: %v\n", err)
+		return 1
+	}
+	_ = os.Setenv("HOME", home)
+	_ = os.Setenv("USERPROFILE", home) // Windows compatibility
+	_ = os.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
 	_ = os.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 
 	// Keep telemetry out of the test suite entirely (wy-12x1p).
@@ -139,6 +168,15 @@ func testMainInner(m *testing.M) int {
 	_ = os.Setenv(metrics.EnvDisableMetrics, "1")
 	_ = os.Setenv(metrics.EnvDisableEventFlush, "1")
 
+	// Pin the migration-freeze override to a path that cannot exist (dc-6jaq).
+	// The freeze gate walks every ancestor of the workspace and of the cwd up
+	// to the filesystem root, so a stray MIGRATION-FREEZE above TMPDIR — or in
+	// a developer's home, or exported by their shell — would refuse every
+	// write in every subprocess suite in this package with exit 14. The
+	// override is authoritative, so pinning it here holds the walk off
+	// globally; the freeze tests that need the walk clear it per-run.
+	_ = os.Setenv(migration.EnvFreezeFile, filepath.Join(tmp, "no-such-freeze-marker"))
+
 	// Also reset viper state that was loaded by main.go's init().
 	config.ResetForTesting()
 
@@ -160,6 +198,8 @@ func testMainInner(m *testing.M) int {
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.
 	// Each test that needs a .beads directory should set BEADS_DIR explicitly.
+	// This is startup isolation only: fresh in-process command fixtures should
+	// use isolateBeadsDirForTest before setup to contain later dispatch mutations.
 	origBeadsDir := os.Getenv("BEADS_DIR")
 	os.Unsetenv("BEADS_DIR")
 	defer func() {

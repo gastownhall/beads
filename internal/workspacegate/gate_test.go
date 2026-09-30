@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // TestMain doubles as the cross-process helper: when WORKSPACEGATE_HELPER
@@ -477,7 +479,7 @@ func deadPID(t *testing.T) int {
 		t.Fatalf("os.Executable: %v", err)
 	}
 	cmd := exec.Command(exe)
-	cmd.Env = append(os.Environ(), "WORKSPACEGATE_HELPER=exit")
+	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()), "WORKSPACEGATE_HELPER=exit")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("running exit helper: %v", err)
 	}
@@ -599,7 +601,7 @@ func spawnHolder(t *testing.T, dir, mode string) *holderProc {
 		t.Fatalf("os.Executable: %v", err)
 	}
 	cmd := exec.Command(exe, dir, mode)
-	cmd.Env = append(os.Environ(), "WORKSPACEGATE_HELPER=hold")
+	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()), "WORKSPACEGATE_HELPER=hold")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -710,7 +712,7 @@ func TestSpawnedChildDoesNotInheritGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	child := exec.Command(exe)
-	child.Env = append(os.Environ(), "WORKSPACEGATE_HELPER=sleep")
+	child.Env = append(bazeltest.ShardFreeEnv(os.Environ()), "WORKSPACEGATE_HELPER=sleep")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}

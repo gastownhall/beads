@@ -1522,6 +1522,39 @@ func TestRequiredPatterns_ContainsSyncStatePatterns(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsDoltServerConfig verifies that the generated Dolt
+// server config is ignored like the other dolt-server.* runtime state files
+// it sits beside. doltserver.Start() writes .beads/dolt-server-config.yaml
+// when the resolved dolt binary supports auto_gc_behavior.archive_level, and
+// it holds an absolute cfg_dir plus a per-machine port, so committing it
+// would break every other clone.
+//
+// The hyphenated name falls outside the "dolt-server." prefix shared by the
+// other five entries, so it was missed by both lists. It must be in
+// requiredPatterns too, otherwise bd doctor --fix cannot heal an existing
+// .beads/.gitignore.
+func TestGitignore_ContainsDoltServerConfig(t *testing.T) {
+	// Keep this in sync with doltserver.doltServerConfigFileName. It is not
+	// imported here because cmd/bd/doctor must not depend on the server
+	// package for a string constant.
+	const pattern = "dolt-server-config.yaml"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+
+	found := false
+	for _, p := range requiredPatterns {
+		if p == pattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
 // TestCheckLastTouchedNotTracked_NoFile verifies that check passes when no last-touched file exists
 func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -1891,6 +1924,36 @@ func TestEnsureProjectGitignore_CreatesFile(t *testing.T) {
 	}
 }
 
+func TestEnsureProjectGitignore_LeadingSeparatorOnlyAfterExistingContent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{name: "fresh file", existing: "", want: ProjectGitignoreHeader + "\n"},
+		{name: "existing content", existing: "build/\n", want: "build/\n\n" + ProjectGitignoreHeader + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if tc.existing != "" {
+				if err := os.WriteFile(".gitignore", []byte(tc.existing), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := EnsureProjectGitignore("."); err != nil {
+				t.Fatalf("EnsureProjectGitignore() error = %v", err)
+			}
+			content, err := os.ReadFile(".gitignore")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(content); !strings.HasPrefix(got, tc.want) {
+				t.Errorf(".gitignore starts with %q, want prefix %q", got[:min(len(got), len(tc.want)+16)], tc.want)
+			}
+		})
+	}
+}
+
 func TestEnsureProjectGitignore_AppendsToExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldDir, err := os.Getwd()
@@ -1931,6 +1994,59 @@ func TestEnsureProjectGitignore_AppendsToExisting(t *testing.T) {
 	}
 	if !strings.Contains(contentStr, "*.db") {
 		t.Error("Expected *.db pattern in .gitignore")
+	}
+}
+
+func TestEnsureProjectGitignore_PreservesAppendLineEndings(t *testing.T) {
+	lfSection := ProjectGitignoreHeader + "\n" + strings.Join(ProjectGitignorePatterns, "\n") + "\n"
+	lfBlock := "\n" + lfSection
+	crlfBlock := "\r\n" + ProjectGitignoreHeader + "\r\n" + strings.Join(ProjectGitignorePatterns, "\r\n") + "\r\n"
+	partial := ProjectGitignoreHeader + "\r\n" + ProjectGitignorePatterns[0] + "\r\n"
+	remaining := "\r\n" + ProjectGitignoreHeader + "\r\n" + strings.Join(ProjectGitignorePatterns[1:], "\r\n") + "\r\n"
+	complete := ProjectGitignoreHeader + "\r\n" + strings.Join(ProjectGitignorePatterns, "\r\n")
+	for _, tc := range []struct {
+		name, existing, want string
+		missing              bool
+	}{
+		{"empty", "", lfSection, false},
+		{"missing", "", lfSection, true},
+		{"whitespace", " \t", " \t\n" + lfBlock, false},
+		{"blank LF", "\n", "\n" + lfBlock, false},
+		{"blank CRLF", "\r\n", "\r\n" + crlfBlock, false},
+		{"delimiter-free", "local", "local\n" + lfBlock, false},
+		{"LF", "local\n", "local\n" + lfBlock, false},
+		{"CRLF", "local\r\n", "local\r\n" + crlfBlock, false},
+		{"CRLF unterminated", "local\r\nlast", "local\r\nlast\r\n" + crlfBlock, false},
+		{"CRLF trailing CR", "local\r\nlast\r", "local\r\nlast\r\n" + crlfBlock, false},
+		{"LF trailing CR", "local\nlast\r", "local\nlast\r\n" + lfBlock, false},
+		{"only trailing CR", "local\r", "local\r\n" + lfBlock, false},
+		{"mixed majority CRLF", "a\r\nb\r\nc\n", "a\r\nb\r\nc\n" + lfBlock, false},
+		// Re-emitting an existing header is pre-existing behavior, preserved here.
+		{"partial with header", partial, partial + remaining, false},
+		{"complete unterminated", complete, complete, false},
+		{"complete CRLF", complete + "\r\n", complete + "\r\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".gitignore")
+			if !tc.missing {
+				if err := os.WriteFile(path, []byte(tc.existing), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for call := 1; call <= 2; call++ {
+				if err := EnsureProjectGitignore(dir); err != nil {
+					t.Fatalf("call %d: %v", call, err)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != tc.want {
+					t.Fatalf("call %d: got bytes %q, want %q", call, got, tc.want)
+				}
+			}
+		})
 	}
 }
 

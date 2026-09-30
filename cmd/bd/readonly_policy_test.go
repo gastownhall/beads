@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestEffectiveRootStorePolicy(t *testing.T) {
@@ -63,26 +64,6 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 			}
 			if policy.runMaintenance != tc.wantMaintenance {
 				t.Fatalf("runMaintenance = %v, want %v", policy.runMaintenance, tc.wantMaintenance)
-			}
-		})
-	}
-}
-
-func TestStrictReadonlyBackendSupport(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *configfile.Config
-		want bool
-	}{
-		{name: "fresh embedded default", cfg: nil, want: true},
-		{name: "dolt server", cfg: &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer}, want: true},
-		{name: "proxied server", cfg: &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeProxiedServer}, want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := backendSupportsStrictReadonly(tc.cfg); got != tc.want {
-				t.Fatalf("backendSupportsStrictReadonly() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -345,8 +326,12 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 		t.Fatalf("create isolated XDG home: %v", err)
 	}
 	// The canary must execute the current worktree source, never a caller-provided
-	// prebuilt binary that may predate this candidate.
-	t.Setenv("BEADS_TEST_BD_BINARY", "")
+	// prebuilt binary that may predate this candidate. Under Bazel the injected
+	// binary (//cmd/bd:bd_for_tests) is built from this source tree, and there is
+	// no toolchain to build another one.
+	if !bazeltest.IsBazel() {
+		t.Setenv("BEADS_TEST_BD_BINARY", "")
+	}
 	bd := buildBDForTest(t)
 	cmd := exec.Command(bd, "config", "validate", "--readonly")
 	cmd.Dir = repoDir

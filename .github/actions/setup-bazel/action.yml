@@ -1,0 +1,70 @@
+name: setup-bazel
+description: >
+  Install a sha256-pinned Bazelisk (Bazel itself comes from .bazelversion),
+  restore the runner Bazel cache (--repository_cache and Bazelisk only),
+  and write a CI bazelrc outside the workspace. When the caller passes all of
+  BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY in the step env, that rc
+  enables --config=remote-exec for every bazel command; with none of them the
+  job runs locally (fork PRs); a partial set fails. `bazel` on PATH is a
+  wrapper that always passes the generated rc.
+outputs:
+  remote:
+    description: '"true" when remote execution is configured'
+    value: ${{ steps.rc.outputs.remote }}
+  cache-restored:
+    description: '"true" when a runner Bazel cache was restored (any prefix match)'
+    value: ${{ steps.restore.outputs.cache-matched-key != '' }}
+  cache-hit:
+    description: '"true" when the cache for this .bazelversion and MODULE.bazel.lock was restored exactly'
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    # Keyed on what determines its content; saved only by a push to main that
+    # missed the exact key (see the caller's "Save Bazel runner cache" step).
+    # A lock change restores the previous lock's entry, which still holds most
+    # of the downloads.
+    - name: Restore Bazel runner cache
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/bazel-ci-cache
+        key: bazel-repo-v2-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
+        restore-keys: |
+          bazel-repo-v2-${{ runner.os }}-
+
+    - name: Install Bazelisk
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=v1.29.0
+        case "$(uname -m)" in
+          x86_64) arch=amd64; sha=5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992 ;;
+          aarch64 | arm64) arch=arm64; sha=e20e8b0f4f240091b7a55bf17b9398bd4f40ee70ae0208dff95dd4c445fb4010 ;;
+          *) echo "setup-bazel: unsupported arch $(uname -m)" >&2; exit 1 ;;
+        esac
+        curl -fsSL --retry 3 --max-time 120 -o "$RUNNER_TEMP/bazelisk" \
+          "https://github.com/bazelbuild/bazelisk/releases/download/${version}/bazelisk-linux-${arch}"
+        echo "${sha}  $RUNNER_TEMP/bazelisk" | sha256sum -c -
+        sudo install -m 755 "$RUNNER_TEMP/bazelisk" /usr/local/bin/bazelisk
+        rm -f "$RUNNER_TEMP/bazelisk"
+        echo "BAZELISK_HOME=$RUNNER_TEMP/bazel-ci-cache/bazelisk" >> "$GITHUB_ENV"
+
+    - name: Write CI bazelrc
+      id: rc
+      shell: bash
+      env:
+        BAZEL_CI_CACHE_DIR: ${{ runner.temp }}/bazel-ci-cache
+        BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+      run: bash "$GITHUB_ACTION_PATH/write-bazelrc.sh"
+
+    - name: Install bazel wrapper
+      shell: bash
+      env:
+        RC: ${{ steps.rc.outputs.rc }}
+      run: |
+        set -euo pipefail
+        printf '%s\n' '#!/usr/bin/env bash' "exec /usr/local/bin/bazelisk --bazelrc=\"$RC\" \"\$@\"" > "$RUNNER_TEMP/bazel-wrapper"
+        sudo install -m 755 "$RUNNER_TEMP/bazel-wrapper" /usr/local/bin/bazel
+        rm -f "$RUNNER_TEMP/bazel-wrapper"
+        /usr/local/bin/bazelisk --version

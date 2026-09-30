@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "kvkeys",
+    srcs = ["kvkeys.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/kvkeys",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "kvkeys_test",
+    srcs = ["kvkeys_test.go"],
+    embed = [":kvkeys"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

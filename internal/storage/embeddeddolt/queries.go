@@ -9,9 +9,17 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// WakeExpiredDefersAdvisory preserves the backend wake contract for decorators.
+func (s *EmbeddedDoltStore) WakeExpiredDefersAdvisory(ctx context.Context) {
+	s.wakeExpiredDefers(ctx)
+}
+
+var _ storage.ExpiredDeferWaker = (*EmbeddedDoltStore)(nil)
 
 // wakeExpiredDefers runs the lazy defer-wake sweep (issueops.WakeExpiredDefersInTx)
 // in its own write transaction before a ready-work read. Advisory by contract:
@@ -60,6 +68,21 @@ func (s *EmbeddedDoltStore) GetReadyWorkWithCounts(ctx context.Context, filter t
 		return err
 	})
 	return result, err
+}
+
+// GetReadyWorkWithCountsAndTotal returns the ready page and the size of the
+// whole ready set in one read transaction (and one defer-wake sweep), so a
+// capped `bd ready` needs no separate count pass.
+func (s *EmbeddedDoltStore) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	s.wakeExpiredDefers(ctx)
+	var result []*types.IssueWithCounts
+	var total int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, total, err = issueops.GetReadyWorkWithCountsAndTotalInTx(ctx, tx, filter)
+		return err
+	})
+	return result, total, err
 }
 
 // CountReadyWork returns the total ready-work count for filter. It is identical

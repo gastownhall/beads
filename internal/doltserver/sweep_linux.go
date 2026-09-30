@@ -3,94 +3,39 @@
 package doltserver
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
-	"time"
 )
 
-// SweepOrphanedTestServers reaps `dolt sql-server` processes that are
-// provably leaked test debris: their working directory has been deleted, or
-// sits under one of suiteTempRoots. It is meant to be called once, from a
-// test suite's TestMain, after m.Run() returns — a backstop for servers
-// that survived an interrupted (e.g. SIGKILLed) test run despite the
-// test-mode Pdeathsig in procattr_linux.go.
+// SweepOrphanedTestServers reaps dolt sql-servers under suiteTempRoots and
+// deleted-cwd servers under credible global temp roots. A root must belong
+// exclusively to the caller, never be a shared/global temp directory.
 //
-// suiteTempRoots MUST be directories owned by (anchored under) the calling
-// suite alone — e.g. a package's own testTempRoot — never a shared/global
-// temp dir such as os.TempDir(). scripts/test.sh runs packages in parallel
-// (-p N), so a global root would make every *other* suite's still-running
-// server (whose data dir also happens to live under os.TempDir(), which is
-// true of essentially all of them) look like debris and get SIGTERM'd
-// mid-run. That is why this function never defaults to os.TempDir() itself:
-// a live server is only ever reaped when its cwd is nested under a root the
-// caller vouches for as its own.
+// Deprecated: use SweepSuiteTestServers for suite shutdown and
+// SweepDeadSuiteRoots for abandoned runs. This global sweep can consume leak
+// evidence belonging to a still-running foreign suite; do not call it from
+// TestMain or pass its result to ApplyLeakPolicy.
 //
-// A server whose working directory has been deleted (cwdDeleted, see
-// readProcCwd) is reaped unconditionally regardless of suiteTempRoots —
-// that is the unambiguous leak signature (a t.TempDir() cleanup ran out
-// from under a still-live detached server) and cannot occur for any
-// server, from any suite, that is still legitimately in use.
-//
-// Safety is the whole point: this must never touch a developer's real
-// shared server. It only reads /proc (no killing) to build the candidate
-// list, and selectOrphanTestServerPIDs only matches processes whose data
-// directory is gone or explicitly caller-scoped — a production server's
-// data directory is neither. Errors reading /proc for any single PID just
-// drop that PID from consideration; this function is best-effort and never
-// returns an error itself.
-//
-// Returns the PIDs it sent a kill signal to.
-func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
+// Returns the servers (pid + cwd) it sent a kill signal to. Process-listing
+// errors and candidates whose cwd cannot be resolved are ignored.
+func SweepOrphanedTestServers(suiteTempRoots ...string) []SweptServer {
 	candidates := gatherDoltServerCandidates()
-	pids := selectOrphanTestServerPIDs(candidates, suiteTempRoots)
+	selected := selectOrphanTestServers(candidates, canonicalRoots(suiteTempRoots), tempDirRoots())
+	return reapServers(selected, isDoltServerProcess)
+}
 
-	self := os.Getpid()
-	var killed []int
-	for _, pid := range pids {
-		if pid == self {
-			continue
-		}
-		// Revalidate identity right before signaling: candidate selection
-		// above already did its own /proc read, and in a PID-reuse window
-		// the kernel could have recycled this PID to an unrelated process
-		// in between. isDoltServerProcess re-reads /proc/<pid>/cmdline so
-		// we only ever signal something that still looks like the
-		// dolt sql-server we selected.
-		if !isDoltServerProcess(pid) {
-			continue
-		}
-		if err := syscall.Kill(pid, syscall.SIGTERM); err == nil {
-			killed = append(killed, pid)
-		}
-	}
-
-	if len(killed) == 0 {
-		return killed
-	}
-
-	fmt.Fprintf(os.Stderr, "Info: swept %d orphaned test dolt sql-server process(es): %v\n", len(killed), killed)
-
-	// Give SIGTERM a moment, then force anything still alive. This runs at
-	// suite exit, so a short bounded wait here is acceptable.
-	time.Sleep(300 * time.Millisecond)
-	for _, pid := range killed {
-		// Revalidate again before escalating to SIGKILL: the original
-		// server may have exited cleanly during the grace period, and in
-		// a PID-reuse window (the kernel cycling the whole PID space
-		// within 300ms) this PID could now belong to an unrelated
-		// process. Recheck it still looks like a dolt sql-server before
-		// force-killing it.
-		if !isDoltServerProcess(pid) {
-			continue
-		}
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-
-	return killed
+// sweepServersUnderRoots reaps only the dolt sql-servers whose working
+// directory sits under one of suiteTempRoots. It is SweepOrphanedTestServers
+// without the deleted-cwd arm, for callers that must not reach outside the
+// trees they name — see selectServersUnderRoots.
+//
+// Returns the servers (pid + cwd) it sent a kill signal to.
+func sweepServersUnderRoots(suiteTempRoots ...string) []SweptServer {
+	candidates := gatherDoltServerCandidates()
+	selected := selectServersUnderRoots(candidates, canonicalRoots(suiteTempRoots))
+	return reapServers(selected, isDoltServerProcess)
 }
 
 // isDoltServerProcess re-reads /proc/<pid>/cmdline and reports whether pid

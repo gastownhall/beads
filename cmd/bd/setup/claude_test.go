@@ -1655,3 +1655,207 @@ func TestRemoveClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
 		t.Fatalf("AGENTS.md should still contain its beads block after remove:\n%s", agentsData)
 	}
 }
+
+// countingClaudeEnv wraps env.writeFile with a per-path write counter so tests
+// can assert that an unchanged settings file is not rewritten.
+func countingClaudeEnv(env claudeEnv, counts map[string]int) claudeEnv {
+	inner := env.writeFile
+	env.writeFile = func(path string, data []byte) error {
+		counts[path]++
+		return inner(path, data)
+	}
+	return env
+}
+
+func assertTrailingNewline(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		t.Errorf("%s should end with a trailing newline, got %q", path, tailOf(data))
+	}
+}
+
+func tailOf(data []byte) string {
+	if len(data) > 24 {
+		return string(data[len(data)-24:])
+	}
+	return string(data)
+}
+
+// GH#5693: bd setup claude must leave settings.json POSIX-clean (trailing
+// newline) instead of stripping the newline json.MarshalIndent omits.
+func TestInstallClaudeSettingsEndsWithTrailingNewline(t *testing.T) {
+	t.Run("project", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		if err := installClaude(env, false, false); err != nil {
+			t.Fatalf("installClaude: %v", err)
+		}
+		assertTrailingNewline(t, projectSettingsPath(env.projectDir))
+	})
+	t.Run("global", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		if err := installClaude(env, true, false); err != nil {
+			t.Fatalf("installClaude: %v", err)
+		}
+		assertTrailingNewline(t, globalSettingsPath(env.homeDir))
+	})
+}
+
+// GH#5693: a second bd setup claude with nothing to change must not rewrite
+// settings.json.
+func TestInstallClaudeSkipsRewriteWhenSettingsUnchanged(t *testing.T) {
+	env, _, _ := newClaudeTestEnv(t)
+	counts := map[string]int{}
+	env = countingClaudeEnv(env, counts)
+	settingsPath := projectSettingsPath(env.projectDir)
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("first installClaude: %v", err)
+	}
+	if counts[settingsPath] != 1 {
+		t.Fatalf("first install should write settings once, got %d", counts[settingsPath])
+	}
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("second installClaude: %v", err)
+	}
+	if got := counts[settingsPath]; got != 1 {
+		t.Errorf("second install rewrote unchanged settings: %d total writes, want 1", got)
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("re-read settings: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("second install changed settings content:\nbefore=%q\nafter=%q", before, after)
+	}
+}
+
+// GH#5693: the same two properties must hold for the removeClaude write path,
+// which marshals and writes settings.json through a separate call site.
+func TestRemoveClaudeSettingsNewlineAndSkipsUnchangedRewrite(t *testing.T) {
+	env, _, _ := newClaudeTestEnv(t)
+	counts := map[string]int{}
+	env = countingClaudeEnv(env, counts)
+	settingsPath := projectSettingsPath(env.projectDir)
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+	writesAfterInstall := counts[settingsPath]
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("first removeClaude: %v", err)
+	}
+	assertTrailingNewline(t, settingsPath)
+	writesAfterRemove := counts[settingsPath]
+	if writesAfterRemove != writesAfterInstall+1 {
+		t.Fatalf("first remove should write settings once, got %d writes (install left %d)",
+			writesAfterRemove-writesAfterInstall, writesAfterInstall)
+	}
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("second removeClaude: %v", err)
+	}
+	if got := counts[settingsPath]; got != writesAfterRemove {
+		t.Errorf("second remove rewrote unchanged settings: %d writes, want %d", got, writesAfterRemove)
+	}
+}
+
+// GH#5693: the legacy settings.local.json migration writes are the two other
+// marshal-and-write call sites in this file; they strip the newline too.
+func TestClaudeLegacySettingsWritesEndWithNewline(t *testing.T) {
+	legacyWithBeadsHook := func() map[string]interface{} {
+		return map[string]interface{}{
+			"hooks": map[string]interface{}{
+				"SessionStart": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": "bd prime"},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	// The second install writes settings.local.json zero times, but not via
+	// writeSettingsIfChanged: installClaude's migration block is guarded by
+	// hasBeadsHooks(legacyPath), which is false once the first install has
+	// migrated the hooks away, so the block is skipped outright. That guard is
+	// also why the skip inside writeSettingsIfChanged is unreachable on this
+	// call site — whenever the guard passes, removeHookCommand strips a hook
+	// that hasBeadsHooks just matched, so the marshaled bytes always differ.
+	// What this subtest pins is therefore the user-visible property (a repeat
+	// bd setup claude leaves settings.local.json alone) plus the newline, not
+	// the no-op-skip helper.
+	t.Run("install migration then no further legacy writes", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		counts := map[string]int{}
+		env = countingClaudeEnv(env, counts)
+		legacyPath := legacyProjectSettingsPath(env.projectDir)
+		writeSettings(t, legacyPath, legacyWithBeadsHook())
+
+		if err := installClaude(env, false, false); err != nil {
+			t.Fatalf("first installClaude: %v", err)
+		}
+		if hasBeadsHooks(legacyPath) {
+			t.Fatal("legacy beads hooks should have been migrated away")
+		}
+		assertTrailingNewline(t, legacyPath)
+		writesAfterFirst := counts[legacyPath]
+		if writesAfterFirst != 1 {
+			t.Fatalf("first install should write legacy settings once, got %d", writesAfterFirst)
+		}
+		before, err := os.ReadFile(legacyPath)
+		if err != nil {
+			t.Fatalf("read legacy settings: %v", err)
+		}
+
+		if err := installClaude(env, false, false); err != nil {
+			t.Fatalf("second installClaude: %v", err)
+		}
+		if got := counts[legacyPath]; got != writesAfterFirst {
+			t.Errorf("second install rewrote migrated legacy settings: %d writes, want %d", got, writesAfterFirst)
+		}
+		after, err := os.ReadFile(legacyPath)
+		if err != nil {
+			t.Fatalf("re-read legacy settings: %v", err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Errorf("second install changed legacy settings content:\nbefore=%q\nafter=%q", before, after)
+		}
+	})
+
+	t.Run("remove cleanup", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		counts := map[string]int{}
+		env = countingClaudeEnv(env, counts)
+		legacyPath := legacyProjectSettingsPath(env.projectDir)
+		writeSettings(t, legacyPath, legacyWithBeadsHook())
+
+		if err := removeClaude(env, false); err != nil {
+			t.Fatalf("first removeClaude: %v", err)
+		}
+		assertTrailingNewline(t, legacyPath)
+		writesAfterFirst := counts[legacyPath]
+		if writesAfterFirst != 1 {
+			t.Fatalf("first remove should write legacy settings once, got %d", writesAfterFirst)
+		}
+
+		if err := removeClaude(env, false); err != nil {
+			t.Fatalf("second removeClaude: %v", err)
+		}
+		if got := counts[legacyPath]; got != writesAfterFirst {
+			t.Errorf("second remove rewrote unchanged legacy settings: %d writes, want %d", got, writesAfterFirst)
+		}
+	})
+}

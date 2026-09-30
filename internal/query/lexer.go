@@ -271,6 +271,19 @@ func (l *Lexer) readNumberOrDuration(startPos int) (Token, error) {
 		return Token{Type: TokenDuration, Value: sb.String(), Pos: startPos}, nil
 	}
 
+	// Multi-rune duration suffixes ("min") cannot be recognized above:
+	// isDurationSuffix classifies a single rune, and the stands-alone guard
+	// bails on the letters that follow it. Left as an identifier, "30min"
+	// would skip the evaluator's TokenDuration arm and resolve through
+	// timeparsing.ParseRelativeTime as a *future* offset — the opposite
+	// direction from the "N ago" contract 7d, 24h and 30m all honor.
+	if r != 0 {
+		if word, ok := l.acceptDurationWord(); ok {
+			sb.WriteString(word)
+			return Token{Type: TokenDuration, Value: sb.String(), Pos: startPos}, nil
+		}
+	}
+
 	// Identifier-continuation fallback: an unsigned digit-led run that
 	// butts against more identifier characters is an identifier, not a
 	// number. Restart the lex at the original position and read it as an
@@ -357,4 +370,36 @@ func isDurationSuffix(r rune) bool {
 	default:
 		return false
 	}
+}
+
+// durationWords are the multi-rune duration suffixes of the shared
+// compact-duration grammar (internal/timeparsing). "min" is spelled out there
+// precisely because "m" means months, so the query plane has to match the whole
+// word to classify it as a duration. Lowercase only, matching that grammar.
+var durationWords = []string{"min"}
+
+// acceptDurationWord reports whether the input spells a multi-rune duration
+// suffix, starting at the rune the caller most recently read with next() and
+// standing alone. On a match it consumes the suffix and returns it; otherwise
+// the lexer position is left untouched.
+func (l *Lexer) acceptDurationWord() (string, bool) {
+	if l.width == 0 {
+		return "", false
+	}
+	start := l.pos - l.width
+	for _, word := range durationWords {
+		if !strings.HasPrefix(l.input[start:], word) {
+			continue
+		}
+		end := start + len(word)
+		// More identifier characters follow ("30mins", "30minutes",
+		// "30min-sla"), so this is an identifier, not a duration.
+		if end < len(l.input) && isIdentChar(rune(l.input[end])) {
+			continue
+		}
+		l.pos = end
+		l.width = 1
+		return word, true
+	}
+	return "", false
 }

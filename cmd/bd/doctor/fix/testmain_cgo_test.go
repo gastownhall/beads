@@ -26,29 +26,46 @@ func testMainInner(m *testing.M) int {
 	// database-name firewall when they connect to the spawned test server.
 	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			return 1
+		}
 	} else {
 		defer testutil.TerminateDoltContainer()
 	}
 
-	// Suite-owned root for the orphan-server sweep below. Must never be a
-	// shared/global temp dir (see SweepOrphanedTestServers) — this one is
-	// unique to this test run and removed when it exits.
-	suiteTempRoot, tempRootErr := os.MkdirTemp("", "beads-fix-tests-*")
-	if tempRootErr != nil {
-		fmt.Fprintf(os.Stderr, "WARN: failed to create suite temp root: %v\n", tempRootErr)
+	// Clear out the roots of earlier runs of this suite whose process is
+	// gone, before claiming one of our own. A `go test -timeout` panic skips
+	// every defer here AND the post-run sweep, so the servers such a run
+	// started outlive every cleanup this process installs and nothing ever
+	// looks at that run's tree again (wy-j2zc8q). Roots with no owner marker,
+	// and roots whose owner is still running, are left untouched.
+	doltserver.SweepDeadSuiteRoots(os.TempDir(), suiteRootPrefix)
+
+	// Pin t.TempDir() under a suite-owned root so the sweep below can reap
+	// AutoStart leftovers whose directory cleanup failed because the live
+	// child still holds the tree (gastownhall/beads#5631). Must never be a
+	// shared/global temp dir (see SweepSuiteTestServers).
+	root, pinErr := testutil.PinSuiteTempRoot(suiteRootPrefix + "*")
+	if pinErr != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: suite temp root: %v\n", pinErr)
+		return 1
+	}
+	suiteTempRoot = root
+	defer os.RemoveAll(root)
+
+	// Claim the root for this process so the NEXT run can tell our debris
+	// from a concurrent run's live tree.
+	if err := doltserver.WriteSuiteOwnerMarker(root); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not claim suite temp root %s: %v\n", root, err)
 	}
 
 	code := m.Run()
 
 	// Best-effort reap of any dolt sql-server left running under this
 	// suite's own temp root (e.g. a SIGKILLed run) — see
-	// gastownhall/beads mybd-q6cz.
-	doltserver.SweepOrphanedTestServers(suiteTempRoot)
-
-	if suiteTempRoot != "" {
-		os.RemoveAll(suiteTempRoot)
-	}
+	// gastownhall/beads mybd-q6cz / #5631.
+	swept := doltserver.SweepSuiteTestServers(root)
+	code = doltserver.ApplyLeakPolicy("cmd/bd/doctor/fix", code, swept)
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_TEST_SERVER")

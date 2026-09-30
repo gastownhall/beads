@@ -29,6 +29,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 const windowsOS = "windows"
@@ -78,6 +79,17 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 	data := []byte(t.Name() + prefix + string(rune(counter)) + string(rune(index)))
 	hash := sha256.Sum256(data)
 	return prefix + "-" + hex.EncodeToString(hash[:])[:8]
+}
+
+// isolateBeadsDirForTest starts a fresh-workspace fixture without an inherited
+// selection and restores BEADS_DIR exactly after command dispatch, even
+// when dispatch changes BEADS_DIR with raw os.Setenv.
+// Call before fixture setup or dispatch; like t.Setenv, it is not parallel-safe.
+// Tests that intentionally select a workspace should set BEADS_DIR explicitly
+// instead; initConfigForTest and ensureCleanGlobalState preserve that selection.
+func isolateBeadsDirForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
 }
 
 // initConfigForTest initializes viper config for a test and ensures cleanup.
@@ -304,14 +316,12 @@ var (
 	initTestBDErr  error
 )
 
+// findPrebuiltBDBinary returns the absolute path of the BEADS_TEST_BD_BINARY
+// binary, or "" when none is configured and the caller should `go build` bd.
+// Under Bazel the binary is always injected (//cmd/bd:bd_for_tests) and is
+// resolved through runfiles; see bazeltest.PrebuiltBD.
 func findPrebuiltBDBinary() (string, error) {
-	if configured := os.Getenv("BEADS_TEST_BD_BINARY"); configured != "" {
-		if _, err := os.Stat(configured); err != nil {
-			return "", fmt.Errorf("BEADS_TEST_BD_BINARY %q is not usable: %w", configured, err)
-		}
-		return filepath.Abs(configured)
-	}
-	return "", nil
+	return bazeltest.PrebuiltBD()
 }
 
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess

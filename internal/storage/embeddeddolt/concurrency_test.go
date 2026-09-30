@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -32,8 +33,6 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
-
-	modRoot := mustFindModuleRoot(t)
 
 	// All subprocesses share one directory to stress filesystem locking.
 	sharedDir := filepath.Join(t.TempDir(), "embeddeddolt-test")
@@ -80,7 +79,9 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 			"-o", testBin,
 			"./internal/storage/embeddeddolt/",
 		)
-		build.Dir = modRoot
+		// Only this build needs the module root: a pre-built binary (PR
+		// Risk's, or Bazel's, whose runfiles hold no go.mod) runs anywhere.
+		build.Dir = mustFindModuleRoot(t)
 		build.Env = append(os.Environ(), "CGO_ENABLED=1")
 		if out, err := build.CombinedOutput(); err != nil {
 			t.Fatalf("build test binary: %v\n%s", err, string(out))
@@ -96,7 +97,9 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 		eg.Go(func() error {
 			t.Logf("proc %d: starting", procN)
 			cmd := exec.CommandContext(egCtx, testBin, "-test.run=^TestHelperProcess$", "-test.v")
-			cmd.Env = append(os.Environ(),
+			// ShardFreeEnv: a sharded parent's TEST_SHARD_* would filter the
+			// child's one -test.run test away.
+			cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()),
 				"BEADS_EMBEDDED_DOLT_HELPER=1",
 				"BEADS_EMBEDDED_DOLT_DIR="+sharedDir,
 				"BEADS_EMBEDDED_DOLT_ITERS="+strconv.Itoa(iters),

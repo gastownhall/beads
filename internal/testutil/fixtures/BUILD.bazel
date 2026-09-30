@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "fixtures",
+    srcs = ["fixtures.go"],
+    importpath = "github.com/steveyegge/beads/internal/testutil/fixtures",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage/dolt",
+        "//internal/types",
+    ],
+)
+
+# integration-only: fixtures_test.go is `//go:build integration`, so outside
+# --config=integration this target has no tests; the tag keeps it out of
+# --config=prcore/ci (hand-written, gazelle keeps it).
+go_test(
+    name = "fixtures_test",
+    srcs = ["fixtures_test.go"],
+    embed = [":fixtures"],
+    tags = ["integration-only"],
+    deps = [
+        "//internal/storage/dolt",
+        "//internal/testutil",
+        "//internal/types",
+    ],
+)

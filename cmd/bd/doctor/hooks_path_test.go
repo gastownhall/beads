@@ -251,33 +251,146 @@ func TestCheckHooksPath_SymlinkedRepoRoot(t *testing.T) {
 	}
 }
 
+// TestFixHooksPath_ClearsDanglingOutOfRepoStorageHooks pins the other half of
+// the shared-predicate contract. `bd hooks install --beads` configures
+// <effective .beads>/hooks, which BEADS_DIR can place outside the repository, so
+// `bd doctor --fix` must recognize that value as beads-managed too — otherwise
+// the check reports bd's own dangling hooksPath as third-party and deliberately
+// refuses to unset it, and nothing repairs a repo whose hooks are all shadowed.
+func TestFixHooksPath_ClearsDanglingOutOfRepoStorageHooks(t *testing.T) {
+	dir := t.TempDir()
+	setupGitRepoInDir(t, dir)
+	// External storage that FindBeadsDir will accept: BEADS_DIR plus at least
+	// one project file. Its hooks/ directory is deliberately absent, which is
+	// what makes the configured path dangling and therefore doctor's business.
+	storage := filepath.Join(t.TempDir(), "external storage")
+	if err := os.MkdirAll(storage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", storage)
+	storageHooks := filepath.Join(storage, "hooks")
+	setGitConfig(t, dir, "core.hooksPath", storageHooks)
+
+	runInDir(t, dir, func() {
+		check := CheckHooksPath()
+		if check.Status != StatusWarning {
+			t.Fatalf("expected a warning for a dangling storage hooks path, got %q: %s", check.Status, check.Message)
+		}
+		if !strings.Contains(check.Fix, "bd doctor --fix") {
+			t.Errorf("expected the beads-managed fix hint, got %q", check.Fix)
+		}
+		if err := FixHooksPath(); err != nil {
+			t.Fatalf("FixHooksPath failed: %v", err)
+		}
+	})
+
+	if got := getGitConfig(t, dir, "core.hooksPath"); got != "" {
+		t.Errorf("core.hooksPath = %q, want it unset after FixHooksPath", got)
+	}
+}
+
+// TestFixHooksPath_LeavesDanglingStorageHooksWhenStorageIsGone records an
+// accepted limitation, not a desired behavior: the storage arm recognizes the
+// directory `bd hooks install --beads` would configure *right now*, not the value
+// install actually wrote. BeadsManagedStorageHooksDir resolves through
+// beads.FindBeadsDir, whose every arm is gated on the storage directory existing
+// and holding project files, so deleting .beads/ — the exact trigger
+// CheckHooksPath documents for GH#4440 — removes the only value the predicate
+// could have matched. The dangling out-of-repo hooksPath is then classified as
+// third-party and deliberately left alone.
+//
+// Tracked in bd-s76jm: record what install configured (a local beads.hooksPath
+// key) and match the record, with the current recomputation as the fallback. When
+// that lands this expectation flips to "unset" and this test becomes its
+// counterfactual.
+func TestFixHooksPath_LeavesDanglingStorageHooksWhenStorageIsGone(t *testing.T) {
+	dir := t.TempDir()
+	setupGitRepoInDir(t, dir)
+	storage := filepath.Join(t.TempDir(), "external storage")
+	if err := os.MkdirAll(storage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", storage)
+	storageHooks := filepath.Join(storage, "hooks")
+	setGitConfig(t, dir, "core.hooksPath", storageHooks)
+
+	// The user deletes the whole storage directory without running
+	// `bd hooks uninstall` first, leaving core.hooksPath behind in the common dir.
+	if err := os.RemoveAll(storage); err != nil {
+		t.Fatal(err)
+	}
+
+	runInDir(t, dir, func() {
+		if got := BeadsManagedStorageHooksDir(); got != "" {
+			t.Fatalf("precondition: no storage may resolve once it is deleted, got %q", got)
+		}
+		check := CheckHooksPath()
+		if check.Status != StatusWarning {
+			t.Fatalf("expected a warning for a dangling storage hooks path, got %q: %s", check.Status, check.Message)
+		}
+		if !strings.Contains(check.Fix, "not beads-managed") {
+			t.Errorf("expected the third-party hint the unrecognized value earns, got %q", check.Fix)
+		}
+		if err := FixHooksPath(); err != nil {
+			t.Fatalf("FixHooksPath failed: %v", err)
+		}
+	})
+
+	if got := getGitConfig(t, dir, "core.hooksPath"); got != storageHooks {
+		t.Errorf("core.hooksPath = %q, want it still set to %q: the value is unclearable once the derivation inputs are gone (bd-s76jm)", got, storageHooks)
+	}
+}
+
 // TestIsBeadsManagedHooksPath_LeavesThirdPartyAlone guards the widened
 // symlink-resolving match against over-reach: resolving paths must not make
 // an unrelated hooks directory look beads-managed, since a false positive here
 // means bd unsets a hooksPath it does not own (husky, lefthook).
 func TestIsBeadsManagedHooksPath_LeavesThirdPartyAlone(t *testing.T) {
 	root := t.TempDir()
+	// The out-of-repo storage directory `bd hooks install --beads` configures
+	// when BEADS_DIR or a .beads/redirect points outside the repository.
+	storage := filepath.Join(t.TempDir(), "external storage")
+	storageHooks := filepath.Join(storage, "hooks")
 	cases := []struct {
-		name      string
-		hooksPath string
-		want      bool
+		name string
+		// storageHooksDir is what the caller resolved for this repository; ""
+		// means no beads storage resolved at all.
+		storageHooksDir string
+		hooksPath       string
+		want            bool
 	}{
-		{"relative beads hooks", ".beads/hooks", true},
-		{"relative shared beads hooks", ".beads-hooks", true},
-		{"absolute beads hooks", filepath.Join(root, ".beads", "hooks"), true},
-		{"absolute shared beads hooks", filepath.Join(root, ".beads-hooks"), true},
-		{"relative husky", ".husky/_", false},
-		{"relative githooks", ".githooks", false},
-		{"absolute husky", filepath.Join(root, ".husky", "_"), false},
-		{"beads hooks under a different repo", filepath.Join(t.TempDir(), ".beads", "hooks"), false},
-		{"deeper path below beads hooks", filepath.Join(root, ".beads", "hooks", "pre-commit"), false},
-		{"empty", "", false},
+		{"relative beads hooks", "", ".beads/hooks", true},
+		{"relative shared beads hooks", "", ".beads-hooks", true},
+		{"absolute beads hooks", "", filepath.Join(root, ".beads", "hooks"), true},
+		{"absolute shared beads hooks", "", filepath.Join(root, ".beads-hooks"), true},
+		{"relative husky", "", ".husky/_", false},
+		{"relative githooks", "", ".githooks", false},
+		{"absolute husky", "", filepath.Join(root, ".husky", "_"), false},
+		{"beads hooks under a different repo", "", filepath.Join(t.TempDir(), ".beads", "hooks"), false},
+		{"deeper path below beads hooks", "", filepath.Join(root, ".beads", "hooks", "pre-commit"), false},
+		{"empty", "", "", false},
+		// The install target must be recognized so uninstall and
+		// `bd doctor --fix` can clear the value install itself wrote (GH#4440).
+		{"out-of-repo storage hooks", storageHooks, storageHooks, true},
+		// ...and only that directory: the arm is gated on the resolved storage,
+		// not on "any absolute path", so it never reaches a third-party dir.
+		{"unrelated out-of-repo hooks dir", storageHooks, filepath.Join(t.TempDir(), "hooks"), false},
+		{"storage itself, not its hooks dir", storageHooks, storage, false},
+		{"storage hooks with no storage resolved", "", storageHooks, false},
+		{"in-repo forms still match with storage resolved", storageHooks, filepath.Join(root, ".beads-hooks"), true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := IsBeadsManagedHooksPath(root, tc.hooksPath); got != tc.want {
-				t.Errorf("IsBeadsManagedHooksPath(%q, %q) = %v, want %v", root, tc.hooksPath, got, tc.want)
+			if got := IsBeadsManagedHooksPath(root, tc.storageHooksDir, tc.hooksPath); got != tc.want {
+				t.Errorf("IsBeadsManagedHooksPath(%q, %q, %q) = %v, want %v",
+					root, tc.storageHooksDir, tc.hooksPath, got, tc.want)
 			}
 		})
 	}

@@ -1,0 +1,42 @@
+diff -ruN a/serial/BUILD.bazel b/serial/BUILD.bazel
+--- a/serial/BUILD.bazel	2026-09-21 23:59:07.249245731 +0000
++++ b/serial/BUILD.bazel	2026-09-21 23:59:07.250190084 +0000
+@@ -1,35 +1,10 @@
+ load("@io_bazel_rules_go//go:def.bzl", "go_library")
+-load("@rules_pkg//:pkg.bzl", "pkg_tar")
+ 
+ package(default_visibility = ["//visibility:public"])
+ 
+-alias(
+-    name = "flatc",
+-    actual = "@com_github_dolthub_flatbuffers//:flatc",
+-)
+-
+-genrule(
+-    name = "go_srcs",
+-    srcs = glob(["*.fbs"]),
+-    outs = [n[:-4] + ".go" for n in glob(["*.fbs"])],
+-    cmd = "$(location //:generate.sh) $(location //:flatc) $(RULEDIR) $(location :copyright.txt) $(SRCS)",
+-    tools = [
+-        ":copyright.txt",
+-        ":flatc",
+-        ":generate.sh",
+-    ],
+-)
+-
+-pkg_tar(
+-    name = "go_srcs.tar",
+-    srcs = [
+-        "fileidentifiers.go",
+-        ":go_srcs",
+-    ],
+-    mode = "0644",
+-    package_dir = "gen/fb/serial",
+-)
+-
++# Patched for Bazel (Bzlmod): dropped the pkg_tar/go_srcs/flatc codegen
++# targets. They load @rules_pkg, which is not visible from go_deps extension
++# repos under Bzlmod, and are only used to regenerate flatbuffers sources.
+ go_library(
+     name = "serial",
+     srcs = [

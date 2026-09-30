@@ -187,6 +187,34 @@ type ListRequest struct {
 	// hydrated there either way, which costs time and not correctness.
 	SkipCounts bool
 
+	// IncludeComments populates every row's Issue.Comments with that issue's
+	// full comment bodies, and is the LIST twin of GetRequest.IncludeComments.
+	// Like SkipLabels and SkipCounts it chooses what is HYDRATED, never which
+	// rows match: the rows, their order, Parent and the has-more verdict are
+	// what they would have been.
+	//
+	// IT IS OPT-IN BECAUSE IT COSTS A QUERY PER ROW, which is the same reason
+	// the detail view's twin is. A page of 50 is 50 comment reads; a listing
+	// asking for the whole store is that many. Nothing hydrates comments
+	// unless a caller asks.
+	//
+	// WHY THE KNOB EXISTS AT ALL (be-73x). comment_count has always been on
+	// the row and the bodies never were, so a caller searching a LISTING for
+	// text that lives in a comment gets a well-formed, non-empty, WRONG answer
+	// — the rows that match are simply absent, and no error, no zero and no
+	// short count marks them. That is the failure this knob exists to make
+	// answerable, which is why the unhydrated rows also carry
+	// types.IssueWithCounts.CommentsOmitted rather than staying silent.
+	//
+	// IT APPLIES TO BOTH ARMS, ReadyFlag included, and is neither carried nor
+	// refused by it: hydration runs in the shared page epilogue after the
+	// query, so it is not a filter the ready query has to be able to express.
+	//
+	// A row whose comments could not be read is an ERROR, not a short list.
+	// The detail view's IncludeComments makes the same promise for the same
+	// reason: a caller that asked for the rows gets them or gets told.
+	IncludeComments bool
+
 	// Brief suppresses the FREE-FORM TEXT the way SkipLabels suppresses labels
 	// and SkipCounts the cardinalities: Description, Design,
 	// AcceptanceCriteria, Notes, Payload and Waiters are not selected and come
@@ -340,7 +368,9 @@ type ListRequest struct {
 	// narrower filter vocabulary than this request can describe, and only part
 	// of the request reaches it.
 	//
-	// WHAT IT CARRIES: IssueType, all five label forms, Assignee, NoAssignee,
+	// WHAT IT CARRIES: Status/Statuses (an explicit --status is the
+	// intersection; AllFlag and `--status all` still take the open default),
+	// IssueType, all five label forms, Assignee, NoAssignee,
 	// the exact Priority, ParentID, MolType, WispType, MetadataFields,
 	// HasMetadataKey, the type exclusions (ExcludeTypes, and with them
 	// IncludeGates and IncludeInfra), IncludeEphemeral — the ready query has an
@@ -348,8 +378,7 @@ type ListRequest struct {
 	// IncludeInfra's plane half crosses with it — Limit, Offset and the MaxRows
 	// cap with its attribution. SortBy and Reverse
 	// still apply, because the display order is applied to the page after the
-	// query rather than inside it. Status and AllFlag are resolved to "open"
-	// and have no further effect: ready work is open work.
+	// query rather than inside it.
 	//
 	// WHAT IT REFUSES: every other filter here is one the ready query cannot
 	// carry, so combining it with ReadyFlag returns ErrValidation naming the
@@ -398,8 +427,24 @@ type ListRequest struct {
 	// AfterCreatedAt and AfterID carry a decoded keyset position in the
 	// (created_at DESC, id ASC) order. The opaque token that encodes them is a
 	// transport concern and never reaches this contract.
+	//
+	// AfterPriority EXTENDS that position to the (priority ASC, created_at
+	// DESC, id ASC) order — the order SortBy="priority" and the empty default
+	// render — and is honored by every implementation, on BOTH tier legs, the
+	// same way the pair above is. It is the same position and not a second
+	// one: AfterCreatedAt alone decides whether one was supplied, so a
+	// priority with no instant is ignored exactly as an AfterID with no instant
+	// is.
+	//
+	// SET IT ONLY UNDER THE ORDER IT NAMES. A priority position under
+	// SortBy="created" positions in an order the ORDER BY does not render, and
+	// the page that comes back is a walk through rows neither side agrees on.
+	// The order the request asks for and the order the position was minted in
+	// are one decision; the transport above this contract is what keeps them
+	// from drifting.
 	AfterCreatedAt *time.Time
 	AfterID        string
+	AfterPriority  *int
 
 	// MaxRows is a DEFENSIVE CAP rather than a page. It bounds how many rows
 	// the query may match before the whole answer is refused; 0 disables it.

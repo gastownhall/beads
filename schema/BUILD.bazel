@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "schema",
+    srcs = ["schema.go"],
+    importpath = "github.com/steveyegge/beads/schema",
+    visibility = ["//visibility:public"],
+    deps = ["//internal/storage/schema"],
+)
+
+go_test(
+    name = "schema_test",
+    srcs = ["schema_test.go"],
+    deps = [":schema"],
+)

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestReleaseScriptUsesVerifiedInstalledBDBeforeStaleRepoBD(t *testing.T) {
@@ -84,6 +85,7 @@ echo '{"source":"/tmp/stale.formula.toml"}'
 }
 
 func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testing.T) {
+	skipReleaseFormulaUnderBazel(t)
 	repoRoot := sourceRepoRoot(t)
 	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
@@ -117,6 +119,7 @@ func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testi
 }
 
 func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.T) {
+	skipReleaseFormulaUnderBazel(t)
 	repoRoot := sourceRepoRoot(t)
 	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
@@ -203,13 +206,26 @@ func releaseTestTempDir(t *testing.T) string {
 	return t.TempDir()
 }
 
+// skipReleaseFormulaUnderBazel skips tests that read
+// .beads/formulas/beads-release.formula.toml under Bazel: .beads holds live
+// Dolt data and is in .bazelignore, so no target can declare the formula.
+// These tests run under `go test`.
+func skipReleaseFormulaUnderBazel(t *testing.T) {
+	t.Helper()
+	if bazeltest.IsBazel() {
+		t.Skip(".beads/ is in .bazelignore, so the release formula cannot be declared as data; runs under go test")
+	}
+}
+
 func sourceRepoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	return filepath.Dir(filepath.Dir(file))
+	// Under Bazel the caller path is workspace-relative; CallerDir rebuilds it
+	// under the runfiles root, which holds the files scripts_test declares.
+	return filepath.Dir(bazeltest.CallerDir(file, "scripts"))
 }
 
 func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {

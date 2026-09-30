@@ -320,7 +320,12 @@ func TestUpdateRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 		{"unknown metadata member", `{"actor":"alice","patch":{"metadata":{"clear":true}}}`, "patch.metadata.clear"},
 		{"force_assignee_transfer without an assignee edit", `{"actor":"alice","patch":{"title":"t"},"force_assignee_transfer":true}`, "force_assignee_transfer"},
 		{"force_assignee_transfer beside expected_assignee", `{"actor":"alice","patch":{"assignee":"bob"},"force_assignee_transfer":true,"expected_assignee":"carol"}`, "force_assignee_transfer"},
-		{"expected_version is not a number", `{"actor":"alice","patch":{"title":"t"},"expected_version":"3"}`, "expected_version"},
+		// The guard is a decimal STRING; a bare number is the spelling this
+		// contract deliberately does not also accept, since a double-based
+		// client would have rounded it before it ever arrived.
+		{"expected_version is a number", `{"actor":"alice","patch":{"title":"t"},"expected_version":3}`, "expected_version"},
+		{"expected_version is a number past 2^53", `{"actor":"alice","patch":{"title":"t"},"expected_version":9007199254740993}`, "expected_version"},
+		{"expected_version is not a decimal token", `{"actor":"alice","patch":{"title":"t"},"expected_version":"three"}`, "expected_version"},
 		{"null expected_status", `{"actor":"alice","patch":{"title":"t"},"expected_status":null}`, "expected_status"},
 		{"null force_close_policy", `{"actor":"alice","patch":{"title":"t"},"force_close_policy":null}`, "force_close_policy"},
 		{"blank title", `{"actor":"alice","patch":{"title":"   "}}`, "patch.title"},
@@ -609,7 +614,7 @@ func TestUpdateForwardsTheGuardedMembers(t *testing.T) {
 
 	resp := ts.updateIssue(t, updatePath, `{
 		"actor":"alice",
-		"expected_version": 41,
+		"expected_version": "41",
 		"expected_status": "open",
 		"force_close_policy": true,
 		"patch": {
@@ -757,20 +762,23 @@ func TestUpdateGuardsComposeFromTheRevisionTheWriteAnswered(t *testing.T) {
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", first.StatusCode, readAll(t, first))
 	}
-	revision, ok := decodeBody(t, first)["revision"].(float64)
+	revision, ok := decodeBody(t, first)["revision"].(string)
 	if !ok {
-		t.Fatalf("the response carries no `revision`; a guard whose token no response carries cannot be filled")
+		t.Fatalf("the response carries no string `revision`; a guard whose token no response carries cannot be filled")
 	}
 	// The token must be the ROW's, read off the snapshot the role answered
 	// with. Without this the loop below round-trips whatever the handler put
 	// there — including a constant zero — and could not fail against a
 	// `revision` that describes no row.
-	if int64(revision) != stored {
-		t.Fatalf("revision = %d, want the %d the role's row carries", int64(revision), stored)
+	if revision != types.RevisionToken(stored) {
+		t.Fatalf("revision = %q, want the %q the role's row carries", revision, types.RevisionToken(stored))
 	}
 
+	// The guard is the response's token spliced back in VERBATIM, which is the
+	// whole discipline the string spelling exists to make possible: nothing
+	// here parses, re-renders or arithmetics the value.
 	second := ts.updateIssue(t, updatePath,
-		fmt.Sprintf(`{"actor":"alice","expected_version":%d,"patch":{"title":"second"}}`, int64(revision)))
+		fmt.Sprintf(`{"actor":"alice","expected_version":%q,"patch":{"title":"second"}}`, revision))
 	if second.StatusCode != http.StatusOK {
 		t.Fatalf("guarded status = %d, want 200: %s", second.StatusCode, readAll(t, second))
 	}
@@ -778,8 +786,8 @@ func TestUpdateGuardsComposeFromTheRevisionTheWriteAnswered(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("the role was called %d times, want 2", len(got))
 	}
-	if got[1].ExpectedVersion == nil || *got[1].ExpectedVersion != int64(revision) {
-		t.Errorf("expected_version = %v, want the %d the write answered with", got[1].ExpectedVersion, int64(revision))
+	if got[1].ExpectedVersion == nil || *got[1].ExpectedVersion != stored {
+		t.Errorf("expected_version = %v, want the %d the write answered with", got[1].ExpectedVersion, stored)
 	}
 }
 
@@ -798,11 +806,11 @@ func TestUpdateRefusesAStaleGuard(t *testing.T) {
 	}{
 		{
 			name:      "version",
-			body:      `{"actor":"alice","expected_version":7,"patch":{"title":"t"}}`,
+			body:      `{"actor":"alice","expected_version":"7","patch":{"title":"t"}}`,
 			err:       fmt.Errorf("update bd-1: %w", issueops.ErrVersionMismatch),
 			wantParam: "expected_version",
 			wantEcho:  "expected_version",
-			wantValue: float64(7),
+			wantValue: "7",
 		},
 		{
 			name:      "status",

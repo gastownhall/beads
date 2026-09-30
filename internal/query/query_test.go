@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -145,6 +146,36 @@ func TestLexer(t *testing.T) {
 			input:    "updated>30d AND status=open",
 			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"updated", ">", "30d", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "multi-rune minutes suffix is a duration",
+			input:    "updated>30min",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
+			values:   []string{"updated", ">", "30min", ""},
+		},
+		{
+			name:     "multi-rune minutes suffix in a compound expression",
+			input:    "updated>30min AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "30min", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "plural minutes spelling stays an identifier",
+			input:    "label=30mins",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "30mins", ""},
+		},
+		{
+			name:     "minutes suffix continuing into an identifier stays an identifier",
+			input:    "label=30min-window",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "30min-window", ""},
+		},
+		{
+			name:     "uppercase minutes spelling stays an identifier",
+			input:    "label=30MIN",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "30MIN", ""},
 		},
 	}
 
@@ -676,6 +707,141 @@ func TestDurationParsing(t *testing.T) {
 			// Compare dates (ignore time precision)
 			if got.Year() != tt.expected.Year() || got.Month() != tt.expected.Month() || got.Day() != tt.expected.Day() {
 				t.Errorf("got %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestQueryMinutesUnitResolvesAgo pins the query-plane semantics of the "min"
+// minutes unit in the shared compact-duration grammar: like every other duration
+// token here it resolves to N *ago*, per the documented contract in
+// `bd query --help` ("7d (7 days ago)"). The fixed now makes the exact instant
+// assertable, so classifying "30min" as an identifier again — which routes it to
+// the future-relative ParseRelativeTime fallback — fails this test.
+func TestQueryMinutesUnitResolvesAgo(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		query string
+		want  time.Time
+		bound func(*types.IssueFilter) *time.Time
+	}{
+		{
+			name:  "created>30min is 30 minutes ago",
+			query: "created>30min",
+			want:  now.Add(-30 * time.Minute),
+			bound: func(f *types.IssueFilter) *time.Time { return f.CreatedAfter },
+		},
+		{
+			name:  "updated<90min is 90 minutes ago",
+			query: "updated<90min",
+			want:  now.Add(-90 * time.Minute),
+			bound: func(f *types.IssueFilter) *time.Time { return f.UpdatedBefore },
+		},
+		{
+			name:  "bare m still means months, not minutes",
+			query: "created>30m",
+			want:  now.AddDate(0, -30, 0),
+			bound: func(f *types.IssueFilter) *time.Time { return f.CreatedAfter },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := EvaluateAt(tt.query, now)
+			if err != nil {
+				t.Fatalf("EvaluateAt(%q) error = %v", tt.query, err)
+			}
+			got := tt.bound(&result.Filter)
+			if got == nil {
+				t.Fatalf("EvaluateAt(%q) left the time bound unset, filter=%+v", tt.query, result.Filter)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("EvaluateAt(%q) = %s, want %s", tt.query, got.Format(time.RFC3339), tt.want.Format(time.RFC3339))
+			}
+		})
+	}
+}
+
+// TestCompactDurationGrammarReachesQueryPlane binds this package's duration
+// grammar to the shared one in internal/timeparsing, which owns it. The lexer
+// keeps a second copy of the unit set — isDurationSuffix for single runes,
+// durationWords for whole words — and nothing outside this test holds the two
+// in sync. A unit added to the shared grammar but missed here lexes as
+// TokenIdent, skips the evaluator's TokenDuration arm, and resolves through
+// ParseRelativeTime as a *future* offset: the "30min meant 30 minutes from now"
+// inversion this PR fixed, reproduced silently for the next unit.
+//
+// The shared pattern is unexported, so ParseCompactDuration is the oracle:
+// whatever suffix it accepts must lex as a duration here. Candidates are
+// exhaustive over lowercase ASCII up to three runes, so plausible future
+// spellings ("sec", "hr", "mo", "yr") are covered alongside today's six.
+//
+// Only this direction is asserted. The reverse — everything the lexer accepts
+// being valid in the shared grammar — is already false at base: isDurationSuffix
+// also takes "H D W M Y", which the case-sensitive pattern rejects, so
+// "created>30M" lexes as a duration and then fails in ParseCompactDuration.
+// That asymmetry predates this PR and is not what this test is for.
+func TestCompactDurationGrammarReachesQueryPlane(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	const letters = "abcdefghijklmnopqrstuvwxyz"
+	var candidates []string
+	for _, a := range letters {
+		candidates = append(candidates, string(a))
+		for _, b := range letters {
+			candidates = append(candidates, string(a)+string(b))
+			for _, c := range letters {
+				candidates = append(candidates, string(a)+string(b)+string(c))
+			}
+		}
+	}
+
+	var accepted []string
+	isAccepted := make(map[string]bool)
+	for _, unit := range candidates {
+		if _, err := timeparsing.ParseCompactDuration("1"+unit, now); err != nil {
+			continue
+		}
+		accepted = append(accepted, unit)
+		isAccepted[unit] = true
+	}
+
+	// Guard the oracle itself: if ParseCompactDuration stopped accepting the
+	// units the grammar documents, every assertion below would pass vacuously.
+	for _, unit := range []string{"min", "h", "d", "w", "m", "y"} {
+		if !isAccepted[unit] {
+			t.Fatalf("oracle lost unit %q: timeparsing no longer accepts %q", unit, "1"+unit)
+		}
+	}
+
+	for _, unit := range accepted {
+		t.Run(unit, func(t *testing.T) {
+			value := "1" + unit
+
+			tokens, err := NewLexer("updated>" + value).Tokenize()
+			if err != nil {
+				t.Fatalf("Tokenize(updated>%s) error = %v", value, err)
+			}
+			if len(tokens) < 3 {
+				t.Fatalf("Tokenize(updated>%s) produced %d tokens, want at least 3", value, len(tokens))
+			}
+			if tokens[2].Type != TokenDuration || tokens[2].Value != value {
+				t.Errorf("timeparsing accepts %q but the query lexer typed it %v(%q), want %v(%q); "+
+					"add the unit to durationWords/isDurationSuffix or it resolves as a future offset",
+					value, tokens[2].Type, tokens[2].Value, TokenDuration, value)
+			}
+
+			// Widening the duration grammar must not change non-time fields:
+			// parseTimeValue is the only consumer of ValueType, so a duration
+			// token on label= is still filtered as the literal string.
+			result, err := EvaluateAt("label="+value, now)
+			if err != nil {
+				t.Fatalf("EvaluateAt(label=%s) error = %v", value, err)
+			}
+			if len(result.Filter.Labels) != 1 || result.Filter.Labels[0] != value {
+				t.Errorf("EvaluateAt(label=%s) Labels = %v, want [%q]", value, result.Filter.Labels, value)
 			}
 		})
 	}

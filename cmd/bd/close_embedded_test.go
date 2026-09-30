@@ -113,6 +113,154 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// A batch still closes the IDs it can close, but a caller must receive a
+	// nonzero exit when any sibling was refused. Otherwise an orchestrator can
+	// record the whole batch as complete while a blocked issue remains open.
+	t.Run("mixed_batch_refusal_exits_nonzero_after_closing_survivor", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Mixed batch blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Mixed batch blocked", "--type", "task")
+		closable := bdCreate(t, bd, dir, "Mixed batch closable", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, dir, closable.ID, blocked.ID)
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected partial-close summary, got: %s", out)
+		}
+		if got := bdShow(t, bd, dir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, dir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+	})
+
+	// The direct-route twin of TestProxiedClose/
+	// close_partial_failure_json_names_the_failed_ids. Two things were asserted
+	// on the proxied route only: that exit 1 comes with a payload naming the
+	// failed ids while stdout keeps the success-shaped closed-issues array, and
+	// that failed[].error is the TYPED error rather than the decorated line
+	// stderr shows a person. This is the default route — what most scripts and
+	// the parity harness exercise — so a regression in reportCloseFailures'
+	// jsonOut branch was previously invisible to CI on the route most callers
+	// are on, and the two routes could drift on the field's contents with
+	// nothing failing.
+	t.Run("close_partial_failure_json_names_the_failed_ids", func(t *testing.T) {
+		jdir, _, _ := bdInit(t, bd, "--prefix", "jf")
+		closable := bdCreate(t, bd, jdir, "JSON closable", "--type", "task")
+		blocker := bdCreate(t, bd, jdir, "JSON blocker", "--type", "task")
+		blocked := bdCreate(t, bd, jdir, "JSON blocked", "--type", "task")
+		bdDepAdd(t, bd, jdir, blocked.ID, blocker.ID)
+
+		cmd := exec.Command(bd, "close", "--json", closable.ID, blocked.ID)
+		cmd.Dir = jdir
+		cmd.Env = bdEnv(jdir)
+		stdoutBuf, stderrBuf, err := runCommandBuffers(t, cmd)
+		stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+		if err == nil {
+			t.Fatalf("expected a partial batch close to exit nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// stdout keeps the success shape: just the survivor.
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("expected the closed-issues array on stdout, got:\n%s", stdout)
+		}
+		var closed []*types.Issue
+		if jsonErr := json.Unmarshal([]byte(stdout[start:]), &closed); jsonErr != nil {
+			t.Fatalf("parse closed array: %v\nraw: %s", jsonErr, stdout[start:])
+		}
+		if len(closed) != 1 || closed[0].ID != closable.ID {
+			t.Fatalf("stdout closed array = %d issue(s), want only the survivor %s\nraw: %s", len(closed), closable.ID, stdout[start:])
+		}
+
+		// stderr's last line is the failure report.
+		line := lastJSONObjectLine(stderr)
+		if line == "" {
+			t.Fatalf("expected a compact JSON failure line on stderr, got:\n%s", stderr)
+		}
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if jsonErr := json.Unmarshal([]byte(line), &report); jsonErr != nil {
+			t.Fatalf("parse failure report: %v\nraw: %s", jsonErr, line)
+		}
+		if report.Error != "1 of 2 issues failed to close" {
+			t.Errorf("failure report error = %q, want the N of M summary", report.Error)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != blocked.ID {
+			t.Fatalf("failure report named %+v, want exactly the refused id %s", report.Failed, blocked.ID)
+		}
+		assertCloseFailedErrorIsTyped(t, report.Failed[0].Error, stderr)
+
+		if got := bdShow(t, bd, jdir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed despite the refused sibling", got.Status)
+		}
+		if got := bdShow(t, bd, jdir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+	})
+
+	// The --claim-next × partial-failure interaction, adjudicated rather than
+	// left implicit (#6648). --claim-next rides inside the batch transaction
+	// and fires whenever something LANDED, so a mixed batch claims and then
+	// exits 1. The claim is durable — the refused sibling does not roll it back
+	// — so the contract pinned here is "the claim stands and the failure
+	// summary names it", NOT "the claim is silently suppressed": suppressing
+	// only the report would leave an issue assigned to this actor with nothing
+	// saying so, which is strictly worse than announcing it.
+	//
+	// Its own project, because the assertion depends on exactly which issue is
+	// ready at claim time: once `closable` closes, `blocker` is the only ready
+	// issue left (`blocked` still depends on it), so the claim is deterministic.
+	t.Run("mixed_batch_claim_next_names_the_claim_it_kept", func(t *testing.T) {
+		kdir, _, _ := bdInit(t, bd, "--prefix", "kn")
+		closable := bdCreate(t, bd, kdir, "Claim-next batch closable", "--type", "task")
+		blocker := bdCreate(t, bd, kdir, "Claim-next batch blocker", "--type", "task")
+		blocked := bdCreate(t, bd, kdir, "Claim-next batch blocked", "--type", "task")
+		bdDepAdd(t, bd, kdir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, kdir, closable.ID, blocked.ID, "--claim-next")
+		if !strings.Contains(out, "1 of 2 issues failed to close") {
+			t.Errorf("expected the partial-close summary, got: %s", out)
+		}
+		if !strings.Contains(out, "already claimed "+blocker.ID) {
+			t.Errorf("expected the failure summary to name the claim it kept (%s), got: %s", blocker.ID, out)
+		}
+		if got := bdShow(t, bd, kdir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, kdir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+		// The claim really landed: the report is not describing a claim that
+		// was rolled back with the refusal.
+		if got := bdShow(t, bd, kdir, blocker.ID); got.Assignee == "" {
+			t.Errorf("claimed issue %s assignee = %q, want it assigned: the claim commits inside the batch transaction and the refused sibling does not undo it",
+				blocker.ID, got.Assignee)
+		}
+
+		// And retrying does NOT stack a second claim, which is what makes
+		// keeping the first one safe. `closable` is already closed on the way
+		// back through, so the batch lands nothing and an empty batch earns no
+		// claim (see the already-closed re-close subtest below). `spare` is
+		// created only now, so it is the one ready issue a repeat claim could
+		// take — without it this assertion would pass vacuously, since the
+		// first run left nothing else ready.
+		spare := bdCreate(t, bd, kdir, "Claim-next batch spare", "--type", "task")
+		out = bdCloseFail(t, bd, kdir, closable.ID, blocked.ID, "--claim-next")
+		if strings.Contains(out, "already claimed "+spare.ID) {
+			t.Errorf("a retry claimed %s as well, got: %s", spare.ID, out)
+		}
+		if got := bdShow(t, bd, kdir, spare.ID); got.Assignee != "" {
+			t.Errorf("retrying the same failed batch claimed a second issue (%s assignee = %q); the leak must be bounded at the one claim the first run earned",
+				spare.ID, got.Assignee)
+		}
+	})
+
 	// Proves the S7 delegation: `bd close` on a blocked issue now surfaces the
 	// engine's atomic guard (storage.ErrCloseBlocked) rather than a duplicated
 	// CLI pre-check. The refusal must be atomic — the issue stays open because the

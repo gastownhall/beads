@@ -6,11 +6,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -383,6 +388,277 @@ func TestFindBeadsDirSkipsDaemonRegistry(t *testing.T) {
 		if resultResolved == beadsDirResolved {
 			t.Errorf("FindBeadsDir() should skip daemon-only directory, got %q", result)
 		}
+	}
+}
+
+func TestFindBeadsDirFromSkipsOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "private", "tmp")
+	if err := os.MkdirAll(filepath.Join(tempRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempRoot, ".beads", "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(tempRoot, "isolated", "project")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	if got := FindBeadsDirFrom(child); got != "" {
+		t.Fatalf("FindBeadsDirFrom() = %q, want no discovery from OS temp root", got)
+	}
+}
+
+func TestFindBeadsDirFromSkipsAliasedOSTempRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinked temp-root alias is a Unix path regression")
+	}
+
+	sandbox := t.TempDir()
+	realTempRoot := filepath.Join(sandbox, "private", "var", "tmp")
+	aliasParent := filepath.Join(sandbox, "var")
+	if err := os.MkdirAll(realTempRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(sandbox, "private", "var"), aliasParent); err != nil {
+		t.Fatal(err)
+	}
+	aliasTempRoot := filepath.Join(aliasParent, "tmp")
+	if err := os.MkdirAll(filepath.Join(realTempRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realTempRoot, ".beads", "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(realTempRoot, "isolated", "project")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", aliasTempRoot)
+
+	if got := FindBeadsDirFrom(child); got != "" {
+		t.Fatalf("FindBeadsDirFrom() = %q, want aliased OS temp root ignored", got)
+	}
+}
+
+func TestFindBeadsDirFromPreservesNestedProjectUnderOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	project := filepath.Join(tempRoot, "project")
+	want := filepath.Join(project, ".beads")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(want, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(project, "nested", "directory")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	if got := FindBeadsDirFrom(child); !utils.PathsEqual(got, want) {
+		t.Fatalf("FindBeadsDirFrom() = %q, want nested project %q", got, want)
+	}
+}
+
+func TestDiscoveryResolversDoNotAdoptOSTempRootAncestor(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(rootBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(tempRoot, "fixture", "nested")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(child)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	if got := FindDatabasePath(); got != "" {
+		t.Errorf("FindDatabasePath() = %q, want no temp-root ancestor", got)
+	}
+	if got := FindBeadsDir(); got != "" {
+		t.Errorf("FindBeadsDir() = %q, want no temp-root ancestor", got)
+	}
+	if got := findLocalBeadsDir(); got != "" {
+		t.Errorf("findLocalBeadsDir() = %q, want no temp-root ancestor", got)
+	}
+	if got := FindAllDatabases(); len(got) != 0 {
+		t.Errorf("FindAllDatabases() = %+v, want no temp-root ancestor", got)
+	}
+}
+
+func TestDiscoveryResolversHonorStoreAtOSTempRootStart(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "tmp")
+	rootBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(filepath.Join(rootBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tempRoot)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	if got := FindDatabasePath(); got == "" {
+		t.Error("FindDatabasePath() = empty, want temp-root start store")
+	}
+	if got := FindBeadsDir(); !utils.PathsEqual(got, rootBeadsDir) {
+		t.Errorf("FindBeadsDir() = %q, want %q", got, rootBeadsDir)
+	}
+	if got := findLocalBeadsDir(); !utils.PathsEqual(got, rootBeadsDir) {
+		t.Errorf("findLocalBeadsDir() = %q, want %q", got, rootBeadsDir)
+	}
+	if got := FindAllDatabases(); len(got) != 1 {
+		t.Errorf("FindAllDatabases() = %+v, want temp-root start store", got)
+	}
+}
+
+// TestFindAllDatabasesFindsAncestorStoreOutsideGitRepo pins the empty-gitRoot
+// arm. findGitRoot returns "" outside a git repository, and canonicalizing that
+// sentinel resolves it to the current working directory, which makes the
+// git-root break fire on the walk's first iteration and stops discovery at the
+// CWD instead of walking upward.
+func TestFindAllDatabasesFindsAncestorStoreOutsideGitRepo(t *testing.T) {
+	sandbox := t.TempDir()
+	workspace := filepath.Join(sandbox, "workspace")
+	wantBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(filepath.Join(wantBeadsDir, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wantBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(workspace, "project", "nested")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(child)
+	// The git context is cached per process from wherever it was first
+	// resolved, so it has to be re-resolved from the sandbox for this test to
+	// exercise the non-git arm at all.
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	if root := findGitRoot(); root != "" {
+		t.Skipf("sandbox %q resolves inside git repo %q; cannot exercise the non-git arm", child, root)
+	}
+	// Keep the temp-root ceiling clear of this walk; it is not what this pins.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+
+	got := FindAllDatabases()
+	if len(got) != 1 {
+		t.Fatalf("FindAllDatabases() = %+v, want the ancestor store %q", got, wantBeadsDir)
+	}
+	if !utils.PathsEqual(got[0].BeadsDir, wantBeadsDir) {
+		t.Errorf("FindAllDatabases()[0].BeadsDir = %q, want %q", got[0].BeadsDir, wantBeadsDir)
+	}
+}
+
+// TestAncestorDirWalkEndsAtOSTempRoot pins that the ceiling terminates the walk
+// rather than skipping the temp root and resuming above it.
+func TestAncestorDirWalkEndsAtOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	project := filepath.Join(tempRoot, "project")
+	start := filepath.Join(project, "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+
+	var got []string
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		got = append(got, dir)
+	}
+
+	want := []string{
+		canonicalizeAncestorWalkPath(start),
+		canonicalizeAncestorWalkPath(project),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("walk yielded %q, want %q — the temp-root ceiling must end the walk, not skip the temp root and continue above it", got, want)
+	}
+}
+
+// TestAncestorDirWalkStopsBelowBeadsCeiling pins that BEADS_CEILING_DIRECTORIES
+// ends every FindBeadsDir-style walk below the ceiling, so a .beads at or
+// above it is never found.
+func TestAncestorDirWalkStopsBelowBeadsCeiling(t *testing.T) {
+	sandbox := t.TempDir()
+	ceilingDir := filepath.Join(sandbox, "ceiling")
+	start := filepath.Join(ceilingDir, "project", "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "elsewhere"))
+	t.Setenv(ceiling.EnvVar, ceilingDir)
+
+	var got []string
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		got = append(got, dir)
+	}
+	want := []string{
+		canonicalizeAncestorWalkPath(start),
+		canonicalizeAncestorWalkPath(filepath.Join(ceilingDir, "project")),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("walk yielded %q, want %q", got, want)
+	}
+}
+
+// TestAncestorDirWalkYieldsFilesystemRoot pins the documented choice that the
+// walk includes the filesystem root. Most of the hand-rolled loops this type
+// replaced stopped before "/"; the unified walk does not, so the behavior is
+// deliberate and must not flip silently.
+func TestAncestorDirWalkYieldsFilesystemRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	start := filepath.Join(sandbox, "project", "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Point the ceiling somewhere off this walk so it can reach the root, and
+	// lift any BEADS_CEILING_DIRECTORIES the test runner set.
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	t.Setenv(ceiling.EnvVar, "")
+
+	fsRoot := canonicalizeAncestorWalkPath(start)
+	for {
+		parent := filepath.Dir(fsRoot)
+		if parent == fsRoot {
+			break
+		}
+		fsRoot = parent
+	}
+
+	last := ""
+	// The walk must terminate at the root; bound the loop so a regression
+	// reports a failure instead of hanging until the package timeout.
+	const maxDepth = 256
+	steps := 0
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		last = dir
+		if steps++; steps > maxDepth {
+			t.Fatalf("walk did not terminate after %d directories, last %q", maxDepth, last)
+		}
+	}
+	if last != fsRoot {
+		t.Errorf("last yielded directory = %q, want the filesystem root %q", last, fsRoot)
 	}
 }
 
@@ -2450,4 +2726,189 @@ func TestGitPathForRepo(t *testing.T) {
 			t.Fatalf("gitPathForRepo() = %q, want %q", got, want)
 		}
 	})
+}
+
+func TestFindBeadsDirFromIgnoresInheritedRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	for _, layout := range []string{"regular", "bare"} {
+		t.Run(layout, func(t *testing.T) {
+			setup := setupRegularWorktreeRepo
+			if layout == "bare" {
+				setup = setupBareParentWorktree
+			}
+			main, target := setup(t)
+			decoyMain, decoy := setup(t)
+			for _, dir := range []string{main, decoyMain} {
+				if err := os.MkdirAll(filepath.Join(dir, ".beads", "dolt"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			decoyGit := runGitInDir(t, decoy, "rev-parse", "--absolute-git-dir")
+			start := filepath.Join(target, "sub dir")
+			if err := os.Mkdir(start, 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(decoy)
+			t.Setenv("BEADS_DIR", filepath.Join(decoyMain, ".beads"))
+			for _, name := range []string{"ordinary", "decoy", "invalid", "work_tree_only"} {
+				t.Run(name, func(t *testing.T) {
+					if name != "ordinary" {
+						t.Setenv("GIT_WORK_TREE", decoy)
+						if name != "work_tree_only" {
+							gitDir := decoyGit
+							if name == "invalid" {
+								gitDir = filepath.Join(home, "missing git dir")
+							}
+							t.Setenv("GIT_DIR", gitDir)
+						}
+						got, err := gitOutput(start, "rev-parse", "--show-toplevel")
+						if (name == "invalid" && err == nil) || (name != "invalid" && (err != nil || !utils.PathsEqual(got, decoy))) {
+							t.Fatalf("inherited probe precondition: %q (%v)", got, err)
+						}
+					}
+					before := os.Environ()
+					if got := FindBeadsDirFrom(start); !utils.PathsEqual(got, filepath.Join(main, ".beads")) {
+						t.Errorf("explicit discovery = %q, want selected shared .beads", got)
+					}
+					cwd, err := os.Getwd()
+					if err != nil || !utils.PathsEqual(cwd, decoy) || !reflect.DeepEqual(before, os.Environ()) {
+						t.Errorf("explicit discovery changed process directory/environment: %q (%v)", cwd, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestSelectedBeadsCanonicalizerIgnoresInheritedRouting(t *testing.T) {
+	t.Chdir(t.TempDir())
+	detached, stable, database := setupDetachedCommitBeadsWorktree(t)
+	_, decoy, _ := setupDetachedCommitBeadsWorktree(t)
+	decoyGitDir := runGitInDir(t, filepath.Dir(decoy), "rev-parse", "--absolute-git-dir")
+	decoyCommonDir := runGitInDir(t, filepath.Dir(decoy), "rev-parse", "--path-format=absolute", "--git-common-dir")
+	redirect := filepath.Join(t.TempDir(), ".beads")
+	if err := os.Mkdir(redirect, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirect, RedirectFileName), []byte(detached), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		query []string
+	}{
+		{"decoy", map[string]string{"GIT_DIR": decoyGitDir}, []string{"rev-parse", "--abbrev-ref", "HEAD"}},
+		{"invalid", map[string]string{"GIT_DIR": filepath.Join(t.TempDir(), "missing git dir")}, []string{"rev-parse", "--abbrev-ref", "HEAD"}},
+		{"work_tree_only", map[string]string{"GIT_WORK_TREE": filepath.Dir(decoy)}, []string{"rev-parse", "--show-toplevel"}},
+		{"common_dir_only", map[string]string{"GIT_COMMON_DIR": decoyCommonDir}, []string{"rev-parse", "--git-common-dir"}},
+		// Linked worktrees stay non-bare regardless of core.bare; observe the config itself.
+		{"inline_config", map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.bare", "GIT_CONFIG_VALUE_0": "false"}, []string{"config", "--get", "core.bare"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			t.Setenv("BEADS_DIR", detached)
+			t.Setenv("BEADS_DB", "")
+			// Each vector changes the generic query; selected queries keep their own context.
+			inherited, inheritedErr := gitOutput(filepath.Dir(detached), tc.query...)
+			selected, err := selectedBeadsGitOutput(filepath.Dir(detached), tc.query...)
+			if err != nil || (tc.name == "invalid" && inheritedErr == nil) ||
+				(tc.name != "invalid" && (inheritedErr != nil || inherited == selected)) {
+				t.Fatalf("routing precondition: inherited=%q (%v), selected=%q (%v)", inherited, inheritedErr, selected, err)
+			}
+			for _, check := range []struct{ name, got, want string }{
+				{"FollowRedirect", FollowRedirect(redirect), stable},
+				{"FindBeadsDir", FindBeadsDir(), stable},
+				{"FindDatabasePath", FindDatabasePath(), database},
+			} {
+				if !utils.PathsEqual(check.got, check.want) {
+					t.Errorf("%s = %q, want selected stable path %q", check.name, check.got, check.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectedBeadsCanonicalizerFallbacks(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, name := range []string{"stable_branch", "different_head", "missing_stable"} {
+		t.Run(name, func(t *testing.T) {
+			detached, stable, _ := setupDetachedCommitBeadsWorktree(t)
+			want := detached
+			switch name {
+			case "stable_branch":
+				want = stable
+			case "different_head":
+				runGitInDir(t, filepath.Dir(stable), "commit", "--allow-empty", "-m", "Different branch head")
+			case "missing_stable":
+				if err := os.Rename(stable, stable+".saved"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := canonicalizeBeadsDirPath(want); !utils.PathsEqual(got, want) {
+				t.Errorf("canonical path = %q, want unchanged %q", got, want)
+			}
+		})
+	}
+}
+
+func TestResolveBeadsDirForRepoIgnoresInheritedRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, t.TempDir())
+	}
+	// Production ScrubRouting retains this explicit system-config suppression.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	targetParent, target := setupRegularWorktreeRepo(t)
+	decoyParent, decoy := setupRegularWorktreeRepo(t)
+	want := utils.CanonicalizePath(filepath.Join(targetParent, ".beads"))
+	for _, dir := range []string{want, filepath.Join(decoyParent, ".beads")} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("fixture must require common-parent fallback: %v", err)
+	}
+	decoyGitDir := runGitInDir(t, decoy, "rev-parse", "--absolute-git-dir")
+	for _, name := range []string{"decoy", "invalid_git_dir"} {
+		t.Run(name, func(t *testing.T) {
+			gitDir := decoyGitDir
+			if name == "invalid_git_dir" {
+				gitDir = filepath.Join(t.TempDir(), "missing.git")
+			}
+			t.Setenv("GIT_DIR", gitDir)
+			t.Setenv("GIT_WORK_TREE", decoy)
+			t.Setenv("GIT_COMMON_DIR", filepath.Join(decoyParent, ".git"))
+			before := strings.Join(os.Environ(), "\x00")
+			if got := ResolveBeadsDirForRepo(target); !utils.PathsEqual(got, want) {
+				t.Errorf("ResolveBeadsDirForRepo() = %q, want target %q", got, want)
+			}
+			if strings.Join(os.Environ(), "\x00") != before {
+				t.Error("resolver changed inherited environment")
+			}
+		})
+	}
 }

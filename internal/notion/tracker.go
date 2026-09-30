@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/tracker"
 	itracker "github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -47,7 +47,7 @@ func init() {
 
 type Tracker struct {
 	client       notionAPI
-	store        storage.Storage
+	store        tracker.Store
 	config       *MappingConfig
 	dataSourceID string
 	viewURL      string
@@ -65,7 +65,7 @@ func (t *Tracker) Name() string         { return "notion" }
 func (t *Tracker) DisplayName() string  { return "Notion" }
 func (t *Tracker) ConfigPrefix() string { return "notion" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 	t.dataSourceID = t.getConfig(ctx, "notion.data_source_id", "NOTION_DATA_SOURCE_ID")
 	t.viewURL = t.getConfig(ctx, "notion.view_url", "NOTION_VIEW_URL")

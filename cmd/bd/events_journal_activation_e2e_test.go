@@ -109,8 +109,13 @@ func TestRoutedCreateJournalsIntoTheTargetWorkspace(t *testing.T) {
 	}
 
 	// The launching workspace never enabled the journal, so it records nothing
-	// — the target's setting must not leak back, in either direction.
-	if got := strings.TrimSpace(run(sourceDir, "events", "export")); got != "" {
+	// — the target's setting must not leak back, in either direction. Read
+	// STDOUT only: a disabled workspace also prints the "journal is disabled"
+	// notice, and that notice is on stderr precisely so it cannot be mistaken
+	// for a record.
+	sourceEnv := envWithout(bdEnv(sourceDir), "BD_EVENTS_JOURNAL")
+	stdout, _ := runBDOut(t, bd, sourceDir, sourceEnv, "events", "export")
+	if got := strings.TrimSpace(stdout); got != "" {
 		t.Errorf("the launching workspace journaled %q despite never enabling the journal", got)
 	}
 }

@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "molecules",
+    srcs = ["molecules.go"],
+    importpath = "github.com/steveyegge/beads/internal/molecules",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/debug",
+        "//internal/storage",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "molecules_test",
+    srcs = [
+        "molecules_test.go",
+        "testmain_test.go",
+    ],
+    embed = [":molecules"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/dolt",
+        "//internal/testutil",
+        "//internal/types",
+    ],
+)

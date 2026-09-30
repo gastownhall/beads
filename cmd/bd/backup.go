@@ -40,7 +40,12 @@ Auto-backup default:
   dir and full-sync the whole database — a self-amplifying storm. To back up
   a shared server, run 'bd backup' explicitly (or set backup.enabled=true and
   coordinate destinations). 'bd config get backup.enabled' shows the effective
-  value and its source.`,
+  value and its source.
+
+  A proxied-server workspace is server mode too: auto-backup is OFF by
+  default and backup.enabled=true opts in. Both the opt-in and the five
+  backup verbs above are honored only on a managed-local proxied server —
+  one bd started itself; on a Dolt server bd does not own they are refused.`,
 	GroupID: "sync",
 }
 
@@ -56,7 +61,9 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if usesProxiedServer() {
-				return HandleErrorRespectJSON("backup status is not supported in proxied-server mode")
+				if err := requireLocalProxiedBackup("backup status"); err != nil {
+					return err
+				}
 			}
 			evt := metrics.NewCommandEvent("backup-status")
 			defer func() {
@@ -124,14 +131,9 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			// Show config (effective values with source)
 			enabled := isBackupAutoEnabled()
 			interval := config.GetDuration("backup.interval")
-			enabledSource := config.GetValueSource("backup.enabled")
 			enabledNote := ""
-			if enabledSource == config.SourceDefault {
-				if enabled {
-					enabledNote = " (auto: git remote detected)"
-				} else {
-					enabledNote = " (auto: no git remote)"
-				}
+			if note := backupAutoStatusNote(enabled); note != "" {
+				enabledNote = " (" + note + ")"
 			}
 			fmt.Printf("\nConfig: enabled=%v%s interval=%s\n",
 				enabled, enabledNote, interval)

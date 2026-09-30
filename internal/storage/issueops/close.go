@@ -381,10 +381,18 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}
+	NoteStatusChangeBlockedRecheck(tx, id, string(types.StatusClosed), affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
-	// recordEvent gates the human audit event, never the journal.
+	// recordEvent gates the human audit event, never the journal — nor the
+	// version row: a close changes status, closed_at, close_reason and
+	// closed_by_session, all durable state, so it mints whether or not the
+	// audit event was suppressed (as update.go already does). The rows == 0
+	// return above (already closed) wrote nothing and mints nothing.
 	if err := RecordEventInTx(ctx, tx, EventClose, id, actor); err != nil {
+		return nil, err
+	}
+	if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
 		return nil, err
 	}
 

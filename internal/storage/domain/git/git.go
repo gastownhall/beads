@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	internalgit "github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -18,15 +19,24 @@ func NewGitRepository(workDir string) domain.GitRepository {
 	return &gitRepositoryImpl{workDir: workDir}
 }
 
+// NewInitGitRepository binds init artifact operations to the selected workDir.
+// The generic constructor retains inherited routing for its existing callers.
+// beads.role reads and writes re-scrub this captured environment for config
+// suppression as well; see roleAuthorityEnv for why that is not optional here.
+func NewInitGitRepository(workDir string) domain.GitRepository {
+	return &gitRepositoryImpl{workDir: workDir, env: gitenv.ScrubRouting(os.Environ())}
+}
+
 type gitRepositoryImpl struct {
 	workDir string
+	env     []string
 }
 
 var _ domain.GitRepository = (*gitRepositoryImpl)(nil)
 
 func (r *gitRepositoryImpl) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = r.workDir
+	cmd.Dir, cmd.Env = r.workDir, r.env
 	return cmd
 }
 
@@ -94,15 +104,49 @@ func (r *gitRepositoryImpl) Init(ctx context.Context) error {
 	return nil
 }
 
+// roleAuthorityEnv returns the environment for a beads.role read or write.
+// The role grants privilege, so this boundary drops the explicit config
+// suppression that ScrubRouting deliberately preserves: an inherited
+// GIT_CONFIG_GLOBAL=/dev/null blinds the lookup, and the proxied init tail
+// answers a missing role by persisting "maintainer" into repository-local
+// config, where it then outranks the global value for every later read.
+//
+// The strict scrub applies to whichever environment this repository already
+// carries, not to os.Environ(), so a captured environment keeps its own HOME
+// and loses only the suppression entries. Testing r.env for nil instead would
+// leave the arm dead on the one production role path, which always arrives
+// through NewInitGitRepository and therefore always carries a captured env.
+func (r *gitRepositoryImpl) roleAuthorityEnv() []string {
+	env := r.env
+	if env == nil {
+		env = os.Environ()
+	}
+	return gitenv.ScrubRoutingAndSuppression(env)
+}
+
 func (r *gitRepositoryImpl) GetConfig(ctx context.Context, key string) (string, bool, error) {
 	if key == "" {
 		return "", false, fmt.Errorf("git: GetConfig: key must not be empty")
 	}
-	out, err := r.gitCmd(ctx, "config", "--get", key).Output()
+	cmd := r.gitCmd(ctx, "config", "--get", key)
+	// Git config key names are case-insensitive, so match its rule: a caller
+	// spelling "Beads.Role" reads the same key and must take the same
+	// role-authority environment, not slip through on the inherited one. ToLower
+	// rather than EqualFold, following execenv.keyIdentityForWindows: EqualFold
+	// also collapses Unicode near-collisions such as s and ſ, while git folds
+	// ASCII only and rejects beadſ.role as an invalid key.
+	if strings.ToLower(key) == domain.BeadsRoleConfigKey {
+		cmd.Env = r.roleAuthorityEnv()
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return "", false, nil
+			// Git also uses exit 1 for invalid keys, with a diagnostic.
+			if exitErr.ExitCode() == 1 && len(bytes.TrimSpace(exitErr.Stderr)) == 0 {
+				return "", false, nil
+			}
+			return "", false, fmt.Errorf("git: GetConfig %s: %w: %s", key, err, bytes.TrimSpace(exitErr.Stderr))
 		}
 		return "", false, fmt.Errorf("git: GetConfig %s: %w", key, err)
 	}
@@ -117,7 +161,14 @@ func (r *gitRepositoryImpl) SetConfig(ctx context.Context, key, value string) er
 	if key == "" {
 		return fmt.Errorf("git: SetConfig: key must not be empty")
 	}
-	out, err := r.gitCmd(ctx, "config", key, value).CombinedOutput()
+	cmd := r.gitCmd(ctx, "config", key, value)
+	// Case-insensitive for the same reason as GetConfig, and with the same
+	// ToLower rule: git resolves key names case-insensitively over ASCII, so
+	// every spelling must take the role-authority environment.
+	if strings.ToLower(key) == domain.BeadsRoleConfigKey {
+		cmd.Env = r.roleAuthorityEnv()
+	}
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git: SetConfig %s: %w: %s", key, err, bytes.TrimSpace(out))
 	}

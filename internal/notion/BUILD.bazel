@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "notion",
+    srcs = [
+        "auth.go",
+        "client.go",
+        "fieldmapper.go",
+        "mapping.go",
+        "refs.go",
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/notion",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "notion_test",
+    srcs = [
+        "auth_test.go",
+        "client_test.go",
+        "mapping_test.go",
+        "refs_test.go",
+        "tracker_test.go",
+    ],
+    embed = [":notion"],
+    deps = [
+        "//internal/config",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
