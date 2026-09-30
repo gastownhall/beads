@@ -784,6 +784,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// BEADS_DIR names the workspace directory, not the project directory.
+		// If the explicit target is empty but contains an initialized .beads
+		// child, accepting it would create a second workspace directly in the
+		// project root. Refuse that typo before any init side effects. An empty
+		// arbitrary explicit directory remains a supported initialization target.
+		if err := guardExplicitBeadsDirProjectRoot(); err != nil {
+			return err
+		}
+
 		// Historical workspaces need an explicit sealed-copy bridge. This runs
 		// before init's existing-workspace checks so even --force cannot create
 		// or rewrite state beside a source that has not been preserved.
@@ -2777,6 +2786,20 @@ func resolveInitBeadsDir() string {
 		return beads.GetWorktreeFallbackBeadsDir()
 	}
 	return filepath.Join(cwd, ".beads")
+}
+
+func guardExplicitBeadsDirProjectRoot() error {
+	explicit := beads.ExplicitBeadsDir()
+	if explicit == "" || beads.HasProjectFiles(explicit) {
+		return nil
+	}
+
+	nested := filepath.Join(explicit, ".beads")
+	if !beads.HasProjectFiles(nested) {
+		return nil
+	}
+
+	return fmt.Errorf("BEADS_DIR=%q points to a project root, not its beads workspace; use BEADS_DIR=%q", explicit, nested)
 }
 
 // existingWorkspaceDBName returns the Dolt database name explicitly recorded
