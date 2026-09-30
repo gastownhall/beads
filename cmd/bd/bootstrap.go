@@ -497,25 +497,27 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 		// before hydration. When such a skeleton is present AND a remote with data
 		// is available, fall through to sync detection so bootstrap hydrates
 		// instead of reporting "nothing to do" and stranding the workspace. Both
-		// markers must hold; the emptiness probe opens the embedded engine, so it
-		// is gated behind the (cheaper) remote check — a `git ls-remote` (10s
-		// timeout) that sync detection below probes again.
+		// must hold.
 		//
 		// This gate is NOT off the hot path: an already-hydrated workspace is
 		// exactly the Action=="none" case that reaches here (the `!= "none"`
 		// check above does not return for it), so every `bd bootstrap` over a
-		// healthy workspace — including --dry-run and --json — pays the remote
-		// check, and pays the emptiness probe too whenever a hydratable remote
-		// answers. The probe exits at the first marker query, but its ctx allows
-		// 30s and embeddeddolt.OpenSQL's backoff has no max elapsed time, so a
-		// database another process holds open can cost that full 30s.
+		// healthy workspace — including --dry-run and --json — runs it. That is
+		// why the local emptiness proof goes first and the remote check second:
+		// on a healthy workspace the proof stops at its first config row
+		// (issue_prefix), tens of milliseconds, and the remote check — a
+		// `git ls-remote` with a 10s timeout — never runs. Only a proven-empty
+		// skeleton pays for the network. The proof's ctx allows 30s and
+		// embeddeddolt.OpenSQL's backoff has no max elapsed time, so a database
+		// another process holds open can cost that full 30s, as it can for any
+		// other bd command that opens it.
 		// A legitimately empty `bd init` DB with no hydratable remote — and any DB
 		// we cannot prove empty — stays authoritative. As with the "none" fallback
 		// above, the plan is held aside rather than merged into plan so its
 		// HasExisting/Blocked/Reason cannot leak into the probe branches below; it
 		// is restored as the fallback only if no other recovery source matches.
-		if !isServer && bootstrapHasHydratableRemote() &&
-			embeddedDBIsEmpty(filepath.Join(beadsDir, "embeddeddolt"), cfg.GetDoltDatabase()) {
+		if !isServer && embeddedDBIsEmpty(filepath.Join(beadsDir, "embeddeddolt"), cfg.GetDoltDatabase()) &&
+			bootstrapHasHydratableRemote() {
 			deferredExistingPlan = &dbAction // fall through to sync detection; fallback if none found
 		} else if beadsDirExists && !settledOnNameAlone {
 			return dbAction
@@ -863,24 +865,65 @@ func probeBootstrapServerDB(beadsDir string, cfg *configfile.Config, isSharedSer
 	return result
 }
 
+// skeletonSeededConfig is the complete config table of a freshly migrated
+// embedded database: the compaction defaults seeded by
+// internal/storage/schema/migrations/0016_default_config.up.sql, and nothing
+// else. embeddedDBUserWork accepts a config row only when both its key and its
+// value appear here. Any other key (issue_prefix, kv.*, kv.memory.*, anything
+// `bd config set` stores) and any changed default is user work.
+//
+// A migration that seeds another config row must add it here. If it does not,
+// the proof fails closed: #5915 hydration stops firing, but nothing is deleted.
+// TestEmbeddedDBIsEmpty's unidentified-skeleton case fails and names the key.
+var skeletonSeededConfig = map[string]string{
+	"auto_compact_enabled":     "false",
+	"compact_batch_size":       "50",
+	"compact_parallel_workers": "5",
+	"compact_tier1_days":       "30",
+	"compact_tier1_dep_levels": "2",
+	"compact_tier2_commits":    "100",
+	"compact_tier2_days":       "90",
+	"compact_tier2_dep_levels": "5",
+	"compaction_enabled":       "false",
+}
+
+// skeletonBookkeepingTables are the only tables besides config that hold rows
+// in a freshly migrated embedded database. The rows record schema state or a
+// counter, never user work: the applied-migration ledgers, and the single
+// bd_events_seq counter row. A mutation that advances the counter also writes
+// rows to tables the proof does check.
+var skeletonBookkeepingTables = map[string]bool{
+	"schema_migrations":         true,
+	"ignored_schema_migrations": true,
+	"bd_events_seq":             true,
+}
+
 // embeddedDBIsEmpty reports true ONLY when dataDir holds a readable embedded
 // Dolt database that provably carries NO user work — the fingerprint of the
 // skeleton the SessionStart `bd prime` hook creates before hydration (#5915).
+// See embeddedDBUserWork for the proof.
+func embeddedDBIsEmpty(dataDir, dbName string) bool {
+	return embeddedDBUserWork(dataDir, dbName) == ""
+}
+
+// embeddedDBUserWork returns "" when dataDir/dbName is provably the empty
+// pre-hydration skeleton. Otherwise it describes the first thing that stops the
+// proof: an open or query error, or a row that could be user work.
 //
 // The caller (cloneViaEmbedded) deletes the whole database before re-cloning, so
-// proving zero `issues` is not enough: a database with zero issues can still
-// hold a user-chosen prefix, a server-provisioned project id, custom statuses,
-// federation peers, or routes, and destroying that would regress the GH#5037
-// "already exists, nothing to do" contract into silent data loss. Emptiness is
-// therefore proven on two fronts:
+// proving zero `issues` is not enough. A database with zero issues can still
+// hold a user-chosen prefix, a server-provisioned project id, memories from
+// `bd remember`, `bd kv` values, `bd config set` settings, custom statuses,
+// federation peers or routes. Destroying any of that would turn the GH#5037
+// "already exists, nothing to do" contract into silent data loss. So the proof
+// is an allowlist of what a fresh skeleton contains, not a list of known user
+// tables:
 //
-//   - UNIDENTIFIED: neither bootstrap marker is present — no `issue_prefix` in
-//     config and no `_project_id` in metadata. This is the same pair
-//     workapi.RefuseIdentifiedSubstrate treats as "already a real workspace",
-//     and either one alone is enough to disqualify.
-//   - NO USER ROWS: every user-data table (issues, wisps, custom_types,
-//     custom_statuses, federation_peers, routes) is empty. None of these carry
-//     seeded defaults, so a fresh skeleton has them all at zero.
+//   - config holds exactly skeletonSeededConfig, key and value. This also rules
+//     out the issue_prefix identity marker.
+//   - every other base table is empty, except skeletonBookkeepingTables. This
+//     covers metadata (so the _project_id identity marker), and it covers any
+//     table added later without anyone having to list it here.
 //
 // Known divergence: this proof is NAME-SCOPED (it opens dbName, and every query
 // runs against that database), while the existing-database detection that routes
@@ -892,62 +935,97 @@ func probeBootstrapServerDB(beadsDir string, cfg *configfile.Config, isSharedSer
 // destroyed — but it is an invisible non-fix rather than a safe one, which is why
 // it is recorded here instead of papered over.
 //
-// Any failure to open the engine or read a probed table/marker returns false, so
-// the caller treats the directory as an authoritative existing database and
-// leaves it untouched. This deliberate error==false rule fails closed and keeps
-// two behaviors intact: a bare directory that is not a valid Dolt database
-// (OpenSQL errors) is left alone, and a pure-Go (CGO_ENABLED=0) build, whose
-// OpenSQL stub always errors, keeps the pre-existing "database already exists"
-// detection. We re-clone over a local database only when we can PROVE it holds
-// no user work, never on an ambiguous or unreadable directory.
-func embeddedDBIsEmpty(dataDir, dbName string) bool {
+// Any failure to open the engine or read a table stops the proof, so the caller
+// treats the directory as an authoritative existing database and leaves it
+// untouched. This deliberate fail-closed rule keeps two behaviors intact: a bare
+// directory that is not a valid Dolt database (OpenSQL errors) is left alone,
+// and a pure-Go (CGO_ENABLED=0) build, whose OpenSQL stub always errors, keeps
+// the pre-existing "database already exists" detection. We re-clone over a local
+// database only when we can PROVE it holds no user work, never on an ambiguous
+// or unreadable directory.
+func embeddedDBUserWork(dataDir, dbName string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, dbName, "main")
 	if err != nil {
-		return false
+		return fmt.Sprintf("open embedded database: %v", err)
 	}
 	defer func() { _ = cleanup() }()
 
-	// Identity markers: either one present means a bootstrapped workspace bd must
-	// never stamp over. The queries are constant strings (table and key are the
-	// canonical workapi.ConfigKeyIssuePrefix / MetadataKeyProjectID markers, not
-	// interpolated) so there is no injection surface. A probe error fails closed
-	// — we cannot prove the marker's absence.
-	for _, markerQuery := range []string{
-		"SELECT COUNT(*) FROM config WHERE `key` = 'issue_prefix'",
-		"SELECT COUNT(*) FROM metadata WHERE `key` = '_project_id'",
-	} {
-		var n int
-		if err := db.QueryRowContext(ctx, markerQuery).Scan(&n); err != nil {
-			return false
+	// config first: on an initialized workspace issue_prefix is here, so the
+	// common not-empty case stops at this query.
+	rows, err := db.QueryContext(ctx, "SELECT `key`, value FROM config")
+	if err != nil {
+		return fmt.Sprintf("read config: %v", err)
+	}
+	for rows.Next() {
+		var key string
+		var value sql.NullString
+		if err := rows.Scan(&key, &value); err != nil {
+			_ = rows.Close()
+			return fmt.Sprintf("read config: %v", err)
 		}
-		if n != 0 {
-			return false
+		if seeded, ok := skeletonSeededConfig[key]; !ok || !value.Valid || value.String != seeded {
+			_ = rows.Close()
+			return fmt.Sprintf("config key %q is not a skeleton default", key)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Sprintf("read config: %v", err)
+	}
+	_ = rows.Close()
 
-	// User-data tables: every one must be empty. Each query is a constant string
-	// (no table interpolation) so there is no injection surface. A probe error
-	// (missing table, unreadable engine) fails closed for the same reason as above.
-	for _, countQuery := range []string{
-		"SELECT COUNT(*) FROM issues",
-		"SELECT COUNT(*) FROM wisps",
-		"SELECT COUNT(*) FROM custom_types",
-		"SELECT COUNT(*) FROM custom_statuses",
-		"SELECT COUNT(*) FROM federation_peers",
-		"SELECT COUNT(*) FROM routes",
-	} {
-		var n int
-		if err := db.QueryRowContext(ctx, countQuery).Scan(&n); err != nil {
-			return false
+	tables, err := embeddedBaseTables(ctx, db)
+	if err != nil {
+		return fmt.Sprintf("list tables: %v", err)
+	}
+	// An enumeration that misses the core table proves nothing about the rest.
+	sawIssues := false
+	for _, table := range tables {
+		if table == "issues" {
+			sawIssues = true
 		}
-		if n != 0 {
-			return false
+		if table == "config" || skeletonBookkeepingTables[table] {
+			continue
+		}
+		// The name comes from the engine's catalog, not from bd, so it is escaped.
+		var one int
+		//nolint:gosec // G701: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+		err := db.QueryRowContext(ctx, "SELECT 1 FROM "+doltutil.QuoteIdentifierUnvalidated(table)+" LIMIT 1").Scan(&one)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		case err != nil:
+			return fmt.Sprintf("read table %s: %v", table, err)
+		default:
+			return fmt.Sprintf("table %s has rows", table)
 		}
 	}
-	return true
+	if !sawIssues {
+		return "table list does not include issues"
+	}
+	return ""
+}
+
+// embeddedBaseTables lists the base tables (not views) of the current database.
+func embeddedBaseTables(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
 }
 
 // unprovenSiblingDatabases returns the entries in dataDir that an emptiness
@@ -985,9 +1063,9 @@ func unprovenSiblingDatabases(dataDir, dbName string) ([]string, error) {
 // available to clone from — a configured sync.remote (a dolt-native remote, or a
 // git code-repository URL that actually carries refs/dolt/data), or a git origin
 // carrying refs/dolt/data. It answers the same clone/no-clone question as the
-// sync-detection logic in detectBootstrapAction and is used to gate the #5915
-// empty-skeleton hydration so the (engine-opening) emptiness probe only runs when
-// hydration is possible.
+// sync-detection logic in detectBootstrapAction and is the second half of the
+// #5915 empty-skeleton gate. It runs only after embeddedDBIsEmpty has proven the
+// local database empty, so a healthy workspace never pays for its network probe.
 //
 // The forge arm is the one that must not short-circuit: `bd init` persists the
 // git origin as sync.remote, so the canonical team setup (fresh clone whose
