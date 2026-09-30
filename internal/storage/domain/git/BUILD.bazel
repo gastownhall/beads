@@ -17,6 +17,7 @@ go_test(
     name = "git_test",
     srcs = [
         "git_test.go",
+        "git_windows_test.go",
         "suite_test.go",
     ],
     embed = [":git"],
@@ -25,7 +26,13 @@ go_test(
         "//internal/storage/domain",
         "@com_github_stretchr_testify//require",
         "@com_github_stretchr_testify//suite",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@com_github_stretchr_testify//assert",
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # git_test without -short, as pr.yml's "Test (storage domain + uow)" job runs
