@@ -179,3 +179,42 @@ func TestGetIssueCommentsPageEmbedded(t *testing.T) {
 		t.Fatalf("wisp keyset walk = %v, want %v", wispWalk, want)
 	}
 }
+
+// TestIssueLifecycleTransactionImportIssueCommentCommits pins the transactional
+// ImportIssueComment that tracker pull merges remote threads through: the
+// comment must land in the transaction's Dolt commit, not stay behind in the
+// working set. The embedded transaction stages only the tables its writes mark
+// dirty, so an import that skipped its "comments" mark would read back fine
+// and still never be committed.
+func TestIssueLifecycleTransactionImportIssueCommentCommits(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "txc")
+	ctx := t.Context()
+
+	iss := &types.Issue{ID: "txc-1", Title: "txc", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, iss, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if _, err := te.store.CommitAll(ctx, "test: flush baseline"); err != nil {
+		t.Fatalf("baseline CommitAll: %v", err)
+	}
+
+	var imported *types.Comment
+	err := te.store.RunInIssueLifecycleTransaction(ctx, "test: import comment", func(tx storage.IssueLifecycleTransaction) error {
+		var err error
+		imported, err = tx.ImportIssueComment(ctx, iss.ID, "alice", "pulled", time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("RunInIssueLifecycleTransaction: %v", err)
+	}
+
+	var dirty, committed int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'comments'", nil, &dirty)
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM comments AS OF 'HEAD' WHERE id = ?", []any{imported.ID}, &committed)
+	if dirty != 0 || committed != 1 {
+		t.Fatalf("comments dolt_status rows = %d, rows for %s at HEAD = %d; want 0 and 1 (the import must be staged into the transaction's commit)",
+			dirty, imported.ID, committed)
+	}
+}

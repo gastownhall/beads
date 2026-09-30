@@ -22,9 +22,12 @@ go_library(
 go_test(
     name = "github_test",
     srcs = [
+        "client_comments_test.go",
         "client_ratelimit_test.go",
+        "mapping_comments_test.go",
         "mapping_test.go",
         "push_dedup_test.go",
+        "tracker_comments_test.go",
         "tracker_test.go",
         "types_test.go",
     ],

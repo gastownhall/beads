@@ -63,9 +63,27 @@ type Issue struct {
 	HTMLURL   string     `json:"html_url"`
 	Locked    bool       `json:"locked"`
 
+	// Comments is the API-reported comment count, used to skip the
+	// thread fetch when zero. Thread contents arrive via HydratedComments.
+	Comments int `json:"comments"`
+
 	// PullRequest is non-nil if this issue is actually a pull request.
 	// Used to filter PRs out of issue listings.
 	PullRequest *PullRequestRef `json:"pull_request,omitempty"`
+
+	// HydratedComments carries the comment thread, filled in code when the
+	// count is nonzero. Excluded from API unmarshalling.
+	HydratedComments []IssueComment `json:"-"`
+}
+
+// IssueComment represents an issue comment from the GitHub API.
+type IssueComment struct {
+	ID        int64      `json:"id"` // Global comment ID; stable across syncs
+	User      *User      `json:"user,omitempty"`
+	Body      string     `json:"body"`
+	CreatedAt *time.Time `json:"created_at"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	HTMLURL   string     `json:"html_url,omitempty"`
 }
 
 // PullRequestRef is a minimal reference indicating an issue is a PR.

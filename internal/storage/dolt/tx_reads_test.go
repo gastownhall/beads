@@ -11,9 +11,9 @@ import (
 // TestTxReadYourWritesWithComment exercises the full composite-view
 // read-your-writes cycle on real Dolt: an issue graph plus a comment created
 // inside one transaction, read back through the new snapshot-read methods
-// BEFORE commit. The comment leg is Dolt-specific because it writes through
-// doltTransaction.ImportIssueComment (the embedded transaction stubs it), so it
-// lives here rather than in the backend-agnostic conformance suite.
+// BEFORE commit. It lives here rather than in the backend-agnostic
+// conformance suite because its comment leg was Dolt-only while the embedded
+// transaction stubbed ImportIssueComment; that backend now implements it.
 func TestTxReadYourWritesWithComment(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
