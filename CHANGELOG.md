@@ -625,6 +625,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   purge that used to delete a closed molecule root under a live step now
   leaves it. See the `--wisps-plane` entry under Added.
 
+- **The proxied-server DSN now interpolates query parameters client-side**
+  ([#6360](https://github.com/gastownhall/beads/pull/6360)), the same setting
+  [#4617](https://github.com/gastownhall/beads/pull/4617) gave the plain
+  server-mode DSN. Every parameterized statement bd sends through the proxy
+  was a server-side PREPARE followed by an EXECUTE, two awaited round trips
+  for one row. With `interpolateParams` it is one. The driver still falls back
+  to a server-side prepare for any argument it cannot render safely, so
+  results are unchanged. Measured on a proxied Dolt 2.2.3 server at 254 ms
+  RTT with no other change, `bd ready` went from 17.7 s to 12.7 s. The
+  parameterized statements of the open path get the same cut, which is why
+  even `bd sql 'select 1'`, itself unparameterized, went from 12.3 s to 9.4 s.
+
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`
   and `mutates`: `design` for a refusal that is expected to stay (shared
