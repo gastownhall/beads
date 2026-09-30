@@ -259,3 +259,65 @@ func TestUpsertEpochMintedAddressInTxIsANoOpWhenTheAddressAlreadyExists(t *testi
 		t.Fatalf("unmet no-op-on-exists SQL expectations: %v", err)
 	}
 }
+
+// TestEnsureStoreEpochRowSeedsTheSingletonWithInsertIgnore is the regression
+// test for the "Unverified" note of gastownhall/beads#6664 (bee-ghosttrack,
+// review 5360880888): ensureStoreEpochRow seeded
+// store_epoch's singleton with a plain INSERT where version_history.go seeds
+// the very same row with INSERT IGNORE. It follows that seed's shape: read
+// first, seed only when the row is absent (so the seed happens once per store,
+// not once per mint), then read the row back so the epoch it reports is what
+// the row actually holds.
+func TestEnsureStoreEpochRowSeedsTheSingletonWithInsertIgnore(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+
+	// store_epoch starts empty (migration 0067), so the first read finds no row.
+	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"epoch"}))
+	mock.ExpectExec(`INSERT IGNORE INTO store_epoch \(id, epoch\) VALUES \(1, 1\)`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(1))
+
+	got, err := ensureStoreEpochRow(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("ensureStoreEpochRow on an empty store_epoch: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("ensureStoreEpochRow on an empty store_epoch = epoch %d, want 1 (a freshly seeded singleton starts at epoch 1)", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet store_epoch seed SQL expectations: %v", err)
+	}
+}
+
+// TestEnsureStoreEpochRowReportsTheEpochOfARowItsSeedDidNotWrite pins why the
+// seed reads back instead of returning the literal 1 it would have written:
+// INSERT IGNORE writes nothing when the singleton already exists, and the row
+// it leaves behind may hold a later epoch than the one this call tried to seed.
+func TestEnsureStoreEpochRowReportsTheEpochOfARowItsSeedDidNotWrite(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+
+	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"epoch"}))
+	// The seed is ignored: another writer's row is already there.
+	mock.ExpectExec(`INSERT IGNORE INTO store_epoch \(id, epoch\) VALUES \(1, 1\)`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT epoch FROM store_epoch WHERE id = 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(3))
+
+	got, err := ensureStoreEpochRow(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("ensureStoreEpochRow when the seed is ignored: %v", err)
+	}
+	if got != 3 {
+		t.Fatalf("ensureStoreEpochRow when the seed is ignored = epoch %d, want 3 (the epoch the surviving row holds, not the 1 the ignored seed would have written)", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet ignored-seed SQL expectations: %v", err)
+	}
+}
