@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
@@ -25,11 +26,12 @@ type backupRestoreRecordingStore struct {
 	restoreCalls  int
 	restoreSource string
 	backupAddURL  string
+	backupAddErr  error
 }
 
 func (s *backupRestoreRecordingStore) BackupAdd(_ context.Context, _ string, url string) error {
 	s.backupAddURL = url
-	return nil
+	return s.backupAddErr
 }
 func (s *backupRestoreRecordingStore) BackupSync(context.Context, string) error     { return nil }
 func (s *backupRestoreRecordingStore) BackupRemove(context.Context, string) error   { return nil }
@@ -355,5 +357,114 @@ func TestBackupRestoreCommandRegistersBackupURLAfterRestore(t *testing.T) {
 	}
 	if cfg.BackupURL != source {
 		t.Fatalf("saved backup_url = %q, want %q", cfg.BackupURL, source)
+	}
+}
+
+func TestRegisterBackupRemoteRedactsBackupAddFailure(t *testing.T) {
+	const source = "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/db"
+	fake := &backupRestoreRecordingStore{
+		backupAddErr: fmt.Errorf("Dolt rejected %q", source),
+	}
+
+	stderr := captureStderr(t, func() {
+		registerBackupRemote(context.Background(), fake, source)
+	})
+	assertBackupWarningRedacted(t, stderr)
+}
+
+func TestReconcileRestoredProxiedWorkspaceRegistersBackupURL(t *testing.T) {
+	beadsDir := backupConfigTestDir(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	const source = "s3://bucket/path?endpoint=https://minio.example&region=auto&path-style=true"
+	mock.ExpectExec("CALL DOLT_BACKUP('rm', ?)").
+		WithArgs(proxiedBackupTargetName).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CALL DOLT_BACKUP('add', ?, ?)").
+		WithArgs(proxiedBackupTargetName, source).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := reconcileRestoredProxiedWorkspace(context.Background(), conn, beadsDir, source, false); err != nil {
+		t.Fatalf("reconcileRestoredProxiedWorkspace() = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("proxied backup registration: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-backup.json"))
+	if err != nil {
+		t.Fatalf("read saved backup config: %v", err)
+	}
+	var cfg doltBackupConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal saved backup config: %v", err)
+	}
+	if cfg.BackupURL != source {
+		t.Fatalf("saved backup_url = %q, want %q", cfg.BackupURL, source)
+	}
+}
+
+func TestReconcileRestoredProxiedWorkspaceRedactsBackupAddFailure(t *testing.T) {
+	beadsDir := backupConfigTestDir(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	const source = "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/db"
+	mock.ExpectExec("CALL DOLT_BACKUP('rm', ?)").
+		WithArgs(proxiedBackupTargetName).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CALL DOLT_BACKUP('add', ?, ?)").
+		WithArgs(proxiedBackupTargetName, source).
+		WillReturnError(fmt.Errorf("Dolt rejected %q", source))
+
+	stderr := captureStderr(t, func() {
+		if err := reconcileRestoredProxiedWorkspace(context.Background(), conn, beadsDir, source, false); err != nil {
+			t.Fatalf("reconcileRestoredProxiedWorkspace() = %v", err)
+		}
+	})
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("proxied backup registration: %v", err)
+	}
+	assertBackupWarningRedacted(t, stderr)
+}
+
+func backupConfigTestDir(t *testing.T) string {
+	t.Helper()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o700); err != nil {
+		t.Fatalf("create workspace marker: %v", err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	beads.ResetCaches()
+	t.Cleanup(beads.ResetCaches)
+	return beadsDir
+}
+
+func assertBackupWarningRedacted(t *testing.T, stderr string) {
+	t.Helper()
+	if !strings.Contains(stderr, "aws://bucket/db") {
+		t.Errorf("warning %q does not retain the redacted backup location", stderr)
+	}
+	for _, leaked := range []string{"AKIAEXAMPLE", "wJalrXUtnFEMI", "K7MDENG"} {
+		if strings.Contains(stderr, leaked) {
+			t.Errorf("warning %q echoes %q", stderr, leaked)
+		}
 	}
 }
