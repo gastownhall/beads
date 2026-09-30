@@ -278,6 +278,7 @@ func (r *applyBatchRun) applyUpdate(ctx context.Context, tx *sql.Tx, index int, 
 		ExpectedStatus:        item.ExpectedStatus,
 		ExpectedAssignee:      item.ExpectedAssignee,
 		ForceClosePolicy:      item.ForceClosePolicy,
+		DueClearReason:        item.DueClearReason,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
 	})
 	if err != nil {

@@ -12,6 +12,8 @@ type Event struct {
 	Actor    string
 	OldValue string
 	NewValue string
+	// Comment is free text attached to the event; empty records none.
+	Comment string
 }
 
 type RecordEventOpts struct {
