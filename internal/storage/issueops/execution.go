@@ -176,6 +176,15 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	// first.
 	changedAny := false
 	if attempt.Claim {
+		if !attempt.ForceClosePolicy {
+			blocked, blockers, err := IsBlockedInTx(ctx, tx, attempt.IssueID)
+			if err != nil {
+				return publicops.UpdateResult{}, nil, err
+			}
+			if blocked {
+				return publicops.UpdateResult{}, nil, fmt.Errorf("%w: %s is blocked by %v", storage.ErrClaimBlocked, attempt.IssueID, blockers)
+			}
+		}
 		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
