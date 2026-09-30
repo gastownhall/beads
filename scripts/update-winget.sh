@@ -103,14 +103,26 @@ EOF
 # Always set PortableCommandAlias so WinGet\\Links\\bd.exe is created (GH#4908).
 # SHA256 for arm64 is left for the releaser to fill from checksums.txt when present.
 ARM_SHA=$(curl -sL "https://github.com/gastownhall/beads/releases/download/v$VERSION/checksums.txt" | grep 'windows_arm64' | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
+ARM_SHA_IS_PLACEHOLDER=0
 if [ -z "$ARM_SHA" ]; then
   ARM_SHA="0000000000000000000000000000000000000000000000000000000000000000"
+  ARM_SHA_IS_PLACEHOLDER=1
 fi
 
+# Keep this header in step with the checked-in winget/GasTownHall.Beads.installer.yaml:
+# the first run of this script overwrites that file, so anything documented only
+# there (the GH#4908 rationale) would be silently dropped.
 cat > "$WINGET_DIR/GasTownHall.Beads.installer.yaml" << EOF
 # yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
-# PortableCommandAlias creates WinGet\\Links\\bd.exe (required — GH#4908).
-# Commands: is search metadata only and does not create the symlink.
+# Canonical installer for PackageIdentifier GasTownHall.Beads (published under
+# manifests/g/GasTownHall/Beads/<version>/ in microsoft/winget-pkgs).
+#
+# PortableCommandAlias is REQUIRED so winget creates
+# %LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\bd.exe. Without it, only the package
+# folder is on PATH (visible only to processes started after install) and
+# already-running shells never see \`bd\` (GH#4908).
+#
+# Commands: is search metadata only — it does NOT create the Links symlink.
 PackageIdentifier: GasTownHall.Beads
 PackageVersion: $VERSION
 InstallerType: zip
@@ -120,6 +132,7 @@ NestedInstallerFiles:
     PortableCommandAlias: bd
 Commands:
   - bd
+ReleaseDate: $(date -u +%F)
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/gastownhall/beads/releases/download/v$VERSION/beads_${VERSION}_windows_amd64.zip
@@ -144,3 +157,14 @@ echo "   (legacy SteveYegge.beads → manifests/s/SteveYegge/beads/$VERSION/)"
 echo "4. Submit PR to microsoft/winget-pkgs"
 echo ""
 echo "Reminder: PortableCommandAlias: bd is required (GH#4908)."
+
+# The arm64 fallback above is otherwise disclosed only in a source comment, and
+# the manifest it writes is schema-valid, so a releaser following the steps
+# above would publish an installer entry that fails hash validation at install
+# time.
+if [ "$ARM_SHA_IS_PLACEHOLDER" -eq 1 ]; then
+    echo ""
+    echo "WARNING: no windows_arm64 checksum found for v$VERSION;"
+    echo "         the arm64 InstallerSha256 is a zero placeholder — DO NOT PUBLISH"
+    echo "         until it is replaced with the real hash from checksums.txt."
+fi

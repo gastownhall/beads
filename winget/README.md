@@ -22,7 +22,11 @@ Without `PortableCommandAlias`, winget only adds the package folder to PATH (inh
 ### GasTownHall.Beads (current)
 
 - `GasTownHall.Beads.installer.yaml` — installer + **PortableCommandAlias**
-- Copy to winget-pkgs: `manifests/g/GasTownHall/Beads/<version>/`
+
+This repo carries only the installer manifest for this id, but a winget-pkgs version
+directory needs a `version` + `defaultLocale` + `installer` set. **Publish this id with
+`wingetcreate update`** (below), which supplies the other two from the already-published
+manifests. Hand-copying just this file produces a set winget-pkgs validation rejects.
 
 ### SteveYegge.beads (legacy)
 
@@ -31,11 +35,14 @@ Without `PortableCommandAlias`, winget only adds the package folder to PATH (inh
 - `SteveYegge.beads.locale.en-US.yaml` — locale
 - Copy to winget-pkgs: `manifests/s/SteveYegge/beads/<version>/`
 
+The hand-copy path applies to this id only — it is the one with a complete three-file set.
+
 ## Submitting to winget-pkgs
 
 1. Fork https://github.com/microsoft/winget-pkgs
-2. Place manifests under the paths above
-3. Open a PR (or use `wingetcreate`)
+2. For `SteveYegge.beads`, place the three manifests under the path above
+3. For `GasTownHall.Beads`, use `wingetcreate` rather than a hand-copied directory
+4. Open a PR
 
 ```powershell
 wingetcreate update GasTownHall.Beads --version <new-version> --urls <new-url> --submit
@@ -48,7 +55,9 @@ wingetcreate update GasTownHall.Beads --version <new-version> --urls <new-url> -
 ```
 
 This refreshes the SteveYegge.beads manifests (and regenerates GasTownHall.Beads.installer.yaml
-with PortableCommandAlias). Then:
+with PortableCommandAlias). Note that it rewrites **both** ids to `<version>`, including the
+legacy one — so the first run moves `SteveYegge.beads` off the 0.30.x version named above.
+Then:
 
 1. Update InstallerSha256 from the release `checksums.txt`
 2. Commit, then PR to microsoft/winget-pkgs
@@ -56,5 +65,9 @@ with PortableCommandAlias). Then:
 ### Getting the SHA256
 
 ```bash
-curl -sL https://github.com/gastownhall/beads/releases/download/v<VERSION>/checksums.txt | grep windows
+curl -sL https://github.com/gastownhall/beads/releases/download/v<VERSION>/checksums.txt | grep windows_
 ```
+
+The `windows_amd64` line is the `x64` `InstallerSha256`; the `windows_arm64` line is the
+`arm64` one. A bare `grep windows` matches both and is what produced the two-hash
+`InstallerSha256` that `scripts/check-winget-portable-alias.sh` now catches.
