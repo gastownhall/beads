@@ -144,6 +144,33 @@ func parseDoltDataRefs(out []byte, dataRef string) []string {
 	return refs
 }
 
+// resetDataTarget names what reset-data is about to replace: the remote's
+// URL and, for a git-backed remote, the ref its data lives on. The ref is
+// part of the name because one repository can hold several databases on
+// their own refs, and there the URL alone does not say which one goes. A
+// remote that is not git-backed has no ref and is named by its URL.
+func resetDataTarget(url string, kind resetDataKind, dataRef string) string {
+	if kind != resetDataGitBacked {
+		return url
+	}
+	return url + ", ref " + storage.EffectiveGitDataRef(dataRef)
+}
+
+// resetDataJSONRef is the ref reported in reset-data's JSON output: the
+// recorded ref of a git-backed remote in canonical form, empty when it is
+// the default (the key is then left out) and for every other kind of
+// remote. That is what `bd dolt remote add --json` reports and what `bd dolt
+// remote list --json` shows for a remote bd created, since bd canonicalizes
+// the ref before recording it; a remote added through dolt itself with an
+// explicit --ref refs/dolt/data lists verbatim. The refs that were deleted,
+// the default among them, are in deleted_refs.
+func resetDataJSONRef(kind resetDataKind, dataRef string) string {
+	if kind != resetDataGitBacked {
+		return ""
+	}
+	return canonicalGitDataRef(dataRef)
+}
+
 // deleteGitDoltDataRefs deletes refs on the git remote at gitURL. Git
 // client-side hooks are disabled for the push, same as bd's other internal
 // git invocations (GH#3724 class: a user's templated pre-push hook must not
@@ -288,11 +315,11 @@ Examples:
 		if !doltRemoteResetDataYes {
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return HandleErrorWithHint(
-					fmt.Sprintf("reset-data replaces all Dolt data stored on remote %q (%s)", name, url),
+					fmt.Sprintf("reset-data replaces all Dolt data stored on remote %q (%s)", name, resetDataTarget(url, kind, dataRef)),
 					"Re-run with --yes to confirm.")
 			}
 			fmt.Printf("This replaces all Dolt data stored on remote %q:\n", name)
-			fmt.Printf("  %s\n", url)
+			fmt.Printf("  %s\n", resetDataTarget(url, kind, dataRef))
 			fmt.Println("The remote is rebuilt from local HEAD, including any pending changes; other clones must re-clone.")
 			fmt.Print("Proceed? (y/N): ")
 			reader := bufio.NewReader(os.Stdin)
@@ -342,13 +369,17 @@ Examples:
 		}
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			out := map[string]interface{}{
 				"remote":        name,
 				"url":           url,
 				"deleted_refs":  deletedRefs,
 				"cleared_store": clearedStore,
 				"pushed":        true,
-			})
+			}
+			if ref := resetDataJSONRef(kind, dataRef); ref != "" {
+				out["ref"] = ref
+			}
+			return outputJSON(out)
 		}
 		fmt.Printf("✓ Remote %q data plane reset; store rebuilt from HEAD.\n", name)
 		fmt.Println("  Other clones of this database must re-clone from the remote.")

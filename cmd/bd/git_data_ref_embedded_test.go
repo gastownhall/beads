@@ -174,6 +174,18 @@ func TestEmbeddedGitDataRefRemoteAddPushesToRefAndBootstrapReadsIt(t *testing.T)
 				t.Error("refs/heads/main disappeared from the git remote")
 			}
 
+			// Without a terminal and without --yes, reset-data refuses and names
+			// the ref it would have replaced, not only the URL: in a repository
+			// holding several databases the ref is what tells them apart.
+			if _, stderr, err := bdDoltSeparate(t, bd, dir, "remote", "reset-data", "origin"); err == nil {
+				t.Error("reset-data without --yes and without a terminal should refuse")
+			} else if !strings.Contains(stderr, "ref "+ref) || !strings.Contains(stderr, "--yes") {
+				t.Errorf("reset-data refusal should name the ref and --yes, got:\n%s", stderr)
+			}
+			if lsRemoteRef(t, remoteDir, ref) == "" {
+				t.Fatalf("the refused reset-data removed %s", ref)
+			}
+
 			// reset-data rebuilds the configured ref, never refs/dolt/data.
 			stdout, stderr, err = bdDoltSeparate(t, bd, dir, "remote", "reset-data", "origin", "--yes")
 			if err != nil {
@@ -187,6 +199,33 @@ func TestEmbeddedGitDataRefRemoteAddPushesToRefAndBootstrapReadsIt(t *testing.T)
 			}
 			if got := lsRemoteRef(t, remoteDir, "refs/dolt/data"); got != "" {
 				t.Errorf("reset-data created refs/dolt/data (%s)", got)
+			}
+
+			// The JSON result carries the recorded ref, as remote add --json
+			// does, and names the deleted refs: the remote's ref and the info
+			// ref, never refs/dolt/data. The progress lines precede the object on
+			// stdout, so decode from the first brace.
+			stdout, stderr, err = bdDoltSeparate(t, bd, dir, "remote", "reset-data", "origin", "--yes", "--json")
+			if err != nil {
+				t.Fatalf("reset-data --json: %v\nstderr:\n%s", err, stderr)
+			}
+			var result struct {
+				Ref         string   `json:"ref"`
+				DeletedRefs []string `json:"deleted_refs"`
+			}
+			brace := strings.Index(stdout, "{")
+			if brace < 0 {
+				t.Fatalf("reset-data --json printed no object:\n%s", stdout)
+			}
+			if err := json.Unmarshal([]byte(stdout[brace:]), &result); err != nil {
+				t.Fatalf("decode reset-data --json: %v\n%s", err, stdout)
+			}
+			if result.Ref != ref {
+				t.Errorf("reset-data --json ref = %q, want %q", result.Ref, ref)
+			}
+			deleted := strings.Join(result.DeletedRefs, " ")
+			if !strings.Contains(deleted, ref) || strings.Contains(deleted, "refs/dolt/data") {
+				t.Errorf("reset-data --json deleted_refs = %v, want %s and never refs/dolt/data", result.DeletedRefs, ref)
 			}
 
 			// A second workspace bootstraps from the key, a third from --ref;
