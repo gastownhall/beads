@@ -28,41 +28,37 @@ import (
 // flag has to move — removing the one closed child of an any-children gate
 // can block its waiter, and the recheck settles that too. Writes that add a
 // blocker (a reopen, a dependency add, a parent-child add) recompute the same
-// way and are not recorded here; a racing pair where the last committer adds
-// a blocker can leave a dependent flagged ready while blocked.
+// way and are not recorded here, and the residue they leave runs in both
+// directions. A racing pair whose last committer adds a plain blocks edge can
+// leave a dependent flagged ready while blocked. A parent-child add is not
+// monotonic, though — an already-closed child can satisfy an any-children
+// waits-for gate (see addDependencyInTx) — so an add of a still-open child
+// racing the close of that child leaves the waiter flagged blocked while
+// ready and hidden from `bd ready`: the #6716 shape itself, reached through
+// `bd dep add` or `bd create --parent`.
 //
 // # What is scoped, and what is not
 //
-// Recording only reaches a recheck through a transaction a store scoped (see
-// ScopeBlockedRecheckTransaction), and exactly two write runners scope one:
-// DoltStore's commitWriteTx and EmbeddedDoltStore's commitConn. A write that
-// reaches this package on any other transaction records nothing and behaves
-// exactly as it did before the recheck existed — the skew above survives on
-// it. Those routes are known and deliberately out of scope here:
+// Recording only reaches a recheck through a transaction a write runner
+// scoped (see ScopeBlockedRecheckTransaction). The runners that scope one,
+// and settle what it recorded once it has committed, are:
 //
-//   - the uow/domain-db routing system (internal/storage/uow, with the
-//     in-transaction recomputes at internal/storage/domain/db/issue.go and
-//     dependency.go), which serves `bd batch` when proxied and every write a
-//     uow provider serves. Scoping it needs more than these two lines:
-//     doltServerTx.Runner() hands out the pinned *sql.Conn, not the *sql.Tx
-//     this package keys its scope on, so the key has to be threaded through
-//     the wrapper — the caveat below, already real rather than hypothetical.
-//   - storage.Transaction (internal/storage/dolt/transaction.go, reached
-//     through DoltStore.RunInTransaction on a pinned connection), which is
-//     how `bd batch` closes, status updates and dep removals land when not
-//     proxied, and how `bd cook`'s proto-subgraph delete, `bd mol squash` and
-//     `bd mol burn` delete and close.
-//   - the legacy DoltStore.RemoveDependencyWithOptions (raw BeginTx in
-//     internal/storage/dolt/dependencies.go), which `bd duplicates --merge`
-//     uses to remove parent-child edges.
-//   - the wisp writers (internal/storage/dolt/wisps.go closeWisp/updateWisp/
-//     deleteWisp and ephemeral_routing.go's demote-to-wisp), which run raw
-//     unscoped transactions. The recompute joins depends_on_wisp_id, so a
-//     permanent issue blocked by two wisps whose removals race keeps the same
-//     stale flag.
+//   - DoltStore's commitWriteTx (withWriteTx/withRetryTx), its storage.Transaction
+//     runner (RunInTransaction, which scopes both its regular and its ignored
+//     transaction), and the raw transactions of its wisp writers and of the
+//     legacy RemoveDependencyWithOptions;
+//   - EmbeddedDoltStore's commitConn, which every embedded write, including
+//     RunInTransaction, goes through;
+//   - the uow Tx (internal/storage/uow), which serves every write a uow
+//     provider serves: the proxied CLI, `bd batch` when proxied, and bd serve.
+//     It scopes the pinned *sql.Conn its repositories run on, and the
+//     domain/db repositories record through the Note* helpers below exactly
+//     where the issueops write paths do.
 //
-// Every one of these leaves the pre-existing, operator-repairable state
-// (`bd doctor`, `bd recompute-blocked`); none is made worse by the recheck.
+// A write that reaches this package on any other transaction records nothing
+// and behaves exactly as it did before the recheck existed; that leaves the
+// operator-repairable state (`bd doctor`, `bd recompute-blocked`) the recheck
+// was added to prevent.
 type BlockedRecheck struct {
 	IssueIDs []string
 	WispIDs  []string
@@ -220,6 +216,43 @@ func TakeBlockedRecheck(tx DBTX) BlockedRecheck {
 	taken := *pending
 	*pending = BlockedRecheck{}
 	return taken
+}
+
+// Merge returns the union of r and other: every id either recorded, and the
+// sources and counts of both. A runner that scoped two transactions for one
+// write (DoltStore's split regular/ignored transactions) settles them with one
+// recheck.
+func (r BlockedRecheck) Merge(other BlockedRecheck) BlockedRecheck {
+	merged := BlockedRecheck{SourceCount: r.SourceCount + other.SourceCount}
+	merged.IssueIDs, _ = appendRecheckIDs(append([]string(nil), r.IssueIDs...), other.IssueIDs, nil)
+	merged.WispIDs, _ = appendRecheckIDs(append([]string(nil), r.WispIDs...), other.WispIDs, nil)
+	merged.Sources, _ = appendRecheckIDs(append([]string(nil), r.Sources...), other.Sources, nil)
+	if len(merged.Sources) > recheckSourceLimit {
+		merged.Sources = merged.Sources[:recheckSourceLimit]
+	}
+	return merged
+}
+
+// NoteStatusChangeBlockedRecheck records, for the post-commit recheck, the
+// dependents a move of id to the inactive newStatus (a close included)
+// recomputed in tx. The issue itself is excluded: a concurrent writer
+// conflicts on its row rather than racing past it.
+func NoteStatusChangeBlockedRecheck(tx DBTX, id, newStatus string, affectedIssues, affectedWisps []string) {
+	noteBlockedRecheck(tx, statusChangeRecheckLabel(id, newStatus), []string{id}, affectedIssues, affectedWisps)
+}
+
+// NoteDependencyRemovalBlockedRecheck records the dependents a removal of the
+// issueID -> dependsOnID edge recomputed in tx. Nothing is excluded: the
+// dependent is exactly the row a racing unblocking write can leave stale.
+func NoteDependencyRemovalBlockedRecheck(tx DBTX, issueID, dependsOnID string, affectedIssues, affectedWisps []string) {
+	noteBlockedRecheck(tx, fmt.Sprintf("dependency removal %s -> %s", issueID, dependsOnID), nil, affectedIssues, affectedWisps)
+}
+
+// NoteDeleteBlockedRecheck records the dependents a delete of deletedIDs
+// recomputed in tx, leaving out the deleted rows themselves. scope, when set,
+// says where the ids came from ("from <sourceRepo>").
+func NoteDeleteBlockedRecheck(tx DBTX, deletedIDs []string, scope string, affectedIssues, affectedWisps []string) {
+	noteBlockedRecheck(tx, deleteRecheckLabel(deletedIDs, scope), deletedIDs, affectedIssues, affectedWisps)
 }
 
 // noteBlockedRecheck records the dependents a write recomputed in tx. source

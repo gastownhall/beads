@@ -104,6 +104,15 @@ suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
 on the `local` backend (the `dolt-server` targets); they need no docker and
 execute remotely with `--config=remote-exec`. `--config=docker` runs the same
 suites on the `container` backend (host docker) as the A/B control.
+PR Risk's heavier server tiers have configs of their own, run by bazel.yml
+only with remote execution, each in a job of its own (`bazel-proxied`,
+`bazel-server-storage`): `--config=doltserver-proxied` is the
+proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
+`//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
+server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
+Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
+builds with the integration tag like `--config=integration`. Each shard
+runs its CI job's shard script, so Bazel shard k runs the tests of job k+1.
 
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;

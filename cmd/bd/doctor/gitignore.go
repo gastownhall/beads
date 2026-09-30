@@ -790,6 +790,8 @@ func EnsureProjectGitignore(repoPath string) error {
 		return nil // All patterns already present
 	}
 
+	// A fresh .gitignore must not start with a blank line; the separator only
+	// belongs between existing content and the appended block.
 	lines := make([]string, 0, len(toAdd)+2)
 	if len(content) > 0 {
 		lines = append(lines, "")

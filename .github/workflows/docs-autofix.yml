@@ -11,9 +11,15 @@
 # never checks out or executes PR code. It checks out the base default branch
 # for scripts, and treats the artifact strictly as data: every path in the
 # patch must match an anchored generated-docs allowlist (single path segment,
-# no traversal, no symlink modes) and `git apply --index` supplies the
-# underlying escape guards (scripts/docs-autofix-push.sh), so a hostile patch
-# can at most rewrite generated doc files on its own PR branch.
+# no traversal), mode/symlink/rename/copy/binary hunks are refused, and the
+# patch is applied to an index in a bare clone and re-checked once staged
+# (scripts/docs-autofix-push.sh), so a hostile patch can at most rewrite
+# generated doc files on its own PR branch. Pushes are leased to the run's
+# head SHA and skipped for heads that are protected or under a ruleset.
+#
+# CONCURRENCY: job-level, shared with bazel-autofix.yml per head branch and
+# without cancel-in-progress, so the two bots queue instead of racing on one
+# branch (see bazel-autofix.yml).
 #
 # TOKEN NOTE: pushes made with the default GITHUB_TOKEN do not retrigger PR
 # checks. Configure a DOCS_AUTOFIX_TOKEN repo secret (fine-grained PAT or
@@ -34,10 +40,6 @@ permissions:
   pull-requests: write
   actions: read
 
-concurrency:
-  group: docs-autofix-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
-
 jobs:
   autofix:
     name: Apply CLI docs regeneration to PR
@@ -45,9 +47,18 @@ jobs:
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
+    # Bounded: a hung run would hold the shared group for the default 6h.
+    timeout-minutes: 10
+    # Shared with bazel-autofix.yml; queue, never cancel.
+    concurrency:
+      group: autofix-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
     steps:
-      # Trusted side only: base repo default branch, never the PR head.
+      # Trusted side only: base repo default branch, never the PR head. The
+      # workflow token is not left in .git/config.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
 
       - name: Download docs freshness patch (if any)
         id: patch
@@ -63,9 +74,22 @@ jobs:
             echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > patch.zip
-          unzip -o patch.zip -d "${RUNNER_TEMP}/docs-patch"
-          ls -la "${RUNNER_TEMP}/docs-patch"
+          dir="${RUNNER_TEMP}/docs-patch"
+          mkdir -p "$dir"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/docs-patch.zip"
+          # Extract only the expected name, and only as a regular file.
+          unzip -o "${RUNNER_TEMP}/docs-patch.zip" cli-docs-freshness.patch -d "$dir" || true
+          ls -la "$dir"
+          f="$dir/cli-docs-freshness.patch"
+          if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then
+            echo "::error::artifact entry cli-docs-freshness.patch is not a regular file"
+            exit 1
+          fi
+          if [ ! -f "$f" ]; then
+            echo "Artifact has no cli-docs-freshness.patch; nothing to do."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "found=true" >> "$GITHUB_OUTPUT"
 
       - name: Push regen commit or leave apply recipe

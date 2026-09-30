@@ -239,7 +239,7 @@ var configSetCmd = &cobra.Command{
 			if !validRoles[value] {
 				return HandleError("invalid role %q (valid values: maintainer, contributor)", value)
 			}
-			// bd config's own beads.role reads and writes ignore inherited Git
+			// bd config get/set/unset/set-many beads.role ignore inherited Git
 			// routing, including GIT_CONFIG_GLOBAL, so the value lands in the
 			// repository this command selected. beads.role is an authority
 			// value and the reader it feeds treats a missing value as
@@ -1264,7 +1264,11 @@ func validateStorageClassConfig(key, value string) error {
 	if canonical := issueType.Normalize(); canonical != issueType {
 		return fmt.Errorf("invalid key %q: %q is an alias of %q, and create-time lookup uses the canonical type; set storage-class.%s instead", key, suffix, canonical, canonical)
 	}
-	if !issueType.IsValidWithCustom(loadEmbeddedCustomTypes()) {
+	customTypes, err := resolveWorkspaceCustomTypes(rootCtx)
+	if err != nil {
+		return err
+	}
+	if !issueType.IsValidWithCustom(customTypes) {
 		return fmt.Errorf("invalid key %q: unknown issue type %q (use a built-in type, or add it to types.custom first)", key, suffix)
 	}
 	if _, err := types.ParseStorageClass(value); err != nil {

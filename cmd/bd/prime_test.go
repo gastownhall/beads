@@ -397,6 +397,44 @@ func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 	}
 }
 
+// TestPrimeMemoryGuidanceDoesNotProhibitHarnessMemory guards GH#6111: both
+// renderings used to emit "Do NOT use MEMORY.md files", which contradicts
+// harnesses that ship a first-party memory whose index file has exactly that
+// name. The guidance now names the store each content class belongs in, so
+// neither rendering may name the file again. The assertion is negative on the
+// old prohibition rather than positive on the new prose, so it survives any
+// future rewording; the bd remember check keeps it from passing vacuously if
+// the memory bullet is dropped altogether.
+func TestPrimeMemoryGuidanceDoesNotProhibitHarnessMemory(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(true)()
+	defer stubPrimeAgentProfile(config.ProfileConservative)()
+
+	for _, tc := range []struct {
+		name    string
+		mcpMode bool
+	}{
+		{name: "CLI", mcpMode: false},
+		{name: "MCP", mcpMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := outputPrimeContext(&buf, tc.mcpMode, false); err != nil {
+				t.Fatalf("outputPrimeContext failed: %v", err)
+			}
+
+			output := buf.String()
+			if !strings.Contains(output, "bd remember") {
+				t.Fatalf("prime output should still teach bd remember; output:\n%s", output)
+			}
+			if strings.Contains(output, "MEMORY.md") {
+				t.Errorf("prime output should not name MEMORY.md; output:\n%s", output)
+			}
+		})
+	}
+}
+
 func TestPrimeStartsWithTruncationDirective(t *testing.T) {
 	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
