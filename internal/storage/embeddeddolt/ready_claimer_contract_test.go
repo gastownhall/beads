@@ -80,6 +80,12 @@ func TestEmbeddedReadyClaimerDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunReadyClaimerDoesNotMutateTheCallerRequest(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcsnap"))
 }
 
+func TestEmbeddedReadyClaimerHonorsExcludeIDs(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReadyClaimerHonorsExcludeIDs(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcexcl"))
+}
+
 // newEmbeddedReadyClaimerFixture composes the frozen role kit with this
 // backend's two accessors. An environment per case is affordable here — each
 // newTestEnv clones a pristine template rather than booting a server — which is

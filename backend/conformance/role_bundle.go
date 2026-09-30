@@ -103,6 +103,7 @@ type RoleContractBundle struct {
 	Reader               func(t *testing.T) *ReaderFixture
 	ReadyClaimer         func(t *testing.T) *ReadyClaimerFixture
 	ReadyCounter         func(t *testing.T) *ReadyCounterFixture
+	ReadyLister          func(t *testing.T) *ReadyListerFixture
 	Relations            func(t *testing.T) *RelationsFixture
 	Releaser             func(t *testing.T) *ReleaserFixture
 	StatsReporter        func(t *testing.T) *StatsReporterFixture

@@ -706,6 +706,10 @@ func (s *configStore) ReadyCounter() (issueops.ReadyCounter, error) {
 	return nil, &storage.ErrUnsupported{Op: "ReadyCounter", Backend: "jira-config-stub"}
 }
 
+func (s *configStore) ReadyLister() (issueops.ReadyLister, error) {
+	return nil, &storage.ErrUnsupported{Op: "ReadyLister", Backend: "jira-config-stub"}
+}
+
 func (s *configStore) Querier() (issueops.Querier, error) {
 	return nil, &storage.ErrUnsupported{Op: "Querier", Backend: "jira-config-stub"}
 }

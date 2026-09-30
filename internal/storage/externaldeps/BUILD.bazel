@@ -3,7 +3,9 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "externaldeps",
     srcs = [
+        "batch_apply_policy.go",
         "decorator.go",
+        "policy_roles.go",
         "resolver.go",
         "role_accessors.go",
         "uow_decorator.go",
@@ -18,7 +20,6 @@ go_library(
         "//internal/types",
         "//internal/workapi",
         "//internal/workapi/storereader",
-        "//internal/workapi/storereadycounter",
         "//issueops",
         "//memoryops",
     ],
@@ -27,9 +28,21 @@ go_library(
 go_test(
     name = "externaldeps_test",
     srcs = [
+        "batch_apply_guard_test.go",
+        "batch_close_guard_test.go",
+        "claim_if_open_guard_test.go",
+        "close_narrowing_test.go",
         "decorator_test.go",
+        "fake_roles_test.go",
+        "forced_update_close_test.go",
+        "policy_roles_test.go",
+        "ready_budget_test.go",
         "ready_wake_test.go",
+        "uow_claim_guard_test.go",
         "uow_decorator_test.go",
+        "uow_policy_roles_test.go",
+        "uow_preresolve_test.go",
+        "uow_reclose_exemption_test.go",
     ],
     embed = [":externaldeps"],
     deps = [
@@ -38,6 +51,10 @@ go_test(
         "//internal/storage/issueops",
         "//internal/storage/uow",
         "//internal/types",
+        "//internal/workapi",
+        "//internal/workapi/storereader",
+        "//internal/workapi/storereadycounter",
+        "//internal/workapi/storereadylister",
         "//issueops",
     ],
 )

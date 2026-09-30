@@ -2,6 +2,7 @@ package workapi
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -65,6 +66,9 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		ExcludeTypes:     normalizeExcludeTypes(in.ExcludeTypes),
 		HasMetadataKey:   in.HasMetadataKey,
 		Lite:             in.Brief,
+		// Cloned so a filter a seam later appends to cannot write through
+		// into the caller's request (roles snapshot their requests).
+		ExcludeIDs: slices.Clone(in.ExcludeIDs),
 	}
 
 	if in.Priority != nil {
@@ -153,4 +157,32 @@ func normalizeExcludeTypes(raw []string) []types.IssueType {
 		}
 	}
 	return out
+}
+
+// ReadyListingOf assembles an issueops.ReadyListing from a page that has already
+// been skipped and trimmed, the request's offset and resolved limit, and the size
+// of the whole ready set. Both ReadyLister bodies finish through it, so the
+// has-more verdict and the total's floor are one definition.
+//
+// HasMore is "rows past this page exist", read off the total: only a limited
+// request can hide rows. Total is clamped from below to the rows the page proves
+// exist (Offset+len(items), when the page is non-empty) so a published "Showing
+// X of N" never shows an N smaller than X.
+func ReadyListingOf(items []*types.IssueWithCounts, offset, limit int, total int64) issueops.ReadyListing {
+	if items == nil {
+		items = []*types.IssueWithCounts{}
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if len(items) > 0 {
+		if seen := int64(offset + len(items)); total < seen {
+			total = seen
+		}
+	}
+	return issueops.ReadyListing{
+		Items:   items,
+		HasMore: limit > 0 && int64(offset+len(items)) < total,
+		Total:   total,
+	}
 }

@@ -188,8 +188,10 @@ func TestProxiedServerReady(t *testing.T) {
 		if !strings.Contains(stderr, "Use --limit 0 for all") {
 			t.Fatalf("expected truncation hint on stderr, got: %q", stderr)
 		}
-		if !strings.Contains(stderr, "more matched but were hidden by --limit") {
-			t.Errorf("expected HasMore-based hint wording on stderr, got: %q", stderr)
+		// The direct route's wording, total included: both routes render one
+		// ReadyLister answer through renderReadyListing.
+		if !strings.Contains(stderr, "Showing 2 of 4 ready issues.") {
+			t.Errorf("expected the \"Showing X of N\" hint on stderr, got: %q", stderr)
 		}
 	})
 

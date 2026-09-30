@@ -1,0 +1,7 @@
+$ bd ready --label nobody
+--- exit: 0
+--- stdout
+
+✨ No ready work found (all issues have blocking dependencies)
+
+--- stderr

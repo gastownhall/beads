@@ -1,0 +1,100 @@
+$ bd ready --json --limit 0
+--- exit: 0
+--- stdout
+{
+  "data": [
+    {
+      "id": "gd-bug",
+      "title": "Crash on start",
+      "description": "long text that --brief drops",
+      "status": "open",
+      "priority": 0,
+      "issue_type": "bug",
+      "owner": "test@test.com",
+      "created_at": "<TS>",
+      "created_by": "Test",
+      "updated_at": "<TS>",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "gd-alpha",
+      "title": "Alpha task",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "owner": "test@test.com",
+      "estimated_minutes": 30,
+      "created_at": "<TS>",
+      "created_by": "Test",
+      "updated_at": "<TS>",
+      "labels": [
+        "team-a"
+      ],
+      "dependency_count": 0,
+      "dependent_count": 1,
+      "comment_count": 0
+    },
+    {
+      "id": "gd-feat",
+      "title": "Shiny feature",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "feature",
+      "assignee": "alice",
+      "owner": "test@test.com",
+      "created_at": "<TS>",
+      "created_by": "Test",
+      "updated_at": "<TS>",
+      "labels": [
+        "team-a",
+        "team-b"
+      ],
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "gd-epic",
+      "title": "Big epic",
+      "status": "open",
+      "priority": 3,
+      "issue_type": "epic",
+      "owner": "test@test.com",
+      "created_at": "<TS>",
+      "created_by": "Test",
+      "updated_at": "<TS>",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "gd-epic.1",
+      "title": "Epic child",
+      "status": "open",
+      "priority": 4,
+      "issue_type": "task",
+      "owner": "test@test.com",
+      "created_at": "<TS>",
+      "created_by": "Test",
+      "updated_at": "<TS>",
+      "dependencies": [
+        {
+          "issue_id": "gd-epic.1",
+          "depends_on_id": "gd-epic",
+          "type": "parent-child",
+          "created_at": "<TS>",
+          "created_by": "Test",
+          "metadata": "{}"
+        }
+      ],
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0,
+      "parent": "gd-epic"
+    }
+  ],
+  "schema_version": 1
+}
+--- stderr

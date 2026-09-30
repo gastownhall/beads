@@ -131,6 +131,12 @@ func TestBatchCloserSettlesTheDependersOfWhatItClosed(t *testing.T) {
 	conformance.RunBatchCloserSettlesTheDependersOfWhatItClosed(t, ctx, fixture)
 }
 
+func TestBatchCloserClaimNextHonorsExcludeIDs(t *testing.T) {
+	fixture, ctx, cleanup := newDoltBatchCloserFixture(t, "bcclaimexcl")
+	defer cleanup()
+	conformance.RunBatchCloserClaimNextHonorsExcludeIDs(t, ctx, fixture)
+}
+
 func newDoltBatchCloserFixture(t *testing.T, prefix string) (conformance.BatchCloserFixture, context.Context, func()) {
 	t.Helper()
 	store, storeCleanup := setupTestStore(t)

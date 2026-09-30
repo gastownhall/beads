@@ -694,6 +694,36 @@ func TestReadyCounterExposesTypedUnsupportedError(t *testing.T) {
 	}
 }
 
+// TestReadyListerKeepsTelemetryOutermost is the READ answer for the listing:
+// a ready page fires no completion hooks, so the hook decorator adds no layer
+// and the storage.ReadyLister.ListReady span is the outermost one.
+func TestReadyListerKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	lister, err := storage.NewHookFiringStore(instrumented, nil).ReadyLister()
+	if err != nil {
+		t.Fatalf("ReadyLister() error = %v", err)
+	}
+	if got := reflect.TypeOf(lister).String(); got != "*telemetry.instrumentedReadyLister" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+func TestReadyListerExposesTypedUnsupportedError(t *testing.T) {
+	lister, err := (*dolt.DoltStore)(nil).ReadyLister()
+	if lister != nil {
+		t.Fatalf("ReadyLister() lister = %T, want nil", lister)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("ReadyLister() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 // TestQuerierKeepsTelemetryOutermost is the READ answer again: a query fires no
 // completion hooks, so the hook decorator adds no layer.
 func TestQuerierKeepsTelemetryOutermost(t *testing.T) {

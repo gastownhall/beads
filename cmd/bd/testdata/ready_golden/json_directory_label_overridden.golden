@@ -1,0 +1,43 @@
+$ (in golden-scope-dir) bd ready --json --label team-a
+--- exit: 0
+--- stdout
+[
+  {
+    "id": "gd-alpha",
+    "title": "Alpha task",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "test@test.com",
+    "estimated_minutes": 30,
+    "created_at": "<TS>",
+    "created_by": "Test",
+    "updated_at": "<TS>",
+    "labels": [
+      "team-a"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 1,
+    "comment_count": 0
+  },
+  {
+    "id": "gd-feat",
+    "title": "Shiny feature",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "feature",
+    "assignee": "alice",
+    "owner": "test@test.com",
+    "created_at": "<TS>",
+    "created_by": "Test",
+    "updated_at": "<TS>",
+    "labels": [
+      "team-a",
+      "team-b"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+--- stderr

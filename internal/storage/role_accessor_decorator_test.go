@@ -68,7 +68,7 @@ func roleAccessorNamesOf(surface reflect.Type) (names, unclassified []string) {
 }
 
 // TestEveryStoreRoleAccessorIsClassified fails when DoltStorage hands out an
-// interface the census cannot place. Every one of the twenty-eight today is a
+// interface the census cannot place. Every one of the twenty-nine today is a
 // facade role, so this costs nothing and closes the path where a role surface
 // grows a package and the census quietly stops covering it. (roleAccessorNames
 // is derived, so the count is prose and only this sentence goes stale — but it
@@ -151,7 +151,7 @@ func assertRoleAccessorsAreDeclared(t *testing.T, decorator reflect.Type) {
 }
 
 // roleAccessorStore is a DoltStorage whose only real methods are the
-// twenty-eight role accessors, each answering with a distinguishable sentinel
+// twenty-nine role accessors, each answering with a distinguishable sentinel
 // so a test can tell a decorated surface from a passed-through one.
 type roleAccessorStore struct {
 	DoltStorage
@@ -175,6 +175,7 @@ type roleAccessorStore struct {
 	editor       issueops.DependencyEditor
 	applier      issueops.BatchApplier
 	readyCounter issueops.ReadyCounter
+	readyLister  issueops.ReadyLister
 	querier      issueops.Querier
 	sweeper      issueops.Sweeper
 	deleter      issueops.Deleter
@@ -207,6 +208,7 @@ func newRoleAccessorStore() *roleAccessorStore {
 		editor:       sentinel,
 		applier:      sentinel,
 		readyCounter: sentinel,
+		readyLister:  sentinel,
 		querier:      sentinel,
 		sweeper:      sentinel,
 		deleter:      sentinel,
@@ -246,6 +248,9 @@ func (s *roleAccessorStore) Commenter() (issueops.Commenter, error) { return s.c
 func (s *roleAccessorStore) ReadyCounter() (issueops.ReadyCounter, error) {
 	return s.readyCounter, s.err
 }
+func (s *roleAccessorStore) ReadyLister() (issueops.ReadyLister, error) {
+	return s.readyLister, s.err
+}
 func (s *roleAccessorStore) Querier() (issueops.Querier, error) { return s.querier, s.err }
 func (s *roleAccessorStore) Sweeper() (issueops.Sweeper, error) {
 	return s.sweeper, s.err
@@ -282,7 +287,7 @@ func (s *roleAccessorStore) Releaser() (issueops.Releaser, error) {
 	return s.releaser, s.err
 }
 
-// roleAccessorSentinel implements twenty-seven of the twenty-eight roles at
+// roleAccessorSentinel implements twenty-eight of the twenty-nine roles at
 // once — every one but memoryops.Memories, whose List collides with
 // issueops.Reader.List and needs the second sentinel below.
 // Nothing calls its methods; identity is the whole point.
@@ -359,6 +364,9 @@ func (*roleAccessorSentinel) ApplyBatch(context.Context, issueops.ApplyBatchRequ
 	return issueops.ApplyBatchResult{}, nil
 }
 
+func (*roleAccessorSentinel) ListReady(context.Context, issueops.ReadyListRequest) (issueops.ReadyListing, error) {
+	return issueops.ReadyListing{}, nil
+}
 func (*roleAccessorSentinel) CountReady(context.Context, issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
 	return issueops.ReadyCountResult{}, nil
 }
@@ -436,7 +444,8 @@ func (*memoryRoleSentinel) List(context.Context, memoryops.ListRequest) (memoryo
 // paragraph rather than four near-identical ones (bd-8ri3m). Reads fire no
 // completion hooks, so IssueReader, IssueRelations, Counter, StatsReporter,
 // CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, GraphCounter,
-// ReadyCounter, Querier and InitVerifier deliberately return the inner surface
+// ReadyCounter, ReadyLister, Querier and InitVerifier deliberately return the
+// inner surface
 // unwrapped,
 // each in its own hook_*.go. The ones in that column that are NOT reads are
 // WorkspaceConfig, Memories, VersionReconciler, Bootstrapper, Sweeper and
@@ -479,6 +488,7 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"StatsReporter", func() (any, error) { return store.StatsReporter() }, inner.stats, false},
 		{"CycleDetector", func() (any, error) { return store.CycleDetector() }, inner.cycles, false},
 		{"ReadyCounter", func() (any, error) { return store.ReadyCounter() }, inner.readyCounter, false},
+		{"ReadyLister", func() (any, error) { return store.ReadyLister() }, inner.readyLister, false},
 		{"Querier", func() (any, error) { return store.Querier() }, inner.querier, false},
 		{"Sweeper", func() (any, error) { return store.Sweeper() }, inner.sweeper, false},
 		{"Deleter", func() (any, error) { return store.Deleter() }, inner.deleter, false},
@@ -536,6 +546,7 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"StatsReporter", func() (any, error) { return store.StatsReporter() }},
 		{"CycleDetector", func() (any, error) { return store.CycleDetector() }},
 		{"ReadyCounter", func() (any, error) { return store.ReadyCounter() }},
+		{"ReadyLister", func() (any, error) { return store.ReadyLister() }},
 		{"Querier", func() (any, error) { return store.Querier() }},
 		{"Sweeper", func() (any, error) { return store.Sweeper() }},
 		{"Deleter", func() (any, error) { return store.Deleter() }},

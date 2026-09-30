@@ -5,12 +5,17 @@ import (
 	"errors"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -94,7 +99,7 @@ func TestInstrumentedStorageDeclaresEveryRoleAccessor(t *testing.T) {
 }
 
 // roleAccessorStore is a DoltStorage whose only real methods are the
-// twenty-eight role accessors, each answering with a distinguishable sentinel
+// twenty-nine role accessors, each answering with a distinguishable sentinel
 // so a test can tell an instrumented surface from a passed-through one.
 //
 // TWO sentinels rather than one: memoryops.Memories.List and issueops.Reader.List
@@ -140,6 +145,9 @@ func (s *roleAccessorStore) Commenter() (issueops.Commenter, error) { return s.s
 func (s *roleAccessorStore) ReadyCounter() (issueops.ReadyCounter, error) {
 	return s.surface, s.err
 }
+func (s *roleAccessorStore) ReadyLister() (issueops.ReadyLister, error) {
+	return s.surface, s.err
+}
 func (s *roleAccessorStore) Querier() (issueops.Querier, error) { return s.surface, s.err }
 func (s *roleAccessorStore) Sweeper() (issueops.Sweeper, error) {
 	return s.surface, s.err
@@ -173,7 +181,7 @@ func (s *roleAccessorStore) Releaser() (issueops.Releaser, error) {
 	return s.surface, s.err
 }
 
-// roleAccessorSentinel implements twenty-seven of the twenty-eight roles at
+// roleAccessorSentinel implements twenty-eight of the twenty-nine roles at
 // once — every one but memoryops.Memories, whose List collides with
 // issueops.Reader.List and needs the second sentinel below.
 // Nothing calls its methods; identity is the whole point.
@@ -251,6 +259,9 @@ func (*roleAccessorSentinel) ApplyBatch(context.Context, issueops.ApplyBatchRequ
 	return issueops.ApplyBatchResult{}, nil
 }
 
+func (*roleAccessorSentinel) ListReady(context.Context, issueops.ReadyListRequest) (issueops.ReadyListing, error) {
+	return issueops.ReadyListing{}, nil
+}
 func (*roleAccessorSentinel) CountReady(context.Context, issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
 	return issueops.ReadyCountResult{}, nil
 }
@@ -362,6 +373,7 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 		{"StatsReporter", func() (any, error) { return wrapped.StatsReporter() }, sentinel},
 		{"CycleDetector", func() (any, error) { return wrapped.CycleDetector() }, sentinel},
 		{"ReadyCounter", func() (any, error) { return wrapped.ReadyCounter() }, sentinel},
+		{"ReadyLister", func() (any, error) { return wrapped.ReadyLister() }, sentinel},
 		{"Querier", func() (any, error) { return wrapped.Querier() }, sentinel},
 		{"Sweeper", func() (any, error) { return wrapped.Sweeper() }, sentinel},
 		{"Deleter", func() (any, error) { return wrapped.Deleter() }, sentinel},
@@ -388,34 +400,45 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 	}
 }
 
-// TestExternalDepsReadyCounterSurvivesThisLayer pins the span across the one
-// decorator above this one that CANNOT recurse. cmd/bd wires
-// hooks -> externaldeps -> telemetry -> store, and externaldeps has to build
-// its own ready counter over itself so the total honors its external-dependency
-// exclusions — recursing into the inner counter the way the accessors above do
-// would count externally blocked issues as ready. That leaves handing the
-// finished counter to WrapReadyCounter as the only way this layer keeps its
-// turn, so an externaldeps override that skips it silently drops the
-// storage.ReadyCounter.CountReady span for every text-mode `bd ready`.
-//
-// This is the only test that wires a real decorator above the instrumented
-// store, which is why WrapReadyCounter's sole caller outside this package is
-// the thing being pinned here.
+// TestExternalDepsReadyCounterSurvivesThisLayer pins the span across the
+// decorator cmd/bd wires above this one (hooks -> externaldeps -> telemetry ->
+// store). externaldeps narrows the count's request with its external
+// exclusions and then delegates to THIS layer's counter, so every text-mode
+// `bd ready` total still emits exactly one storage.ReadyCounter.CountReady
+// span. An externaldeps counter that went around this layer — or rebuilt a
+// counter over itself without handing it back here — drops the span.
 func TestExternalDepsReadyCounterSurvivesThisLayer(t *testing.T) {
 	t.Setenv("BD_OTEL_STDOUT", "true")
-	inner := &roleAccessorStore{surface: &roleAccessorSentinel{}}
+	inner := &edgelessRoleAccessorStore{roleAccessorStore: &roleAccessorStore{surface: &roleAccessorSentinel{}}}
 	instrumented, ok := WrapStorage(inner).(*InstrumentedStorage)
 	if !ok {
 		t.Fatal("WrapStorage did not instrument the store; telemetry is disabled in this environment")
 	}
+	recorder := tracetest.NewSpanRecorder()
+	instrumented.tracer = sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)).Tracer(storageScopeName)
 
 	counter, err := externaldeps.New(instrumented, nil, nil).ReadyCounter()
 	if err != nil {
 		t.Fatalf("externaldeps ReadyCounter() error = %v", err)
 	}
-	if _, ok := counter.(*instrumentedReadyCounter); !ok {
-		t.Fatalf("externaldeps ReadyCounter() = %T, want it wrapped by this layer; the storage.ReadyCounter.CountReady span stops being emitted for text-mode bd ready", counter)
+	if _, err := counter.CountReady(t.Context(), issueops.ReadyRequest{Sort: "priority"}); err != nil {
+		t.Fatalf("CountReady: %v", err)
 	}
+	var names []string
+	for _, span := range recorder.Ended() {
+		names = append(names, span.Name())
+	}
+	if !slices.Contains(names, "storage.ReadyCounter.CountReady") {
+		t.Fatalf("spans = %v; the storage.ReadyCounter.CountReady span stops being emitted for text-mode bd ready", names)
+	}
+}
+
+// edgelessRoleAccessorStore answers the external-dependency policy's narrow
+// edge query with nothing, so the policy can run over the sentinel store.
+type edgelessRoleAccessorStore struct{ *roleAccessorStore }
+
+func (*edgelessRoleAccessorStore) GetExternalBlockingDependencyRecords(context.Context) (map[string][]*types.Dependency, error) {
+	return nil, nil
 }
 
 // TestInstrumentedStorageRoleAccessorsPropagateInnerErrors pins the other half
@@ -447,6 +470,7 @@ func TestInstrumentedStorageRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"StatsReporter", func() (any, error) { return wrapped.StatsReporter() }},
 		{"CycleDetector", func() (any, error) { return wrapped.CycleDetector() }},
 		{"ReadyCounter", func() (any, error) { return wrapped.ReadyCounter() }},
+		{"ReadyLister", func() (any, error) { return wrapped.ReadyLister() }},
 		{"Querier", func() (any, error) { return wrapped.Querier() }},
 		{"Sweeper", func() (any, error) { return wrapped.Sweeper() }},
 		{"Deleter", func() (any, error) { return wrapped.Deleter() }},

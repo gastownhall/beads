@@ -197,7 +197,7 @@ UpdateIssueType
 
 **Issueops role operations** — `storage.<Role>.<Method>`, emitted when a caller
 goes through the guarded issueops surface instead of calling storage directly
-(39 spans):
+(40 spans):
 
 ```
 BatchCloser.CloseBatch BatchCreator.CreateBatch
@@ -209,8 +209,8 @@ IssueOperations.Close IssueOperations.Create IssueOperations.Reopen
 IssueOperations.Update IssueReader.Get IssueReader.List IssueReader.Ready
 IssueRelations.Related Memories.Forget Memories.List Memories.Recall
 Memories.Remember Querier.Query ReadyClaimer.ClaimNext ReadyCounter.CountReady
-StatsReporter.AssigneeStats StatsReporter.Stats Sweeper.Sweep
-TreeWalker.WalkTree VersionReconciler.ReconcileVersion
+ReadyLister.ListReady StatsReporter.AssigneeStats StatsReporter.Stats
+Sweeper.Sweep TreeWalker.WalkTree VersionReconciler.ReconcileVersion
 VersionReconciler.RecordedVersion WorkspaceConfig.GetSetting
 WorkspaceConfig.ListSettings WorkspaceConfig.SetSetting
 WorkspaceConfig.UnsetSetting

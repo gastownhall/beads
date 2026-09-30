@@ -41,6 +41,7 @@ go_library(
         "hook_querier.go",
         "hook_ready_claimer.go",
         "hook_ready_counter.go",
+        "hook_ready_lister.go",
         "hook_relations.go",
         "hook_releaser.go",
         "hook_stats_reporter.go",

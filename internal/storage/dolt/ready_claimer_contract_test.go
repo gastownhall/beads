@@ -79,6 +79,12 @@ func TestReadyClaimerDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunReadyClaimerDoesNotMutateTheCallerRequest(t, ctx, fixture)
 }
 
+func TestReadyClaimerHonorsExcludeIDs(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcexcl")
+	defer cleanup()
+	conformance.RunReadyClaimerHonorsExcludeIDs(t, ctx, fixture)
+}
+
 // newDoltReadyClaimerFixture composes the frozen role kit with this backend's
 // two accessors. A store per case is affordable here — setupTestStore hands out
 // a copy-on-write branch of the shared package server — which is why this

@@ -68,6 +68,86 @@
     }
   },
   {
+    "name": "exclude_ids_policy",
+    "args": null,
+    "params": {
+      "Limit": 100,
+      "Sort": "priority",
+      "ExcludeIDs": [
+        "bd-b",
+        "bd-a"
+      ]
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false,
+        "ExcludeIDs": [
+          "bd-b",
+          "bd-a"
+        ]
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false,
+        "ExcludeIDs": [
+          "bd-b",
+          "bd-a"
+        ]
+      }
+    }
+  },
+  {
     "name": "type_plain",
     "args": [
       "--type",

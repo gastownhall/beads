@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -457,7 +458,11 @@ func closeProxiedRunPostClose(ctx context.Context, args []string, in closeProxie
 		return closeProxiedPostClose{}
 	}
 
-	post, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (closeProxiedPostClose, string, error) {
+	provider, err := closeProxiedPostCloseProvider(ctx, args, in)
+	if err != nil {
+		return closeProxiedPostClose{warnings: []string{fmt.Sprintf("post-close work failed: %v", err)}}
+	}
+	post, err := uow.RunTxResult(ctx, provider, func(ctx context.Context, uw uow.UnitOfWork) (closeProxiedPostClose, string, error) {
 		var out closeProxiedPostClose
 		var wrote []string
 
@@ -497,6 +502,41 @@ func closeProxiedRunPostClose(ctx context.Context, args []string, in closeProxie
 		post.warnings = append(post.warnings, fmt.Sprintf("post-close work failed: %v", err))
 	}
 	return post
+}
+
+// closeProxiedPostCloseProvider is the provider the post-close transaction
+// runs on. With --continue the external-dependency policy is asked about the
+// candidate steps inside the transaction: the auto-claim's guard
+// (ClaimIssueIfOpen / ClaimWispIfOpen), or with --no-auto the same check made
+// without claiming (GuardClaimInUOW), so the suggested step is one the claim
+// would not refuse. The candidates' `external:` refs are resolved here, in a
+// read before it, so neither opens a foreign project while the write
+// transaction holds its connection.
+func closeProxiedPostCloseProvider(ctx context.Context, args []string, in closeProxiedInput) (uow.UnitOfWorkProvider, error) {
+	if !in.continueOn || len(args) != 1 {
+		return uowProvider, nil
+	}
+	candidates, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]string, error) {
+		moleculeID := proxiedFindParentMolecule(ctx, uw, args[0])
+		if moleculeID == "" {
+			return nil, nil
+		}
+		// A progress read that fails resolves nothing: AdvanceToNextStep, which
+		// makes the same read in the transaction, is the one that reports it.
+		var ids []string
+		if progress, perr := getMoleculeProgress(ctx, uowMolReader{uw: uw}, moleculeID); perr == nil {
+			for _, step := range progress.Steps {
+				if step.Status == "ready" {
+					ids = append(ids, step.Issue.ID)
+				}
+			}
+		}
+		return ids, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return externaldeps.PreResolve(ctx, uowProvider, candidates...)
 }
 
 func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID string) ([]*types.Issue, string) {

@@ -39,6 +39,19 @@ const ProjectIDHeader = "Bd-Project-Id"
 // instead of discovering an older server silently ignored its stamp.
 const CapProjectEnforce = "project.enforce"
 
+// CapExternalDependencies is the CONDITIONAL behavior capability: it tells a
+// client that the ready, claim and close roles this server answers from carry
+// bd's external-dependency policy — an issue blocked by an unsatisfied or
+// unresolvable `external:<project>:<capability>` edge is left out of ready
+// work, refused by claim and claimNext, and refused by close — so the client
+// forwards its request and applies no policy of its own. A client that does
+// not see it must assume the server lists and claims past `external:` edges.
+//
+// Unlike project.enforce it is not a property of the build: whether the served
+// roles carry the policy is decided by whoever composed them, so it is
+// advertised only when Config.ExternalDependencyPolicy says so.
+const CapExternalDependencies = "policy.external_dependencies"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -750,12 +763,20 @@ func (r route) specPathOf() string {
 // rather than silently dropped by an older server.
 var behaviorCapabilities = []string{CapProjectEnforce}
 
-// Capabilities lists what this build advertises in ContextResponse.capabilities:
-// the operations it actually implements, gated on `implemented` so a stub can
-// never advertise itself, PLUS the behavior tokens for server-wide behaviors this
-// build enforces. A client that checks capabilities before calling gets a
-// truthful answer from every release, including one cut halfway through the
-// endpoint slices.
+// conditionalBehaviorCapabilities are the behavior tokens a server advertises
+// only when its Config says the behavior is present; see
+// AdvertisedCapabilities. They are listed here so the spec parity test can hold
+// the documented vocabulary to every token any server may advertise.
+var conditionalBehaviorCapabilities = []string{CapExternalDependencies}
+
+// Capabilities lists what EVERY server of this build advertises in
+// ContextResponse.capabilities: the operations it actually implements, gated on
+// `implemented` so a stub can never advertise itself, PLUS the behavior tokens
+// for server-wide behaviors this build enforces. A client that checks
+// capabilities before calling gets a truthful answer from every release,
+// including one cut halfway through the endpoint slices. A particular server may
+// advertise more — the conditional behavior tokens its Config turns on; see
+// AdvertisedCapabilities, which is what GET /v0/beads/context answers with.
 func Capabilities() []string {
 	var out []string
 	for _, rt := range routeTable {
@@ -764,6 +785,19 @@ func Capabilities() []string {
 		}
 	}
 	out = append(out, behaviorCapabilities...)
+	slices.Sort(out)
+	return out
+}
+
+// AdvertisedCapabilities is the capability list a server built from cfg
+// reports: Capabilities(), plus each conditional behavior token cfg turns on,
+// sorted. policy.external_dependencies is added only when
+// cfg.ExternalDependencyPolicy is set.
+func AdvertisedCapabilities(cfg Config) []string {
+	out := Capabilities()
+	if cfg.ExternalDependencyPolicy {
+		out = append(out, CapExternalDependencies)
+	}
 	slices.Sort(out)
 	return out
 }

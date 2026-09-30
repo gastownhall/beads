@@ -1,0 +1,5 @@
+$ bd ready --claim
+--- exit: 0
+--- stdout
+✓ Claimed issue: gd-alpha — Alpha task
+--- stderr

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -57,10 +58,23 @@ func (c *readyCounter) CountReady(ctx context.Context, req publicops.ReadyReques
 		return publicops.ReadyCountResult{}, err
 	}
 	return RunTxRead(ctx, c.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ReadyCountResult, error) {
-		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, filter)
+		total, err := countReadyInUOW(ctx, uw, filter)
 		if err != nil {
 			return publicops.ReadyCountResult{}, err
 		}
-		return publicops.ReadyCountResult{Total: int64(len(page.Items))}, nil
+		return publicops.ReadyCountResult{Total: total}, nil
 	})
+}
+
+// countReadyInUOW sizes the ready set for a COUNT filter (BuildReadyCountFilter's)
+// inside a unit of work the caller already holds. It is the one definition of
+// how this seam counts ready work — the unbounded page's length — shared by
+// CountReady and by ReadyLister, which needs the count inside its page's own
+// unit of work.
+func countReadyInUOW(ctx context.Context, uw UnitOfWork, filter types.WorkFilter) (int64, error) {
+	page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(page.Items)), nil
 }

@@ -38,10 +38,9 @@ import (
 // command in the tree, which it was not before: `bd list` used to build the
 // filter and run this body's steps longhand.
 //
-// Ready below is still reached only by tests and by the HTTP surface. `bd
-// ready` calls the workapi builders directly because it consumes the FILTER
-// for --claim, --gated, --explain and --mol; see issueops.Reader's doc comment
-// for why routing only its JSON path through the role would be worse.
+// Ready below is reached by tests and by the HTTP surface. `bd ready`'s
+// listing is issueops.ReadyLister's (internal/workapi/storereadylister), which
+// answers a total beside the page; see issueops.Reader's doc comment.
 func New(store storage.DoltStorage) (issueops.Reader, error) {
 	if store == nil {
 		return nil, &issueops.ErrUnsupported{Op: "storereader.New", Backend: "nil"}

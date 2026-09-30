@@ -47,6 +47,7 @@ func TestBatchCloserContract(t *testing.T) {
 		{name: "AllRefusedBatchRecordsNoHistory", prefix: "bc-nohistory", run: conformance.RunBatchCloserAllRefusedBatchRecordsNoHistory},
 		{name: "DoesNotMutateTheCallerRequest", prefix: "bc-snapshot", run: conformance.RunBatchCloserDoesNotMutateTheCallerRequest},
 		{name: "SettlesTheDependersOfWhatItClosed", prefix: "bc-blocked", run: conformance.RunBatchCloserSettlesTheDependersOfWhatItClosed},
+		{name: "ClaimNextHonorsExcludeIDs", prefix: "bc-claimexcl", run: conformance.RunBatchCloserClaimNextHonorsExcludeIDs},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, newUOWBatchCloserFixture(t, provider, test.prefix))

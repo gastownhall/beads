@@ -423,7 +423,7 @@ func TestSpecDefaultsMatchSharedConstants(t *testing.T) {
 // lowerCamel verb — is what every token on this surface is, and it is narrow
 // enough that no other backticked word in that paragraph can be mistaken for
 // one.
-var capabilityToken = regexp.MustCompile("`([a-z]+\\.[a-zA-Z]+)`")
+var capabilityToken = regexp.MustCompile("`([a-z]+\\.[a-zA-Z_]+)`")
 
 // TestSpecCapabilityVocabularyMatchesTheRouteTable is the gate for the ONE
 // piece of per-operation plumbing that had no gate.
@@ -455,8 +455,10 @@ func TestSpecCapabilityVocabularyMatchesTheRouteTable(t *testing.T) {
 	for _, m := range capabilityToken.FindAllStringSubmatch(desc, -1) {
 		documented[m[1]] = true
 	}
+	// Every token ANY server of this build may advertise: the build-level set
+	// plus the conditional behavior tokens a Config can turn on.
 	served := map[string]bool{}
-	for _, token := range Capabilities() {
+	for _, token := range append(Capabilities(), conditionalBehaviorCapabilities...) {
 		served[token] = true
 	}
 

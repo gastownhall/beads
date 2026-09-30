@@ -115,7 +115,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if err != nil {
 			return err
 		}
-		filter := in.filter
 
 		ctx := rootCtx
 
@@ -137,9 +136,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			// The claim is on the ReadyClaimer role, through the store's own
 			// accessor, so selection, the compare-and-set and the hydration
-			// that feeds --json all share one transaction. The listing below
-			// is not on a role and still builds the filter, for the reasons
-			// issueops.Reader's doc comment gives.
+			// that feeds --json all share one transaction.
 			claimer, err := activeStore.ReadyClaimer()
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
@@ -173,113 +170,134 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return nil
 		}
 
-		if jsonOutput {
-			// The page and the size of the whole ready set come back from ONE
-			// read transaction: the total rides the page's own ID query, so a
-			// capped listing no longer pays for a second counting pass (and a
-			// second defer-wake sweep) just to print "Showing N of M". Against
-			// a remote SQL server each of that pass's statements was a
-			// sequential round trip. The total is the same number the
-			// ReadyCounter role answers (storage.DoltStorage documents the
-			// identity), taken over the listing's own filter.
-			results, total, err := activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
-			if err != nil {
-				if capErr := handleMaxRowsError(err); capErr != nil {
-					return capErr
-				}
-				return HandleErrorRespectJSON("%v", err)
-			}
-			totalReady := len(results)
-			truncated := false
-			if filter.Limit > 0 && len(results) == filter.Limit && total > len(results) {
-				totalReady = total
-				truncated = true
-			}
-			if results == nil {
-				results = []*types.IssueWithCounts{}
-			}
-			var pag *PaginationMeta
-			if truncated {
-				pag = &PaginationMeta{
-					Returned:  len(results),
-					Total:     totalReady,
-					Truncated: true,
-				}
-			}
-			if jerr := outputJSONWithPagination(results, pag); jerr != nil {
-				return jerr
-			}
-			if truncated {
-				fmt.Fprintf(os.Stderr, "Showing %d of %d ready issues. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results), totalReady)
-			}
-			return nil
-		}
-
-		issues, err := activeStore.GetReadyWork(ctx, filter)
+		// The listing is the ReadyLister role's, through the store's own
+		// accessor, for every output mode: the page and the size of the whole
+		// ready set come back from ONE read (the total rides the page's own ID
+		// query), so "Showing N of M" costs no second counting pass, and the
+		// decorators — the external-dependency policy, telemetry, a remote
+		// store that forwards the request — each get their layer. The request
+		// is the command line verbatim (readyInput.ReadyListRequest); this
+		// function builds no filter.
+		listing, err := listReady(ctx, activeStore, in)
 		if err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
 			return HandleErrorRespectJSON("%v", err)
 		}
-
-		totalReady := len(issues)
-		truncated := false
-		if filter.Limit > 0 && len(issues) == filter.Limit {
-			// The same question the --json branch answers in-band, asked here
-			// of the ReadyCounter role, whose answer is the same identity, so
-			// the "Showing X of N" a human reads and the total a script parses
-			// are one number.
-			if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(issues) {
-				totalReady = n
-				truncated = true
-			}
-		}
-		maybeShowUpgradeNotification()
-
-		if len(issues) == 0 {
-			hasOpenIssues := false
-			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
-				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-			}
-			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
-			maybeShowTip(store)
-			return nil
-		}
-		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
-
-		usePlain := in.plainFormat || !in.prettyFormat
-		if usePlain {
-			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
-			for i, issue := range issues {
-				fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
-					ui.RenderPriority(issue.Priority),
-					ui.RenderType(string(issue.IssueType)),
-					ui.RenderID(issue.ID), issue.Title)
-				if issue.EstimatedMinutes != nil {
-					fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
-				}
-				if issue.Assignee != "" {
-					fmt.Printf("   Assignee: %s\n", issue.Assignee)
-				}
-			}
-			fmt.Println()
-		} else {
-			displayReadyList(issues, parentEpicMap)
-		}
-
-		if truncated {
-			fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), totalReady)))
-		}
-
-		maybeShowTip(store)
-		return nil
+		return renderReadyListing(listing, in, readyListingExtras{
+			hasOpenIssues: func() bool {
+				stats, statsErr := activeStore.GetStatistics(ctx)
+				return statsErr == nil && (stats.OpenIssues > 0 || stats.InProgressIssues > 0)
+			},
+			parentEpics: func(issues []*types.Issue) map[string]string {
+				return buildParentEpicMap(ctx, activeStore, issues)
+			},
+			afterText: func() { maybeShowTip(store) },
+		})
 	},
+}
+
+// readyListingExtras are the pieces of `bd ready`'s TEXT rendering that are
+// not the listing's answer and that each route reads through its own plumbing
+// — the store on the direct route, a unit of work on the proxied one. The
+// --json rendering needs none of them.
+type readyListingExtras struct {
+	// hasOpenIssues picks the empty-state message: "all blocked" vs "no open
+	// issues". A failed read reports false, as both routes always have.
+	hasOpenIssues func() bool
+	// parentEpics maps a child ID to its parent epic's title for --pretty.
+	parentEpics func(issues []*types.Issue) map[string]string
+	// afterText runs after a text rendering (the direct route's tip). May be
+	// nil.
+	afterText func()
+}
+
+// renderReadyListing prints one ReadyLister answer the way `bd ready` prints
+// it, on BOTH routes: the direct route and the proxied route hand it the
+// listing their own ReadyLister returned, so the JSON shape, the pagination
+// envelope and the "Showing X of N" hint are one body rather than two that
+// agree by inspection.
+//
+// HasMore is "the limit hid rows", read off the total in the same snapshot by
+// the role (false for --limit 0), and the role clamps Total to at least
+// Offset+len(Items), so the published total is never smaller than the page
+// beside it.
+func renderReadyListing(listing issueops.ReadyListing, in readyInput, extras readyListingExtras) error {
+	truncated := listing.HasMore
+	totalReady := len(listing.Items)
+	if truncated {
+		totalReady = int(listing.Total)
+	}
+
+	if in.jsonOut {
+		results := listing.Items
+		var pag *PaginationMeta
+		if truncated {
+			pag = &PaginationMeta{
+				Returned:  len(results),
+				Total:     totalReady,
+				Truncated: true,
+			}
+		}
+		if jerr := outputJSONWithPagination(results, pag); jerr != nil {
+			return jerr
+		}
+		if truncated {
+			fmt.Fprintf(os.Stderr, "Showing %d of %d ready issues. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results), totalReady)
+		}
+		return nil
+	}
+
+	issues := make([]*types.Issue, 0, len(listing.Items))
+	for _, item := range listing.Items {
+		issues = append(issues, item.Issue)
+	}
+	maybeShowUpgradeNotification()
+
+	if len(issues) == 0 {
+		if extras.hasOpenIssues() {
+			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+				ui.RenderWarn("✨"))
+		} else {
+			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		}
+		if extras.afterText != nil {
+			extras.afterText()
+		}
+		return nil
+	}
+
+	// Read eagerly, as both routes always have, whichever rendering follows.
+	parentEpicMap := extras.parentEpics(issues)
+	usePlain := in.plainFormat || !in.prettyFormat
+	if usePlain {
+		fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
+		for i, issue := range issues {
+			fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
+				ui.RenderPriority(issue.Priority),
+				ui.RenderType(string(issue.IssueType)),
+				ui.RenderID(issue.ID), issue.Title)
+			if issue.EstimatedMinutes != nil {
+				fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
+			}
+			if issue.Assignee != "" {
+				fmt.Printf("   Assignee: %s\n", issue.Assignee)
+			}
+		}
+		fmt.Println()
+	} else {
+		displayReadyList(issues, parentEpicMap)
+	}
+
+	if truncated {
+		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), totalReady)))
+	}
+
+	if extras.afterText != nil {
+		extras.afterText()
+	}
+	return nil
 }
 
 // readyGatedArm reports whether this `bd ready` invocation dispatches to the
@@ -402,29 +420,14 @@ var blockedCmd = &cobra.Command{
 	},
 }
 
-// readyTotal sizes the whole ready set for the request `bd ready` just listed
-// a page of, through the store's own ReadyCounter accessor.
-//
-// THE TEXT OUTPUT CALLS IT, and only when the page came back full, which is
-// the one situation where the answer can differ from what is already on
-// screen. The --json listing does not: it takes its total in-band from
-// GetReadyWorkWithCountsAndTotal, in the page's own transaction.
-//
-// The role has no --max-rows field to honor and needs none: the cap bounds a
-// page this machine materializes, and a count materializes no rows.
-//
-// A failed count is not a failed command — the page is already correct; all
-// that is lost is the "of N" beside it.
-func readyTotal(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (int, error) {
-	counter, err := activeStore.ReadyCounter()
+// listReady answers `bd ready`'s listing through the store's own ReadyLister
+// accessor with the request the command line built, unchanged.
+func listReady(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (issueops.ReadyListing, error) {
+	lister, err := activeStore.ReadyLister()
 	if err != nil {
-		return 0, err
+		return issueops.ReadyListing{}, err
 	}
-	result, err := counter.CountReady(ctx, readyRoleRequest(in))
-	if err != nil {
-		return 0, err
-	}
-	return int(result.Total), nil
+	return lister.ListReady(ctx, in.ReadyListRequest)
 }
 
 // buildParentEpicMap builds a map from child issue ID to parent epic title.

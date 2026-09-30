@@ -56,6 +56,7 @@ go_test(
         "race_detector_on_test.go",
         "ready_count_test.go",
         "ready_golden_test.go",
+        "ready_listing_test.go",
         "ready_test.go",
         "release_test.go",
         "stats_test.go",

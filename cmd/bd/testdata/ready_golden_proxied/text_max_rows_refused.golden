@@ -1,0 +1,5 @@
+$ bd ready --limit 0 --max-rows 2
+--- exit: 1
+--- stdout
+--- stderr
+Error: --max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode

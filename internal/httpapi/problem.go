@@ -1380,6 +1380,13 @@ func ClassifyError(err error) Result {
 	case errors.Is(err, storage.ErrAlreadyClaimed):
 		return newResult(CodeAlreadyClaimed, "issue is claimed by another actor")
 
+	// Before ErrNotClaimable, which it wraps: the code is the same — the
+	// claim is refused for the state around the issue, and there is no bypass
+	// — but the detail must not say "not in a claimable state" about an issue
+	// whose status IS claimable, and there is no `issue_status` to attach.
+	case errors.Is(err, issueops.ErrClaimBlocked):
+		return newResult(CodeNotClaimable, "issue is blocked by an unsatisfied dependency; it cannot be claimed until the blocker is satisfied")
+
 	case errors.Is(err, storage.ErrNotClaimable):
 		return newResult(CodeNotClaimable, "issue is not in a claimable state")
 

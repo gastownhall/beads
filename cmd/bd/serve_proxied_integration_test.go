@@ -171,7 +171,9 @@ func assertServedCapabilities(t *testing.T, body map[string]any) {
 		}
 		got = append(got, token)
 	}
-	want := httpapi.Capabilities()
+	// Every topology this subprocess runs composes the external-dependency
+	// policy itself, so each one advertises it on top of the build-level set.
+	want := httpapi.AdvertisedCapabilities(httpapi.Config{ExternalDependencyPolicy: true})
 	if len(want) == 0 {
 		t.Fatal("this build derives no capabilities; the assertion below would pass against a server that advertises nothing")
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,7 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -46,11 +44,15 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	if in.claim {
 		return runReadyProxiedClaim(ctx, in)
 	}
+	if !in.gated && in.molID == "" && !in.explain {
+		return runReadyProxiedList(ctx, in)
+	}
 
 	// Wake expired dated defers before the read below. The unit of work this
 	// route opens is read-only-by-ending (Close rolls back), so the sweep runs
-	// in a committing UOW of its own first; the claim route above gets the
-	// same sweep from its role (uow.readyClaimer.ClaimNext).
+	// in a committing UOW of its own first; the claim and listing routes above
+	// get the same sweep from their roles (uow.readyClaimer.ClaimNext,
+	// uow.readyLister.ListReady).
 	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
 
 	uw, err := uowProvider.NewUOW(ctx)
@@ -64,10 +66,8 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return runReadyProxiedGated(ctx, uw, in)
 	case in.molID != "":
 		return runReadyProxiedMolecule(ctx, uw, in)
-	case in.explain:
-		return runReadyProxiedExplain(ctx, uw, in)
 	default:
-		return runReadyProxiedList(ctx, uw, in)
+		return runReadyProxiedExplain(ctx, uw, in)
 	}
 }
 
@@ -115,93 +115,76 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	return nil
 }
 
-func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
-	if in.jsonOut {
-		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, in.filter)
-		if err != nil {
-			return HandleError("%v", err)
-		}
-		// The same epilogue issueops.Reader.Ready runs, through the same
-		// function: this seam reports a has-more natively and ready has no
-		// display order, so the trim is a no-op and the verdict is the seam's
-		// — but it is reached the one way, not restated here.
-		results, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
-		truncated = truncated && in.filter.Limit > 0
-		// Parity with the direct route: the pagination key is emitted only
-		// when truncated, and it now carries the same Total, from the same
-		// role. This route published no total at all until ReadyCounter
-		// existed, so a script that read `pagination.total` got one number
-		// under a direct-mode workspace and no key at all under a proxied one.
-		//
-		// The guard is the direct route's guard: the two queries are not one
-		// snapshot (issueops.ReadyCounter.CountReady), so a close landing
-		// between them must not publish a total smaller than the page beside
-		// it.
-		var pag *PaginationMeta
-		if truncated {
-			pag = &PaginationMeta{
-				Returned:  len(results),
-				Truncated: true,
-			}
-			if n, countErr := proxiedReadyTotal(ctx, in); countErr == nil && n > len(results) {
-				pag.Total = n
-			}
-		}
-		_ = outputJSONWithPagination(results, pag)
-		if truncated {
-			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
-		}
-		return nil
+// runReadyProxiedList is the proxied route of `bd ready`'s listing, on the
+// same ReadyLister role the direct route reaches through the store's accessor,
+// with the same request (readyInput.ReadyListRequest): the page and the size of
+// the whole ready set come back from ONE call, inside one read-only unit of
+// work the role opens itself, and the external-dependency policy the provider
+// carries is the role's layer rather than this function's. This function
+// builds no filter and opens no unit of work for the listing; it opens one only
+// to render the text route's extras (the empty-state statistics and the parent
+// epic titles), which are presentation, not the answer.
+func runReadyProxiedList(ctx context.Context, in readyInput) error {
+	lister, err := proxiedReadyLister()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
-
-	page, err := uw.IssueUseCase().GetReadyWork(ctx, in.filter)
+	listing, err := lister.ListReady(ctx, in.ReadyListRequest)
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	issues, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
-	truncated = truncated && in.filter.Limit > 0
-
-	maybeShowUpgradeNotification()
-
-	if len(issues) == 0 {
-		hasOpenIssues := false
-		if stats, statsErr := uw.IssueUseCase().GetStatistics(ctx); statsErr == nil {
-			hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-		}
-		if hasOpenIssues {
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				ui.RenderWarn("✨"))
-		} else {
-			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-		}
-		return nil
-	}
-
-	parentEpicMap := buildParentEpicMapProxied(ctx, uw, issues)
-	usePlain := in.plainFormat || !in.prettyFormat
-	if usePlain {
-		fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
-		for i, issue := range issues {
-			fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
-				ui.RenderPriority(issue.Priority),
-				ui.RenderType(string(issue.IssueType)),
-				ui.RenderID(issue.ID), issue.Title)
-			if issue.EstimatedMinutes != nil {
-				fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
-			}
-			if issue.Assignee != "" {
-				fmt.Printf("   Assignee: %s\n", issue.Assignee)
+	// The rendering is the direct route's, through the same function: one
+	// JSON shape, one pagination envelope, one "Showing X of N" hint. Only the
+	// text route's extras are read through this route's own plumbing, in a
+	// unit of work opened for them alone — and only if the text route asks.
+	var uw uow.UnitOfWork
+	openUW := func() uow.UnitOfWork {
+		if uw == nil {
+			if opened, uwErr := uowProvider.NewUOW(ctx); uwErr == nil {
+				uw = opened
+			} else {
+				debug.Logf("warning: open unit of work for ready rendering: %v", uwErr)
 			}
 		}
-		fmt.Println()
-	} else {
-		displayReadyList(issues, parentEpicMap)
+		return uw
 	}
+	defer func() {
+		if uw != nil {
+			uw.Close(ctx)
+		}
+	}()
+	return renderReadyListing(listing, in, readyListingExtras{
+		hasOpenIssues: func() bool {
+			w := openUW()
+			if w == nil {
+				return false
+			}
+			stats, statsErr := w.IssueUseCase().GetStatistics(ctx)
+			return statsErr == nil && (stats.OpenIssues > 0 || stats.InProgressIssues > 0)
+		},
+		parentEpics: func(issues []*types.Issue) map[string]string {
+			w := openUW()
+			if w == nil {
+				return nil
+			}
+			return buildParentEpicMapProxied(ctx, w, issues)
+		},
+	})
+}
 
-	if truncated {
-		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.", len(issues))))
+// proxiedReadyLister hands back the ready-listing surface for the
+// proxied-server provider through the provider's OWN capability accessor — the
+// accessor is where a decorator (the external-dependency policy, telemetry)
+// adds its layer, so reaching past it would list unpoliced.
+func proxiedReadyLister() (issueops.ReadyLister, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
 	}
-	return nil
+	src, ok := uowProvider.(uow.ReadyListerSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the ready-listing surface", uowProvider)
+	}
+	return src.ReadyLister()
 }
 
 // runReadyProxiedClaim is the proxied route of `bd ready --claim`, on the same
@@ -239,32 +222,6 @@ func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 		fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.Claimed.ID, res.Claimed.Title))
 	}
 	return nil
-}
-
-// proxiedReadyTotal sizes the whole ready set through the provider's own
-// ReadyCounter accessor — the same role the direct route reaches through the
-// store's accessor, over the request both build in readyRoleRequest.
-//
-// It opens NO unit of work of its own: the role's request IS the transaction,
-// so the count runs in its own read-only unit of work rather than the one the
-// page came from, which is why the two are not one snapshot.
-func proxiedReadyTotal(ctx context.Context, in readyInput) (int, error) {
-	if uowProvider == nil {
-		return 0, errors.New("proxied-server UOW provider not initialized")
-	}
-	src, ok := uowProvider.(uow.ReadyCounterSource)
-	if !ok {
-		return 0, fmt.Errorf("proxied-server provider %T does not offer the ready-count surface", uowProvider)
-	}
-	counter, err := src.ReadyCounter()
-	if err != nil {
-		return 0, err
-	}
-	result, err := counter.CountReady(ctx, readyRoleRequest(in))
-	if err != nil {
-		return 0, err
-	}
-	return int(result.Total), nil
 }
 
 // proxiedReadyClaimer hands back the guarded claim surface for the

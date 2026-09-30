@@ -343,6 +343,7 @@ var (
 	_ uow.BlockingAnnotatorSource   = timedProvider{}
 	_ uow.TreeWalkerSource          = timedProvider{}
 	_ uow.ReadyCounterSource        = timedProvider{}
+	_ uow.ReadyListerSource         = timedProvider{}
 	_ uow.CounterSource             = timedProvider{}
 	_ uow.QuerierSource             = timedProvider{}
 	_ uow.SweeperSource             = timedProvider{}
@@ -375,10 +376,12 @@ var (
 // That pin is per-route and there are thirteen accessors here, so
 // TestEveryTimedProviderAccessorBindsToTheWrapper covers the rest structurally.
 //
-// The cost is that a provider whose own accessor decorated its reader would be
-// bypassed here. There is one provider (doltSQLProvider) and its accessor is
-// this same construction, so nothing is bypassed today — but if a decorating
-// provider ever appears, this is the line that has to grow a wrap.
+// A DECORATING provider is not bypassed by this: the server never asks a
+// timedProvider for a role when the configured provider can rewrap itself
+// (uow.ProviderRewrapper, which the external-dependency policy implements).
+// Server.requestProvider slides this wrapper BENEATH such a decorator and asks
+// the decorator's own accessor, whose roles open their units of work through
+// this wrapper's NewUOW all the same.
 func (p timedProvider) IssueReader() (issueops.Reader, error) {
 	return uow.NewIssueReader(p)
 }
@@ -486,6 +489,12 @@ func (p timedProvider) TreeWalker() (issueops.TreeWalker, error) {
 // and with the same hazard as IssueReader.
 func (p timedProvider) ReadyCounter() (issueops.ReadyCounter, error) {
 	return uow.NewReadyCounter(p)
+}
+
+// ReadyLister builds the ready lister OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueReader.
+func (p timedProvider) ReadyLister() (issueops.ReadyLister, error) {
+	return uow.NewReadyLister(p)
 }
 
 // Counter builds the issue counter OVER THIS WRAPPER, for ReadyCounter's reason.

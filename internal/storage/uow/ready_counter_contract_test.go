@@ -44,6 +44,9 @@ func TestReadyCounterContract(t *testing.T) {
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunReadyCounterDoesNotMutateTheCallerRequest(t, ctx, fixture)
 	})
+	t.Run("HonorsExcludeIDs", func(t *testing.T) {
+		conformance.RunReadyCounterHonorsExcludeIDs(t, ctx, fixture)
+	})
 }
 
 func newUOWReadyCounterFixture(t *testing.T, ctx context.Context, prefix string) conformance.ReadyCounterFixture {

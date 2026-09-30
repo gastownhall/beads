@@ -58,7 +58,7 @@ func isExternalReference(raw string) bool {
 
 // resolveReferences returns ref -> satisfied. Every ref starts unsatisfied;
 // malformed refs and foreign-store failures therefore fail closed.
-func (s *Store) resolveReferences(ctx context.Context, refs []reference) (map[string]bool, error) {
+func (p *Policy) resolveReferences(ctx context.Context, refs []reference) (map[string]bool, error) {
 	result := make(map[string]bool, len(refs))
 	byProject := make(map[ProjectName]map[CapabilityName][]string)
 	for _, ref := range refs {
@@ -72,7 +72,7 @@ func (s *Store) resolveReferences(ctx context.Context, refs []reference) (map[st
 		byProject[ref.project][ref.capability] = append(byProject[ref.project][ref.capability], ref.raw)
 	}
 
-	if s.locateProject == nil || s.openProject == nil {
+	if p.locateProject == nil || p.openProject == nil {
 		return result, nil
 	}
 
@@ -80,17 +80,17 @@ func (s *Store) resolveReferences(ctx context.Context, refs []reference) (map[st
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		path, ok := s.locateProject(project)
+		path, ok := p.locateProject(project)
 		if !ok {
-			s.warnUnresolvedProject(project)
+			p.warnUnresolvedProject(project)
 			continue
 		}
-		foreign, err := s.openProject(ctx, path)
+		foreign, err := p.openProject(ctx, path)
 		if err != nil || foreign == nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
-			s.warnUnresolvedProject(project)
+			p.warnUnresolvedProject(project)
 			continue
 		}
 
@@ -101,7 +101,7 @@ func (s *Store) resolveReferences(ctx context.Context, refs []reference) (map[st
 					_ = foreign.Close()
 					return nil, ctxErr
 				}
-				s.warnUnresolvedProject(project)
+				p.warnUnresolvedProject(project)
 				continue
 			}
 			satisfied := false

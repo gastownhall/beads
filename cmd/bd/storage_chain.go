@@ -17,6 +17,10 @@ import (
 //
 //	caller → HookFiringStore → externaldeps.Store → InstrumentedStorage → raw DoltStorage
 //
+// The externaldeps layer is absent for a client of a bd server that enforces
+// the policy itself (storage.ServerEnforcedPolicy); see
+// wireExternalDependencyPolicy.
+//
 // telemetry.WrapStorage is a no-op when telemetry is disabled, so the
 // instrumentation layer is only present when BD_OTEL_ENABLED=true (or a
 // legacy BD_OTEL_* selector is set). The hook layer sits outside telemetry so
@@ -40,11 +44,16 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 
 // wireExternalDependencyPolicy applies only the read/guard policy. Routed
 // stores must use this without inheriting the caller's hooks or telemetry.
+//
+// A client of a bd server that enforces the policy itself
+// (storage.ServerEnforcedPolicy) comes back unwrapped, so its chain is
+// hooks → telemetry → store and `bd ready` forwards the request instead of
+// reading dependency records the client cannot see.
 func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
 	if store == nil {
 		return nil
 	}
-	return externaldeps.New(
+	return externaldeps.Wrap(
 		store,
 		func(project externaldeps.ProjectName) (string, bool) {
 			path := config.ResolveExternalProjectPath(string(project))

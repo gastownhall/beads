@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -97,7 +98,15 @@ func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, erro
 	return w.DoltStorage.GetConfig(ctx, key)
 }
 
+// ClaimStepIfOpen claims a molecule step after `bd close --continue`. Step
+// readiness comes from within-molecule edges only, so the external-dependency
+// policy is asked first, outside the transaction below (which no policy
+// override sees): an externally blocked step is refused and AdvanceToNextStep
+// moves on to the next ready one.
 func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
+	if err := externaldeps.GuardClaim(ctx, w.DoltStorage, id); err != nil {
+		return err
+	}
 	return w.DoltStorage.RunInTransaction(ctx, fmt.Sprintf("bd: advance to step %s", id), func(tx storage.Transaction) error {
 		current, err := tx.GetIssue(ctx, id)
 		if err != nil {
@@ -111,6 +120,13 @@ func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) e
 		}
 		return tx.UpdateIssue(ctx, id, map[string]interface{}{"status": types.StatusInProgress}, actor)
 	})
+}
+
+// GuardStepClaim reports, without claiming, whether ClaimStepIfOpen's
+// external-dependency guard would refuse id (ErrClaimBlocked), so
+// `bd close --continue --no-auto` never suggests a step that claim refuses.
+func (w storeMolWriter) GuardStepClaim(ctx context.Context, id string) error {
+	return externaldeps.GuardClaim(ctx, w.DoltStorage, id)
 }
 
 func newStandaloneStoreMolWriter(store storage.DoltStorage) storeMolWriter {
@@ -452,6 +468,12 @@ func (w *uowMolWriter) DeleteIssue(ctx context.Context, id, actor string) error 
 
 func (w *uowMolWriter) SetConfig(ctx context.Context, key, value string) error {
 	return w.uw.ConfigUseCase().SetConfig(ctx, key, value)
+}
+
+// GuardStepClaim is storeMolWriter.GuardStepClaim for the unit-of-work port:
+// the check ClaimStepIfOpen's policy override makes, without the claim.
+func (w *uowMolWriter) GuardStepClaim(ctx context.Context, id string) error {
+	return externaldeps.GuardClaimInUOW(ctx, w.uw, id)
 }
 
 func (w *uowMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {

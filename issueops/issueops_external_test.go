@@ -167,6 +167,7 @@ func TestPublicErrorsKeepCanonicalIdentity(t *testing.T) {
 		"assignee mismatch": issueops.ErrAssigneeMismatch,
 		"status mismatch":   issueops.ErrStatusMismatch,
 		"already exists":    issueops.ErrAlreadyExists,
+		"claim blocked":     issueops.ErrClaimBlocked,
 	} {
 		if err == nil {
 			t.Errorf("%s sentinel is nil", name)

@@ -182,8 +182,10 @@ info:
 
     * `capabilities` gates OPERATION presence, and also advertises server-wide
       BEHAVIOR tokens such as `project.enforce` (per-request `Bd-Project-Id`
-      enforcement). It is derived from the server's implemented handlers plus the
-      behaviors this build enforces; check the list, never the version string.
+      enforcement) and `policy.external_dependencies` (server-side
+      `external:` dependency policy on ready, claim and close). It is derived
+      from the server's implemented handlers plus the behaviors this server
+      enforces; check the list, never the version string.
     * `bd_version` gates BEHAVIORAL changes tied to a release, and is the only
       field a client may compare as a version.
     * `api_version` gates the path major, and changes only when `/v1` is cut.
@@ -2695,6 +2697,14 @@ paths:
         `assignee` extension member, read inside the same transaction; an issue
         in a non-claimable state is 409 `not_claimable` and carries
         `issue_status`. Neither needs the client to parse prose.
+
+
+        An issue held back by an unsatisfied `external:<project>:<capability>`
+        dependency (see the `policy.external_dependencies` capability) is also
+        409 `not_claimable`, WITHOUT `issue_status` — its status is claimable;
+        the dependency is what refuses. There is no bypass: the blocker has to
+        be satisfied first. A LOCAL blocking dependency does not refuse a
+        claim-by-id.
       parameters:
         - $ref: '#/components/parameters/IssueID'
       security:
@@ -2730,8 +2740,10 @@ paths:
         '409':
           description: >-
             The issue is held by another actor (`already_claimed`, with the
-            `assignee` extension member) or is not in a claimable state
-            (`not_claimable`, with the `issue_status` extension member).
+            `assignee` extension member), is not in a claimable state
+            (`not_claimable`, with the `issue_status` extension member), or is
+            held back by an unsatisfied `external:` dependency
+            (`not_claimable`, without `issue_status`).
           x-bd-codes: [already_claimed, not_claimable]
           content:
             application/problem+json:
@@ -7346,9 +7358,19 @@ components:
             `dependencies.add`, `dependencies.remove`,
             `memories.list`, `memories.get`, `memories.remember`,
             `memories.forget`, `events.list`, `events.watch`,
-            `issues.casMetadata`; the one behavior token is `project.enforce`,
+            `issues.casMetadata`. The behavior tokens are `project.enforce`,
             which announces that a `Bd-Project-Id` stamp for the wrong workspace
-            is refused here rather than silently ignored. The list grows
+            is refused here rather than silently ignored, and
+            `policy.external_dependencies`, which announces that the ready,
+            claim and close operations here apply bd's external-dependency
+            policy server-side: an issue blocked by an unsatisfied or
+            unresolvable `external:<project>:<capability>` dependency is left
+            out of `ready.list` and `ready.count`, refused by `issues.claim`
+            and `issues.claimNext`, and refused by `issues.close` and
+            `issues.batchClose`. A client that sees it forwards its ready and
+            claim requests as asked and applies no policy of its own; a client
+            that does not see it must assume this server lists and claims past
+            `external:` edges. The list grows
             additively, and an operation never appears here unless it is fully
             implemented. This is how a client checks for an operation or a
             behavior — never the version string.
@@ -7364,6 +7386,16 @@ components:
             journal. A consumer of either MUST treat the capability as "this
             server speaks it" and the 409 as "not on this workspace", and must
             not read the capability as a promise that records will arrive.
+
+
+            `policy.external_dependencies` is the one CONDITIONAL token: it is
+            not a property of the build but of how the serving process composed
+            the roles it answers from, so two servers of the same release may
+            differ. `bd serve` advertises it on every topology whose roles it
+            built through the policy layer, and omits it when it served a
+            store the policy was never put on (one whose own server enforces
+            the policy). An embedder of the server library cannot advertise it
+            without composing the policy first.
           items:
             type: string
 

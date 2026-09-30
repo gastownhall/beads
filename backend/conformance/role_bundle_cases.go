@@ -78,6 +78,7 @@ var roleContractCases = []roleContract{
 		RunBatchCloserAllRefusedBatchRecordsNoHistory,
 		RunBatchCloserDoesNotMutateTheCallerRequest,
 		RunBatchCloserSettlesTheDependersOfWhatItClosed,
+		RunBatchCloserClaimNextHonorsExcludeIDs,
 	),
 
 	roleCases("BatchCreator", "BatchCreator()", oncePerRole,
@@ -577,6 +578,7 @@ var roleContractCases = []roleContract{
 		RunReadyClaimerDoesNotMutateTheCallerRequest,
 		RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven,
 		RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities,
+		RunReadyClaimerHonorsExcludeIDs,
 	),
 
 	roleCases("ReadyCounter", "ReadyCounter() and IssueReader()", oncePerRole,
@@ -589,6 +591,19 @@ var roleContractCases = []roleContract{
 		RunReadyCounterWritesNothing,
 		RunReadyCounterDoesNotMutateTheCallerRequest,
 		RunReadyCounterCountsOnlyTheOpenRowsItsListingLists,
+		RunReadyCounterHonorsExcludeIDs,
+	),
+
+	roleCases("ReadyLister", "ReadyLister(), IssueReader() and ReadyCounter()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *ReadyListerFixture { return b.ReadyLister },
+		RunReadyListerAgreesWithReadyAndCountReady,
+		RunReadyListerTotalCountsTheWispPlaneItAdmits,
+		RunReadyListerHonorsExcludeIDs,
+		RunReadyListerRefusesPastTheRowCap,
+		RunReadyListerRejectsWhatReadyRejects,
+		RunReadyListerEmptyFrontIsEmptyAndZero,
+		RunReadyListerWritesNothing,
+		RunReadyListerDoesNotMutateTheCallerRequest,
 	),
 
 	roleCases("Relations", "IssueRelations()", oncePerRole,

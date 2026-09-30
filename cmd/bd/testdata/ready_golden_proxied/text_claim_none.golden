@@ -1,0 +1,7 @@
+$ bd ready --claim --label nobody
+--- exit: 0
+--- stdout
+
+○ No ready work to claim
+
+--- stderr

@@ -1,0 +1,48 @@
+$ bd ready --json --limit 2
+--- exit: 0
+--- stdout
+{
+  "data": [
+    {
+      "id": "gd-bug",
+      "title": "Crash on start",
+      "description": "long text that --brief drops",
+      "status": "open",
+      "priority": 0,
+      "issue_type": "bug",
+      "owner": "test@test.com",
+      "created_at": "<TS>",
+      "created_by": "Test",
+      "updated_at": "<TS>",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "gd-alpha",
+      "title": "Alpha task",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "owner": "test@test.com",
+      "estimated_minutes": 30,
+      "created_at": "<TS>",
+      "created_by": "Test",
+      "updated_at": "<TS>",
+      "labels": [
+        "team-a"
+      ],
+      "dependency_count": 0,
+      "dependent_count": 1,
+      "comment_count": 0
+    }
+  ],
+  "pagination": {
+    "returned": 2,
+    "total": 5,
+    "truncated": true
+  },
+  "schema_version": 1
+}
+--- stderr
+Showing 2 of 5 ready issues. Use --limit 0 for all, or --limit N to raise the cap.

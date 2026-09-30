@@ -151,6 +151,22 @@ type ProviderUnwrapper interface {
 	Unwrap() UnitOfWorkProvider
 }
 
+// ProviderRewrapper is a provider decorator that can put its own layer over a
+// DIFFERENT inner provider: Rewrap(x) is the same decorator, configured the
+// same way, wrapped around x instead of around Unwrap().
+//
+// It exists for a per-request decorator that must sit BENEATH a policy
+// decorator rather than around it. internal/httpapi times every unit of work a
+// request opens by wrapping the provider for that request; wrapped around the
+// external-dependency policy, the roles it built bypassed the policy's own
+// accessors. Rewrapping puts the timing underneath, so the request reaches its
+// roles through the policy's accessors and every unit of work those roles open
+// is still timed.
+type ProviderRewrapper interface {
+	ProviderUnwrapper
+	Rewrap(inner UnitOfWorkProvider) UnitOfWorkProvider
+}
+
 // unitOfWorkUnwrapper is the same idea one level down, for decorators that wrap
 // a unit of work.
 type unitOfWorkUnwrapper interface {
@@ -242,6 +258,10 @@ func (p *notifyingProvider) Counter() (publicops.Counter, error) { return NewCou
 
 func (p *notifyingProvider) ReadyCounter() (publicops.ReadyCounter, error) {
 	return NewReadyCounter(p)
+}
+
+func (p *notifyingProvider) ReadyLister() (publicops.ReadyLister, error) {
+	return NewReadyLister(p)
 }
 
 func (p *notifyingProvider) ReadyClaimer() (publicops.ReadyClaimer, error) {
@@ -402,6 +422,7 @@ var (
 	_ GraphCounterSource        = (*notifyingProvider)(nil)
 	_ CounterSource             = (*notifyingProvider)(nil)
 	_ ReadyCounterSource        = (*notifyingProvider)(nil)
+	_ ReadyListerSource         = (*notifyingProvider)(nil)
 	_ ReadyClaimerSource        = (*notifyingProvider)(nil)
 	_ QuerierSource             = (*notifyingProvider)(nil)
 	_ StatsReporterSource       = (*notifyingProvider)(nil)
@@ -559,10 +580,29 @@ func (u *notifyingUOW) rewindNotifications(mark int) {
 // markBatchNotifications returns a rewind token for a batch item's close, or -1
 // when this unit of work buffers nothing.
 func markBatchNotifications(uw UnitOfWork) int {
-	if buf, ok := uw.(batchNotificationBuffer); ok {
+	if buf, ok := batchNotificationBufferOf(uw); ok {
 		return buf.markNotifications()
 	}
 	return -1
+}
+
+// batchNotificationBufferOf finds the recording buffer at or beneath uw. A
+// policy decorator between the batch body and the notifying unit of work (the
+// external-dependency batch-close guard is one) forwards Unwrap, and must not
+// hide the buffer: without it a batch's idempotent re-close would announce
+// itself (ga-2yaqp.1) whenever such a decorator sat in the way.
+func batchNotificationBufferOf(uw UnitOfWork) (batchNotificationBuffer, bool) {
+	for uw != nil {
+		if buf, ok := uw.(batchNotificationBuffer); ok {
+			return buf, true
+		}
+		unwrapper, ok := uw.(unitOfWorkUnwrapper)
+		if !ok {
+			return nil, false
+		}
+		uw = unwrapper.Unwrap()
+	}
+	return nil, false
 }
 
 // rewindBatchNotifications drops whatever a batch item's close buffered. The
@@ -573,7 +613,7 @@ func rewindBatchNotifications(uw UnitOfWork, mark int) {
 	if mark < 0 {
 		return
 	}
-	if buf, ok := uw.(batchNotificationBuffer); ok {
+	if buf, ok := batchNotificationBufferOf(uw); ok {
 		buf.rewindNotifications(mark)
 	}
 }

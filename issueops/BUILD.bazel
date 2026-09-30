@@ -27,6 +27,7 @@ go_library(
         "reader_ready_scope.go",
         "readyclaimer.go",
         "readycounter.go",
+        "readylister.go",
         "relations.go",
         "releaser.go",
         "statsreporter.go",

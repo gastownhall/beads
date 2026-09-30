@@ -1064,3 +1064,32 @@ func readyClaimerPageIDs(page publicops.IssuePage) []string {
 	}
 	return ids
 }
+
+// RunReadyClaimerHonorsExcludeIDs pins that the claim walks past an excluded
+// row even when it heads the ready order, and that an excluded row is never
+// claimed once it is the only one left.
+//
+// ExcludeIDs is how a workspace policy layered above a backend's roles (the
+// external-capability policy in internal/storage/externaldeps) narrows ready
+// work: it puts ids there and delegates to the backend's OWN role, so a
+// backend that dropped the field would hand out work the policy refused. An
+// excluded id that names nothing is not an error and changes nothing.
+func RunReadyClaimerHonorsExcludeIDs(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
+	t.Helper()
+	label := fixture.IssuePrefix + "-rcexcl"
+	excluded := fixture.IssuePrefix + "-rcexcl-a"
+	eligible := fixture.IssuePrefix + "-rcexcl-b"
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(excluded, 0, label))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(eligible, 1, label))
+
+	filter := publicops.ReadyRequest{
+		Labels:     []string{label},
+		Sort:       readyClaimerSort,
+		ExcludeIDs: []string{excluded, fixture.IssuePrefix + "-rcexcl-absent"},
+	}
+	if won := readyClaimerWin(t, ctx, fixture, filter); won != eligible {
+		t.Fatalf("ClaimNext with ExcludeIDs=[%s] claimed %s, want %s", excluded, won, eligible)
+	}
+	assertReadyClaimerClaimsNothing(t, ctx, fixture, filter, "a front whose only ready row is excluded")
+	assertReadyClaimerRowState(t, ctx, fixture, excluded, string(types.StatusOpen), "")
+}

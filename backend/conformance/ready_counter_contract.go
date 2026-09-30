@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -488,5 +489,49 @@ func assertReadyCounterAgreesWithTheListing(t *testing.T, ctx context.Context, f
 	if total != int64(len(listed)) {
 		t.Errorf("CountReady(includeEphemeral=%v) = %d, Reader.Ready listed %d (%v)",
 			request.IncludeEphemeral, total, len(listed), listed)
+	}
+}
+
+// RunReadyCounterHonorsExcludeIDs asks both surfaces of the ready-count
+// fixture one question with ExcludeIDs set: the listing drops the excluded
+// rows (including from the FRONT of a bounded page, where a post-fetch filter
+// would leave the page short), and the count sizes the same smaller set.
+//
+// ExcludeIDs is how a workspace policy layered above a backend's roles (the
+// external-capability policy in internal/storage/externaldeps) narrows ready
+// work: it puts ids there and delegates to the backend's OWN role, so a
+// backend that dropped the field would hand out work the policy refused. An
+// excluded id that names nothing is not an error and changes nothing.
+func RunReadyCounterHonorsExcludeIDs(t *testing.T, ctx context.Context, fixture ReadyCounterFixture) {
+	t.Helper()
+	label := fixture.IssuePrefix + "-rcexcl"
+	ids := readyCounterIDs(fixture, "rcexcl", 4)
+	for i, id := range ids {
+		seedReadyCounterIssue(t, ctx, fixture, readyCounterIssue(id, i, label))
+	}
+
+	build := func() publicops.ReadyRequest {
+		return publicops.ReadyRequest{
+			Labels:     []string{label},
+			Sort:       readyCounterSort,
+			ExcludeIDs: []string{ids[0], ids[2], fixture.IssuePrefix + "-rcexcl-absent"},
+		}
+	}
+	request := build()
+
+	unbounded := readyCounterPageIDs(t, ctx, fixture, request, 0)
+	if want := []string{ids[1], ids[3]}; !slices.Equal(unbounded, want) {
+		t.Fatalf("Reader.Ready with ExcludeIDs listed %v, want %v", unbounded, want)
+	}
+	// The excluded row is the highest-priority one, so a bounded page that
+	// filtered after its LIMIT would come back empty here.
+	if page := readyCounterPageIDs(t, ctx, fixture, request, 1); !slices.Equal(page, []string{ids[1]}) {
+		t.Errorf("Reader.Ready with ExcludeIDs and Limit=1 listed %v, want [%s]", page, ids[1])
+	}
+	if total := readyCounterTotal(t, ctx, fixture, request); total != 2 {
+		t.Errorf("CountReady with ExcludeIDs = %d, want 2 (the listing's %v)", total, unbounded)
+	}
+	if !reflect.DeepEqual(request, build()) {
+		t.Errorf("a role mutated the caller's ExcludeIDs: got %v", request.ExcludeIDs)
 	}
 }

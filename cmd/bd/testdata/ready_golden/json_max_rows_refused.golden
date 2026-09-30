@@ -1,0 +1,7 @@
+$ bd ready --json --limit 0 --max-rows 2
+--- exit: 2
+--- stdout
+--- stderr
+Error: too many rows: 3 found, --max-rows=2 exceeded.
+       Refine the query (add filters, set --limit), or raise the cap with
+       --max-rows N or BEADS_MAX_ROWS=N.

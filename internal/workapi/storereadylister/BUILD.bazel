@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "storereadylister",
+    srcs = ["lister.go"],
+    importpath = "github.com/steveyegge/beads/internal/workapi/storereadylister",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "storereadylister_test",
+    srcs = ["lister_test.go"],
+    embed = [":storereadylister"],
+    deps = [
+        "//internal/storage/issueops",
+        "//internal/types",
+        "//issueops",
+    ],
+)

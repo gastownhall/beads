@@ -16,16 +16,10 @@ type wakeStore struct {
 
 func (s *wakeStore) WakeExpiredDefersAdvisory(context.Context) { s.wake() }
 
-func (s *wakeStore) SearchIssuesWithCounts(ctx context.Context, _ string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
-	rows := make([]*types.IssueWithCounts, 0, len(filter.IDs))
-	for _, id := range filter.IDs {
-		row, err := s.GetIssue(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, &types.IssueWithCounts{Issue: row})
-	}
-	return rows, nil
+// ReadyClaimer is the backend role, which owns the lazy wake; the policy
+// wrapper must reach it rather than select around it.
+func (s *wakeStore) ReadyClaimer() (publicops.ReadyClaimer, error) {
+	return &fakeReadyClaimer{store: s, wake: s.WakeExpiredDefersAdvisory}, nil
 }
 
 func TestReadyClaimerWakesBeforeExternalFilteredSelection(t *testing.T) {

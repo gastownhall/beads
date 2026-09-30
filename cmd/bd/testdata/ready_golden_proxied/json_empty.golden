@@ -1,0 +1,5 @@
+$ bd ready --json --label nobody
+--- exit: 0
+--- stdout
+[]
+--- stderr

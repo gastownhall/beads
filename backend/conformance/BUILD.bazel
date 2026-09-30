@@ -44,6 +44,7 @@ go_library(
         "reader_contract.go",
         "ready_claimer_contract.go",
         "ready_counter_contract.go",
+        "ready_lister_contract.go",
         "reclaim_scope.go",
         "relations_contract.go",
         "releaser_contract.go",

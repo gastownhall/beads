@@ -25,6 +25,7 @@ import (
 var (
 	ErrAlreadyClaimed    = issueops.ErrAlreadyClaimed
 	ErrNotClaimable      = issueops.ErrNotClaimable
+	ErrClaimBlocked      = issueops.ErrClaimBlocked
 	ErrAssigneeMismatch  = issueops.ErrAssigneeMismatch
 	ErrNotFound          = issueops.ErrNotFound
 	ErrValidation        = issueops.ErrValidation
@@ -261,6 +262,14 @@ type Storage interface {
 	//
 	// Reads fire no hooks, as for IssueReader.
 	ReadyCounter() (issueops.ReadyCounter, error)
+	// ReadyLister returns the guarded ready-listing surface for this store: a
+	// page of ready work AND the size of the set it was cut from, answered in
+	// one pass — `bd ready`'s listing. Its own role rather than Reader.Ready
+	// plus ReadyCounter because two calls are two reads, and the published
+	// total has to describe the set the page came from.
+	//
+	// Reads fire no hooks, as for IssueReader.
+	ReadyLister() (issueops.ReadyLister, error)
 	// Querier returns the guarded boolean-query surface for this store: `bd
 	// query`'s expression language, which has OR, NOT and parentheses. Its own
 	// role rather than a mode of IssueReader because a ListRequest is a
@@ -940,6 +949,31 @@ type ReadyWorkCounter interface {
 // edge on each ready-work query.
 type ExternalDependencyQueryStore interface {
 	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
+}
+
+// ServerEnforcedPolicy marks a store that is a client of a bd server which
+// applies workspace policy — the external-capability ready/claim/close policy
+// among it — on the server side. A client composing its storage chain must
+// not layer that policy again over such a store: the request is forwarded and
+// the server answers it with the policy already applied, while a client-side
+// copy would need dependency records a remote client cannot (and should not)
+// read.
+//
+// An implementer must answer true ONLY when the server it talks to has
+// advertised the behavior capability `policy.external_dependencies`
+// (httpapi.CapExternalDependencies, listed by GET /v0/beads/context), which a
+// server sets only when the ready, claim and close roles it answers from carry
+// the policy. Being a remote client is not enough: a server that does not
+// advertise the capability lists and claims past `external:` edges, so its
+// client must answer false — including when the capability list could not be
+// read — and let the client-side policy apply.
+//
+// The check is made on storage.UnwrapStore(store), so decorators such as
+// hooks and telemetry between the caller and the client do not hide it. A
+// store that does not implement this interface, or answers false, is treated
+// as local and gets the client-side policy — composition fails closed.
+type ServerEnforcedPolicy interface {
+	PolicyEnforcedByServer() bool
 }
 
 // Transaction provides atomic multi-operation support within a single database transaction.

@@ -42,6 +42,7 @@ func TestReadyClaimerContract(t *testing.T) {
 		{name: "SkipsIneligibleFrontRows", run: conformance.RunReadyClaimerSkipsIneligibleFrontRows},
 		{name: "RecordsOneHistoryEntryForAWin", run: conformance.RunReadyClaimerRecordsOneHistoryEntryForAWin},
 		{name: "DoesNotMutateTheCallerRequest", run: conformance.RunReadyClaimerDoesNotMutateTheCallerRequest},
+		{name: "HonorsExcludeIDs", run: conformance.RunReadyClaimerHonorsExcludeIDs},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)

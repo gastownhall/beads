@@ -1,0 +1,15 @@
+$ bd ready --limit 0
+--- exit: 0
+--- stdout
+○ gd-bug P0 [bug] Crash on start
+○ gd-alpha P1 Alpha task
+○ gd-feat P2 Shiny feature
+○ gd-epic P3 [epic] Big epic
+○ gd-epic.1 P4 Epic child ← Big epic
+
+--------------------------------------------------------------------------------
+Ready: 5 issues with no active blockers
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+Priority: P0–P4 (label only; not a status icon)
+--- stderr

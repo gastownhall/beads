@@ -1,0 +1,15 @@
+$ bd ready --plain
+--- exit: 0
+--- stdout
+
+📋 Ready work (5 issues with no active blockers):
+
+1. [P0] [bug] gd-bug: Crash on start
+2. [P1] [task] gd-alpha: Alpha task
+   Estimate: 30 min
+3. [P2] [feature] gd-feat: Shiny feature
+   Assignee: alice
+4. [P3] [epic] gd-epic: Big epic
+5. [P4] [task] gd-epic.1: Epic child
+
+--- stderr

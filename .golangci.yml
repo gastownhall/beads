@@ -234,6 +234,8 @@ linters:
               desc: "a command reaches the summary role through store.StatsReporter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storestats/reporter.go"
             - pkg: github.com/steveyegge/beads/internal/workapi/storereadycounter
               desc: "a command reaches the ready-count role through store.ReadyCounter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereadycounter/counter.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storereadylister
+              desc: "a command reaches the ready-listing role through store.ReadyLister(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereadylister/lister.go"
             - pkg: github.com/steveyegge/beads/internal/workapi/storequerier
               desc: "a command reaches the boolean-query role through store.Querier(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storequerier/querier.go"
         # beadserrors sits BENEATH every role leaf, so whatever it imports is
@@ -358,7 +360,7 @@ linters:
       # and a reviewer can count them.
       #
       # Inside cmd/bd the rule is deny-by-default, so each entry below is a
-      # HOLE in it and carries the reason that hole exists. 59 of the 389
+      # HOLE in it and carries the reason that hole exists. 58 of the 389
       # non-test files under cmd/bd are on this list; widening it is an edit
       # here and a diff a reviewer sees. internal/httpapi has no entry and is
       # meant not to.
@@ -379,24 +381,18 @@ linters:
         text: 'do not write a filter here'
         linters:
           - forbidigo
-      # `bd ready` hands its filter to the plain listing and to --claim, and
-      # readyInput carries it as a field for them. Routing only the listing
-      # through the role would fork the command in two, so the filter stays
-      # nameable here. The other modes take no filter from readyInput: --gated
-      # and --mol answer a different question and short-circuit before the
-      # flags are gathered, and so does --explain, which is a whole-graph
-      # diagnostic and therefore builds its own fixed request through the same
+      # `bd ready`'s listing is on issueops.ReadyLister on BOTH routes and
+      # --claim on ReadyClaimer, all over the request rather than a filter, so
+      # cmd/bd/ready_input.go left this list when the proxied listing moved
+      # onto the role. The filter is still nameable in these two files for
+      # what is left: --explain builds its own fixed request through the same
       # builder (readyExplainFilter, which names the type it returns) rather
-      # than inlining a third copy of the default - bd-3fs.3. The blocked-issue
-      # views in these files name the type directly for an empty filter or one
+      # than inlining a third copy of the default - bd-3fs.3; and the
+      # blocked-issue views name the type directly for an empty filter or one
       # carrying only a --parent id, which is the absence of a filter rather
-      # than one this command built. `bd ready`'s LISTING is on the shared
-      # BUILDER and, on the proxied route, the shared EPILOGUE; it is not on a
-      # role, and this rule does not pretend otherwise. Its other two questions
-      # are: --claim goes to ReadyClaimer and the published total to
-      # ReadyCounter, both over the request rather than the filter, on both
-      # routes - which is why this hole keeps shrinking rather than growing.
-      - path: '^cmd/bd/ready(_input|_proxied_server)?\.go$'
+      # than one this command built. --gated and --mol answer a different
+      # question and short-circuit before the flags are gathered.
+      - path: '^cmd/bd/ready(_proxied_server)?\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

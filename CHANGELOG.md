@@ -226,6 +226,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry above.
 
 
+- **`bd update --status closed --force` honors `--force` against an
+  `external:` blocker on the `--proxied-server` route** (and `PATCH
+  /v0/beads/issues/{id}` with `force_close_policy` on `bd serve`'s provider
+  arm). The unit-of-work policy ignored the force and refused the close that
+  the direct route and `bd close --force` on both routes allow.
+
+- **`bd close --continue` no longer auto-claims a molecule step an
+  unsatisfied `external:` dependency holds back.** Step readiness is computed
+  from the molecule's own edges, so such a step looked ready and was marked
+  in_progress on both the direct and the `--proxied-server` route. It is now
+  skipped (the next ready step, if any, is claimed instead).
+
+- **`bd close --continue` no longer suggests claiming a step `bd update
+  --claim` would refuse.** When the external-dependency guard held the next
+  ready step, the output still said `Start with: bd update <step> --claim`
+  (with or without `--no-auto`). It now names the first ready step the guard
+  does not refuse; when it refuses every one, it prints `No claimable steps in
+  molecule: every ready step (<ids>) is held by an unsatisfied external
+  dependency.` and no claim hint, and `--json` omits `next_step`. Both the
+  direct and the `--proxied-server` route.
+
+- **`bd serve`'s `POST /v0/beads/issues:batchApply` no longer closes work an
+  unsatisfied `external:` dependency holds back.** On the store arm the
+  applier bypassed the external-dependency policy entirely; on the provider
+  arm it applied it per item inside the write transaction, opening foreign
+  projects there. A close item, or an update item setting `status` to
+  `closed`, on externally blocked work now refuses the whole request (`409
+  not_closable`, nothing written) unless it sends `force` /
+  `force_close_policy` — including when an earlier item of the same request
+  adds the `external:` edge. Re-closing already-closed work stays the
+  idempotent no-op. An apply-batch has no claim, so nothing there is a claim
+  refusal. On the provider arm a closing update item sent with
+  `force_close_policy` was refused anyway; it now lands.
+
+- **`bd update --claim` no longer claims work an unsatisfied `external:`
+  dependency holds back.** On both the direct and the `--proxied-server`
+  route the claim went straight to the backend's compare-and-set, past the
+  external-dependency policy that `bd ready --claim` and the claim endpoint
+  already applied. It is now refused (nonzero, the blocker named, nothing
+  written); `--force` does not bypass it, since a claim has no force.
+
+- **A batch `bd close` can no longer close externally blocked work through a
+  concurrent reopen.** The "already closed, so re-closing is a no-op"
+  exemption for an issue an unsatisfied `external:` dependency holds was
+  decided on a status read taken before the batch; it is now decided in the
+  batch's own transaction (proxied / `bd serve` provider arm) or the item is
+  never sent to the closer at all (direct / store arm).
+
+- **`bd serve` answers an externally blocked claim with `409 not_claimable`**
+  ("issue is blocked by an unsatisfied dependency"), not `not_closable` with
+  close-with-force advice. The claim's `external:` refusal is the same set on
+  both of `bd serve`'s arms: the store arm no longer refuses a claim-by-id of
+  an issue whose only blocker is LOCAL, matching the provider arm and the CLI.
+
+- **Direct `bd close` no longer closes work an unsatisfied `external:`
+  dependency holds back.** On the direct (embedded / store) route the close
+  went past the external-dependency policy: `bd close X` exited 0 with
+  `✓ Closed X`. It now exits 1 with `cannot close blocked issue X ... (use
+  --force to override)`, naming the blocker and writing nothing for X, as the
+  `--proxied-server` route and `bd update --status closed` already did;
+  `--force` still closes it, and re-closing already-closed work stays the
+  idempotent no-op. The same gap let `bd close --claim-next` hand out
+  externally blocked work as the next claim; it now skips it. `bd serve`'s
+  store arm (`POST /v0/beads/issues:batchClose`) had both holes too: it now
+  refuses such an item at its own index unless the request sends `force`
+  (the other items still close together) and never claims one for
+  `claim_next`.
+
 - **`bd list --watch --format` is refused instead of silently dropping the
   format** ([#6277](https://github.com/gastownhall/beads/issues/6277)).
   `--watch` always re-renders the pretty listing, so on the direct route a
@@ -378,6 +446,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`issueops.SweepRequest.Limit`), so a large backlog drains in bounded
     transactions; `--json` then adds `remaining` and `has_more`. Loop while
     `has_more` is true.
+
+- **`bd serve` advertises `policy.external_dependencies`.** `GET
+  /v0/beads/context` now lists this behavior capability whenever the ready,
+  claim and close roles the server answers from carry bd's
+  `external:<project>:<capability>` dependency policy — every topology
+  `bd serve` composes itself. A client that sees it forwards ready and claim
+  requests as asked instead of applying the policy client-side. The token is
+  set from the composed store or provider (`httpapi.Config.ExternalDependencyPolicy`),
+  so a server built without the policy, including an embedder's, does not
+  advertise it.
 
 - **`bd backup` works on a proxied-server workspace bd runs the Dolt server
   for.** `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
@@ -610,6 +688,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `blocks` is no longer purged (reported as `live_dependent_skipped`), so a
   purge that used to delete a closed molecule root under a live step now
   leaves it. See the `--wisps-plane` entry under Added.
+
+- **Re-running `bd update --claim` on work you already hold is refused if an
+  `external:` blocker was added after you claimed it.** The claim guard that
+  now covers `bd update --claim` (see Fixed) runs on every claim, including
+  the same actor re-claiming its own in-progress issue, which used to be an
+  idempotent success. Once an unsatisfied `external:<project>:<capability>`
+  edge lands on that issue, the repeat claim exits nonzero naming the blocker;
+  the issue stays in progress and assigned to you. Nothing about the first
+  claim changes.
+
+- **`bd ready --proxied-server` prints the same truncation hint as the direct
+  route, with the total.** A proxied listing cut short by `--limit` used to say
+  `Showing N ready issues; more matched but were hidden by --limit. Use --limit
+  0 for all, or --limit N to raise the cap.` on both stdout (text) and stderr
+  (`--json`), without saying how many matched. Both routes now list through
+  the `issueops.ReadyLister` role and render its answer with one function, so
+  the proxied route prints the direct route's wording: `Showing X of N ready
+  issues. Use -n to show more.` under the text renderings and `Showing X of N
+  ready issues. Use --limit 0 for all, or --limit N to raise the cap.` on
+  stderr under `--json`. JSON stdout is unchanged — the pagination envelope
+  already carried `total` — and so is every untruncated listing, including
+  gc's `bd ready --json --include-ephemeral --limit 0` (a plain array). The
+  proxied listing's page and its total now come from one read-only unit of
+  work (a truncated page used to count in a second one), but the
+  `external:` dependency policy now reads its edges in its own read-only unit
+  of work before the listing, so foreign projects are resolved with no
+  transaction open. A proxied listing therefore opens three units of work
+  (edge read, defer wake, listing): one more than before for an untruncated
+  listing such as gc's, and the same number for a truncated one.
+
+- **`bd ready`'s direct listing is one read in every output mode, and its
+  directory-label scope is normalized.** The listing now goes through the
+  `issueops.ReadyLister` role, which returns the page and the size of the
+  ready set from the same statements. The text rendering used to list with a
+  separate query and, when the page was full, run a second counting
+  transaction for "Showing X of N"; it now issues 3-6 statements where it
+  issued 7-18 (measured on the embedded engine), and its output is
+  byte-for-byte unchanged. One visible difference: a `directory.labels` value
+  with surrounding whitespace is now trimmed before matching on the listing,
+  as `bd ready --claim` and the published total already did, so all three
+  scope to the same set; a value that is only whitespace applies no scope.
 
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`

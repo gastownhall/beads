@@ -1,0 +1,25 @@
+$ bd ready --claim --json
+--- exit: 0
+--- stdout
+[
+  {
+    "id": "gd-bug",
+    "title": "Crash on start",
+    "description": "long text that --brief drops",
+    "status": "in_progress",
+    "priority": 0,
+    "issue_type": "bug",
+    "assignee": "golden-claimer",
+    "owner": "test@test.com",
+    "created_at": "<TS>",
+    "created_by": "Test",
+    "updated_at": "<TS>",
+    "started_at": "<TS>",
+    "lease_expires_at": "<TS>",
+    "heartbeat_at": "<TS>",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+--- stderr

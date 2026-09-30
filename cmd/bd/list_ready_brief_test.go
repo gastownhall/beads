@@ -219,10 +219,10 @@ func TestListBriefIsAcceptedOnThePageRoutes(t *testing.T) {
 }
 
 // TestReadyBriefReachesTheFilter pins the hop for `bd ready`, which does NOT
-// go through issueops.Reader on either route: the direct route calls
-// GetReadyWorkWithCounts(ctx, in.filter) and the proxied one calls the same
-// through the unit of work. The filter is therefore the thing that has to
-// carry the projection, and types.WorkFilter.Lite is where it lands.
+// go through issueops.Reader on either route: both routes hand the request to
+// a ReadyLister, and every ReadyLister body builds its storage filter with
+// workapi.BuildReadyFilter. The filter is therefore the thing that has to carry
+// the projection, and types.WorkFilter.Lite is where it lands.
 func TestReadyBriefReachesTheFilter(t *testing.T) {
 	t.Run("off by default", func(t *testing.T) {
 		got := runGatherReadyInput(t, newReadyFlagsCommand(t), nil)
@@ -232,7 +232,7 @@ func TestReadyBriefReachesTheFilter(t *testing.T) {
 		if got.in.Brief {
 			t.Error("ReadyRequest.Brief defaulted to true")
 		}
-		if got.in.filter.Lite {
+		if readyListFilter(t, got.in).Lite {
 			t.Error("WorkFilter.Lite defaulted to true")
 		}
 	})
@@ -248,7 +248,7 @@ func TestReadyBriefReachesTheFilter(t *testing.T) {
 		if !got.in.Brief {
 			t.Error("gatherReadyInput did not read --brief")
 		}
-		if !got.in.filter.Lite {
+		if !readyListFilter(t, got.in).Lite {
 			t.Error("--brief did not reach WorkFilter.Lite, so both ready routes would ignore it")
 		}
 	})
@@ -390,7 +390,7 @@ func TestReadyBriefWithJSONIsAccepted(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("gatherReadyInput(--brief --json) = %v, want no error", got.err)
 	}
-	if !got.in.filter.Lite {
+	if !readyListFilter(t, got.in).Lite {
 		t.Error("--brief with --json did not reach WorkFilter.Lite")
 	}
 }
@@ -404,7 +404,7 @@ func TestReadyBriefWithJSONIsAccepted(t *testing.T) {
 // make `bd ready --brief` hydrate every heavy column of the whole ready set to
 // fetch the total printed beside its page.
 func TestReadyRoleRequestCarriesBrief(t *testing.T) {
-	got := readyRoleRequest(readyInput{ReadyRequest: issueops.ReadyRequest{Brief: true}})
+	got := readyRoleRequest(readyInput{ReadyListRequest: issueops.ReadyListRequest{ReadyRequest: issueops.ReadyRequest{Brief: true}}})
 	if !got.Brief {
 		t.Error("readyRoleRequest dropped Brief, so the ready count would run unprojected")
 	}

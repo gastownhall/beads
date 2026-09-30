@@ -1,0 +1,21 @@
+$ bd ready --json --limit 0 --priority 0
+--- exit: 0
+--- stdout
+[
+  {
+    "id": "gd-bug",
+    "title": "Crash on start",
+    "description": "long text that --brief drops",
+    "status": "open",
+    "priority": 0,
+    "issue_type": "bug",
+    "owner": "test@test.com",
+    "created_at": "<TS>",
+    "created_by": "Test",
+    "updated_at": "<TS>",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+--- stderr

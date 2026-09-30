@@ -1397,3 +1397,46 @@ func requireBatchCloserWisps(t *testing.T, fixture BatchCloserFixture) {
 		t.Skipf("fixture has no CreateWisp: this backend cannot seed the ephemeral plane, so the ephemeral rules are UNPINNED here")
 	}
 }
+
+// RunBatchCloserClaimNextHonorsExcludeIDs pins the same rule on the claim a
+// batch close earns: its filter is ReadyClaimer's vocabulary by reference
+// (batchcloser.go ClaimNext), ExcludeIDs included.
+//
+// ExcludeIDs is how a workspace policy layered above a backend's roles (the
+// external-capability policy in internal/storage/externaldeps) narrows ready
+// work: it puts ids there and delegates to the backend's OWN role, so a
+// backend that dropped the field would hand out work the policy refused. An
+// excluded id that names nothing is not an error and changes nothing.
+func RunBatchCloserClaimNextHonorsExcludeIDs(t *testing.T, ctx context.Context, fixture BatchCloserFixture) {
+	t.Helper()
+	closeable := fixture.IssuePrefix + "-claimexcl-closeable"
+	excluded := fixture.IssuePrefix + "-claimexcl-a"
+	eligible := fixture.IssuePrefix + "-claimexcl-b"
+	label := batchCloserCaseLabel(fixture, "claimexcl")
+	seedBatchCloserIssue(t, ctx, fixture, closeable)
+	seedBatchCloserIssue(t, ctx, fixture, excluded, label)
+	seedBatchCloserIssue(t, ctx, fixture, eligible, label)
+
+	claim := batchCloserClaimFor(label)
+	claim.ExcludeIDs = []string{excluded, fixture.IssuePrefix + "-claimexcl-absent"}
+	result, err := fixture.Closer.CloseBatch(ctx, publicops.CloseBatchRequest{
+		Actor:     "claimer",
+		Items:     []publicops.BatchCloseItem{{IssueID: closeable}},
+		ClaimNext: claim,
+	})
+	if err != nil {
+		t.Fatalf("CloseBatch with a claim: %v", err)
+	}
+	if result.Outcomes[0].Err != nil {
+		t.Fatalf("the close the claim is earned by refused: %v", result.Outcomes[0].Err)
+	}
+	if result.ClaimedNext == nil || result.ClaimedNext.Issue == nil {
+		t.Fatalf("ClaimedNext is nil with %s ready and only %s excluded", eligible, excluded)
+	}
+	if result.ClaimedNext.ID != eligible {
+		t.Errorf("ClaimedNext = %s, want %s — %s is excluded", result.ClaimedNext.ID, eligible, excluded)
+	}
+	if got := batchCloserAssignee(t, ctx, fixture, excluded); got != "" {
+		t.Errorf("excluded %s was assigned to %q", excluded, got)
+	}
+}

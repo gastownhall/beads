@@ -392,7 +392,7 @@ Other events on the same stream:
 
 | Event | When |
 |---|---|
-| `startup` | Bound address, mode, workspace, database, host allowlist, capabilities, and `auth` — `none`, or `bearer (<token file path>)`. Check `auth` after a deploy rather than inferring it from a process listing. |
+| `startup` | Bound address, mode, workspace, database, host allowlist, capabilities (including `policy.external_dependencies` whenever the served ready/claim/close roles carry the `external:` dependency policy — every topology `bd serve` composes itself; its absence means clients get no server-side `external:` filtering), and `auth` — `none`, or `bearer (<token file path>)`. Check `auth` after a deploy rather than inferring it from a process listing. |
 | `auth_refused` | A `401`. Carries `request_id`, `op`, `remote_addr` and `reason` (`missing`, `malformed`, `unknown_token`). A burst of `unknown_token` from one peer is a client left on a rotated-out token; `missing` is a client that was never configured with one. |
 | `auth_reload_error` | The token file could not be re-read. **Not** a refusal — the last-good set stays in force — but the file an operator is rotating is unreadable and nothing else says so. |
 | `limits` | The operating envelope this build compiled in. Log it, then compare against this page. |
@@ -416,7 +416,7 @@ gives the shape, the `request_error` line gives the cause.
 | Message | Cause |
 |---|---|
 | `bd serve requires a Dolt SQL server; this workspace uses embedded Dolt` | Permanent. The embedded backend commits outside the SQL transaction on a separate connection, so this server's per-request atomicity would be a lie there. Refused by `serveDatabaseSource`, which is the only thing refusing it — see "Workspace modes" in the design doc. |
-| `bd serve is unavailable under strict readonly` | `--readonly`, or `readonly` in config. Every server this command binds publishes the issue-claim operation and the advertised capability set is a property of the build, not of the flags on the process that started it — so the alternatives were a server advertising a claim it always fails (the store source, where the read-only open reaches the claimer) or a `--readonly` that quietly bought nothing (the provider source, which builds its own writable connection). Drop the flag to serve. |
+| `bd serve is unavailable under strict readonly` | `--readonly`, or `readonly` in config. Every server this command binds publishes the issue-claim operation and the advertised operation set is a property of the build, not of the flags on the process that started it — so the alternatives were a server advertising a claim it always fails (the store source, where the read-only open reaches the claimer) or a `--readonly` that quietly bought nothing (the provider source, which builds its own writable connection). Drop the flag to serve. |
 | `--addr "localhost:7777": host must be a numeric IP literal, not a name — use 127.0.0.1 rather than localhost` | `--addr` was given a DNS name. |
 | `--addr "0.0.0.0:7777" binds beyond loopback, which requires --allow-non-loopback (and, with it, --auth-token-file)` | A non-loopback `--addr` without the flag. |
 | `--allow-non-loopback requires --auth-token-file (or the explicit --insecure-no-auth): every peer that can reach the address gets full read and claim access` | Binding beyond loopback with no credential and no waiver. |

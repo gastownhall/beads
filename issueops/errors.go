@@ -16,6 +16,16 @@ var ErrAlreadyClaimed = errors.New("issue already claimed")
 // same actor owning the claim.
 var ErrNotClaimable = errors.New("issue not claimable")
 
+// ErrClaimBlocked is the claim refusal for an issue an unsatisfied dependency
+// holds back — today an `external:<project>:<capability>` blocker the
+// external-dependency policy resolves as unsatisfied. It WRAPS
+// ErrNotClaimable, so every caller that classifies claim refusals with
+// errors.Is(err, ErrNotClaimable) keeps doing so; a caller that wants to tell
+// "blocked" from "wrong status" asks for this one. Unlike a status refusal it
+// names no status (the issue's status is claimable) and it is not a
+// *ClaimConflictError. There is no force bypass: a claim is not a close.
+var ErrClaimBlocked = fmt.Errorf("%w: blocked by an unsatisfied dependency", ErrNotClaimable)
+
 // ClaimConflictError reports the state that refused a claim — the current
 // assignee and status, read inside the same transaction that lost the
 // compare-and-set. It wraps the refusal rather than replacing it, so the

@@ -1,0 +1,13 @@
+$ bd ready --plain --limit 2
+--- exit: 0
+--- stdout
+
+📋 Ready work (2 issues with no active blockers):
+
+1. [P0] [bug] gd-bug: Crash on start
+2. [P1] [task] gd-alpha: Alpha task
+   Estimate: 30 min
+
+Showing 2 of 5 ready issues. Use -n to show more.
+
+--- stderr

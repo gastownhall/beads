@@ -1,0 +1,10 @@
+$ (in golden-scope-dir) bd ready --plain
+--- exit: 0
+--- stdout
+
+📋 Ready work (1 issues with no active blockers):
+
+1. [P2] [feature] gd-feat: Shiny feature
+   Assignee: alice
+
+--- stderr

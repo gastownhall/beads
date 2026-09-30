@@ -24,6 +24,7 @@ go_library(
         "querier.go",
         "ready_claimer.go",
         "ready_counter.go",
+        "ready_lister.go",
         "relations.go",
         "releaser.go",
         "stats_reporter.go",
@@ -72,11 +73,14 @@ go_test(
     deps = [
         "//internal/storage",
         "//internal/storage/externaldeps",
+        "//internal/types",
         "//issueops",
         "//memoryops",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel_metric//noop",
+        "@io_opentelemetry_go_otel_sdk//trace",
+        "@io_opentelemetry_go_otel_sdk//trace/tracetest",
         "@io_opentelemetry_go_otel_trace//noop",
     ],
 )

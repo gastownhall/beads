@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/contextinfo"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
@@ -332,9 +333,15 @@ func runServe() error {
 			// extraction, this flag and the maintenance ticker cannot disagree
 			// about whether this workspace journals.
 			EventsJournalEnabled: journalEnabled,
-			Workspace:            info,
-			SchemaVersion:        JSONSchemaVersion,
-			Mode:                 serveResolvedMode(info, db),
+			// Read off the very value the roles above came from
+			// (externaldeps.Composed in serveIssueRoles), so the
+			// policy.external_dependencies capability is advertised exactly
+			// when those roles carry the policy. A store the policy was never
+			// put on — a client of a bd server that enforces it — says false.
+			ExternalDependencyPolicy: roles.externalDependencyPolicy,
+			Workspace:                info,
+			SchemaVersion:            JSONSchemaVersion,
+			Mode:                     serveResolvedMode(info, db),
 		})
 	}
 
@@ -409,9 +416,14 @@ func runServe() error {
 		// provider knows how to READ the journal, not whether this workspace has
 		// one.
 		EventsJournalEnabled: eventsjournal.EnabledFor(info.BeadsDir),
-		Workspace:            info,
-		SchemaVersion:        JSONSchemaVersion,
-		Mode:                 serveResolvedMode(info, db),
+		// httpapi builds every role through this provider's own accessors, so
+		// the advertisement is read off this same value: true because
+		// wireExternalDependencyUOWProvider put the policy on it above, and
+		// false for any provider that reached here without it.
+		ExternalDependencyPolicy: externaldeps.Composed(provider),
+		Workspace:                info,
+		SchemaVersion:            JSONSchemaVersion,
+		Mode:                     serveResolvedMode(info, db),
 	})
 }
 
@@ -710,6 +722,9 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 	if hooked, ok := src.(*storage.HookFiringStore); ok {
 		src = hooked.Unwrap()
 	}
+	// Read off the value every role below is taken from: the policy is on
+	// those roles exactly when this value is the policy layer itself.
+	roles.externalDependencyPolicy = externaldeps.Composed(src)
 
 	// Each entry binds one Config field to the accessor that fills it, and
 	// names itself in the failure.
@@ -812,6 +827,12 @@ func serveJournalCursor(src serveRoleSource) (storage.EventsJournalCursor, bool)
 // requires every httpapi.Config literal in this package to sit in a function
 // that consulted serveDatabaseSource.
 type serveRoles struct {
+	// externalDependencyPolicy reports that the roles below were taken off the
+	// external-dependency policy layer itself (externaldeps.Composed), so the
+	// ready, claim and close roles carry it. It becomes
+	// httpapi.Config.ExternalDependencyPolicy.
+	externalDependencyPolicy bool
+
 	reader  issueops.Reader
 	claimer issueops.Claimer
 	// batchCloser closes many issues as one transaction, behind

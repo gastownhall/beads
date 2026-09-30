@@ -234,8 +234,8 @@ func TestGatherReadyInputResolvesCapWhereTheDirectBuilderDid(t *testing.T) {
 		if got.err != nil {
 			t.Fatalf("gatherReadyInput: %v", got.err)
 		}
-		if want := "--" + maxRowsFlagName; got.in.filter.MaxRows != 5 || got.in.filter.MaxRowsSource != want {
-			t.Errorf("filter cap = (%d, %q), want (5, %q)", got.in.filter.MaxRows, got.in.filter.MaxRowsSource, want)
+		if want := "--" + maxRowsFlagName; readyListFilter(t, got.in).MaxRows != 5 || readyListFilter(t, got.in).MaxRowsSource != want {
+			t.Errorf("filter cap = (%d, %q), want (5, %q)", readyListFilter(t, got.in).MaxRows, readyListFilter(t, got.in).MaxRowsSource, want)
 		}
 	})
 
@@ -248,8 +248,8 @@ func TestGatherReadyInputResolvesCapWhereTheDirectBuilderDid(t *testing.T) {
 		if got.err != nil {
 			t.Fatalf("gatherReadyInput: %v", got.err)
 		}
-		if got.in.filter.MaxRows != 0 || got.in.filter.MaxRowsSource != "" {
-			t.Errorf("filter cap = (%d, %q), want it unset", got.in.filter.MaxRows, got.in.filter.MaxRowsSource)
+		if readyListFilter(t, got.in).MaxRows != 0 || readyListFilter(t, got.in).MaxRowsSource != "" {
+			t.Errorf("filter cap = (%d, %q), want it unset", readyListFilter(t, got.in).MaxRows, readyListFilter(t, got.in).MaxRowsSource)
 		}
 		if got.stderr != "" {
 			t.Errorf("no resolver should mean no cap output, got:\n%s", got.stderr)
@@ -387,7 +387,7 @@ func TestGatherReadyInputMapsReadyPassThroughFlags(t *testing.T) {
 			if got.err != nil {
 				t.Fatalf("gatherReadyInput(%v): %v", tc.args, got.err)
 			}
-			tc.check(t, got.in.filter)
+			tc.check(t, readyListFilter(t, got.in))
 		})
 	}
 }
@@ -464,8 +464,8 @@ func TestGatherReadyInputIgnoresNegativeOffset(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("gatherReadyInput(--offset -1) = %v, want no error", got.err)
 	}
-	if got.in.filter.Offset != 0 {
-		t.Errorf("filter.Offset = %d, want 0 (a negative offset must not reach storage)", got.in.filter.Offset)
+	if readyListFilter(t, got.in).Offset != 0 {
+		t.Errorf("filter.Offset = %d, want 0 (a negative offset must not reach storage)", readyListFilter(t, got.in).Offset)
 	}
 }
 
@@ -496,14 +496,15 @@ func TestGatherReadyInputFlatAliasesPlain(t *testing.T) {
 	}
 }
 
-// TestGatherReadyInputKeepsDirectoryLabelVerbatim pins GH#541's label against
-// the collapse into workapi. The configured label is not user input: `bd ready`
-// has always put it on the filter exactly as configured, so it must not be
-// routed through issueops.ReadyRequest, whose label sets BuildReadyFilter
-// normalizes.
-// The label below is one NormalizeLabels would visibly change, which is what
-// makes this a test and not a tautology.
-func TestGatherReadyInputKeepsDirectoryLabelVerbatim(t *testing.T) {
+// TestGatherReadyInputNormalizesTheDirectoryLabel pins where GH#541's label
+// lives now that the listing is on the ReadyLister role: ON THE REQUEST, where
+// it is normalized like every other label, so the listing, its total and a
+// --claim beside it scope to the same set. The listing used to put the
+// configured value on its filter verbatim; the label below is one
+// NormalizeLabels visibly changes, which is what makes this a test of that
+// decision rather than a tautology. The proxied filter is built from the same
+// request, so it carries the same normalized value.
+func TestGatherReadyInputNormalizesTheDirectoryLabel(t *testing.T) {
 	const configured = "  scope:web  "
 	configureDirectoryLabel(t, configured)
 
@@ -511,9 +512,26 @@ func TestGatherReadyInputKeepsDirectoryLabelVerbatim(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("gatherReadyInput: %v", got.err)
 	}
-	if want := []string{configured}; !slices.Equal(got.in.filter.LabelsAny, want) {
-		t.Errorf("filter.LabelsAny = %q, want %q (the configured value, unnormalized)", got.in.filter.LabelsAny, want)
+	want := []string{"scope:web"}
+	if !slices.Equal(readyListFilter(t, got.in).LabelsAny, want) {
+		t.Errorf("filter.LabelsAny = %q, want %q (the configured value, normalized)", readyListFilter(t, got.in).LabelsAny, want)
 	}
+	if req := readyRoleRequest(got.in); !slices.Equal(workapiNormalized(t, req), want) {
+		t.Errorf("role request LabelsAny normalizes to %q, want %q", workapiNormalized(t, req), want)
+	}
+	if !slices.Equal(got.in.LabelsAny, []string{configured}) {
+		t.Errorf("request LabelsAny = %q, want the configured %q (normalization happens inside the role)", got.in.LabelsAny, []string{configured})
+	}
+}
+
+// workapiNormalized is the label set the role will actually match for req.
+func workapiNormalized(t *testing.T, req issueops.ReadyRequest) []string {
+	t.Helper()
+	filter, err := workapi.BuildReadyFilter(req)
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	return filter.LabelsAny
 }
 
 // TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven pins the two
@@ -539,7 +557,7 @@ func TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven(t *testing.
 			if got.err != nil {
 				t.Fatalf("gatherReadyInput: %v", got.err)
 			}
-			if labels := got.in.filter.LabelsAny; len(labels) != 0 || len(tc.wantLabelsAny) != 0 {
+			if labels := readyListFilter(t, got.in).LabelsAny; len(labels) != 0 || len(tc.wantLabelsAny) != 0 {
 				if !slices.Equal(labels, tc.wantLabelsAny) {
 					t.Errorf("filter.LabelsAny = %q, want %q", labels, tc.wantLabelsAny)
 				}
@@ -577,4 +595,21 @@ func TestReadyExplainFilterDerivesTheReadyDefault(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("explain filter = %+v\nwant the listing default, unlimited = %+v", got, want)
 	}
+}
+
+// readyListFilter is the storage filter a ReadyLister builds from in's
+// request: workapi.BuildReadyFilter plus the listing's own --max-rows cap,
+// which is what every ReadyLister body (uow.readyLister,
+// storereadylister) does with a ReadyListRequest. The gatherer no longer
+// builds a filter — both routes hand the request to the role — so the tests
+// that pin a flag's arrival at storage build it the role's way.
+func readyListFilter(t *testing.T, in readyInput) types.WorkFilter {
+	t.Helper()
+	filter, err := workapi.BuildReadyFilter(in.ReadyRequest)
+	if err != nil {
+		t.Fatalf("workapi.BuildReadyFilter: %v", err)
+	}
+	filter.MaxRows = in.MaxRows
+	filter.MaxRowsSource = in.MaxRowsSource
+	return filter
 }

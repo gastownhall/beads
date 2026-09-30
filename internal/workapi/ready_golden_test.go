@@ -193,3 +193,39 @@ func mustMarshal(t *testing.T, v any) []byte {
 	}
 	return blob
 }
+
+// TestReadyFiltersCarryExcludeIDs pins the one field no CLI flag spells:
+// a workspace policy above the roles narrows the ready set through
+// ReadyRequest.ExcludeIDs, so BOTH builders must copy it onto the filter the
+// seam renders — a count that dropped it would size a larger set than the
+// page it totals. The copy must not alias the request, because roles promise
+// never to mutate a caller-owned request.
+func TestReadyFiltersCarryExcludeIDs(t *testing.T) {
+	req := issueops.ReadyRequest{Sort: "priority", ExcludeIDs: []string{"bd-b", "bd-a"}}
+
+	listing, err := BuildReadyFilter(req)
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	counting, err := BuildReadyCountFilter(req)
+	if err != nil {
+		t.Fatalf("BuildReadyCountFilter: %v", err)
+	}
+	for name, got := range map[string][]string{"listing": listing.ExcludeIDs, "count": counting.ExcludeIDs} {
+		if len(got) != 2 || got[0] != "bd-b" || got[1] != "bd-a" {
+			t.Errorf("%s filter ExcludeIDs = %v, want [bd-b bd-a]", name, got)
+		}
+	}
+	listing.ExcludeIDs[0] = "mutated"
+	if req.ExcludeIDs[0] != "bd-b" {
+		t.Fatalf("filter aliases the request's ExcludeIDs: request now %v", req.ExcludeIDs)
+	}
+
+	empty, err := BuildReadyFilter(issueops.ReadyRequest{Sort: "priority"})
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	if empty.ExcludeIDs != nil {
+		t.Fatalf("an unset ExcludeIDs must stay nil on the filter, got %#v", empty.ExcludeIDs)
+	}
+}

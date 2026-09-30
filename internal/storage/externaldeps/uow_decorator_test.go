@@ -123,10 +123,13 @@ func (u *fakeDependencyUseCase) GetExternalBlockingDependencyRecords(context.Con
 	return u.external, nil
 }
 
+// GetIssueDependencyRecords answers from both planes, as the real query does
+// (GetDependencyRecordsForIssuesInTx partitions ids into wisps and issues):
+// an id's records are its non-external ones plus its external blocking edges.
 func (u *fakeDependencyUseCase) GetIssueDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency, len(ids))
 	for _, id := range ids {
-		result[id] = u.records[id]
+		result[id] = append(append(slices.Clone(u.records[id]), u.external[id]...), u.wispDeps[id]...)
 	}
 	return result, nil
 }
@@ -411,4 +414,41 @@ func TestWrapUOWProviderToleratesInnerWithoutConfigurers(t *testing.T) {
 	}
 	journal.SetEventsJournalEnabled(true)
 	version.SetVersionedHistoryEnabled(true)
+}
+
+// TestWrapUOWProviderReClosesAClosedIssueAsANoOp pins the idempotent re-close
+// (ga-ktn9pe.4.8) on the unit-of-work arm: every close-shaped use-case override
+// lets an ALREADY-closed issue with an unsatisfied external blocker through to
+// the inner no-op, on both planes, while an open one stays refused.
+func TestWrapUOWProviderReClosesAClosedIssueAsANoOp(t *testing.T) {
+	done, doneWisp, open := issue("be-done"), issue("be-done-wisp"), issue("be-open")
+	done.Status, doneWisp.Status = types.StatusClosed, types.StatusClosed
+	issues := &fakeIssueUseCase{ready: []*types.Issue{done, open}, wisps: []*types.Issue{doneWisp}}
+	held := func(id string) []*types.Dependency {
+		return []*types.Dependency{externalDep(id, "external:remote:payments", types.DepBlocks)}
+	}
+	inner := &fakeUOW{issues: issues, deps: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+		done.ID: held(done.ID), doneWisp.ID: held(doneWisp.ID), open.ID: held(open.ID),
+	}}}
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, func(ProjectName) (string, bool) { return "", false }, nil)
+	uw, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatalf("NewUOW: %v", err)
+	}
+	uc := uw.IssueUseCase()
+	if _, err := uc.CloseIssueChecked(t.Context(), done.ID, domain.CloseIssueParams{}, "tester", false); err != nil {
+		t.Errorf("CloseIssueChecked re-close of %s: %v, want the no-op", done.ID, err)
+	}
+	if _, err := uc.CloseWispChecked(t.Context(), doneWisp.ID, domain.CloseIssueParams{}, "tester", false); err != nil {
+		t.Errorf("CloseWispChecked re-close of %s: %v, want the no-op", doneWisp.ID, err)
+	}
+	if _, err := uc.ApplyUpdate(t.Context(), done.ID, domain.UpdateSpec{Fields: map[string]any{"status": string(types.StatusClosed)}}, "tester"); err != nil {
+		t.Errorf("ApplyUpdate to closed on closed %s: %v, want no external refusal", done.ID, err)
+	}
+	if !slices.Equal(issues.closed, []string{done.ID, doneWisp.ID, done.ID}) {
+		t.Errorf("inner close calls = %v, want the three re-closes delegated", issues.closed)
+	}
+	if _, err := uc.CloseIssueChecked(t.Context(), open.ID, domain.CloseIssueParams{}, "tester", false); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Errorf("CloseIssueChecked of open %s: %v, want ErrCloseBlocked", open.ID, err)
+	}
 }

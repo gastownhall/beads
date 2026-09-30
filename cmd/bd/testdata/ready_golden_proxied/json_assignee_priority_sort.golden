@@ -1,0 +1,25 @@
+$ bd ready --json --assignee alice --sort priority
+--- exit: 0
+--- stdout
+[
+  {
+    "id": "gd-feat",
+    "title": "Shiny feature",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "feature",
+    "assignee": "alice",
+    "owner": "test@test.com",
+    "created_at": "<TS>",
+    "created_by": "Test",
+    "updated_at": "<TS>",
+    "labels": [
+      "team-a",
+      "team-b"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+--- stderr
