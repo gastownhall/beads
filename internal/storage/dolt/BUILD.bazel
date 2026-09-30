@@ -208,6 +208,7 @@ go_test(
         "edge_reader_contract_test.go",
         "empty_commit_test.go",
         "ephemeral_routing_test.go",
+        "epoch_cas_publish_test.go",
         "errors_test.go",
         "event_commit_boundary_test.go",
         "events_since_test.go",

@@ -134,6 +134,7 @@ go_test(
         "dirty_tables_gate_test.go",
         "dualwrite_history_contract_test.go",
         "edge_reader_contract_test.go",
+        "epoch_cas_status_test.go",
         "events_since_test.go",
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
