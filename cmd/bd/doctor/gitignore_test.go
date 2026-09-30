@@ -1924,6 +1924,36 @@ func TestEnsureProjectGitignore_CreatesFile(t *testing.T) {
 	}
 }
 
+func TestEnsureProjectGitignore_LeadingSeparatorOnlyAfterExistingContent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{name: "fresh file", existing: "", want: ProjectGitignoreHeader + "\n"},
+		{name: "existing content", existing: "build/\n", want: "build/\n\n" + ProjectGitignoreHeader + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if tc.existing != "" {
+				if err := os.WriteFile(".gitignore", []byte(tc.existing), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := EnsureProjectGitignore("."); err != nil {
+				t.Fatalf("EnsureProjectGitignore() error = %v", err)
+			}
+			content, err := os.ReadFile(".gitignore")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(content); !strings.HasPrefix(got, tc.want) {
+				t.Errorf(".gitignore starts with %q, want prefix %q", got[:min(len(got), len(tc.want)+16)], tc.want)
+			}
+		})
+	}
+}
+
 func TestEnsureProjectGitignore_AppendsToExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldDir, err := os.Getwd()

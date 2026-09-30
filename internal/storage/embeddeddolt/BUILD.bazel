@@ -156,6 +156,7 @@ go_test(
         "journal_retention_test.go",
         "journal_truncation_test.go",
         "label_list_all_benchmark_test.go",
+        "label_rename_test.go",
         "lease_replica_test.go",
         "lease_test.go",
         "lenient_gate_warning_test.go",

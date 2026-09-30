@@ -155,6 +155,7 @@ go_test(
         "journal_prune_test.go",
         "journal_truncation_test.go",
         "journal_vocabulary_test.go",
+        "label_rename_merged_count_test.go",
         "lease_replica_test.go",
         "metadata_test.go",
         "public_claim_test.go",
