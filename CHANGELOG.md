@@ -31,9 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `domain/fs` context provider — which `bd serve` also resolves through, so
   `bd serve` in a non-git directory with a valid `.beads/` now proceeds rather
   than failing at context resolution. Anything that runs git commands still
-  uses `GetRepoContext()`. The synthesized context reports `is_redirected` from
-  `BEADS_DIR` (the only evidence available once git cannot be asked), and
-  `bd context` prints `cwd repo: git: unavailable` rather than silently
+  uses `GetRepoContext()`. The synthesized context roots at the repository
+  containing the `.beads/` (falling back to its parent when git cannot be asked
+  there either) and decides `is_redirected` positionally — whether discovery
+  standing in the working directory would have found that `.beads/` — so
+  `--db`, `BEADS_DB`/`BD_DB` and `-C` are reported the same way `BEADS_DIR` is.
+  `bd context` also prints `cwd repo: git: unavailable` rather than silently
   omitting the one degraded state it exists to report.
 
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The

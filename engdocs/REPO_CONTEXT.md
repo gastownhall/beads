@@ -152,9 +152,9 @@ The synthesized context differs from a normal one in what it can know:
 
 | Field | Value without git | Why |
 |-------|-------------------|-----|
-| `RepoRoot` | the `.beads` parent | no git root to ask for |
-| `CWDRepoRoot` | `""` | git answered nothing for the CWD |
-| `IsRedirected` | true iff `BEADS_DIR` names the resolved dir | `isExternalBeadsDir` compares git *common dirs*, and the CWD side needs a repository; an explicit `BEADS_DIR` is the only evidence left, and it is what `Role()` means by "external repo mode" |
+| `RepoRoot` | the repository containing `.beads`, else the `.beads` parent | the missing git root is the **CWD's**, not the `.beads`'s, so git is still asked from the `.beads` side (`repoRootForBeadsDir`); only when that cannot answer either does it fall back to the parent |
+| `CWDRepoRoot` | `""` | known-empty, not merely unanswered: `GetMainRepoRoot`, `GetRepoRoot` and `IsWorktree` share one cached git context, and reaching this path means that lookup already failed |
+| `IsRedirected` | true iff discovery standing in the CWD would not have found the resolved `.beads` | `isExternalBeadsDir` compares git *common dirs* and the CWD side needs a repository, so externality is decided **positionally** instead. This covers all four caller-directed channels (`BEADS_DIR`, `--db`, `BEADS_DB`/`BD_DB`, `-C`) uniformly, where an environment inventory could not: bd rewrites `BEADS_DIR` for itself before resolving, so the variable cannot distinguish a workspace the caller named from one bd just discovered. A store reachable only by being named is a redirect — including one in a *sibling* directory of the CWD — which is what `Role()` means by "external repo mode" |
 | `IsWorktree` | false | nothing to be a worktree of |
 
 `*NoRepoRootError` means "git could not tell us a root", which is broader than

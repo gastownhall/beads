@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,13 @@ func TestGetRepoContextAllowingNoGit_RecoversOutsideGitRepo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0o600); err != nil {
 		t.Fatalf("failed to create beads.db: %v", err)
 	}
+
+	// An inherited BEADS_DIR wins at FindBeadsDir step 1 (beads.go:929) and would
+	// bind an unrelated workspace instead of the one this test just built, so the
+	// walk-discovery assertions below would grade the ambient environment rather
+	// than the code. The package TestMain scrubs HOME and GIT_CONFIG_* but not
+	// BEADS_DIR; three sibling tests already use this per-test convention.
+	t.Setenv("BEADS_DIR", "")
 
 	origWD, err := os.Getwd()
 	if err != nil {
@@ -64,9 +72,12 @@ func TestGetRepoContextAllowingNoGit_RecoversOutsideGitRepo(t *testing.T) {
 	if rc.CWDRepoRoot != "" {
 		t.Errorf("CWDRepoRoot = %q, want empty outside a git repository", rc.CWDRepoRoot)
 	}
-	// The .beads here was found by walking up from the working directory, not
-	// named by BEADS_DIR, so the synthesized context must not claim a
-	// redirect. TestRecoverNoGit_RedirectProvenance covers the other side.
+	// The .beads here is discoverable by walking up from the working directory, so
+	// the caller is standing in this workspace and the synthesized context must
+	// not claim a redirect. Because externality is decided positionally rather
+	// than from an environment snapshot, the BEADS_DIR scrub above is all this
+	// assertion needs — there is no package-init value left to stub.
+	// TestRecoverNoGit_RedirectProvenance covers the other side.
 	if rc.IsRedirected {
 		t.Error("IsRedirected = true for a .beads found by the working-directory walk")
 	}
@@ -143,45 +154,130 @@ func TestNoRepoRootError_DoesNotMatchUnsafeLocation(t *testing.T) {
 	}
 }
 
+// TestRecoverNoGit_RootsAtTheRepoContainingBeadsDir is the regression for
+// rooting the synthesized context.
+//
+// The failure that reaches recoverNoGit is the CWD's missing repository, not the
+// .beads's. Rooting at filepath.Dir(BeadsDir) conflated the two, so a .beads
+// that did live inside a repo reported a SUBDIRECTORY of that repo as repo_root
+// and the same workspace answered differently depending only on where the caller
+// stood. repoRootForBeadsDir asks git from the .beads side, which needs no CWD
+// repo.
+func TestRecoverNoGit_RootsAtTheRepoContainingBeadsDir(t *testing.T) {
+	repoRoot := resolveSymlinks(t.TempDir())
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = repoRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("git init unavailable: %v: %s", err, out)
+	}
+
+	// The .beads lives in a SUBDIRECTORY of the repo, which is the case that
+	// distinguishes the two rootings.
+	beadsDir := filepath.Join(repoRoot, "sub", ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
+	if err != nil {
+		t.Fatalf("recoverNoGit: %v", err)
+	}
+	if got := resolveSymlinks(rc.RepoRoot); got != repoRoot {
+		t.Errorf("RepoRoot = %q, want %q (the repository containing .beads, not its parent directory %q)",
+			got, repoRoot, filepath.Dir(beadsDir))
+	}
+}
+
+// TestRecoverNoGit_RootsAtBeadsParentWithNoGitAnywhere pins the other half of
+// the same change: when git cannot answer from the .beads side either,
+// repoRootForBeadsDir falls back to the .beads parent, so the documented
+// no-git-anywhere behaviour is preserved exactly.
+func TestRecoverNoGit_RootsAtBeadsParentWithNoGitAnywhere(t *testing.T) {
+	workspace := resolveSymlinks(t.TempDir())
+	beadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
+	if err != nil {
+		t.Fatalf("recoverNoGit: %v", err)
+	}
+	if got := resolveSymlinks(rc.RepoRoot); got != workspace {
+		t.Errorf("RepoRoot = %q, want the .beads parent %q", got, workspace)
+	}
+}
+
 // TestRecoverNoGit_RedirectProvenance pins what the synthesized context says
 // about identity, which is the question `bd context` exists to answer.
 //
 // isExternalBeadsDir compares git COMMON DIRS, and the CWD side cannot be
 // computed without a repository — which is precisely the state this fallback
-// serves. So the normal path's answer is unavailable and BEADS_DIR is the only
-// evidence there is: naming a directory explicitly is a redirect, and Role()
-// documents that "BEADS_DIR implies contributor (external repo mode)". Leaving
-// the field zero made `bd context` deny a redirect plainly present in the
-// environment, and withheld the Contributor role that goes with it.
+// serves. Position is the substitute: the workspace is a redirect iff discovery
+// standing in the CWD would not have found it. That covers all four
+// caller-directed channels (BEADS_DIR, --db, BEADS_DB/BD_DB, -C) uniformly,
+// because it asks where the caller IS rather than which variable was set — and
+// bd rewrites BEADS_DIR for itself before resolving, so the environment cannot
+// answer this question at all.
 func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
-	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-		t.Fatal(err)
+	newWorkspace := func(t *testing.T, parent string) string {
+		t.Helper()
+		beadsDir := filepath.Join(parent, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// hasBeadsProjectFiles gates discovery, so the workspace needs to look
+		// like a real one to be found by the walk.
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return resolveSymlinks(beadsDir)
 	}
-	beadsDir = resolveSymlinks(beadsDir)
 
-	t.Run("named by BEADS_DIR is redirected", func(t *testing.T) {
-		stubCallerBeadsDir(t, beadsDir)
+	// chdirTo moves the process into dir for the duration of the subtest. Only
+	// the caller's POSITION decides provenance now, so this is the control.
+	chdirTo := func(t *testing.T, dir string) {
+		t.Helper()
+		origWD, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chdir(origWD)
+			ResetCaches()
+			git.ResetCaches()
+		})
+		ResetCaches()
+		git.ResetCaches()
+		if err := os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("discoverable from the CWD is not redirected", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		workspace := resolveSymlinks(t.TempDir())
+		beadsDir := newWorkspace(t, workspace)
+		chdirTo(t, workspace)
 
 		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
 		if err != nil {
 			t.Fatalf("recoverNoGit: %v", err)
 		}
-		if !rc.IsRedirected {
-			t.Error("IsRedirected = false for a workspace named by BEADS_DIR")
-		}
-		if role, ok := rc.Role(); !ok || role != Contributor {
-			t.Errorf("Role() = (%q, %v), want (%q, true) — BEADS_DIR implies contributor", role, ok, Contributor)
+		if rc.IsRedirected {
+			t.Error("IsRedirected = true for a .beads discoverable by walking up from the working directory")
 		}
 	})
 
-	t.Run("found by the CWD walk is not redirected", func(t *testing.T) {
-		stubCallerBeadsDir(t, "")
-		// The live environment says otherwise, which is the whole point: bd
-		// exports a BEADS_DIR for itself before resolving (context_cmd.go
+	t.Run("bd's own re-exported BEADS_DIR does not fake a redirect", func(t *testing.T) {
+		workspace := resolveSymlinks(t.TempDir())
+		beadsDir := newWorkspace(t, workspace)
+		chdirTo(t, workspace)
+		// bd exports a BEADS_DIR for itself before resolving (context_cmd.go
 		// calls prepareSelectedNoDBContext immediately beforehand), so a
-		// walk-found workspace has one in the env by the time this runs. Only
-		// the caller's own value counts.
+		// walk-found workspace always has one in the environment by the time
+		// this runs. Position must be indifferent to it; an environment
+		// inventory would report a redirect here.
 		t.Setenv("BEADS_DIR", beadsDir)
 
 		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
@@ -189,30 +285,71 @@ func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
 			t.Fatalf("recoverNoGit: %v", err)
 		}
 		if rc.IsRedirected {
-			t.Error("IsRedirected = true for a .beads found by walking up from the working directory")
+			t.Error("IsRedirected = true for a walk-discoverable workspace that bd merely re-exported")
 		}
 	})
 
-	t.Run("BEADS_DIR naming a different directory is not this one", func(t *testing.T) {
-		stubCallerBeadsDir(t, filepath.Join(t.TempDir(), "elsewhere", ".beads"))
+	t.Run("named from a directory that cannot reach it is redirected", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		beadsDir := newWorkspace(t, resolveSymlinks(t.TempDir()))
+		// Stand somewhere with no .beads on its ancestor chain. This is the
+		// shape every caller-directed channel produces: --db, BEADS_DB/BD_DB
+		// and -C all resolve a store the CWD could never have discovered.
+		chdirTo(t, resolveSymlinks(t.TempDir()))
 
 		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
 		if err != nil {
 			t.Fatalf("recoverNoGit: %v", err)
 		}
-		if rc.IsRedirected {
-			t.Error("IsRedirected = true, but BEADS_DIR does not name the directory that was resolved")
+		if !rc.IsRedirected {
+			t.Error("IsRedirected = false for a workspace the working directory cannot discover")
+		}
+		if role, ok := rc.Role(); !ok || role != Contributor {
+			t.Errorf("Role() = (%q, %v), want (%q, true) — a redirect implies contributor", role, ok, Contributor)
 		}
 	})
-}
 
-// stubCallerBeadsDir sets what the context resolver sees as the caller's own
-// BEADS_DIR. The real value is captured at package initialization from the
-// inherited environment, so t.Setenv cannot move it — which is precisely why
-// the snapshot exists, and therefore why it has to be stubbed here.
-func stubCallerBeadsDir(t *testing.T, dir string) {
-	t.Helper()
-	orig := beadsDirFromCaller
-	beadsDirFromCaller = dir
-	t.Cleanup(func() { beadsDirFromCaller = orig })
+	t.Run("a sibling of the CWD is redirected", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		// The boundary the review left unspecified, settled deliberately: a
+		// store reachable only by being named is a redirect even when it sits
+		// beside the caller. With no repository for the CWD there is no
+		// enclosing scope that could make a sibling local.
+		parent := resolveSymlinks(t.TempDir())
+		here := filepath.Join(parent, "here")
+		sibling := filepath.Join(parent, "sibling")
+		if err := os.MkdirAll(here, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(sibling, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		beadsDir := newWorkspace(t, sibling)
+		chdirTo(t, here)
+
+		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: beadsDir, Err: errors.New("not a git repository")})
+		if err != nil {
+			t.Fatalf("recoverNoGit: %v", err)
+		}
+		if !rc.IsRedirected {
+			t.Error("IsRedirected = false for a .beads in a sibling directory of the working directory")
+		}
+	})
+
+	t.Run("a different discoverable workspace is still a redirect", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		// The CWD can discover a workspace, but not THIS one.
+		local := resolveSymlinks(t.TempDir())
+		newWorkspace(t, local)
+		named := newWorkspace(t, resolveSymlinks(t.TempDir()))
+		chdirTo(t, local)
+
+		rc, err := recoverNoGit(nil, &NoRepoRootError{BeadsDir: named, Err: errors.New("not a git repository")})
+		if err != nil {
+			t.Fatalf("recoverNoGit: %v", err)
+		}
+		if !rc.IsRedirected {
+			t.Error("IsRedirected = false, but the resolved workspace is not the one the CWD discovers")
+		}
+	})
 }

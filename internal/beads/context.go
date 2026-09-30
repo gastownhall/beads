@@ -31,6 +31,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // UserRole represents the user's relationship to a repository.
@@ -161,66 +162,80 @@ func recoverNoGit(rc *RepoContext, err error) (*RepoContext, error) {
 		return rc, err
 	}
 	return &RepoContext{
-		BeadsDir:    noRoot.BeadsDir,
-		RepoRoot:    filepath.Dir(noRoot.BeadsDir),
-		CWDRepoRoot: git.GetRepoRoot(), // "" outside a git repo
-		// An explicitly-set BEADS_DIR is a redirect, and outside a git repo
-		// it is the only evidence available: isExternalBeadsDir compares git
-		// COMMON DIRS, and the CWD side of that comparison cannot be computed
-		// without a repo — which is exactly why this branch was reached. So
-		// the normal path's answer is unavailable here, and leaving the field
-		// zero would have `bd context` deny a redirect that is plainly in the
-		// environment, and `Role()` withhold the Contributor that
-		// "BEADS_DIR implies contributor (external repo mode)" promises.
+		BeadsDir: noRoot.BeadsDir,
+		// Root from the .beads side, not at filepath.Dir(BeadsDir). The failure
+		// that reaches here is the CWD's missing repository, not the .beads's —
+		// so when the .beads DOES live inside a repo, naming its parent would
+		// report a subdirectory and the same workspace would answer differently
+		// depending only on where the caller stood. repoRootForBeadsDir asks git
+		// from the .beads directory, which needs no CWD repo, and already falls
+		// back to filepath.Dir(beadsDir) when git cannot answer — so the
+		// no-git-anywhere result is unchanged.
+		RepoRoot: repoRootForBeadsDir(noRoot.BeadsDir),
+		// Known-empty, not merely usually: GetMainRepoRoot, GetRepoRoot and
+		// IsWorktree all read one sync.Once-cached gitContext, so reaching
+		// recoverNoGit means that cached lookup has already failed and all three
+		// degrade together. The call stays because it documents where the value
+		// comes from, but it cannot return anything but "" here.
+		CWDRepoRoot: git.GetRepoRoot(),
+		// Externality is decided POSITIONALLY: the resolved .beads is a redirect
+		// iff discovery standing in the current working directory would not have
+		// found it.
 		//
-		// This mirrors FindBeadsDir's step 1, the same condition that chose
-		// the directory — but asked of the CALLER's environment, not the live
-		// one bd has already written to. A .beads found by the working
-		// directory walk leaves the field false, as it should.
+		// Why position rather than an inventory of environment variables: bd has
+		// four caller-directed workspace channels — BEADS_DIR, --db,
+		// BEADS_DB/BD_DB and -C — and every one but BEADS_DIR reaches
+		// FindBeadsDir only after cmd/bd has rewritten BEADS_DIR for itself
+		// (selectedNoDBBeadsDir; applyChangeDirSelection for -C, which resolves a
+		// .beads and exports it WITHOUT changing the process directory). Reading
+		// the environment therefore cannot distinguish a workspace the caller
+		// named from one bd just found and re-exported, an inventory goes stale
+		// as channels are added, and a further BEADS_DIR writer already exists in
+		// the save/restore pair in cmd/bd/doctor.go. Asking where the caller is
+		// STANDING needs no inventory and covers all four channels uniformly.
 		//
-		// A redirect file cannot reach here to be missed: buildRepoContext
-		// checks GetRedirectInfo() at step 3, and a redirect sends it down the
-		// isExternal branch that never asks git for a root. So by construction
-		// the only redirect this branch can be looking at is a caller-named
-		// BEADS_DIR.
-		IsRedirected: beadsDirNamedByCaller(noRoot.BeadsDir),
-		// IsWorktree stays false: git.IsWorktree() needs a repository, and
-		// there is none.
+		// isExternalBeadsDir answers this by comparing git COMMON DIRS on the
+		// normal path; the CWD side of that comparison needs a repository, which
+		// is precisely what is missing here, so position is the substitute.
+		IsRedirected: beadsDirIsExternalToCWD(noRoot.BeadsDir),
+		// IsWorktree stays false for the same reason CWDRepoRoot is empty: the
+		// one cached git context this all reads has already failed, so
+		// git.IsWorktree() cannot be true here.
 	}, nil
 }
 
-// beadsDirFromCaller is BEADS_DIR as the process INHERITED it, captured at
-// package initialization — which the language guarantees runs before main, and
-// so before any bd code exports a BEADS_DIR of its own.
+// beadsDirIsExternalToCWD reports whether beadsDir is external to the working
+// directory — whether workspace discovery, standing in the CWD, would have
+// found something other than beadsDir, or nothing at all.
 //
-// Reading the live environment instead is a different question and the wrong
-// one, because bd routinely answers it for itself first: `bd context` calls
-// prepareSelectedNoDBContext immediately before resolving (cmd/bd/
-// context_cmd.go), the root PersistentPreRunE does the same for every no-DB
-// command, and both end in os.Setenv("BEADS_DIR", <whatever discovery just
-// found>). A workspace found by walking up from the working directory would
-// therefore look like one the caller had named.
+// It reuses FindBeadsDirFrom, which is both the primitive -C itself resolves
+// through (resolveChangeDirBeadsDir) and purely positional: it consults none of
+// the caller-directed variables, and its git probe scrubs routing env, so bd's
+// own re-exported BEADS_DIR cannot make a walk-found workspace look named.
 //
-// This is the same snapshot, for the same reason, as beadsDirFromCaller in
-// package main (GH#4635) — provenance has to be captured before the process
-// starts overwriting the evidence.
-//
-// A package var so tests can stub it.
-var beadsDirFromCaller = os.Getenv("BEADS_DIR")
-
-// beadsDirNamedByCaller reports whether the caller's own BEADS_DIR names
-// beadsDir — i.e. whether FindBeadsDir picked this directory via its step 1
-// because the caller said so, rather than by walking up from the working
-// directory.
-//
-// It resolves the caller's value the same way FindBeadsDir does
-// (canonicalize, then follow a redirect file), so the comparison answers "is
-// this the directory they named" rather than "is the string equal".
-func beadsDirNamedByCaller(beadsDir string) bool {
-	if beadsDirFromCaller == "" || beadsDir == "" {
+// Settled boundary (the unspecified case the review flagged): a store reachable
+// only by being named is a redirect, INCLUDING one in a sibling directory of the
+// CWD. With no repository for the CWD there is no enclosing scope that could
+// make a sibling local, so the ancestor walk is the only defensible notion of
+// "the workspace I am standing in". This matches what Role() means by "external
+// repo mode": you are not standing in this store's project.
+func beadsDirIsExternalToCWD(beadsDir string) bool {
+	if beadsDir == "" {
 		return false
 	}
-	return FollowRedirect(canonicalizeBeadsDirPath(beadsDirFromCaller)) == beadsDir
+	cwd, err := os.Getwd()
+	if err != nil {
+		// No position to compare against. Report no redirect rather than
+		// inventing one from a failure that says nothing about provenance.
+		return false
+	}
+	discovered := FindBeadsDirFrom(cwd)
+	if discovered == "" {
+		// Nothing is discoverable from here, yet a workspace was resolved, so
+		// some caller-directed channel must have named it.
+		return true
+	}
+	return !utils.PathsEqual(discovered, beadsDir)
 }
 
 // buildRepoContext constructs the RepoContext by resolving all paths.
