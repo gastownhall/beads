@@ -167,6 +167,7 @@ go_test(
         "journal_truncation_test.go",
         "journal_vocabulary_test.go",
         "label_rename_merged_count_test.go",
+        "labels_noop_test.go",
         "lease_reclaimer_test.go",
         "lease_replica_test.go",
         "metadata_test.go",
