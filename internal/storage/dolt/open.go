@@ -364,6 +364,7 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = parseTimeout(poolCfg("dolt.pool-write-timeout"), 0)
 	}
+	applyDialTimeout(cfg)
 
 	return nil
 }
@@ -389,4 +390,18 @@ func applyCentralConfigDefaults(fileCfg *configfile.Config) {
 	}
 
 	configfile.ApplyCentralDefaults(fileCfg, centralCfg)
+}
+
+// applyDialTimeout fills the fail-fast dial budget when the caller left it
+// unset: caller override > BEADS_DOLT_DIAL_TIMEOUT > dolt.dial-timeout >
+// defaultDialTimeout (resolved at dial time by dialTimeoutFor, so an unset
+// field stays 0 here, like the pool deadlines). It also runs from New
+// (applyConfigDefaults) so the CLI's hand-built Config honours it.
+func applyDialTimeout(cfg *Config) {
+	if cfg.DialTimeout == 0 {
+		cfg.DialTimeout = timeoutFromEnv("BEADS_DOLT_DIAL_TIMEOUT", 0)
+	}
+	if cfg.DialTimeout == 0 {
+		cfg.DialTimeout = parseTimeout(config.GetString("dolt.dial-timeout"), 0)
+	}
 }
