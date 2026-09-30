@@ -2051,41 +2051,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Check if we're in a git repo and hooks aren't installed
-		// Install by default unless --skip-hooks is passed
-		// Hooks are installed to .beads/hooks/ (uses git config core.hooksPath)
-		// For jujutsu colocated repos, use simplified hooks (no staging needed)
-		hooksExist := hooksInstalled()
-		if !skipHooks && (!hooksExist || hooksNeedUpdate()) {
-			if hooksExist && !quiet {
-				fmt.Printf("  Updating hooks to version %s...\n", Version)
-			}
-			isJJ := git.IsJujutsuRepo()
-			isColocated := git.IsColocatedJJGit()
-
-			if isJJ && !isColocated {
-				// Pure jujutsu repo (no git) - print alias instructions
-				if !quiet {
-					printJJAliasInstructions()
-				}
-			} else if isColocated {
-				// Colocated jj+git repo - use simplified hooks
-				if err := installJJHooks(); err != nil && !quiet {
-					fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
-					fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
-				} else if !quiet {
-					fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
-				}
-			} else if isGitRepo() {
-				// Regular git repo - install hooks to .beads/hooks/
-				if err := installHooksWithOptions(managedHookNames, false, false, false, true); err != nil && !quiet {
-					fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
-					fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd hooks install --beads"))
-				} else if !quiet {
-					fmt.Printf("  Hooks installed to: .beads/hooks/\n")
-				}
-			}
-		}
+		runEmbeddedInitHooks(rootCtx, cwd, beadsDir, skipHooks, quiet)
 
 		// Initialize version tracking: create .local_version file during bd init
 		// instead of deferring it to the first bd command.

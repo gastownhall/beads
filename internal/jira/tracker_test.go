@@ -802,6 +802,9 @@ func (s *configStore) GetLabels(_ context.Context, _ string) ([]string, error) {
 func (s *configStore) GetIssuesByLabel(_ context.Context, _ string) ([]*types.Issue, error) {
 	return nil, nil
 }
+func (s *configStore) RenameLabel(_ context.Context, _, _, _ string) (int, int, []string, error) {
+	return 0, 0, nil, nil
+}
 func (s *configStore) GetReadyWork(_ context.Context, _ types.WorkFilter) ([]*types.Issue, error) {
 	return nil, nil
 }

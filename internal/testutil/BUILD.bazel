@@ -7,6 +7,9 @@ go_library(
         "container_provider_windows.go",
         "dockercontext.go",
         "git_test_hooks.go",
+        "localdoltserver.go",
+        "localdoltserver_linux.go",
+        "localdoltserver_other.go",
         "suite_temp.go",
         "testdoltbranch.go",
         "testdoltcommon.go",
@@ -104,6 +107,7 @@ go_test(
     name = "testutil_test",
     srcs = [
         "dockercontext_test.go",
+        "localdoltserver_test.go",
         "suite_temp_test.go",
         "testdoltbranch_test.go",
         "testdoltserver_env_test.go",
@@ -112,6 +116,10 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":testutil"],
+    deps = [
+        "//internal/storage/doltutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
 )
 
 # Dolt image pin read as text by //test/docsync and the dolt pin tests in

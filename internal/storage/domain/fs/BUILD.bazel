@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "fs",
@@ -38,6 +39,30 @@ go_test(
         "@com_github_stretchr_testify//require",
         "@com_github_stretchr_testify//suite",
     ],
+)
+
+# fs_test without -short, as pr.yml's "Test (storage domain + uow)" job runs
+# its package (--config=ci passes -test.short). It needs no Dolt server; it is
+# in the dolt-server lane so that lane alone runs every package of the job.
+# GOMAXPROCS=4 is the job's runner shape. It still pins the local backend and
+# fails closed like the lane's other targets: a Dolt-server test added to this
+# package later must fail here, not skip into a cached green, while the job
+# runs it.
+#
+# Tags:
+#   dolt-server: part of the dolt-server lane (--config=doltserver), which
+#     runs the whole job without -short; excluded from --config=prcore/ci.
+sh_test(
+    name = "fs_noshort_test",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :fs_test)"],
+    data = [":fs_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    tags = ["dolt-server"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/setup"
 	"github.com/steveyegge/beads/internal/config"
@@ -45,4 +47,30 @@ func newInitFileSystemAdapters(workDir string) domain.BeadsDirFSAdapters {
 		return setupStealthModeAt(workDir, verbose)
 	}
 	return adapters
+}
+
+// withInitHooks scopes only hook operations; exclude and the other supplied
+// callbacks keep their existing provider. Empty paths retain isolated callers.
+func withInitHooks(fs domain.BeadsDirFSUseCase, workDir, beadsDir string) (domain.BeadsDirFSUseCase, *initHooksContext, error) {
+	if workDir == "" {
+		return fs, nil, nil
+	}
+	hooks, err := resolveInitHooksContext(workDir, beadsDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return initHooksFileSystem{BeadsDirFSUseCase: fs, hooks: hooks}, hooks, nil
+}
+
+type initHooksFileSystem struct {
+	domain.BeadsDirFSUseCase
+	hooks *initHooksContext
+}
+
+func (fs initHooksFileSystem) InstallGitHooks(_ context.Context, p domain.HooksInstallParams) error {
+	return installHooksWithContext(p.HookNames, p.Force, p.Shared, p.Chain, p.BeadsHooks, fs.hooks)
+}
+
+func (fs initHooksFileSystem) InstallJJHooks(_ context.Context) error {
+	return installHooksWithContext(jjHookNames, false, false, false, false, fs.hooks)
 }

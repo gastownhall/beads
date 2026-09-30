@@ -10,6 +10,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGuardHookWritePathIgnoresInheritedGitRouting(t *testing.T) {
@@ -51,6 +53,7 @@ func TestGuardHookWritePathIgnoresInheritedGitRouting(t *testing.T) {
 		name string
 		env  map[string]string
 	}{
+		{"both", map[string]string{"GIT_DIR": filepath.Join(target, ".git"), "GIT_WORK_TREE": target}},
 		{"repository", map[string]string{"GIT_DIR": filepath.Join(decoy, ".git")}},
 		{"worktree", map[string]string{"GIT_DIR": filepath.Join(decoy, ".git"), "GIT_WORK_TREE": decoy}},
 		{"index", map[string]string{"GIT_INDEX_FILE": filepath.Join(decoy, ".git", "index")}},
@@ -60,9 +63,16 @@ func TestGuardHookWritePathIgnoresInheritedGitRouting(t *testing.T) {
 			for key, value := range tc.env {
 				t.Setenv(key, value)
 			}
+			if tc.name == "both" {
+				probe := exec.Command("git", "-C", hooksDir, "ls-files", "--error-unmatch", "--", "pre-commit")
+				out, err := probe.CombinedOutput()
+				require.NoError(t, err, "inherited index must also prove tracking: %s", out)
+			}
 			if !isGitTrackedFile(foreign) {
 				t.Error("inherited routing hid the tracked hook")
 			}
+			require.Equal(t, "containing repository index", gitTrackedFileContext(foreign), "clean proof takes precedence, including when both views track it")
+			require.ErrorContains(t, guardHookWritePath(foreign, false), "tracked by git (containing repository index)")
 			if err := guardHookWritePath(foreign, false); err == nil || !strings.Contains(err.Error(), "tracked by git") {
 				t.Errorf("expected tracked-file refusal, got %v", err)
 			}
@@ -78,6 +88,7 @@ func TestGuardHookWritePathIgnoresInheritedGitRouting(t *testing.T) {
 			if isGitTrackedFile(untracked) {
 				t.Error("untracked hook reported as tracked")
 			}
+			require.Empty(t, gitTrackedFileContext(untracked))
 			if err := guardHookWritePath(untracked, false); err != nil {
 				t.Errorf("untracked hook refused: %v", err)
 			}
@@ -467,5 +478,83 @@ func TestGuardHookWritePathAllowsFileWhenGitUnavailable(t *testing.T) {
 	}
 	if err := guardHookWritePath(path, false); err != nil {
 		t.Fatalf("both tracking errors must retain the untracked policy: %v", err)
+	}
+}
+
+func TestInitHooksContextGuardPreservesOwnership(t *testing.T) {
+	for _, name := range []string{"tracked", "bd_owned", "symlink", "captured_fallback"} {
+		t.Run(name, func(t *testing.T) {
+			selected, _, _, _ := newInitHooksFixture(t)
+			storage := filepath.Join(selected, "local-storage")
+			hooksDir := filepath.Join(storage, "hooks")
+			if name == "captured_fallback" {
+				storage = t.TempDir()
+				hooksDir = filepath.Join(storage, "hooks")
+			}
+			require.NoError(t, os.MkdirAll(hooksDir, 0755))
+			hook := filepath.Join(hooksDir, "pre-commit")
+			content := "#!/bin/sh\necho foreign\n"
+			if name == "bd_owned" {
+				content = "#!/bin/sh\n" + generateHookSection("pre-commit")
+			}
+			if name == "symlink" {
+				target := filepath.Join(t.TempDir(), "foreign hook")
+				require.NoError(t, os.WriteFile(target, []byte(content), 0755))
+				if err := os.Symlink(target, hook); err != nil {
+					t.Skipf("symlink capability unavailable: %v", err)
+				}
+			} else {
+				require.NoError(t, os.WriteFile(hook, []byte(content), 0755))
+				if name == "captured_fallback" {
+					bare := t.TempDir()
+					initExcludeGit(t, bare, "init", "--bare", "--quiet")
+					initExcludeGit(t, storage, "--git-dir", bare, "--work-tree", storage, "add", "hooks/pre-commit")
+					t.Setenv("GIT_DIR", bare)
+					t.Setenv("GIT_WORK_TREE", storage)
+					t.Setenv("GIT_INDEX_FILE", filepath.Join(bare, "index"))
+				} else {
+					initExcludeGit(t, selected, "add", "--force", "--", hook)
+				}
+			}
+			fs, hooks, err := withInitHooks(nil, selected, storage)
+			require.NoError(t, err)
+			if name == "captured_fallback" {
+				require.False(t, isGitTrackedFileWithEnv(hook, hooks.env, hooks.env), "clean view must not supply the proof")
+				require.True(t, isGitTrackedFileWithEnv(hook, hooks.env, hooks.inheritedEnv), "inherited view must prove tracking")
+			}
+			t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "missing"))
+			err = fs.InstallGitHooks(t.Context(), domain.HooksInstallParams{HookNames: managedHookNames, BeadsHooks: true})
+			if name == "bd_owned" {
+				require.NoError(t, err)
+				require.Contains(t, string(readInitHooksFile(t, hook)), hookSectionBeginPrefix)
+			} else {
+				want := "tracked by git"
+				if name == "symlink" {
+					want = "symlink"
+				}
+				require.ErrorContains(t, err, want)
+				if name == "captured_fallback" {
+					require.ErrorContains(t, err, "tracked by git (inherited Git index)")
+					// The remediation follows the proof: `git rm --cached` from the
+					// operator's shell aims at whichever index that shell routes to,
+					// so the inherited case has to name clearing the routing instead.
+					require.ErrorContains(t, err, "Clear the inherited Git routing environment and re-run")
+					for _, entry := range hooks.inheritedEnv {
+						if strings.HasPrefix(entry, "GIT_DIR=") {
+							require.NotContains(t, err.Error(), strings.TrimPrefix(entry, "GIT_DIR="))
+						}
+					}
+				} else if name == "tracked" {
+					require.ErrorContains(t, err, "tracked by git (containing repository index)")
+					require.ErrorContains(t, err, "Untrack it (git rm --cached) or move hooks to an untracked directory")
+					require.NotContains(t, err.Error(), "Clear the inherited Git routing environment")
+				}
+				require.Equal(t, content, string(readInitHooksFile(t, hook)))
+				for _, other := range []string{"post-merge", "pre-commit.backup"} {
+					_, err := os.Lstat(filepath.Join(hooksDir, other))
+					require.ErrorIs(t, err, os.ErrNotExist)
+				}
+			}
+		})
 	}
 }

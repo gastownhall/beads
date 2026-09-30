@@ -81,7 +81,15 @@ go_test(
         "//internal/storage/dbproxy/util",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-    ],
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "//internal/testutil/bazeltest",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/testutil/bazeltest",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

@@ -499,6 +499,7 @@ Selected commonly-used variables:
 | `BD_DEBUG` | Enable debug logging |
 | `BD_MIGRATION_FREEZE_FILE` | Check this exact path for the freeze marker instead of walking ancestor directories; authoritative when set (see [Migration Freeze](#migration-freeze)) |
 | `BEADS_DIR` | Force the active beads workspace directory |
+| `BEADS_CEILING_DIRECTORIES` | Directories (separated like `PATH`) that `.beads` and `config.yaml` discovery never looks at or above, like git's `GIT_CEILING_DIRECTORIES`; the starting directory is always examined. For sandboxes such as `bazel test` that must not reach the user's own `~/.beads` |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
 | `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |

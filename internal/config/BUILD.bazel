@@ -17,6 +17,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/config",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/ceiling",
         "//internal/debug",
         "//internal/gitenv",
         "@com_github_spf13_viper//:viper",

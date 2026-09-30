@@ -197,6 +197,10 @@ func TestResolveHooksContext(t *testing.T) {
 	check := func(t *testing.T, dir string, env []string, repo, hooks string) HooksContext {
 		t.Helper()
 		got, err := ResolveHooksContext(dir, env)
+		fresh, freshErr := GetGitHooksDirFrom(dir, env)
+		if freshErr != nil || fresh != hooks {
+			t.Errorf("fresh lazy hooks = %q, %v; want %q", fresh, freshErr, hooks)
+		}
 		want := HooksContext{HooksDir: hooks, CommonDir: filepath.Join(canonical(selected), ".git"), RepoRoot: canonical(repo), MainRepoRoot: canonical(selected)}
 		if err != nil || got != want {
 			t.Errorf("selected context = %+v, %v; want %+v", got, err, want)
@@ -318,6 +322,12 @@ func TestResolveHooksContext(t *testing.T) {
 		got, err := GetGitHooksDir()
 		if err != nil || got != absolute {
 			t.Fatalf("lazy absolute hooks = %q, %v; want %q", got, err, absolute)
+		}
+		for _, dir := range []string{nonrepo, bare} {
+			fresh, err := GetGitHooksDirFrom(dir, cleanEnv)
+			if err != nil || fresh != absolute {
+				t.Errorf("fresh absolute hooks from %q = %q, %v", dir, fresh, err)
+			}
 		}
 	})
 	for name, dir := range map[string]string{"empty_workdir": "", "nonrepo": nonrepo, "bare": bare} {

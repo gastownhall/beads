@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -786,10 +787,14 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 // when they agree on which ancestors exist. The ceiling is not extended to "/"
 // because it guards against ambient state in a world-writable shared root,
 // which the filesystem root is not.
+//
+// BEADS_CEILING_DIRECTORIES (package ceiling) also ends the walk: no directory
+// at or above a ceiling containing the origin is yielded.
 type AncestorDirWalk struct {
 	next     string
 	origin   string
 	tempRoot string
+	bound    *ceiling.Bound
 	done     bool
 }
 
@@ -797,10 +802,12 @@ type AncestorDirWalk struct {
 // caller's actual discovery start even when startDir begins a later segment of
 // a bounded walk.
 func NewAncestorDirWalk(startDir, originDir string) *AncestorDirWalk {
+	origin := canonicalizeAncestorWalkPath(originDir)
 	return &AncestorDirWalk{
 		next:     canonicalizeAncestorWalkPath(startDir),
-		origin:   canonicalizeAncestorWalkPath(originDir),
+		origin:   origin,
 		tempRoot: canonicalizeAncestorWalkPath(os.TempDir()),
+		bound:    ceiling.For(origin),
 	}
 }
 
@@ -832,12 +839,17 @@ func canonicalizeAncestorWalkPath(path string) string {
 	}
 }
 
-// Next returns the next directory permitted by the temp-root ceiling.
+// Next returns the next directory permitted by the temp-root and
+// BEADS_CEILING_DIRECTORIES ceilings.
 func (w *AncestorDirWalk) Next() (string, bool) {
 	if w == nil || w.done || w.next == "" || w.next == "." {
 		return "", false
 	}
 	dir := w.next
+	if w.bound.Excludes(dir) {
+		w.done = true
+		return "", false
+	}
 	if w.tempRoot != "" && dir == w.tempRoot && dir != w.origin {
 		w.done = true
 		return "", false
@@ -880,11 +892,26 @@ func hasBeadsDatabase(beadsDir string) bool {
 	return false
 }
 
+// ExplicitBeadsDir returns the .beads directory named by the BEADS_DIR
+// environment variable, canonicalized and with any redirect followed, or ""
+// when BEADS_DIR is unset. Unlike FindBeadsDir it does not require the
+// directory to exist or to hold project files, so commands that create a
+// workspace can target the caller's explicit choice instead of CWD.
+func ExplicitBeadsDir() string {
+	beadsDir := os.Getenv("BEADS_DIR")
+	if beadsDir == "" {
+		return ""
+	}
+	return FollowRedirect(canonicalizeBeadsDirPath(beadsDir))
+}
+
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
 //
 // Resolution order:
-//  1. BEADS_DIR environment variable (highest priority)
+//  1. BEADS_DIR environment variable (highest priority). An explicit
+//     BEADS_DIR is authoritative: when it does not (yet) hold project files,
+//     FindBeadsDir returns "" instead of discovering some other workspace.
 //  2. Walk up from CWD toward repo root boundary, checking each directory
 //     for .beads/ with valid project files. For worktrees, stops at the
 //     worktree root; for non-worktrees, stops at the git root.
@@ -899,18 +926,20 @@ func hasBeadsDatabase(beadsDir string) bool {
 // contents are used as the actual .beads directory path.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-		absBeadsDir := canonicalizeBeadsDirPath(beadsDir)
-
-		// Follow redirect if present
-		absBeadsDir = FollowRedirect(absBeadsDir)
-
+	if absBeadsDir := ExplicitBeadsDir(); absBeadsDir != "" {
 		if info, err := os.Stat(absBeadsDir); err == nil && info.IsDir() {
 			// Validate directory contains actual project files
 			if hasBeadsProjectFiles(absBeadsDir) {
 				return absBeadsDir
 			}
 		}
+
+		// The caller named this directory explicitly. Walking up from CWD
+		// here would bind an unrelated ancestor workspace (and PersistentPreRun
+		// would then rewrite BEADS_DIR to it), so `bd init` and every other
+		// command would act on the wrong store. Report "not found" instead,
+		// matching FindDatabasePath.
+		return ""
 	}
 
 	// 2. Walk up from CWD toward the repo root, checking each directory for .beads/.

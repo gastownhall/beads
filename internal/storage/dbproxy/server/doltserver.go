@@ -36,6 +36,13 @@ const (
 	LockFileName = "proxy-child.lock"
 )
 
+// errBackendExited is the result of the supervising goroutine when the dolt
+// sql-server exits on its own with status 0 (for example dolt's graceful
+// shutdown on SIGTERM). errgroup cancels egCtx only for a non-nil result, and
+// Running reads egCtx, so without it a cleanly exited backend would be
+// reported as running forever.
+var errBackendExited = errors.New("dolt sql-server exited")
+
 const (
 	startReadyTimeout      = 30 * time.Second
 	startReadyPollInterval = 50 * time.Millisecond
@@ -303,7 +310,10 @@ func (s *DoltServer) Start(ctx context.Context) error {
 
 	eg.Go(func() error {
 		defer lock.Unlock()
-		return cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			return err
+		}
+		return errBackendExited
 	})
 
 	if err := s.waitReady(ctx); err != nil {
@@ -358,7 +368,7 @@ func (s *DoltServer) Stop(ctx context.Context) error {
 	if s.eg != nil {
 		waitErr = s.eg.Wait()
 		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) || errors.Is(waitErr, context.Canceled) {
+		if errors.As(waitErr, &exitErr) || errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, errBackendExited) {
 			waitErr = nil
 		}
 	}

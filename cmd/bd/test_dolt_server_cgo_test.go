@@ -38,7 +38,10 @@ func startTestDoltServer() func() {
 		return func() { testutil.TerminateDoltContainer() }
 	}
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			// Nothing has been started yet; there is nothing to clean up.
+			os.Exit(1)
+		}
 		return func() {}
 	}
 

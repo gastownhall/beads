@@ -54,6 +54,7 @@ go_library(
         "metadata.go",
         "metadata_cas.go",
         "remote.go",
+        "remote_ref.go",
         "storage.go",
         "sync.go",
         "version_control.go",
@@ -98,6 +99,7 @@ go_test(
         "metadata_jsonpath_test.go",
         "metadata_schema_test.go",
         "metadata_test.go",
+        "remote_ref_test.go",
         "role_accessor_decorator_test.go",
     ],
     data = [
@@ -158,6 +160,7 @@ filegroup(
         "//internal/storage/rowid:go_srcs",
         "//internal/storage/schema:go_srcs",
         "//internal/storage/sqlbuild:go_srcs",
+        "//internal/storage/sqlclass:go_srcs",
         "//internal/storage/storagecontract:go_srcs",
         "//internal/storage/uow:go_srcs",
         "//internal/storage/versioncontrolops:go_srcs",

@@ -112,10 +112,7 @@ type pullDoltRun struct {
 func runPullDoltImage(t *testing.T, failures int) pullDoltRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test pull-dolt-image.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

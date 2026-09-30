@@ -143,6 +143,20 @@ Run 'bd backup init <path>' first to configure a destination.`,
 
 		ctx := rootCtx
 		if usesProxiedServer() {
+			if err := requireLocalProxiedBackup("backup sync"); err != nil {
+				return err
+			}
+		}
+		release, err := acquireBackupLock(backupLockWait)
+		if err != nil {
+			if errors.Is(err, errBackupBusy) {
+				return HandleErrorRespectJSON("%v; retry when it completes", err)
+			}
+			return HandleErrorRespectJSON("%v", err)
+		}
+		defer release()
+
+		if usesProxiedServer() {
 			return runBackupSyncProxied(ctx)
 		}
 		if store == nil {
@@ -453,7 +467,7 @@ backup configuration. The backup data at the destination is not deleted.`,
 		}
 
 		// Also remove backup_export if it exists (auto-export may have created it at same URL)
-		_ = bs.BackupRemove(ctx, "backup_export")
+		_ = bs.BackupRemove(ctx, versioncontrolops.ExportBackupName)
 
 		// Remove local config
 		if path, err := doltBackupConfigPath(); err == nil {

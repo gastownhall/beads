@@ -35,6 +35,21 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("TreatsALegacyTypedWispAsEphemeralTier", func(t *testing.T) {
 		conformance.RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t, ctx, fixture)
 	})
+	t.Run("WispsPlaneClearsTheWholeWispsTable", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneClearsTheWholeWispsTable(t, ctx, fixture)
+	})
+	t.Run("WispsPlaneRequiresAFilter", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneRequiresAFilter(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependents", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependents(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependentsAcrossPlanes", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, ctx, fixture)
+	})
+	t.Run("LimitTakesTheOldestClosedFirst", func(t *testing.T) {
+		conformance.RunSweeperLimitTakesTheOldestClosedFirst(t, ctx, fixture)
+	})
 	t.Run("LeavesNoHistoryBeadsToTheDurableTier", func(t *testing.T) {
 		conformance.RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t, ctx, fixture)
 	})
@@ -97,6 +112,20 @@ func newUOWSweeperFixture(t *testing.T, ctx context.Context, prefix string) conf
 				}
 				return "seed legacy sweep rows", nil
 			})
+		},
+		AddDependencies: func(ctx context.Context, req issueops.AddDependenciesRequest) error {
+			// Through the DependencyEditor ROLE, which routes each edge to its
+			// source plane's dependency table itself.
+			ds, ok := provider.(DependencyEditorSource)
+			if !ok {
+				return fmt.Errorf("provider %T does not offer the DependencyEditor accessor", provider)
+			}
+			editor, err := ds.DependencyEditor()
+			if err != nil {
+				return err
+			}
+			_, err = editor.AddDependencies(ctx, req)
+			return err
 		},
 		AddComment: func(ctx context.Context, issueID, author, text string) error {
 			// Through the Commenter ROLE, which resolves the plane itself, so

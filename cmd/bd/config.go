@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -238,7 +239,7 @@ var configSetCmd = &cobra.Command{
 			if !validRoles[value] {
 				return HandleError("invalid role %q (valid values: maintainer, contributor)", value)
 			}
-			// bd config's own beads.role reads and writes ignore inherited Git
+			// bd config get/set/unset/set-many beads.role ignore inherited Git
 			// routing, including GIT_CONFIG_GLOBAL, so the value lands in the
 			// repository this command selected. beads.role is an authority
 			// value and the reader it feeds treats a missing value as
@@ -1022,7 +1023,8 @@ func isValidRemoteURL(rawURL string) bool {
 // findBeadsRepoRoot walks up from the given path to find the repo root (containing .beads)
 func findBeadsRepoRoot(startPath string) string {
 	path := startPath
-	for {
+	bound := ceiling.For(startPath)
+	for !bound.Excludes(path) {
 		beadsDir := filepath.Join(path, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return path
@@ -1262,7 +1264,11 @@ func validateStorageClassConfig(key, value string) error {
 	if canonical := issueType.Normalize(); canonical != issueType {
 		return fmt.Errorf("invalid key %q: %q is an alias of %q, and create-time lookup uses the canonical type; set storage-class.%s instead", key, suffix, canonical, canonical)
 	}
-	if !issueType.IsValidWithCustom(loadEmbeddedCustomTypes()) {
+	customTypes, err := resolveWorkspaceCustomTypes(rootCtx)
+	if err != nil {
+		return err
+	}
+	if !issueType.IsValidWithCustom(customTypes) {
 		return fmt.Errorf("invalid key %q: unknown issue type %q (use a built-in type, or add it to types.custom first)", key, suffix)
 	}
 	if _, err := types.ParseStorageClass(value); err != nil {

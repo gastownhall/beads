@@ -4,10 +4,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/utils"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfigureBeadsHooksPath_WorktreeUsesMainRepo(t *testing.T) {
@@ -337,5 +343,450 @@ func TestConfigureBeadsHooksPath_NormalRepoUnchanged(t *testing.T) {
 	expected, _ = filepath.EvalSymlinks(expected)
 	if hooksPath != expected {
 		t.Errorf("core.hooksPath = %q, want %q", hooksPath, expected)
+	}
+}
+
+// newInitHooksFixture keeps the selected worktree, ambient repository and
+// storage physically distinct. Git's default HOME is owned by the parent helper.
+func newInitHooksFixture(t *testing.T) (selected, decoy, storage, common string) {
+	t.Helper()
+	selected, decoy, exclude, _ := newInitExcludeRepos(t)
+	common = filepath.Dir(filepath.Dir(exclude))
+	storage = filepath.Join(t.TempDir(), "separate storage")
+	require.NoError(t, os.Mkdir(storage, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, "seed"), []byte("decoy\n"), 0600))
+	initExcludeGit(t, decoy, "add", "seed")
+	initExcludeGit(t, selected, "config", "beads.role", "contributor")
+	t.Setenv("BEADS_DIR", filepath.Join(decoy, ".beads"))
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+	t.Setenv("GIT_WORK_TREE", decoy)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(decoy, ".git", "index"))
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	return selected, decoy, storage, common
+}
+
+func readInitHooksFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
+}
+
+func TestInitEmbeddedHooksSelectedTail(t *testing.T) {
+	for _, name := range []string{"missing", "skip", "nonrepo", "pure_jj", "quiet_pure_jj", "colocated", "bare", "config_lock", "quiet_config_lock"} {
+		t.Run(name, func(t *testing.T) {
+			selected, decoy, storage, common := newInitHooksFixture(t)
+			preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index"))
+			if name == "nonrepo" || strings.Contains(name, "pure_jj") || name == "bare" {
+				selected = t.TempDir()
+			}
+			if name == "bare" {
+				initExcludeGit(t, selected, "init", "--bare")
+			}
+			if strings.Contains(name, "pure_jj") || name == "colocated" {
+				require.NoError(t, os.Mkdir(filepath.Join(selected, ".jj"), 0755))
+			}
+			if name == "colocated" {
+				initExcludeGit(t, selected, "config", "--local", "core.hooksPath", filepath.Join(common, "hooks"))
+			}
+			locked, quiet := strings.Contains(name, "config_lock"), strings.HasPrefix(name, "quiet")
+			if locked {
+				require.NoError(t, os.WriteFile(filepath.Join(common, "config.lock"), []byte("owned lock"), 0600))
+				preserveInitRoleInputs(t, filepath.Join(common, "config"))
+			}
+			run := func() { runEmbeddedInitHooks(t.Context(), selected, storage, name == "skip", quiet) }
+			if locked {
+				stderr := captureStderr(t, run)
+				require.Equal(t, !quiet, strings.Contains(stderr, "Failed to install git hooks"))
+				require.Equal(t, !quiet, strings.Contains(stderr, "bd hooks install --beads"))
+			} else {
+				stdout := captureStdout(t, func() error { run(); return nil })
+				require.Equal(t, name == "pure_jj", strings.Contains(stdout, "Jujutsu repository detected"))
+			}
+			destination := filepath.Join(storage, "hooks")
+			if name == "colocated" {
+				destination = filepath.Join(common, "hooks")
+			}
+			if name == "skip" || name == "nonrepo" || strings.Contains(name, "pure_jj") {
+				_, err := os.Stat(destination)
+				require.ErrorIs(t, err, os.ErrNotExist)
+				return
+			}
+			require.Contains(t, string(readInitHooksFile(t, filepath.Join(destination, "pre-commit"))), hookSectionBeginPrefix)
+			if !locked && name != "colocated" {
+				// A bare repository has no work tree to anchor, so it resolves
+				// through the work-tree-less hooks context (GH#6457) and is its own
+				// common directory. It installs like any other selected repository
+				// rather than degrading to a warning and no install at all.
+				configRoot := common
+				if name == "bare" {
+					configRoot = selected
+				}
+				got := initExcludeGit(t, selected, "config", "--file", filepath.Join(configRoot, "config"), "--get", "core.hooksPath")
+				require.Equal(t, filepath.Clean(destination), filepath.Clean(got))
+			}
+		})
+	}
+}
+
+func TestInitEmbeddedHooksSelectedStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook current-status checks require POSIX executable bits")
+	}
+	for _, name := range []string{"decoy_current", "target_current", "target_outdated"} {
+		t.Run(name, func(t *testing.T) {
+			selected, decoy, storage, common := newInitHooksFixture(t)
+			current := filepath.Join(decoy, ".git", "hooks")
+			configuredRepo := decoy
+			if name != "decoy_current" {
+				current = filepath.Join(common, "hooks")
+				configuredRepo = selected
+			}
+			initExcludeGit(t, configuredRepo, "config", "--local", "core.hooksPath", current)
+			require.NoError(t, os.MkdirAll(current, 0755))
+			for _, hook := range managedHookNames {
+				content := "#!/bin/sh\n" + generateHookSection(hook)
+				if name == "target_outdated" {
+					content = "#!/bin/sh\n" + hookVersionPrefix + "0.0.0\n# bd (beads) " + hook + " hook\n"
+				}
+				require.NoError(t, os.WriteFile(filepath.Join(current, hook), []byte(content), 0755))
+			}
+			require.True(t, hooksInstalledAt(current))
+			require.Equal(t, name == "target_outdated", hookStatusesNeedUpdate(checkGitHooksAt(current)))
+			if name == "decoy_current" {
+				require.True(t, hooksInstalled() && !hooksNeedUpdate(), "inherited decoy hooks must be current")
+			}
+			preserveInitRoleInputs(t, filepath.Join(current, "pre-commit"), filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index"))
+			stdout := captureStdout(t, func() error {
+				runEmbeddedInitHooks(t.Context(), selected, storage, false, false)
+				return nil
+			})
+			require.Equal(t, name == "target_outdated", strings.Contains(stdout, "Updating hooks to version"))
+			if name == "target_current" {
+				_, err := os.Stat(filepath.Join(storage, "hooks"))
+				require.ErrorIs(t, err, os.ErrNotExist)
+			} else {
+				require.Contains(t, string(readInitHooksFile(t, filepath.Join(storage, "hooks", "pre-commit"))), hookSectionBeginLine())
+			}
+		})
+	}
+}
+
+func preserveStandaloneHookInputs(t *testing.T, paths ...string) {
+	t.Helper()
+	beforeEnv := os.Environ()
+	t.Cleanup(func() { require.Equal(t, beforeEnv, os.Environ()) })
+	for _, path := range paths {
+		before := readInitHooksFile(t, path)
+		t.Cleanup(func() { require.Equal(t, before, readInitHooksFile(t, path), "changed %s", path) })
+	}
+}
+
+func setStandaloneHookMode(t *testing.T, mode string) {
+	t.Helper()
+	oldJSON := jsonOutput
+	jsonOutput = false // These command fixtures assert the human-readable stderr contract.
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	for _, flag := range []string{"force", "shared", "chain", "beads"} {
+		f := hooksInstallCmd.Flags().Lookup(flag)
+		old, changed := f.Value.String(), f.Changed
+		t.Cleanup(func() {
+			require.NoError(t, hooksInstallCmd.Flags().Set(flag, old))
+			f.Changed = changed
+		})
+		value := "false"
+		if flag == mode {
+			value = "true"
+		}
+		require.NoError(t, hooksInstallCmd.Flags().Set(flag, value))
+	}
+}
+
+func TestStandaloneHookCommandsUseSelectedContext(t *testing.T) {
+	for _, name := range []string{"regular", "linked", "private", "shared", "beads", "bare_external", "inline", "config_file", "config_lock"} {
+		t.Run(name, func(t *testing.T) {
+			selected, decoy, storage, common := newInitHooksFixture(t)
+			require.True(t, utils.PathsEqual(decoy, git.GetRepoRoot()), "seed stale decoy cache")
+			cwd, mainRoot := decoy, filepath.Dir(common)
+			if name == "regular" {
+				selected = mainRoot
+			}
+			private := initExcludeGit(t, selected, "rev-parse", "--absolute-git-dir")
+			if name == "bare_external" {
+				root := t.TempDir()
+				common, selected = filepath.Join(root, "selected bare.git"), filepath.Join(root, "external tree")
+				initExcludeGit(t, root, "init", "--bare", common)
+				require.NoError(t, os.Mkdir(selected, 0755))
+				cwd, mainRoot, private = selected, selected, filepath.Join("..", "selected bare.git")
+			}
+			t.Chdir(cwd)
+			t.Setenv("GIT_DIR", private)
+			t.Setenv("GIT_WORK_TREE", selected)
+			t.Setenv("BEADS_DIR", storage)
+			require.NoError(t, os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0600))
+			destination := filepath.Join(mainRoot, ".beads", "hooks")
+			initExcludeGit(t, cwd, "--git-dir", common, "config", "--local", "core.hooksPath", destination)
+			initExcludeGit(t, cwd, "--git-dir", common, "config", "--local", "beads.role", "contributor")
+			if name == "private" {
+				destination = t.TempDir()
+				initExcludeGit(t, selected, "config", "extensions.worktreeConfig", "true")
+				initExcludeGit(t, selected, "config", "--worktree", "core.hooksPath", destination)
+				preserveStandaloneHookInputs(t, filepath.Join(private, "config.worktree"))
+			}
+			if name == "shared" {
+				destination = filepath.Join(mainRoot, ".beads-hooks")
+			} else if name == "beads" {
+				destination = filepath.Join(storage, "hooks")
+			}
+			decoyHook := filepath.Join(decoy, ".git", "hooks", "pre-commit")
+			require.NoError(t, os.WriteFile(decoyHook, []byte("#!/bin/sh\n"+generateHookSection("pre-commit")), 0755))
+			if name == "inline" {
+				t.Setenv("GIT_CONFIG_COUNT", "1")
+				t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+				t.Setenv("GIT_CONFIG_VALUE_0", filepath.Dir(decoyHook))
+			}
+			if name == "config_file" {
+				initExcludeGit(t, decoy, "config", "--local", "core.hooksPath", filepath.Dir(decoyHook))
+				t.Setenv("GIT_CONFIG", filepath.Join(decoy, ".git", "config"))
+			}
+			preserveStandaloneHookInputs(t, decoyHook, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index"))
+			setStandaloneHookMode(t, name)
+			require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+			require.Contains(t, string(readInitHooksFile(t, filepath.Join(destination, "pre-commit"))), hookSectionBeginPrefix)
+			if name == "shared" || name == "beads" {
+				got := initExcludeGit(t, cwd, "--git-dir", common, "config", "--local", "--get", "core.hooksPath")
+				require.True(t, utils.PathsEqual(destination, got), "selected hooks path = %q, want %q", got, destination)
+			}
+			if name == "config_lock" {
+				require.NoError(t, os.WriteFile(filepath.Join(common, "config.lock"), []byte("owned lock"), 0600))
+				var err error
+				stderr := captureStderr(t, func() { err = hooksUninstallCmd.RunE(hooksUninstallCmd, nil) })
+				require.Equal(t, &exitError{Code: 1}, err)
+				require.Contains(t, stderr, "failed to reset")
+				return
+			}
+			require.NoError(t, hooksUninstallCmd.RunE(hooksUninstallCmd, nil))
+			_, err := os.Stat(filepath.Join(destination, "pre-commit"))
+			require.ErrorIs(t, err, os.ErrNotExist)
+			query := exec.Command("git", "--git-dir", common, "config", "--local", "--get", "beads.role")
+			query.Dir, query.Env = cwd, gitenv.ScrubRouting(os.Environ())
+			var exit *exec.ExitError
+			require.ErrorAs(t, query.Run(), &exit)
+			require.Equal(t, 1, exit.ExitCode(), "selected local role must be absent")
+			if name == "beads" {
+				// The value install wrote is the out-of-repo <BEADS_DIR>/hooks
+				// directory whose hook files uninstall just deleted. Leaving it
+				// configured keeps .git/hooks shadowed by an emptied directory,
+				// i.e. every hook silently disabled while beads-managed config is
+				// still installed — the GH#4440 contract this command enforces.
+				pathQuery := exec.Command("git", "--git-dir", common, "config", "--local", "--get", "core.hooksPath")
+				pathQuery.Dir, pathQuery.Env = cwd, gitenv.ScrubRouting(os.Environ())
+				var pathExit *exec.ExitError
+				require.ErrorAs(t, pathQuery.Run(), &pathExit)
+				require.Equal(t, 1, pathExit.ExitCode(), "out-of-storage hooks path must be cleared, not left behind")
+			}
+			require.True(t, utils.PathsEqual(decoy, git.GetRepoRoot()), "fresh commands must leave the legacy cache untouched")
+		})
+	}
+}
+
+// TestStandaloneBeadsUninstallLeavesHooksPathWhenResolutionDrifts records an
+// accepted limitation, not a desired behavior. The shared predicate recognizes the
+// directory `bd hooks install --beads` would configure *right now*
+// (doctor.BeadsManagedStorageHooksDir -> beads.FindBeadsDir), not the value install
+// actually wrote, and every FindBeadsDir arm reads live inputs: BEADS_DIR, the
+// .beads/redirect contents, storage existence plus project files, and the process
+// cwd. core.hooksPath lives in the shared common dir, so an installing shell with
+// BEADS_DIR set and an uninstalling shell without it see the same configured value
+// and resolve different storage. Uninstall then deletes the hook files and leaves
+// core.hooksPath pointing at the emptied directory — .git/hooks stays shadowed,
+// which is the GH#4440 shape the clearance exists to prevent.
+//
+// Tracked in bd-s76jm: record what install configured (a local beads.hooksPath key)
+// and match the record, with the current recomputation as the fallback. When that
+// lands this expectation flips to "cleared" and this test becomes its
+// counterfactual.
+func TestStandaloneBeadsUninstallLeavesHooksPathWhenResolutionDrifts(t *testing.T) {
+	selected, decoy, storage, common := newInitHooksFixture(t)
+	require.True(t, utils.PathsEqual(decoy, git.GetRepoRoot()), "seed stale decoy cache")
+	mainRoot := filepath.Dir(common)
+	private := initExcludeGit(t, selected, "rev-parse", "--absolute-git-dir")
+	t.Chdir(decoy)
+	t.Setenv("GIT_DIR", private)
+	t.Setenv("GIT_WORK_TREE", selected)
+	t.Setenv("BEADS_DIR", storage)
+	require.NoError(t, os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0600))
+	destination := filepath.Join(storage, "hooks")
+	initExcludeGit(t, decoy, "--git-dir", common, "config", "--local", "core.hooksPath",
+		filepath.Join(mainRoot, ".beads", "hooks"))
+	setStandaloneHookMode(t, "beads")
+	require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+	require.Contains(t, string(readInitHooksFile(t, filepath.Join(destination, "pre-commit"))), hookSectionBeginPrefix)
+	require.True(t, utils.PathsEqual(destination, readSelectedHooksPath(t, decoy, common)),
+		"install must configure the out-of-repo storage hooks directory")
+
+	// Same repository and same configured value; only the resolution inputs move.
+	require.NoError(t, os.Unsetenv("BEADS_DIR"))
+	require.NotEqual(t, destination, doctor.BeadsManagedStorageHooksDir(),
+		"precondition: cleanup must no longer re-derive the value install wrote")
+
+	require.NoError(t, hooksUninstallCmd.RunE(hooksUninstallCmd, nil))
+	_, err := os.Stat(filepath.Join(destination, "pre-commit"))
+	require.ErrorIs(t, err, os.ErrNotExist, "uninstall still deletes the hook files it can no longer recognize")
+	require.True(t, utils.PathsEqual(destination, readSelectedHooksPath(t, decoy, common)),
+		"known gap (bd-s76jm): the configured value survives an install/uninstall resolution drift")
+}
+
+// readSelectedHooksPath returns the selected repository's local core.hooksPath,
+// read through the common dir with routing overrides dropped, exactly as
+// resetHooksPathAt reads it.
+func readSelectedHooksPath(t *testing.T, workDir, commonDir string) string {
+	t.Helper()
+	return initExcludeGit(t, workDir, "--git-dir", commonDir, "config", "--local", "--get", "core.hooksPath")
+}
+
+// TestStandaloneHooksWarnOnEffectivePathDivergence pins the warning that names
+// both hook paths when they disagree. install/uninstall act on the selected,
+// config-scrubbed directory, while every status and execution reader
+// (bd hooks list, bd doctor, runChainedHook) still resolves hooks through the
+// inherited context — and git itself honors the inherited core.hooksPath. A
+// bare success would leave the user comparing an install that reported one
+// directory against a status that reports another, with nothing saying why.
+func TestStandaloneHooksWarnOnEffectivePathDivergence(t *testing.T) {
+	selected, decoy, _, common := newInitHooksFixture(t)
+	mainRoot := filepath.Dir(common)
+	private := initExcludeGit(t, selected, "rev-parse", "--absolute-git-dir")
+	t.Chdir(decoy)
+	t.Setenv("GIT_DIR", private)
+	t.Setenv("GIT_WORK_TREE", selected)
+	destination := filepath.Join(mainRoot, ".beads", "hooks")
+	initExcludeGit(t, decoy, "--git-dir", common, "config", "--local", "core.hooksPath", destination)
+	injected := filepath.Join(decoy, ".git", "hooks")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_0", injected)
+	setStandaloneHookMode(t, "")
+
+	var err error
+	stderr := captureStderr(t, func() { err = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+	require.NoError(t, err)
+	require.Contains(t, stderr, injected, "warning must name the effective inherited hooks directory")
+	require.Contains(t, stderr, destination, "warning must name the selected directory bd operated on")
+	require.Contains(t, string(readInitHooksFile(t, filepath.Join(destination, "pre-commit"))), hookSectionBeginPrefix)
+}
+
+func TestInitHooksPreservesManagedDirectoryAliases(t *testing.T) {
+	for _, managed := range []string{".beads/hooks", ".beads-hooks"} {
+		t.Run(managed, func(t *testing.T) {
+			selected, _, storage, common := newInitHooksFixture(t)
+			root := filepath.Dir(common)
+			source := filepath.Join(root, managed)
+			require.NoError(t, os.MkdirAll(source, 0755))
+			const content = "#!/bin/sh\necho existing managed-directory hook\n"
+			require.NoError(t, os.WriteFile(filepath.Join(source, "post-rewrite"), []byte(content), 0755))
+			alias := filepath.Join(t.TempDir(), "repository alias")
+			if err := os.Symlink(root, alias); err != nil {
+				if runtime.GOOS == "windows" {
+					t.Skipf("directory symlink capability unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+			initExcludeGit(t, selected, "config", "--local", "core.hooksPath", filepath.Join(alias, managed))
+			fs, _, err := withInitHooks(nil, selected, storage)
+			require.NoError(t, err)
+			require.NoError(t, fs.InstallGitHooks(t.Context(), domain.HooksInstallParams{HookNames: managedHookNames, BeadsHooks: true}))
+			_, err = os.Stat(filepath.Join(storage, "hooks", "post-rewrite"))
+			require.ErrorIs(t, err, os.ErrNotExist, "an existing managed hooks directory must not be copied through an alias")
+			require.Equal(t, content, string(readInitHooksFile(t, filepath.Join(source, "post-rewrite"))))
+		})
+	}
+}
+
+func TestInitHooksRefusesSharedMode(t *testing.T) {
+	selected, _, storage, common := newInitHooksFixture(t)
+	fs, _, err := withInitHooks(nil, selected, storage)
+	require.NoError(t, err)
+	require.ErrorContains(t, fs.InstallGitHooks(t.Context(), domain.HooksInstallParams{HookNames: managedHookNames, Shared: true}), "shared hooks mode")
+	for _, path := range []string{filepath.Join(storage, "hooks"), filepath.Join(filepath.Dir(common), ".beads-hooks")} {
+		_, err := os.Stat(path)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+}
+
+func TestInitHooksContextPreservesSelectedPaths(t *testing.T) {
+	for _, name := range []string{"foreign", "global", "private", "config_lock"} {
+		t.Run(name, func(t *testing.T) {
+			selected, decoy, storage, common := newInitHooksFixture(t)
+			current := t.TempDir()
+			const foreign = "#!/bin/sh\necho selected hook\n"
+			for _, hook := range []string{"pre-commit", "post-rewrite"} {
+				require.NoError(t, os.WriteFile(filepath.Join(current, hook), []byte(foreign), 0755))
+			}
+			initExcludeGit(t, selected, "config", "--local", "core.hooksPath", current)
+			if name == "global" {
+				initExcludeGit(t, selected, "config", "--local", "--unset", "core.hooksPath")
+				initExcludeGit(t, selected, "config", "--global", "core.hooksPath", current)
+			}
+			preserved := map[string][]byte{}
+			if name == "private" {
+				initExcludeGit(t, selected, "config", "extensions.worktreeConfig", "true")
+				initExcludeGit(t, selected, "config", "--worktree", "core.hooksPath", current)
+				path := filepath.Join(initExcludeGit(t, selected, "rev-parse", "--absolute-git-dir"), "config.worktree")
+				preserved[path] = readInitHooksFile(t, path)
+			}
+			for _, path := range []string{filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index")} {
+				preserved[path] = readInitHooksFile(t, path)
+			}
+			if name == "global" {
+				path := filepath.Join(os.Getenv("HOME"), ".gitconfig")
+				preserved[path] = readInitHooksFile(t, path)
+			}
+			fs, hooks, err := withInitHooks(nil, selected, storage)
+			require.NoError(t, err)
+			require.False(t, hooks.installed())
+			if name == "config_lock" {
+				require.NoError(t, os.WriteFile(filepath.Join(common, "config.lock"), []byte("owned lock"), 0600))
+				preserved[filepath.Join(common, "config")] = readInitHooksFile(t, filepath.Join(common, "config"))
+			}
+			// Later ambient routing must not rebind the captured hook operation.
+			t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "missing"))
+			t.Setenv("GIT_CONFIG_COUNT", "1")
+			t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+			t.Setenv("GIT_CONFIG_VALUE_0", filepath.Join(decoy, "wrong hooks"))
+			env := os.Environ()
+			destination := filepath.Join(storage, "hooks")
+			for range 2 {
+				err := fs.InstallGitHooks(t.Context(), domain.HooksInstallParams{HookNames: managedHookNames, BeadsHooks: true})
+				if name == "config_lock" {
+					require.ErrorContains(t, err, "failed to configure git hooks path")
+				} else {
+					require.NoError(t, err)
+					got := initExcludeGit(t, selected, "config", "--file", filepath.Join(common, "config"), "--get", "core.hooksPath")
+					gotInfo, err := os.Stat(got)
+					require.NoError(t, err)
+					wantInfo, err := os.Stat(destination)
+					require.NoError(t, err)
+					require.True(t, os.SameFile(gotInfo, wantInfo), "common config must name the installed storage hooks")
+				}
+				installed := string(readInitHooksFile(t, filepath.Join(destination, "pre-commit")))
+				require.Contains(t, installed, foreign)
+				require.Equal(t, 1, strings.Count(installed, hookSectionBeginPrefix))
+				require.Equal(t, foreign, string(readInitHooksFile(t, filepath.Join(destination, "pre-commit.backup"))))
+				require.Equal(t, foreign, string(readInitHooksFile(t, filepath.Join(destination, "post-rewrite"))))
+			}
+			for path, before := range preserved {
+				require.Equal(t, before, readInitHooksFile(t, path), "changed %s", path)
+			}
+			for _, hook := range []string{"pre-commit", "post-rewrite"} {
+				require.Equal(t, foreign, string(readInitHooksFile(t, filepath.Join(current, hook))))
+			}
+			if name == "private" {
+				paths, err := git.ResolveHooksContext(selected, hooks.env)
+				require.NoError(t, err)
+				require.Equal(t, current, paths.HooksDir, "private override remains effective")
+			}
+			require.Equal(t, env, os.Environ())
+		})
 	}
 }

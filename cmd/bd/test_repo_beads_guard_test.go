@@ -50,7 +50,9 @@ type testRunner interface {
 }
 
 func runTestsAndSweep(m testRunner) int {
+	stdout, stderr := os.Stdout, os.Stderr
 	code := m.Run()
+	code = checkStdioAfterRun(code, stdout, stderr)
 	swept := doltserver.SweepSuiteTestServers(testTempRoot)
 	return doltserver.ApplyLeakPolicy("cmd/bd", code, swept)
 }

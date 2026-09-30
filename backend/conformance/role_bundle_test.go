@@ -315,7 +315,7 @@ func TestRoleCasesFailsWhenAFactoryReturnsNil(t *testing.T) {
 func runProbeChild(t *testing.T, mode string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v")
-	cmd.Env = append(os.Environ(), roleBundleProbeEnv+"="+mode)
+	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()), roleBundleProbeEnv+"="+mode)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

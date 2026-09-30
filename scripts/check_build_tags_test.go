@@ -17,12 +17,10 @@ func runCheckBuildTags(t *testing.T, files map[string]string) (string, error) {
 	if runtime.GOOS == "windows" {
 		t.Skip("checker is a Bash boundary")
 	}
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
+	requireHostTool(t, "git")
 	// The checker needs bash >= 4 (mapfile); macOS ships bash 3.2 as /bin/bash.
 	if err := exec.Command("bash", "-c", "type mapfile").Run(); err != nil {
-		t.Skip("bash lacks mapfile (bash >= 4 required)")
+		skipOrFailWithoutHostTool(t, "bash lacks mapfile (bash >= 4 required)")
 	}
 	script, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), "scripts", "check-build-tags.sh"))
 	if err != nil {

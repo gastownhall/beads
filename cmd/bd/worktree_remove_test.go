@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 const (
@@ -295,7 +297,7 @@ func runWorktreeRemoveProcess(t *testing.T, dir string, extraEnv []string, args 
 	}
 	command := exec.Command(executable, "-test.run=^TestWorktreeRemoveProcessHelper$")
 	command.Dir = dir
-	command.Env = overrideWorktreeRemoveEnv(os.Environ(), append([]string{worktreeRemoveHelperEnv + "=1", worktreeRemoveHelperArgsEnv + "=" + string(encodedArgs), "BD_DISABLE_METRICS=1"}, extraEnv...))
+	command.Env = overrideWorktreeRemoveEnv(bazeltest.ShardFreeEnv(os.Environ()), append([]string{worktreeRemoveHelperEnv + "=1", worktreeRemoveHelperArgsEnv + "=" + string(encodedArgs), "BD_DISABLE_METRICS=1"}, extraEnv...))
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err = command.Run()

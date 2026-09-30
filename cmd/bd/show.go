@@ -99,8 +99,7 @@ var showCmd = &cobra.Command{
 			if len(args) != 1 {
 				return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
 			}
-			watchIssue(ctx, args[0])
-			return nil
+			return watchIssue(ctx, args[0])
 		}
 
 		if showThread {

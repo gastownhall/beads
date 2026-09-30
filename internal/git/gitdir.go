@@ -120,6 +120,30 @@ type HooksContext struct {
 	HooksDir, CommonDir, RepoRoot, MainRepoRoot string
 }
 
+// normalizeHooksWorkDir anchors workDir and normalizes its symlinks and case
+// once. Every HooksContext producer shares it so they cannot drift into emitting
+// different spellings of the same directory: worktree code string-compares these
+// paths (GH#880).
+// The caller-supplied directory must resolve before it can select a repo:
+// unlike the discovered repoRoot spelling in loadGitContext, it is an input
+// to Git.
+func normalizeHooksWorkDir(workDir string) (string, error) {
+	workDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", err
+	}
+	// This caller-supplied directory must resolve before it can select a repo.
+	// Unlike the discovered repoRoot spelling, it is an input to Git.
+	workDir, err = filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve hooks working directory: %w", err)
+	}
+	if canonical := canonicalizeCase(workDir); canonical != "" {
+		workDir = canonical
+	}
+	return workDir, nil
+}
+
 // ResolveHooksContext reads fresh paths without changing the legacy cache.
 // workDir must be nonempty and is anchored and symlink/case-normalized once;
 // bare/non-repositories error. Configured absolute hook paths retain their spelling.
@@ -133,24 +157,14 @@ type HooksContext struct {
 // This is the explicit-context sibling of GetGitHooksDir. It returns a struct
 // instead of following this file's GetXFrom(startDir) convention because all
 // four paths must come from one resolution of one directory. The first in-repo
-// caller arrives with GH#6440, so at this commit only tests exercise the
-// contract above.
+// caller is the selected-hook setup in cmd/bd/init_git_hooks.go (GH#6440).
 func ResolveHooksContext(workDir string, env []string) (HooksContext, error) {
 	if workDir == "" {
 		return HooksContext{}, fmt.Errorf("hooks context requires a working directory")
 	}
-	workDir, err := filepath.Abs(workDir)
+	workDir, err := normalizeHooksWorkDir(workDir)
 	if err != nil {
 		return HooksContext{}, err
-	}
-	// This caller-supplied directory must resolve before it can select a repo.
-	// Unlike the discovered repoRoot spelling above, it is an input to Git.
-	workDir, err = filepath.EvalSymlinks(workDir)
-	if err != nil {
-		return HooksContext{}, fmt.Errorf("resolve hooks working directory: %w", err)
-	}
-	if canonical := canonicalizeCase(workDir); canonical != "" {
-		workDir = canonical
 	}
 	ctx := loadGitContext(workDir, env)
 	if ctx.err != nil {
@@ -164,6 +178,58 @@ func ResolveHooksContext(workDir string, env []string) (HooksContext, error) {
 	}
 	return HooksContext{HooksDir: hooksDir, CommonDir: ctx.commonDir,
 		RepoRoot: ctx.repoRoot, MainRepoRoot: ctx.mainRepoRoot()}, nil
+}
+
+// ResolveWorkTreelessHooksContext resolves hook paths for a repository whose
+// common directory resolves but whose work tree does not: a bare repository, or
+// a directory such as a repository's own .git that Git answers from while
+// reporting no work tree. ResolveHooksContext requires one, because it cannot
+// honor its RepoRoot contract without it; this is the explicit counterpart, so a
+// caller opts into the weaker shape instead of silently receiving one. RepoRoot
+// and MainRepoRoot are empty — there is no work-tree root — and a relative
+// core.hooksPath is anchored to the common directory, which is where Git runs
+// hooks without a work tree.
+// It fails for non-repositories and for directories inside a work tree alike, so
+// callers can use it as a fallback after ResolveHooksContext without widening
+// that call's failure contract. workDir and env are handled exactly as
+// ResolveHooksContext handles them, anchoring and normalization included.
+func ResolveWorkTreelessHooksContext(workDir string, env []string) (HooksContext, error) {
+	if workDir == "" {
+		return HooksContext{}, fmt.Errorf("hooks context requires a working directory")
+	}
+	workDir, err := normalizeHooksWorkDir(workDir)
+	if err != nil {
+		return HooksContext{}, err
+	}
+	probe := exec.Command("git", "rev-parse", "--is-inside-work-tree", "--git-common-dir")
+	probe.Dir, probe.Env = workDir, env
+	output, err := probe.Output()
+	if err != nil {
+		return HooksContext{}, fmt.Errorf("resolve work-tree-less Git repository: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) < 2 {
+		return HooksContext{}, fmt.Errorf("unexpected git rev-parse output: got %d lines, expected 2", len(lines))
+	}
+	// A work tree resolves here, so ResolveHooksContext's stronger contract is
+	// the one that applies and its error is the one the caller should surface.
+	if strings.TrimSpace(lines[0]) == "true" {
+		return HooksContext{}, fmt.Errorf("%s is inside a Git work tree", workDir)
+	}
+	commonDir, err := absoluteGitPath(workDir, strings.TrimSpace(lines[1]))
+	if err != nil {
+		return HooksContext{}, fmt.Errorf("failed to resolve common dir path: %w", err)
+	}
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir, cmd.Env = workDir, env
+	// Without a work tree Git runs hooks in the common directory, so it anchors a
+	// relative core.hooksPath in place of the absent work-tree root.
+	ctx := gitContext{gitDirRaw: commonDir, commonDir: commonDir, repoRoot: commonDir}
+	hooksDir, err := gitHooksDir(cmd, func() (*gitContext, error) { return &ctx, nil })
+	if err != nil {
+		return HooksContext{}, err
+	}
+	return HooksContext{HooksDir: hooksDir, CommonDir: commonDir}, nil
 }
 
 // getGitContext returns the cached git context, initializing it if needed.
@@ -212,6 +278,32 @@ func GetGitCommonDir() (string, error) {
 // the worktree-specific directory (e.g., /repo/.git/worktrees/feature/hooks).
 func GetGitHooksDir() (string, error) {
 	return gitHooksDir(exec.Command("git", "config", "--get", "core.hooksPath"), getGitContext)
+}
+
+// GetGitHooksDirFrom resolves a fresh hook path without reading the legacy cache.
+// Like GetGitHooksDir, an absolute configured path needs no working repository.
+// Routing and supplied env are honored unchanged; tilde uses the process home.
+func GetGitHooksDirFrom(workDir string, env []string) (string, error) {
+	if workDir == "" {
+		return "", fmt.Errorf("hooks path requires a working directory")
+	}
+	workDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", err
+	}
+	workDir, err = filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve hooks working directory: %w", err)
+	}
+	if canonical := canonicalizeCase(workDir); canonical != "" {
+		workDir = canonical
+	}
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir, cmd.Env = workDir, env
+	return gitHooksDir(cmd, func() (*gitContext, error) {
+		ctx := loadGitContext(workDir, env)
+		return &ctx, ctx.err
+	})
 }
 
 func gitHooksDir(cmd *exec.Cmd, context func() (*gitContext, error)) (string, error) {

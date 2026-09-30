@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -593,6 +594,33 @@ func TestAncestorDirWalkEndsAtOSTempRoot(t *testing.T) {
 	}
 }
 
+// TestAncestorDirWalkStopsBelowBeadsCeiling pins that BEADS_CEILING_DIRECTORIES
+// ends every FindBeadsDir-style walk below the ceiling, so a .beads at or
+// above it is never found.
+func TestAncestorDirWalkStopsBelowBeadsCeiling(t *testing.T) {
+	sandbox := t.TempDir()
+	ceilingDir := filepath.Join(sandbox, "ceiling")
+	start := filepath.Join(ceilingDir, "project", "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "elsewhere"))
+	t.Setenv(ceiling.EnvVar, ceilingDir)
+
+	var got []string
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		got = append(got, dir)
+	}
+	want := []string{
+		canonicalizeAncestorWalkPath(start),
+		canonicalizeAncestorWalkPath(filepath.Join(ceilingDir, "project")),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("walk yielded %q, want %q", got, want)
+	}
+}
+
 // TestAncestorDirWalkYieldsFilesystemRoot pins the documented choice that the
 // walk includes the filesystem root. Most of the hand-rolled loops this type
 // replaced stopped before "/"; the unified walk does not, so the behavior is
@@ -603,8 +631,10 @@ func TestAncestorDirWalkYieldsFilesystemRoot(t *testing.T) {
 	if err := os.MkdirAll(start, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Point the ceiling somewhere off this walk so it can reach the root.
+	// Point the ceiling somewhere off this walk so it can reach the root, and
+	// lift any BEADS_CEILING_DIRECTORIES the test runner set.
 	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	t.Setenv(ceiling.EnvVar, "")
 
 	fsRoot := canonicalizeAncestorWalkPath(start)
 	for {

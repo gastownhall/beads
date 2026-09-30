@@ -572,3 +572,122 @@ func TestProxiedInitExcludeUsesSelectedDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestProxiedInitHooksUseSelectedContext(t *testing.T) {
+	for _, name := range []string{"normal", "missing", "outdated", "current", "skip", "nonrepo", "pure_jj", "colocated", "bare", "git_dir_cwd", "config_lock", "quiet_config_lock"} {
+		t.Run(name, func(t *testing.T) {
+			selected, decoy, storage, common := newInitHooksFixture(t)
+			// Repository shapes whose common directory resolves while no work tree
+			// does; both must still install, as bd did before the hooks resolver.
+			workTreeless := name == "bare" || name == "git_dir_cwd"
+			if name == "normal" {
+				selected = filepath.Dir(common)
+			}
+			if name == "bare" {
+				selected = t.TempDir()
+				initExcludeGit(t, selected, "init", "--bare", "--quiet")
+			}
+			if name == "git_dir_cwd" {
+				// Standing in a non-bare repository's own .git directory: rev-parse
+				// --git-dir answers, so the repository arm runs, but --show-toplevel
+				// fails and --is-bare-repository reports false.
+				repo := t.TempDir()
+				initExcludeGit(t, repo, "init", "--quiet")
+				selected = filepath.Join(repo, ".git")
+			}
+			current, ambient := t.TempDir(), t.TempDir()
+			initExcludeGit(t, selected, "config", "core.hooksPath", current)
+			initExcludeGit(t, decoy, "config", "core.hooksPath", ambient)
+			writeHooks := func(dir string, outdated bool) {
+				for _, hook := range []string{"pre-commit", "post-merge"} {
+					text := "#!/bin/sh\n" + generateHookSection(hook)
+					if outdated {
+						text = "#!/bin/sh\n# bd (beads) " + hook + " hook\n# Version: obsolete\n"
+					}
+					require.NoError(t, os.WriteFile(filepath.Join(dir, hook), []byte(text), 0755))
+				}
+			}
+			if name == "current" || name == "outdated" {
+				writeHooks(current, name == "outdated")
+			}
+			if name != "current" {
+				writeHooks(ambient, false)
+			}
+			// Filesystems without executable mode bits retain the existing reinstall policy.
+			currentReady := false
+			if name == "current" {
+				info, err := os.Stat(filepath.Join(current, "pre-commit"))
+				require.NoError(t, err)
+				currentReady = info.Mode().Perm()&0111 != 0
+				if runtime.GOOS != "windows" {
+					require.True(t, currentReady, "POSIX current-status fixture requires executable hooks")
+				}
+			}
+			preserved := map[string][]byte{}
+			for _, path := range []string{filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index")} {
+				preserved[path] = readInitHooksFile(t, path)
+			}
+			if name == "nonrepo" || name == "pure_jj" {
+				selected = t.TempDir()
+			}
+			if name == "pure_jj" || name == "colocated" {
+				require.NoError(t, os.Mkdir(filepath.Join(selected, ".jj"), 0755))
+			}
+			locked := name == "config_lock" || name == "quiet_config_lock"
+			if locked {
+				require.NoError(t, os.WriteFile(filepath.Join(common, "config.lock"), []byte("owned lock"), 0600))
+			}
+			fs := storagefs.NewFileSystemProvider(selected, newBeadsDirTemplates(), newInitFileSystemAdapters(selected)).BeadsDirFSUseCase()
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("setup-exclude", true, "")
+			in := initProxiedServerInput{skipHooks: name == "skip", quiet: name == "quiet_config_lock", skipAgents: true, nonInteractive: true}
+			env := os.Environ()
+			stderr := captureStderr(t, func() {
+				require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{workDir: selected, beadsDir: storage, remoteURL: "file:///unused-hooks-fixture-remote", fsUseCase: fs, gitUC: storagegit.NewGitProvider(selected).GitUseCase()}))
+			})
+			if name == "config_lock" {
+				require.Contains(t, stderr, "Failed to install git hooks")
+			} else if name != "nonrepo" && name != "pure_jj" {
+				require.Empty(t, stderr)
+			}
+			require.NotContains(t, stderr, "Failed to resolve git hooks")
+			wantInstall := name == "normal" || name == "missing" || name == "outdated" || name == "colocated" || workTreeless || locked || (name == "current" && !currentReady)
+			path := filepath.Join(storage, "hooks", "pre-commit")
+			if name == "colocated" {
+				path = filepath.Join(current, "pre-commit")
+			}
+			if wantInstall {
+				require.Contains(t, string(readInitHooksFile(t, path)), hookSectionBeginPrefix)
+			} else {
+				_, err := os.Stat(path)
+				require.ErrorIs(t, err, os.ErrNotExist, "ambient status must not trigger an install")
+			}
+			if workTreeless {
+				// These resolve through the work-tree-less hooks context, so the
+				// install must still land in the selected storage and configure the
+				// selected repository -- not the inherited one this fixture routes to.
+				require.Equal(t, filepath.Join(storage, "hooks"), initExcludeGit(t, selected, "config", "--local", "--get", "core.hooksPath"))
+			}
+			if name != "nonrepo" && name != "pure_jj" {
+				excludeRoot := common
+				if workTreeless {
+					excludeRoot = selected // a work-tree-less selection is its own common directory
+				}
+				exclude := readInitHooksFile(t, filepath.Join(excludeRoot, "info", "exclude"))
+				require.Contains(t, string(exclude), ".beads/", "selected exclude callback lost")
+			}
+			for path, before := range preserved {
+				require.Equal(t, before, readInitHooksFile(t, path), "changed %s", path)
+			}
+			require.Equal(t, env, os.Environ())
+		})
+	}
+}
+
+func TestInitHooksEmptyPathRetainsUseCase(t *testing.T) {
+	supplied := &initTailForkObservation{}
+	fs, hooks, err := withInitHooks(supplied, "", "unused storage")
+	require.NoError(t, err)
+	require.Same(t, supplied, fs)
+	require.Nil(t, hooks)
+}

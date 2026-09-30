@@ -6,6 +6,9 @@ go_library(
         "close.go",
         "dsn.go",
         "identifier.go",
+        "probe_pid_other.go",
+        "probe_pid_unix.go",
+        "probe_pid_windows.go",
         "remotes.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/doltutil",
@@ -15,12 +18,18 @@ go_library(
         "//internal/remotecache",
         "//internal/storage",
         "@com_github_go_sql_driver_mysql//:mysql",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "doltutil_test",
     srcs = [
+        "cli_mirror_ref_test.go",
         "close_test.go",
         "dsn_test.go",
         "identifier_test.go",
@@ -28,6 +37,7 @@ go_test(
         "remotes_test.go",
     ],
     embed = [":doltutil"],
+    deps = ["//internal/storage"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
