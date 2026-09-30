@@ -70,6 +70,11 @@ func TestCheckTestingShortPassesOnCleanRepoTree(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("checker is a Bash boundary")
 	}
+	if os.Getenv("TEST_SRCDIR") != "" {
+		// Under Bazel the tree is only this target's runfiles, so the scan
+		// would pass vacuously. make check-testing-short runs it in CI.
+		t.Skip("walks the whole source checkout; runs under go test")
+	}
 	repo := sourceRepoRoot(t)
 	cmd := exec.Command("bash", filepath.Join(repo, "scripts", "check-testing-short.sh"))
 	cmd.Dir = repo

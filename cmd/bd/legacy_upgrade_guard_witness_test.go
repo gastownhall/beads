@@ -84,7 +84,8 @@ func TestLegacyServerVersionSpansHistoricalServerEra(t *testing.T) {
 }
 
 // writeSelectedServerWorkspace lays down the ambiguous shape the guard has to
-// classify: a selected Dolt server workspace that still owns a local Dolt root.
+// classify: a selected Dolt server workspace that still owns a populated local
+// Dolt root.
 func writeSelectedServerWorkspace(t *testing.T, version string) string {
 	t.Helper()
 	beadsDir := t.TempDir()
@@ -97,13 +98,12 @@ func writeSelectedServerWorkspace(t *testing.T, version string) string {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	populateLegacyDoltRoot(t, beadsDir)
 	return beadsDir
 }
 
 func TestLegacyUpgradeGuardAdmitsNonReleaseVersionWitnesses(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	versions := []string{
 		"v1.1.1-0.20260805093327-bf97b73749ac",
 		"1.1.0",
@@ -128,6 +128,7 @@ func TestLegacyUpgradeGuardAdmitsNonReleaseVersionWitnesses(t *testing.T) {
 }
 
 func TestLegacyUpgradeGuardStillRefusesPreOneWorkspaces(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	versions := []string{
 		"0.9.1",
 		"v0.49.6",
@@ -150,6 +151,7 @@ func TestLegacyUpgradeGuardStillRefusesPreOneWorkspaces(t *testing.T) {
 }
 
 func TestLegacyUpgradeGuardRefusesWorkspaceWithoutAnyWitness(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	captureLegacyUpgradeWarnings(t)
 	beadsDir := writeSelectedServerWorkspace(t, "")
 
@@ -166,6 +168,7 @@ func TestLegacyUpgradeGuardRefusesWorkspaceWithoutAnyWitness(t *testing.T) {
 // absent witness must still refuse so the pre-1.0 safety invariant does not
 // relax.
 func TestLegacyUpgradeGuardWarnsInsteadOfRefusingPresentButBlankWitness(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	blankWitnesses := []struct {
 		name    string
 		content []byte
@@ -248,6 +251,7 @@ func TestLegacyUpgradeVersionWitnessPresence(t *testing.T) {
 }
 
 func TestLegacyUpgradeGuardWarnsInsteadOfRefusingUnreadableWitness(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	warnings := captureLegacyUpgradeWarnings(t)
 	beadsDir := writeSelectedServerWorkspace(t, "not-a-version")
 
@@ -266,6 +270,7 @@ func TestLegacyUpgradeGuardWarnsInsteadOfRefusingUnreadableWitness(t *testing.T)
 // next command reads it cleanly. Only a stamp bd rewrites identically every
 // run (a Homebrew --HEAD build, GH#5603) can warn repeatedly.
 func TestLegacyUpgradeGuardWarningIsSelfHealing(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	warnings := captureLegacyUpgradeWarnings(t)
 	beadsDir := writeSelectedServerWorkspace(t, "not-a-version")
 
@@ -297,6 +302,7 @@ func TestLegacyUpgradeGuardWarningIsSelfHealing(t *testing.T) {
 // needs the shape recognizer in GH#5625 (anisoptera), which this does not
 // duplicate.
 func TestLegacyUpgradeGuardAdmitsBrewHeadStamp(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	for _, stamp := range []string{"HEAD-f925f3f", "HEAD", "HEAD-f925f3f_1"} {
 		t.Run(stamp, func(t *testing.T) {
 			captureLegacyUpgradeWarnings(t)

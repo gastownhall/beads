@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // staleLockAge is the maximum age of a lock file before it's considered stale.
@@ -46,6 +48,21 @@ func BootstrapFromGitRemote(ctx context.Context, doltDir, gitRemoteURL string) (
 // callers should use cfg.GetDoltDatabase() which applies the fallback chain
 // (env var → config → default).
 func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database string) (bool, error) {
+	return BootstrapFromRemoteWithDBRef(ctx, doltDir, remoteURL, database, "")
+}
+
+// BootstrapFromRemoteWithDBRef is BootstrapFromRemoteWithDB for a git-backed
+// remote whose Dolt data lives on the git ref ref (`dolt clone --ref`). An
+// empty ref is Dolt's default, refs/dolt/data.
+func BootstrapFromRemoteWithDBRef(ctx context.Context, doltDir, remoteURL, database, ref string) (bool, error) {
+	// The ref is checked before the already-exists early return so the same
+	// --ref argument is accepted or refused the same way on every host, rather
+	// than surfacing a typo only on a machine that has not bootstrapped yet.
+	// The URL and database checks keep their existing position below it.
+	if err := doltutil.ValidateGitDataRefArg(strings.TrimSpace(ref)); err != nil {
+		return false, fmt.Errorf("invalid git data ref: %w", err)
+	}
+
 	// Skip if Dolt database already exists
 	if doltExists(doltDir) {
 		return false, nil
@@ -78,7 +95,7 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 	// from an earlier bootstrap that a stale/empty doltExists() check
 	// missed) that we must not delete.
 	targetPreExisted := pathExists(cloneTarget)
-	cmd := bootstrapCloneCmd(ctx, remoteURL, cloneTarget)
+	cmd := bootstrapCloneCmd(ctx, remoteURL, cloneTarget, ref)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		if targetPreExisted {
 			return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s\nClone target %q already existed before this attempt; left untouched to avoid deleting a pre-existing Dolt repo", err, output, cloneTarget)
@@ -94,8 +111,8 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 // bootstrapCloneCmd builds the `dolt clone` for remote bootstrap. It does not
 // route through prepareDoltCLITransferCommand, so it applies the remote env
 // guards itself (see internal/gittraceenv and internal/githooksenv).
-func bootstrapCloneCmd(ctx context.Context, remoteURL, cloneTarget string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget)...)
+func bootstrapCloneCmd(ctx context.Context, remoteURL, cloneTarget, ref string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget, ref)...) // #nosec G204 -- validated remote URL; the ref is an option value, taken verbatim by dolt's argparser and checked by doltutil.ValidateGitDataRefArg
 	cmd.Env = githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
 	return cmd
 }
@@ -144,10 +161,16 @@ func formatFailedCloneTargetError(cloneErr error, output []byte, cloneTarget str
 	return fmt.Errorf("dolt clone failed: %w\nOutput: %s\nCould not clean up failed clone target %q after retrying: %v\nOn Windows this usually means a dolt or bd process, or antivirus scanner, still has a file handle open under `.dolt/noms/LOCK`. Stop stuck dolt/bd processes, wait a moment, delete the directory manually if it remains, then retry `bd bootstrap`", cloneErr, output, cloneTarget, cleanupErr)
 }
 
-func doltCloneArgs(remoteURL, target string) []string {
+// doltCloneArgs builds the `dolt clone` argv. A non-empty ref adds --ref so
+// the clone reads a git-backed remote's Dolt data from that git ref instead
+// of the default refs/dolt/data.
+func doltCloneArgs(remoteURL, target, ref string) []string {
 	args := []string{"clone"}
 	if user := os.Getenv("DOLT_REMOTE_USER"); user != "" {
 		args = append(args, "--user", user)
+	}
+	if ref = strings.TrimSpace(ref); ref != "" {
+		args = append(args, "--ref", ref)
 	}
 	return append(args, remoteURL, target)
 }

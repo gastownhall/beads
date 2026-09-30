@@ -9,6 +9,7 @@ import (
 	"hash"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -80,8 +81,10 @@ type Issue struct {
 	// row_lock is random per write, so generic Issue serialization would break
 	// stable list/export round-trips. The detail-view DTO projects it explicitly
 	// as `revision` for guarded clients (IssueDetails.Revision, set by
-	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}); Go
-	// consumers read RowVersion directly.
+	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}) — as a
+	// decimal STRING, via RevisionToken, because the full int64 range does not
+	// survive a JSON number in a JavaScript consumer. Go consumers read
+	// RowVersion directly and never see the string.
 	//
 	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
 	// generic update path, but NOT on direct-UPDATE paths that rewrite text
@@ -1139,6 +1142,34 @@ type IssueWithCounts struct {
 	DependentCount  int     `json:"dependent_count"`
 	CommentCount    int     `json:"comment_count"`
 	Parent          *string `json:"parent,omitempty"` // Computed parent from parent-child dep (bd-ym8c)
+
+	// CommentsOmitted is the list row's half of the ga-clgh contract
+	// IssueDetails.CommentsOmitted states for the detail view, and it is set
+	// under exactly the same rule: true only when CommentCount is nonzero AND
+	// the embedded Issue.Comments was left nil, never alongside a populated
+	// slice and never on a zero count.
+	//
+	// A LIST ROW NEEDS IT MORE THAN A DETAIL VIEW DOES (be-73x). A caller
+	// grepping a whole listing for a phrase that lives in a comment gets a
+	// plausible NON-ZERO answer with the matching rows missing — the shape
+	// that invites no suspicion at all, unlike an empty result. Without this
+	// marker nothing in the page says the text was never in scope.
+	//
+	// The comment BODIES ride on the embedded Issue.Comments, which already
+	// carries the `comments` key for export/import; this type adds only the
+	// marker, so a row that was hydrated and a row that was not are told
+	// apart by a field rather than by the caller remembering what it asked
+	// for.
+	//
+	// WHICH SURFACES SET IT, because this type is shared by more than the
+	// listing and an absent marker means different things on them. It is set
+	// by the page epilogue behind issueops.Reader.List — `bd list --json` on
+	// both routes, its --ready arm included, and GET /v0/beads/issues. It is
+	// NOT set by Reader.Ready (GET /v0/beads/ready) or by the claim response
+	// that returns this type, so on those an absent marker says nothing about
+	// whether a row's comments exist: read comment_count there. Extending the
+	// marker to them is be-ozp.
+	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 }
 
 // IssueDetails extends Issue with labels, dependencies, dependents, and comments.
@@ -1186,12 +1217,44 @@ type IssueDetails struct {
 	// from a legacy migration-0054 row, so the projection lives beside the
 	// field and not at each caller.
 	//
-	// NO omitempty. A guarded write that expects 0 matches an un-mutated
+	// IT IS A STRING ON THE WIRE, holding the token's decimal spelling
+	// (RevisionToken). The token is drawn from the FULL int64 range, and a JSON
+	// number past 2^53 does not survive a JavaScript consumer: it reads back a
+	// rounded value, echoes that as its guard, and earns a 409 for a row nobody
+	// touched. A string round-trips exactly in every JSON consumer, which is
+	// what an equality-only opaque token needs, and it leaves a future backend
+	// free to mint a token that is not an int64 at all.
+	//
+	// NO omitempty. A guarded write that expects "0" matches an un-mutated
 	// legacy row and misses any current one, which is correct CAS; omitting
 	// the member would leave that client unable to read the value it must
 	// send, and would make an absent field mean either "legacy-zero" or "this
-	// producer has no token".
-	Revision int64 `json:"revision"`
+	// producer has no token". The legacy migration-0054 value is the string
+	// "0", not the empty string.
+	Revision string `json:"revision"`
+}
+
+// RevisionToken renders an optimistic-concurrency token for the wire.
+//
+// This and ParseRevisionToken are the ONE spelling of the encoding. The token
+// is int64 everywhere inside bd — the row_lock column, Issue.RowVersion, the
+// ExpectedVersion guard on the issueops requests — and a decimal string
+// everywhere on the wire, because it is opaque and equality-only and a JSON
+// number loses the top bits in a JavaScript consumer. Keeping the conversion in
+// one pair of functions is what keeps "0" meaning the legacy row rather than
+// an absent value.
+func RevisionToken(v int64) string {
+	return strconv.FormatInt(v, 10)
+}
+
+// ParseRevisionToken reads a wire revision token back to the internal int64.
+//
+// It accepts exactly what RevisionToken emits. A caller must echo the token a
+// response carried rather than compose one, so anything else is a client that
+// invented a value, and reporting that as a parse failure is more useful than
+// guessing at it.
+func ParseRevisionToken(s string) (int64, error) {
+	return strconv.ParseInt(s, 10, 64)
 }
 
 // NewIssueDetails starts a detail view of issue with the wire-visible revision
@@ -1202,7 +1265,7 @@ type IssueDetails struct {
 // literal would publish a silently wrong token that nothing can distinguish
 // from a right one. The caller fills in labels, edges and counts afterwards.
 func NewIssueDetails(issue Issue) *IssueDetails {
-	return &IssueDetails{Issue: issue, Revision: issue.RowVersion}
+	return &IssueDetails{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
 }
 
 // DependencyType categorizes the relationship
@@ -1224,7 +1287,7 @@ const (
 	DepRepliesTo  DependencyType = "replies-to" // Conversation threading
 	DepRelatesTo  DependencyType = "relates-to" // Loose knowledge graph edges
 	DepDuplicates DependencyType = "duplicates" // Deduplication link
-	DepSupersedes DependencyType = "supersedes" // Version chain link
+	DepSupersedes DependencyType = "supersedes" // Replacement link: old issue superseded by a different issue (bd supersede); not a version relation
 
 	// Entity types (HOP foundation - Decision 004)
 	DepAuthoredBy DependencyType = "authored-by" // Creator relationship
@@ -1619,7 +1682,12 @@ const (
 	EventDependencyRemoved EventType = "dependency_removed"
 	EventLabelAdded        EventType = "label_added"
 	EventLabelRemoved      EventType = "label_removed"
-	EventCompacted         EventType = "compacted"
+	// EventLabelRenamed records a bulk `bd label rename` sweep landing on one
+	// issue or wisp. old_value/new_value hold the old and new label strings.
+	// Unlike EventLabelAdded/EventLabelRemoved, one rename produces exactly
+	// one of these per touched row, never a paired add+remove.
+	EventLabelRenamed EventType = "label_renamed"
+	EventCompacted    EventType = "compacted"
 	// EventLeaseReclaimed records that a stale lease was reverted to ready by
 	// bd reclaim (dead-worker recovery). old_value is the previous owner.
 	EventLeaseReclaimed EventType = "lease_reclaimed"

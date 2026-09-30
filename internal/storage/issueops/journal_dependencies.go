@@ -16,7 +16,13 @@ type journalDependencyEdge struct {
 // RecordDependencyRemovalsForIssuesInTx emits one deterministic dep_remove
 // record for every edge whose source or target is in ids. Callers invoke this
 // before deleting the edges or nodes so source snapshots are still available.
-func RecordDependencyRemovalsForIssuesInTx(ctx context.Context, tx DBTX, ids []string) error {
+//
+// actor is the identity whose request removed the edges. A cascade edge
+// removal takes the REQUESTING actor, the same way the reference-rewrite
+// `update` rows a delete emits do; system plumbing with no request behind it
+// (gc, source-repo wipe, the actorless storage.DeleteIssue surface) passes ""
+// explicitly, which the 0066 contract reads as system/unknown.
+func RecordDependencyRemovalsForIssuesInTx(ctx context.Context, tx DBTX, ids []string, actor string) error {
 	if !journalEnabled(ctx, tx) || len(ids) == 0 {
 		return nil
 	}
@@ -24,12 +30,13 @@ func RecordDependencyRemovalsForIssuesInTx(ctx context.Context, tx DBTX, ids []s
 	if err != nil {
 		return err
 	}
-	return recordDependencyRemovalsInTx(ctx, tx, edges)
+	return recordDependencyRemovalsInTx(ctx, tx, edges, actor)
 }
 
 // RecordDependencyRemovalsForTableInTx is the table-scoped variant used by
 // the UOW dependency repository immediately before its bulk edge DELETE.
-func RecordDependencyRemovalsForTableInTx(ctx context.Context, tx DBTX, table string, ids []string) error {
+// actor carries the same meaning as in RecordDependencyRemovalsForIssuesInTx.
+func RecordDependencyRemovalsForTableInTx(ctx context.Context, tx DBTX, table string, ids []string, actor string) error {
 	if !journalEnabled(ctx, tx) || len(ids) == 0 {
 		return nil
 	}
@@ -37,14 +44,12 @@ func RecordDependencyRemovalsForTableInTx(ctx context.Context, tx DBTX, table st
 	if err != nil {
 		return err
 	}
-	return recordDependencyRemovalsInTx(ctx, tx, edges)
+	return recordDependencyRemovalsInTx(ctx, tx, edges, actor)
 }
 
-func recordDependencyRemovalsInTx(ctx context.Context, tx DBTX, edges []journalDependencyEdge) error {
+func recordDependencyRemovalsInTx(ctx context.Context, tx DBTX, edges []journalDependencyEdge, actor string) error {
 	for _, edge := range edges {
-		// Every caller is bulk/cascade delete plumbing (node deletes, source-repo
-		// wipes, the UOW bulk edge DELETE), none of which carries an actor.
-		if err := RecordDepEventInTx(ctx, tx, EventDepRemove, edge.source, edge.kind, edge.target, edge.metadata, ""); err != nil {
+		if err := RecordDepEventInTx(ctx, tx, EventDepRemove, edge.source, edge.kind, edge.target, edge.metadata, actor); err != nil {
 			return err
 		}
 	}

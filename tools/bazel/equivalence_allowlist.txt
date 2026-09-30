@@ -1,0 +1,31 @@
+# Expected divergences between the Go tests `go test` runs (pr.yml) and the
+# ones `bazel test //... --config=ci` runs, for tools/bazel/equivalence.py.
+#
+# One entry per line, each with a justification:
+#
+#   <package dir> <TestName or glob>        # why Bazel does not run it
+#   <package dir> <TestName or glob> skip   # why Bazel skips a test go test runs
+#
+# `*` as the test name covers the whole package, including a package with no
+# go_test target. `skip` entries are checked only when go test statuses are
+# supplied (--go-test-json, the nightly run). Keep this list short: every entry
+# is a test the Bazel lane does not exercise. The checker reports entries that
+# no longer match anything.
+
+# The in-test `go build` of bd that this test guards does not happen under
+# Bazel (bd comes in through BEADS_TEST_BD_BINARY); go test still runs it.
+cmd/bd TestGOMODCACHENotUnderTestHome skip  # no in-test go build under Bazel; guarded by go test
+# Needs TestAAAStdioBaseline in the same process; sharding splits them.
+# TestMain's checkStdioAfterRun still checks every shard.
+cmd/bd TestZZStdioNotLeaked skip  # baseline test lands in another shard; checkStdioAfterRun covers each shard
+
+# Repository-policy tests that walk the whole source checkout (git ls-files,
+# every BUILD file, .beads/ formulas). Bazel's runfiles hold only declared
+# data, so they skip under TEST_SRCDIR; PR Core's go test runs them.
+scripts TestBazelGoSrcsBlocksCurrent skip  # walks the source checkout; runs under go test
+scripts TestBazelNoPackagesUnderDocsTrees skip  # walks the source checkout; runs under go test
+scripts TestBazelNoRemoteEndpointsInTrackedFiles skip  # scans git-tracked files; runs under go test
+scripts TestBazelTestTagsFollowTaxonomy skip  # reads every BUILD file in the checkout; runs under go test
+scripts TestBazelTreeGoSrcsListsEveryPackage skip  # walks the source checkout; runs under go test
+scripts TestCheckTestingShortPassesOnCleanRepoTree skip  # walks the whole checkout; runs under go test
+scripts TestReleaseFormula* skip  # .beads/ is in .bazelignore, so the formula cannot be data; runs under go test

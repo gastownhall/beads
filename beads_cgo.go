@@ -31,7 +31,7 @@ func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
 		cfg = configfile.DefaultConfig()
 	}
 	if !configfile.IsSupportedBackend(cfg.Backend) {
-		return nil, configuredBackendUnavailable(cfg.Backend)
+		return nil, configuredBackendUnavailable(cfg.Backend, beadsDir, cfg)
 	}
 
 	// Dispatch to a registered extension backend before any Dolt path, mirroring

@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "bazeltest",
+    srcs = ["bazeltest.go"],
+    importpath = "github.com/steveyegge/beads/internal/testutil/bazeltest",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "bazeltest_test",
+    srcs = ["bazeltest_test.go"],
+    data = glob(["testdata/**"]),
+    embed = [":bazeltest"],
+)

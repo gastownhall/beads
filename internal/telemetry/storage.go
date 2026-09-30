@@ -390,6 +390,23 @@ func (s *InstrumentedStorage) RemoveLabel(ctx context.Context, issueID, label, a
 	return err
 }
 
+func (s *InstrumentedStorage) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.label.old", oldLabel),
+		attribute.String("bd.label.new", newLabel),
+	}
+	ctx, span, t := s.op(ctx, "RenameLabel", attrs...)
+	renamed, merged, ids, err = s.inner.RenameLabel(ctx, oldLabel, newLabel, actor)
+	if err == nil {
+		span.SetAttributes(
+			attribute.Int("bd.result.count", renamed),
+			attribute.Int("bd.merged.count", merged),
+		)
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return renamed, merged, ids, err
+}
+
 func (s *InstrumentedStorage) GetLabels(ctx context.Context, issueID string) ([]string, error) {
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetLabels", attrs...)
@@ -426,6 +443,16 @@ func (s *InstrumentedStorage) GetReadyWorkWithCounts(ctx context.Context, filter
 	}
 	s.done(ctx, span, t, err)
 	return v, err
+}
+
+func (s *InstrumentedStorage) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	ctx, span, t := s.op(ctx, "GetReadyWorkWithCountsAndTotal")
+	v, total, err := s.inner.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
+	}
+	s.done(ctx, span, t, err)
+	return v, total, err
 }
 
 func (s *InstrumentedStorage) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {

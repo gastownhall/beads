@@ -36,6 +36,14 @@ var _ issueops.BatchApplier = (*batchApplier)(nil)
 // The message is composed inside the body because its default names how much
 // LANDED, which is not knowable until every item has run — an update that
 // matched and an edge that was already there both land nothing.
+//
+// Durability contract: a nil error means the applied updates and edges are
+// durable in the branch working set. The Dolt history commit runs after the
+// SQL transaction (runIssueOperationTxWithMessage) and may be deferred — if it
+// fails after retries the changes still landed and ride the next Dolt commit;
+// the only signal is the bd.db.post_tx_commit_dropped counter, since the batch
+// path has no verify-by-re-read recovery. A nil return is therefore not a retry
+// signal: the mutations already applied, and retrying would double-apply.
 func (o *batchApplier) ApplyBatch(ctx context.Context, request issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
 	plan, err := storage.PlanApplyBatch(request)
 	if err != nil {

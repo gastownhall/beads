@@ -6,11 +6,21 @@
 # Runs on the PRIVILEGED side of the docs-autofix workflow_run pipeline: the
 # checkout is always the base repository's default branch (trusted code), and
 # the patch produced by the unprivileged PR build is treated as UNTRUSTED DATA.
-# Confinement is layered: the path allowlist below pins WHICH files a patch may
-# name (anchored regexes, single path segment, no traversal, no symlink modes),
-# and `git apply --index` supplies the underlying escape guards (rejects `..`
-# paths, absolute paths, and writes through in-patch symlinks). A hostile patch
-# can therefore at most rewrite generated doc files on its own PR branch.
+# Confinement is layered:
+#   * the path allowlist below pins WHICH files a patch may name (anchored
+#     regexes, single path segment, no traversal);
+#   * any mode line, symlink, rename/copy or binary hunk is refused, so only
+#     regular 100644 files are created, edited or deleted;
+#   * the patch is applied to an index only (`git read-tree` + `git apply
+#     --cached` in a bare clone): the PR tree is never written to disk, and
+#     git's own guards reject `..`/absolute paths and in-patch symlinks;
+#   * the staged result is re-checked against the same allowlist.
+# A hostile patch can therefore at most rewrite generated doc files on its own
+# PR branch.
+#
+# Usage:
+#   docs-autofix-push.sh             validate, then push or comment (env below)
+#   docs-autofix-push.sh --check P   validate patch P only; exit 0 if acceptable
 #
 # Inputs (environment):
 #   BASE_REPO    base "owner/name" (e.g. gastownhall/beads)
@@ -23,28 +33,25 @@
 #   RUN_URL      html url of that run (for commit/comment provenance)
 #   GH_TOKEN     token for gh api calls (PR lookup, comments) - needs the
 #                workflow's pull-requests:write; never the PAT
-#   PUSH_TOKEN   token for the git push only (optional; defaults to GH_TOKEN),
-#                so a dedicated DOCS_AUTOFIX_TOKEN needs contents:write only
+#   PUSH_TOKEN   token for git fetch/push only (optional; defaults to
+#                GH_TOKEN), so a dedicated DOCS_AUTOFIX_TOKEN needs
+#                contents:write only
 #   AUTOFIX_TOKEN_KIND  "pat" when a dedicated push token is in use, "default"
 #                       for the workflow's GITHUB_TOKEN (retrigger caveat)
 #
 # Exit 0 on every non-actionable outcome (PR closed, head moved, no patch);
-# exit 1 only on genuine errors so the workflow surfaces them.
+# exit 1 on a refused patch or a genuine error so the workflow surfaces them.
 
 set -euo pipefail
-
-if [ -z "${HEAD_REPO:-}" ] || [ -z "${HEAD_BRANCH:-}" ]; then
-    echo "Head repository/branch unavailable (deleted fork?); nothing to do."
-    exit 0
-fi
-: "${BASE_REPO:?}" "${HEAD_SHA:?}"
-: "${PATCH_FILE:?}" "${RUN_ID:?}" "${RUN_URL:?}" "${GH_TOKEN:?}"
-AUTOFIX_TOKEN_KIND="${AUTOFIX_TOKEN_KIND:-default}"
-PUSH_TOKEN="${PUSH_TOKEN:-$GH_TOKEN}"
-PATCH_FILE="$(readlink -f "$PATCH_FILE")"
+export LC_ALL=C
+# Nothing from the PR tree may run: no LFS smudge, no prompts.
+export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
 
 COMMENT_MARKER="<!-- cli-docs-autofix -->"
 AUTOFIX_SUBJECT="docs: auto-regenerate CLI reference"
+# Comments are only ever edited when this account wrote them: anyone can post
+# a comment that starts with the marker.
+COMMENT_AUTHOR="github-actions[bot]"
 
 # Files the doc generators may write - keep in sync with GEN_PATHSPECS in
 # scripts/check-cli-docs-drift.sh. Anchored, single path segment where a
@@ -58,74 +65,169 @@ path_allowed() {
     return 1
 }
 
+# Every git call: no hooks, whatever config a clone might carry.
+git_() {
+    git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+
+# validate_patch FILE: refuse anything but plain text edits to regular files
+# that path_allowed accepts. Shared verbatim with bazel-autofix-push.sh
+# (scripts/ci_workflow_test.go checks), which documents each rule.
+validate_patch() {
+    local file="$1" line path names bad="" count=0
+    # No mode change, symlink, rename or copy, binary hunk. ANY line starting
+    # "rename " or "copy " is refused: git apply also accepts the legacy
+    # "rename old"/"rename new" headers, which name a second path.
+    if grep -qE '^(old mode|new mode|similarity index|dissimilarity index|rename |copy |GIT binary patch|Binary files )' "$file"; then
+        echo "REFUSED: patch contains a mode change, rename/copy or binary hunk."
+        return 1
+    fi
+    if grep -E '^(new file mode|deleted file mode) ' "$file" | grep -qvE '^(new file mode|deleted file mode) 100644$'; then
+        echo "REFUSED: patch creates or deletes a non-regular (symlink/executable/submodule) file."
+        return 1
+    fi
+    # Every index line, whatever its ids look like, must be "index A..B" or
+    # "index A..B 100644"; a malformed id cannot hide a mode from this check.
+    if grep -E '^index ' "$file" | grep -qvE '^index [0-9a-f]+\.\.[0-9a-f]+( 100644)?$'; then
+        echo "REFUSED: patch has an index line that is not a regular 100644 file."
+        return 1
+    fi
+    # --summary is git's own view of creations, deletions, renames, copies,
+    # mode changes and rewrites; only 100644 creations/deletions may appear.
+    if ! names="$(git apply --summary "$file")"; then
+        echo "REFUSED: git apply cannot parse the patch."
+        return 1
+    fi
+    while IFS= read -r line; do
+        case "$line" in
+            "") continue ;;
+            " create mode 100644 "*) path="${line# create mode 100644 }" ;;
+            " delete mode 100644 "*) path="${line# delete mode 100644 }" ;;
+            *)
+                echo "REFUSED: patch summary has an unexpected entry: $line"
+                return 1
+                ;;
+        esac
+        path_allowed "$path" || bad="${bad}  ${path}\n"
+    done <<<"$names"
+    # --numstat -z prints "added<TAB>deleted<TAB>NAME<NUL>" with NAME raw
+    # (never quoted) and, for a rename, only the NEW name - hence the header
+    # and --summary checks above. The last read field keeps any tab/newline.
+    names="$(mktemp)"
+    if ! git apply --numstat -z "$file" >"$names"; then
+        rm -f "$names"
+        echo "REFUSED: git apply cannot parse the patch."
+        return 1
+    fi
+    while IFS=$'\t' read -r -d '' _ _ path; do
+        count=$((count + 1))
+        path_allowed "$path" || bad="${bad}  ${path}\n"
+    done <"$names"
+    rm -f "$names"
+    if [ "$count" -eq 0 ]; then
+        echo "REFUSED: patch names no files."
+        return 1
+    fi
+    if [ -n "$bad" ]; then
+        printf 'REFUSED: patch touches paths outside the allowlist:\n%b' "$bad"
+        return 1
+    fi
+}
+
+# check_staged COMMIT: the index (after git apply --cached) differs from
+# COMMIT only by regular-file adds/edits/deletes of allowlisted paths. Sets
+# STAGED_PATHS. Shared verbatim with bazel-autofix-push.sh.
+check_staged() {
+    local base="$1" meta path raw src_mode dst_mode status err=""
+    STAGED_PATHS=()
+    raw="$(mktemp)"
+    # -z --raw records: ":SRCMODE DSTMODE SRCSHA DSTSHA STATUS<NUL>PATH<NUL>".
+    git_ diff-index --cached --raw --no-renames -z "$base" >"$raw"
+    while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+        read -r src_mode dst_mode _ _ status <<<"$meta"
+        case "$src_mode $dst_mode $status" in
+            ":100644 100644 M" | ":000000 100644 A" | ":100644 000000 D") ;;
+            *) err="REFUSED: staged change is not a regular-file edit: $meta $path" && break ;;
+        esac
+        if ! path_allowed "$path"; then
+            err="REFUSED: staged change outside the allowlist: $meta $path" && break
+        fi
+        STAGED_PATHS+=("$path")
+    done <"$raw"
+    rm -f -- "$raw"
+    if [ -n "$err" ]; then
+        echo "$err"
+        return 1
+    fi
+}
+
+if [ "${1:-}" = "--check" ]; then
+    [ -s "${2:-}" ] || { echo "usage: $0 --check <patch>" >&2; exit 2; }
+    validate_patch "$2"
+    echo "OK: patch touches only generated CLI docs."
+    exit 0
+fi
+
+if [ -z "${HEAD_REPO:-}" ] || [ -z "${HEAD_BRANCH:-}" ]; then
+    echo "Head repository/branch unavailable (deleted fork?); nothing to do."
+    exit 0
+fi
+: "${BASE_REPO:?}" "${HEAD_SHA:?}"
+: "${PATCH_FILE:?}" "${RUN_ID:?}" "${RUN_URL:?}" "${GH_TOKEN:?}"
+AUTOFIX_TOKEN_KIND="${AUTOFIX_TOKEN_KIND:-default}"
+PUSH_TOKEN="${PUSH_TOKEN:-$GH_TOKEN}"
+
 if [ ! -s "$PATCH_FILE" ]; then
     echo "No patch content; nothing to do."
     exit 0
 fi
+PATCH_FILE="$(readlink -f "$PATCH_FILE")"
+if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "HEAD_SHA is not a commit id: $HEAD_SHA" >&2
+    exit 1
+fi
 
 # --- Validate the untrusted patch --------------------------------------------
 
-# Generated docs are regular files; refuse any symlink (120000) mode before
-# git apply can materialize one at an allowlisted path.
-if grep -qE '^(new|old) file mode 120000$|^new mode 120000$' "$PATCH_FILE"; then
-    echo "REFUSED: patch introduces a symlink mode."
-    exit 1
-fi
-
-# --numstat prints "added<TAB>deleted<TAB>path"; renames appear as
-# "old => new" forms, which the allowlist match rejects.
-BAD_PATHS=""
-while IFS=$'\t' read -r _ _ path; do
-    [ -n "$path" ] || continue
-    if ! path_allowed "$path"; then
-        BAD_PATHS="${BAD_PATHS}${path}\n"
-    fi
-done < <(git apply --numstat "$PATCH_FILE")
-
-if [ -n "$BAD_PATHS" ]; then
-    printf 'REFUSED: patch touches paths outside the generated-docs allowlist:\n%b' "$BAD_PATHS"
-    exit 1
-fi
+validate_patch "$PATCH_FILE"
 
 # --- Resolve the PR and confirm the patch is still current -------------------
 
 # List-and-filter client side: branch names with URL metacharacters would
-# corrupt a ?head= query string, and jq --arg needs no encoding.
+# corrupt a ?head= query string, and jq --arg needs no encoding. The PR must
+# target this repository. One head branch can back several open PRs (into
+# different bases); this artifact names no PR, so an ambiguous match is
+# skipped rather than guessed.
 PULLS_JSON="$(gh api --paginate "repos/$BASE_REPO/pulls?state=open&per_page=100")"
-PR_MATCH="$(printf '%s' "$PULLS_JSON" | jq -r -s --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" \
-    'add | [ .[] | select(.head.ref == $branch and (.head.repo.full_name // "") == $repo) ]
-     | .[0] | if . == null then "" else "\(.number) \(.head.sha)" end')"
-PR_NUMBER="${PR_MATCH%% *}"
-PR_HEAD_NOW="${PR_MATCH##* }"
-
-if [ -z "$PR_NUMBER" ]; then
-    echo "No open PR for $HEAD_REPO:$HEAD_BRANCH; nothing to do."
-    exit 0
-fi
+PR_MATCH="$(printf '%s' "$PULLS_JSON" | jq -r -s --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" --arg base "$BASE_REPO" \
+    'add | [ .[] | select(.head.ref == $branch and (.head.repo.full_name // "") == $repo
+                          and (.base.repo.full_name // "") == $base) ]
+     | if length == 1 then .[0] | "\(.number)\t\(.head.sha)" else "\(length)" end')"
+case "$PR_MATCH" in
+    0)
+        echo "No open PR for $HEAD_REPO:$HEAD_BRANCH into $BASE_REPO; nothing to do."
+        exit 0
+        ;;
+    *$'\t'*) IFS=$'\t' read -r PR_NUMBER PR_HEAD_NOW <<<"$PR_MATCH" ;;
+    *)
+        echo "$PR_MATCH open PRs use $HEAD_REPO:$HEAD_BRANCH; not guessing which one this patch is for."
+        exit 0
+        ;;
+esac
 if [ "$PR_HEAD_NOW" != "$HEAD_SHA" ]; then
     echo "PR #$PR_NUMBER head moved ($HEAD_SHA -> $PR_HEAD_NOW); a newer run owns the fix."
     exit 0
 fi
 
-# Circuit breaker: if the failing head is already one of our autofix commits,
-# regeneration is not converging (or something keeps dirtying the docs) -
-# stacking more bot commits would loop. Fail safe to the recipe comment.
-HEAD_MSG="$(gh api "repos/$BASE_REPO/commits/$HEAD_SHA" --jq '.commit.message' 2>/dev/null || true)"
-case "$HEAD_MSG" in
-    "$AUTOFIX_SUBJECT"*)
-        echo "Head $HEAD_SHA is already an autofix commit; refusing to stack another."
-        NONCONVERGENT=1
-        ;;
-    *) NONCONVERGENT=0 ;;
-esac
-
+# post_or_update_comment BODY_FILE: edit our own marker comment, else post.
+# Shared verbatim with bazel-autofix-push.sh.
 post_or_update_comment() {
     local body_file="$1"
     # Capture fully before taking the first id: head -1 on a live --paginate
     # stream SIGPIPEs gh under pipefail.
     local ids existing
     ids="$(gh api --paginate "repos/$BASE_REPO/issues/$PR_NUMBER/comments" \
-        --jq ".[] | select(.body | startswith(\"$COMMENT_MARKER\")) | .id")"
+        --jq ".[] | select(.user.login == \"$COMMENT_AUTHOR\" and (.body | startswith(\"$COMMENT_MARKER\"))) | .id")"
     existing="$(printf '%s\n' "$ids" | head -1)"
     if [ -n "$existing" ]; then
         gh api --method PATCH "repos/$BASE_REPO/issues/comments/$existing" \
@@ -136,6 +238,22 @@ post_or_update_comment() {
             -F body=@"$body_file" >/dev/null
         echo "Posted autofix comment on PR #$PR_NUMBER."
     fi
+}
+
+# head_branch_protected: true unless GitHub itself says HEAD_BRANCH has no
+# branch protection and no ruleset; an API error counts as protected. The name
+# list is a floor, not the check. Shared verbatim with bazel-autofix-push.sh.
+head_branch_protected() {
+    local enc protected rules
+    case "$HEAD_BRANCH" in
+        main | release/* | gh-readonly-queue/*) return 0 ;;
+    esac
+    enc="$(jq -rn --arg b "$HEAD_BRANCH" '$b | @uri')"
+    protected="$(gh api "repos/$BASE_REPO/branches/$enc" --jq '.protected' 2>/dev/null)" || return 0
+    [ "$protected" = "false" ] || return 0
+    rules="$(gh api "repos/$BASE_REPO/rules/branches/$enc" --jq 'length' 2>/dev/null)" || return 0
+    [ "$rules" = "0" ] || return 0
+    return 1
 }
 
 comment_fallback() {
@@ -163,15 +281,17 @@ EOF
     rm -f "$body"
 }
 
-if [ "$NONCONVERGENT" = "1" ]; then
-    comment_fallback "an earlier auto-fix did not converge - please regenerate manually"
-    exit 0
-fi
-
 # --- Fork PRs: no token we hold can push there, leave the recipe --------------
 
 if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
     comment_fallback "fork PR - CI cannot push the fix to your branch"
+    exit 0
+fi
+
+# Never push to a protected branch or one under a ruleset, even if a PR uses
+# it as head: the push token may be able to bypass what the author cannot.
+if head_branch_protected; then
+    comment_fallback "the head branch $HEAD_BRANCH is protected from bot pushes"
     exit 0
 fi
 
@@ -183,37 +303,70 @@ AUTH_CONFIG="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# Bare clone and a private index: the PR tree is never checked out, so no
+# symlink, .gitattributes or hook from it touches the disk.
+export GIT_INDEX_FILE="$WORK/index"
 
-git -c "$AUTH_CONFIG" clone --quiet --no-checkout --filter=blob:none \
-    "https://github.com/${BASE_REPO}.git" "$WORK/repo"
-cd "$WORK/repo"
-git -c "$AUTH_CONFIG" fetch --quiet origin "$HEAD_BRANCH"
-git checkout --quiet "$HEAD_SHA" 2>/dev/null || {
+# Only the head branch, blobs on demand: other branches' history never
+# reaches the runner.
+git_ init --quiet --bare "$WORK/repo.git"
+cd "$WORK/repo.git"
+git_ remote add origin "https://github.com/${BASE_REPO}.git"
+git_ config remote.origin.promisor true
+git_ config remote.origin.partialclonefilter blob:none
+git_ -c "$AUTH_CONFIG" fetch --quiet --no-tags --filter=blob:none origin \
+    "+refs/heads/$HEAD_BRANCH:refs/autofix/head"
+if ! git_ cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
     echo "Head $HEAD_SHA no longer reachable on $BASE_REPO/$HEAD_BRANCH; skipping."
     exit 0
-}
+fi
 
-if ! git apply --index "$PATCH_FILE" 2>/dev/null; then
-    cd - >/dev/null
+git_ read-tree "$HEAD_SHA"
+if ! git_ -c "$AUTH_CONFIG" apply --cached "$PATCH_FILE" 2>/dev/null; then
+    cd /
     comment_fallback "the regeneration patch no longer applies cleanly"
     exit 0
 fi
 
-git -c user.name="github-actions[bot]" \
-    -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-    commit --quiet -m "$AUTOFIX_SUBJECT
+# Belt and braces: what actually got staged must pass the same rules.
+check_staged "$HEAD_SHA"
+if [ "${#STAGED_PATHS[@]}" -eq 0 ]; then
+    echo "Patch changes nothing on $HEAD_SHA; nothing to push."
+    exit 0
+fi
+
+# Circuit breaker, once the fix is known to be non-empty: if the failing head
+# is already one of our autofix commits, regeneration is not converging (or
+# something keeps dirtying the docs) - stacking more bot commits would loop.
+# Read from the fetched commit (no API); failing to read it counts as
+# non-convergent.
+if ! HEAD_SUBJECT="$(git_ log -1 --format=%s "$HEAD_SHA")" || [[ "$HEAD_SUBJECT" == "$AUTOFIX_SUBJECT"* ]]; then
+    echo "Head $HEAD_SHA is (or may be) an autofix commit; refusing to stack another."
+    cd / && comment_fallback "the previous auto-regeneration commit left the docs stale - please regenerate manually"
+    exit 0
+fi
+
+TREE="$(git_ write-tree)"
+NEW_SHA="$(GIT_AUTHOR_NAME="github-actions[bot]" GIT_COMMITTER_NAME="github-actions[bot]" \
+    GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+    GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" \
+    git_ commit-tree "$TREE" -p "$HEAD_SHA" -m "$AUTOFIX_SUBJECT
 
 Applied from the cli-docs-freshness-patch artifact of $RUN_URL
 (generated with CI's canonical pinned build). See
-scripts/check-cli-docs-drift.sh for how drift is attributed."
+scripts/check-cli-docs-drift.sh for how drift is attributed.")"
 
-if ! git -c "$AUTH_CONFIG" push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"; then
-    cd - >/dev/null
+# Leased to HEAD_SHA: if the branch moved at all since the run (including a
+# force-push back to an ancestor), the push is refused rather than resurrecting
+# commits the author dropped.
+if ! git_ -c "$AUTH_CONFIG" push --quiet \
+    "--force-with-lease=refs/heads/$HEAD_BRANCH:$HEAD_SHA" \
+    origin "$NEW_SHA:refs/heads/$HEAD_BRANCH"; then
+    cd /
     comment_fallback "pushing the fix to $HEAD_BRANCH failed (branch protection or a concurrent push)"
     exit 0
 fi
-NEW_SHA="$(git rev-parse HEAD)"
-cd - >/dev/null
+cd /
 
 echo "Pushed regen commit $NEW_SHA to $BASE_REPO/$HEAD_BRANCH."
 

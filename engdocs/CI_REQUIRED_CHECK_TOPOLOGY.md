@@ -1,7 +1,7 @@
 # Required Check Topology
 
-Status: aggregate gate jobs are implemented; branch-protection and ruleset
-adoption remain pending. The aggregate-gate policy below remains maintainer
+Status: aggregate gate jobs are implemented, and the default-branch ruleset
+requires both aggregates (see Current State). The aggregate-gate policy below remains maintainer
 context, but `.github/workflows/*.yml` and their structural tests are
 authoritative for current job membership and display names. Copied workflow
 wiring and rollout steps in this note describe the initial rollout, not the
@@ -36,12 +36,43 @@ Current PR-related workflow names:
 - `.github/workflows/pr.yml`: `PR`
   Runs on `pull_request` and `merge_group`. Contains the baseline PR jobs,
   Linux build artifact stage, policy/lint compatibility jobs, package gates
-  that consume the Linux artifact, focused storage domain/uow coverage, and
-  the baseline aggregate gate `PR / CI Gate / Required`.
+  that consume the Linux artifact, focused storage domain/uow coverage, the
+  Bazel lane (the `bazel` job calls `bazel.yml`), and the baseline aggregate
+  gate `PR / CI Gate / Required`.
+- `.github/workflows/bazel.yml`: `Bazel`
+  Runs on `push` to `main`, manual dispatch, and `workflow_call` only. PRs and
+  merge groups run it once, through `pr.yml`'s `bazel` job. Its `rbe` job
+  decides the execution mode once (`remote`, `local` for fork and Dependabot
+  PRs, or `skip` while the `RBE_WEST_WORKERS` repo variable is unset) and
+  exports it as the `rbe-mode` / `rbe-enabled` outputs; every lane exports its
+  `job.status` as an output named after the job. `pr.yml`'s gate requires the
+  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
+  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`. The legacy jobs these mirror stay required in `pr.yml`
+  and `pr-risk.yml`.
+  `.github/scripts/bazel-gate.sh` reads the exported mode, never the variable
+  or the fork flag: mode `skip` allows every Bazel id to skip, mode `local`
+  allows only the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
+  `BAZEL_SERVER_STORAGE` (fork and Dependabot PRs rely on `pr-risk.yml`'s
+  legacy tiers for those), and mode `remote` allows none.
+  A lane that should run and fails, is cancelled, or reports no result fails
+  the gate, and so does a missing or invalid mode.
+  `bazel-integration` is not part of the PR call (`pr.yml` passes
+  `integration: "off"`) and has no gate id: its legacy counterparts
+  (`main.yml`'s integration jobs) run only on push to `main`, and so does it
+  (plus dispatch and nightly). `scripts/ci_workflow_test.go` fails when a new
+  `bazel.yml` job has neither a gate id nor an advisory entry.
+  Runbook: if `main`'s Bazel BUILD files drift (every PR's Bazel lanes go
+  red, and autofix only patches packages the PR itself changed), the RBE
+  farm is down, or the beads CI RBE client certificate expires (about
+  2027-09-27; a partial secret set also fails every same-repo run), fix
+  `main` (`make bazel-sync`) or renew the secrets, or unset the
+  `RBE_WEST_WORKERS` repo variable: same-repo runs then take mode `skip`,
+  which the gate accepts (fork PRs still run locally, so drift on `main`
+  still reaches them).
 - `.github/workflows/pr-risk.yml`: `PR Risk`
   Runs on `pull_request` and `merge_group`. Contains embedded Dolt risk
   detection, embedded build/test shards, the Nix flake smoke check, and the
-  risk aggregate gate `PR Risk / CI Gate / Required`.
+  risk aggregate gate `PR Risk / PR Risk Gate / Required`.
 - `.github/workflows/main.yml`: `Main`
   Runs on pushes to `main`. Contains the main branch health checks, package
   gates, platform smoke/short coverage, embedded Dolt coverage, and promoted
@@ -63,7 +94,17 @@ Current PR-related workflow names:
 
 As of 2026-05-26, the live `gastownhall/beads` ruleset named
 `Protect main - light (beads and gastown)` enforces deletion and non-fast-forward
-protection on the default branch. It does not currently require status checks.
+protection on the default branch. It does not require status checks.
+
+Since 2026-09-29 a second, beads-only ruleset, `beads main: required CI
+gates`, is active on the default branch. It requires the GitHub Actions
+checks `CI Gate / Required` (`pr.yml`, which includes the Bazel lanes through
+the `bazel` call) and `PR Risk Gate / Required` (`pr-risk.yml`). PR Risk's
+gate job was renamed from `CI Gate / Required` to `PR Risk Gate / Required`
+(#6939), so the two required contexts are distinct; before that both
+workflows reported the same check name. Organization admins and one team
+may bypass it. There is no merge queue, so the checks run on
+`pull_request`.
 
 ## Required Check Contract
 
@@ -76,7 +117,7 @@ rollout uses one aggregate per required workflow. An external status aggregator
 would only be needed if maintainers still want exactly one required check.
 
 - Baseline aggregate candidate: `PR / CI Gate / Required`
-- Risk aggregate candidate: `PR Risk / CI Gate / Required`
+- Risk aggregate candidate: `PR Risk / PR Risk Gate / Required`
 - Source: GitHub Actions
 - Required on: pull requests and merge queue groups targeting `main`
 
@@ -102,6 +143,7 @@ Do not require these existing check names directly:
 - `Upgrade smoke (<version> -> candidate)`
 - `Resolve versions to test`
 - `nix build .#default`
+- `Bazel / test` and the other jobs of `bazel.yml`
 
 Those checks should remain visible for diagnosis, but branch protection should
 point at aggregate gates after the gate jobs are verified.

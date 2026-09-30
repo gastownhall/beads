@@ -6,7 +6,8 @@ set -euo pipefail
 # releases/latest, because "latest" silently changes the binary under test.
 #
 # Keep this version in sync with internal/testutil/testdoltcommon.go:
-# DoltDockerImage and scripts/ci/pull-dolt-image.sh. Tests run the CLI (the
+# DoltDockerImage, scripts/ci/pull-dolt-image.sh and tools/bazel/dolt.bzl
+# (DOLT_VERSION plus its per-platform sha256). Tests run the CLI (the
 # per-test sql-server that doltserver.Start launches) and the container
 # side by side against the same databases; letting the two drift means the
 # suite is exercising a Dolt pair no release ever shipped.

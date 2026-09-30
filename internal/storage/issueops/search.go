@@ -32,6 +32,35 @@ func SearchIssueIDsInTx(ctx context.Context, tx DBTX, query string, filter types
 	return searchInTx(ctx, tx, query, filter, idProjection)
 }
 
+// SearchWispsPlaneInTx searches the wisps plane ALONE: every row stored in
+// the wisps table, whatever its ephemeral, no_history or wisp_type values, and
+// never the issues table.
+//
+// It is not SearchIssuesInTx with Ephemeral=true. That filter adds an
+// "ephemeral = 1" clause, which drops the no-history rows stored beside the
+// wisps, and it falls back to the issues table when the wisps plane is empty.
+// This answers "what is in the wisps table" — the unit
+// issueops.SweepWispsPlane selects by — and a database with no wisps table
+// answers with nothing.
+func SearchWispsPlaneInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	proj := issueProjection
+	if filter.Lite {
+		proj = issueLiteProjection
+	}
+	results, err := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
+	if err != nil {
+		if missingOptionalWispTable(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("search wisps plane: %w", err)
+	}
+	results = trimToSearchLimit(results, filter.Limit)
+	if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // searchProjection describes how to project, scan, and dedup search results.
 // Adding a narrow-projection variant means adding a new projection literal —
 // not a parallel top-level function or wisp-merge wrapper, which is how the

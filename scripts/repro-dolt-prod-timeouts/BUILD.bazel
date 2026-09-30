@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "repro-dolt-prod-timeouts_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/scripts/repro-dolt-prod-timeouts",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/execenv",
+        "//internal/storage/depid",
+        "//internal/storage/doltutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+go_binary(
+    name = "repro-dolt-prod-timeouts",
+    embed = [":repro-dolt-prod-timeouts_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "repro-dolt-prod-timeouts_test",
+    srcs = ["main_test.go"],
+    embed = [":repro-dolt-prod-timeouts_lib"],
+    deps = [
+        "//internal/execenv",
+        "//internal/storage/depid",
+        "//internal/storage/doltutil",
+        "//internal/storage/schema",
+        "//internal/testutil",
+        "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+    ],
+)

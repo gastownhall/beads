@@ -40,6 +40,14 @@ func DoltContainerPortInt() int { return 0 }
 // TerminateDoltContainer is a no-op on Windows.
 func TerminateDoltContainer() {}
 
+// RestartSharedDoltContainer is not supported on Windows CI.
+func RestartSharedDoltContainer() (int, error) {
+	return 0, fmt.Errorf("Docker not available on Windows CI")
+}
+
+// ServerUnreachable is always false on Windows (no shared container).
+func ServerUnreachable(err error) bool { return false }
+
 // DoltContainerCrashed always returns false on Windows (no container to monitor).
 func DoltContainerCrashed() bool { return false }
 

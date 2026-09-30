@@ -53,7 +53,9 @@ func TestIsValidSemver(t *testing.T) {
 		{"valid large numbers", "100.200.300", true},
 		{"empty string", "", false},
 		{"invalid letters", "1.2.a", false},
-		{"invalid format", "v1.2.3", false},
+		// A leading "v" is the Go module spelling bd itself may stamp and
+		// write (GH#6152); it used to be rejected here.
+		{"leading v (Go module form)", "v1.2.3", true},
 		{"trailing dot", "1.2.", false},
 		{"leading dot", ".1.2", false},
 		{"double dots", "1..2", false},
@@ -64,6 +66,41 @@ func TestIsValidSemver(t *testing.T) {
 			result := IsValidSemver(tt.version)
 			if result != tt.expected {
 				t.Errorf("IsValidSemver(%q) = %v, want %v", tt.version, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsBrewHeadVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{name: "short sha", version: "HEAD-f925f3f", want: true},
+		{name: "full sha", version: "HEAD-" + strings.Repeat("a", 40), want: true},
+		{name: "uppercase sha", version: "HEAD-F925F3F", want: true},
+		{name: "bare HEAD", version: "HEAD", want: true},
+		{name: "revision suffix", version: "HEAD-f925f3f_1", want: true},
+		{name: "bare HEAD with revision suffix", version: "HEAD_2", want: true},
+		{name: "empty sha", version: "HEAD-"},
+		{name: "non-hex sha", version: "HEAD-zzzzzzz"},
+		{name: "sha below git abbreviation floor", version: "HEAD-abc"},
+		{name: "sha beyond object id length", version: "HEAD-" + strings.Repeat("a", 41)},
+		{name: "dirty suffix", version: "HEAD-f925f3f-dirty"},
+		{name: "non-numeric revision", version: "HEAD-f925f3f_x"},
+		{name: "signed revision", version: "HEAD-f925f3f_+1"},
+		{name: "negative zero revision", version: "HEAD_-0"},
+		{name: "empty revision", version: "HEAD-f925f3f_"},
+		{name: "unrelated prefix", version: "HEADLESS-f925f3f"},
+		{name: "semver", version: "1.1.2"},
+		{name: "empty", version: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsBrewHeadVersion(tt.version); got != tt.want {
+				t.Fatalf("IsBrewHeadVersion(%q) = %v, want %v", tt.version, got, tt.want)
 			}
 		})
 	}
@@ -116,6 +153,39 @@ func TestCheckCLIVersionUsesFetcher(t *testing.T) {
 	}
 	if !strings.Contains(check.Message, "unable to check for updates") {
 		t.Fatalf("Message = %q, want network fallback notice", check.Message)
+	}
+}
+
+// TestCheckCLIVersionBrewHeadBuild verifies that a --HEAD build is not told to
+// run `brew upgrade beads`. CompareVersions reads the stamp as 0.0.0, so every
+// release looks newer forever, and taking the advice would move the user off
+// HEAD entirely.
+func TestCheckCLIVersionBrewHeadBuild(t *testing.T) {
+	orig := latestGitHubReleaseFetcher
+	fetched := false
+	latestGitHubReleaseFetcher = func() (string, error) {
+		fetched = true
+		return "1.3.0", nil
+	}
+	t.Cleanup(func() { latestGitHubReleaseFetcher = orig })
+
+	for _, stamp := range []string{"HEAD-f925f3f", "HEAD", "HEAD-f925f3f_1"} {
+		t.Run(stamp, func(t *testing.T) {
+			check := CheckCLIVersion(stamp)
+			if check.Status != StatusOK {
+				t.Fatalf("Status = %q, want %q (message: %q)", check.Status, StatusOK, check.Message)
+			}
+			if check.Fix != "" {
+				t.Fatalf("Fix = %q, want no upgrade advice for a --HEAD build", check.Fix)
+			}
+			if !strings.Contains(check.Message, stamp) {
+				t.Fatalf("Message = %q, want it to name the stamp", check.Message)
+			}
+		})
+	}
+
+	if fetched {
+		t.Error("CheckCLIVersion fetched the latest release for a --HEAD build; there is nothing to compare against")
 	}
 }
 
@@ -188,6 +258,34 @@ func TestCheckMetadataVersionTracking_EmptyFile(t *testing.T) {
 	}
 	if check.Message != ".local_version file is empty" {
 		t.Errorf("Message = %q, want %q", check.Message, ".local_version file is empty")
+	}
+}
+
+// TestCheckMetadataVersionTracking_BrewHeadStamp verifies that the version
+// stamp a Homebrew --HEAD install writes is reported as healthy rather than
+// permanently warning as an invalid format the user cannot fix: the offered
+// fix, running any bd command, writes the same stamp straight back.
+func TestCheckMetadataVersionTracking_BrewHeadStamp(t *testing.T) {
+	for _, stamp := range []string{"HEAD-f925f3f", "HEAD", "HEAD-f925f3f_1"} {
+		t.Run(stamp, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(stamp+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			check := CheckMetadataVersionTracking(tmpDir, "HEAD-aaaaaaa")
+
+			if check.Status != StatusOK {
+				t.Errorf("Status = %q, want %q (message: %q)", check.Status, StatusOK, check.Message)
+			}
+			if check.Fix != "" {
+				t.Errorf("Fix = %q, want no fix advice for a --HEAD stamp", check.Fix)
+			}
+		})
 	}
 }
 
@@ -334,5 +432,39 @@ func TestCheckMetadataVersionTracking_SinglePartVersion(t *testing.T) {
 				t.Errorf("Name = %q, want %q", check.Name, "Version Tracking")
 			}
 		})
+	}
+}
+
+// A leading "v" is the canonical spelling of a Go module version, and a build
+// stamped from a Go pseudo-version reports it — bd writes that string into
+// .local_version itself. The version helpers used to parse digits first, so
+// "v1" read as invalid (and as 0 in comparisons) while a prerelease suffix
+// passed by accident (gastownhall/beads#6152).
+func TestVersionHelpersAcceptALeadingV(t *testing.T) {
+	for _, v := range []string{"v1.2.3", "1.2.3", "v1.1.1-0.20260805093327-bf97b73749ac", "1.3.0-rc.1", "v0.30.0"} {
+		if !IsValidSemver(v) {
+			t.Errorf("IsValidSemver(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "v", "abc", "1.2.x", "v.1.2"} {
+		if IsValidSemver(v) {
+			t.Errorf("IsValidSemver(%q) = true, want false", v)
+		}
+	}
+	for _, tt := range []struct {
+		v1, v2 string
+		want   int
+	}{
+		{"v1.2.3", "1.2.3", 0},
+		{"v2.0.0", "1.9.9", 1},
+		{"1.0.0", "v1.0.1", -1},
+		{"v1.1.1-0.20260805093327-bf97b73749ac", "1.1.1-0.20260805093327-bf97b73749ac", 0},
+	} {
+		if got := CompareVersions(tt.v1, tt.v2); got != tt.want {
+			t.Errorf("CompareVersions(%q, %q) = %d, want %d", tt.v1, tt.v2, got, tt.want)
+		}
+	}
+	if got := ParseVersionParts("v1.2.3"); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("ParseVersionParts(%q) = %v, want [1 2 3]", "v1.2.3", got)
 	}
 }

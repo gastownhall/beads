@@ -157,4 +157,6 @@ routine agent traffic does not mint history — claim leases and
 so bloat at this scale usually means something is writing versioned tables
 in a tight loop. Find and fix that writer, watch data-directory growth over time, and
 run `dolt gc` periodically so unreachable garbage never accumulates on top
-of reachable history.
+of reachable history — with an occasional `dolt gc --full`, since a default
+pass is generational and never revisits data an earlier pass moved to the old
+generation.

@@ -58,6 +58,7 @@ type migrateLockOptions struct {
 	freshBootstrapHeal *freshBootstrapHealRequest
 	lockedPreparation  *lockedPreparationRequest
 	databaseSelector   DatabaseSelector
+	migrationGate      MigrationGate
 }
 
 type freshBootstrapHealRequest struct {
@@ -188,6 +189,34 @@ func WithLockedPreparation(endpoint string, fn LockedPreparation) MigrateLockOpt
 // without this package depending on it.
 type DatabaseSelector func(ctx context.Context, conn DBConn, databaseName string) (quotedName string, err error)
 
+// MigrationGate decides whether MigrateUpWithLock may apply the migrations it
+// found pending. A non-nil error refuses the migration and is returned to the
+// caller unchanged, so a typed refusal (*RemoteMigrateGateError) survives
+// errors.As at the CLI boundary.
+type MigrationGate func(context.Context, *sql.Conn) error
+
+// WithMigrationGate installs a pre-migration gate for callers whose migration
+// runs entirely inside MigrateUpWithLock — the proxied/`bd serve` provider,
+// which has no separate pre-open gate hook of the kind internal/storage/dolt
+// runs in its own retry loop.
+//
+// It runs after the migration lock is acquired and after any locked
+// preparation, immediately before MigrateUp. That placement is the whole
+// design:
+//
+//   - the steady-state alreadyConverged fast path above returns before the
+//     lock is ever taken, so a converged open pays the gate zero statements;
+//   - preparation has already CREATEd and USEd the database, so a fresh
+//     bootstrap reads CurrentVersion == 0 and passes (creating a database is
+//     consent for its schema);
+//   - a refusal propagates out through the deferred lock release, so refusing
+//     cannot leak the lock.
+func WithMigrationGate(fn MigrationGate) MigrateLockOption {
+	return func(o *migrateLockOptions) {
+		o.migrationGate = fn
+	}
+}
+
 // WithDatabaseSelector lets the convergence probe put the pinned session on
 // the target database itself.
 //
@@ -273,6 +302,19 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 				capability: capability,
 				endpoint:   o.lockedPreparation.endpoint,
 			}
+		}
+	}
+
+	// Fresh-bootstrap heal authority is proof that THIS logical open performed
+	// the exact bare CREATE DATABASE for the incarnation now being migrated —
+	// so creating it was consent for its schema, and the gate has nothing to
+	// protect. Checking the capability rather than re-reading the version is
+	// what makes that hold across a retry: a first pass that died part-way
+	// leaves a non-zero cursor behind, and a version-only test would then have
+	// the init refuse to finish migrating the database it just created.
+	if o.migrationGate != nil && o.freshBootstrapHeal == nil {
+		if gateErr := o.migrationGate(ctx, conn); gateErr != nil {
+			return 0, gateErr
 		}
 	}
 

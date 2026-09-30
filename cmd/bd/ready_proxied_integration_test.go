@@ -667,29 +667,18 @@ func TestProxiedServerReady2(t *testing.T) {
 			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk ready, got: %s", out)
 		}
 
+		before := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
 		stdout, stderr, err = bdProxiedRunBuffersWithEnv(t, bd, p.dir,
 			[]string{"BEADS_MAX_ROWS=1"}, "ready", "--claim", "--json", "--label", "rcmr-claim")
-		if err != nil {
-			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 should succeed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		if err == nil {
+			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 should refuse")
 		}
-		var claimed []types.IssueWithCounts
-		s := strings.TrimSpace(stdout)
-		start := strings.Index(s, "[")
-		if start < 0 {
-			t.Fatalf("no JSON array in claim output:\n%s", stdout)
+		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Fatalf("expected cap refusal, got:\n%s", out)
 		}
-		if err := json.Unmarshal([]byte(s[start:]), &claimed); err != nil {
-			t.Fatalf("parse claim JSON: %v\n%s", err, s[start:])
-		}
-		if len(claimed) != 1 {
-			t.Fatalf("expected exactly one claimed issue, got %d: %s", len(claimed), stdout)
-		}
-		if claimed[0].Status != types.StatusInProgress {
-			t.Errorf("Status = %s, want %s", claimed[0].Status, types.StatusInProgress)
-		}
-		persisted := bdProxiedShow(t, bd, p.dir, claimed[0].ID)
-		if persisted.Status != types.StatusInProgress || persisted.Assignee == "" {
-			t.Errorf("persisted claim = %+v, want in_progress with assignee", persisted)
+		after := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
+		if len(after) != len(before) {
+			t.Fatalf("claim refusal mutated ready set: before=%d after=%d", len(before), len(after))
 		}
 	})
 }

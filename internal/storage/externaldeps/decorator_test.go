@@ -68,6 +68,20 @@ func (f *fakeStore) GetReadyWorkWithCounts(ctx context.Context, filter types.Wor
 	return result, nil
 }
 
+func (f *fakeStore) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	items, err := f.GetReadyWorkWithCounts(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	unbounded := filter
+	unbounded.Limit, unbounded.Offset = 0, 0
+	all, err := f.GetReadyWork(ctx, unbounded)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, len(all), nil
+}
+
 func (f *fakeStore) GetBlockedIssues(_ context.Context, _ types.WorkFilter) ([]*types.BlockedIssue, error) {
 	return slices.Clone(f.blocked), nil
 }
@@ -377,6 +391,64 @@ func TestCountReadyWorkUsesExternalPolicy(t *testing.T) {
 	}
 	if got != 1 {
 		t.Fatalf("ready count = %d, want 1", got)
+	}
+}
+
+// TestReadyPageTotalUsesExternalPolicy: the page `bd ready --json` lists and
+// the total it prints beside it must both exclude externally blocked work. The
+// decorator embeds the inner store, so without its own override this method
+// would pass straight through and count the excluded rows.
+func TestReadyPageTotalUsesExternalPolicy(t *testing.T) {
+	a, b, c := issue("be-a"), issue("be-b"), issue("be-c")
+	raw := &fakeStore{
+		ready: []*types.Issue{a, b, c},
+		deps: map[string][]*types.Dependency{
+			a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, true)
+
+	items, total, err := store.GetReadyWorkWithCountsAndTotal(t.Context(), types.WorkFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != b.ID {
+		t.Fatalf("page = %v, want [%s]", items, b.ID)
+	}
+	if total != 2 {
+		t.Fatalf("total = %d, want 2 (be-a is externally blocked)", total)
+	}
+}
+
+// TestReadyTotalsAgreeAcrossOutputModes: text `bd ready` sizes a full page
+// through the ReadyCounter role, `bd ready --json` through the in-band total.
+// With an externally blocked issue present both must exclude it; before the
+// decorator overrode ReadyCounter, the text total passed through to the inner
+// store and counted it.
+func TestReadyTotalsAgreeAcrossOutputModes(t *testing.T) {
+	a, b, c := issue("be-a"), issue("be-b"), issue("be-c")
+	raw := &fakeStore{
+		ready: []*types.Issue{a, b, c},
+		deps: map[string][]*types.Dependency{
+			a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, true)
+
+	counter, err := store.ReadyCounter()
+	if err != nil {
+		t.Fatalf("ReadyCounter: %v", err)
+	}
+	text, err := counter.CountReady(t.Context(), publicops.ReadyRequest{})
+	if err != nil {
+		t.Fatalf("CountReady: %v", err)
+	}
+	_, jsonTotal, err := store.GetReadyWorkWithCountsAndTotal(t.Context(), types.WorkFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal: %v", err)
+	}
+	if text.Total != 2 || int(text.Total) != jsonTotal {
+		t.Fatalf("text total = %d, json total = %d; want both 2 (be-a is externally blocked)", text.Total, jsonTotal)
 	}
 }
 

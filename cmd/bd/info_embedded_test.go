@@ -141,6 +141,35 @@ func TestEmbeddedInfo(t *testing.T) {
 	})
 }
 
+// TestEmbeddedInfoSuppressGitHooks pins GH#6027: bd info must honor
+// doctor.suppress.git-hooks the same way bd doctor does, instead of printing
+// the missing-hooks warning unconditionally.
+func TestEmbeddedInfoSuppressGitHooks(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ih")
+	bdRunOK(t, bd, dir, "hooks", "uninstall")
+
+	const hookWarning = "Git hooks not installed"
+	if out := bdInfo(t, bd, dir); !strings.Contains(out, hookWarning) {
+		t.Fatalf("precondition: expected %q with hooks uninstalled:\n%s", hookWarning, out)
+	}
+
+	bdConfig(t, bd, dir, "set", "doctor.suppress.git-hooks", "true")
+	if out := bdInfo(t, bd, dir); strings.Contains(out, hookWarning) {
+		t.Errorf("doctor.suppress.git-hooks=true should hide %q:\n%s", hookWarning, out)
+	}
+
+	bdConfig(t, bd, dir, "set", "doctor.suppress.git-hooks", "false")
+	if out := bdInfo(t, bd, dir); !strings.Contains(out, hookWarning) {
+		t.Errorf("doctor.suppress.git-hooks=false should keep %q:\n%s", hookWarning, out)
+	}
+}
+
 // TestEmbeddedInfoConcurrent exercises info operations concurrently.
 func TestEmbeddedInfoConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

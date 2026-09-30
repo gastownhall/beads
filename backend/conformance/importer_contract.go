@@ -277,7 +277,16 @@ func RunImporterWiresTheCrossPlaneEdgeBetweenItsRows(t *testing.T, ctx context.C
 	if result.Created != 3 {
 		t.Errorf("Created = %d, want 3", result.Created)
 	}
+	// BOTH BELTS PER DIRECTION: the pinned cell fails a misrouted edge (the
+	// expected cell reads 0), and the summed total fails a DUPLICATE landing in
+	// any of the six table x column cells, which no per-cell count can see. The
+	// two together also make "the other plane holds none" exact: total 1 with
+	// the expected cell at 1 leaves every remaining cell empty.
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", "depends_on_issue_id", wisp, durable, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "dependencies", "depends_on_issue_id", wisp, durable, 0)
 	assertImporterEdgeCount(t, ctx, fixture, wisp, durable, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "dependencies", "depends_on_wisp_id", depender, wisp, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", "depends_on_wisp_id", depender, wisp, 0)
 	assertImporterEdgeCount(t, ctx, fixture, depender, wisp, 1)
 	assertImporterSkipped(t, result, nil)
 }
@@ -415,7 +424,9 @@ func assertImporterRowCount(t *testing.T, ctx context.Context, fixture ImporterF
 // importerEdgeCount counts the stored edges from source to target across BOTH
 // dependency tables and all three target columns. A dropped edge is dropped on
 // every plane, so the cases that expect zero want zero everywhere, and a
-// per-table count could report one while the row sat in the other.
+// per-table count could report one while the row sat in the other. WHICH of the
+// six cells a row landed in is a placement detail the cases that care about it
+// assert through assertImporterPlaneEdgeCount instead.
 func importerEdgeCount(t *testing.T, ctx context.Context, fixture ImporterFixture, source, target string) int {
 	t.Helper()
 	var got int
@@ -435,6 +446,29 @@ func assertImporterEdgeCount(t *testing.T, ctx context.Context, fixture Importer
 	t.Helper()
 	if got := importerEdgeCount(t, ctx, fixture, source, target); got != want {
 		t.Errorf("edges %s -> %s = %d, want %d", source, target, got, want)
+	}
+}
+
+// assertImporterPlaneEdgeCount pins WHERE an edge landed: one table and one
+// target column, the way RunImporterWiresTheCrossPlaneEdgeBetweenItsRows
+// documents its claim. importerEdgeCount deliberately sums both planes, which
+// is right for "dropped everywhere" and wrong for "wired in the right place":
+// an edge written to the other plane's table, or under the wrong target
+// column, counts as one there too. ONE CALL PINS ONE CELL, so the cross-plane
+// case asserts the expected cell holds exactly one row and the mirror cell of
+// the other plane holds none, and keeps importerEdgeCount's summed total
+// alongside them — a duplicate under one of the four cells neither call names
+// is invisible to this helper and is exactly what the sum still catches.
+func assertImporterPlaneEdgeCount(t *testing.T, ctx context.Context, fixture ImporterFixture, table, column, source, target string, want int) {
+	t.Helper()
+	//nolint:gosec // G201: table and column are hardcoded names from this contract's call sites.
+	query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ? AND " + column + " = ?"
+	var got int
+	if err := fixture.QueryScalar(ctx, query, []any{source, target}, &got); err != nil {
+		t.Fatalf("count %s.%s edges %s -> %s: %v", table, column, source, target, err)
+	}
+	if got != want {
+		t.Errorf("%s.%s rows %s -> %s = %d, want %d", table, column, source, target, got, want)
 	}
 }
 
