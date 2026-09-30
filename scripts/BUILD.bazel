@@ -20,6 +20,7 @@ go_test(
         "bazel_autofix_push_test.go",
         "bazel_policy_test.go",
         "check_build_tags_test.go",
+        "check_doc_flags_test.go",
         "check_doc_freshness_test.go",
         "check_testing_short_test.go",
         "ci_capability_selector_test.go",
