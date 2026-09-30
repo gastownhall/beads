@@ -629,6 +629,9 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-windows-liveness"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"),
+	})
 	for _, jobName := range []string{"check-doc-freshness-platforms", "pr-preflight-platforms", "build-examples"} {
 		assertGoCacheInventory(t, workflows["pr.yml"].job(t, jobName), []goCacheStep{restoreModuleCache()})
 	}
@@ -641,6 +644,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		},
 		"pr.yml": {
 			"build-artifacts": true, "pr-core-wrapper": true, "test-macos": true, "worktree-remove-windows": true,
+			"test-windows-liveness":         true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "build-examples": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
@@ -679,6 +683,21 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, prMacOS, []string{"Restore race Go build cache"}, []string{"Test"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "worktree-remove-windows"),
 		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests"})
+	prWindows := workflows["pr.yml"].job(t, "test-windows-liveness")
+	cacheSteps := []string{"Restore Go module cache", "Restore non-race Go build cache"}
+	assertStepsBefore(t, prWindows, cacheSteps,
+		[]string{"Run native Windows global Prime override", "Run Windows liveness regression test"})
+	for _, name := range cacheSteps {
+		step := prWindows.step(t, name)
+		if step.ContinueOnError != true {
+			t.Errorf("optional cache restore %q must allow a cold fallback on failure", name)
+		}
+		for _, key := range []string{"fail-on-cache-miss", "lookup-only"} {
+			if strings.EqualFold(strings.TrimSpace(step.With[key]), "true") {
+				t.Errorf("cache restore %q must not enable %s", name, key)
+			}
+		}
+	}
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
 		[]string{"Restore Go module cache"}, []string{"Exercise native date and Bash process boundary"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"),
@@ -705,6 +724,8 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Build", "non-race")
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Test", "race")
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
+	assertGoCacheEnv(t, prWindows, "Run native Windows global Prime override", "non-race")
+	assertGoCacheEnv(t, prWindows, "Run Windows liveness regression test", "non-race")
 	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
 		assertGoCacheEnv(t, workflows["pr-risk.yml"].job(t, "build-embedded"), stepName, "race")
 	}
@@ -740,6 +761,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		{"pr.yml", "pr-core-wrapper"},
 		{"pr.yml", "test-macos"},
 		{"pr.yml", "worktree-remove-windows"},
+		{"pr.yml", "test-windows-liveness"},
 		{"pr.yml", "check-doc-freshness-platforms"},
 		{"pr.yml", "pr-preflight-platforms"},
 		{"pr.yml", "build-examples"},

@@ -271,10 +271,27 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
+      - name: Restore Go module cache
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore non-race Go build cache
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
       - name: Run native Windows global Prime override
         shell: bash
         env:
           CGO_ENABLED: "1"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: |
           go_path=$(command -v go)
           [[ "$("$go_path" env GOHOSTOS GOOS)" == $'windows\nwindows' ]]
@@ -296,6 +313,8 @@ jobs:
           ((pass_count == 1))
 
       - name: Run Windows liveness regression test
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
 
   # internal/doltversion carries Windows-specific branches (PATHEXT
