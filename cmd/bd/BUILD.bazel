@@ -583,6 +583,7 @@ go_test(
         "config_isolation_regression_test.go",
         "config_leaked_secret_test.go",
         "config_list_test.go",
+        "config_machine_local_routing_test.go",
         "config_nodb_embedded_test.go",
         "config_proxied_integration_test.go",
         "config_setmany_test.go",
