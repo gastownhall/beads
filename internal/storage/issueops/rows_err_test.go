@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -87,8 +89,13 @@ func columnsFor(query string) []string {
 	return cols
 }
 
-func truncatingDB(t *testing.T, name string, rowsBeforeFailure int) *sql.DB {
+// sql.Register panics on a name it has already seen, which a -count=2 run of
+// this test would otherwise hit.
+var truncatingDriverSeq atomic.Int64
+
+func truncatingDB(t *testing.T, rowsBeforeFailure int) *sql.DB {
 	t.Helper()
+	name := fmt.Sprintf("truncating-%d", truncatingDriverSeq.Add(1))
 	sql.Register(name, &truncatingDriver{after: rowsBeforeFailure})
 	db, err := sql.Open(name, "")
 	if err != nil {
@@ -126,9 +133,9 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 		},
 	}
 
-	for i, tt := range tests {
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			db := truncatingDB(t, "truncating-"+tt.name+itoa(i), 1)
+			db := truncatingDB(t, 1)
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -145,16 +152,4 @@ func TestRowIterationReportsMidIterationFailure(t *testing.T) {
 			}
 		})
 	}
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b []byte
-	for i > 0 {
-		b = append([]byte{byte('0' + i%10)}, b...)
-		i /= 10
-	}
-	return string(b)
 }
