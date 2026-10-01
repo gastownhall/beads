@@ -15,3 +15,11 @@ go_test(
     ],
     embed = [":git"],
 )
+
+exports_files(
+    [
+        "gitdir.go",
+        "gitdir_test.go",
+    ],
+    visibility = ["//:__pkg__"],
+)

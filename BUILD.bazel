@@ -62,6 +62,8 @@ filegroup(
         "engdocs/**",
     ]) + [
         "integrations/beads-mcp/PYPI.md",
+        "//internal/git:gitdir.go",
+        "//internal/git:gitdir_test.go",
         "//scripts:README.md",
     ],
     visibility = ["//test/docsync:__pkg__"],

@@ -125,6 +125,44 @@ $ bd dolt push
 | `IsRedirected` | True if BEADS_DIR points to different repo than CWD |
 | `IsWorktree` | True if CWD is in a git worktree |
 
+## Explicit Read-Only Hooks Context
+
+`internal/git.ResolveHooksContext(workDir, env)` returns a fresh `HooksContext`
+without using or changing the legacy Git context cache. It is distinct from the
+`internal/beads.RepoContext` command helpers above: it reads paths and grants no
+authority to install or modify hooks. Callers own repository routing; nil `env`
+inherits, while a non-nil slice is supplied unchanged, including an empty slice.
+
+The resolver preserves these inherited boundaries:
+
+- **Config-query fallback:** `gitHooksDir` falls back to the common hooks directory
+  when the `core.hooksPath` query fails. This is legacy behavior, not proof that
+  the setting was absent. [#6467](https://github.com/gastownhall/beads/issues/6467)
+  owns a separate strict observation path; that pending work does not change the
+  generic resolver contract. Its recorded supplied-environment query failure
+  does not establish an init-scrub bypass or an installation race.
+- **Tilde home:** `~/` hook paths use the Go process's `os.UserHomeDir`, independently
+  of `HOME` supplied only to child Git. A child environment alone therefore does
+  not redirect these paths. The existing `process_tilde_home` resolver subtest
+  covers this behavior; it is not a missing regression.
+- **Path dialect:** `absoluteGitPath` anchors raw Git/common-directory paths using
+  native `filepath` rules; the discovered repository root separately uses
+  `NormalizePath`. On Windows, MSYS-style `/c/...` output would be treated as
+  relative by the former. The [#6436 review](https://github.com/gastownhall/beads/pull/6436#issuecomment-5858222578)
+  records Git for Windows emitting `C:/...`, so this is a hypothetical dialect
+  gap, not a reproduced failure on that host. Changing normalization needs a
+  supported-host witness and an explicit contract decision.
+
+The implementation and existing characterization tests are in
+[`internal/git/gitdir.go`](../internal/git/gitdir.go) and
+[`internal/git/gitdir_test.go`](../internal/git/gitdir_test.go). Broader discovery
+and write authority remain with [#6786](https://github.com/gastownhall/beads/issues/6786)
+and its proposal [#6796](https://github.com/gastownhall/beads/pull/6796); this section
+does not settle that proposal or supersede hook-consumer ownership in
+[#6440](https://github.com/gastownhall/beads/pull/6440) or the merged
+[#6463](https://github.com/gastownhall/beads/pull/6463) and
+[#6464](https://github.com/gastownhall/beads/pull/6464).
+
 ## Security
 
 ### Git Hooks Disabled
