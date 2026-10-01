@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // TestPrePushFSCK_EmptyCLIDir verifies that prePushFSCK is a no-op when
@@ -383,20 +386,116 @@ func TestClassifyFSCKFailure_CallerVsOwnTimeout(t *testing.T) {
 func TestFsckTimeoutDuration(t *testing.T) {
 	t.Run("valid duration honored", func(t *testing.T) {
 		t.Setenv(fsckTimeoutEnv, "2m")
-		if got := fsckTimeoutDuration(); got != 2*time.Minute {
+		if got := fsckTimeoutDuration(0); got != 2*time.Minute {
 			t.Errorf("want 2m, got %v", got)
 		}
 	})
 	t.Run("unset returns default", func(t *testing.T) {
 		t.Setenv(fsckTimeoutEnv, "")
-		if got := fsckTimeoutDuration(); got != fsckTimeout {
+		if got := fsckTimeoutDuration(0); got != fsckTimeout {
 			t.Errorf("want %v (default), got %v", fsckTimeout, got)
 		}
 	})
 	t.Run("invalid returns default", func(t *testing.T) {
 		t.Setenv(fsckTimeoutEnv, "not-a-duration")
-		if got := fsckTimeoutDuration(); got != fsckTimeout {
+		if got := fsckTimeoutDuration(0); got != fsckTimeout {
 			t.Errorf("want %v (default), got %v", fsckTimeout, got)
 		}
 	})
+}
+
+func TestApplyFSCKTimeout(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	t.Setenv("BD_DOLT_FSCK_TIMEOUT", "")
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "default", want: fsckTimeout},
+		{name: "duration", raw: "5m", want: 5 * time.Minute},
+		{name: "seconds", raw: "300", want: 5 * time.Minute},
+		{name: "invalid", raw: "not-a-duration", wantErr: true},
+		{name: "zero", raw: "0", wantErr: true},
+		{name: "negative", raw: "-1s", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.raw != "" {
+				if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("dolt:\n  fsck-timeout: "+tc.raw+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := &Config{BeadsDir: dir}
+			err := applyFSCKTimeout(cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && cfg.FSCKTimeout != tc.want {
+				t.Fatalf("timeout = %s, want %s", cfg.FSCKTimeout, tc.want)
+			}
+		})
+	}
+	t.Setenv("BEADS_DIR", t.TempDir())
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	config.Set("dolt.fsck-timeout", "4m")
+	cfg := &Config{}
+	if err := applyFSCKTimeout(cfg); err != nil || cfg.FSCKTimeout != 4*time.Minute {
+		t.Fatalf("initialized configuration: timeout=%s, error=%v", cfg.FSCKTimeout, err)
+	}
+	cfg.FSCKTimeout = time.Minute
+	if err := applyFSCKTimeout(cfg); err != nil || cfg.FSCKTimeout != time.Minute {
+		t.Fatalf("explicit caller budget was lost: timeout=%s, error=%v", cfg.FSCKTimeout, err)
+	}
+	cfg.FSCKTimeout = -time.Second
+	if err := applyFSCKTimeout(cfg); err == nil {
+		t.Fatal("negative caller budget was accepted")
+	}
+}
+
+func TestFsckTimeoutDuration_RepositoryAndEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		want      time.Duration
+	}{
+		{name: "persisted budget", want: 5 * time.Minute},
+		{name: "legacy override", env: "2m", want: 2 * time.Minute},
+		{name: "invalid override keeps repository budget", env: "bad", want: 5 * time.Minute},
+		{name: "zero override keeps repository budget", env: "0", want: 5 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(fsckTimeoutEnv, tc.env)
+			if got := fsckTimeoutDuration(5 * time.Minute); got != tc.want {
+				t.Fatalf("timeout=%s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPrePushFSCK_RepositoryBudget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test command uses a POSIX shell")
+	}
+	t.Setenv(fsckTimeoutEnv, "")
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "mydb", ".dolt", "noms"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte("#!/bin/sh\nexec sleep 0.1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	s := &DoltStore{dbPath: dir, database: "mydb", fsckTimeout: 20 * time.Millisecond}
+	if err := s.prePushFSCK(context.Background()); !errors.Is(err, ErrFSCKTimeout) {
+		t.Fatalf("small repository budget should time out, got %v", err)
+	}
+	s.fsckTimeout = time.Second
+	if err := s.prePushFSCK(context.Background()); err != nil {
+		t.Fatalf("larger repository budget should pass, got %v", err)
+	}
 }

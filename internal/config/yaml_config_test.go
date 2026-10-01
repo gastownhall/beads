@@ -754,6 +754,24 @@ func TestValidateYamlConfigValue_HierarchyMaxDepth(t *testing.T) {
 	}
 }
 
+// TestValidateYamlConfigValue_FSCKTimeout rejects budgets that cannot safely
+// bound the pre-push integrity check.
+func TestValidateYamlConfigValue_FSCKTimeout(t *testing.T) {
+	for _, value := range []string{"5m", "300", "0.5s", " 2m "} {
+		if err := validateYamlConfigValue("dolt.fsck-timeout", value); err != nil {
+			t.Errorf("valid timeout %q rejected: %v", value, err)
+		}
+	}
+	for _, value := range []string{"", "0", "0s", "-1s", "bad", "99999999999h"} {
+		if err := validateYamlConfigValue("dolt.fsck-timeout", value); err == nil {
+			t.Errorf("invalid timeout %q accepted", value)
+		}
+	}
+	if !YamlOnlyKeys["dolt.fsck-timeout"] {
+		t.Fatal("integrity budget must be local startup configuration")
+	}
+}
+
 // TestValidateYamlConfigValue_OtherKeys tests that other keys are not validated
 func TestValidateYamlConfigValue_OtherKeys(t *testing.T) {
 	// Other keys should pass validation regardless of value
