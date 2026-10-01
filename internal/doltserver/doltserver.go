@@ -1585,7 +1585,7 @@ func validateDistinctServerPorts(sqlPort, remotesAPIPort int) error {
 func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
 	state.RemotesAPIPort = cfg.RemotesAPIPort
 	if err := validateDistinctServerPorts(state.Port, cfg.RemotesAPIPort); err != nil {
-		return nil, fmt.Errorf("%w and run 'bd dolt restart'", err)
+		return nil, fmt.Errorf("%w; choose a different remotesapi port with 'bd dolt set remotesapi-port <port>' and run 'bd dolt restart'", err)
 	}
 	if cfg.RemotesAPIPort > 0 && !ProbeRemotesAPI(cfg.RemotesAPIPort) {
 		return nil, fmt.Errorf(
@@ -2038,6 +2038,12 @@ func Stop(beadsDir string) error {
 // lock for the entire stop/start transition. The live SQL port is restored as
 // desired state so a per-project ephemeral server does not move merely because
 // it was restarted.
+//
+// The desired configuration is checked against the live server BEFORE it is
+// stopped. A restart that stops first and then cannot start leaves a shared
+// server down for every workspace on the machine until the user-global key is
+// reverted, so a configuration the start step would reject is refused up front
+// with the server left running.
 func Restart(beadsDir string) (*State, error) {
 	lockF, err := acquireLifecycleLock(beadsDir)
 	if err != nil {
@@ -2045,9 +2051,16 @@ func Restart(beadsDir string) (*State, error) {
 	}
 	defer releaseLifecycleLock(lockF)
 
+	var previous *State
+	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil && state.Running {
+		previous = state
+	}
+	if err := preflightRestart(DefaultConfig(beadsDir), previous); err != nil {
+		return nil, fmt.Errorf("refusing to restart Dolt server (server left running): %w", err)
+	}
 	previousPort := 0
-	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil {
-		previousPort = state.Port
+	if previous != nil {
+		previousPort = previous.Port
 	}
 	if err := IgnoreNotRunning(stopLocked(beadsDir)); err != nil {
 		return nil, fmt.Errorf("stopping Dolt server for restart: %w", err)
@@ -2070,6 +2083,34 @@ func Restart(beadsDir string) (*State, error) {
 		return nil, restartErr
 	}
 	return state, nil
+}
+
+// preflightRestart applies the listener checks startLocked would make, against
+// the SQL port Restart will re-pin (the live server's port when one is
+// running, else the configured one). The remotesapi port must differ from it
+// and must be free, or held by the server being replaced, which releases it
+// when it stops. An occupied port whose owner cannot be identified is refused
+// like reclaimPort refuses an unidentifiable SQL listener: the cost of a wrong
+// guess here is a stopped shared server.
+func preflightRestart(cfg *Config, previous *State) error {
+	sqlPort := cfg.Port
+	if previous != nil && previous.Port > 0 {
+		sqlPort = previous.Port
+	}
+	if err := validateDistinctServerPorts(sqlPort, cfg.RemotesAPIPort); err != nil {
+		return fmt.Errorf("%w; choose a different remotesapi port with 'bd dolt set remotesapi-port <port>'", err)
+	}
+	if cfg.RemotesAPIPort <= 0 {
+		return nil
+	}
+	err := checkRemotesAPIPortAvailable(cfg.RemotesAPIPort)
+	if err == nil {
+		return nil
+	}
+	if previous != nil && findPIDOnPort(cfg.RemotesAPIPort) == previous.PID {
+		return nil
+	}
+	return fmt.Errorf("%w; free it or choose a different port with 'bd dolt set remotesapi-port <port>'", err)
 }
 
 // StopWithForce is like Stop but with an optional force flag.
