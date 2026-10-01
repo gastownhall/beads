@@ -9,19 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`bd serve`'s blocked-close refusal names the blockers.** A `409
-  not_closable` for a live blocker — on `issues/{id}:close`, `issues:batchClose`
-  per-item outcomes, `PATCH issues/{id}` into a done status, and
-  `issues:batchApply` — said only "issue is blocked", so an HTTP client could
-  not tell the user what held the close, while `bd close` on the direct and
-  proxied routes prints `cannot close blocked issue: X is blocked by [Y]`. The
-  refusal now carries a `blockers` extension member (`[{id, kind, type}]`,
-  `kind` `local` or `external`, `type` the blocking edge type when known) and a
-  `detail` that opens with the direct route's sentence. The code, the status
-  and the `open_children` discriminator are unchanged. The list travels typed
-  end to end: close refusals are now an `issueops.BlockedError` (still matching
-  `ErrCloseBlocked`, with a byte-identical message), so the server never parses
-  prose to build the member and a client can rebuild the same typed error.
+- **`bd list` no longer silently drops all but the last repeated filter flag.**
+  `--status`, `--state`, and `--id` were plain string flags, so
+  `bd list --status open --status closed --status pinned` kept only `pinned` —
+  a census over 477 issues quietly answered over 3, with nothing in the output
+  to distinguish the narrowed answer from a correct one. Repeats of those three
+  flags now accumulate (duplicates collapse) instead of overwriting, so
+  `--status open --status closed` selects the same set as
+  `--status open,closed`. The one repeat that does not simply accumulate is one
+  involving `--status all`: `all` cannot be combined with other statuses, so
+  `--status all --status open` is now refused rather than narrowed to `open`.
+  `--type` and `--assignee` are single-valued all the way down — unioning would
+  fail type validation or exact-match nobody — so a repeat of either now refuses
+  loudly instead of silently keeping the last value:
+  `invalid argument "epic" for "-t, --type" flag: --type given more than once
+  (already "bug"); pass a single value`.
+  Single-flag and comma-form spellings behave exactly as before.
 
 - **`bd init --force` can no longer silently recreate a missing server-side
   database as empty** (be-5up5). `--force` is an alias for `--reinit-local`,
@@ -130,6 +133,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first. They now accept an optional leading `v`; versions without it are
   unchanged ([#6152](https://github.com/gastownhall/beads/issues/6152)).
 
+- **`bd serve`'s blocked-close refusal names the blockers.** A `409
+  not_closable` for a live blocker — on `issues/{id}:close`, `issues:batchClose`
+  per-item outcomes, `PATCH issues/{id}` into a done status, and
+  `issues:batchApply` — said only "issue is blocked", so an HTTP client could
+  not tell the user what held the close, while `bd close` on the direct and
+  proxied routes prints `cannot close blocked issue: X is blocked by [Y]`. The
+  refusal now carries a `blockers` extension member (`[{id, kind, type}]`,
+  `kind` `local` or `external`, `type` the blocking edge type when known) and a
+  `detail` that opens with the direct route's sentence. The code, the status
+  and the `open_children` discriminator are unchanged. The list travels typed
+  end to end: close refusals are now an `issueops.BlockedError` (still matching
+  `ErrCloseBlocked`, with a byte-identical message), so the server never parses
+  prose to build the member and a client can rebuild the same typed error.
+
 - **The #6716 fan-in stall is fixed on the proxied-server route and the
   remaining store routes.** Two blockers of one dependent taken away at the
   same time (parallel workers closing both, or a close racing a
@@ -224,6 +241,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merely contains a token (`bd-null`, `null3t0`, `undefined-behavior`) still
   resolves, and abbreviation matching is otherwise unchanged. The empty string
   already failed; it now says why.
+
+- **`bd ready --parent` and `bd blocked --parent` no longer re-scan the whole
+  parent-child edge relation for every descendant they find.** The transitive
+  descendant walk recursed against a materialized `parent_edges` CTE that Dolt
+  cannot index through, so its cost was (parent-child rows) × (descendants):
+  7.5 s for a 483-descendant parent on a 4.6k-edge database, and past the
+  shared-pool read deadline on a busy server. The walk now recurses directly
+  off `dependencies` / `wisp_dependencies` through their typed target indexes
+  and returns the same rows in a fraction of the time
+  ([#6128](https://github.com/gastownhall/beads/issues/6128)).
+
+- **`bd list --parent` on a proxied-server workspace no longer drops a child
+  whose prefix differs from its parent's**
+  ([#6130](https://github.com/gastownhall/beads/pull/6130)). The edge to such
+  a parent is stored in `depends_on_external` — `issueops.IsExternalDepTarget`
+  routes every cross-prefix target there — but the descendant walk behind the
+  proxied tree view resolved a parent only through the issue and wisp target
+  columns, so the child and its subtree were missing from the tree and from
+  `--watch`, while the direct route listed them. The walk now reads all three
+  target columns, as the direct route's `--parent` filter does. Nothing listed
+  before can drop out: the added column is read only when the other two are
+  both empty.
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
@@ -438,6 +477,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only consumers driving `bd --readonly … --json` see the change.
 
 ### Added
+
+- **A long-running schema migration now says so instead of going quiet**
+  ([#5997](https://github.com/gastownhall/beads/pull/5997)). Migrations are
+  allowed to take a long time by design — migration 0047's full-table
+  `is_blocked` recompute is a real example — but until now a slow one and a
+  wedged one looked identical from outside: `bd` simply stopped printing. A
+  watchdog now emits a WARN naming the migration's version, name, and elapsed
+  time once the migration's own SQL has been running past the interval, and
+  repeats every interval while it keeps running, so an operator reading logs
+  can tell "still working" from "stopped emitting anything". Coverage is the
+  migration body specifically — the per-step Dolt commit that follows it on
+  the production embedded path is outside the watchdog, so a stall there is
+  still quiet. Set `BEADS_MIGRATION_WATCHDOG_INTERVAL` to change the
+  5-minute default; it accepts durations like `10m` and bare seconds like `90`,
+  and falls back to the default when unset or unparsable. This is observability
+  only and never a circuit breaker: the migration receives the caller's exact
+  context, its error is passed through unchanged, and nothing is aborted or
+  rolled back. The warning is deliberately not terminal-gated, so it survives
+  `bd serve`, systemd, CI, and piped invocations.
 
 - **Auto-backup runs on a managed-local proxied-server workspace.** The
   proxied arm of the post-command hook now calls auto-backup, so an explicit

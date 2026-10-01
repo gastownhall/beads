@@ -298,6 +298,11 @@ func primeWorkspaceDir() string {
 //
 // NOTE: the probes built here are not prime-only — see primeHasGitRemote for
 // the auto-backup consumer that inherits this directory choice.
+//
+// NOTE: since GH#4927 every return path pairs with a nil error — the
+// GetRepoContext() failure falls back to a cwd probe instead of propagating —
+// so the err != nil arms at both call sites are unreachable today. The error
+// result is retained for future callers that can genuinely fail.
 func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	if ws := primeWorkspaceDir(); ws != "" {
 		cmd := exec.CommandContext(ctx, "git", args...)
@@ -306,7 +311,14 @@ func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	}
 	rc, err := internalbeads.GetRepoContext()
 	if err != nil {
-		return nil, err
+		// GH#4927: an unusable BEADS_DIR must not be reported as "no git
+		// remote" / "ephemeral branch". An external BEADS_DIR under another
+		// account's home (common in agent sandboxes) makes buildRepoContext
+		// fail, but the process cwd is frequently a perfectly good git
+		// workspace, so probe it directly instead of giving up. The SEC-003
+		// boundary on BEADS_DIR stays enforced by the callers that consume
+		// BEADS_DIR itself; these probes only ask git about its own workspace.
+		return exec.CommandContext(ctx, "git", args...), nil
 	}
 	return rc.GitCmdCWD(ctx, args...), nil
 }
@@ -372,7 +384,9 @@ func isMCPActive() bool {
 	return false
 }
 
-// isEphemeralBranch detects if current branch has no upstream (ephemeral/local-only)
+// isEphemeralBranch detects if current branch has no upstream (ephemeral/local-only).
+// Runs through primeGitCmd, so it honors -C (#5509) and still falls back to the
+// process CWD git workspace when BEADS_DIR is unusable (GH#4927).
 var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
@@ -405,11 +419,43 @@ var primeAgentProfile = func() config.AgentProfile {
 // remote rather than the cwd's (#5509). That is the consistent answer, because
 // the store being backed up is the -C-resolved one, but it is a behavior
 // change beyond prime: check backup_auto before changing what this probes.
+//
+// GH#4927: this must not require a valid RepoContext / BEADS_DIR. An external
+// BEADS_DIR under another account's home (common in agent sandboxes) fails to
+// build a RepoContext and must not be misreported as "no git remote" when
+// `git remote` in the workspace succeeds. primeGitCmd supplies that fallback,
+// which keeps the -C behavior above intact. The SEC-003 boundary on BEADS_DIR
+// remains enforced elsewhere.
 var primeHasGitRemote = func() bool {
 	cmd, err := primeGitCmd(context.Background(), "remote")
 	if err != nil {
 		return false
 	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// gitCWDHasRemote reports whether the process CWD git repo has any remote.
+// Delegates to gitDirHasRemote (no BEADS_DIR coupling). It is the
+// BEADS_DIR-independent primitive the GH#4927 regression test drives directly,
+// alongside primeHasGitRemote.
+//
+// This pair is a test-only oracle with no production callers: the production
+// probes build their own command in primeGitCmd.
+func gitCWDHasRemote() bool {
+	return gitDirHasRemote("")
+}
+
+// gitDirHasRemote reports whether the git repo at dir has any remote
+// configured. dir == "" runs git in the process's current working directory
+// (this is what gitCWDHasRemote uses); a non-empty dir lets tests probe an
+// explicit fixture repo without chdir-ing the whole process.
+func gitDirHasRemote(dir string) bool {
+	cmd := exec.Command("git", "remote")
+	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
 		return false

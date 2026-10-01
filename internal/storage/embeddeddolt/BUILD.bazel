@@ -129,6 +129,7 @@ go_test(
         "dependency_editor_contract_test.go",
         "dependency_editor_version_history_test.go",
         "dependents_records_test.go",
+        "descendants_test.go",
         "detection_test.go",
         "dirty_tables_gate_test.go",
         "dualwrite_history_contract_test.go",

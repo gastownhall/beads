@@ -36,6 +36,19 @@ func defaultStderr() io.Writer {
 	return io.Discard
 }
 
+// watchdogStderr is where the migration watchdog's WARN lines go. Unlike
+// stderr it is deliberately NOT terminal-gated: bd serve, systemd, CI and any
+// piped invocation are all non-tty, and they are exactly the cases where a
+// migration that has been running for twenty minutes needs to be visible.
+// Routing it through stderr would make the warning io.Discard precisely there.
+//
+// This matches how this package already emits operator warnings that must not
+// be swallowed (remote_migrate_gate.go, smart_remote_migrate_gate.go, and the
+// skew notices in this file all write to os.Stderr directly); stderr remains
+// for the routine per-migration progress lines it was introduced for.
+// Overridable in tests.
+var watchdogStderr io.Writer = os.Stderr
+
 const largeRigThreshold = 10000
 
 // issueRowCounter returns the current issues-table row count, or an error if
@@ -58,6 +71,90 @@ func emitLargeRigNotice(out io.Writer, count int64, err error) {
 		return
 	}
 	fmt.Fprintf(out, "Large rig detected (%d issues). This migration may take up to 90 seconds; do not interrupt.\n", count)
+}
+
+// migrationWatchdogInterval is the default interval between soft watchdog
+// warnings for a single long-running migration.
+const migrationWatchdogInterval = 5 * time.Minute
+
+// migrationWatchdogIntervalEnv overrides migrationWatchdogInterval.
+const migrationWatchdogIntervalEnv = "BEADS_MIGRATION_WATCHDOG_INTERVAL"
+
+// migrationWatchdogIntervalDuration returns the configured watchdog interval.
+// BEADS_MIGRATION_WATCHDOG_INTERVAL overrides the compiled-in default. Valid
+// time.ParseDuration strings ("10m", "90s") and bare numbers treated as
+// seconds ("90") are both accepted; unset, empty, unparsable, or non-positive
+// values fall back to migrationWatchdogInterval. This is the full contract of
+// internal/storage/dolt/store.go's parseTimeout, bare-seconds included —
+// mirrored rather than reused because that function is unexported in another
+// package.
+func migrationWatchdogIntervalDuration() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(migrationWatchdogIntervalEnv))
+	if raw == "" {
+		return migrationWatchdogInterval
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d > 0 {
+			return d
+		}
+		return migrationWatchdogInterval
+	}
+	// Bare numbers mean seconds, matching parseTimeout. Without this an
+	// operator setting the value to 90 gets 5m and no diagnostic.
+	if d, err := time.ParseDuration(raw + "s"); err == nil && d > 0 {
+		return d
+	}
+	return migrationWatchdogInterval
+}
+
+// runMigrationWithWatchdog runs fn — the same call runMigrations already
+// makes to execMigrationBody — while a background timer watches elapsed
+// time. If fn is still running after interval, it logs a WARN line to out
+// naming the migration's version, name, and elapsed time, and repeats every
+// additional interval for as long as fn keeps running, so an operator
+// watching logs can tell "still working" from "stopped emitting anything".
+//
+// This is observability only, never a circuit breaker: fn receives exactly
+// the ctx this function received (no wrapping timeout/cancel), and fn's
+// returned error is passed through unchanged. Migrations are allowed to run
+// arbitrarily long by design — store.go's own initSchema comment cites
+// migration 0047's full-table is_blocked recompute as a real example — and
+// no confirmed production hang exists today. See bd show be-m65rs for the
+// full rationale before turning this into a hard abort.
+func runMigrationWithWatchdog(ctx context.Context, out io.Writer, version int, name string, interval time.Duration, fn func(ctx context.Context) error) error {
+	start := time.Now()
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Fprintf(out, "WARN: migration %04d (%s) still running after %s — watchdog check every %s, this is not an error\n",
+					version, name, time.Since(start).Round(time.Millisecond), interval)
+			}
+		}
+	}()
+
+	// Deferred so the warner is stopped on every exit path, including a panic
+	// out of fn — Dolt's embedded engine can panic out of DDL, and a caller
+	// that recovers rather than dying (internal/httpapi/server.go's middleware
+	// recovers everything except http.ErrAbortHandler and keeps serving) would
+	// otherwise orphan the ticker goroutine, which goes on writing "still
+	// running" to the un-gated watchdogStderr for a migration that is no longer
+	// running. A straight-line close/wait after fn returns leaks in exactly
+	// that case.
+	defer func() {
+		close(done)
+		wg.Wait()
+	}()
+
+	return fn(ctx)
 }
 
 // humanMigrationName turns "0033_add_date_indexes.up.sql" into
@@ -1813,7 +1910,28 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 
 		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
 		start := time.Now()
-		if err := execMigrationBody(ctx, db, string(data)); err != nil {
+		// Soft warning only, by design — never turn this into a hard
+		// timeout/abort. Migrations can legitimately run arbitrarily long
+		// (see the initSchema comment in internal/storage/dolt/store.go,
+		// e.g. migration 0047's full-table recompute); aborting mid-DDL
+		// risks leaving Dolt in a partially-migrated state with no clean
+		// rollback. Full scoping rationale and rejected alternatives:
+		// bd show be-m65rs.
+		//
+		// The wrap deliberately covers the migration's own SQL body and
+		// nothing else: the dirty-table snapshot and preMigrationRepair above
+		// and the cursor INSERT and commitMigrationStep below all run outside
+		// it, including the per-step DOLT_ADD/DOLT_COMMIT that the comment
+		// further down calls the expensive, fallible part of this step on the
+		// production embedded path. Widening the boundary to the whole step
+		// means moving this loop's snapshot/commit ordering — the atomicity
+		// contract documented on runMigrations and in commitMigrationStep
+		// (#4566, #4690) — which is more risk than an observability change
+		// should carry. So a wedge inside the per-step commit is still silent;
+		// CHANGELOG.md scopes the user-facing promise to match.
+		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
+			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
+		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
