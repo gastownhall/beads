@@ -31,6 +31,7 @@ go_library(
         "hook_decorator.go",
         "hook_deleter.go",
         "hook_dependency_editor.go",
+        "hook_detailbatchreader.go",
         "hook_edgereader.go",
         "hook_graph_counter.go",
         "hook_init_verifier.go",

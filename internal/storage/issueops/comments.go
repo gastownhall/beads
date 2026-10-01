@@ -154,7 +154,7 @@ func GetIssueCommentsPageInTx(ctx context.Context, tx *sql.Tx, issueID string, a
 // GetCommentCountsInTx returns comment counts per issue ID within a transaction.
 // Routes each ID to comments or wisp_comments based on wisp status.
 // Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
-func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string]int, error) {
+func GetCommentCountsInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string]int, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string]int), nil
 	}
@@ -173,45 +173,51 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 		{"wisp_comments", wispIDs},
 		{"comments", permIDs},
 	} {
-		if len(pair.ids) == 0 {
-			continue
-		}
-		for start := 0; start < len(pair.ids); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(pair.ids) {
-				end = len(pair.ids)
-			}
-			batch := pair.ids[start:end]
-			placeholders := make([]string, len(batch))
-			args := make([]any, len(batch))
-			for i, id := range batch {
-				placeholders[i] = "?"
-				args[i] = id
-			}
-			//nolint:gosec // G201: pair.table is hardcoded
-			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-				`SELECT issue_id, COUNT(*) as cnt FROM %s WHERE issue_id IN (%s) GROUP BY issue_id`,
-				pair.table, strings.Join(placeholders, ",")), args...)
-			if err != nil {
-				return nil, fmt.Errorf("get comment counts from %s: %w", pair.table, err)
-			}
-			for rows.Next() {
-				var issueID string
-				var count int
-				if err := rows.Scan(&issueID, &count); err != nil {
-					_ = rows.Close()
-					return nil, fmt.Errorf("get comment counts: scan: %w", err)
-				}
-				result[issueID] = count
-			}
-			_ = rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, fmt.Errorf("get comment counts: rows: %w", err)
-			}
+		if err := getCommentCountsForIDsInto(ctx, tx, pair.table, pair.ids, result); err != nil {
+			return nil, err
 		}
 	}
 
 	return result, nil
+}
+
+// getCommentCountsForIDsInto is the known-plane read shared with detail batches,
+// whose UOW route selects comments by the winning subject rather than wisp existence.
+func getCommentCountsForIDsInto(ctx context.Context, tx DBTX, table string, ids []string, result map[string]int) error {
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		//nolint:gosec // G201: table is hardcoded by callers.
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT issue_id, COUNT(*) as cnt FROM %s WHERE issue_id IN (%s) GROUP BY issue_id`,
+			table, strings.Join(placeholders, ",")), args...)
+		if err != nil {
+			return fmt.Errorf("get comment counts from %s: %w", table, err)
+		}
+		for rows.Next() {
+			var issueID string
+			var count int
+			if err := rows.Scan(&issueID, &count); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("get comment counts: scan: %w", err)
+			}
+			result[issueID] = count
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("get comment counts: rows: %w", err)
+		}
+	}
+	return nil
 }
 
 // AddIssueCommentInTx adds a structured comment to an issue within a transaction.

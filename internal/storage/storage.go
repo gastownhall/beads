@@ -282,6 +282,9 @@ type Storage interface {
 	// EdgeReader (that one answers with the stored ROWS, outbound only). Reads
 	// fire no hooks, as for IssueReader.
 	GraphCounter() (issueops.GraphCounter, error)
+	// DetailBatchReader returns ordered issue details from one read snapshot.
+	// Reads fire no completion hooks, as for IssueReader.
+	DetailBatchReader() (issueops.DetailBatchReader, error)
 	// ReadyCounter returns the guarded ready-count surface for this store: the
 	// size of the ready set, which is the number `bd ready`'s pagination
 	// publishes and which no other role answers. Counter's predicate is a

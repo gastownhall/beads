@@ -234,6 +234,10 @@ func (p *notifyingProvider) BlockingAnnotator() (publicops.BlockingAnnotator, er
 
 func (p *notifyingProvider) TreeWalker() (publicops.TreeWalker, error) { return NewTreeWalker(p) }
 
+func (p *notifyingProvider) DetailBatchReader() (publicops.DetailBatchReader, error) {
+	return NewDetailBatchReader(p)
+}
+
 func (p *notifyingProvider) GraphCounter() (publicops.GraphCounter, error) {
 	return NewGraphCounter(p)
 }
@@ -400,6 +404,7 @@ var (
 	_ BlockingAnnotatorSource   = (*notifyingProvider)(nil)
 	_ TreeWalkerSource          = (*notifyingProvider)(nil)
 	_ GraphCounterSource        = (*notifyingProvider)(nil)
+	_ DetailBatchReaderSource   = (*notifyingProvider)(nil)
 	_ CounterSource             = (*notifyingProvider)(nil)
 	_ ReadyCounterSource        = (*notifyingProvider)(nil)
 	_ ReadyClaimerSource        = (*notifyingProvider)(nil)

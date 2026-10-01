@@ -70,6 +70,10 @@ func (p *uowProvider) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
 	return uow.NewBlockingAnnotator(p)
 }
 func (p *uowProvider) TreeWalker() (publicops.TreeWalker, error) { return uow.NewTreeWalker(p) }
+func (p *uowProvider) DetailBatchReader() (publicops.DetailBatchReader, error) {
+	return uow.NewDetailBatchReader(p)
+}
+
 func (p *uowProvider) GraphCounter() (publicops.GraphCounter, error) {
 	return uow.NewGraphCounter(p)
 }
@@ -172,6 +176,7 @@ var (
 	_ uow.BlockingAnnotatorSource        = (*uowProvider)(nil)
 	_ uow.TreeWalkerSource               = (*uowProvider)(nil)
 	_ uow.GraphCounterSource             = (*uowProvider)(nil)
+	_ uow.DetailBatchReaderSource        = (*uowProvider)(nil)
 	_ uow.CounterSource                  = (*uowProvider)(nil)
 	_ uow.ReadyCounterSource             = (*uowProvider)(nil)
 	_ uow.ReadyClaimerSource             = (*uowProvider)(nil)
