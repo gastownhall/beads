@@ -769,6 +769,11 @@ esac
 		{"unlisted test ran", 2, []string{"TestA", "TestB", "TestZ"}, []string{"TestC"}, false, "TestZ ran"},
 		{"shard count differs", 1, []string{"TestA", "TestB"}, []string{"TestC"}, false, "want 2"},
 		{"missing test.xml", 2, []string{"TestA", "TestB"}, nil, false, "missing"},
+		// Review G5: a shard whose test.xml has no top-level test at all
+		// still reports every listed test missing (check_testcases.py also
+		// rejects it, but this check must not depend on that).
+		{"shard ran zero tests", 2, []string{}, []string{"TestC"}, false, "TestA is listed"},
+		{"zero tests, only subtests", 2, []string{"TestA/sub"}, []string{"TestC"}, false, "TestB is listed"},
 		// Review G3: some skips are fine; a shard of only skips is not.
 		{"some skipped", 2, []string{"TestA~", "TestB"}, []string{"TestC"}, true, ""},
 		{"shard all skipped", 2, []string{"TestA~", "TestB~"}, []string{"TestC"}, false, "shard 1/2: every top-level test (2) was skipped"},
