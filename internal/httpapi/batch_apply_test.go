@@ -893,6 +893,31 @@ func TestApplyBatchMapsTheRolesTypedRefusalsOntoTheDocumentedCodes(t *testing.T)
 // branch is driven rather than assumed.
 var errUnmapped = fmt.Errorf("a failure this mapping has never seen")
 
+// TestApplyBatchNamesTheBlockersOfARefusedClose: the all-or-nothing plan has no
+// per-item result array to carry the refusal in, so the problem document names
+// the offending item AND its blockers, from the same typed list the single
+// close publishes.
+func TestApplyBatchNamesTheBlockersOfARefusedClose(t *testing.T) {
+	applier := &roleBatchApplier{err: itemErr(0, issueops.ItemClose, "", "bd-1", blockedCloseFixture())}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"create","create":{"title":"one"}}]}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodeNotClosable) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotClosable)
+	}
+	if body["item_index"] != float64(0) {
+		t.Errorf("item_index = %v, want 0", body["item_index"])
+	}
+	assertBlockersMember(t, "problem", body["blockers"])
+	if want := blockedCloseSentence + "; clear the blocker, or send the item's force flag"; body["detail"] != want {
+		t.Errorf("detail = %q, want %q", body["detail"], want)
+	}
+}
+
 // TestApplyBatchCarriesTheHierarchyMembersOnlyOnTheHierarchyRefusal pins the
 // discriminator inside `dependency_cycle`: member PRESENCE tells a plain
 // scheduling cycle from the hierarchy case, exactly as it does on

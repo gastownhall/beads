@@ -140,7 +140,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
 		}
-		return nil, proxiedUpdateFailure(id, err), nil
+		return nil, proxiedUpdateFailure(id, in.claim, err), nil
 	}
 	updated := result.Issue
 	if updated == nil {
@@ -237,11 +237,15 @@ func proxiedClaimPoolAliases(ctx context.Context) func() []string {
 // proxiedUpdateFailure sorts a refused update into the per-id verdicts. A guard
 // refusal sets GuardMismatch so the batch exits 13 rather than 1.
 //
+// A refused claim reads as the generic update failure, as it does on the direct
+// route: the external claim guard ignores --force but shares ErrCloseBlocked
+// with the close policy, so the hint could name an override that cannot work.
+//
 // The one verdict it cannot reproduce is stage attribution: "opening unit of
 // work" and "committing" were told apart by watching the provider this path no
 // longer owns, so both now read as the generic update failure. The id still
 // fails, loudly and non-zero.
-func proxiedUpdateFailure(id string, err error) *updateIDFailure {
+func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
@@ -252,7 +256,7 @@ func proxiedUpdateFailure(id string, err error) *updateIDFailure {
 	case errors.Is(err, storage.ErrCloseOpenChildren):
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return &updateIDFailure{ID: id, Error: err.Error()}
-	case errors.Is(err, storage.ErrCloseBlocked):
+	case errors.Is(err, storage.ErrCloseBlocked) && !claim:
 		fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
 		return &updateIDFailure{ID: id, Error: fmt.Sprintf("%v (use --force to override)", err)}
 	case uow.IsSerializationError(err):

@@ -37,7 +37,10 @@ go_test(
         "remotes_test.go",
     ],
     embed = [":doltutil"],
-    deps = ["//internal/storage"],
+    deps = [
+        "//internal/storage",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

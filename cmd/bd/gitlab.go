@@ -720,7 +720,7 @@ func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tra
 	var warnings []string
 	var descendantSet map[string]bool
 	if opts.ParentID != "" {
-		descendantSet, err = buildGitLabDescendantSet(ctx, st, opts.ParentID)
+		descendantSet, err = buildSyncDescendantSet(ctx, st, opts.ParentID)
 		if err != nil {
 			return gitlabLinkSyncData{}, []string{fmt.Sprintf("GitLab dependency link sync skipped: resolving parent %s: %v", opts.ParentID, err)}
 		}
@@ -801,26 +801,6 @@ func gitlabIssueAllowedByPushFilters(issue *types.Issue, opts tracker.SyncOption
 		return false
 	}
 	return true
-}
-
-func buildGitLabDescendantSet(ctx context.Context, st storage.Storage, parentID string) (map[string]bool, error) {
-	result := map[string]bool{parentID: true}
-	queue := []string{parentID}
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-		dependents, err := st.GetDependentsWithMetadata(ctx, current)
-		if err != nil {
-			return nil, fmt.Errorf("getting dependents of %s: %w", current, err)
-		}
-		for _, dep := range dependents {
-			if dep.DependencyType == types.DepParentChild && !result[dep.Issue.ID] {
-				result[dep.Issue.ID] = true
-				queue = append(queue, dep.Issue.ID)
-			}
-		}
-	}
-	return result, nil
 }
 
 func gitlabIssueIDSet(ids []string) map[string]bool {

@@ -5,11 +5,68 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestNormalizeOptionalTimestampsToUTCCoversEveryPointerTimestamp is the drift
+// tripwire for NormalizeOptionalTimestampsToUTC's hand-written field list. The
+// helper enumerates its *time.Time fields explicitly to keep the insert hot path
+// free of reflection, so a *time.Time field added to Issue later would be skipped
+// silently and would reintroduce #5765 for that field. This walks Issue by
+// reflection, sets every pointer timestamp to a fixed non-UTC zone, and fails on
+// any field the helper leaves off UTC — keeping the explicit list honest without
+// driving the production path by reflection.
+func TestNormalizeOptionalTimestampsToUTCCoversEveryPointerTimestamp(t *testing.T) {
+	est := time.FixedZone("EST", -5*60*60)
+	// 2026-03-07T22:06:41-05:00 == 2026-03-08T03:06:41Z.
+	zoned := time.Date(2026, 3, 7, 22, 6, 41, 0, est)
+	const wantWall = "2026-03-08T03:06:41Z"
+
+	ptrTime := reflect.TypeOf((*time.Time)(nil))
+	issue := &Issue{}
+	v := reflect.ValueOf(issue).Elem()
+
+	var pinned []string
+	for i := 0; i < v.NumField(); i++ {
+		if v.Type().Field(i).Type != ptrTime {
+			continue
+		}
+		ts := zoned
+		v.Field(i).Set(reflect.ValueOf(&ts))
+		pinned = append(pinned, v.Type().Field(i).Name)
+	}
+	if len(pinned) == 0 {
+		t.Fatal("no *time.Time fields found on Issue: the reflection walk is vacuous")
+	}
+
+	issue.NormalizeOptionalTimestampsToUTC()
+
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Type().Field(i)
+		if field.Type != ptrTime {
+			continue
+		}
+		got, _ := v.Field(i).Interface().(*time.Time)
+		if got == nil {
+			t.Errorf("%s: became nil", field.Name)
+			continue
+		}
+		if got.Location() != time.UTC {
+			t.Errorf("%s: location = %v, want UTC (field missing from NormalizeOptionalTimestampsToUTC's list?)",
+				field.Name, got.Location())
+		}
+		// Wall-clock digits, not just the label: a relabel without conversion
+		// would keep Location()==UTC but report the pre-shift digits.
+		if wall := got.Format("2006-01-02T15:04:05Z07:00"); wall != wantWall {
+			t.Errorf("%s: = %s, want %s", field.Name, wall, wantWall)
+		}
+	}
+	t.Logf("pinned %d pointer timestamps: %v", len(pinned), pinned)
+}
 
 func TestIssueValidation(t *testing.T) {
 	tests := []struct {
