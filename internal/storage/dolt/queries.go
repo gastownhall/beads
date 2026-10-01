@@ -359,6 +359,9 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 		childIDs = append(childIDs, id)
 	}
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
+	if err := depRows.Err(); err != nil {
+		return nil, wrapQueryError("get molecule progress: child rows", err)
+	}
 
 	// Step 2: Batch-fetch status for all children (batched IN clauses to avoid full table scans).
 	// Children of a wisp molecule are also wisps, so use the same table.
@@ -389,6 +392,9 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 				childMap[id] = childInfo{status: status}
 			}
 			_ = statusRows.Close()
+			if err := statusRows.Err(); err != nil {
+				return nil, wrapQueryError("get molecule progress: status rows", err)
+			}
 		}
 
 		for _, childID := range childIDs {
