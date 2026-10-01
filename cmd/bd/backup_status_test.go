@@ -228,8 +228,24 @@ func TestBackupStatusShowsSizeCapPaused(t *testing.T) {
 		if stderr != "" {
 			t.Errorf("stderr = %q, want empty", stderr)
 		}
-		if !strings.Contains(stdout, "PAUSED (cap exceeded)") {
-			t.Errorf("status text missing PAUSED indicator: %s", stdout)
+		var pausedLine string
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.Contains(line, "PAUSED (cap exceeded)") {
+				pausedLine = line
+			}
+		}
+		if pausedLine == "" {
+			t.Fatalf("status text missing PAUSED indicator: %s", stdout)
+		}
+		// Same levers as the pause warning — see
+		// TestPauseAutoBackupForSizeCap_RemediationAdvice.
+		for _, want := range []string{"backup.size-cap-mb", "backup.git-repo"} {
+			if !strings.Contains(pausedLine, want) {
+				t.Errorf("PAUSED line missing %s pointer: %q", want, pausedLine)
+			}
+		}
+		if strings.Contains(pausedLine, "bd backup init") {
+			t.Errorf("PAUSED line points at `bd backup init`, which does not move the auto-backup destination: %q", pausedLine)
 		}
 	})
 }

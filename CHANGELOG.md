@@ -157,7 +157,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advice no longer suggests deleting the backup directory — nothing
   guarantees a deleted destination is cleanly recreated by the next sync, and
   the server-side backup remote stays registered against that path; it now
-  points at `backup.size-cap-mb` / `bd backup init <new-path>` instead. The
+  points at raising `backup.size-cap-mb` or pointing `backup.git-repo` at a
+  different git repository instead — not `bd backup init`, which configures
+  manual `bd backup sync`'s destination and leaves auto-backup paused. The
   size-cap check itself runs after both the interval throttle and change
   detection, so it costs nothing on any path that is not about to sync — an
   idle workspace never reaches it at all, and a paused destination re-arms
