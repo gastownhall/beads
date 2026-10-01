@@ -41,9 +41,9 @@ func formulaVarRefSubgraph(text string, varDefs map[string]formula.VarDef, formu
 }
 
 // gateVarSubgraph models a cooked proto whose only reference to a var is a GATE
-// field: the await_id, or a gh:* gate's metadata.repo selector. Neither is a
-// prose field, and neither has to be declared in [vars] - but cloneSubgraphInto
-// substitutes both, so both are consumable.
+// field: the await_id, or the metadata.repo selector createGateIssue writes for
+// a gh:* gate. Neither is a prose field, and neither has to be declared in
+// [vars] - but cloneSubgraphInto substitutes both, so both are consumable.
 func gateVarSubgraph(awaitType, awaitID, repoSelector string) *TemplateSubgraph {
 	gate := &types.Issue{
 		ID:        "t-1.gate-deploy",
@@ -56,6 +56,19 @@ func gateVarSubgraph(awaitType, awaitID, repoSelector string) *TemplateSubgraph 
 	}
 	return &TemplateSubgraph{
 		Issues:            []*types.Issue{{ID: "t-1", Title: "root"}, gate},
+		DeclaredVarsKnown: true,
+	}
+}
+
+// issueVarSubgraph models a cooked proto, with no [vars], whose only reference
+// to a var is in one of the non-prose fields cloneSubgraphInto substitutes on
+// any issue (GH#5110, GH#5754) - the assignee, a label, or a metadata value -
+// which the caller sets on step.
+func issueVarSubgraph(step *types.Issue) *TemplateSubgraph {
+	step.ID = "t-1.step"
+	step.Title = "step"
+	return &TemplateSubgraph{
+		Issues:            []*types.Issue{{ID: "t-1", Title: "root"}, step},
 		DeclaredVarsKnown: true,
 	}
 }
@@ -149,7 +162,7 @@ func TestCheckPourVarsRejectsUnknownVars(t *testing.T) {
 		{
 			// ...and so is metadata.repo on a gh:* gate, which is the arm with
 			// no mirror anywhere else on the issue: createGateIssue stores the
-			// selector literally and substituteMetadataRepo fills it at clone
+			// selector literally and substituteMetadataVars fills it at clone
 			// time.
 			name:     "var referenced only by a gh gate metadata.repo is accepted",
 			subgraph: gateVarSubgraph("gh:run", "12345", "{{gate_repo}}"),
@@ -157,24 +170,55 @@ func TestCheckPourVarsRejectsUnknownVars(t *testing.T) {
 		},
 		{
 			// The gate fields widen the known set; they do not disable the
-			// check.
+			// check. (With no [vars], gate_repo is also REQUIRED - the
+			// required-var check reads metadata values too - so it is supplied
+			// alongside the typo, or the missing-var error would fire first.)
 			name:        "typo against a gate-only proto is still rejected",
 			subgraph:    gateVarSubgraph("gh:run", "12345", "{{gate_repo}}"),
-			vars:        map[string]string{"gate_rpo": "owner/repo"},
+			vars:        map[string]string{"gate_repo": "owner/repo", "gate_rpo": "owner/repo"},
 			wantErr:     true,
 			wantInError: []string{"gate_rpo", "gate_repo"},
 		},
 		{
 			// `repo` on a non-gh gate is ordinary metadata, not a repo
-			// selector: the pour does not substitute it, so nothing there is
-			// consumable and a name matching it must still be refused. This is
-			// the polarity that keeps the read side honest about WHICH issues
-			// carry a var-bearing selector.
-			name:        "repo on a non-github gate is not a substituted field",
-			subgraph:    gateVarSubgraph("human", "sign-off", "{{gate_repo}}"),
-			vars:        map[string]string{"gate_repo": "owner/repo"},
+			// selector - but the pour substitutes every metadata string value
+			// whatever the gate type (#5758 superseded the gh:*-only rule), so
+			// a name used there is consumed. Refusing it would be a closed
+			// loop: with no [vars], the required-var check demands the very
+			// name this check would refuse, and the proto can never be poured.
+			name:     "repo on a non-github gate is substituted like any metadata value",
+			subgraph: gateVarSubgraph("human", "sign-off", "{{gate_repo}}"),
+			vars:     map[string]string{"gate_repo": "owner/repo"},
+		},
+		{
+			// The same holds on any issue for every non-prose field the pour
+			// substitutes: a name used only in the assignee...
+			name:     "var referenced only by an assignee is accepted",
+			subgraph: issueVarSubgraph(&types.Issue{Assignee: "{{owner}}"}),
+			vars:     map[string]string{"owner": "alice"},
+		},
+		{
+			// ...only in a label...
+			name:     "var referenced only by a label is accepted",
+			subgraph: issueVarSubgraph(&types.Issue{Labels: []string{"area:{{area}}"}}),
+			vars:     map[string]string{"area": "parser"},
+		},
+		{
+			// ...or only in a metadata value, at any depth.
+			name:     "var referenced only by a nested metadata value is accepted",
+			subgraph: issueVarSubgraph(&types.Issue{Metadata: json.RawMessage(`{"owner":{"teams":["{{team}}"]}}`)}),
+			vars:     map[string]string{"team": "core"},
+		},
+		{
+			// substituteMetadataVars never rewrites an object KEY, so a name
+			// that appears only in one is not consumable and must still be
+			// refused. This is the polarity that keeps the read side honest
+			// about WHICH metadata strings the pour substitutes.
+			name:        "var referenced only by a metadata key is rejected",
+			subgraph:    issueVarSubgraph(&types.Issue{Metadata: json.RawMessage(`{"{{team}}":"core"}`)}),
+			vars:        map[string]string{"team": "core"},
 			wantErr:     true,
-			wantInError: []string{"gate_repo", "takes no variables"},
+			wantInError: []string{"team", "takes no variables"},
 		},
 		{
 			// A DB-loaded proto has no formula behind it, so its [vars]

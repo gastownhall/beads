@@ -92,7 +92,7 @@ func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) e
 		return err
 	}
 	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+		return publicops.NewCloseBlockedError(id, blockers)
 	}
 	return nil
 }
@@ -471,7 +471,7 @@ func (s *Store) CloseIssueChecked(ctx context.Context, issueID, actor string, op
 				return storage.CloseIssueResult{}, err
 			}
 			if blocked && len(blockers) > 0 {
-				return storage.CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, issueID, blockers)
+				return storage.CloseIssueResult{}, publicops.NewCloseBlockedError(issueID, blockers)
 			}
 		}
 	}

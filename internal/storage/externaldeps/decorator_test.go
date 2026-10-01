@@ -499,9 +499,11 @@ func TestIssueLifecycleRefusesExternalCloseAndDoneUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueLifecycle: %v", err)
 	}
-	if _, err := ops.Close(t.Context(), publicops.CloseRequest{IssueID: issue.ID}); !errors.Is(err, storage.ErrCloseBlocked) {
+	_, err = ops.Close(t.Context(), publicops.CloseRequest{IssueID: issue.ID})
+	if !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("Close error = %v, want ErrCloseBlocked", err)
 	}
+	assertExternalCloseBlockers(t, err, issue.ID, "external:remote:payments")
 	if _, err := ops.Update(t.Context(), publicops.UpdateRequest{IssueID: issue.ID, Patch: publicops.IssuePatch{
 		Status: publicops.Field[types.Status]{Set: true, Value: types.StatusClosed},
 	}}); !errors.Is(err, storage.ErrCloseBlocked) {
@@ -592,9 +594,11 @@ func TestCloseIssueCheckedRefusesUnsatisfiedExternalRef(t *testing.T) {
 	}}
 	store := testStore(raw, &fakeStore{}, true)
 
-	if _, err := store.CloseIssueChecked(t.Context(), a.ID, "tester", storage.CloseIssueOptions{}); !errors.Is(err, storage.ErrCloseBlocked) {
+	_, err := store.CloseIssueChecked(t.Context(), a.ID, "tester", storage.CloseIssueOptions{})
+	if !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("CloseIssueChecked error = %v, want ErrCloseBlocked", err)
 	}
+	assertExternalCloseBlockers(t, err, a.ID, ref)
 	if len(raw.closed) != 0 {
 		t.Fatalf("raw close calls = %v, want none", raw.closed)
 	}
@@ -674,4 +678,22 @@ func issueIDs(issues []*types.Issue) []string {
 		ids = append(ids, issue.ID)
 	}
 	return ids
+}
+
+// assertExternalCloseBlockers checks that an external close refusal carries the
+// typed blocker list — the unsatisfied reference, as an external blocker with no
+// reported edge type — and still spells the historical sentence.
+func assertExternalCloseBlockers(t *testing.T, err error, issueID, ref string) {
+	t.Helper()
+	var blocked *publicops.BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("close refusal %v carries no *BlockedError", err)
+	}
+	want := []publicops.Blocker{{ID: ref}}
+	if blocked.IssueID != issueID || !slices.Equal(blocked.Blockers, want) || !blocked.Blockers[0].External() {
+		t.Errorf("BlockedError = %+v, want issue %s blocked by %+v (external)", blocked, issueID, want)
+	}
+	if wantText := "cannot close blocked issue: " + issueID + " is blocked by [" + ref + "]"; err.Error() != wantText {
+		t.Errorf("refusal = %q, want %q", err.Error(), wantText)
+	}
 }

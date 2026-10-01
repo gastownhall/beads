@@ -136,6 +136,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	if !hasExplicitBeadsDir {
+		// Bootstrap routing is handled separately in follow-up #6460.
 		res, err := gitUC.EnsureGitRepo(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to initialize git repository: %v", err)
@@ -188,8 +189,11 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 	defer func() { _ = initUOWProvider.Close(ctx) }()
 
-	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
+	remoteURL := resolveProxiedInitRemoteURL(ctx, cwd, in)
 
+	// Unlike the origin lookup above, ComputeRepoID and GetCloneID still inherit
+	// Git routing: under an inherited GIT_DIR/GIT_WORK_TREE, repo_id and clone_id
+	// can describe a different repository than remoteURL, or fail to resolve.
 	var repoID, cloneID string
 	if id, err := beads.ComputeRepoID(); err == nil {
 		repoID = id
@@ -316,7 +320,7 @@ func resolveInitPrefix(flagPrefix string) (string, error) {
 	return prefix, nil
 }
 
-func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, in initProxiedServerInput) string {
+func resolveProxiedInitRemoteURL(ctx context.Context, workDir string, in initProxiedServerInput) string {
 	url, source := resolveInitConfiguredSyncRemote(in.initRemote, in.initRemoteChanged, resolveSyncRemote)
 	if url != "" {
 		return url
@@ -325,6 +329,8 @@ func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, i
 		return ""
 	}
 	if !in.stealth {
+		// Origin belongs to the selected project, independently of Beads storage.
+		gitUC := domain.NewGitUseCase(workDir, domaingit.NewInitGitRepository(workDir))
 		if originURL, err := gitUC.OriginRemoteURL(ctx); err == nil && originURL != "" {
 			return normalizeRemoteURL(originURL)
 		}

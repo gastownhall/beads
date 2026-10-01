@@ -2,7 +2,17 @@ load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "prlintmake_test",
-    srcs = ["prlintmake_test.go"],
-    data = ["//scripts:ci/fmt-check.sh"],
+    srcs = [
+        "gofmtbin_test.go",
+        "prlintmake_test.go",
+    ],
+    data = [
+        "//:.buildflags",
+        "//:go.mod",
+        "//scripts:ci/fmt-check.sh",
+        "//scripts:ci/gofmt-bin.sh",
+        "//scripts:ci/lib/timing.sh",
+        "//scripts:ci/pr-lint.sh",
+    ],
     deps = ["//internal/testutil/bazeltest"],
 )

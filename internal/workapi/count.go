@@ -124,8 +124,9 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 //   - counting an infra type (agent/role/message, or the store-configured set)
 //     routes to the ephemeral wisps tier, like list's infra-type listing.
 //
-// A count without IncludeInfra never calls this and keeps its historical
-// durable-only semantics.
+// A count without IncludeInfra never calls this. It keeps its historical
+// durable-only semantics unless IncludeEphemeral admits the wisps tier: the
+// first of the changes above, with none of the rest.
 func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg ListConfig) {
 	filter.SkipWisps = false
 

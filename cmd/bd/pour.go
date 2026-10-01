@@ -267,8 +267,8 @@ func checkPourVars(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgra
 
 // checkUnknownVars rejects --var names the protos being poured cannot consume.
 // A name is accepted if any proto declares it in [vars], references it as a
-// {{handlebar}} in a field the pour substitutes (including the gate fields -
-// AwaitID and a gh:* gate's metadata.repo), references it from a step
+// {{handlebar}} in a field the pour substitutes (including the assignee,
+// labels, a gate's AwaitID and metadata values), references it from a step
 // condition, or - in a standalone expansion formula - uses it as a {name}
 // placeholder in the template; so documentation handlebars and vars belonging
 // to an --attach proto still pass. What is left over cannot affect the pour, and silently dropping it
@@ -330,9 +330,10 @@ func knownVarsAcross(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubg
 		for name := range sg.VarDefs {
 			known[name] = true
 		}
-		// Every field the clone substitutes, not just the prose: a gate's
-		// await_id and a gh:* gate's metadata.repo carry handlebars that the
-		// pour fills in, so names appearing only there are consumable too.
+		// Every field the clone substitutes, not just the prose: the
+		// assignee, labels, a gate's await_id and every metadata value carry
+		// handlebars that the pour fills in, so names appearing only there
+		// are consumable too.
 		for _, name := range extractConsumableVariables(sg) {
 			known[name] = true
 		}

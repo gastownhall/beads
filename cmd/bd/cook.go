@@ -850,10 +850,11 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 //     field. These are handlebar expressions - `{{spike}}`, `!{{spike}}`,
 //     `{{env}} == "prod"` (internal/formula/stepcondition.go) - so the same
 //     extractor the substitutable fields use finds their names.
-//   - the substitutable text of the steps themselves, which vanishes when the
-//     filter drops the step. Without it, `--var deploy=false --var
-//     deploy_target=prod` would reject deploy_target while `deploy=true`
-//     accepted it, making one name's validity depend on another name's value.
+//   - the substitutable fields of the steps themselves - prose, assignee,
+//     labels and metadata values - which vanish when the filter drops the
+//     step. Without them, `--var deploy=false --var deploy_target=prod` would
+//     reject deploy_target while `deploy=true` accepted it, making one name's
+//     validity depend on another name's value.
 //
 // The step fields read here are the ones processStepToIssue copies into a
 // substituted issue field, plus the gate fields createGateIssue derives from
@@ -867,7 +868,16 @@ func formulaVarRefs(steps []*formula.Step) []string {
 			if step == nil {
 				continue
 			}
-			texts := []string{step.Condition, step.Title, step.Description, step.Notes}
+			texts := []string{step.Condition, step.Title, step.Description, step.Notes, step.Assignee}
+			texts = append(texts, step.Labels...)
+			// processStepToIssue carries the metadata onto the issue as JSON,
+			// and the pour substitutes every string value in it but never a
+			// key, so read it back the way substitutedIssueFields does.
+			if len(step.Metadata) > 0 {
+				if metaJSON, err := json.Marshal(step.Metadata); err == nil {
+					texts = append(texts, metadataVarStrings(metaJSON)...)
+				}
+			}
 			if step.Gate != nil {
 				// createGateIssue mirrors the awaitID into the gate issue's
 				// Title and AwaitID, and writes Repo to metadata.repo only for
@@ -1201,11 +1211,23 @@ func substituteFormulaVars(f *formula.Formula, vars map[string]string) {
 }
 
 // substituteStepVars recursively substitutes variables in step fields.
+//
+// The fields covered here must stay in sync with cloneSubgraphInto (pour):
+// runtime-mode cook feeds the proto that pour later clones, so a field left
+// literal in one path is a literal placeholder on the created bead either way
+// (GH#5110 labels/metadata, GH#5754 assignee).
 func substituteStepVars(steps []*formula.Step, vars map[string]string) {
 	for _, step := range steps {
 		step.Title = substituteVariables(step.Title, vars)
 		step.Description = substituteVariables(step.Description, vars)
 		step.Notes = substituteVariables(step.Notes, vars)
+		step.Assignee = substituteVariables(step.Assignee, vars)
+		for i, label := range step.Labels {
+			step.Labels[i] = substituteVariables(label, vars)
+		}
+		for k, v := range step.Metadata {
+			step.Metadata[k] = substituteMetadataValue(v, vars)
+		}
 		if step.Gate != nil {
 			step.Gate.Type = substituteVariables(step.Gate.Type, vars)
 			step.Gate.ID = substituteVariables(step.Gate.ID, vars)
@@ -1216,6 +1238,36 @@ func substituteStepVars(steps []*formula.Step, vars map[string]string) {
 		if len(step.Children) > 0 {
 			substituteStepVars(step.Children, vars)
 		}
+	}
+}
+
+// substituteMetadataValue substitutes variables in the string leaves of a
+// decoded step metadata value (`[steps.metadata]` from TOML/JSON), at any
+// nesting depth. Non-string scalars are returned untouched, and map keys are
+// left alone so a rewritten key can never collide with a sibling.
+func substituteMetadataValue(v interface{}, vars map[string]string) interface{} {
+	return substituteMetadataValueDepth(v, vars, 0)
+}
+
+func substituteMetadataValueDepth(v interface{}, vars map[string]string, depth int) interface{} {
+	if depth >= maxMetadataSubstitutionDepth {
+		return v
+	}
+	switch val := v.(type) {
+	case string:
+		return substituteVariables(val, vars)
+	case map[string]interface{}:
+		for k, elem := range val {
+			val[k] = substituteMetadataValueDepth(elem, vars, depth+1)
+		}
+		return val
+	case []interface{}:
+		for i, elem := range val {
+			val[i] = substituteMetadataValueDepth(elem, vars, depth+1)
+		}
+		return val
+	default:
+		return v
 	}
 }
 

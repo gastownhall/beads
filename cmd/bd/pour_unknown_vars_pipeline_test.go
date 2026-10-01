@@ -196,6 +196,68 @@ func TestCookedSubgraphAcceptsAVarUsedOnlyByADroppedStepsGate(t *testing.T) {
 	}
 }
 
+// release_owner, release_train and change_ticket appear ONLY in the assignee, a
+// label and a nested metadata value of the step deploy can remove, and none is
+// declared in [vars]. The pour substitutes all three fields (GH#5110,
+// GH#5754), but no prose field mirrors them.
+const fieldVarFormula = `formula = "fieldvar-pour"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+
+[[steps]]
+id = "release"
+title = "Release"
+type = "task"
+condition = "{{deploy}}"
+assignee = "{{release_owner}}"
+labels = ["train:{{release_train}}"]
+metadata = { change = { ticket = "{{change_ticket}}" } }
+`
+
+// A var referenced only by the assignee, a label or a metadata value of a step
+// the condition filter drops stays consumable too: cook reads those fields
+// ahead of the filter along with the step's text, and the falsey case is the
+// one that regresses if it ever stops - the step is gone, so nothing else in
+// the subgraph names any of the three.
+func TestCookedSubgraphAcceptsAVarUsedOnlyByADroppedStepsNonProseFields(t *testing.T) {
+	searchPaths := []string{writePipelineFormula(t, "fieldvar-pour", fieldVarFormula)}
+
+	for _, deploy := range []string{"true", "false"} {
+		t.Run("deploy_"+deploy, func(t *testing.T) {
+			vars := map[string]string{"deploy": deploy, "release_owner": "alice", "release_train": "r42", "change_ticket": "CHG-7"}
+
+			subgraph, err := resolveAndCookFormulaWithVars("fieldvar-pour", searchPaths, vars)
+			if err != nil {
+				t.Fatalf("cook: %v", err)
+			}
+			// The premise, both ways: the release step - and with it every
+			// field naming these vars - exists exactly while deploy is truthy.
+			released := false
+			for _, issue := range subgraph.Issues {
+				if issue.Title != "Release" {
+					continue
+				}
+				released = true
+				if issue.Assignee == "" || len(issue.Labels) == 0 || len(issue.Metadata) == 0 {
+					t.Fatalf("the release step lost its assignee, labels or metadata in the cook, so this case is not testing them: %+v", issue)
+				}
+			}
+			if released != (deploy == "true") {
+				t.Fatalf("deploy=%s cooked the release step = %v, so this case is not testing the dropped-step path", deploy, released)
+			}
+
+			if err := checkPourVars(subgraph, nil, applyVariableDefaults(vars, subgraph)); err != nil {
+				t.Errorf("pour rejected a var referenced only by a step's assignee, label or metadata (deploy=%s): %v", deploy, err)
+			}
+		})
+	}
+}
+
 // A standalone expansion formula has no [[steps]]: formula.MaterializeExpansion
 // builds them from its [[template]] before the cook, substituting --var values
 // into the template's single-brace {name} placeholders as it goes. component
