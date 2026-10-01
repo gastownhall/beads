@@ -4554,7 +4554,10 @@ func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
 	}
 	root := sourceRepoRoot(t)
 	retry := regexp.MustCompile(`flaky_test_attempts|runs_per_test_detects_flakes`)
-	flakyAttr := regexp.MustCompile(`\bflaky\s*=\s*(True|1)\b`)
+	// Any flaky = other than a literal False/0 (a variable or macro
+	// parameter could be True). bazel-embedded also asks Bazel itself
+	// (TestBazelEmbeddedQueriesFlakyTargets).
+	flakyAttr := regexp.MustCompile(`\bflaky\s*=\s*([^,)\s]+)`)
 	checked := 0
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -4591,7 +4594,7 @@ func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
 			if retry.MatchString(code) {
 				t.Errorf("%s:%d retries failing tests (%q); the gated lanes run each test once", rel, i+1, strings.TrimSpace(line))
 			}
-			if isBuild && flakyAttr.MatchString(code) {
+			if m := flakyAttr.FindStringSubmatch(code); isBuild && m != nil && m[1] != "False" && m[1] != "0" {
 				t.Errorf("%s:%d marks a target flaky (%q); Bazel would retry it", rel, i+1, strings.TrimSpace(line))
 			}
 		}

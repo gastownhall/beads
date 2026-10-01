@@ -1143,3 +1143,22 @@ func TestBazelEmbeddedLaneCannotBeNarrowed(t *testing.T) {
 		t.Errorf("embedded-tagged targets' args/env changed:\ngot  %v\nwant %v", got, want)
 	}
 }
+
+// Review G4: bazel-embedded asks Bazel which test targets are flaky (a
+// grep of BUILD files misses `flaky = _VAR` or a macro default) before it
+// runs the tier, and fails on any.
+func TestBazelEmbeddedQueriesFlakyTargets(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelEmbedJobName)
+	step := job.step(t, "No test target is marked flaky")
+	const want = `flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+if [ -n "$flaky" ]; then
+  echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+  exit 1
+fi`
+	if strings.TrimSpace(step.Run) != want || step.If != "" || step.ContinueOnError != nil {
+		t.Errorf("flaky query step: if %q, continue-on-error %v, run:\n%s\nwant run:\n%s", step.If, step.ContinueOnError, step.Run, want)
+	}
+	if !(job.stepIndex(t, "Set up Bazel") < job.stepIndex(t, step.Name) && job.stepIndex(t, step.Name) < job.stepIndex(t, "bazel test //... --config=embedded")) {
+		t.Errorf("flaky query step must run after setup-bazel and before the tier")
+	}
+}

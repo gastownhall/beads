@@ -696,6 +696,18 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
 
+      # Bazel retries a flaky = True test (up to three attempts) and reports a
+      # later pass as PASSED. The policy test greps BUILD files for it; this
+      # asks Bazel itself, so a macro or a variable cannot hide one. Cheap:
+      # loading only, with the repository cache the test step needs anyway.
+      - name: No test target is marked flaky
+        run: |
+          flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+          if [ -n "$flaky" ]; then
+            echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+            exit 1
+          fi
+
       # --build_event_json_file is a command option, so it goes after `test`.
       - name: bazel test //... --config=embedded
         id: test
