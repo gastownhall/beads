@@ -3841,12 +3841,19 @@ paths:
         ## What lands, and what it costs
 
 
-        `items` accepts at most 100 entries. The cap bounds how long one request
-        may hold a write transaction — it is not a statement about batch
-        semantics, and it is the bound the sibling batch operations already run
-        under. Split a larger plan; each request is atomic on its own, but note
-        that splitting it changes what the end gate can see, since the gate runs
-        over one request at a time.
+        `items` accepts at most 1000 entries (raised from 100; see the
+        `issues.batchApplyLarge` capability token on `ContextResponse`). The
+        cap bounds how long one request may hold a write transaction — it is
+        not a statement about batch semantics. A request over 100 items also
+        EXTENDS the effective request deadline to an operator-configured
+        ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default)
+        instead of the ordinary small-request deadline, so a plan that
+        genuinely needs minutes to apply is not cut off mid-commit; a request
+        at or under 100 items keeps exactly the deadline — and the sibling
+        batch operations' bound — it has always had. Split a larger plan if
+        you must; each request is atomic on its own, but note that splitting
+        it changes what the end gate can see, since the gate runs over one
+        request at a time.
 
 
         ONE HISTORY ENTRY IS RECORDED FOR THE WHOLE REQUEST, attributed to
