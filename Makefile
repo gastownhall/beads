@@ -344,15 +344,18 @@ endif
 # The old rm-first shape added an ENOENT window on top. Same treatment for the
 # beads symlink.
 #
-# EXCEPTION — native Windows keeps the rm-first + cp shape: under Git for
-# Windows' bash the staged tmp+rename leaves no bd.exe at the destination even
-# though cp && mv exit 0 (caught by pr.yml's spaced-USERPROFILE install proof;
-# root cause untraced). Restore Windows atomicity only with that proof green.
+# On Git for Windows, `rm path/bd` can resolve and delete `path/bd.exe` when no
+# literal extensionless entry exists. Replace bd.exe first, then enumerate real
+# legacy aliases (including case variants and redirected install directories)
+# so cleanup cannot remove the executable or weaken a failed install. Keep
+# directories named bd; the Windows PATH above supplies MSYS find, not System32 find.
+# find -H follows the install-directory argument; internal aliases are selected by
+# ! -type d, without assuming how this find implementation classifies junctions.
 install install-force: build
 	@mkdir -p "$(INSTALL_DIR)"
 ifeq ($(OS),Windows_NT)
-	@rm -f "$(INSTALL_DIR)/bd" "$(INSTALL_DIR)/bd.exe"
-	@cp "$(BD_BUILD_OUTPUT)" "$(INSTALL_DIR)/bd.exe"
+	@cp "$(BD_BUILD_OUTPUT)" "$(INSTALL_DIR)/.bd.exe.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.exe.install.tmp.$$$$" "$(INSTALL_DIR)/bd.exe"
+	@find -H "$(INSTALL_DIR)" -mindepth 1 -maxdepth 1 -iname bd ! -type d -exec rm -f -- {} +
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
 	@cp "$(BD_BUILD_OUTPUT)" "$(INSTALL_DIR)/.bd.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.install.tmp.$$$$" "$(INSTALL_DIR)/bd"
@@ -364,10 +367,13 @@ endif
 
 install: check-up-to-date
 
-# Format all Go files
+# Format all Go files.
+# Through the go.mod-pinned gofmt, never a bare PATH one: a newer local Go
+# formats differently from CI, so a bare gofmt -w here rewrites files into a
+# form CI's gofmt then rejects. See scripts/ci/gofmt-bin.sh.
 fmt:
 	@echo "Formatting Go files..."
-	@gofmt -w .
+	@gofmt_bin="$$(./scripts/ci/gofmt-bin.sh)" && "$$gofmt_bin" -w .
 	@echo "Done"
 
 # Check that all Go files are properly formatted (for CI)

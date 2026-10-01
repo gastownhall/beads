@@ -1,0 +1,133 @@
+# Bazel lanes on the remote-execution farm for fork PRs by trusted authors.
+#
+# Fork PRs get no Actions secrets, so pr.yml's Bazel call runs them locally
+# (no remote-only lanes). This workflow gives the farm to fork PRs whose
+# author AND triggering user are on .github/bazel-farm-allowlist.txt (by
+# numeric user id), by calling bazel.yml from pull_request_target, which has
+# the secrets.
+#
+# ADVISORY. pr.yml is unchanged: every fork PR, listed or not, still runs the
+# local Bazel lanes inside the enforced `CI Gate / Required`. This run adds a
+# fast remote signal, including the remote-only embedded, integration,
+# proxied-server and server-storage tiers, that no required check and no
+# privileged workflow reads. Making it authoritative needs a trusted
+# reporter; see engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Trusted-author fork
+# PRs".
+#
+# SECURITY MODEL (policy-tested in scripts/ci_workflow_test.go,
+# TestBazelFarmWorkflowSecurity; threat model in the engdoc):
+# - pull_request_target runs THIS file, and bazel.yml (`uses: ./`, resolved
+#   from the same commit), from the base branch: a PR cannot edit either
+#   for its own run.
+# - authorize runs no PR code: a sparse checkout of the run's own base
+#   commit (github.sha) holding only the allowlist and the decision script,
+#   no token on disk, no secrets, and event facts passed through env, never
+#   interpolated into a script. It requires the PR author and the sender
+#   (the pusher on synchronize) to be listed, so a collaborator on a listed
+#   author's fork, or someone opening a PR from that fork, gets nothing, and
+#   the head repository's owner to be the author (no PR from a third
+#   party's fork).
+# - farm hands bazel.yml exactly the four RBE secrets and the event's head
+#   SHA, which every lane checks out pinned (a later push is a new event,
+#   judged on its own sender), without persisted credentials. The token is
+#   contents: read everywhere, so PR code holds no write access.
+# - Accepted: a listed author's PR code runs with the RBE client
+#   certificate, as a same-repo PR's does.
+# - Caches: this run is in the default branch's cache scope. GitHub's cache
+#   is read-only for pull_request_target, and nothing here may declare a
+#   cache-mode other than read or none (policy-tested). Whether Blacksmith's
+#   colocated cache enforces that is unverified. Either way, trusted runs
+#   verify what they restore: the Bazel binary is never cached, the
+#   repository cache is content-addressed, the repo contents cache is off,
+#   and go mod verify runs after the module cache restore (see the engdoc).
+# - No artifact from this run is consumed: bazel-autofix.yml reads only
+#   "PR" runs of pull_request events, and bazel.yml skips its sync-patch
+#   upload here.
+#
+# Re-runs replay the original event: the same pinned head SHA, and the
+# allowlist at the original base commit. De-listing a user therefore also
+# means cancelling/deleting their old farm runs, or rotating the RBE
+# certificate (engdoc: "Re-runs, Adding and Removing a User").
+#
+# Workflow edits take effect only once merged to the default branch.
+name: Bazel Farm (trusted forks)
+
+on:
+  pull_request_target:
+    # Not reopened or ready_for_review: they re-test a head no listed user
+    # necessarily pushed (see the script).
+    types: [ opened, synchronize ]
+    branches: [ main ]
+
+# One run per PR; a newer event supersedes (its sender is judged afresh).
+# Differs from bazel.yml's group (bazel-pull_request_target-<n>).
+concurrency:
+  group: bazel-farm-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    name: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Cheap prefilter; the script re-checks these and decides on the list.
+    if: >-
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      contents: read
+    outputs:
+      allowed: ${{ steps.decide.outputs.allowed }}
+    steps:
+      # The base commit this run's workflow file came from; never the PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/bazel-farm-allowlist.txt
+            .github/scripts/bazel-farm-authorize.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Check author and sender against the allowlist
+        id: decide
+        env:
+          ALLOWLIST: .github/bazel-farm-allowlist.txt
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_OWNER_ID: ${{ github.event.pull_request.head.repo.owner.id }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          SENDER: ${{ github.event.sender.login }}
+          SENDER_ID: ${{ github.event.sender.id }}
+        run: bash .github/scripts/bazel-farm-authorize.sh
+
+  # Not "Bazel": pr.yml's call is named that, and this run's lane results are
+  # PR-controlled, so its check names ("Bazel Farm / <lane>") must never
+  # collide with ones a ruleset might require.
+  farm:
+    name: Bazel Farm
+    needs: authorize
+    if: ${{ needs.authorize.outputs.allowed == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bazel.yml
+    secrets:
+      RBE_WEST_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
+      RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
+      RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
+      RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
+    with:
+      checkout-sha: ${{ github.event.pull_request.head.sha }}
+      fork-farm: authorized
+      integration: "on"
+      build-artifact-name: bazel-farm-build-artifacts

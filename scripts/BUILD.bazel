@@ -18,10 +18,12 @@ go_test(
     name = "scripts_test",
     srcs = [
         "bazel_autofix_push_test.go",
+        "bazel_farm_workflow_test.go",
         "bazel_policy_test.go",
         "check_build_tags_test.go",
         "check_doc_freshness_test.go",
         "check_testing_short_test.go",
+        "check_winget_portable_alias_test.go",
         "ci_capability_selector_test.go",
         "ci_workflow_apt_get_timeout_test.go",
         "ci_workflow_test.go",
@@ -30,13 +32,16 @@ go_test(
         "host_tools_test.go",
         "install_dolt_test.go",
         "pr_preflight_test.go",
+        "pr_risk_bazel_coverage_test.go",
         "pull_dolt_image_test.go",
         "release_script_test.go",
+        "required_suite_test.go",
         "test_script_test.go",
         "upgrade_smoke_loop_test.go",
     ],
     data = [
         ":scripts_files",
+        "//:.goreleaser.yml",
         "//:bazel_policy_files",
         "//:test_sh_files",
         "//:workflow_files",
@@ -51,6 +56,7 @@ go_test(
     deps = [
         "//internal/formula",
         "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -75,11 +81,20 @@ exports_files(
 )
 
 exports_files(
-    ["ci/fmt-check.sh"],
+    [
+        "ci/fmt-check.sh",
+        "ci/lib/timing.sh",
+        "ci/pr-lint.sh",
+    ],
     visibility = ["//scripts/prlintmake:__pkg__"],
 )
 
 exports_files(
     ["README.md"],
     visibility = ["//:__pkg__"],
+)
+
+exports_files(
+    ["ci/gofmt-bin.sh"],
+    visibility = ["//scripts/prlintmake:__pkg__"],
 )

@@ -315,7 +315,7 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
 
-	// config.yaml rung shared by the pool knobs below. It needs both reads:
+	// config.yaml rung for the pool-size knob below. It needs both reads:
 	// config.GetString reads a package-global viper populated only by
 	// cmd/bd's config.Initialize(), so for a library consumer it always
 	// returns "" and the project's configured values were silently ignored.
@@ -323,7 +323,9 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	// fallback dolt.auto-start carries above for this exact hole. The
 	// fallback follows GetStringFromDir's ladder, so when beadsDir is not
 	// the process CWD a user-level ~/.config/bd/config.yaml value outranks
-	// that project's file — same behavior as dolt.auto-start.
+	// that project's file — same behavior as dolt.auto-start. The pool
+	// deadlines carry the same rung in poolTimeoutFromConfig, which runs
+	// from applyPoolTimeouts so every DoltStore open gets it.
 	poolCfg := func(key string) string {
 		if v := config.GetString(key); v != "" {
 			return v
@@ -348,24 +350,46 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		}
 	}
 
-	// Pool per-I/O deadlines: caller override > env var > config.yaml > default
-	// (10s, see buildServerDSN). The default fast-fail is right for healthy
-	// local servers; overloaded shared-server deployments raise it so ordinary
-	// queries stop dying with "i/o timeout" under load (bd-vz0y9).
+	applyPoolTimeouts(cfg)
+
+	return nil
+}
+
+// applyPoolTimeouts fills the shared pool's per-I/O deadlines when the caller
+// left them unset: caller override > env var > config.yaml > default (10s, see
+// buildServerDSN). The default fast-fail is right for healthy local servers;
+// overloaded shared-server deployments raise it so ordinary queries stop dying
+// with "i/o timeout" under load (bd-vz0y9). It is idempotent, and it runs from
+// New (applyConfigDefaults) so every DoltStore open honors the knob — the CLI's own
+// store open hand-builds its Config and never passes through
+// applyResolvedConfig, which is how the knob shipped in #5089 stayed
+// inert for every bd command in server mode (gastownhall/beads#6144).
+func applyPoolTimeouts(cfg *Config) {
 	if cfg.PoolReadTimeout == 0 {
 		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
 	}
 	if cfg.PoolReadTimeout == 0 {
-		cfg.PoolReadTimeout = parseTimeout(poolCfg("dolt.pool-read-timeout"), 0)
+		cfg.PoolReadTimeout = parseTimeout(poolTimeoutFromConfig(cfg, "dolt.pool-read-timeout"), 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
-		cfg.PoolWriteTimeout = parseTimeout(poolCfg("dolt.pool-write-timeout"), 0)
+		cfg.PoolWriteTimeout = parseTimeout(poolTimeoutFromConfig(cfg, "dolt.pool-write-timeout"), 0)
 	}
+}
 
-	return nil
+// poolTimeoutFromConfig reads a pool-deadline key from the initialized config
+// and, like the auto-start ladder above, falls back to the .beads directory's
+// own config.yaml for library consumers that never called config.Initialize.
+func poolTimeoutFromConfig(cfg *Config, key string) string {
+	if v := config.GetString(key); v != "" {
+		return v
+	}
+	if cfg.BeadsDir == "" {
+		return ""
+	}
+	return config.GetStringFromDir(cfg.BeadsDir, key)
 }
 
 // applyCentralConfigDefaults loads the central server config from

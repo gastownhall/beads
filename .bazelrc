@@ -99,6 +99,12 @@ test:embedded --test_timeout=-1,-1,-1,1200
 test:embedded --test_arg=-test.parallel=4
 test:embedded --test_env=GO_TEST_WRAP_TESTV=1
 test:embedded --remote_download_regex=.*/test\.xml$
+# Since D2 step 1 this lane is the tier's only pre-merge run on same-repo PRs
+# (pr-risk.yml's legacy jobs stand down), and the legacy jobs ran every test
+# every time (-test.count=1). A cached PASS would let a stale or poisoned
+# farm action-cache entry, or an unreproduced -race finding, stand in for a
+# run: always execute, at farm (not runner) cost.
+test:embedded --nocache_test_results
 
 # Dolt-server lane: the same jobs as the docker lane ("Test (storage domain +
 # uow)" and "Contract corpus"), but every dolt sql-server is a child of the

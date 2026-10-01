@@ -490,9 +490,17 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 	if err := refuseConditionalRefArm(bondType, childRef); err != nil {
 		return CloneOptions{}, err
 	}
-	requiredVars := extractAllVariables(subgraph)
+	// Resolve variables the way pour (cmd/bd/pour.go) and wisp (cmd/bd/wisp.go)
+	// do: fill declared defaults first, then demand only the declared vars that
+	// have none. Demanding every handlebar the subgraph mentions would fail the
+	// bond on a proto's documentation placeholders and on declared vars that
+	// carry only a default - and widening the scanned field set (assignee,
+	// labels, metadata) would have widened that refusal too.
+	// extractRequiredVariables returns the unfiltered list when VarDefs is nil,
+	// so a legacy template still requires every var it mentions.
+	vars = applyVariableDefaults(vars, subgraph)
 	var missingVars []string
-	for _, v := range requiredVars {
+	for _, v := range extractRequiredVariables(subgraph) {
 		if _, ok := vars[v]; !ok {
 			missingVars = append(missingVars, v)
 		}

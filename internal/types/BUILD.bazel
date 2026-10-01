@@ -18,6 +18,7 @@ go_test(
     srcs = [
         "explain_test.go",
         "id_generator_test.go",
+        "issue_summary_test.go",
         "non_completing_close_test.go",
         "storage_class_test.go",
         "types_test.go",

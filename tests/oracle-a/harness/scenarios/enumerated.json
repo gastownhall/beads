@@ -2380,7 +2380,7 @@
     "--json"
    ]
   ],
-  "pins": "Error 'invalid --defer format \"not-a-date\". Examples: ...' to STDERR; exit 1.",
+  "pins": "Error 'invalid --defer format \"not-a-date\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, ...' (shared deferUntilFormatHint) to STDERR; exit 1.",
   "deterministic": true
  },
  {
@@ -2759,7 +2759,7 @@
     "--json"
    ]
   ],
-  "pins": "Error 'invalid --due format \"whenever\". Examples: ...' to STDERR; exit 1.",
+  "pins": "Error 'invalid --due format \"whenever\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, ...' (shared deferUntilFormatHint) to STDERR; exit 1.",
   "deterministic": true
  },
  {
@@ -15495,7 +15495,7 @@
     "--json"
    ]
   ],
-  "pins": "update.go:224-225 'invalid --defer format \"notadate\". Examples: +1h, tomorrow, next monday, 2025-01-15'; exit 1.",
+  "pins": "update.go:224-225 'invalid --defer format \"notadate\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)'; exit 1.",
   "deterministic": true
  },
  {
@@ -15606,7 +15606,7 @@
     "--json"
    ]
   ],
-  "pins": "update.go:200-211 invalid -> 'invalid --due format \"garbage\". Examples: +6h, tomorrow, next monday, 2025-01-15' exit 1; empty -> due_at=nil cleared.",
+  "pins": "update.go:200-211 invalid -> 'invalid --due format \"garbage\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)' exit 1; empty -> due_at=nil cleared.",
   "deterministic": true
  },
  {

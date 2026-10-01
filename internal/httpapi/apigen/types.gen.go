@@ -815,6 +815,18 @@ type BatchCreateResponse struct {
 	Items []Issue `json:"items"`
 }
 
+// Blocker One live blocker named by a blocked-issue refusal.
+type Blocker struct {
+	// Id The blocker: a local issue id, or the full `external:<project>:<capability>` reference.
+	Id string `json:"id"`
+
+	// Kind `local` for an issue this database holds, which clears when it closes; `external` for an `external:` reference, which clears when the named project ships the capability. The set may grow; default-branch on unknown values.
+	Kind string `json:"kind"`
+
+	// Type The blocking edge's dependency type (`blocks`, `waits-for`, `conditional-blocks`). ABSENT when the refusal did not report it, which is the case for an `external:` blocker.
+	Type *string `json:"type,omitempty"`
+}
+
 // BlockingAnnotations The blocking decoration of the named issues. It is NOT a page: this operation has no limit and no cursor, because the number of issues asked about is what bounds it.
 type BlockingAnnotations struct {
 	// Items One entry per DISTINCT requested id, in the order the request first named it — so a client can zip this against the ids it sent. Empty array (never null) when the request named none.
@@ -916,6 +928,9 @@ type CloseOutcome struct {
 	//
 	// A BATCH WHOSE ITEMS ARE ALL `true` LANDED NOTHING, and records no history entry: a per-item success that changed nothing is not work the caller did.
 	AlreadyClosed *bool `json:"already_closed,omitempty"`
+
+	// Blockers With `not_closable` on the live-blocker refusal: the blockers that refused THIS item, exactly as `Problem.blockers` carries them for the single close, and optional for the same reason. Absent on a successful item and on every other refusal.
+	Blockers *[]Blocker `json:"blockers,omitempty"`
 
 	// Code This item's refusal, from `Problem.code`'s vocabulary and restricted to `not_found` (the id names no row in either plane) and `not_closable` (close policy refused it: open children, or a live blocker — see `open_children`). ABSENT means the item succeeded.
 	//
@@ -1324,7 +1339,7 @@ type IssueCount struct {
 // IssueDetails An `Issue` with its labels, dependency edges and cardinalities — the body of `GET /v0/beads/issues/{id}`. `dependencies` and `dependents` carry FULL issue objects plus the edge type, not bare edges. Property semantics are documented on `Issue`.
 type IssueDetails = types.IssueDetails
 
-// IssuePatchBody The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
+// IssuePatchBody The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug — except on `updateIssue` beside `claim: true`, where the claim is the write.
 //
 // This is a deliberate SUBSET of the fields an issue carries; the members it does not spell are future surface rather than oversights, and `updateIssue`'s own description says which and why.
 //
@@ -1480,6 +1495,13 @@ type Problem struct {
 	// BlockerIsAncestor With `dependency_cycle`, hierarchy refusal only: true when `blocker_id` is an ANCESTOR of `issue_id` (which cannot close until its descendants finish, so the gate would never clear), false when it is a DESCENDANT (blocked status cascades, so it would inherit the block and never close). Both polarities are reported; this member is never omitted to mean false. See `issue_id`.
 	BlockerIsAncestor *bool `json:"blocker_is_ancestor,omitempty"`
 
+	// Blockers With `not_closable`, and ONLY on the live-blocker refusal: the live blockers that refused the close, in the order the refusing check reported them, read from the refusal's typed list rather than parsed out of any message. Never present together with `open_children`.
+	//
+	// A client renders the direct CLI's sentence from it: `cannot close blocked issue: <id> is blocked by [<b1> <b2> …]`, each blocker spelled `id` when its `type` is absent or `blocks` and `id (type)` otherwise — the sentence `detail` already begins with when this member is present.
+	//
+	// IT IS OPTIONAL. A refusal that could not name its blockers omits it and keeps the generic `detail`; absence means "this refusal did not name them", never "nothing blocks it". Re-read the issue's dependencies then.
+	Blockers *[]Blocker `json:"blockers,omitempty"`
+
 	// Code The stable machine-readable reason, and the ONLY member a client may dispatch on. v0's vocabulary: `invalid_argument` (400, also emitted by the Host-header middleware on any route), `invalid_cursor` (400), `unauthenticated` (401, only on a server configured with a token file), `not_found` (404), `already_claimed` (409), `not_claimable` (409), `not_closable` (409), `not_releasable` (409), `dependency_cycle` (409), `dependency_exists` (409), `already_exists` (409), `precondition_failed` (409), `events_journal_disabled` (409), `events_journal_truncated` (410), `busy` (503), `db_unavailable` (503), `events_watch_saturated` (503), `internal` (500). Renaming or removing a status+code pair is a breaking change; ADDING one is not, so clients MUST default-branch on unknown values and fall back to the status class (unknown 4xx → client bug, fail loud; unknown 503 → retry per `Retry-After`; other unknown 5xx → server fault).
 	Code string `json:"code"`
 
@@ -1539,7 +1561,7 @@ type Problem struct {
 
 	// OpenChildren With `not_closable`: how many open children the transaction that refused the close observed, read inside that transaction rather than parsed out of `detail`.
 	//
-	// PRESENT ONLY for the open-children refusal. The other `not_closable` refusal is a live blocker and carries no such member, so member presence — not prose — is how a client tells the two apart. Both are bypassed by `force`.
+	// PRESENT ONLY for the open-children refusal. The other `not_closable` refusal is a live blocker and carries `blockers` instead, so member presence — not prose — is how a client tells the two apart. Both are bypassed by `force`.
 	OpenChildren *int `json:"open_children,omitempty"`
 
 	// Param With `invalid_argument`: the offending query parameter, body member or header name. Present on every 400 except a body that fails to parse at all.
@@ -1909,6 +1931,9 @@ type UpdateIssueRequest struct {
 	// Actor Who is editing the issue. `ClaimRequest.actor`'s rules exactly: the server trims it, then refuses an empty result, anything longer than 256 BYTES (the `maxLength` above counts characters — the byte limit is the binding one), and any control character including newline. The value reaches the history entry's attribution and the storage commit message, so an unvalidated newline would forge audit-trail lines.
 	Actor string `json:"actor"`
 
+	// Claim Claims the issue for `actor` in the same transaction as `patch`: `bd update <id> --claim`, served by the same role. The claim sets `assignee` to `actor` and `status` to `in_progress`, then the patch applies, so a `patch.assignee` or `patch.status` overrides the claim's value. Eligibility is `{id}:claim`'s: a claimable status, and unassigned, already held by `actor`, or held by a configured claim pool. Held by `actor` and `in_progress` already is an idempotent success. A refusal is `409 already_claimed` or `409 not_claimable` naming `claim`, and writes nothing — the patch included. With `claim: true` the `patch` may be empty. It must not be combined with `expected_assignee`, `expected_status` or `force_assignee_transfer`; a request that does is a `400` naming `claim`.
+	Claim *bool `json:"claim,omitempty"`
+
 	// ExpectedAssignee Requires the issue's assignee to equal this value before the patch. A match AUTHORIZES the requested `patch.assignee` transfer: this compare-and-set replaces the ordinary anti-steal fence, so it must not be combined with `force_assignee_transfer`. A miss refuses the whole request with `409 precondition_failed`.
 	ExpectedAssignee *string `json:"expected_assignee,omitempty"`
 
@@ -1930,7 +1955,7 @@ type UpdateIssueRequest struct {
 	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
 	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
 
-	// Patch The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
+	// Patch The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug — except on `updateIssue` beside `claim: true`, where the claim is the write.
 	//
 	// This is a deliberate SUBSET of the fields an issue carries; the members it does not spell are future surface rather than oversights, and `updateIssue`'s own description says which and why.
 	//
@@ -2377,7 +2402,7 @@ type CountIssuesParams struct {
 	//
 	// The infra vocabulary is the WORKSPACE's, read from its configuration inside the role. A caller does not supply it and cannot — that config load is what this role exists to keep off both front doors.
 	//
-	// Unset, the count is durable-plane only and applies none of the four: the historical `bd count` answer, kept exactly so a scripted caller reads the same number it read yesterday.
+	// Unset — and with `include_ephemeral` also unset — the count is durable-plane only and applies none of the four: the historical `bd count` answer, kept exactly so a scripted caller reads the same number it read yesterday.
 	IncludeInfra *bool `form:"include_infra,omitempty" json:"include_infra,omitempty"`
 
 	// GroupBy Bucket the count by one dimension and return `groups` beside `total`. Absent, the response carries `total` alone.
