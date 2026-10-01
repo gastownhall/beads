@@ -1745,23 +1745,31 @@ var bazelLaneGateIDs = map[string]string{
 	// pr-risk.yml's legacy jobs, like the embedded tier's).
 	bazelProxiedJobName: "BAZEL_PROXIED",
 	bazelServerJobName:  "BAZEL_SERVER_STORAGE",
+	// main.yml's integration jobs, required on same-repo PRs although their
+	// legacy twins run only on push to main. Remote-only: fork and
+	// Dependabot PRs skip it until the farm has a read-only cache for them
+	// (then it becomes local-capable for forks, here and in bazel-gate.sh).
+	bazelIntegJobName: "BAZEL_INTEGRATION",
 }
 
-var bazelAdvisoryLanes = map[string]string{
-	bazelIntegJobName: "its legacy counterparts, main.yml's integration jobs, run only on push to main",
-}
+// None today: every lane is gated. Kept so a future lane that pr.yml's call
+// turns off has a place to record why.
+var bazelAdvisoryLanes = map[string]string{}
 
-// bazel-integration's if: remote only, and off when the caller passes
-// integration: "off" (pr.yml). A string input: on push and dispatch it is
-// null, and null != 'off', so the lane keeps running on main.
+// bazel-integration's if: remote only, and off when a caller passes
+// integration: "off" (pr.yml and bazel-farm.yml pass "on"). A string input:
+// on push and dispatch it is null, and null != 'off', so the lane keeps
+// running on main.
 const bazelIntegIf = "${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}"
 
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
-// while the gate stays self-consistent.
+// while the gate stays self-consistent; integration: "off" would drop the
+// required integration lane (explicit "on", so the pin and the gate
+// simulation, which reads these inputs, do not depend on the default).
 var bazelPRCallWith = map[string]string{
 	"build-artifact-name": "bazel-ci-build-artifacts",
-	"integration":         "off",
+	"integration":         "on",
 }
 
 // The call's aggregate result (needs.bazel.result, through bazel-gate.sh).
@@ -2259,9 +2267,10 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 // The gate over every execution mode (review D1 F3): the skip script allows
 // exactly the skips the lanes' own `if:`s produce in that mode, and for every
 // lane that should run, that lane alone skipped, failed or cancelled turns
-// pr.yml's actual gate step red, whatever the aggregate says. The advisory
-// integration lane's failure alone keeps it green; a missing or inconsistent
-// mode, or an aggregate failure no lane explains, turns it red.
+// pr.yml's actual gate step red, whatever the aggregate says (in mode remote
+// that includes the integration lane, which skips green in mode local); a
+// missing or inconsistent mode, or an aggregate failure no lane explains,
+// turns it red.
 func TestBazelGateSimulation(t *testing.T) {
 	requireHostTool(t, "bash")
 	root := sourceRepoRoot(t)
@@ -3003,12 +3012,32 @@ func bazelRuleBlock(build, name string) string {
 func TestBazelIntegrationJob(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelIntegJobName)
-	if job.TimeoutMinutes > 45 {
-		t.Errorf("%s timeout-minutes = %d; it runs remotely only, keep it near the step's 30", bazelIntegJobName, job.TimeoutMinutes)
-	}
 	test := job.step(t, "bazel test //... --config=integration")
-	if test.TimeoutMinutes == 0 || test.TimeoutMinutes >= job.TimeoutMinutes {
-		t.Errorf("%s test step timeout-minutes = %d, want set and below the job's %d", bazelIntegJobName, test.TimeoutMinutes, job.TimeoutMinutes)
+	// A required PR lane: the step must fit a cold compile (the first
+	// GitHub run took 17 minutes end to end) followed by the longest test
+	// action, which .bazelrc caps at its test:integration --test_timeout
+	// (rbe-west's 1200s limit). The job adds setup and log upload, but
+	// stays remote-only short.
+	const coldCompileMinutes = 20
+	actionCapMinutes := 0
+	for line := range bazelrcLines(t) {
+		if v, ok := strings.CutPrefix(line, "test:integration --test_timeout="); ok {
+			secs, err := strconv.Atoi(v)
+			if err != nil || secs <= 0 || secs > 1200 {
+				t.Fatalf(".bazelrc test:integration --test_timeout=%s, want one value of at most 1200 (rbe-west's cap)", v)
+			}
+			actionCapMinutes = (secs + 59) / 60
+		}
+	}
+	if actionCapMinutes == 0 {
+		t.Fatal(".bazelrc has no test:integration --test_timeout")
+	}
+	if want := coldCompileMinutes + actionCapMinutes; test.TimeoutMinutes < want {
+		t.Errorf("%s test step timeout-minutes = %d, want at least %d (cold compile %d + action cap %d)",
+			bazelIntegJobName, test.TimeoutMinutes, want, coldCompileMinutes, actionCapMinutes)
+	}
+	if job.TimeoutMinutes <= test.TimeoutMinutes || job.TimeoutMinutes > test.TimeoutMinutes+15 {
+		t.Errorf("%s timeout-minutes = %d, want above the test step's %d by at most 15", bazelIntegJobName, job.TimeoutMinutes, test.TimeoutMinutes)
 	}
 	cmd := regexp.MustCompile(`\s*\\\n\s*`).ReplaceAllString(test.Run, " ")
 	const wantCmd = `bazel test //... --config=integration --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?`
@@ -3268,7 +3297,7 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 	// pr.yml's gate requires it: bazelLaneGateIDs): not a step of
 	// bazel-doltserver (which also runs locally, and whose job a gate may
 	// require) or of bazel-integration (which a caller may switch off,
-	// although the server tier is a PR-time tier).
+	// while the server tier always runs remotely).
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	for _, c := range []struct{ job, config, logs string }{
 		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs"},

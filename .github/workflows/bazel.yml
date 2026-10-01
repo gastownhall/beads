@@ -10,16 +10,19 @@
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
 # requires the call's aggregate result (BAZEL) and bazel-test, bazel-pure,
-# bazel-embedded, bazel-doltserver, bazel-proxied and bazel-server-storage
-# (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED, BAZEL_DOLTSERVER, BAZEL_PROXIED,
-# BAZEL_SERVER_STORAGE); .github/scripts/bazel-gate.sh turns the rbe job's
-# rbe-mode output into the skips it accepts, so a lane skipped by its `if:`
-# below passes and one that should have run and failed, was cancelled or
-# reported nothing fails the gate. bazel-integration is not part of the PR
-# call (pr.yml passes integration: "off"): its legacy counterparts, main.yml's
-# integration jobs, run only on push to main, so it runs on push to main,
-# dispatch and nightly, like them. Direct runs (push to main,
-# workflow_dispatch, nightly.yml's call) gate nothing.
+# bazel-embedded, bazel-integration, bazel-doltserver, bazel-proxied and
+# bazel-server-storage (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED,
+# BAZEL_INTEGRATION, BAZEL_DOLTSERVER, BAZEL_PROXIED, BAZEL_SERVER_STORAGE);
+# .github/scripts/bazel-gate.sh turns the rbe job's rbe-mode output into the
+# skips it accepts, so a lane skipped by its `if:` below passes and one that
+# should have run and failed, was cancelled or reported nothing fails the
+# gate. bazel-integration runs in the PR call (pr.yml passes integration:
+# "on") although its legacy counterparts, main.yml's integration jobs, run
+# only on push to main: remotely it is minutes, and it catches on the PR what
+# main.yml would catch after the merge. Like every remote-only lane it skips
+# for fork and Dependabot PRs (mode local); forks get it once the farm has a
+# read-only cache for them. Direct runs (push to main, workflow_dispatch,
+# nightly.yml's call) gate nothing.
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to
@@ -130,8 +133,8 @@ on:
       # test would silently stop the lane on main.
       integration:
         description: >
-          "off" skips bazel-integration (pr.yml: its legacy counterparts do
-          not run on PRs); anything else runs it where remote execution is on.
+          "off" skips bazel-integration; anything else (pr.yml and
+          bazel-farm.yml pass "on") runs it where remote execution is on.
         type: string
         required: false
         default: "on"
@@ -192,7 +195,7 @@ on:
         description: "bazel-embedded's job.status"
         value: ${{ jobs.bazel-embedded.outputs.result }}
       bazel-integration:
-        description: "bazel-integration's job.status (empty in pr.yml's call, which turns the lane off)"
+        description: "bazel-integration's job.status"
         value: ${{ jobs.bazel-integration.outputs.result }}
       bazel-doltserver:
         description: "bazel-doltserver's job.status"
@@ -737,17 +740,19 @@ jobs:
   # selection (go list without the integration tag, -short, ^TestEmbedded
   # skipped), and its job mode needs the integration jobs' go test -json,
   # which no run here has. check_testcases.py still catches a target or
-  # shard that ran no tests.
+  # shard that ran no tests. pr.yml's gate requires it (BAZEL_INTEGRATION)
+  # on same-repo PRs; see the header.
   bazel-integration:
-    name: integration (advisory)
+    name: integration
     # Remote execution only, like bazel-embedded: locally the tagged race
     # build of //... plus 14 jobs' worth of tests on one runner is well over
-    # the timeout, for tests main.yml's integration jobs already run. Off in
-    # pr.yml's call (integration: "off"), as those jobs are off on PRs.
+    # the timeout, for tests main.yml's integration jobs already run. A
+    # caller may turn it off with integration: "off"; pr.yml and
+    # bazel-farm.yml pass "on".
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}
-    timeout-minutes: 40
+    timeout-minutes: 55
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
@@ -770,11 +775,13 @@ jobs:
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
 
-      # Remote: a cold compile plus the longest test action (1200s cap, see
-      # .bazelrc) fits well inside 30 minutes.
+      # Remote: a cold compile (a PR touching a widely imported package; the
+      # first cold run took 17 minutes end to end, warm ones ~3.5) plus the
+      # longest test action (1200s cap, see .bazelrc) if it starts last.
+      # scripts/ci_workflow_test.go keeps this at or above that sum.
       - name: bazel test //... --config=integration
         id: test
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: |
           set -o pipefail
           start=$(date +%s)
@@ -803,8 +810,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Last step: the job's result as a workflow_call output (for
-      # symmetry; pr.yml's call turns this lane off).
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too.
       - name: Record job result
         id: result
         if: ${{ always() }}

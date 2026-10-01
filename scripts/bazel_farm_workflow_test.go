@@ -215,7 +215,7 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	wantWith := map[string]string{
 		"checkout-sha":        "${{ github.event.pull_request.head.sha }}",
 		"fork-farm":           "authorized",
-		"integration":         "off",
+		"integration":         "on",
 		"build-artifact-name": "bazel-farm-build-artifacts",
 	}
 	if !reflect.DeepEqual(farm.With, wantWith) {

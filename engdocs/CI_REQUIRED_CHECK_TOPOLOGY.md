@@ -47,20 +47,32 @@ Current PR-related workflow names:
   exports it as the `rbe-mode` / `rbe-enabled` outputs; every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
   call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
-  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`. The legacy jobs these mirror stay required in `pr.yml`
-  and `pr-risk.yml`.
+  `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
+  `BAZEL_SERVER_STORAGE`. The legacy jobs these mirror stay required in
+  `pr.yml` and `pr-risk.yml`.
   `.github/scripts/bazel-gate.sh` reads the exported mode, never the variable
   or the fork flag: mode `skip` allows every Bazel id to skip, mode `local`
-  allows only the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
-  `BAZEL_SERVER_STORAGE` (fork and Dependabot PRs rely on `pr-risk.yml`'s
-  legacy tiers for those), and mode `remote` allows none.
+  allows only the remote-only `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
+  `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE` (fork and Dependabot PRs rely on
+  `pr-risk.yml`'s legacy tiers for the embedded, proxied and server-storage
+  tiers), and mode `remote` allows none.
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
-  `bazel-integration` is not part of the PR call (`pr.yml` passes
-  `integration: "off"`) and has no gate id: its legacy counterparts
-  (`main.yml`'s integration jobs) run only on push to `main`, and so does it
-  (plus dispatch and nightly). `scripts/ci_workflow_test.go` fails when a new
-  `bazel.yml` job has neither a gate id nor an advisory entry.
+  `bazel-integration` (`bazel test //... --config=integration`, the Bazel
+  twin of `main.yml`'s Linux integration shards) is required on same-repo
+  PRs: `pr.yml` passes `integration: "on"` (policy-pinned), so in mode
+  `remote` it runs, and a failure, cancellation or missing result turns the
+  gate red. Its legacy twins still run only on push to `main`, so this lane
+  is the only PR-time run of the full integration-tagged suite. Fork and
+  Dependabot PRs (mode `local`) skip it, with no legacy fallback on the PR:
+  they get integration coverage only after merge, from `main.yml`. Running it
+  for forks waits on a read-only remote cache they may use; that change is
+  making the lane local-capable for forks in `bazel.yml` and dropping
+  `BAZEL_INTEGRATION` from `bazel-gate.sh`'s mode-`local` skips. Its step
+  timeout (45 minutes) covers a cold compile plus the 1200 s per-action cap
+  (policy-tested against `.bazelrc`); warm runs take about 3.5 minutes.
+  `scripts/ci_workflow_test.go` fails when a new `bazel.yml` job has neither
+  a gate id nor an advisory entry.
   Runbook: if `main`'s Bazel BUILD files drift (every PR's Bazel lanes go
   red, and autofix only patches packages the PR itself changed), the RBE
   farm is down, or the beads CI RBE client certificate expires (about
@@ -152,7 +164,7 @@ fork PRs are unchanged.
 - `farm` job: calls `bazel.yml` only when `authorize` allowed it, with
   `contents: read`, exactly the four RBE secrets, `checkout-sha` =
   `github.event.pull_request.head.sha`, `fork-farm: authorized`, and
-  `integration: "off"`. `bazel.yml` checks out that SHA in every lane with
+  `integration: "on"`. `bazel.yml` checks out that SHA in every lane with
   `persist-credentials: false`. actions/checkout v7 refuses to check out a
   fork PR's head on `pull_request_target` unless `allow-unsafe-pr-checkout`
   is true. Each lane sets that input to
@@ -170,7 +182,7 @@ fork PRs are unchanged.
 - Gate: advisory. `pr.yml` is unchanged. Every fork PR, listed or not, still
   runs the local Bazel lanes inside the enforced `CI Gate / Required`, and
   the farm run adds a faster signal that also covers the remote-only
-  embedded, proxied-server and server-storage tiers.
+  embedded, integration, proxied-server and server-storage tiers.
 - Policy tests: `scripts/bazel_farm_workflow_test.go` pins the trigger,
   both jobs' conditions, the allowlist source, the pinned checkout, the
   permissions, where secrets appear, and that no expression is interpolated

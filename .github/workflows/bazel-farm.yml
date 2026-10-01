@@ -8,10 +8,11 @@
 #
 # ADVISORY. pr.yml is unchanged: every fork PR, listed or not, still runs the
 # local Bazel lanes inside the enforced `CI Gate / Required`. This run adds a
-# fast remote signal, including the remote-only embedded, proxied-server and
-# server-storage tiers, that no required check and no privileged workflow
-# reads. Making it authoritative needs a trusted reporter; see
-# engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Trusted-author fork PRs".
+# fast remote signal, including the remote-only embedded, integration,
+# proxied-server and server-storage tiers, that no required check and no
+# privileged workflow reads. Making it authoritative needs a trusted
+# reporter; see engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Trusted-author fork
+# PRs".
 #
 # SECURITY MODEL (policy-tested in scripts/ci_workflow_test.go,
 # TestBazelFarmWorkflowSecurity; threat model in the engdoc):
@@ -128,5 +129,5 @@ jobs:
     with:
       checkout-sha: ${{ github.event.pull_request.head.sha }}
       fork-farm: authorized
-      integration: "off"
+      integration: "on"
       build-artifact-name: bazel-farm-build-artifacts
