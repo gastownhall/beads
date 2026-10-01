@@ -3,6 +3,7 @@
 
 Usage: check_shard_coverage.py --bep <build_event_json_file> [--testlogs DIR]
                                --suite LABEL SCRIPT SHARDS [--suite ...]
+                               [--whole LABEL ...]
 
 The manifest-sharded targets (//cmd/bd:bd_embedded_test runs
 .github/scripts/embedded-test-shard.sh, ...) discover their tests from
@@ -16,7 +17,11 @@ For each --suite this runs SCRIPT k SHARDS with BEADS_TEST_SHARD_LIST_ONLY=1
 the names it lists with the top-level <testcase> names in the test.xml of
 Bazel shard k of LABEL in this invocation's BEP. Any test listed but absent
 (or present but not listed), a shard count other than SHARDS, a missing
-test.xml or a failing script is an error. It needs test.xml locally and
+test.xml or a failing script is an error. So is a shard (or any test.xml of
+a --whole LABEL, an unsharded target such as the conformance partitions)
+whose top-level tests are all skipped: an injected -test.short,
+BEADS_TEST_SKIP or a lost BEADS_TEST_EMBEDDED_DOLT=1 turns the tier into
+t.Skip calls, which still list every test. It needs test.xml locally and
 -test.v in it, as --config=embedded sets.
 
 Exit status: 0 if every shard matches, 1 otherwise.
@@ -56,18 +61,47 @@ def listed_tests(script, shard, shards):
 
 
 def ran_tests(xml_path):
-    """Return the set of top-level Go tests in a test.xml."""
-    names = set()
+    """Return (set of top-level Go tests, set of those skipped) in a test.xml."""
+    names, skipped = set(), set()
     for tc in ET.parse(xml_path).getroot().iter("testcase"):
         name = tc.get("name", "")
         if name.startswith("Test") and "/" not in name:
             names.add(name)
-    return names
+            if tc.find("skipped") is not None:
+                skipped.add(name)
+    return names, skipped
 
 
-def check(tested, testlogs, suites, lister=listed_tests):
-    """Return ([summary lines], [problems]) for suites of (label, script, shards)."""
+def all_skipped_problem(where, got, skipped):
+    if got and got == skipped:
+        return f"{where}: every top-level test ({len(got)}) was skipped"
+    return None
+
+
+def check(tested, testlogs, suites, lister=listed_tests, whole=()):
+    """Return ([summary lines], [problems]) for suites of (label, script, shards)
+    and whole (unsharded or sharded) labels that must not be all-skipped."""
     lines, problems = [], []
+    for label in whole:
+        if label not in tested:
+            problems.append(f"{label}: --whole, but the BEP has no result for it")
+            continue
+        for xml_path in testlog_xmls(testlogs, label, tested[label]):
+            rel = os.path.relpath(xml_path, testlogs)
+            if not os.path.exists(xml_path):
+                problems.append(f"{label}: {rel} missing (was test.xml downloaded?)")
+                continue
+            try:
+                got, skipped = ran_tests(xml_path)
+            except ET.ParseError as e:
+                problems.append(f"{label}: cannot parse {rel}: {e}")
+                continue
+            if not got:
+                problems.append(f"{label}: {rel} lists no tests")
+            p = all_skipped_problem(f"{label}: {rel}", got, skipped)
+            if p:
+                problems.append(p)
+        lines.append(f"{label}: not all skipped")
     for label, script, shards in suites:
         if tested.get(label) != shards:
             problems.append(f"{label}: the BEP has {tested.get(label, 0)} shard(s), want {shards} ({script})")
@@ -84,11 +118,14 @@ def check(tested, testlogs, suites, lister=listed_tests):
                 problems.append(f"{label}: {rel} missing (was test.xml downloaded?)")
                 continue
             try:
-                got = ran_tests(xml_path)
+                got, skipped = ran_tests(xml_path)
             except ET.ParseError as e:
                 problems.append(f"{label}: cannot parse {rel}: {e}")
                 continue
             total += len(want)
+            p = all_skipped_problem(f"{label} shard {k}/{shards}", got, skipped)
+            if p:
+                problems.append(p)
             for name in sorted(want - got):
                 problems.append(f"{label} shard {k}/{shards}: {name} is listed by {script} but did not run "
                                 f"(not in the target's srcs?)")
@@ -104,6 +141,8 @@ def main(argv=None):
     ap.add_argument("--testlogs", default=None, help="default: from the BEP, else ./bazel-testlogs")
     ap.add_argument("--suite", nargs=3, action="append", required=True, metavar=("LABEL", "SCRIPT", "SHARDS"),
                     help="a manifest-sharded target, its shard script and shard count (repeatable)")
+    ap.add_argument("--whole", action="append", default=[], metavar="LABEL",
+                    help="a target none of whose test.xml may be all skipped (repeatable)")
     args = ap.parse_args(argv)
 
     suites = []
@@ -113,7 +152,7 @@ def main(argv=None):
         suites.append((label, script, int(shards)))
     tested, _, bep_testlogs = read_bep(args.bep)
     testlogs = args.testlogs or bep_testlogs or "bazel-testlogs"
-    lines, problems = check(tested, testlogs, suites)
+    lines, problems = check(tested, testlogs, suites, whole=args.whole)
     for line in lines:
         print(line)
     for p in problems:

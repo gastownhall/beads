@@ -673,6 +673,13 @@ func TestBazelEmbeddedChecksListedTestsRan(t *testing.T) {
 		}
 		want = append(want, fmt.Sprintf("--suite %s %s %d", c.label, c.script, shards))
 	}
+	// The conformance partitions (unsharded): not all skipped.
+	for _, partition := range []string{"core", "audit"} {
+		if risk.job(t, "test-embedded-conformance").step(t, "Test "+partition+" conformance").Run == "" {
+			t.Errorf("pr-risk.yml test-embedded-conformance has no %s partition; update this check", partition)
+		}
+		want = append(want, "--whole //internal/storage/embeddeddolt:embeddeddolt_conformance_"+partition+"_test")
+	}
 	if got := strings.Join(strings.Fields(step.Run), " "); got != strings.Join(want, " ") {
 		t.Errorf("%s coverage step runs %q, want %q", bazelEmbedJobName, got, strings.Join(want, " "))
 	}
@@ -724,6 +731,7 @@ esac
 		}
 		return path
 	}
+	// A name ending in "~" is written as a skipped testcase.
 	writeXML := func(logs string, k int, names ...string) {
 		d := filepath.Join(logs, "pkg", "t", fmt.Sprintf("shard_%d_of_2", k))
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -732,6 +740,10 @@ esac
 		var b strings.Builder
 		b.WriteString(`<testsuites><testsuite name="pkg">`)
 		for _, n := range names {
+			if skipped, ok := strings.CutSuffix(n, "~"); ok {
+				fmt.Fprintf(&b, `<testcase classname="pkg" name="%s"><skipped message="skip"></skipped></testcase>`, skipped)
+				continue
+			}
 			fmt.Fprintf(&b, `<testcase classname="pkg" name="%s"></testcase>`, n)
 		}
 		b.WriteString(`</testsuite></testsuites>`)
@@ -757,6 +769,9 @@ esac
 		{"unlisted test ran", 2, []string{"TestA", "TestB", "TestZ"}, []string{"TestC"}, false, "TestZ ran"},
 		{"shard count differs", 1, []string{"TestA", "TestB"}, []string{"TestC"}, false, "want 2"},
 		{"missing test.xml", 2, []string{"TestA", "TestB"}, nil, false, "missing"},
+		// Review G3: some skips are fine; a shard of only skips is not.
+		{"some skipped", 2, []string{"TestA~", "TestB"}, []string{"TestC"}, true, ""},
+		{"shard all skipped", 2, []string{"TestA~", "TestB~"}, []string{"TestC"}, false, "shard 1/2: every top-level test (2) was skipped"},
 	}
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -771,6 +786,53 @@ esac
 			}
 		})
 	}
+	// --whole: an unsharded target must list a test and not only skips.
+	for i, c := range []struct {
+		names   []string
+		pass    bool
+		mention string
+	}{
+		{[]string{"TestConformance"}, true, ""},
+		{[]string{"TestConformance~"}, false, "was skipped"},
+		{[]string{}, false, "lists no tests"},
+	} {
+		logs := filepath.Join(dir, fmt.Sprintf("whole%d", i))
+		d := filepath.Join(logs, "pkg", "w")
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		xml := `<testsuites><testsuite name="pkg">`
+		for _, n := range c.names {
+			if skipped, ok := strings.CutSuffix(n, "~"); ok {
+				xml += `<testcase name="` + skipped + `"><skipped></skipped></testcase>`
+			} else {
+				xml += `<testcase name="` + n + `"></testcase>`
+			}
+		}
+		xml += `</testsuite></testsuites>`
+		if err := os.WriteFile(filepath.Join(d, "test.xml"), []byte(xml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bep := filepath.Join(dir, fmt.Sprintf("whole%d.json", i))
+		if err := os.WriteFile(bep, []byte(`{"id":{"targetConfigured":{"label":"//pkg:w"}},"configured":{"targetKind":"sh_test rule"}}
+{"id":{"testResult":{"label":"//pkg:w","run":1,"attempt":1}}}
+{"id":{"targetConfigured":{"label":"`+label+`"}},"configured":{"targetKind":"sh_test rule"}}
+{"id":{"testResult":{"label":"`+label+`","shard":1}}}
+{"id":{"testResult":{"label":"`+label+`","shard":2}}}
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeXML(logs, 1, "TestA", "TestB")
+		writeXML(logs, 2, "TestC")
+		out, err := exec.Command(python, script, "--bep", bep, "--testlogs", logs, "--suite", label, shard, "2", "--whole", "//pkg:w").CombinedOutput()
+		if (err == nil) != c.pass || (c.mention != "" && !strings.Contains(string(out), c.mention)) {
+			t.Errorf("--whole %v: pass = %v, want %v (mention %q):\n%s", c.names, err == nil, c.pass, c.mention, out)
+		}
+	}
+	if out, err := exec.Command(python, script, "--bep", writeBEP(2), "--testlogs", filepath.Join(dir, "logs0"), "--suite", label, shard, "2", "--whole", "//pkg:absent").CombinedOutput(); err == nil {
+		t.Errorf("--whole for a target the BEP lacks passed:\n%s", out)
+	}
+
 	// A failing shard script fails the check, even if what it listed
 	// matches; so does a missing one.
 	logs := filepath.Join(dir, "logs-bad")
@@ -864,5 +926,220 @@ func TestEmbeddedShardScriptsListOnlyRealTests(t *testing.T) {
 		if name != "TestMain" {
 			t.Errorf("NOT_TESTS has %s; only TestMain is never a test", name)
 		}
+	}
+}
+
+// Review G3: since D2 step 1 the Bazel embedded lane is the tier's only
+// pre-merge run on same-repo PRs, so nothing that reaches it may narrow it
+// (select fewer tests, or turn them into skips) without a reviewed edit of
+// this test. TestBazelEmbeddedJobMirrorsEmbeddedTier pins the command line
+// and the --config=embedded lines; this covers everything else that applies
+// to the lane: every other .bazelrc line of a config the lane uses (the
+// unconfigured ones, remote-exec, which setup-bazel's rc enables, and any
+// config those pull in), rc files that would be try-imported, the
+// tools/bazel scripts every test runs under or through, the whole
+// setup-bazel action, and the embedded-tagged targets' args and env. At run
+// time, check_shard_coverage.py also fails a shard of only skips.
+func TestBazelEmbeddedLaneCannotBeNarrowed(t *testing.T) {
+	root := sourceRepoRoot(t)
+	rcNarrow := regexp.MustCompile(`test_filter|test_arg|-test\.|_filters\b|test_env=(BEADS_TEST|GO_TEST|TESTBRIDGE)|--config=|cache_test_results|run_under|flaky|runs_per_test|test_sharding_strategy|build_tests_only`)
+	const runUnder = "test --run_under=//tools/bazel:test_env"
+	wantImports := []string{"try-import %workspace%/.bazelrc.local", "try-import %workspace%/user.bazelrc"}
+
+	type rcLine struct{ cmd, config, text string }
+	var lines []rcLine
+	var imports []string
+	sawRunUnder := false
+	for _, raw := range strings.Split(readPolicyFile(t, root, ".bazelrc"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		head, _, _ := strings.Cut(line, " ")
+		if head == "import" || head == "try-import" {
+			imports = append(imports, line)
+			continue
+		}
+		cmd, config, _ := strings.Cut(head, ":")
+		lines = append(lines, rcLine{cmd, config, line})
+	}
+	if !reflect.DeepEqual(imports, wantImports) {
+		t.Errorf(".bazelrc imports %v, want exactly %v (an import can carry any flag into the lane)", imports, wantImports)
+	}
+	// The configs the lane uses: --config=embedded (pinned), remote-exec
+	// (setup-bazel's generated rc), the unconfigured lines, and anything they
+	// reference (which the check below then forbids anyway).
+	inUse := map[string]bool{"": true, "embedded": true, "remote-exec": true}
+	for changed := true; changed; {
+		changed = false
+		for _, l := range lines {
+			if !inUse[l.config] {
+				continue
+			}
+			for _, m := range regexp.MustCompile(`--config=([A-Za-z0-9_-]+)`).FindAllStringSubmatch(l.text, -1) {
+				if !inUse[m[1]] {
+					inUse[m[1]], changed = true, true
+				}
+			}
+		}
+	}
+	pinned := map[string]bool{}
+	for _, l := range bazelEmbeddedRCLines {
+		pinned[l] = true
+	}
+	for _, l := range lines {
+		if !inUse[l.config] || pinned[l.text] {
+			continue
+		}
+		if l.config == "embedded" {
+			t.Errorf(".bazelrc %q: not one of the pinned --config=embedded lines", l.text)
+			continue
+		}
+		if l.text == runUnder {
+			sawRunUnder = true
+			continue
+		}
+		if rcNarrow.MatchString(l.text) {
+			t.Errorf(".bazelrc %q applies to the embedded lane (config %q) and selects, narrows or re-runs tests", l.text, l.config)
+		}
+	}
+	if !sawRunUnder {
+		t.Errorf(".bazelrc lacks %q (the wrapper the narrowing checks below cover)", runUnder)
+	}
+
+	// Committed rc files: only .bazelrc. .bazelrc.local and user.bazelrc are
+	// developer-local (gitignored) and would be try-imported into CI runs.
+	if os.Getenv("TEST_SRCDIR") == "" {
+		if git, err := exec.LookPath("git"); err == nil {
+			out, err := exec.Command(git, "-C", root, "ls-files").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				base := filepath.Base(f)
+				if strings.Contains(base, "bazelrc") && f != ".bazelrc" && f != setupBazelActionDir+"/write-bazelrc.sh" {
+					t.Errorf("committed rc file %s: .bazelrc's try-import would load it into every CI run", f)
+				}
+			}
+		}
+	}
+
+	// The scripts every embedded test runs under or through, and the whole
+	// setup-bazel action (its generated rc applies to every command).
+	if os.Getenv("TEST_SRCDIR") == "" {
+		scriptNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|TESTBRIDGE_TEST_ONLY|test_filter|test_arg|_filters\b|cache_test_results|flaky|runs_per_test|test_sharding_strategy`)
+		files, _ := filepath.Glob(filepath.Join(root, "tools", "bazel", "*.sh"))
+		action, _ := filepath.Glob(filepath.Join(root, setupBazelActionDir, "*"))
+		files = append(files, action...)
+		if len(files) < 5 {
+			t.Fatalf("found only %v", files)
+		}
+		for _, f := range files {
+			rel, _ := filepath.Rel(root, f)
+			data, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, line := range strings.Split(string(data), "\n") {
+				code := strings.TrimSpace(line)
+				if strings.HasPrefix(code, "#") {
+					continue
+				}
+				if scriptNarrow.MatchString(code) {
+					t.Errorf("%s:%d %q can select, skip or re-run the embedded lane's tests", rel, i+1, code)
+				}
+				for _, m := range regexp.MustCompile(`--config=([A-Za-z0-9_-]+)`).FindAllStringSubmatch(code, -1) {
+					if m[1] != "remote-exec" {
+						t.Errorf("%s:%d enables --config=%s for every command", rel, i+1, m[1])
+					}
+				}
+			}
+		}
+	}
+
+	// The embedded-tagged targets: exactly these, with exactly these args
+	// and env (the legacy jobs' flags; the shard scripts add the rest).
+	if os.Getenv("TEST_SRCDIR") != "" {
+		return // scripts_test's runfiles hold no other package's BUILD
+	}
+	type target struct {
+		args []string
+		env  map[string]string
+	}
+	want := map[string]target{
+		"//cmd/bd:bd_embedded_test": {
+			[]string{"$(rootpath //:.github/scripts/embedded-test-shard.sh)", "BEADS_TEST_CMD_BINARY", "$(rootpath :bd_test)", "-test.timeout=19m"},
+			map[string]string{"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)", "BEADS_TEST_EMBEDDED_DOLT": "1", "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)"},
+		},
+		"//internal/storage/embeddeddolt:embeddeddolt_embedded_test": {
+			[]string{"$(rootpath //:.github/scripts/embedded-storage-test-shard.sh)", "BEADS_TEST_EMBEDDED_TEST_BINARY", "$(rootpath :embeddeddolt_test)"},
+			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
+		},
+		"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test": {
+			[]string{"$(rootpath :embeddeddolt_test)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^TestConformance$$", "-test.skip=^TestConformance$$/^Audit$$"},
+			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
+		},
+		"//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test": {
+			[]string{"$(rootpath :embeddeddolt_test)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^TestConformance$$/^Audit$$"},
+			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
+		},
+	}
+	quoted := regexp.MustCompile(`"([^"]*)"`)
+	envPair := regexp.MustCompile(`"([^"]*)":\s*"([^"]*)"`)
+	nameRe := regexp.MustCompile(`(?m)^    name = "([^"]+)",$`)
+	tagsRe := regexp.MustCompile(`(?ms)^    tags = \[(.*?)\],$`)
+	envRe := regexp.MustCompile(`(?ms)^    env = \{(.*?)\},$`)
+	got := map[string]target{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".beads":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 || (d.Name() != "BUILD.bazel" && d.Name() != "BUILD") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		pkg, _ := filepath.Rel(root, filepath.Dir(path))
+		for _, rule := range bazelTopRules(string(data)) {
+			tags := tagsRe.FindStringSubmatch(rule)
+			if tags == nil || !strings.Contains(tags[1], `"embedded"`) {
+				continue
+			}
+			name := nameRe.FindStringSubmatch(rule)
+			if name == nil {
+				t.Errorf("%s: an embedded-tagged rule without a literal name:\n%s", pkg, rule)
+				continue
+			}
+			var tg target
+			for _, q := range quoted.FindAllStringSubmatch(bazelAttrBlock(rule, "args"), -1) {
+				tg.args = append(tg.args, q[1])
+			}
+			tg.env = map[string]string{}
+			if e := envRe.FindStringSubmatch(rule); e != nil {
+				for _, p := range envPair.FindAllStringSubmatch(e[1], -1) {
+					tg.env[p[1]] = p[2]
+				}
+			}
+			if strings.Contains(rule, "args = select") || strings.Contains(rule, "env = select") || strings.Contains(rule, "env_inherit") {
+				t.Errorf("//%s:%s sets args/env indirectly; keep them literal so this check sees them", pkg, name[1])
+			}
+			got["//"+filepath.ToSlash(pkg)+":"+name[1]] = tg
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("embedded-tagged targets' args/env changed:\ngot  %v\nwant %v", got, want)
 	}
 }
