@@ -921,6 +921,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer counts an issue its batch filter skipped (create-only, a `ShouldPush`
   hook, parent, type, or conflict) as skipped twice. Notion's batch dry-run was already correct.
 
+### Security
+
+- **Raised the `golang.org/x/crypto` and `google.golang.org/grpc` floors past
+  every fixable advisory that reaches a locally built `bd`.** Measured with
+  `govulncheck -scan module`, which reports **four** advisories on `main` and
+  **one** after this change:
+
+  | Advisory | Module on `main` | Fixed in |
+  |---|---|---|
+  | GO-2026-6443 | `google.golang.org/grpc v1.83.1` | `v1.83.2` |
+  | GO-2026-6355 | `golang.org/x/crypto v0.55.0` | `v0.56.0` |
+  | GO-2026-6354 | `golang.org/x/crypto v0.55.0` | `v0.56.0` |
+  | GO-2026-5932 | `golang.org/x/crypto v0.55.0` | **no fix at any version** |
+
+  So this raises `golang.org/x/crypto` to `v0.56.0` and
+  `google.golang.org/grpc` to `v1.83.2`, clearing the three that have a fix.
+  GO-2026-5932 has no fixed version, so it is carried forward and named rather
+  than counted as resolved. Both example modules are mirrored so they cannot
+  pin a lower floor than the module they demonstrate. All upgrades, no
+  downgrades.
+
+  The count shrinks as upstream bumps these modules on its own — it was six
+  when this was first measured, and `main` has since taken grpc to v1.83.1,
+  clearing two. Re-derive rather than trusting this table:
+  `govulncheck -scan module`.
+
+  These floors matter because the versions are baked into the binary `make
+  build` and `make install` produce, so a downstream image-build override
+  cannot reach them — only the module floor can.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
