@@ -203,4 +203,28 @@ func TestDoltTestMainVerdict(t *testing.T) {
 			t.Errorf("output has no FATAL line:\n%s", out)
 		}
 	})
+
+	// The cases above run the verdict in the helper; this one is about the
+	// helper itself. It is an ordinary Test* function, so every run of this
+	// package executes it with no marker set, and it has to come out as a
+	// pass there: a t.Skip would put a SKIP in every run for a test that has
+	// nothing to run outside the re-exec, which reads as coverage that went
+	// missing.
+	t.Run("the helper passes rather than skips outside a verdict run", func(t *testing.T) {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatalf("os.Executable: %v", err)
+		}
+		cmd := exec.Command(exe, "-test.run=^TestDoltTestMainVerdictHelper$", "-test.count=1", "-test.v") // #nosec G204 -- re-exec of this test binary
+		// A later duplicate key wins, so an empty marker outranks one the
+		// surrounding run set.
+		cmd.Env = append(os.Environ(), testMainVerdictHelperEnv+"=")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper run with no marker failed: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "--- SKIP") || !strings.Contains(string(out), "--- PASS: TestDoltTestMainVerdictHelper") {
+			t.Fatalf("the helper must report a pass, not a skip, when run with no marker:\n%s", out)
+		}
+	})
 }
