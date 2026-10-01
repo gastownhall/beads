@@ -121,6 +121,7 @@ go_library(
 go_test(
     name = "issueops_test",
     srcs = [
+        "aggregate_authorize_notes_test.go",
         "aggregate_authorize_transfer_test.go",
         "as_of_test.go",
         "batch_apply_test.go",

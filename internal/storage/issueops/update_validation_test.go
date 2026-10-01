@@ -31,6 +31,45 @@ func TestValidateUpdateRequestRejectsInvalidCanonicalFields(t *testing.T) {
 	}
 }
 
+// TestValidateUpdateRequestRejectsInvalidNotesRequestShapes covers the two
+// notes rules ValidateUpdateRequest owns that are properties of the REQUEST
+// rather than of the patch alone, so they cannot be expressed in the
+// patch-only table above. Both are contract-level: the batch apply leg reaches
+// them here and nowhere else, and the single-issue HTTP handler's own
+// pre-check returns before storage is reached, so without these cases the
+// branches backing the published ApplyUpdateItem promise are unexercised.
+func TestValidateUpdateRequestRejectsInvalidNotesRequestShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		request publicops.UpdateRequest
+	}{
+		{
+			name: "forced notes overwrite without a notes value",
+			request: publicops.UpdateRequest{
+				Actor: "actor", IssueID: "bd-validate",
+				ForceNotesOverwrite: true,
+			},
+		},
+		{
+			name: "notes replacement combined with append",
+			request: publicops.UpdateRequest{
+				Actor: "actor", IssueID: "bd-validate",
+				Patch: publicops.IssuePatch{
+					Notes:       publicops.Field[string]{Set: true, Value: "replacement"},
+					AppendNotes: publicops.Field[string]{Set: true, Value: "addition"},
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateUpdateRequest(tc.request)
+			if !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("ValidateUpdateRequest() error = %v, want ErrValidation", err)
+			}
+		})
+	}
+}
+
 func TestApplyMetadataPatchRejectsUnsafeKeysAndNullMerge(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
