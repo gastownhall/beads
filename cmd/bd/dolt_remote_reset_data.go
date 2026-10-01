@@ -116,23 +116,59 @@ func resetDataGitURL(url string) string {
 }
 
 // lsRemoteDoltDataRefs returns which of the Dolt data-plane refs currently
-// exist on the git remote at gitURL.
-func lsRemoteDoltDataRefs(ctx context.Context, gitURL string) ([]string, error) {
+// exist on the git remote at gitURL. dataRef is the ref the remote keeps its
+// data on ("" = refs/dolt/data).
+func lsRemoteDoltDataRefs(ctx context.Context, gitURL, dataRef string) ([]string, error) {
+	want := storage.EffectiveGitDataRef(dataRef)
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, gitDoltDataRef, gitDoltInfoRef) // #nosec G204 -- URL from configured remote
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, want, gitDoltInfoRef) // #nosec G204 -- URL and ref from the configured remote
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-remote %s failed: %s: %w", gitURL, strings.TrimSpace(string(out)), err)
 	}
+	return parseDoltDataRefs(out, want), nil
+}
+
+// parseDoltDataRefs keeps, out of ls-remote output, only the exact data ref
+// and the info ref: git ls-remote matches its arguments as patterns, and
+// only those two refs may ever be deleted.
+func parseDoltDataRefs(out []byte, dataRef string) []string {
 	var refs []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 {
+		if len(fields) == 2 && (fields[1] == dataRef || fields[1] == gitDoltInfoRef) {
 			refs = append(refs, fields[1])
 		}
 	}
-	return refs, nil
+	return refs
+}
+
+// resetDataTarget names what reset-data is about to replace: the remote's
+// URL and, for a git-backed remote, the ref its data lives on. The ref is
+// part of the name because one repository can hold several databases on
+// their own refs, and there the URL alone does not say which one goes. A
+// remote that is not git-backed has no ref and is named by its URL.
+func resetDataTarget(url string, kind resetDataKind, dataRef string) string {
+	if kind != resetDataGitBacked {
+		return url
+	}
+	return url + ", ref " + storage.EffectiveGitDataRef(dataRef)
+}
+
+// resetDataJSONRef is the ref reported in reset-data's JSON output: the
+// recorded ref of a git-backed remote in canonical form, empty when it is
+// the default (the key is then left out) and for every other kind of
+// remote. That is what `bd dolt remote add --json` reports and what `bd dolt
+// remote list --json` shows for a remote bd created, since bd canonicalizes
+// the ref before recording it; a remote added through dolt itself with an
+// explicit --ref refs/dolt/data lists verbatim. The refs that were deleted,
+// the default among them, are in deleted_refs.
+func resetDataJSONRef(kind resetDataKind, dataRef string) string {
+	if kind != resetDataGitBacked {
+		return ""
+	}
+	return canonicalGitDataRef(dataRef)
 }
 
 // deleteGitDoltDataRefs deletes refs on the git remote at gitURL. Git
@@ -189,9 +225,10 @@ Dolt remotes accumulate chunks monotonically, so the remote keeps the full
 pre-squash store. This command rebuilds the remote's data plane so it holds
 only live chunks:
 
-  - Git-backed remotes (issue data riding a git remote under refs/dolt/data):
-    deletes the Dolt data refs on the git remote, then force-pushes to
-    rebuild a fresh store. Code branches are untouched.
+  - Git-backed remotes (issue data riding a git remote under refs/dolt/data,
+    or under the ref the remote was added with --ref): deletes the Dolt data
+    refs on the git remote, then force-pushes to rebuild a fresh store. Code
+    branches are untouched.
   - Native file remotes (file:// paths): clears the store directory, then
     force-pushes to rebuild it.
   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
@@ -201,9 +238,11 @@ only live chunks:
       bd dolt push --force
 
 This rewrites the remote's data plane. Every other clone must re-clone from
-the reset remote (that is already true after the squash itself). Refuses to
-run with uncommitted working-set changes: the rebuilt remote holds exactly
-HEAD, and anything uncommitted would not be part of it.
+the reset remote (that is already true after the squash itself). Uncommitted
+working-set changes are committed first, before anything on the remote is
+touched, so the rebuilt remote holds everything local; a commit that fails
+leaves the remote as it was. In server mode, where the working set is shared,
+the command refuses while anything is uncommitted instead.
 
 Examples:
   bd dolt remote reset-data origin          # prompts for confirmation
@@ -234,10 +273,11 @@ Examples:
 		if err != nil {
 			return HandleError("listing remotes: %v", err)
 		}
-		var url string
+		var url, dataRef string
 		for _, r := range remotes {
 			if r.Name == name {
 				url = r.URL
+				dataRef = r.Ref
 				break
 			}
 		}
@@ -247,9 +287,19 @@ Examples:
 				"Use 'bd dolt remote list' to see configured remotes.")
 		}
 
-		// The rebuilt remote holds exactly HEAD; refuse while anything
-		// uncommitted would be silently left out of it.
-		if det, ok := storage.UnwrapStore(st).(storage.PendingChangeDetector); ok {
+		// Only the server-mode store reports pending changes, and its
+		// working set is shared: refuse while anything is uncommitted, since
+		// the rebuilt remote holds exactly HEAD and committing here would
+		// publish another session's unfinished work. Checked before the
+		// prompt, so a dirty working set is refused up front, and again after
+		// it, since another session can write while the prompt waits. The
+		// embedded store has no detector and takes the commit-first branch
+		// below; a detector added to it would move it to this one.
+		det, sharedWorkingSet := storage.UnwrapStore(st).(storage.PendingChangeDetector)
+		refuseIfDirty := func() error {
+			if !sharedWorkingSet {
+				return nil
+			}
 			dirty, derr := det.HasCommittablePending(ctx)
 			if derr != nil {
 				return HandleError("checking working set: %v", derr)
@@ -259,6 +309,10 @@ Examples:
 					"working set has uncommitted changes; refusing to reset remote data",
 					"Run 'bd dolt commit' first — the rebuilt remote holds exactly HEAD.")
 			}
+			return nil
+		}
+		if err := refuseIfDirty(); err != nil {
+			return err
 		}
 
 		kind, err := classifyResetDataRemote(url)
@@ -277,12 +331,16 @@ Examples:
 		if !doltRemoteResetDataYes {
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return HandleErrorWithHint(
-					fmt.Sprintf("reset-data replaces all Dolt data stored on remote %q (%s)", name, url),
+					fmt.Sprintf("reset-data replaces all Dolt data stored on remote %q (%s)", name, resetDataTarget(url, kind, dataRef)),
 					"Re-run with --yes to confirm.")
 			}
 			fmt.Printf("This replaces all Dolt data stored on remote %q:\n", name)
-			fmt.Printf("  %s\n", url)
-			fmt.Println("The remote is rebuilt from local HEAD, including any pending changes; other clones must re-clone.")
+			fmt.Printf("  %s\n", resetDataTarget(url, kind, dataRef))
+			if sharedWorkingSet {
+				fmt.Println("The remote is rebuilt from local HEAD; other clones must re-clone.")
+			} else {
+				fmt.Println("The remote is rebuilt from local HEAD, including any pending changes; other clones must re-clone.")
+			}
 			fmt.Print("Proceed? (y/N): ")
 			reader := bufio.NewReader(os.Stdin)
 			response, rerr := reader.ReadString('\n')
@@ -296,12 +354,29 @@ Examples:
 			}
 		}
 
+		if sharedWorkingSet {
+			if err := refuseIfDirty(); err != nil {
+				return err
+			}
+		} else {
+			// A store with a private working set (embedded) commits pending
+			// changes inside the push below. Commit them here, before the
+			// remote's data is removed, so a commit that fails leaves the
+			// remote intact; after the removal the same failure would leave
+			// the remote without its data ref.
+			if _, cerr := st.CommitPending(ctx, getActorWithGit()); cerr != nil {
+				return HandleErrorWithHint(
+					fmt.Sprintf("commit pending changes before reset: %v", cerr),
+					"The remote was not touched. Run 'bd dolt commit' to see the failure on its own, then re-run reset-data.")
+			}
+		}
+
 		var deletedRefs []string
 		var clearedStore bool
 		switch kind {
 		case resetDataGitBacked:
 			gitURL := resetDataGitURL(url)
-			refs, lerr := lsRemoteDoltDataRefs(ctx, gitURL)
+			refs, lerr := lsRemoteDoltDataRefs(ctx, gitURL, dataRef)
 			if lerr != nil {
 				return HandleError("%v", lerr)
 			}
@@ -331,13 +406,17 @@ Examples:
 		}
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			out := map[string]interface{}{
 				"remote":        name,
 				"url":           url,
 				"deleted_refs":  deletedRefs,
 				"cleared_store": clearedStore,
 				"pushed":        true,
-			})
+			}
+			if ref := resetDataJSONRef(kind, dataRef); ref != "" {
+				out["ref"] = ref
+			}
+			return outputJSON(out)
 		}
 		fmt.Printf("✓ Remote %q data plane reset; store rebuilt from HEAD.\n", name)
 		fmt.Println("  Other clones of this database must re-clone from the remote.")

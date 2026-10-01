@@ -24,6 +24,41 @@ func TestResetDataRefNamesMatchDolt(t *testing.T) {
 	}
 }
 
+// The confirmation, the non-interactive refusal, and the JSON result name
+// the ref of a git-backed remote: on a repository holding several databases
+// on their own refs, the URL alone does not say which one is replaced. A
+// remote that is not git-backed carries no ref and is named by its URL. The
+// JSON ref follows `bd dolt remote list --json`: the recorded ref, empty
+// (and left out) for the default.
+func TestResetDataTargetNamesTheRef(t *testing.T) {
+	const url = "git+ssh://git@host/org/ledgers.git"
+	cases := []struct {
+		name     string
+		kind     resetDataKind
+		dataRef  string
+		want     string
+		wantJSON string
+	}{
+		{"unit ref", resetDataGitBacked, "refs/dolt/units/team-12542", url + ", ref refs/dolt/units/team-12542", "refs/dolt/units/team-12542"},
+		{"branch ref", resetDataGitBacked, "refs/heads/issue-data", url + ", ref refs/heads/issue-data", "refs/heads/issue-data"},
+		{"default ref", resetDataGitBacked, "", url + ", ref refs/dolt/data", ""},
+		{"explicit default ref", resetDataGitBacked, "refs/dolt/data", url + ", ref refs/dolt/data", ""},
+		{"file store", resetDataFileStore, "", url, ""},
+		{"absent file target", resetDataFileAbsent, "", url, ""},
+		{"unsupported", resetDataUnsupported, "", url, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resetDataTarget(url, tc.kind, tc.dataRef); got != tc.want {
+				t.Errorf("resetDataTarget = %q, want %q", got, tc.want)
+			}
+			if got := resetDataJSONRef(tc.kind, tc.dataRef); got != tc.wantJSON {
+				t.Errorf("resetDataJSONRef = %q, want %q", got, tc.wantJSON)
+			}
+		})
+	}
+}
+
 func TestEnvWithNoGitHooksPreservesExistingParameters(t *testing.T) {
 	const existing = "'user.email=ci@example.com'"
 	t.Setenv(githooksenv.ParametersEnv, existing)

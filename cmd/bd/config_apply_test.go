@@ -414,3 +414,97 @@ func TestCurrentOriginRemoteURL(t *testing.T) {
 		}
 	})
 }
+
+// fakeOriginRemoteWriter records the remote mutations replaceOriginRemote
+// makes, so the ref carried onto the new origin and the restore after a
+// failed add are both visible.
+type fakeOriginRemoteWriter struct {
+	removeErr error
+	addErr    error
+	calls     []string
+}
+
+func (f *fakeOriginRemoteWriter) RemoveRemote(ctx context.Context, name string) error {
+	f.calls = append(f.calls, "remove "+name)
+	return f.removeErr
+}
+
+func (f *fakeOriginRemoteWriter) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	f.calls = append(f.calls, "add "+name+" "+url+" ref="+ref)
+	if f.addErr != nil {
+		err := f.addErr
+		f.addErr = nil // the restore succeeds
+		return err
+	}
+	return nil
+}
+
+// TestCurrentOriginRemoteKeepsRef: the evidence rule of
+// currentOriginRemoteURL, with the git data ref read alongside the URL from
+// either source.
+func TestCurrentOriginRemoteKeepsRef(t *testing.T) {
+	ctx := context.Background()
+	got, err := currentOriginRemote(ctx, &fakeOriginRemoteEvidence{
+		listed: []storage.RemoteInfo{{Name: "origin", URL: "git+file:///srv/ledgers.git", Ref: "refs/dolt/units/team-12542"}},
+	})
+	if err != nil || got.Ref != "refs/dolt/units/team-12542" {
+		t.Fatalf("listed: got %+v, %v", got, err)
+	}
+	got, err = currentOriginRemote(ctx, &fakeOriginRemoteEvidence{
+		persisted: []storage.RemoteInfo{{Name: "origin", URL: "git+file:///srv/ledgers.git", Ref: "refs/heads/issue-data"}},
+	})
+	if err != nil || got.Ref != "refs/heads/issue-data" {
+		t.Fatalf("persisted: got %+v, %v", got, err)
+	}
+}
+
+// TestReplaceOriginRemote: `bd config apply` moving origin to a new URL
+// keeps the ref the old origin lived on when the new URL can carry one,
+// drops it for a URL that cannot, and restores the old remote on its own
+// ref when the add fails.
+func TestReplaceOriginRemote(t *testing.T) {
+	ctx := context.Background()
+	current := storage.RemoteInfo{Name: "origin", URL: "git+file:///srv/old.git", Ref: "refs/heads/issue-data"}
+
+	t.Run("ref carried onto a git-backed URL", func(t *testing.T) {
+		st := &fakeOriginRemoteWriter{}
+		ref, removed, err := replaceOriginRemote(ctx, st, current, "git+ssh://git@host/org/ledgers.git")
+		if err != nil || !removed || ref != "refs/heads/issue-data" {
+			t.Fatalf("got ref %q removed %v err %v", ref, removed, err)
+		}
+		want := []string{"remove origin", "add origin git+ssh://git@host/org/ledgers.git ref=refs/heads/issue-data"}
+		if strings.Join(st.calls, ";") != strings.Join(want, ";") {
+			t.Fatalf("calls = %q, want %q", st.calls, want)
+		}
+	})
+
+	t.Run("ref dropped for a URL dolt cannot carry one on", func(t *testing.T) {
+		st := &fakeOriginRemoteWriter{}
+		ref, _, err := replaceOriginRemote(ctx, st, current, "dolthub://org/repo")
+		if err != nil || ref != "" {
+			t.Fatalf("got ref %q err %v", ref, err)
+		}
+		if st.calls[1] != "add origin dolthub://org/repo ref=" {
+			t.Fatalf("calls = %q", st.calls)
+		}
+	})
+
+	t.Run("failed add restores the old remote on its ref", func(t *testing.T) {
+		st := &fakeOriginRemoteWriter{addErr: errors.New("refused")}
+		_, removed, err := replaceOriginRemote(ctx, st, current, "git+file:///srv/new.git")
+		if err == nil || !removed {
+			t.Fatalf("want the add error with removed=true, got %v %v", err, removed)
+		}
+		if st.calls[2] != "add origin git+file:///srv/old.git ref=refs/heads/issue-data" {
+			t.Fatalf("restore did not carry the ref: %q", st.calls)
+		}
+	})
+
+	t.Run("failed remove touches nothing else", func(t *testing.T) {
+		st := &fakeOriginRemoteWriter{removeErr: errors.New("busy")}
+		_, removed, err := replaceOriginRemote(ctx, st, current, "git+file:///srv/new.git")
+		if err == nil || removed || len(st.calls) != 1 {
+			t.Fatalf("got removed %v err %v calls %q", removed, err, st.calls)
+		}
+	})
+}

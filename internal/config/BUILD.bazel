@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "agent_profile.go",
         "config.go",
+        "gitref.go",
         "permissions.go",
         "permissions_open_linux.go",
         "permissions_open_nonlinux.go",
@@ -39,6 +40,7 @@ go_test(
         "agents_file_test.go",
         "config_test.go",
         "git_routing_test.go",
+        "gitref_test.go",
         "permissions_linux_test.go",
         "permissions_test.go",
         "repos_test.go",
