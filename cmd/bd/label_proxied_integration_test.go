@@ -136,6 +136,50 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 	})
 
+	// rename_definition_only pins the proxied publication of a vocabulary
+	// rename no issue carries: renamed == 0, yet the label_definitions row
+	// moved, so the unit of work must still commit (an empty commit message
+	// rolls the transaction back) and leave nothing in the working set.
+	t.Run("rename_definition_only", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lrd")
+		db := openProxiedDB(t, p)
+		ctx := context.Background()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO label_definitions (label, label_folded, description, created_by) VALUES ('frontend', 'frontend', 'ui', 'tester')"); err != nil {
+			t.Fatalf("seed definition: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed label definition')"); err != nil {
+			t.Fatalf("commit seed: %v", err)
+		}
+
+		bdProxiedLabel(t, bd, p.dir, "rename", "frontend", "client")
+
+		var label, description string
+		if err := db.QueryRowContext(ctx,
+			"SELECT label, description FROM label_definitions WHERE label_folded = 'client'").Scan(&label, &description); err != nil {
+			t.Fatalf("definition not renamed to client: %v", err)
+		}
+		if label != "client" || description != "ui" {
+			t.Errorf("definition = %q/%q, want client/ui", label, description)
+		}
+		var stale, dirty int
+		if err := db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM label_definitions WHERE label_folded = 'frontend'").Scan(&stale); err != nil {
+			t.Fatalf("count stale definition: %v", err)
+		}
+		if stale != 0 {
+			t.Errorf("stale frontend definition survived the rename")
+		}
+		if err := db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'label_definitions'").Scan(&dirty); err != nil {
+			t.Fatalf("query dolt_status: %v", err)
+		}
+		if dirty != 0 {
+			t.Errorf("label_definitions left uncommitted by the proxied rename")
+		}
+	})
+
 	t.Run("add_multiple_issues", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "lm")

@@ -633,8 +633,11 @@ func runLabelRename(ctx context.Context, args []string, dryRun bool) error {
 	// Recorded from renamed>0 BEFORE the error check: a rename can commit its
 	// SQL side and still return a non-nil err (e.g. the Dolt publication step
 	// failing after the working-set write landed), and the caller's deferred
-	// commit needs to know a write happened either way.
-	if renamed > 0 {
+	// commit needs to know a write happened either way. A successful rename
+	// with renamed == 0 may still have renamed a label definition (the
+	// vocabulary registry follows the rename), so it counts as a write too;
+	// the post-run auto-commit tolerates nothing-to-commit for a true no-op.
+	if renamed > 0 || err == nil {
 		commandDidWrite.Store(true)
 	}
 	if err != nil {

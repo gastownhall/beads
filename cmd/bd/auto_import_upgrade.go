@@ -109,14 +109,50 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 
 	// Parse the JSONL file without touching the store.
-	issues, configEntries, err := parseJSONLFile(jsonlPath)
+	issues, configEntries, labelDefs, err := parseJSONLFile(jsonlPath)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
 		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to parse %s: %v\n", jsonlPath, err)
 		return
 	}
-	if len(issues) == 0 {
+	if len(issues) == 0 && len(labelDefs) == 0 {
 		return // nothing to import
+	}
+
+	// Label definitions go FIRST, before the issue import and before any
+	// stamp (bda-os0d): applyLabelDefinitionsClassic is define-if-absent, so
+	// a crash between the definitions and the issue import leaves an empty
+	// database with no stamp, and the next pass genuinely retries both. The
+	// previous order (issues -> stamp -> definitions) made a definitions
+	// failure permanent: the stamp - and the now non-empty database - blocked
+	// every later attempt. A definitions error returns WITHOUT stamping for
+	// the same reason (record-level validation problems are already warnings
+	// inside applyLabelDefinitionsClassic; a hard error here is store-level
+	// and transient).
+	defined, defErr := applyLabelDefinitionsClassic(ctx, s, labelDefs)
+	if defErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: auto-import: label definitions: %v\n", defErr)
+		return
+	}
+	if defined > 0 {
+		commandDidWrite.Store(true)
+	}
+	if len(issues) == 0 {
+		if len(configEntries) > 0 {
+			// Config/memory records without issues: the issue importers are
+			// the only paths that apply configEntries, and neither runs on an
+			// empty issue set (this was true before bda-we22 too). Do NOT
+			// stamp - stamping here would permanently suppress a retry of
+			// records this pass could not apply (codex re-verify 2026-08-25).
+			fmt.Fprintf(os.Stderr, "auto-imported %d label definitions from %s; "+
+				"%d config/memory record(s) were NOT applied (auto-import applies them only alongside issues) - "+
+				"run: bd import -i %s\n", defined, jsonlPath, len(configEntries), jsonlPath)
+			return
+		}
+		// Definition-only export (bda-we22): the definitions ARE the import.
+		writeAutoImportStamp(beadsDir, info)
+		fmt.Fprintf(os.Stderr, "auto-imported %d label definitions from %s\n", defined, jsonlPath)
+		return
 	}
 
 	// Prefer single-transaction import (embedded mode) to avoid
@@ -138,6 +174,9 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			fmt.Fprintf(os.Stderr, "auto-imported %d issues", imported)
 			if len(configEntries) > 0 {
 				fmt.Fprintf(os.Stderr, " and %d config entries", len(configEntries))
+			}
+			if defined > 0 {
+				fmt.Fprintf(os.Stderr, " and %d label definitions", defined)
 			}
 			fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
 		}

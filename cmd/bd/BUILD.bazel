@@ -727,6 +727,7 @@ go_test(
         "export_auto_wedge_heal_test.go",
         "export_embedded_test.go",
         "export_exclude_owner_test.go",
+        "export_label_definitions_test.go",
         "export_max_rows_gate_test.go",
         "export_proxied_integration_test.go",
         "export_source_wisp_subset_test.go",
