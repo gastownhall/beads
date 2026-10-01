@@ -22,7 +22,47 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/stretchr/testify/require"
 )
+
+func TestEmbeddedInitHooksRouting(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	target, decoy, home := newInitRoleFixture(t)
+	global := filepath.Join(home, ".gitconfig")
+	initRoleFixtureGit(t, target, "config", "--file", global, "user.name", "Hook Fixture")
+	initRoleFixtureGit(t, target, "config", "--file", global, "user.email", "hooks@example.invalid")
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, "seed"), []byte("decoy\n"), 0600))
+	initRoleFixtureGit(t, decoy, "add", "seed")
+	t.Setenv("GIT_DIR", filepath.Join(home, "missing.git"))
+	t.Setenv("GIT_WORK_TREE", decoy)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(decoy, ".git", "index"))
+	preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index"), global)
+	storage := filepath.Join(home, "separate storage", ".beads")
+	require.NoError(t, os.MkdirAll(filepath.Dir(storage), 0750))
+	cmd := exec.Command(bd, "init", "--prefix", "hookfixture", "--quiet", "--non-interactive", "--skip-agents", "--role", "maintainer")
+	env := bdEnv(home)
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+		env = envWithout(env, key)
+	}
+	cmd.Dir, cmd.Env = target, append(env, "BEADS_DIR="+storage, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "embedded hook init: %s", out)
+	cfg, err := configfile.Load(storage)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Equal(t, configfile.DoltModeEmbedded, cfg.DoltMode)
+	info, err := os.Stat(filepath.Join(storage, "embeddeddolt", "hookfixture", ".dolt"))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	for _, name := range managedHookNames {
+		require.Contains(t, string(readInitHooksFile(t, filepath.Join(storage, "hooks", name))), hookSectionBeginPrefix)
+	}
+	got := initRoleFixtureGit(t, target, "config", "--local", "--get", "core.hooksPath")
+	require.Equal(t, filepath.Clean(filepath.Join(storage, "hooks")), filepath.Clean(got))
+}
 
 var (
 	embeddedBDOnce sync.Once

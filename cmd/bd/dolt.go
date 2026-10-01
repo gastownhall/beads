@@ -2375,6 +2375,13 @@ func extractSSHHost(url string) string {
 // Bare dial+close (no doltserver.ProbeSQLServer): SSH, not MySQL — there is
 // no handshake greeting to drain here.
 func testSSHConnectivity(host string) bool {
+	// #nosec G704 -- host is extractSSHHost(r.URL) over the remotes this repo's
+	// own store returns, i.e. operator-configured local state, not request data.
+	// The probe dials and immediately closes: nothing is sent and no response is
+	// read, so there is no forgeable request. gosec only reaches this call after
+	// this PR routed config discovery through env-derived paths; its taint
+	// analysis is not field-sensitive, so one env-derived path marks the whole
+	// store value tainted and every URL read back off it inherits that.
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), 5*time.Second)
 	if err != nil {
 		return false
@@ -2413,6 +2420,9 @@ func httpURLToTCPAddr(url string) string {
 // is no handshake greeting to drain here.
 func testHTTPConnectivity(url string) bool {
 	addr := httpURLToTCPAddr(url)
+	// #nosec G704 -- same probe shape and same taint path as testSSHConnectivity
+	// above: url is a remote URL from this repo's own store, and the dial is
+	// closed without sending or reading anything.
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return false
