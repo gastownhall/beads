@@ -29,6 +29,8 @@ go_library(
 go_test(
     name = "utils_test",
     srcs = [
+        "id_parser_exact_test.go",
+        "id_parser_fake_test.go",
         "id_parser_prefix_test.go",
         "id_parser_sentinel_test.go",
         "id_parser_test.go",

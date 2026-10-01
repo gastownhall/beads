@@ -1789,12 +1789,13 @@ paths:
         ## Planes
 
 
-        A count is DURABLE-PLANE ONLY unless `include_infra` is set. The wisps
-        tier — ephemeral wisps and the `no_history` beads that are durable work
-        stored in that tier — is not counted by default, and `include_infra`
-        changes FOUR things at once rather than one. See that parameter; it is
-        the one place on this operation where a single flag moves the set in
-        more than one direction.
+        A count is DURABLE-PLANE ONLY unless `include_infra` or
+        `include_ephemeral` is set. The wisps tier — ephemeral wisps and the
+        `no_history` beads that are durable work stored in that tier — is not
+        counted by default. `include_ephemeral` admits that tier and changes
+        nothing else; `include_infra` admits it too but changes FOUR things at
+        once rather than one. See that parameter; it is the one place on this
+        operation where a single flag moves the set in more than one direction.
       parameters:
         - name: status
           in: query
@@ -2021,9 +2022,10 @@ paths:
             config load is what this role exists to keep off both front doors.
 
 
-            Unset, the count is durable-plane only and applies none of the four:
-            the historical `bd count` answer, kept exactly so a scripted caller
-            reads the same number it read yesterday.
+            Unset — and with `include_ephemeral` also unset — the count is
+            durable-plane only and applies none of the four: the historical
+            `bd count` answer, kept exactly so a scripted caller reads the same
+            number it read yesterday.
           schema:
             type: boolean
             default: false
@@ -2388,8 +2390,8 @@ paths:
             `not_closable` is close policy refusing a `patch.status` that
             crosses into the workspace's done category: open children, or a live
             blocker. `open_children` is attached for the first and withheld for
-            the second, so member presence tells them apart.
-            `force_close_policy` is the bypass.
+            the second, so member presence tells them apart; the second names
+            its blockers in `blockers`. `force_close_policy` is the bypass.
 
 
             `already_claimed` with `param: "patch.assignee"` is the assignee
@@ -2420,7 +2422,7 @@ paths:
             scheduling cycle, every time.
           x-bd-codes:
             [already_claimed, dependency_cycle, dependency_exists,
-             not_claimable, not_closable, precondition_failed]
+             not_claimable, not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -3049,9 +3051,10 @@ paths:
 
         An unforced close is refused with `409` / `not_closable` when the issue
         has open children (the refusal carries `open_children`, the count the
-        refusing transaction observed) or a live blocker (no such member). The
-        MEMBER'S PRESENCE is the discriminator, so telling the two apart never
-        requires reading `detail`. Both refusals are the ROLE's, so `force`
+        refusing transaction observed) or a live blocker (no `open_children`;
+        the blockers themselves travel in `blockers`). The MEMBER'S PRESENCE is
+        the discriminator, so telling the two apart never requires reading
+        `detail`. Both refusals are the ROLE's, so `force`
         bypasses those two and nothing else — this endpoint cannot skip a guard
         by forgetting one exists.
 
@@ -3142,7 +3145,8 @@ paths:
 
             `not_closable`: close policy refused an unforced close — the issue
             has open children, carrying the `open_children` extension member, or
-            a live blocker, which carries none. Resend with `force: true` to
+            a live blocker, which carries no count and names the blockers in
+            `blockers`. Resend with `force: true` to
             bypass both. `force` does NOT bypass the guard above.
 
 
@@ -3991,9 +3995,9 @@ paths:
 
             `not_closable` is close policy refusing a `close` item, or an
             `update` whose `patch.status` crosses into the workspace's done
-            category: open children, or a live blocker. `close.force` and
-            `update.force_close_policy` are the per-item bypasses, and a forced
-            item never earns this.
+            category: open children (`open_children`), or a live blocker
+            (`blockers`). `close.force` and `update.force_close_policy` are the
+            per-item bypasses, and a forced item never earns this.
 
 
             `already_claimed` is the assignee fence: an `update` whose
@@ -4025,7 +4029,7 @@ paths:
             a malformed request.
           x-bd-codes:
             [already_claimed, already_exists, dependency_cycle,
-             dependency_exists, not_closable, precondition_failed]
+             dependency_exists, not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -6708,6 +6712,47 @@ components:
             every such issue on a request that did not set `include_comments`.
             Without it, an absent `comments` key is ambiguous between "no
             comments" and "comments not included in this response".
+        unresolvable_dependencies:
+          type: integer
+          format: int64
+          description: >-
+            How many of `dependency_count`'s edges `dependencies` could not
+            represent, because the issue on the far end has no row in this
+            database — a cross-repo id or an `external:` reference. The edge is
+            real and correctly stored; only its far end is unreachable from
+            here, so the listing drops it while the count keeps it.
+
+
+            Without it the count reads as phantom: a caller sees
+            `dependency_count: 1` beside an absent `dependencies`, finds
+            nothing under that id anywhere, and concludes the count is wrong.
+            It is not — the edge record itself is readable, and on the CLI
+            `bd dep list <id> <id>` prints it.
+
+
+            ABSENT, NEVER ZERO, WHEN THERE IS NOTHING TO REPORT, and absent
+            too when the dependency read FAILED rather than came back short.
+            "Could not be represented" and "was never fetched" are different
+            facts and do not collapse into one member — the same distinction
+            `comments_omitted` draws.
+        unresolvable_dependents:
+          type: integer
+          format: int64
+          description: >-
+            The inbound counterpart of `unresolvable_dependencies`, on the same
+            terms.
+
+
+            Present only on a request that set `include_dependents`. Without
+            those rows `dependents` is absent by design, so a difference taken
+            against it would report every dependent the issue has as
+            unresolvable.
+
+
+            Note the plane disagreement this creates: `bd show` in text mode
+            reads dependents unconditionally and therefore always discloses
+            the inbound direction on stderr, while a client of this field sees
+            it only when it asked for `include_dependents`.
         epic_total_children:
           type: integer
         epic_closed_children:
@@ -9129,6 +9174,18 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with different non-empty content (an
+            explicit clear is not fenced). It requires
+            `patch.notes` — an item setting it without one is a `400` — and,
+            UNLIKE `force_assignee_transfer`, it has no `expected_assignee`
+            exemption: there is no compare-and-set that authorizes a notes
+            overwrite, so combining the two is legal and each answers its own
+            question.
 
     ApplyPatchBody:
       type: object
@@ -9180,7 +9237,10 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with
+            different non-empty content is refused with `409
+            notes_overwrite_refused` unless `force_notes_overwrite` is set; an
+            explicit clear (empty string) is not fenced.
         append_notes:
           type: string
           description: >-
@@ -10025,6 +10085,15 @@ components:
             PRESENCE is the discriminator between the two `not_closable`
             refusals, exactly as it is on a problem document: present means open
             children, absent means a live blocker.
+        blockers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Blocker'
+          description: >-
+            With `not_closable` on the live-blocker refusal: the blockers that
+            refused THIS item, exactly as `Problem.blockers` carries them for
+            the single close, and optional for the same reason. Absent on a
+            successful item and on every other refusal.
         code:
           type: string
           description: >-
@@ -10045,6 +10114,31 @@ components:
             Prose for a refusal, never load-bearing and present only with
             `code`. It reflects the request and this server's own words rather
             than the role's message, for the reason `Problem.detail` gives.
+
+    Blocker:
+      type: object
+      required: [id, kind]
+      description: >-
+        One live blocker named by a blocked-issue refusal.
+      properties:
+        id:
+          type: string
+          description: >-
+            The blocker: a local issue id, or the full
+            `external:<project>:<capability>` reference.
+        kind:
+          type: string
+          description: >-
+            `local` for an issue this database holds, which clears when it
+            closes; `external` for an `external:` reference, which clears when
+            the named project ships the capability. The set may grow;
+            default-branch on unknown values.
+        type:
+          type: string
+          description: >-
+            The blocking edge's dependency type (`blocks`, `waits-for`,
+            `conditional-blocks`). ABSENT when the refusal did not report it,
+            which is the case for an `external:` blocker.
 
     CloseIssueRequest:
       type: object
@@ -10444,6 +10538,18 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with different non-empty content (an
+            explicit clear is not fenced). It requires
+            `patch.notes` — a request setting it without one is a `400` —
+            and, UNLIKE `force_assignee_transfer`, it has no
+            `expected_assignee` exemption: there is no compare-and-set that
+            authorizes a notes overwrite, so combining the two is legal and
+            each answers its own question.
 
     IssuePatchBody:
       type: object
@@ -10486,7 +10592,10 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with
+            different non-empty content is refused with `409
+            notes_overwrite_refused` unless `force_notes_overwrite` is set; an
+            explicit clear (empty string) is not fenced.
         append_notes:
           type: string
           description: >-
@@ -11076,9 +11185,32 @@ components:
 
 
             PRESENT ONLY for the open-children refusal. The other
-            `not_closable` refusal is a live blocker and carries no such
-            member, so member presence — not prose — is how a client tells the
+            `not_closable` refusal is a live blocker and carries `blockers`
+            instead, so member presence — not prose — is how a client tells the
             two apart. Both are bypassed by `force`.
+        blockers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Blocker'
+          description: >-
+            With `not_closable`, and ONLY on the live-blocker refusal: the live
+            blockers that refused the close, in the order the refusing check
+            reported them, read from the refusal's typed list rather than
+            parsed out of any message. Never present together with
+            `open_children`.
+
+
+            A client renders the direct CLI's sentence from it: `cannot close
+            blocked issue: <id> is blocked by [<b1> <b2> …]`, each blocker
+            spelled `id` when its `type` is absent or `blocks` and `id (type)`
+            otherwise — the sentence `detail` already begins with when this
+            member is present.
+
+
+            IT IS OPTIONAL. A refusal that could not name its blockers omits
+            it and keeps the generic `detail`; absence means "this refusal did
+            not name them", never "nothing blocks it". Re-read the issue's
+            dependencies then.
         existing_type:
           type: string
           description: >-

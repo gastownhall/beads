@@ -60,7 +60,15 @@ func (m ServerMode) String() string {
 // The function loads metadata.json only if the file exists, to avoid
 // triggering the legacy config.json -> metadata.json migration side effect.
 func ResolveServerMode(beadsDir string) ServerMode {
-	return resolveServerMode(beadsDir, true)
+	return ResolveServerModeForMode(beadsDir, IsSharedServerMode())
+}
+
+// ResolveServerModeForMode resolves lifecycle ownership for an
+// already-classified target. BEADS_DOLT_SERVER_MODE remains authoritative;
+// shared-server state comes from the caller's target classification rather
+// than the active workspace.
+func ResolveServerModeForMode(beadsDir string, sharedMode bool) ServerMode {
+	return resolveServerMode(beadsDir, sharedMode, true)
 }
 
 // ResolveServerModeIgnoringPortEnv is ResolveServerMode with check 2c
@@ -86,23 +94,22 @@ func ResolveServerMode(beadsDir string) ServerMode {
 // server as shared -- the same reasoning as the kill-guard above, applied
 // to the migrate-on-open decision instead of the process-reaping one.
 func ResolveServerModeIgnoringPortEnv(beadsDir string) ServerMode {
-	return resolveServerMode(beadsDir, false)
+	return resolveServerMode(beadsDir, IsSharedServerMode(), false)
 }
 
-// resolveServerMode is the shared implementation behind ResolveServerMode
-// and ResolveServerModeIgnoringPortEnv. honorPortEnv controls whether check
-// 2c (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT) participates; see
-// ResolveServerModeIgnoringPortEnv for why a caller would want it excluded.
-func resolveServerMode(beadsDir string, honorPortEnv bool) ServerMode {
+// resolveServerMode is the shared implementation behind ResolveServerMode,
+// ResolveServerModeForMode and ResolveServerModeIgnoringPortEnv. sharedMode
+// is the target's shared-server classification (check 2). honorPortEnv
+// controls whether check 2c (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT)
+// participates; see ResolveServerModeIgnoringPortEnv for why a caller would
+// want it excluded.
+func resolveServerMode(beadsDir string, sharedMode, honorPortEnv bool) ServerMode {
 	// 1. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
 		return ServerModeExternal
 	}
 
-	// 2. Shared server mode (env var or config.yaml) -> external.
-	// Must be checked before metadata.json so that a stale
-	// dolt_mode=embedded cannot override active shared-server intent.
-	if IsSharedServerMode() {
+	if sharedMode {
 		return ServerModeExternal
 	}
 

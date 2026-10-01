@@ -25,7 +25,12 @@
 # cert path) and outside BAZEL_CI_CACHE_DIR (the runner cache must never store
 # credentials). The endpoint is masked in the job log.
 #
-# Outputs (to $GITHUB_OUTPUT when set, else stdout): rc=<path>, remote=true|false.
+# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": fork PRs and rbe=cache
+# dispatches) appends --config=fork-cache: .bazelrc's credential-free,
+# read-only rbe-west cache. It is mutually exclusive with the RBE secrets.
+#
+# Outputs (to $GITHUB_OUTPUT when set, else stdout): rc=<path>,
+# remote=true|false, cache=true|false.
 set -euo pipefail
 
 cache_dir="${BAZEL_CI_CACHE_DIR:?BAZEL_CI_CACHE_DIR is required}"
@@ -76,6 +81,14 @@ cert="${RBE_TLS_CERT:-}"
 key="${RBE_TLS_KEY:-}"
 ca="${RBE_TLS_CA:-}"
 instance="${RBE_INSTANCE:-}"
+fork_cache="${BAZEL_FORK_CACHE:-}"
+case "$fork_cache" in
+"" | true) ;;
+*)
+	echo "setup-bazel: BAZEL_FORK_CACHE must be \"true\" or empty, got \"$fork_cache\"" >&2
+	exit 1
+	;;
+esac
 
 rc="$secret_dir/ci.bazelrc"
 umask 077
@@ -116,7 +129,12 @@ for v in "$executor" "$cert" "$key"; do
 done
 
 remote=false
+cache=false
 if [[ "$set_fields" -eq 3 ]]; then
+	if [[ "$fork_cache" == true ]]; then
+		echo "setup-bazel: BAZEL_FORK_CACHE and the remote execution secrets are mutually exclusive" >&2
+		exit 1
+	fi
 	write_pem "$secret_dir/client.crt" "$cert"
 	write_pem "$secret_dir/client.key" "$key"
 	# Outside the rc block below: write_pem's mask commands go to the log.
@@ -146,6 +164,10 @@ if [[ "$set_fields" -eq 3 ]]; then
 elif [[ "$set_fields" -ne 0 ]]; then
 	echo "setup-bazel: remote execution is partially configured; BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY must be set together (or none, for local execution)" >&2
 	exit 1
+elif [[ "$fork_cache" == true ]]; then
+	echo "build --config=fork-cache" >>"$rc"
+	cache=true
+	echo "setup-bazel: read-only remote cache (rbe-cache); executing locally"
 else
 	echo "setup-bazel: no remote execution secrets; running locally"
 fi
@@ -154,4 +176,5 @@ out="${GITHUB_OUTPUT:-/dev/stdout}"
 {
 	echo "rc=$rc"
 	echo "remote=$remote"
+	echo "cache=$cache"
 } >>"$out"

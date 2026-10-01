@@ -177,6 +177,7 @@ go_test(
         "migrate_journal_shape_repair_test.go",
         "migrate_repair_atomicity_test.go",
         "migrate_selfheal_test.go",
+        "migrate_temp_intermediates_test.go",
         "migrate_wisp_dep_forward_repair_test.go",
         "new_methods_test.go",
         "open_test.go",

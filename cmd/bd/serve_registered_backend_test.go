@@ -427,12 +427,7 @@ func TestServeRefusesStrictReadonlyOnARegisteredBackend(t *testing.T) {
 	restoreServeGlobals(t)
 	t.Chdir(dir)
 	t.Setenv("BEADS_DIR", beadsDir)
-	beads.ResetCaches()
-	git.ResetCaches()
-	t.Cleanup(func() {
-		beads.ResetCaches()
-		git.ResetCaches()
-	})
+	resetRepoCachesForTest(t)
 
 	origReadonly := readonlyMode
 	readonlyMode = true

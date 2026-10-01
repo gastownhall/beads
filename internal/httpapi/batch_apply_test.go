@@ -74,8 +74,8 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 			{"kind":"update","update":{
 				"target":{"key":"root"},
 				"expected_status":"open","expected_assignee":"bob",
-				"force_close_policy":true,"force_assignee_transfer":true,
-				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin",
+				"force_close_policy":true,"force_assignee_transfer":true,"force_notes_overwrite":true,
+				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin","notes":"replacement",
 					"labels":{"replace":["a"],"add":["b"],"remove":["c"]},
 					"metadata":{"set":{"k":null},"unset":["old"]},
 					"estimated_minutes":null}}},
@@ -179,8 +179,12 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if update.ExpectedAssignee == nil || *update.ExpectedAssignee != "bob" {
 		t.Errorf("update.expected_assignee = %v, want bob", update.ExpectedAssignee)
 	}
-	if !update.ForceClosePolicy || !update.ForceAssigneeTransfer {
-		t.Errorf("update force flags = %v/%v, want both true", update.ForceClosePolicy, update.ForceAssigneeTransfer)
+	if !update.ForceClosePolicy || !update.ForceAssigneeTransfer || !update.ForceNotesOverwrite {
+		t.Errorf("update force flags = %v/%v/%v, want all three true",
+			update.ForceClosePolicy, update.ForceAssigneeTransfer, update.ForceNotesOverwrite)
+	}
+	if !update.Patch.Notes.Set || update.Patch.Notes.Value != "replacement" {
+		t.Errorf("update.patch.notes = %+v, want replacement", update.Patch.Notes)
 	}
 	if !update.Patch.Status.Set || string(update.Patch.Status.Value) != "closed" {
 		t.Errorf("update.patch.status = %+v, want the crossing status this operation publishes", update.Patch.Status)
@@ -892,6 +896,31 @@ func TestApplyBatchMapsTheRolesTypedRefusalsOntoTheDocumentedCodes(t *testing.T)
 // errUnmapped stands in for a refusal the mapping does not know, so the default
 // branch is driven rather than assumed.
 var errUnmapped = fmt.Errorf("a failure this mapping has never seen")
+
+// TestApplyBatchNamesTheBlockersOfARefusedClose: the all-or-nothing plan has no
+// per-item result array to carry the refusal in, so the problem document names
+// the offending item AND its blockers, from the same typed list the single
+// close publishes.
+func TestApplyBatchNamesTheBlockersOfARefusedClose(t *testing.T) {
+	applier := &roleBatchApplier{err: itemErr(0, issueops.ItemClose, "", "bd-1", blockedCloseFixture())}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"create","create":{"title":"one"}}]}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodeNotClosable) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotClosable)
+	}
+	if body["item_index"] != float64(0) {
+		t.Errorf("item_index = %v, want 0", body["item_index"])
+	}
+	assertBlockersMember(t, "problem", body["blockers"])
+	if want := blockedCloseSentence + "; clear the blocker, or send the item's force flag"; body["detail"] != want {
+		t.Errorf("detail = %q, want %q", body["detail"], want)
+	}
+}
 
 // TestApplyBatchCarriesTheHierarchyMembersOnlyOnTheHierarchyRefusal pins the
 // discriminator inside `dependency_cycle`: member PRESENCE tells a plain

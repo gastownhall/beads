@@ -99,6 +99,12 @@ test:embedded --test_timeout=-1,-1,-1,1200
 test:embedded --test_arg=-test.parallel=4
 test:embedded --test_env=GO_TEST_WRAP_TESTV=1
 test:embedded --remote_download_regex=.*/test\.xml$
+# Since D2 step 1 this lane is the tier's only pre-merge run on same-repo PRs
+# (pr-risk.yml's legacy jobs stand down), and the legacy jobs ran every test
+# every time (-test.count=1). A cached PASS would let a stale or poisoned
+# farm action-cache entry, or an unreproduced -race finding, stand in for a
+# run: always execute, at farm (not runner) cost.
+test:embedded --nocache_test_results
 
 # Dolt-server lane: the same jobs as the docker lane ("Test (storage domain +
 # uow)" and "Contract corpus"), but every dolt sql-server is a child of the
@@ -239,6 +245,37 @@ test:pure --remote_download_regex=.*/test\.xml$
 build:js-wasm --platforms=@rules_go//go/toolchain:js_wasm
 build:js-wasm --use_target_platform_for_tests
 build:js-wasm --remote_download_outputs=toplevel
+
+# Read-only anonymous cache for fork PRs: rbe-west's rbe-cache endpoint serves
+# action-cache and CAS reads only (writes and Execute are refused by the farm)
+# and needs no credentials, so it is committed (scripts/bazel_policy_test.go
+# allowlists exactly the two endpoint lines). bazel.yml's rbe job selects it
+# (mode "cache") for fork pull requests; setup-bazel adds --config=fork-cache.
+# Only non-key flags differ from trusted runs, so fork actions hash like the
+# trusted ones and hit what trusted CI executed.
+build:fork-cache --remote_cache=grpcs://rbe-cache.ops.gascity.com:8443
+build:fork-cache --remote_instance_name=oss
+build:fork-cache --remote_accept_cached
+build:fork-cache --noremote_upload_local_results
+# bazel.yml passes --build_event_json_file and --profile; with a remote cache
+# Bazel would upload the files the build events reference (test logs, the
+# profile) over ByteStream. Fork runs upload nothing.
+build:fork-cache --experimental_build_event_upload_strategy=local
+build:fork-cache --remote_download_minimal
+# If the farm closes the endpoint (kill switch) GetCapabilities fails, and
+# Bazel 9 then fails every action unless both of these are set.
+build:fork-cache --remote_local_fallback
+build:fork-cache --incompatible_remote_local_fallback_for_remote_cache
+# Lookups are network-bound; local CPU work is still bounded by --local_resources.
+build:fork-cache --jobs=64
+# A slow (not closed) endpoint: each lookup gives up after 15s per attempt,
+# and the failure-rate circuit breaker stops calling the endpoint once too
+# many lookups fail (Bazel's default: 10% within 60s); the rest run locally.
+build:fork-cache --remote_timeout=15
+build:fork-cache --remote_retries=2
+build:fork-cache --experimental_circuit_breaker_strategy=failure
+# The farm admits 16 connections per source IP.
+build:fork-cache --remote_max_connections=8
 
 # Remote execution against any REAPI-compatible service. Only generic tuning
 # lives here; the executor endpoint and TLS credentials are never committed.

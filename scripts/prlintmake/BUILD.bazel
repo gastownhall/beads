@@ -7,9 +7,12 @@ go_test(
         "prlintmake_test.go",
     ],
     data = [
+        "//:.buildflags",
         "//:go.mod",
         "//scripts:ci/fmt-check.sh",
         "//scripts:ci/gofmt-bin.sh",
+        "//scripts:ci/lib/timing.sh",
+        "//scripts:ci/pr-lint.sh",
     ],
     deps = ["//internal/testutil/bazeltest"],
 )

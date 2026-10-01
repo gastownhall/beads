@@ -12,6 +12,14 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # gazelle:exclude integrations
 gazelle(name = "gazelle")
 
+exports_files(
+    [".buildflags"],
+    visibility = [
+        "//scripts/pr-lint:__pkg__",
+        "//scripts/prlintmake:__pkg__",
+    ],
+)
+
 exports_files([
     "go.mod",
     "go.sum",

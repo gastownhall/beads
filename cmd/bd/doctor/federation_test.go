@@ -4,9 +4,11 @@ package doctor
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -411,6 +413,107 @@ func TestCheckFederationRemotesAPI_EnvOverridesConfig(t *testing.T) {
 	if port != 7777 {
 		t.Errorf("expected env override port 7777, got %d", port)
 	}
+}
+
+// remotesAPITarget isolates the inputs checkRemotesAPIListener resolves from:
+// the server mode, the user-global dolt.remotesapi-port ("" leaves it unset)
+// and BEADS_DOLT_REMOTESAPI_PORT ("" leaves it unset).
+func remotesAPITarget(t *testing.T, shared bool, userGlobalPort, envPort string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if userGlobalPort != "" {
+		dir := filepath.Join(home, ".config", "bd")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "dolt:\n  remotesapi-port: " + userGlobalPort + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", strconv.FormatBool(shared))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", envPort)
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return beadsDir
+}
+
+// localTCPPort returns a loopback port, still listening when open is true and
+// already closed (so a dial is refused) otherwise.
+func localTCPPort(t *testing.T, open bool) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if open {
+		t.Cleanup(func() { _ = ln.Close() })
+	} else {
+		_ = ln.Close()
+	}
+	return port
+}
+
+// TestCheckRemotesAPIListener covers the running-server arm of
+// CheckFederationRemotesAPI, which the getter tests above never reach: the
+// port it resolves and the remedy it prints for each server mode.
+func TestCheckRemotesAPIListener(t *testing.T) {
+	t.Run("shared server resolves the user-global port", func(t *testing.T) {
+		port := localTCPPort(t, true)
+		check := checkRemotesAPIListener(remotesAPITarget(t, true, strconv.Itoa(port), ""), 4242)
+		if check.Status != StatusOK || check.Message != "Port "+strconv.Itoa(port)+" accessible" {
+			t.Fatalf("got %s %q, want the user-global port %d accessible", check.Status, check.Message, port)
+		}
+	})
+
+	t.Run("environment overrides the user-global port", func(t *testing.T) {
+		port := localTCPPort(t, true)
+		check := checkRemotesAPIListener(remotesAPITarget(t, true, strconv.Itoa(localTCPPort(t, false)), strconv.Itoa(port)), 4242)
+		if check.Status != StatusOK || check.Message != "Port "+strconv.Itoa(port)+" accessible" {
+			t.Fatalf("got %s %q, want the env port %d accessible", check.Status, check.Message, port)
+		}
+	})
+
+	t.Run("unreachable shared server prescribes a restart", func(t *testing.T) {
+		port := localTCPPort(t, false)
+		check := checkRemotesAPIListener(remotesAPITarget(t, true, strconv.Itoa(port), ""), 4242)
+		if check.Status != StatusError || !strings.Contains(check.Fix, "bd dolt stop && bd dolt start") {
+			t.Fatalf("got %s, Fix %q; want StatusError with the stop/start remedy", check.Status, check.Fix)
+		}
+	})
+
+	t.Run("unreachable per-project server names the flag, not a restart", func(t *testing.T) {
+		port := localTCPPort(t, false)
+		check := checkRemotesAPIListener(remotesAPITarget(t, false, "", strconv.Itoa(port)), 4242)
+		if check.Status != StatusError {
+			t.Fatalf("got %s, want StatusError", check.Status)
+		}
+		// bd never opens a listener for a per-project server, so a restart
+		// cannot clear this error.
+		if !strings.Contains(check.Fix, "--remotesapi-port "+strconv.Itoa(port)) || strings.Contains(check.Fix, "bd dolt stop") {
+			t.Fatalf("Fix %q must name --remotesapi-port %d and must not prescribe a restart", check.Fix, port)
+		}
+	})
+
+	t.Run("shared server without a port is disabled", func(t *testing.T) {
+		check := checkRemotesAPIListener(remotesAPITarget(t, true, "", ""), 4242)
+		if check.Status != StatusOK || check.Message != "N/A (remotesapi listener disabled)" || !strings.Contains(check.Detail, "shared dolt sql-server") {
+			t.Fatalf("got %s %q, Detail %q; want the shared server's disabled listener", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("per-project port zero is disabled without naming a shared server", func(t *testing.T) {
+		check := checkRemotesAPIListener(remotesAPITarget(t, false, "", "0"), 4242)
+		if check.Status != StatusOK || check.Message != "N/A (remotesapi listener disabled)" || strings.Contains(check.Detail, "shared") {
+			t.Fatalf("got %s %q, Detail %q; want a disabled listener that does not claim a shared server", check.Status, check.Message, check.Detail)
+		}
+	})
 }
 
 func TestCheckFederationChecks_CategoryIsFederation(t *testing.T) {

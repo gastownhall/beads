@@ -369,7 +369,7 @@ func TestProxiedServerServeClose(t *testing.T) {
 		}
 		first := revisionOf(t, raw)
 
-		status, raw = sp.updateIssueRaw(t, issue.ID, `{"actor":"other-agent","patch":{"notes":"moved"}}`)
+		status, raw = sp.updateIssueRaw(t, issue.ID, `{"actor":"other-agent","patch":{"design":"moved"}}`)
 		if status != http.StatusOK {
 			t.Fatalf("the concurrent write: status = %d, want 200: %s", status, raw)
 		}
@@ -471,7 +471,78 @@ func TestProxiedServerServeClose(t *testing.T) {
 		}
 	})
 
+	// THE BLOCKER-NAMING PROOF, against the CLI's own sentence. A live blocker
+	// refuses with a `blockers` member read from the refusing check's typed
+	// list, and `detail` opens with exactly what `bd close` records in
+	// failed[].error for the same refusal — so an HTTP client can render the
+	// direct route's message instead of an anonymous "blocked".
+	t.Run("a live blocker refusal names its blockers as the CLI does", func(t *testing.T) {
+		blocker := bdProxiedCreate(t, bd, p.dir, "the blocker", "-p", "1")
+		local := bdProxiedCreate(t, bd, p.dir, "blocked locally", "-p", "1")
+		if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", local.ID, blocker.ID); err != nil {
+			t.Fatalf("bd dep add: %v\n%s", err, out)
+		}
+		external := bdProxiedCreate(t, bd, p.dir, "blocked externally", "-p", "1")
+		const ref = "external:remote:payments"
+		if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", external.ID, ref); err != nil {
+			t.Fatalf("bd dep add external: %v\n%s", err, out)
+		}
+
+		for _, tc := range []struct {
+			id   string
+			want string
+		}{
+			{local.ID, `[{"id":"` + blocker.ID + `","kind":"local","type":"blocks"}]`},
+			{external.ID, `[{"id":"` + ref + `","kind":"external"}]`},
+		} {
+			status, body := sp.closeIssue(t, tc.id, `{"actor":"http-agent"}`)
+			if status != http.StatusConflict || body["code"] != "not_closable" {
+				t.Fatalf("close %s: status = %d code = %v, want 409 not_closable: %v", tc.id, status, body["code"], body)
+			}
+			if _, present := body["open_children"]; present {
+				t.Errorf("close %s: open_children on the blocker refusal: %v", tc.id, body)
+			}
+			got, err := json.Marshal(body["blockers"])
+			if err != nil {
+				t.Fatalf("re-encode blockers: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("close %s: blockers = %s, want %s", tc.id, got, tc.want)
+			}
+
+			cli := bdProxiedCloseFailedError(t, bd, p.dir, tc.id)
+			if want := cli + "; clear the blocker or close with force"; body["detail"] != want {
+				t.Errorf("close %s: detail = %q, want the CLI's failed[].error %q plus the HTTP hint", tc.id, body["detail"], cli)
+			}
+		}
+	})
+
 	sp.shutdown(t)
+}
+
+// bdProxiedCloseFailedError runs an unforced `bd close --json` of id that must
+// be refused and returns the failed[].error it reports for id — the
+// route-independent spelling of the refusal (see assertCloseFailedErrorIsTyped).
+// A closable companion rides along because the failure report is the
+// partial-batch shape: a lone refused id prints no failed[] array.
+func bdProxiedCloseFailedError(t *testing.T, bd, dir, id string) string {
+	t.Helper()
+	companion := bdProxiedCreate(t, bd, dir, "closable companion", "-p", "2")
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, "close", "--json", companion.ID, id)
+	if err == nil {
+		t.Fatalf("bd close %s succeeded; it must be refused\nstdout:\n%s", id, stdout)
+	}
+	var report struct {
+		Failed []struct {
+			ID    string `json:"id"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	line := lastJSONObjectLine(stderr)
+	if jsonErr := json.Unmarshal([]byte(line), &report); jsonErr != nil || len(report.Failed) != 1 || report.Failed[0].ID != id {
+		t.Fatalf("bd close %s failure report = %+v (%v)\nstderr:\n%s", id, report, jsonErr, stderr)
+	}
+	return report.Failed[0].Error
 }
 
 // bdProxiedCloseOneRaw runs `bd close --json` and decodes the one item it

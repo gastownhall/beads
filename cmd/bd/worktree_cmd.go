@@ -2141,22 +2141,12 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 	}
 	defer f.Close()
 
-	lineEnding := gitignore.AppendLineEnding(content)
-
-	// Add newline if file doesn't end with one
-	if len(content) > 0 && content[len(content)-1] != '\n' {
-		separator := lineEnding
-		// Only CRLF needs this guard: the LF separator already completes a trailing CR.
-		if lineEnding == "\r\n" && content[len(content)-1] == '\r' {
-			separator = "\n" // Complete the existing CR without rewriting it.
-		}
-		if _, err := f.WriteString(separator); err != nil {
-			return err
-		}
-	}
-
-	// Add comment and entry
-	if _, err := fmt.Fprintf(f, "# bd worktree%s%s/%s", lineEnding, entry, lineEnding); err != nil {
+	// AppendLines owns the line-ending and final-line completion policy and
+	// leaves existing bytes unchanged, so everything past len(content) is the
+	// append. Writing only that suffix keeps this an O_APPEND write rather than
+	// a rewrite of the user's file.
+	appended := gitignore.AppendLines(content, []string{"# bd worktree", entry + "/"})
+	if _, err := f.Write(appended[len(content):]); err != nil {
 		return err
 	}
 

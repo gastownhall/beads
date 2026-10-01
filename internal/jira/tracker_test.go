@@ -769,6 +769,9 @@ func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFil
 func (s *configStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
 	return nil, nil
 }
+func (s *configStore) SearchIssueSummaries(_ context.Context, _ string, _ types.IssueFilter) ([]*types.IssueSummary, error) {
+	return nil, nil
+}
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }

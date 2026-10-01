@@ -80,7 +80,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
+		return handleVarErrorWithHint(err, firstMissingVar(subgraph, vars))
 	}
 
 	if in.dryRun {
