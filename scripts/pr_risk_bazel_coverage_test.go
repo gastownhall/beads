@@ -118,6 +118,8 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		return strconv.FormatBool(strings.EqualFold(f.rbeVar, "true"))
 	case "${{ inputs.rbe == 'off' }}":
 		return strconv.FormatBool(strings.EqualFold(input("rbe", "on"), "off"))
+	case "${{ inputs.rbe == 'cache' }}":
+		return strconv.FormatBool(strings.EqualFold(input("rbe", "on"), "cache"))
 	case "${{ github.event.pull_request.head.repo.fork == true }}":
 		return strconv.FormatBool(f.fork)
 	case bazelForkFarmValue:
@@ -400,28 +402,32 @@ func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 		}
 	}
 
-	// Named cases, for the record (with the committed flag on).
+	// Named cases, for the record (with the committed flag on). Forks and
+	// Dependabot run in mode cache, which, like local, skips the remote-only
+	// embedded lane, so they keep the legacy tier.
 	for _, c := range []struct {
 		name     string
 		f        rbeFacts
+		mode     string
 		covered  string
 		prPasses bool
 	}{
-		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, "true", false}, "true", true},
-		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, "true", false}, "true", false},
-		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, "true", false}, "true", false},
-		{"same-repo PR, flag reverted, var unset", rbeFacts{"pull_request", "", "x", false, "false", false}, "false", true},
-		{"same-repo PR, flag reverted, secret missing", rbeFacts{"pull_request", "true", "", false, "false", false}, "false", true},
-		{"fork PR", rbeFacts{"pull_request", "true", "", true, "true", false}, "false", true},
-		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, "true", false}, "false", true},
-		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, "true", true}, "false", true},
-		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, "true", true}, "false", true},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, "true", false}, "false", true},
-		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, "true", false}, "false", true},
+		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, "true", false}, "remote", "true", true},
+		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, "true", false}, "skip", "true", false},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, "true", false}, "cache", "true", false},
+		{"same-repo PR, flag reverted, var unset", rbeFacts{"pull_request", "", "x", false, "false", false}, "skip", "false", true},
+		{"same-repo PR, flag reverted, secret missing", rbeFacts{"pull_request", "true", "", false, "false", false}, "cache", "false", true},
+		{"fork PR", rbeFacts{"pull_request", "true", "", true, "true", false}, "cache", "false", true},
+		{"fork PR, var unset", rbeFacts{"pull_request", "", "", true, "true", false}, "cache", "false", true},
+		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, "true", false}, "cache", "false", true},
+		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, "true", true}, "cache", "false", true},
+		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, "true", true}, "skip", "false", true},
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, "true", false}, "remote", "false", true},
+		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, "true", false}, "skip", "false", true},
 	} {
 		d := decide(t, c.f)
-		if d.covered != c.covered {
-			t.Errorf("%s: covered = %q, want %s", c.name, d.covered, c.covered)
+		if d.covered != c.covered || d.mode != c.mode {
+			t.Errorf("%s: covered = %q, mode = %q; want %s, %s", c.name, d.covered, d.mode, c.covered, c.mode)
 		}
 		if pass, out := runPRGateStep(t, gateStep, prGateFor(t, lanes, c.f.event, d.mode, d.prCovered)); pass != c.prPasses {
 			t.Errorf("%s: pr.yml gate pass = %v, want %v\n%s", c.name, pass, c.prPasses, out)
@@ -440,7 +446,7 @@ func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 	}
 	// Covered, and an embedded result of success the mode cannot produce
 	// (the lane runs only in mode remote): the mode alone still makes it red.
-	for _, mode := range []string{"skip", "local"} {
+	for _, mode := range []string{"skip", "local", "cache"} {
 		sc := prGateFor(t, lanes, "pull_request", mode, "true")
 		sc.outputs[bazelEmbedJobName] = "success"
 		if pass, out := runPRGateStep(t, gateStep, sc); pass || !strings.Contains(out, "::error::BAZEL_EMBEDDED_RETIRED") {
@@ -940,8 +946,8 @@ func TestEmbeddedShardScriptsListOnlyRealTests(t *testing.T) {
 // this test. TestBazelEmbeddedJobMirrorsEmbeddedTier pins the command line
 // and the --config=embedded lines; this covers everything else that applies
 // to the lane: every other .bazelrc line of a config the lane uses (the
-// unconfigured ones, remote-exec, which setup-bazel's rc enables, and any
-// config those pull in), rc files that would be try-imported, the
+// unconfigured ones, remote-exec and fork-cache, which setup-bazel's rc
+// enables, and any config those pull in), rc files that would be try-imported, the
 // tools/bazel scripts every test runs under or through, the whole
 // setup-bazel action, and the embedded-tagged targets' args and env. At run
 // time, check_shard_coverage.py also fails a shard of only skips.
@@ -971,10 +977,16 @@ func TestBazelEmbeddedLaneCannotBeNarrowed(t *testing.T) {
 	if !reflect.DeepEqual(imports, wantImports) {
 		t.Errorf(".bazelrc imports %v, want exactly %v (an import can carry any flag into the lane)", imports, wantImports)
 	}
-	// The configs the lane uses: --config=embedded (pinned), remote-exec
-	// (setup-bazel's generated rc), the unconfigured lines, and anything they
+	// The configs the lane uses: --config=embedded (pinned), the configs
+	// setup-bazel's generated rc enables for every command (remote-exec,
+	// and fork-cache in mode cache, where the remote-only lane is skipped
+	// but the rc still applies), the unconfigured lines, and anything they
 	// reference (which the check below then forbids anyway).
-	inUse := map[string]bool{"": true, "embedded": true, "remote-exec": true}
+	rcEnabled := map[string]bool{"remote-exec": true, "fork-cache": true}
+	inUse := map[string]bool{"": true, "embedded": true}
+	for c := range rcEnabled {
+		inUse[c] = true
+	}
 	for changed := true; changed; {
 		changed = false
 		for _, l := range lines {
@@ -1054,7 +1066,7 @@ func TestBazelEmbeddedLaneCannotBeNarrowed(t *testing.T) {
 					t.Errorf("%s:%d %q can select, skip or re-run the embedded lane's tests", rel, i+1, code)
 				}
 				for _, m := range regexp.MustCompile(`--config=([A-Za-z0-9_-]+)`).FindAllStringSubmatch(code, -1) {
-					if m[1] != "remote-exec" {
+					if !rcEnabled[m[1]] {
 						t.Errorf("%s:%d enables --config=%s for every command", rel, i+1, m[1])
 					}
 				}

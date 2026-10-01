@@ -10,8 +10,8 @@
 # BAZEL_RETIRES_LEGACY_EMBEDDED flag is "true", on a same-repo,
 # non-Dependabot pull_request (whatever the mode), pr-risk.yml's bazel-embedded-coverage job stands them down and
 # bazel-embedded alone runs the tier; pr.yml's ci-gate then requires that
-# lane to have run remotely and passed, so modes skip and local are red there
-# (scripts/pr_risk_bazel_coverage_test.go).
+# lane to have run remotely and passed, so modes skip, local and cache are
+# red there (scripts/pr_risk_bazel_coverage_test.go).
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
@@ -26,9 +26,9 @@
 # "on") although its legacy counterparts, main.yml's integration jobs, run
 # only on push to main: remotely it is minutes, and it catches on the PR what
 # main.yml would catch after the merge. Like every remote-only lane it skips
-# for fork and Dependabot PRs (mode local); forks get it once the farm has a
-# read-only cache for them. Direct runs (push to main, workflow_dispatch,
-# nightly.yml's call) gate nothing.
+# for fork and Dependabot PRs (mode cache: the read-only cache speeds up
+# local execution, it does not run the remote-only lanes). Direct runs (push
+# to main, workflow_dispatch, nightly.yml's call) gate nothing.
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to

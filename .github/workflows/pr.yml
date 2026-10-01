@@ -1821,7 +1821,7 @@ jobs:
       # and not the executor secret (either, evaluated per run, would let one
       # workflow's re-run disagree with the other's). A same-repo PR whose run
       # lacks the secret is covered anyway, so pr.yml's gate goes red (mode
-      # local) instead of the tier silently moving back. Dependabot runs get
+      # cache) instead of the tier silently moving back. Dependabot runs get
       # no Actions secrets by design and keep the legacy tier; github.actor
       # (unlike triggering_actor) stays the PR's actor on a re-run.
       - name: Decide whether the Bazel lane covers the embedded tier
@@ -1965,8 +1965,8 @@ jobs:
           fi
           # Bazel lanes skipped by design in the call's execution mode (all
           # of them in mode skip, the remote-only embedded, integration,
-          # proxied and server-storage tiers in mode local), and the
-          # aggregate unless the mode is missing or invalid.
+          # proxied and server-storage tiers in modes local and cache), and
+          # the aggregate unless the mode is missing or invalid.
           skipped_ok="$skipped_ok $(bash .github/scripts/bazel-gate.sh skips)"
           BAZEL="$(bash .github/scripts/bazel-gate.sh aggregate)"
           export BAZEL

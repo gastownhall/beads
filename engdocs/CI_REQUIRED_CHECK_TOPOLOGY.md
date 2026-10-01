@@ -68,11 +68,11 @@ Current PR-related workflow names:
   `remote` it runs, and a failure, cancellation or missing result turns the
   gate red. Its legacy twins still run only on push to `main`, so this lane
   is the only PR-time run of the full integration-tagged suite. Fork and
-  Dependabot PRs (mode `local`) skip it, with no legacy fallback on the PR:
+  Dependabot PRs (mode `cache`) skip it, with no legacy fallback on the PR:
   they get integration coverage only after merge, from `main.yml`. Running it
-  for forks waits on a read-only remote cache they may use; that change is
-  making the lane local-capable for forks in `bazel.yml` and dropping
-  `BAZEL_INTEGRATION` from `bazel-gate.sh`'s mode-`local` skips. Its step
+  for forks, now that they have the read-only cache, means making the lane
+  cache-capable in `bazel.yml` and dropping `BAZEL_INTEGRATION` from
+  `bazel-gate.sh`'s mode-`cache` skips. Its step
   timeout (45 minutes) covers a cold compile plus the 1200 s per-action cap
   (policy-tested against `.bazelrc`); warm runs take about 3.5 minutes.
   `scripts/ci_workflow_test.go` fails when a new `bazel.yml` job has neither
@@ -677,7 +677,7 @@ have run remotely and passed.
   `github.actor` is not `dependabot[bot]`, while the flag is `"true"`. The
   executor secret is deliberately not part of the decision: a same-repo PR
   whose run lacks it (secret deleted or emptied) is still covered, takes
-  Bazel mode `local` (no embedded lane) and so turns `CI Gate / Required`
+  Bazel mode `cache` (no embedded lane) and so turns `CI Gate / Required`
   red, instead of quietly moving back to a legacy tier that one of its
   runs may already have skipped.
 - Everyone else keeps the legacy tier unchanged:
