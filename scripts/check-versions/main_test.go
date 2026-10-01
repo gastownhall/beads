@@ -182,6 +182,48 @@ func TestRunRejectsTrackedHookMarkerMismatch(t *testing.T) {
 	}
 }
 
+// On surface drift cmd/bd/version.go already holds the canonical version, so
+// scripts/update-versions.sh with that version leaves the drifted file as it
+// was. Status 1 must not offer that re-run as the fix; it names the remedies
+// that do work.
+func TestRunDriftRemedyDoesNotPrescribeUpdateVersionsAlone(t *testing.T) {
+	root := writeReleaseFixture(t, "1.1.0")
+	if err := os.WriteFile(
+		filepath.Join(root, "plugins", "beads", ".copilot-plugin", "plugin.json"),
+		[]byte(`{"version":"1.0.9"}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run(nil, root, &stdout, &stderr, nil)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1\nstderr:\n%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"Copilot plugin.json: 1.0.9 (expected 1.1.0)",
+		"Re-running scripts/update-versions.sh 1.1.0 fixes only .githooks markers",
+		"- one file drifted: edit it to the expected value above",
+		"- several drifted: set version.go to the previous version, then\n" +
+			"  scripts/update-versions.sh 1.1.0",
+		"- version.go is wrong: scripts/update-versions.sh <intended-version>",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+		}
+	}
+	for _, bare := range []string{
+		"Run: scripts/update-versions.sh 1.1.0",
+		"Or manually update the mismatched files",
+	} {
+		if strings.Contains(stderr.String(), bare) {
+			t.Errorf("stderr still prescribes %q:\n%s", bare, stderr.String())
+		}
+	}
+}
+
 func writeReleaseFixture(t *testing.T, version string) string {
 	t.Helper()
 

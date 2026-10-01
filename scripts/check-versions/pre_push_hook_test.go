@@ -81,3 +81,59 @@ func TestPrePushHookOrdinaryPushWorksWithSystemBash(t *testing.T) {
 		})
 	}
 }
+
+// On drift (checker status 1) the hook defers to the checker's remedies rather
+// than prescribing scripts/update-versions.sh itself: with cmd/bd/version.go
+// already at the release version, that re-run leaves a drifted file as it was.
+// Stub git and checker keep this independent of the checkout, so it also runs
+// under Bazel.
+func TestPrePushHookDriftRefusalPointsAtCheckerRemedy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not provide the oldest supported /bin/bash")
+	}
+
+	const bash = "/bin/bash"
+	if _, err := os.Stat(bash); err != nil {
+		t.Skipf("system Bash unavailable: %v", err)
+	}
+
+	hook := filepath.Join(bazeltest.RepoRoot(t), ".githooks", "pre-push")
+	scratch := t.TempDir()
+	for name, body := range map[string]string{
+		"bin/git":                   "#!/bin/sh\necho '" + scratch + "'\n",
+		"scripts/check-versions.sh": "#!/bin/sh\necho 'stub drift report'\nexit 1\n",
+	} {
+		path := filepath.Join(scratch, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	command := exec.Command(bash, hook, "origin", "https://example.invalid/repo.git")
+	command.Dir = scratch
+	command.Env = append(os.Environ(), "PATH="+filepath.Join(scratch, "bin")+":/bin:/usr/bin")
+	command.Stdin = strings.NewReader(
+		"refs/tags/v1.1.0 1111111111111111111111111111111111111111 " +
+			"refs/tags/v1.1.0 0000000000000000000000000000000000000000\n",
+	)
+	output, err := command.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("hook status = %v, want 1: %s", err, output)
+	}
+	for _, want := range []string{
+		"stub drift report",
+		"versions are inconsistent",
+		"See the checker output above",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Errorf("hook output lacks %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(string(output), "update-versions.sh") {
+		t.Errorf("hook prescribes update-versions.sh for drift:\n%s", output)
+	}
+}
