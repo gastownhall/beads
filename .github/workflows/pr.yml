@@ -1784,13 +1784,13 @@ jobs:
   # bazel-embedded-coverage job; D2 step 1), and ci-gate then requires this
   # call's embedded lane to have run remotely and passed. bazel.yml has no pull_request/merge_group trigger of its own:
   # this call is its only PR run. It gets the four RBE secrets and nothing
-  # else; its rbe job decides remote, local (forks, Dependabot: no
-  # remote-only lanes) or skip, and exports that for ci-gate. Its
-  # bazel-integration lane (main.yml's integration jobs, which run only on
-  # push to main) is on and required here, remote only: same-repo PRs run
-  # it, fork and Dependabot PRs (mode local) skip it until the farm has a
-  # read-only cache for them. Its bd artifact is renamed so it cannot
-  # collide with build-artifacts' upload.
+  # else; its rbe job decides remote, cache (forks, Dependabot: local
+  # execution with the anonymous read-only cache, no remote-only lanes) or
+  # skip, and exports that for ci-gate. Its bazel-integration lane
+  # (main.yml's integration jobs, which run only on push to main) is on and
+  # required here, remote only: same-repo PRs run it, fork and Dependabot PRs
+  # (mode cache) skip it. Its bd artifact is renamed so it cannot collide
+  # with build-artifacts' upload.
   bazel:
     name: Bazel
     permissions:

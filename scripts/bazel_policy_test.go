@@ -913,28 +913,37 @@ func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 	}
 }
 
-// bazelrcOption is one flag set by a `command:config` line of .bazelrc; a
-// flag and its separate value are joined as flag=value.
-type bazelrcOption struct{ config, flag string }
+// bazelrcOption is one flag set by a `command:config` line of .bazelrc, or by
+// a plain `command` line (config ""); a flag and its separate value are
+// joined as flag=value.
+type bazelrcOption struct{ command, config, flag string }
 
+// source is the option's line prefix as written: command:config or command.
+func (o bazelrcOption) source() string {
+	if o.config == "" {
+		return o.command
+	}
+	return o.command + ":" + o.config
+}
+
+// parseBazelrcOptions returns the options of every command line of bazelrc,
+// with or without a config (import and try-import lines are not options).
 func parseBazelrcOptions(bazelrc string) []bazelrcOption {
 	var opts []bazelrcOption
 	for _, line := range strings.Split(bazelrc, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
+		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") ||
+			fields[0] == "import" || fields[0] == "try-import" {
 			continue
 		}
-		_, config, ok := strings.Cut(fields[0], ":")
-		if !ok {
-			continue
-		}
+		command, config, _ := strings.Cut(fields[0], ":")
 		for i := 1; i < len(fields); i++ {
 			flag := fields[i]
 			if (flag == "--config" || flag == "--test_tag_filters" || flag == "--test_arg") && i+1 < len(fields) {
 				i++
 				flag += "=" + fields[i]
 			}
-			opts = append(opts, bazelrcOption{config, flag})
+			opts = append(opts, bazelrcOption{command, config, flag})
 		}
 	}
 	return opts
@@ -942,13 +951,14 @@ func parseBazelrcOptions(bazelrc string) []bazelrcOption {
 
 // bazelrcLaneOptions returns the options of config and of every config that
 // expands it (test:ci --config=prcore), in file order: a later filter line in
-// any of them overrides an earlier one.
+// any of them overrides an earlier one. Plain command lines are not part of
+// any lane (the lane's own lines apply after them).
 func bazelrcLaneOptions(opts []bazelrcOption, config string) []bazelrcOption {
 	lane := map[string]bool{config: true}
 	for grew := true; grew; {
 		grew = false
 		for _, o := range opts {
-			if !lane[o.config] && strings.HasPrefix(o.flag, "--config=") && lane[strings.TrimPrefix(o.flag, "--config=")] {
+			if o.config != "" && !lane[o.config] && strings.HasPrefix(o.flag, "--config=") && lane[strings.TrimPrefix(o.flag, "--config=")] {
 				lane[o.config] = true
 				grew = true
 			}
@@ -1096,14 +1106,18 @@ func TestBazelrcDockerLaneNeverCached(t *testing.T) {
 // --- fork cache --------------------------------------------------------------
 
 // keyNeutralFlag reports whether a flag can be set by a remote config without
-// changing any action key: --jobs and the --remote_* family (connection,
-// lookup and download behaviour), minus the members that execute remotely,
-// send headers, upload local results, or add exec properties (part of the
-// action's platform, so of its key).
+// changing any action key: --jobs, the remote failure circuit breaker, the
+// build event artifact upload strategy, and the --remote_* family
+// (connection, lookup and download behaviour), minus the members that
+// execute remotely, send headers, upload local results, or add exec
+// properties (part of the action's platform, so of its key).
 func keyNeutralFlag(flag string) bool {
 	name, _, _ := strings.Cut(flag, "=")
 	switch {
-	case name == "--jobs":
+	case name == "--jobs", name == "--experimental_circuit_breaker_strategy",
+		name == "--experimental_remote_failure_rate_threshold",
+		name == "--experimental_remote_failure_window_interval",
+		name == "--experimental_build_event_upload_strategy":
 		return true
 	case name == "--remote_executor", name == "--remote_default_exec_properties",
 		strings.HasSuffix(name, "_header"), name == "--remote_upload_local_results",
@@ -1122,14 +1136,52 @@ func keyNeutralFlag(flag string) bool {
 // dashes) in opts, where the last setting wins, and whether any set it.
 func boolFlagFinal(opts []bazelrcOption, name string) (value, set bool) {
 	for _, o := range opts {
-		switch o.flag {
-		case "--" + name, "--" + name + "=true", "--" + name + "=1", "--" + name + "=yes":
-			value, set = true, true
-		case "--no" + name, "--" + name + "=false", "--" + name + "=0", "--" + name + "=no":
-			value, set = false, true
+		if v, ok := boolFlagSetting(o.flag, name); ok {
+			value, set = v, true
 		}
 	}
 	return value, set
+}
+
+// forkCacheMaxTimeout is the longest --remote_timeout (seconds) fork-cache
+// may set: with --remote_retries a slow endpoint costs each lookup a few
+// times this before the circuit breaker gives up on it.
+const forkCacheMaxTimeout = 15
+
+// boolFlagSetting reports whether flag sets the boolean flag name (without
+// dashes), and to what.
+func boolFlagSetting(flag, name string) (value, set bool) {
+	switch flag {
+	case "--" + name, "--" + name + "=true", "--" + name + "=1", "--" + name + "=yes":
+		return true, true
+	case "--no" + name, "--" + name + "=false", "--" + name + "=0", "--" + name + "=no":
+		return false, true
+	}
+	return false, false
+}
+
+// forkCacheOverride reports why flag, set outside fork-cache and remote-exec,
+// would undo a fork-cache guarantee ("" if it would not): on a plain line it
+// applies to every run, and a test or later line overrides fork-cache's
+// build line.
+func forkCacheOverride(flag string) string {
+	for name, safe := range map[string]bool{
+		"remote_upload_local_results":                         false,
+		"remote_local_fallback":                               true,
+		"incompatible_remote_local_fallback_for_remote_cache": true,
+	} {
+		if v, set := boolFlagSetting(flag, name); set && v != safe {
+			form := "--" + name
+			if !safe {
+				form = "--no" + name
+			}
+			return "it would undo fork-cache's " + form
+		}
+	}
+	if v, ok := strings.CutPrefix(flag, "--experimental_build_event_upload_strategy="); ok && v != "local" {
+		return "it would upload build event artifacts from fork runs"
+	}
+	return ""
 }
 
 // checkBazelrcForkCache checks .bazelrc's fork-cache config: rbe-west's
@@ -1137,17 +1189,25 @@ func boolFlagFinal(opts []bazelrcOption, name string) (value, set bool) {
 // top of exactly the flags trusted runs use. Every flag in it must be key
 // neutral (so fork actions hash like trusted ones and hit what trusted CI
 // executed), and it must use the public endpoint and instance only, upload
-// nothing, carry no credentials, and fall back to local execution when the
-// farm closes the endpoint (without both fallback flags a failed
-// GetCapabilities fails every action).
+// nothing (neither local results nor build event artifacts), carry no
+// credentials, fall back to local execution when the farm closes the
+// endpoint (without both fallback flags a failed GetCapabilities fails every
+// action), and give up on a slow endpoint (short --remote_timeout, failure
+// circuit breaker). No other line of .bazelrc may expand it or set the
+// upload / no-fallback flags it relies on.
 func checkBazelrcForkCache(bazelrc string) []error {
 	var errs []error
 	var opts []bazelrcOption
 	for _, o := range parseBazelrcOptions(bazelrc) {
-		if o.config == "fork-cache" {
+		switch {
+		case o.config == "fork-cache":
 			opts = append(opts, o)
-		} else if o.flag == "--config=fork-cache" {
-			errs = append(errs, errors.New(o.config+" expands --config=fork-cache; only setup-bazel's generated rc may"))
+		case o.flag == "--config=fork-cache":
+			errs = append(errs, errors.New(o.source()+" expands --config=fork-cache; only setup-bazel's generated rc may"))
+		case o.config != "remote-exec":
+			if why := forkCacheOverride(o.flag); why != "" {
+				errs = append(errs, errors.New(o.source()+" sets "+o.flag+"; "+why))
+			}
 		}
 	}
 	if len(opts) == 0 {
@@ -1193,7 +1253,30 @@ func checkBazelrcForkCache(bazelrc string) []error {
 	if got, set := boolFlagFinal(opts, "remote_accept_cached"); set && !got {
 		errs = append(errs, errors.New("fork-cache turns off --remote_accept_cached; it would never hit"))
 	}
+	for flag, want := range map[string]string{
+		"--experimental_build_event_upload_strategy": "local",
+		"--experimental_circuit_breaker_strategy":    "failure",
+	} {
+		if got := lastFlagValue(opts, flag); got != want {
+			errs = append(errs, errors.New("fork-cache must end with "+flag+"="+want))
+		}
+	}
+	if secs, err := strconv.Atoi(lastFlagValue(opts, "--remote_timeout")); err != nil || secs < 1 || secs > forkCacheMaxTimeout {
+		errs = append(errs, errors.New("fork-cache must end with --remote_timeout of 1-"+strconv.Itoa(forkCacheMaxTimeout)+" seconds (whole seconds)"))
+	}
 	return errs
+}
+
+// lastFlagValue returns the value of the last flag=value setting in opts, or
+// "" if none sets it.
+func lastFlagValue(opts []bazelrcOption, flag string) string {
+	value := ""
+	for _, o := range opts {
+		if v, ok := strings.CutPrefix(o.flag, flag+"="); ok {
+			value = v
+		}
+	}
+	return value
 }
 
 func hasBazelrcOption(opts []bazelrcOption, flag string) bool {
@@ -1228,7 +1311,12 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"build:fork-cache --remote_download_minimal\n" +
 		"build:fork-cache --remote_local_fallback\n" +
 		"build:fork-cache --incompatible_remote_local_fallback_for_remote_cache\n" +
-		"build:fork-cache --jobs=64 --remote_timeout=60\n"
+		"build:fork-cache --experimental_build_event_upload_strategy=local\n" +
+		"build:fork-cache --experimental_circuit_breaker_strategy=failure\n" +
+		"build:fork-cache --jobs=64 --remote_timeout=15\n" +
+		"build:remote-exec --remote_upload_local_results\n" +
+		"test --noremote_upload_local_results\n" +
+		"try-import %workspace%/.bazelrc.local\n"
 	if errs := checkBazelrcForkCache(good); len(errs) != 0 {
 		t.Errorf("good fixture: %v", errs)
 	}
@@ -1261,6 +1349,21 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"expands another config":     good + "build:fork-cache --config=remote-exec\n",
 		"expanded by another config": good + "build:ci --config=fork-cache\n",
 		"accept cached off":          good + "build:fork-cache --noremote_accept_cached\n",
+		"no bep strategy":            drop("build:fork-cache --experimental_build_event_upload_strategy=local"),
+		"bep uploads again":          good + "build:fork-cache --experimental_build_event_upload_strategy=remote\n",
+		"no breaker":                 drop("build:fork-cache --experimental_circuit_breaker_strategy=failure"),
+		"no timeout":                 strings.Replace(good, " --remote_timeout=15", "", 1),
+		"slow timeout":               good + "build:fork-cache --remote_timeout=60\n",
+		"zero timeout":               good + "build:fork-cache --remote_timeout=0\n",
+		"duration timeout":           good + "build:fork-cache --remote_timeout=15s\n",
+		"plain build expands":        good + "build --config=fork-cache\n",
+		"plain common expands":       good + "common --config=fork-cache\n",
+		"plain upload":               good + "build --remote_upload_local_results\n",
+		"plain test upload":          good + "test --remote_upload_local_results=true\n",
+		"test config upload":         good + "test:ci --remote_upload_local_results\n",
+		"other config no fallback":   good + "build:ci --noremote_local_fallback\n",
+		"common no cache fallback":   good + "common --noincompatible_remote_local_fallback_for_remote_cache\n",
+		"plain bep upload":           good + "build --experimental_build_event_upload_strategy=remote\n",
 	} {
 		if errs := checkBazelrcForkCache(rc); len(errs) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)

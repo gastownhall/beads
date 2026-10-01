@@ -91,7 +91,14 @@ Current PR-related workflow names:
   flag is still `"true"` turns `CI Gate / Required` red on every same-repo PR
   (`BAZEL_EMBEDDED_RETIRED`), because PR Risk no longer runs the legacy
   embedded tier for them. If rbe-west closes the read-only cache, fork runs
-  fall back to executing everything locally (slower, still green).
+  fall back to executing everything locally (slower, still green). If it
+  is slow rather than closed, each lookup gives up after `fork-cache`'s
+  15 s `--remote_timeout` (times its retries), and Bazel's failure circuit
+  breaker (`--experimental_circuit_breaker_strategy=failure`) stops calling
+  it once too many lookups fail (by default 10% within 60 s); the remaining
+  actions run locally. Lookups that time out before the breaker trips still
+  cost up to that timeout each, so a slow endpoint slows fork runs until it
+  trips.
 - `.github/workflows/bazel-farm.yml`: `Bazel Farm (trusted forks)`
   Runs on `pull_request_target` for fork PRs to `main` whose author and
   triggering user are on `.github/bazel-farm-allowlist.txt`, and calls
