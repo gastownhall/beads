@@ -4483,3 +4483,65 @@ func TestReleaseWorkflowRestoresNoCache(t *testing.T) {
 		t.Fatal("release.yml has no setup-go step; update this test")
 	}
 }
+
+// Review F3: the gated Bazel lanes never retry a failing test. The legacy
+// jobs they mirror (and, since D2 step 1, replace for the embedded tier) ran
+// each test once, so a retry would hide a flaky failure no other job sees.
+// Nothing may set --flaky_test_attempts (or --runs_per_test_detects_flakes,
+// which reports a failed-then-passed test as FLAKY, not FAILED): not .bazelrc,
+// a workflow, setup-bazel's generated rc, or a tools/bazel wrapper; and no
+// BUILD file or macro may mark a target flaky = True (Bazel retries those up
+// to three times by default).
+func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
+	root := sourceRepoRoot(t)
+	retry := regexp.MustCompile(`flaky_test_attempts|runs_per_test_detects_flakes`)
+	flakyAttr := regexp.MustCompile(`\bflaky\s*=\s*(True|1)\b`)
+	checked := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".beads":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil // bazel-* convenience symlinks
+		}
+		base := d.Name()
+		isBuild := base == "BUILD" || base == "BUILD.bazel" || strings.HasSuffix(base, ".bzl")
+		isRetrySurface := rel == ".bazelrc" || strings.HasPrefix(rel, ".github"+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, filepath.Join("tools", "bazel")+string(filepath.Separator))
+		if !isBuild && !isRetrySurface {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		checked++
+		for i, line := range strings.Split(string(data), "\n") {
+			code := line
+			if j := strings.Index(code, "#"); j >= 0 && (isBuild || rel == ".bazelrc") {
+				code = code[:j]
+			}
+			if retry.MatchString(code) {
+				t.Errorf("%s:%d retries failing tests (%q); the gated lanes run each test once", rel, i+1, strings.TrimSpace(line))
+			}
+			if isBuild && flakyAttr.MatchString(code) {
+				t.Errorf("%s:%d marks a target flaky (%q); Bazel would retry it", rel, i+1, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked < 10 {
+		t.Fatalf("checked only %d files; is the repository root right?", checked)
+	}
+}
